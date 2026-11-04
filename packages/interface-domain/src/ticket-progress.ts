@@ -51,7 +51,7 @@ export function ticketProgress(input: TicketProgressInput): string {
     (input.turnPurpose !== "review" &&
       (input.turnState === "failed" || input.implementationState === "failed"))
   )
-    return "Implementation could not finish. Inspect the saved failure and retained work before retrying.";
+    return "Implementation could not finish. The Coding conversation shows the saved failure and offers Retry; retained work is kept.";
   if (input.changeState === "delivering")
     return input.promotionState === "failed"
       ? "The verified version is merged, but Main Preview failed. Correct its setup and retry Main Preview. The previous Preview is retained."

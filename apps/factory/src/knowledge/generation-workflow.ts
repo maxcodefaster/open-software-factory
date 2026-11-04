@@ -36,7 +36,8 @@ const topicSchema = z.object({
   pageIDs: z.array(z.uuid()).max(12),
   parentSlug: z.string().nullable(),
 });
-const planSchema = z.object({ topics: z.array(topicSchema).max(6) });
+const maximumTopics = 6;
+const planSchema = z.object({ topics: z.array(topicSchema).max(maximumTopics) });
 const researchSchema = z.object({
   findings: z
     .array(z.object({ claim: z.string().max(1200), paths: z.array(z.string()).min(1).max(8) }))
@@ -358,7 +359,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       }),
     };
   }
-  const maximumTopics = planSchema.shape.topics.maxLength ?? 6;
   const plannerTask =
     "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add a child guide for each distinct reader task the Project's own documentation names, such as setup and verification, architecture, or a main workflow. There is no target page count and no padding. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.";
   const planning = createStep({
