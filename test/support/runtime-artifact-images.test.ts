@@ -39,7 +39,7 @@ test("both native release jobs prove configured Compose inputs before pushing th
   expect(workflow).toContain("runner: ubuntu-24.04-arm");
   const load = workflow.indexOf("--provenance=false --sbom=false --load");
   const gate = workflow.indexOf('bash scripts/runtime/compose-inputs-proof.sh "$image_id"');
-  const push = workflow.indexOf('"${attest[@]}" --push --metadata-file');
+  const push = workflow.indexOf(['"$', '{attest[@]}" --push --metadata-file'].join(""));
   const sameImage = workflow.indexOf("containerimage.config.digest");
   expect(load).toBeGreaterThan(0);
   expect(gate).toBeGreaterThan(load);

@@ -134,7 +134,6 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await page.screenshot({ path: `${evidence}/creator-mobile.png`, fullPage: true });
     await page.setViewportSize({ width: 1440, height: 960 });
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
-    const navigation = page.getByRole("navigation", { name: "Settings navigation" });
     // A personal draft is never silently converted into a shared monitoring connection.
     await chooseSettingsPage(page, "MCP connections");
     await page.getByRole("button", { name: "Add MCP", exact: true }).click();
