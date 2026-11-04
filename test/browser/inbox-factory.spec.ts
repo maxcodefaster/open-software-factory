@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import { mkdir } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
-import { openProjectMenu } from "../fixtures/project-menu";
+import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { fixtureValue } from "../fixtures/value";
 
 test("the real Factory dock aggregates Projects and opens the exact shared question without commissioning work", async ({
@@ -132,7 +132,7 @@ test("the real Factory dock aggregates Projects and opens the exact shared quest
     await page.getByRole("button", { name: "Add person", exact: true }).click();
     const people = page.getByRole("dialog", { name: "Assign responsibility" });
     await expect(people.getByRole("searchbox")).toBeFocused();
-    await people.getByRole("button").filter({ hasNotText: "Not assigned" }).click();
+    await people.getByRole("button", { name: "Local administrator", exact: true }).click();
     await expect
       .poll(async () => {
         const [row] = await fixtureValue(database, "database").client<{ id: string | null }[]>`

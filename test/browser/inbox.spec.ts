@@ -1,9 +1,9 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { test } from "../fixtures/browser-test";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
 
@@ -477,18 +477,22 @@ test("responsibility is optional and mentions work in the real feedback composer
   const search = picker.getByRole("searchbox", { name: "Search Project members" });
   await expect(search).toBeFocused();
   await search.fill("  development Tom  ");
-  await expect(picker.getByRole("button")).toHaveCount(1);
+  await expect(picker.locator(".ticket-picker-options").getByRole("button")).toHaveCount(1);
   await page.screenshot({ path: `${directory}/person-picker-1440.png`, fullPage: true });
   await search.press("ArrowDown");
   await page.keyboard.press("Enter");
   const responsibility = source.getByRole("button", { name: "Responsible: Tom Development" });
   await expect(responsibility).toBeFocused();
   await expect(picker).toHaveCount(0);
-  await source.getByRole("button", { name: "Follow", exact: true }).click();
-  await expect(source.getByRole("button", { name: "Following", exact: true })).toHaveAttribute(
+  await expect(source.getByRole("button", { name: "Follow", exact: true })).toHaveCount(0);
+  await responsibility.click();
+  await picker.getByRole("button", { name: "Follow", exact: true }).click();
+  await expect(picker.getByRole("button", { name: "Following", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
+  await page.keyboard.press("Escape");
+  await expect(responsibility).toBeFocused();
   await source.getByRole("button", { name: "Add feedback", exact: true }).click();
   const comment = source.getByLabel("Review comment");
   await comment.fill("Keep this draft @");
@@ -571,7 +575,7 @@ for (const state of [
       await trigger.focus();
       await trigger.press("Enter");
       await expect(picker).toHaveCount(0);
-      await expect(source.getByRole("button", { name: "Follow", exact: true })).toBeDisabled();
+      await expect(source.getByRole("button", { name: "Follow", exact: true })).toHaveCount(0);
     } else {
       await trigger.click();
       if (state === "no-people")
@@ -579,16 +583,12 @@ for (const state of [
       if (state === "long-person") {
         await expect(trigger).toHaveAccessibleName(/Responsible: Dr. Alexandra-Maria/);
         await expect(picker.getByRole("button", { name: /Dr. Alexandra-Maria/ })).toBeVisible();
-        const controls = await source.locator(".ticket-people > button").evaluateAll((buttons) =>
-          buttons.map((button) => {
-            const bounds = button.getBoundingClientRect();
-            return bounds.y + bounds.height / 2;
-          }),
-        );
-        const [person, follow] = controls;
-        if (person === undefined || follow === undefined)
-          throw new Error("Ticket people controls are missing");
-        expect(Math.abs(person - follow)).toBeLessThanOrEqual(1);
+        await expect(source.locator(".ticket-people > button")).toHaveCount(1);
+        await expect(picker.getByRole("button", { name: "Follow", exact: true })).toBeVisible();
+        const bounds = await picker.boundingBox();
+        if (!bounds) throw new Error("Ticket people menu is not visible");
+        expect(bounds.x).toBeGreaterThanOrEqual(0);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
       }
       if (state === "unavailable-person") {
         await expect(trigger).toHaveAccessibleName("Responsible: Unavailable member");
