@@ -2,13 +2,7 @@ import { expect, test } from "bun:test";
 import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
 import { generateWiki } from "./generation-workflow";
 
-test.each([
-  "missing-guide",
-  "genuine-no-op",
-  "rejected-plan",
-  "unavailable-reviewer",
-  "deferred-guide",
-] as const)(
+test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-reviewer"] as const)(
   "whole-Wiki planning checks useful coverage before accepting %s",
   async (scenario) => {
     const overview: WikiPageSnapshot = {
@@ -78,12 +72,10 @@ test.each([
             expect(correction).toContain("Local setup and verification");
             expect(correction).toContain("rejectedResult");
           }
-          output = {
-            topics:
-              scenario === "deferred-guide" || (scenario === "missing-guide" && plans > 1)
-                ? [topic]
-                : [],
-          };
+          output = { topics: [] };
+        } else if (system.includes("additional topics")) {
+          plans++;
+          output = { topics: scenario === "missing-guide" ? [topic] : [] };
         } else if (system.includes("Review the whole proposed Wiki topic plan")) {
           expect(system).toContain("Reject a new topic whose reader task is already covered");
           coverageChecks++;
@@ -94,7 +86,7 @@ test.each([
             );
           output = {
             issues:
-              scenario === "genuine-no-op" || (scenario === "missing-guide" && plans > 1)
+              scenario === "genuine-no-op"
                 ? []
                 : [
                     "Local setup and verification are deferred by the current overview, although docs/forms.md describes both. The empty plan leaves that useful guidance missing.",
@@ -172,18 +164,14 @@ test.each([
       });
       if (scenario === "rejected-plan") {
         await expect(run).rejects.toThrow("Wiki topic plan omits essential reader coverage");
-        expect([plans, coverageChecks, publications]).toEqual([2, 2, 0]);
-      } else if (scenario === "deferred-guide") {
-        // The reviewer still wants more after one repair, but a useful guide is planned.
-        expect(await run).toEqual({ pages: [] });
-        expect([plans, coverageChecks, publications]).toEqual([2, 2, 1]);
+        expect([plans, coverageChecks, publications]).toEqual([2, 1, 0]);
       } else if (scenario === "unavailable-reviewer") {
         await expect(run).rejects.toThrow();
         expect([plans, coverageChecks, publications]).toEqual([1, 1, 0]);
       } else {
         expect(await run).toEqual({ pages: [] });
         expect([plans, coverageChecks, publications]).toEqual(
-          scenario === "missing-guide" ? [2, 2, 1] : [1, 1, 0],
+          scenario === "missing-guide" ? [2, 1, 1] : [1, 1, 0],
         );
         expect(pages[0]).toBe(overview);
       }

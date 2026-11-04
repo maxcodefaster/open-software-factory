@@ -346,7 +346,9 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       }),
     };
   }
-  let coverageRejections = 0;
+  const maximumTopics = planSchema.shape.topics.maxLength ?? 6;
+  const plannerTask =
+    "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add a child guide for each distinct reader task the Project's own documentation names, such as setup and verification, architecture, or a main workflow. There is no target page count and no padding. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.";
   const planning = createStep({
     id: "plan-wiki-topics",
     inputSchema: z.object({}),
@@ -365,32 +367,48 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             initialSources: input.sources.map(sourcePreview),
           },
           planSources,
-          "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add child guides only when distinct reader tasks need them. There is no target page count. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.",
-          async (plan) => {
-            const remaining = remainingPlan(plan);
-            validatePlan(remaining);
-            const coverage = await ask(
-              "topic-plan-checker",
-              reviewSchema,
+          plannerTask,
+          (plan) => validatePlan(remainingPlan(plan)),
+        );
+        const remaining = remainingPlan(plan);
+        const coverage = await ask(
+          "topic-plan-checker",
+          reviewSchema,
+          {
+            project: input.name,
+            repository,
+            changedPaths: input.changedPaths,
+            currentPages: pages,
+            completedPageIDs: [...completedPageIDs],
+            proposedTopics: remaining.topics,
+            sources: [...planSources.read.values()],
+          },
+          planSources,
+          wikiPlanReviewTask,
+        );
+        if (!coverage.issues.length) return remaining;
+        // A gap is closed by adding the missing guides, never by silently publishing less.
+        const room = maximumTopics - remaining.topics.length;
+        const additional = room
+          ? await ask(
+              "topic-planner",
+              z.object({ topics: z.array(topicSchema).max(room) }),
               {
                 project: input.name,
                 repository,
-                changedPaths: input.changedPaths,
                 currentPages: pages,
                 completedPageIDs: [...completedPageIDs],
-                proposedTopics: remaining.topics,
-                sources: [...planSources.read.values()],
+                plannedTopics: remaining.topics,
+                missingCoverage: coverage.issues,
               },
               planSources,
-              wikiPlanReviewTask,
-            );
-            // One repair pass for a coverage gap. A plan that still publishes something useful
-            // is accepted after that: a missing extra guide is for the next update, not a failure.
-            if (coverage.issues.length && (coverageRejections++ === 0 || !remaining.topics.length))
-              throw new WikiTopicCoverageError(coverage.issues);
-          },
-        );
-        return remainingPlan(plan);
+              "Return only the additional topics that close the missing coverage, as a coverage repair of plannedTopics. Do not repeat or change plannedTopics. Plan no topic when a missing item is already covered by plannedTopics or current pages. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic.",
+              (extra) => validatePlan({ topics: [...remaining.topics, ...extra.topics] }),
+            )
+          : { topics: [] };
+        const merged = { topics: [...remaining.topics, ...additional.topics] };
+        if (!merged.topics.length) throw new WikiTopicCoverageError(coverage.issues);
+        return merged;
       }),
   });
   const packages = createStep({
