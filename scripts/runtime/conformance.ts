@@ -5,6 +5,7 @@ import { readRuntimeRegistryCA } from "../../packages/runtime-kubernetes/src/cli
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
 import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import upstream from "../../upstream.json";
 import { createConformanceRuntime } from "./factorybox-conformance";
 
 const owner = crypto.randomUUID();
@@ -260,7 +261,7 @@ async function verifyRuntimeBoundary() {
   ]);
   assert(
     versions ===
-      `29.9.0\n5.6.0\nv24.21.0\n0.89.0\n${runtime.architecture === "arm64" ? "aarch64" : "x86_64"}`,
+      `29.9.0\n${upstream.dockerCompose.version}\nv24.21.0\n0.89.0\n${runtime.architecture === "arm64" ? "aarch64" : "x86_64"}`,
     `Unexpected runtime toolchain:\n${versions}`,
   );
   const coderBoundary = await inner([

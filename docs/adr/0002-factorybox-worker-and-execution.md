@@ -89,10 +89,17 @@ authorize recreation of missing storage or trust inputs. Missing or replacement 
 refuse new execution instead of silently starting a second worker.
 
 The immutable worker profile pins `arm64` or `amd64` explicitly, independent of the Factory server's
-architecture. The same command and admission protocol serves both. Image, executable, node and
-kernel qualification remain architecture-specific; the adapter accepting a profile does not qualify
-a runtime build. RAM restore never crosses architectures. Each architecture requires the exact
-standalone Factorybox native qualification gates before production admission.
+architecture. The same command and admission protocol serves both. Image, executable and node
+remain architecture-specific; the adapter accepting a profile does not qualify a runtime build.
+The kernel is not pinned. The worker admits a node by capability (Linux 5.15 or newer, cgroup v2,
+the namespaces, `ns_last_pid`, BTF, loop and FUSE devices, networking) and reports the exact
+release and boot ID, which still bind a retained worker. It also reports `qualification:
+verified|unverified`, which records only whether the project ran its native suites on that
+kernel and never refuses. An operator may restrict kernels with `factorybox.kernel`. RAM restore
+never crosses architectures. A new worker build is adopted by an already admitted installation
+only after `bun run runtime:conformance` passed for that exact image and executable on an owned
+namespace of a node with the same architecture; the retained worker is replaced through the
+explicit recovery path of [ADR 0003](0003-worker-recovery-and-storage-retirement.md).
 
 The Source service and Sandbox bind the same canonical Project directory, following
 [ADR 0001](0001-workspaces-source-and-app-access.md#workspace-file-access-independent-of-execution). Private runtime files and Docker storage
@@ -175,6 +182,14 @@ unattempted Resume preparation. Factory can then continue that exact request, re
 original intent and first dispatch timestamp. Native copy verification and storage admission still
 apply. An absent attempted flag, a different owner/input/checkpoint, live runtime or an attempted
 or unknown restore never permits this continuation.
+
+A Resume that never started a restore (the native record shows no attempt, no held restore and no
+result) can be deleted. Its preparation may be unable to continue, for example because the paused
+filesystem changed after the committed Pause, or because the command was interrupted before it
+recorded the attempt. Explicit Stop then removes the Sandbox from the exclusive operation lock
+once native Delete has verified the complete original Pause, the original stopped runtime and an
+empty cgroup. An attempted Resume still needs its recorded failure. Factory also waits up to 100
+seconds for running lifecycle commands before it exits, so a rollout does not interrupt them.
 
 A failed Pause command can have a confirmed native rollback. Factory observes the original
 Start owner/input and exact rejected snapshot, requiring the same live source PID and native
