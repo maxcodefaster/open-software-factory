@@ -57,7 +57,7 @@ This is scheduling capacity, not a sample of free memory.
 The pinned Factorybox binary must admit finite aggregate budgets; the native qualification
 fixtures still retain their 3 CPU / 3 GiB ceiling. Existing workers retain their exact admitted
 profile, including the original 3 GiB aggregate limit. Changing defaults never resizes or replaces
-them. See [worker resource admission](../../docs/adr/0030-select-aggregate-worker-resources-before-admission.md).
+them. See [worker resource admission](../../docs/adr/0002-factorybox-worker-and-execution.md#select-aggregate-worker-resources-before-admission).
 Operator values can independently size `postgres.resources`, `forgejo.resources`,
 `openbao.resources`, `zero.resources` and `objectStorage.resources`; their defaults are unchanged.
 CPU requests are reservations, not instantaneous usage. Keep headroom for startup, storage checks,
@@ -71,13 +71,13 @@ Opening a Project or reconnecting does not replace a worker. Recovery of an alre
 worker requires an explicit System Manager command after its exact original Pod has terminated
 and prior execution has settled. By default the successor reuses the original private store and Source claim;
 it has a new Pod and native epoch, without replaying Agent work. See
-[admitted worker recovery](../../docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md)
-and [bootstrap admission recovery](../../docs/adr/0029-worker-bootstrap-admission-recovery.md).
+[admitted worker recovery](../../docs/adr/0003-worker-recovery-and-storage-retirement.md#recover-an-admitted-worker-without-allocating-another-store)
+and [bootstrap admission recovery](../../docs/adr/0003-worker-recovery-and-storage-retirement.md#keep-source-allocation-separate-from-worker-admission-attempts).
 An explicit `storage: "fresh"` recovery can admit a distinct store with the configured capacity
 only after private backing cleanup is confirmed across every admission sharing the old claim.
 The old store and execution history remain unchanged, and canonical Source keeps its exact claim,
 Namespace and node. This does not resize or migrate a retained store. See
-[fresh execution storage](../../docs/adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
+[fresh execution storage](../../docs/adr/0003-worker-recovery-and-storage-retirement.md#admit-fresh-execution-storage-only-after-confirmed-drain).
 The successor can finish an exact private-backing retirement whose native Delete
 and preceding checkpoint retirements were already confirmed. Factory retains each
 reserve retirement receipt as it arrives, instead of losing completed steps when
@@ -92,7 +92,7 @@ This does not prune native bases, snapshots, Source or the bounded store.
 The current worker also retires a completed consumer transport after reverifying its independent
 native import. Later preparations reuse that verified base without the tar file. The storage
 sweep performs this automatically; Source, snapshots and native backing remain retained.
-See [consumer transport retirement](../../docs/adr/0035-retire-transport-archives-after-native-import.md).
+See [consumer transport retirement](../../docs/adr/0003-worker-recovery-and-storage-retirement.md#retire-a-consumer-transport-after-verifying-its-independent-native-import).
 Fresh admissions check actual backing-filesystem availability before native allocation. The chart
 defaults to an 8 GiB minimum, 64 GiB maximum and 128 GiB claim. Larger safe whole-GiB budgets
 are accepted when the claim covers the maximum plus 17 GiB. The pinned worker selects a fixed
@@ -172,7 +172,7 @@ to the published origins of that exact Runtime Attempt. Projects can use those a
 browser-facing configuration while keeping backend and health connections local. The addresses
 contain no credentials and grant no cross-App access or relaxed authentication. New artifact
 intent freezes the public Factory origin; existing Attempts and clean prepared templates are
-not rewritten. See [published App addresses](../../docs/adr/0037-bind-published-app-origins-to-runtime-intent.md).
+not rewritten. See [published App addresses](../../docs/adr/0001-workspaces-source-and-app-access.md#bind-published-app-addresses-to-their-runtime-attempt).
 The Connector preserves the browser-visible App Host for HTTP and WebSocket requests while
 dialing only the admitted internal target. Factory reconstructs proxy authority after discarding
 client-supplied forwarding headers; same-origin authentication does not need a relaxed origin check.

@@ -36,7 +36,7 @@
 ## Interface
 
 - Before UI changes, read `apps/factory/PRODUCT.md` and the existing control owners. Preserve
-  the visual system in ADR 0005 rather than inventing a new skin for each feature.
+  the visual system in ADR 0010 rather than inventing a new skin for each feature.
 - `apps/factory/src/style.css` loads `ui/controls.css` once. Use native buttons, selects,
   inputs and textareas with those shared defaults. `workspace-action` and `data-primary`
   own quiet document actions; `quiet-button`, `primary-button` and `danger-button` cover

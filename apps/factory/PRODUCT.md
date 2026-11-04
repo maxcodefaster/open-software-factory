@@ -39,7 +39,7 @@ exact-commit review precede deliberate human Delivery approval. A Project manage
 authority can delegate eligible monitoring Autofix through a Project-bound webhook and shared
 read-only MCP connection. Background work does not inherit personal configuration. Insufficient
 context creates no Ticket; disabling the delegation fences further automatic work. See
-[the monitoring decision](../../docs/adr/0016-delegated-monitoring-autofix.md).
+[the monitoring decision](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#monitoring-delegates-a-bounded-fix-and-delivery-not-general-agent-authority).
 
 Developers can commission full Planning or replan an existing technical design.
 Product confirmation durably starts the technical continuation only for an explicit full Planning
@@ -52,13 +52,13 @@ with an explicit status instead of a broken image. It does not repeat inference.
 Implement approves the exact product and technical revisions;
 edits to an unconfirmed proposal stay private until confirmation.
 Reading and ordinary saving never start Planning. See
-[Ticket technical planning](../../docs/adr/0024-ticket-technical-planning.md).
+[Ticket technical planning](../../docs/adr/0004-agents-and-conversations.md#ticket-owned-technical-planning-follows-confirmed-product-intent).
 
 Project Inputs automatically clarify external JSON requests and prepare requirements through the
 Project Agent. The creator asks for a name, task and Connected sources. Selected shared MCP sources
 must be consulted; an empty selection inherits shared Project defaults. Prepared Tickets require
 human implementation approval unless bounded Autofix was explicitly delegated.
-See [Project Inputs](../../docs/adr/0018-project-inputs.md).
+See [Project Inputs](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#project-inputs-prepare-requirements-without-granting-execution-authority).
 
 Settings show one selected scope at a time: Project, Libraries, Personal or admin-only Factory
 administration. The scope chooser replaces a repeated list of all scopes.
@@ -83,7 +83,7 @@ proposed no-op updates. A short overview that defers useful source-supported gui
 replacement. Page options → Update Project Wiki explicitly requests another source-grounded update,
 even after a previous update completed. Saved pages remain readable and human edits retain their
 existing publication protections. Reading the Wiki starts no inference.
-See [revisioned Project Knowledge](../../docs/adr/0004-generated-project-knowledge.md).
+See [revisioned Project Knowledge](../../docs/adr/0007-knowledge-and-files.md#project-knowledge-is-generated-revisioned-and-separate-from-repository-documents).
 
 Skills are an instance library with personal, Project and Factory ownership. Personal libraries span Projects,
 but personal activation choices belong to a particular Project and work type.
@@ -164,7 +164,7 @@ Personal Project Chat can create planning Tickets on an explicit human request t
 defaulting to Requirements. The same creation command serves the UI. A saved chat receipt links to
 the created Ticket even if the final AI answer fails. Creation never starts implementation or grants
 approval. Other chats and external MCP-library sources retain their existing authority.
-See [Factory MCP](../../docs/adr/0020-factory-actions-through-mcp.md).
+See [Factory MCP](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#project-chat-uses-factory-mcp-for-planning-actions).
 
 IDE terminal tabs support keyboard switching and F2 renaming. Session names and the selected tab
 survive iframe reloads. New terminal explicitly opens the first session; opening the IDE or its
@@ -223,7 +223,7 @@ Tickets can name one optional human Responsible for coordinating the outcome, in
 Agent execution, the current writer and approval rights. Eligible responsible people receive
 requests; otherwise the required capability determines recipients. Following and structured
 Project-member mentions control personal activity without granting access or starting work.
-See [human responsibility and the Inbox](../../docs/adr/0025-human-ticket-responsibility-and-inbox.md).
+See [human responsibility and the Inbox](../../docs/adr/0005-authority-identity-and-uncertain-outcomes.md#human-ticket-responsibility-is-independent-of-execution-and-decisions).
 
 Independently commissioned Tickets implement in parallel. An explicit queued implementation waits
 for delivered prerequisites, then starts without another commission when its saved scope and
@@ -231,7 +231,7 @@ authority remain valid. Epics group work; Ticket dependencies determine ordering
 the Ticket Workspace and serializes integration through Staging per Project. Settings → Inputs
 also offers explicit, revocable delegation of eligible Ticket Delivery. Operational, migration,
 dependency and access-policy decisions remain human. See
-[parallel Tickets and serialized Delivery](../../docs/adr/0026-parallel-tickets-and-serialized-delivery.md).
+[parallel Tickets and serialized Delivery](../../docs/adr/0006-verification-review-and-delivery.md#parallel-ticket-implementation-reuses-the-existing-delivery-path).
 
 ## Capabilities and constraints
 
@@ -241,19 +241,19 @@ dependency and access-policy decisions remain human. See
   outcomes and links to native Forgejo. External access manages read credentials, not deployment
   targets or consumer status. Factory never waits for a consumer or claims production success.
   Project Chat can read confirmed versions and suggest a bump, but cannot publish or grant access.
-  See [independent Releases](../../docs/adr/0023-independent-project-releases.md).
+  See [independent Releases](../../docs/adr/0009-installation-releases-and-hardening.md#release-publication-has-no-dependency-on-consumers).
 
 - Human images and documents can accompany Wiki, Tickets, chats and feedback discussions.
   Document editors use `/image`, `/file`, paste and drop instead of standalone Add file buttons.
   Pending uploads and uncreated drafts stay private. Saving or sending determines sharing.
   Agent work uses exact file references; navigation and later replacements do not change them.
-  See [attachment ownership and retention](../../docs/adr/0017-private-revision-bound-attachments.md).
+  See [attachment ownership and retention](../../docs/adr/0007-knowledge-and-files.md#keep-human-attachments-private-and-bound-to-immutable-work).
 
 - Project conversations are personal; Ticket conversations and their active Coding context are
   shared. A fresh Coding conversation keeps the same Workspace and requires settled work or
   confirmed Stop. History selection and drafts never retarget execution. Editing names its holder;
   inactivity is a courtesy signal, not automatic release.
-  See [conversation contexts and shared editing](../../docs/adr/0019-conversation-contexts-and-shared-editing.md).
+  See [conversation contexts and shared editing](../../docs/adr/0004-agents-and-conversations.md#retained-conversations-share-one-ticket-workspace-and-an-explicit-writer).
 - Chats expose existing Skills, message Copy actions and grouped tool activity. File and recorded
   diff navigation is deliberate. A recorded diff is read-only and is not the current working diff.
 - Independent QA browser runs record automatically, without a Settings switch. The Ticket owns
@@ -271,7 +271,7 @@ dependency and access-policy decisions remain human. See
 - MCP connections use public remote HTTPS endpoints and reviewed read-only tools. Sharing copies
   a definition without credentials. Account reconnect and access revocation fence older work;
   token renewal does not change its authorized identity. Independent review cannot inherit
-  library tools. [ADR 0015](../../docs/adr/0015-managed-mcp-library.md) defines that boundary.
+  library tools. [ADR 0008](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#managed-remote-mcp-connections-share-selection-not-credentials) defines that boundary.
 - Board/history navigation, inspection and reconnect do not commission AI or replay an external
   operation. Opening a Workspace for editing starts its compute as described above; failed work
   still needs explicit Retry. Actions state their target and consequences before commitment.
@@ -281,7 +281,7 @@ dependency and access-policy decisions remain human. See
 - Persist intent before external creates. Preserve retained source, history, approvals and runtime
   identities. Show uncertainty and recovery honestly rather than claiming success.
 
-[ADR 0008](../../docs/adr/0008-fixed-role-agent-engines.md) owns engine and Skill admission decisions.
+[ADR 0004](../../docs/adr/0004-agents-and-conversations.md#fixed-engines-for-project-and-change-work) owns engine and Skill admission decisions.
 [Repository instructions](../../AGENTS.md) own implementation and verification rules.
 
 ## Brand commitments

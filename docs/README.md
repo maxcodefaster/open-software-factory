@@ -146,14 +146,14 @@ Engine assignment is fixed. Models, role instructions and eligible Skills are co
 Personal Project Chat uses a turn-bound Factory MCP for existing source reads and explicit Ticket
 creation. Creation shares the UI's planning command and saves an atomic conversation receipt;
 it cannot approve requirements or start implementation. Other Project/Ticket contexts and external
-MCP-library sources acquire no new writes. See [Factory MCP](adr/0020-factory-actions-through-mcp.md).
+MCP-library sources acquire no new writes. See [Factory MCP](adr/0008-external-context-mcp-inputs-and-autofix.md#project-chat-uses-factory-mcp-for-planning-actions).
 Settings → Skills library brings accessible personal, Project and Factory guidance into one
 searchable gallery. Details separate personal activation from the permission-gated Manage view
 for shared defaults and sharing reviews. New Skills and import previews are private by default;
 saving does not enable them. Anyone can keep a personal library across the instance; activation
 choices are per Project and work type. Required rules identify their Factory or Project source. Other choices
 inherit individually and version updates are explicitly adopted for new work. See
-[the engine decision](adr/0008-fixed-role-agent-engines.md) for package admission and privacy.
+[the engine decision](adr/0004-agents-and-conversations.md#fixed-engines-for-project-and-change-work) for package admission and privacy.
 The editor leads with Name, When to use and Instructions; files and source details are optional.
 
 Settings → Libraries → MCP connections applies the same discovery and selection structure to remote external
@@ -161,7 +161,7 @@ context. Exact definition sharing, authenticated connections and Project grants 
 OAuth material lives in OpenBao. Admission retains approved tool contracts and credential epochs;
 each lookup rechecks current access and execution ownership. Mastra uses native tools and OpenCode
 uses a turn-bound Factory facade without provider tokens. Independent review cannot inherit
-library tools. See [the MCP decision](adr/0015-managed-mcp-library.md) for read-only review and
+library tools. See [the MCP decision](adr/0008-external-context-mcp-inputs-and-autofix.md#managed-remote-mcp-connections-share-selection-not-credentials) for read-only review and
 network boundaries.
 
 Inputs add named Project-bound JSON webhooks with saved tasks and shared MCP source selections.
@@ -170,13 +170,13 @@ Prepared Tickets have no approval or Change. Background work excludes personal c
 retains source, Skill and model intent before inference. Explicit sources must be consulted;
 empty selections inherit shared defaults at the saved policy revision. Human-approved Build retains
 those sources, but independent review cannot acquire them. Duplicates coalesce and uncertain
-inference is not replayed. See [the Inputs decision](adr/0018-project-inputs.md).
+inference is not replayed. See [the Inputs decision](adr/0008-external-context-mcp-inputs-and-autofix.md#project-inputs-prepare-requirements-without-granting-execution-authority).
 
 An explicit advanced delegation retains bounded monitoring Autofix. Eligible
 requirements and Delivery Approvals identify the immutable delegation. The normal Verification,
 independent review, exact-source and open-Thread gates still apply. Disabling, rotation, authority
 loss and source changes fence further automatic work. See
-[the Autofix decision](adr/0016-delegated-monitoring-autofix.md).
+[the Autofix decision](adr/0008-external-context-mcp-inputs-and-autofix.md#monitoring-delegates-a-bounded-fix-and-delivery-not-general-agent-authority).
 
 Admission freezes the exact target, input, effective configuration and current authority before
 external work. Navigation and reconnect never retarget an admitted turn. Unknown provider outcomes
@@ -197,7 +197,7 @@ commit, records decisions and assumptions, and maps each product criterion to a 
 Technical Design revisions and their optional validated PlantUML diagrams remain developer-only.
 Implement freezes the exact product and technical revisions and refuses stale product/source
 scope. Build and independent review receive that approved design. Ordinary manual Requirements
-retain their direct Implement path. See [Ticket technical planning](adr/0024-ticket-technical-planning.md).
+retain their direct Implement path. See [Ticket technical planning](adr/0004-agents-and-conversations.md#ticket-owned-technical-planning-follows-confirmed-product-intent).
 
 The Interview uses the frozen selected Ticket without rereading it solely for attribution. Explicitly
 invoked Skills, applicable required rules and the assigned Interview Skill load through Mastra's native `getSkill` API before
@@ -251,7 +251,7 @@ one-shot Pod without restarting the Dev Container. It mounts only the retained n
 not Project files or Git configuration at the original location, and has no model or Factory
 execution capability. Immutable intent and exact Pod receipts recover lost responses without
 replacement execution. Read-only confirmation cannot start this work. See
-[retained native Stop settlement](adr/0028-retained-native-stop-settlement.md).
+[retained native Stop settlement](adr/0003-worker-recovery-and-storage-retirement.md#settle-a-retained-native-stop-without-restarting-project-execution).
 
 The retained OpenCode upgrade preflight validates native history, preserves a complete
 content-addressed SQLite/WAL backup and atomically adds the missing historical `started` timestamp
@@ -306,20 +306,20 @@ and refactoring are not part of the preset.
 
 The [Factorybox admission command](../deploy/factorybox/README.md) inspects the same pinned worker
 contract used by Workspace Start and the existing execution reserve. The consumer preparation and
-lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execution.md).
+lifecycle boundary is recorded in [ADR 0002](adr/0002-factorybox-worker-and-execution.md#run-workspace-execution-in-factorybox-with-shared-canonical-source).
 An explicit System Manager recovery may admit a successor after the original exact-UID Pod
 terminates and prior execution settles. It keeps the original store and Source claim, with new
-worker/epoch and export identities. See [admitted worker recovery](adr/0031-recover-an-admitted-worker-with-its-retained-store.md).
+worker/epoch and export identities. See [admitted worker recovery](adr/0003-worker-recovery-and-storage-retirement.md#recover-an-admitted-worker-without-allocating-another-store).
 Explicit fresh-storage recovery instead admits a distinct store only after confirmed backing
 cleanup across all admissions sharing the previous claim. The original store, history and
-canonical Source claim remain unchanged. See [fresh execution storage](adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
+canonical Source claim remain unchanged. See [fresh execution storage](adr/0003-worker-recovery-and-storage-retirement.md#admit-fresh-execution-storage-only-after-confirmed-drain).
 
 Each immutable worker profile includes its explicit `arm64` or `amd64` architecture, exact image
 and executable, node and kernel. Fresh automatic admissions also retain the aggregate CPU and
 memory budget selected from that node's schedulable resources before any worker create.
 Later samples never resize an admitted worker. The original profiles without that budget keep
 their exact 3 CPU / 3 GiB declaration. See
-[resource admission](adr/0030-select-aggregate-worker-resources-before-admission.md).
+[resource admission](adr/0002-factorybox-worker-and-execution.md#select-aggregate-worker-resources-before-admission).
 The same Factory commands render and check either architecture;
 the control-plane host does not select the worker's CPU. Node mismatch fails before the first
 worker exec.
@@ -346,7 +346,7 @@ uncertain work, human writing and unrelated executions remain protected.
 Before fresh Verification, Factory releases that candidate's submitted Agent execution without
 waiting for the idle grace, then waits for confirmed cleanup before admitting the check Sandbox.
 Active work, human writing, open terminals and unconfirmed operations remain protected.
-The [submitted-compute decision](adr/0033-release-idle-submitted-ticket-compute.md) defines that boundary.
+The [submitted-compute decision](adr/0001-workspaces-source-and-app-access.md#release-idle-submitted-ticket-execution-instead-of-checkpointing-it) defines that boundary.
 Active Agent work, open terminal sessions and uncertain operations remain protected;
 background polling and Run views do not keep compute awake. The Source service and independent
 editor retain the canonical checkout while execution is paused. Explicit Stop deletes execution
@@ -357,7 +357,7 @@ Change commit, or to the original base before the first submission. The canonica
 original seed identity and current checkout. A later commit never retargets an already admitted
 Runtime Attempt, including one still waiting for capacity; recovery uses that Attempt's recorded
 revision. This also keeps a fresh Review execution from launching the base commit's old App commands.
-See [Ticket execution revision](adr/0034-pin-ticket-execution-to-submitted-source.md).
+See [Ticket execution revision](adr/0001-workspaces-source-and-app-access.md#pin-new-ticket-execution-to-the-submitted-source).
 
 Docker, Compose and the Dev Containers CLI run unchanged. Project code has no node
 Docker socket. The privileged outer Factorybox worker is trusted infrastructure; Sysbox shares the
@@ -372,7 +372,7 @@ clean Project template derived from healthy promoted Staging. The template has n
 transport grants; only empty Staging Runtime Environments are eligible. Assignment delivers fresh
 authority after Resume, and used slots are replaced rather than returned to the pool. Existing
 Workspaces keep their canonical source and data identities. The local and Helm defaults request
-two standby Forks, not a two-running-Sandbox limit. See [the ownership and recovery decision](adr/0022-factorybox-workspace-execution.md).
+two standby Forks, not a two-running-Sandbox limit. See [the ownership and recovery decision](adr/0002-factorybox-worker-and-execution.md#run-workspace-execution-in-factorybox-with-shared-canonical-source).
 
 The IDE's Git tab operates only on the selected developer's Personal Workspace. Status and file diffs
 are reads; Commit, Fetch and Pull use authenticated, persisted command identities. Git runs as the
@@ -506,7 +506,7 @@ Epics alone impose no serialization. A Project manager with development authorit
 delegate eligible Ticket Delivery, including features. The existing independent reviewer and
 application-source gate keep operational, dependency, migration and access-policy decisions human.
 Unconfirmed merges and unsuccessful Promotion fence later Delivery. See
-[parallel Tickets and serialized Delivery](adr/0026-parallel-tickets-and-serialized-delivery.md).
+[parallel Tickets and serialized Delivery](adr/0006-verification-review-and-delivery.md#parallel-ticket-implementation-reuses-the-existing-delivery-path).
 Cleanup confirms no writers on the delivered Change branch while retaining its protected source
 ref and history. It does not temporarily remove protection to force branch deletion.
 
@@ -685,19 +685,21 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 
 ## Architecture decisions
 
-Read the current boundaries above first. The records below retain decision rationale and stable
-identities, grouped by concern rather than presented as twenty independent subsystems.
+Read the current boundaries above first. Ten records keep the decision rationale; each holds
+several decisions as sections.
 
-| Concern | Decisions |
+| Record | Covers |
 | --- | --- |
-| Workspaces, runtime and installation | [0001 Workspaces and prepared compute](adr/0001-development-workspaces-and-staging.md), [0009 independent file access](adr/0009-independent-workspace-file-access.md), [0013 Kubernetes installation](adr/0013-kubernetes-native-installation.md), [0029 worker bootstrap admission recovery](adr/0029-worker-bootstrap-admission-recovery.md) |
-| Identity and execution authority | [0007 durable admission and uncertain outcomes](adr/0007-durable-agent-admission-and-uncertain-outcomes.md), [0010 identity and exclusive writers](adr/0010-factory-identity-and-change-writers.md), [0025 human responsibility and Inbox](adr/0025-human-ticket-responsibility-and-inbox.md) |
-| Agents, conversations and planning actions | [0002 OpenCode](adr/0002-opencode-change-agent.md), [0006 Project Agent](adr/0006-project-agent-and-ticket-conversation.md), [0008 fixed engines and Skills](adr/0008-fixed-role-agent-engines.md), [0019 retained conversations and editing](adr/0019-conversation-contexts-and-shared-editing.md), [0020 Factory MCP](adr/0020-factory-actions-through-mcp.md), [0024 Ticket technical planning](adr/0024-ticket-technical-planning.md) |
-| Verification, review and Delivery | [0003 Forgejo Verification and promotion](adr/0003-forgejo-actions-verification-and-promotion.md), [0011 protected delivered branches](adr/0011-delivered-branch-retention.md), [0012 independent review](adr/0012-independent-candidate-review.md), [0014 QA media and human feedback](adr/0014-qa-recordings-and-human-review.md), [0026 parallel Tickets and serialized Delivery](adr/0026-parallel-tickets-and-serialized-delivery.md) |
-| Knowledge and retained content | [0004 revisioned Knowledge](adr/0004-generated-project-knowledge.md), [0017 private attachments](adr/0017-private-revision-bound-attachments.md), [0027 one installation-owned file store](adr/0027-chart-managed-private-file-storage.md) |
-| External context and delegated Inputs | [0015 MCP library](adr/0015-managed-mcp-library.md), [0016 bounded monitoring Autofix](adr/0016-delegated-monitoring-autofix.md), [0018 Project Inputs](adr/0018-project-inputs.md) |
-| Visual system | [0005 desktop and shared UI](adr/0005-curated-desktop-visual-system.md) |
-| Production hardening | [0038 hardening baseline](adr/0038-production-hardening-baseline.md) |
+| [0001 Workspaces, source and App access](adr/0001-workspaces-source-and-app-access.md) | Development Workspaces, independent file access, idle compute, pinned source, published App origins |
+| [0002 Factorybox worker and execution](adr/0002-factorybox-worker-and-execution.md) | Worker admission, Workspace execution, resource admission |
+| [0003 Worker recovery and storage retirement](adr/0003-worker-recovery-and-storage-retirement.md) | Stop settlement, bootstrap and worker recovery, archive and storage retirement |
+| [0004 Agents and conversations](adr/0004-agents-and-conversations.md) | OpenCode, Project Agent, fixed engines and Skills, conversation contexts, technical planning |
+| [0005 Authority, identity and uncertain outcomes](adr/0005-authority-identity-and-uncertain-outcomes.md) | Durable admission, identity and writers, human responsibility and Inbox |
+| [0006 Verification, review and Delivery](adr/0006-verification-review-and-delivery.md) | Forgejo Verification, branch retention, independent review, QA media, serialized Delivery |
+| [0007 Knowledge and files](adr/0007-knowledge-and-files.md) | Revisioned Knowledge, private attachments, chart-managed file storage |
+| [0008 External context](adr/0008-external-context-mcp-inputs-and-autofix.md) | MCP library, Factory MCP, Project Inputs, delegated Autofix |
+| [0009 Installation, releases and hardening](adr/0009-installation-releases-and-hardening.md) | Kubernetes installation, Project Releases, production hardening baseline |
+| [0010 Visual system](adr/0010-visual-system.md) | Desktop and shared UI |
 
 ## Verification and operating limits
 

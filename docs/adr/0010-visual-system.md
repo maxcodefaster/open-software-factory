@@ -1,4 +1,14 @@
-# Curated desktop visual system
+---
+status: accepted
+---
+
+# Visual system
+
+
+This record holds the decisions formerly numbered 0005. Each section keeps its original wording.
+
+
+## Curated desktop visual system
 
 Factory uses one global semantic token system and three locally bundled public-domain paintings
 for its desktop identity. Users may persist only a validated Factory-owned background key in

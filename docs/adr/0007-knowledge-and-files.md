@@ -2,7 +2,13 @@
 status: accepted
 ---
 
-# Project Knowledge is generated, revisioned, and separate from repository documents
+# Knowledge and retained files
+
+
+This record holds the decisions formerly numbered 0004, 0017, 0027. Each section keeps its original wording.
+
+
+## Project Knowledge is generated, revisioned, and separate from repository documents
 
 Factory stores Knowledge Pages and immutable revisions in PostgreSQL. This gives the Wiki stable identity, editable hierarchy, chosen icons, autosave and readable human/AI History without generated repository churn. Wiki serves Product Contributors and developers. Generate only facts that materially improve understanding, use, operation or safe changes; do not mirror source files or invent product intent.
 
@@ -60,3 +66,58 @@ Publication fences the exact current revision and retries against fresh input af
 One tree separates expanded Wiki from collapsed Code docs. Repository Markdown remains source-owned and read-only in Wiki. Only development-authorized roles can discover/search/read it or open technical source actions; enforce the boundary in server responses as well as UI. Discover nested files through complete Forgejo tree pagination and truncation recovery; cache inventory by exact commit and content/search by blob hash. Refresh on default-branch change and reconcile missed events, not on every Wiki open. Search opens from the Wiki root row and leaves the tree intact. Drag/drop shows insertion/child targets with explicit promotion and retained keyboard movement; navigation width is user-resizable. Source reordering is rejected, never converted into a Git mutation.
 
 Page bodies are Markdown behind the shared Factory rich-editor adapter. Caret-anchored filtered slash commands, table controls, highlighted code and a compact page menu share design tokens with Tickets. No arbitrary text-color or database-table suite. Keep caches bounded and separate from product Evidence; persist immutable revisions, generation intent/outcome and compact exact citations.
+
+## Keep human attachments private and bound to immutable work
+
+Wiki, Tickets, conversations and review discussions reference immutable files in the chart-managed
+private object store shared with QA media. PostgreSQL owns their identities, hashes, publication intent, byte
+reservations and authored references. File bytes and page images do not enter Zero, Markdown or
+the product database. [ADR 0007](#one-installation-owned-private-file-store) replaces the former
+external bucket prerequisite and separate state-volume media storage with one bundled service.
+
+Upload intent and all object keys are recorded before external writes. Publication checks the
+same content and current authority. Unconfirmed uploads can reconcile only their exact identity.
+Pending uploads are private; saving or sending is the sharing decision. Project conversations
+remain personal, Ticket conversations and feedback follow Project access, and private Ticket
+drafts do not publish their files merely by uploading.
+
+Agent admission freezes the relevant Ticket revision and human attachment references, including
+the meaning supplied in Ticket chat. Explicit review revision batches retain their complete
+discussion context. Independent review receives the same admitted reference content. Scoped native
+tools return bounded text and actual images or document pages, with current authority checked
+before and after object reads. Compaction can reread those exact files without changing identity.
+Wiki attachments are discovered through authorized source reads, not injected Project-wide.
+File content never grants instructions, tools or execution authority.
+
+Factory limits each original file and the total original bytes in one message, not cumulative
+Project or installation storage. The operator manages Kubernetes storage capacity; an arbitrary total
+cap must not block accumulated Project history. Originals, rendered pages and extracted text
+remain accounted for, with write intent retained before storage I/O. Referenced history does not
+expire to make room. Unassigned uploads expire after one day, with accounted bytes released only
+after confirmed deletion of their recorded, installation-owned
+keys. PDF processing retains scanned and digital page images. Unsupported DOCX drawings and
+embedded objects fail explicitly rather than silently becoming incomplete reference text.
+
+## One installation-owned private file store
+
+The Factory Helm chart includes one pinned single-node Garage service for human attachments,
+derived page images, QA recordings and annotation stills. It creates the private bucket,
+persistent claim and retained credentials automatically. Requiring an operator to provision
+external S3, while keeping QA media on the Factory state volume, made a normal installation
+incomplete and split file recovery across unrelated storage paths.
+
+PostgreSQL retains file intent, identities, hashes, references, extracted attachment text and access decisions. File bytes
+stay in the common object store, behind authenticated Factory routes. Keys include the retained
+installation identity; cleanup deletes only recorded objects. Publication rechecks authority
+after storage I/O. Browser video playback streams authenticated byte ranges without exposing
+storage credentials or signed URLs.
+
+The chart exposes only capacity, not a menu of storage backends. Kubernetes still needs a usable
+StorageClass. The object claim and credentials survive upgrades and uninstall, and must be
+backed up together with PostgreSQL. This is not a replicated storage cluster or an automatic
+backup service. Existing external files or state-volume media require an explicit retained-data
+transfer before switching; an upgrade must not quietly substitute an empty store.
+
+Optional native Forgejo push mirrors preserve central Git at an external Git server. They do
+not back up this file store, PostgreSQL, accounts or installation credentials and do not provide
+a complete Factory restore. They do not change the chart-managed storage prerequisite.

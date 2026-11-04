@@ -3,7 +3,7 @@
 Factorybox is a separate Linux system-container runtime. This operator command admits one
 dedicated worker for a customer or trust domain and controls administrator-prepared private OCI
 bundles through its own CLI. Factory Workspace Start and the execution reserve use this same worker
-contract with Factory-owned consumer preparation. See [Workspace execution](../../docs/adr/0022-factorybox-workspace-execution.md).
+contract with Factory-owned consumer preparation. See [Workspace execution](../../docs/adr/0002-factorybox-worker-and-execution.md#run-workspace-execution-in-factorybox-with-shared-canonical-source).
 
 The Helm chart requires `factorybox.image`, `factorybox.executableSHA256`,
 `factorybox.architecture`, `factorybox.nodeName` and `factorybox.kernel`. The local launcher uses
@@ -163,7 +163,7 @@ A read-only inspector verifies the original initialization receipt, bounded imag
 capacity and requires its old lease to be released. Old imports, exports and runtime histories
 remain retained; new exports have separate admission-scoped inputs. A failed successor bootstrap
 using that store needs another explicit operator recovery, never a new-store bootstrap retry.
-See [ADR 0031](../../docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md).
+See [ADR 0003](../../docs/adr/0003-worker-recovery-and-storage-retirement.md#recover-an-admitted-worker-without-allocating-another-store).
 
 ## Lifecycle commands
 

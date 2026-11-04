@@ -38,7 +38,7 @@ Personal Project Chat uses Factory MCP for Project search, source reads and expl
 creation. Ask it to create a Ticket in Requirements or capture an Idea. The action saves a chat
 receipt linked to the Ticket; creating it starts no Interview, implementation or runtime.
 The existing permission and approval boundaries remain. See
-[Factory MCP](../../docs/adr/0020-factory-actions-through-mcp.md).
+[Factory MCP](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#project-chat-uses-factory-mcp-for-planning-actions).
 
 Typing `/` opens eligible Skill suggestions. Selecting one inserts it into the draft without
 sending a message or enabling guidance. Human and Assistant messages have Copy actions.
@@ -50,7 +50,7 @@ editing; the holder can release it or approve a transfer. After five minutes wit
 edits, deliberate human takeover becomes available. Inactivity never releases authority by itself
 or expires Agent work. Handoff stops previous commands and fences old source and branch writes.
 Save before releasing: unsaved buffers remain with their developer and are not transferred.
-See [the collaboration decision](../../docs/adr/0019-conversation-contexts-and-shared-editing.md).
+See [the collaboration decision](../../docs/adr/0004-agents-and-conversations.md#retained-conversations-share-one-ticket-workspace-and-an-explicit-writer).
 
 ## Personal Inbox and Ticket responsibility
 
@@ -73,7 +73,7 @@ Creating a Ticket, contributing or commissioning work establishes following. The
 person also follows automatically. Follow/Following lets each person override their own discussion
 subscription. Type `@` in shared Ticket chat or feedback to select an active Project member.
 Mentions reach that member even when they do not follow, but grant neither access nor approval.
-See [human responsibility and the Inbox](../../docs/adr/0025-human-ticket-responsibility-and-inbox.md).
+See [human responsibility and the Inbox](../../docs/adr/0005-authority-identity-and-uncertain-outcomes.md#human-ticket-responsibility-is-independent-of-execution-and-decisions).
 
 ## Parallel Tickets and Delivery
 
@@ -93,7 +93,7 @@ Project Settings → Inputs → Automatic Ticket Delivery lets a manager with de
 explicitly delegate eligible application changes and tests, including features. Operational,
 migration, dependency and access-policy changes still require human Delivery. The delegation is
 revocable and never replaces an exact passing review or an open human Thread. See
-[the integration and authority decision](../../docs/adr/0026-parallel-tickets-and-serialized-delivery.md).
+[the integration and authority decision](../../docs/adr/0006-verification-review-and-delivery.md#parallel-ticket-implementation-reuses-the-existing-delivery-path).
 
 ## Work review and monitoring
 
@@ -274,7 +274,7 @@ versioned source and artifact identities. An unconfirmed result is reconciled wi
 starting another run. External access issues project-bound read credentials with explicit
 rotation and revocation. It does not register consumers, store their production credentials
 or test their availability. Production deployment and operation stay outside Factory.
-See [the Release boundary](../../docs/adr/0023-independent-project-releases.md).
+See [the Release boundary](../../docs/adr/0009-installation-releases-and-hardening.md#release-publication-has-no-dependency-on-consumers).
 
 
 ## Requirements, planning and agents
@@ -307,7 +307,7 @@ without repeating the Product Interview. These are explicit model actions; readi
 saving remain model-free. A continuous Ticket document provides Product, Technical design,
 optional Architecture and Validation chapters. Technical Designs and PlantUML diagrams retain
 development-only access. Implement approves both exact revisions and rejects a changed source
-commit. See [Ticket technical planning](../../docs/adr/0024-ticket-technical-planning.md).
+commit. See [Ticket technical planning](../../docs/adr/0004-agents-and-conversations.md#ticket-owned-technical-planning-follows-confirmed-product-intent).
 
 Factory's Models settings show separate Planning & knowledge and Coding choices. Each has a
 connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
@@ -353,8 +353,8 @@ Developer access. Eligible application fixes use the existing Build, fresh Verif
 independent review and exact-commit Delivery path. Operational, configuration and dependency changes
 require a human decision. Disable or key rotation fences pending automatic work; accepted merges
 still finish recorded promotion and cleanup. Previously issued monitoring URLs remain valid.
-See [Project Inputs](../../docs/adr/0018-project-inputs.md) and
-[bounded Autofix](../../docs/adr/0016-delegated-monitoring-autofix.md).
+See [Project Inputs](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#project-inputs-prepare-requirements-without-granting-execution-authority) and
+[bounded Autofix](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#monitoring-delegates-a-bounded-fix-and-delivery-not-general-agent-authority).
 
 Factory supplies OpenCode's configuration through its packaged read-only configuration directory
 and admitted model settings. Home-directory and Project OpenCode configuration and compatibility

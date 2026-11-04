@@ -121,7 +121,7 @@ original worker while retaining its Pod object for terminal observation. Fresh r
 unresolved backing from any admission sharing the old claim. It records a new store intent,
 keeps the old claim and history, and retains canonical Source on its original claim and node.
 Omitting `storage` retains the exact original store. Retry a request only with the same UUID and
-storage selection. See [ADR 0036](../../../docs/adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
+storage selection. See [ADR 0003](../../../docs/adr/0003-worker-recovery-and-storage-retirement.md#admit-fresh-execution-storage-only-after-confirmed-drain).
 A new node, kernel or storage backend still needs its own native admission.
 
 Fresh worker resource admission checks the configured node's readiness and allocatable resources

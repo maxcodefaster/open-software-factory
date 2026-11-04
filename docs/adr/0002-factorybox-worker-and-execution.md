@@ -2,7 +2,64 @@
 status: accepted
 ---
 
-# Run Workspace execution in Factorybox with shared canonical source
+# Factorybox worker and Workspace execution
+
+
+This record holds the decisions formerly numbered 0021, 0022, 0030. Each section keeps its original wording.
+
+
+## Admit Factorybox workers before changing Workspace execution
+
+Add a concrete operator command for Factorybox's bounded worker contract. Reuse ordinary
+Kubernetes objects and the current installation connection. Keep Factory as the sole product
+control plane and preserve its existing execution-reserve coordination.
+
+One worker and complete persistent store belong to one customer or trust domain. The worker runs
+as PID 1. The original 3 CPU / 3 GiB aggregate ceiling is superseded for fresh admissions by
+[ADR 0002](#select-aggregate-worker-resources-before-admission); retained workers and native
+qualification fixtures keep their original declarations. Native HTTP readiness avoids exec tasks during initial
+cgroup delegation. Every administrative mutation verifies recorded Kubernetes resource UIDs and
+pins the live store/epoch inside the runtime CLI. Persist exact intent before the first external
+command. An uncertain operation cannot create a replacement identity or silently retry.
+
+CPU scheduling requests are distinct from that qualified ceiling. Fresh product workers
+reserve 100 millicores by default and can use spare node CPU up to the selected aggregate
+limit. Kubernetes schedules against the reserve and shares available CPU dynamically; the
+reserve does not promise dedicated cores or change the memory ceiling. The operator
+can select a whole-millicore reserve between 10 and 3000 before first admission. Product init
+containers request no more CPU than that reserve, so a completed image exporter does not
+silently retain a larger scheduling floor.
+
+The selected reserve is part of the immutable profile. Existing worker profiles without
+that field retain their original full reservation and exact declarations; an upgrade never
+changes their QoS class, resource UIDs, store or epoch. New execution and reserve preparation
+on an existing worker use its retained profile rather than new installation defaults.
+Lower requests require native target-cluster acceptance under the resulting QoS class.
+Unit tests and spare CPU observations alone do not qualify checkpoint/restore behavior.
+
+The command is an explicit admission lane for private OCI bundles, not another generic runtime
+provider. Workspace execution and the execution reserve now use the same admitted worker contract,
+with Factory-owned consumer preparation and lifecycle intent. The product integration and its
+canonical Source boundary are defined in [ADR 0002](#run-workspace-execution-in-factorybox-with-shared-canonical-source).
+
+The product boundary is canonical source. [ADR 0001](0001-workspaces-source-and-app-access.md#workspace-file-access-independent-of-execution)
+requires the file service and compute to mount the same inodes while editing remains available
+with execution stopped. Factorybox keeps private runtime state in bounded storage and admits only
+the exact declared shared Source mount. A copied checkout would break file/watch semantics.
+Restoring an old full filesystem snapshot over source edited during Pause would discard accepted edits.
+
+Do not bypass either contract to make the image appear integrated. Routing Workspace Start or
+idle Pause through Factorybox requires native proof of the exact shared-source capture/restore
+behavior, including atomic editor replacement and relevant open file handles. PostgreSQL retains
+Runtime Attempt and reserve ownership. New platform profiles require native qualification; a
+different cloud provider, portable manifest or persistent volume does not establish cross-node RAM restore.
+
+The [operator command](../../deploy/factorybox/README.md) is implemented and has targeted contract
+tests. Its native transport proof uses real Factorybox operations with fixture Kubernetes
+observations. Each admitted profile also requires a real target-cluster run and shared-source
+product acceptance. No production or Kubernetes qualification follows from this decision alone.
+
+## Run Workspace execution in Factorybox with shared canonical source
 
 Replace Envbox execution with an admitted, pinned Factorybox worker. Factory remains the sole
 control plane. Keep the existing Runtime Attempt, Connector credentials and PostgreSQL reserve
@@ -38,7 +95,7 @@ a runtime build. RAM restore never crosses architectures. Each architecture requ
 standalone Factorybox native qualification gates before production admission.
 
 The Source service and Sandbox bind the same canonical Project directory, following
-[ADR 0009](0009-independent-workspace-file-access.md). Private runtime files and Docker storage
+[ADR 0001](0001-workspaces-source-and-app-access.md#workspace-file-access-independent-of-execution). Private runtime files and Docker storage
 belong to the worker's bounded filesystem. Source stays available during Pause and is excluded
 from private snapshots. The worker retains open descriptions so atomic saves, renamed working
 directories and queued watches survive same-worker Resume. A stopped worker cannot recover those
@@ -320,4 +377,35 @@ admit the actual cluster's node, kernel, CNI and storage with the pinned worker.
 manifest does not prove support for every Kubernetes cluster, cross-node RAM migration or recovery
 after worker restart. The product replacement requires its own native Connector and lifecycle
 acceptance in addition to the runtime contract proofs described in
-[ADR 0021](0021-factorybox-worker-admission.md).
+[ADR 0002](#admit-factorybox-workers-before-changing-workspace-execution).
+
+## Select aggregate worker resources before admission
+
+The Factorybox Worker contains all Sandboxes in one Factory trust domain. Its
+aggregate CPU and memory budget must not inherit the 3 CPU / 3 GiB native fixture
+ceiling. This supersedes that aggregate ceiling in
+[ADR 0002](#admit-factorybox-workers-before-changing-workspace-execution), not the existing qualification
+fixtures or any retained worker declaration.
+
+Before a fresh automatic admission, read the configured node's exact platform,
+readiness and allocatable resources plus its assigned Pods. Select the node CPU
+ceiling and reserve the remaining schedulable memory after Pod requests and an
+explicit operator headroom. Account for init peaks, native sidecars, overhead,
+terminating Pods and allocated resize reservations. Usage samples are not
+scheduling reservations. An unavailable observation or exhausted budget refuses
+selection without creating execution.
+
+Retain the selected budget on the worker admission before freezing a Sandbox's
+artifact intent or creating the worker. Concurrent commissioners use the same
+retained winner. The worker's memory request equals its finite memory limit;
+the smaller CPU request remains a scheduling reserve, not a dedicated-core
+promise. Kubernetes remains responsible for scheduling against concurrent
+allocations. The observation does not reserve the entire node or guarantee
+capacity for arbitrary Project processes.
+
+An application upgrade, reconnect or later node sample never resizes an
+admitted worker. Profiles without a selected budget retain their original
+3 CPU / 3 GiB declaration. A fresh larger budget requires a pinned Factorybox
+binary that admits finite aggregate limits and native evidence for that
+deployment. This decision does not authorize replacing an admitted worker,
+replaying uncertain execution or claiming per-Sandbox resource isolation.
