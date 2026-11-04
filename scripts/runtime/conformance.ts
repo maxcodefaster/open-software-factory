@@ -32,10 +32,11 @@ const expectedRuntimeHost = (
 if (!/^[a-zA-Z0-9.:/_-]+@sha256:[a-f0-9]{64}$/.test(expectedRuntimeHost))
   throw new Error("Runtime conformance requires an exact registry digest");
 const languageProof = process.env["FACTORY_RUNTIME_LANGUAGE_CONFORMANCE"] === "1";
+const workerProfile = configuredFactoryboxRuntimeProfile();
 const runtime = createConformanceRuntime(
   owner,
   expectedRuntimeHost,
-  configuredFactoryboxRuntimeProfile(),
+  workerProfile,
   await readRuntimeRegistryCA(),
   artifacts,
 );
@@ -1257,9 +1258,16 @@ await writeFile(
       pod,
       namespace,
       image: expectedRuntimeHost,
+      worker: {
+        image: workerProfile.image,
+        executableSHA256: workerProfile.executableSHA256,
+        architecture: workerProfile.architecture,
+        node: workerProfile.nodeName,
+      },
       languageProof,
       passed: true,
       cleanup: true,
+      passedAt: new Date().toISOString(),
     },
     null,
     2,

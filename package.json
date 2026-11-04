@@ -17,6 +17,7 @@
   "scripts": {
     "check": "bun run check:docs && bun run format:check && bun run lint && bun run typecheck && bun run test:unit && bun run connector:check",
     "check:integration": "bun run check && bun run test:postgres && bun run test:controllers",
+    "beta:gate": "bun scripts/release/beta-gate.ts",
     "check:docs": "bun scripts/check-docs.ts",
     "format": "biome format --write .",
     "format:check": "biome format .",
@@ -25,6 +26,7 @@
     "runtime:conformance": "bun scripts/runtime/conformance.ts",
     "factorybox:worker": "bun scripts/runtime/factorybox-worker.ts",
     "factorybox:build": "bun scripts/runtime/factorybox-build.ts",
+    "factorybox:publish": "bun scripts/runtime/factorybox-publish.ts",
     "connector:check": "bun run connector:check:host && bun run connector:check:linux",
     "connector:check:host": "cd services/runtime-connector && go test -race ./... && go vet ./...",
     "connector:check:linux": "bun scripts/testing/connector-linux.ts",

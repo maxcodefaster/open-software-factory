@@ -150,8 +150,11 @@ application does not build its own tools or require a source checkout on the ope
 The image workflow publishes only when a GitHub release is published, never on branch pushes or
 pull requests. A release tag such as `v0.1.0` must point to a commit contained in `main`.
 The shared verification workflow runs the standard checks, PostgreSQL/controller tests and
-owned UI journeys natively on AMD64 and ARM64 for `main` and its pull requests. Release publication
-must pass those same checks on its exact tagged source before any image build or push.
+owned UI journeys natively on AMD64 and ARM64. It does not run on pushes or pull requests;
+release publication calls it, and it can be started by hand. Release publication must pass those
+same checks on its exact tagged source before any image build or push. Before tagging, the
+maintainer runs `bun run beta:gate` on a clean checkout: it scans the history for secrets and for
+terms that must not ship, runs every lane and writes a receipt that names the exact commit.
 Native AMD64 and ARM64 jobs build the runtime roles and Factory, then publish their combined
 manifests. Existing versioned architecture images are not overwritten. Publishing Factory does
 not admit a Factorybox worker or activate an installation.

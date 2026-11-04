@@ -79,6 +79,8 @@ services in Vite or implement a second RPC encoder.
 | `bun run test:postgres` | Database integration checks |
 | `bun run test:forgejo` | Forgejo integration checks |
 | `bun run runtime:conformance` | Actual Factorybox/Kubernetes/Dev Container/Connector conformance |
+| `bun run beta:gate` | Release gate: secret and forbidden-term scans, every lane, receipt for the exact commit |
+| `bun run factorybox:publish` | Push and sign a worker image that passed conformance; refuses unproven bytes |
 | `bun run test:browser` | UI journeys; excludes native, paid and retained-installation restart tests |
 | `bun run test:browser:native` | Explicit real IDE/Terminal/Preview/Delivery journeys |
 | `bun run test:browser:paid` | Explicit real provider journeys; incurs model usage |

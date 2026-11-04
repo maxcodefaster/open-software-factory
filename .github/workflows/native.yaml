@@ -1,11 +1,9 @@
 # Native Factorybox lane. It needs a self-hosted runner with the `sysbox` label: a Linux host that
 # an operator has admitted for the pinned Factorybox worker (Sysbox, CRIU, Docker, Kubernetes
 # access and the Factory test environment described in the README). It never runs for pull
-# requests or release publication; start it on a schedule or with "Run workflow".
+# requests or release publication; start it with "Run workflow".
 name: Native Factorybox lane
 on:
-  schedule:
-    - cron: "17 3 * * 1"
   workflow_dispatch:
 permissions:
   contents: read

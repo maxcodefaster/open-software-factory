@@ -1,9 +1,8 @@
 name: Verify Factory
+# Runs for release publication (called from images.yaml) and on demand. Every commit is judged
+# locally by `bun run beta:gate`; GitHub runs these lanes only for a tagged release.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
   workflow_call:
 permissions:
   contents: read

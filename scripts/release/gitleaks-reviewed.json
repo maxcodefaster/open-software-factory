@@ -1,0 +1,5 @@
+[
+  "curl-auth-header:apps/factory/src/agent/review-execution.test.ts",
+  "private-key:packages/forge/src/diagnostic-output.test.ts",
+  "generic-api-key:services/runtime-connector/connector/browser_proxy_test.go"
+]
