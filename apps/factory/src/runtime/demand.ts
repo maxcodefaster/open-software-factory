@@ -29,7 +29,8 @@ export function createRuntimeDemand(
       }
       if (!["create-intended", "starting", "pausing", "resuming"].includes(current.state))
         return false;
-      await sleep(250);
+      // Resume is requested on the first read above; this only waits for the Connector.
+      await sleep(100);
     }
     return false;
   };

@@ -529,6 +529,15 @@ export function createRuntimeController(
     hub.revoke(attemptID);
     retryCleanup(attemptID);
   }
+  hub.onAppRunning((attemptID, app) => {
+    // Apps already running at Connector readiness are stamped with that
+    // transition. This covers an App that reports healthy afterwards.
+    void database.client`UPDATE factory.runtime_attempt
+      SET app_ready_at=jsonb_set(app_ready_at,ARRAY[${app}]::text[],to_jsonb(now()::text))
+      WHERE id=${attemptID} AND state='ready' AND NOT app_ready_at ? ${app}`.catch(
+      reportFailure("App readiness timestamp"),
+    );
+  });
   async function updateStatus(attemptID: string, phase: string, error?: string) {
     if (["failed", "cleanup-failed", "stopped"].includes(phase)) {
       const [current] = await database.client<
@@ -593,6 +602,15 @@ export function createRuntimeController(
             : null;
     if (!state) return;
     const apps = state === "ready" ? hub.appChannels(attemptID) : [];
+    // Connector readiness implies the declared Apps passed their checks. Stamp
+    // those running now; later restarts never overwrite the first observation.
+    const readyAt = new Date().toISOString();
+    const healthy = Object.fromEntries(
+      hub
+        .processes(attemptID)
+        .filter((process) => process.state === "running" && apps.includes(process.name))
+        .map((process) => [process.name, readyAt]),
+    );
     // Prepared Forks can reconnect before startup observation. Keep them
     // starting until that observer has retained their native ownership, so
     // early Connector readiness cannot skip adoption and later cleanup.
@@ -600,6 +618,9 @@ export function createRuntimeController(
       UPDATE factory.runtime_attempt SET state = ${state}::factory.runtime_attempt_state,
         declared_apps=CASE WHEN declared_apps='[]'::jsonb
           THEN ${JSON.stringify(apps)}::text::jsonb ELSE declared_apps END,
+        ready_at = CASE WHEN ${state} = 'ready' AND state <> 'ready' THEN now() ELSE ready_at END,
+        app_ready_at = CASE WHEN ${state} = 'ready' AND state <> 'ready'
+          THEN ${JSON.stringify(healthy)}::text::jsonb ELSE app_ready_at END,
         failure = ${error ?? null}, stopped_at = CASE WHEN ${state} = 'stopped' THEN now() ELSE stopped_at END,
         updated_at = now() WHERE id = ${attemptID}
           AND (
@@ -621,6 +642,25 @@ export function createRuntimeController(
     if (changed.count === 1 && state === "ready") {
       clearReconnectObservation(attemptID);
       await settleReadyChange(attemptID);
+      await logReadyTiming(attemptID);
+    }
+  }
+  // One compact line per attempt that became ready: how long Connector
+  // readiness took after the create intent, and how long Apps took after that.
+  async function logReadyTiming(attemptID: string) {
+    try {
+      const [row] = await database.client<
+        Array<{ sinceIntentMS: number | null; apps: unknown }>
+      >`SELECT round(extract(epoch FROM (ready_at-create_intended_at))*1000)::int AS "sinceIntentMS",
+          app_ready_at AS apps
+        FROM factory.runtime_attempt WHERE id=${attemptID} AND ready_at IS NOT NULL`;
+      if (row)
+        console.info(
+          "[factory] runtime ready timing",
+          JSON.stringify({ attemptID, sinceCreateIntentMS: row.sinceIntentMS, apps: row.apps }),
+        );
+    } catch {
+      /* Timing is diagnostic; it never changes the lifecycle. */
     }
   }
   async function observeStartup(
@@ -2497,7 +2537,8 @@ export function createRuntimeController(
           COALESCE(staging.runtime_attempt_id = attempt.id, false) AS "currentStaging",
           attempt.state, (SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS "computeWait", attempt.kubernetes_namespace AS "kubernetesNamespace",
           attempt.kubernetes_pod_name AS "kubernetesPodName", attempt.failure,
-          attempt.created_at AS "createdAt", attempt.updated_at AS "updatedAt"
+          attempt.created_at AS "createdAt", attempt.updated_at AS "updatedAt",
+          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt"
         FROM factory.runtime_attempt attempt
         LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
@@ -2575,7 +2616,8 @@ export function createRuntimeController(
           COALESCE(attempt.isolated_kind::text, workspace.kind::text) AS "runtimeKind",
           attempt.state, (SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS "computeWait", attempt.failure, attempt.created_at AS "createdAt",
           COALESCE(staging.runtime_attempt_id = attempt.id, false) AS "currentStaging",
-          attempt.updated_at AS "updatedAt"
+          attempt.updated_at AS "updatedAt",
+          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt"
         FROM factory.runtime_attempt attempt
         LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id

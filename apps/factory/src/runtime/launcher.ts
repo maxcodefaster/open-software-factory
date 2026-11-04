@@ -1,6 +1,6 @@
 import {
-  requireRuntimePodArtifacts,
   type KubernetesClient,
+  requireRuntimePodArtifacts,
 } from "../../../../packages/runtime-kubernetes/src/client";
 import type { FactoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 

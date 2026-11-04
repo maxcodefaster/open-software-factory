@@ -23,6 +23,10 @@ export type RuntimeAttemptView = {
   failure: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Latest transition into ready (Connector ready). Null until the attempt first became ready. */
+  readyAt?: string | null;
+  /** First moment Factory saw each declared App healthy since `readyAt`. */
+  appReadyAt?: Record<string, string>;
 };
 
 export type RuntimeProcessView = {

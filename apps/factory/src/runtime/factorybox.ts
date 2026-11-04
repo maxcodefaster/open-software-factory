@@ -4,6 +4,7 @@ import type postgres from "postgres";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
+import { withCommandDeadline } from "../../../../packages/runtime-kubernetes/src/command";
 import {
   retiredFactoryboxExportOwner,
   retireFactoryboxExports,
@@ -51,12 +52,17 @@ import {
 } from "./factorybox-retirement";
 import type { RuntimeHub } from "./hub";
 import { createInspectionReuse } from "./inspection-reuse";
-import type { RetryBackoff } from "./retry-backoff";
 import {
-  factoryboxAllocation,
-  rememberFactoryboxIdentity,
-  withFactoryboxWorkerLock,
-} from "./worker";
+  acquireNativeDispatch,
+  createNativeLease,
+  gatedFactoryboxTransport,
+  type NativeLease,
+  NativeSlotBusyError,
+  releaseNativeDispatch,
+  withNativeLease,
+} from "./native-lock";
+import type { RetryBackoff } from "./retry-backoff";
+import { factoryboxAllocation, rememberFactoryboxIdentity } from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"];
@@ -96,8 +102,9 @@ async function retiredBackingPending(sql: SQL) {
   return pending?.pending === true;
 }
 
-// Background reclamation shares the worker lifecycle lock with Start, Resume and
-// Pause. A deployment passes this policy to space repeated failures and skip
+// Background reclamation takes the native lock with a low-priority try-lock
+// for one native call at a time, so a waiting Start, Resume or Pause goes
+// first. A deployment passes this policy to space repeated failures and skip
 // sweeps that have nothing to do; without it every sweep runs its full checks.
 export type FactoryboxReclaimPolicy = {
   backoff: RetryBackoff;
@@ -112,57 +119,88 @@ export function createFactoryboxExecution(
 ) {
   let reclaiming: Promise<void> | null = null;
   let importedExportsAt = Number.NEGATIVE_INFINITY;
-  let waiting = 0;
   let reclaimAfter: string | null = null;
   let retiredCursor: RetiredBackingCursor = { attempts: null, slots: null };
   const deadlines = new AsyncLocalStorage<number>();
+  const phases = new AsyncLocalStorage<Record<string, number>>();
   const inspections = createInspectionReuse();
+  const nativeTransport = gatedFactoryboxTransport(transport);
   const run: typeof transport = (args, input, limits) => {
     const remaining =
       (deadlines.getStore() ?? performance.now() + nativeLifecycleWindowMS) - performance.now();
     if (remaining <= 0)
       throw new Error("Factorybox lifecycle deadline expired; original intent was retained");
     return inspections.run(args, input, () =>
-      transport(args, input, {
+      nativeTransport(args, input, {
         timeoutMS: Math.min(remaining, limits?.timeoutMS ?? remaining),
         outputBytes: limits?.outputBytes ?? 4 * 1024 ** 2,
       }),
     );
   };
-  // Lifecycle commands and background reclamation share one native lock. A
-  // sweep that holds it for several retirements lets a waiting Start or Resume
-  // go first once its current retirement finishes.
+  async function phase<T>(name: string, action: () => Promise<T>) {
+    const sink = phases.getStore();
+    const started = performance.now();
+    try {
+      return await action();
+    } finally {
+      if (sink) sink[name] = (sink[name] ?? 0) + performance.now() - started;
+    }
+  }
+  // Only the native commands hold the cross-process lock, one call at a time
+  // (see native-lock.ts). The attempt lock, image export, Kubernetes reads and
+  // database steps do not, so another Runtime Attempt prepares meanwhile.
   async function locked<T>(
     attemptID: string,
+    label: string,
     action: (connection: SQL) => Promise<T>,
     deadline = performance.now() + nativeLifecycleWindowMS,
     background = false,
   ) {
-    let queued = !background;
-    if (queued) waiting += 1;
-    const dequeue = () => {
-      if (!queued) return;
-      queued = false;
-      waiting -= 1;
-    };
     const connection = database.coordination();
+    const lease: NativeLease = createNativeLease(
+      connection,
+      background ? "background" : "foreground",
+      () => deadline,
+    );
+    const started = performance.now();
+    const timings: Record<string, number> = {};
+    let outcome = "ok";
     try {
       await connection`SELECT pg_advisory_lock(hashtext(${`factorybox:${attemptID}`}))`;
-      return await withFactoryboxWorkerLock(
-        connection,
-        () => {
-          dequeue();
-          return deadlines.run(deadline, () => inspections.scope(() => action(connection)));
-        },
-        deadline,
+      return await withCommandDeadline(deadline, () =>
+        deadlines.run(deadline, () =>
+          phases.run(timings, () =>
+            withNativeLease(lease, () => inspections.scope(() => action(connection))),
+          ),
+        ),
       );
+    } catch (cause) {
+      outcome = "failed";
+      throw cause;
     } finally {
-      dequeue();
       try {
-        await connection`SELECT pg_advisory_unlock(hashtext(${`factorybox:${attemptID}`}))`;
+        await lease.release();
       } finally {
-        await connection.end({ timeout: 1 });
+        try {
+          await connection`SELECT pg_advisory_unlock(hashtext(${`factorybox:${attemptID}`}))`;
+        } finally {
+          await connection.end({ timeout: 1 });
+        }
       }
+      if (lease.timing.acquisitions > 0 || ["start", "pause", "resume"].includes(label))
+        console.info(
+          "[factory] factorybox lifecycle timing",
+          JSON.stringify({
+            attemptID,
+            operation: label,
+            outcome,
+            totalMS: Math.round(performance.now() - started),
+            nativeWaitMS: Math.round(lease.timing.waitedMS),
+            nativeHeldMS: Math.round(lease.timing.heldMS),
+            nativeCalls: lease.timing.acquisitions,
+            ...Object.fromEntries(Object.entries(timings).map(([k, v]) => [k, Math.round(v)])),
+          }),
+        );
     }
   }
   async function retained(connection: SQL, attemptID: string) {
@@ -221,7 +259,25 @@ export function createFactoryboxExecution(
     await connection`UPDATE factory.factorybox_lifecycle_operation SET completed_at=now(),observation=${JSON.stringify(observation)}::text::jsonb
       WHERE id=${operation.id} AND completed_at IS NULL`;
   }
+  // Intent and the first native dispatch happen under one native lease, so a
+  // wait for the lock can never leave an attempted but undispatched command.
+  // The lease ends with the last native call; completion bookkeeping is DB-only.
   async function perform(
+    connection: SQL,
+    attemptID: string,
+    saved: Retained,
+    op: LifecycleOperation,
+    observeOnly = false,
+  ) {
+    try {
+      return await phase(op.action, () =>
+        performNative(connection, attemptID, saved, op, observeOnly),
+      );
+    } finally {
+      await releaseNativeDispatch();
+    }
+  }
+  async function performNative(
     connection: SQL,
     attemptID: string,
     saved: Retained,
@@ -261,6 +317,7 @@ export function createFactoryboxExecution(
             declaration,
           )
         : await executeFactoryboxOperation(request, identity, op, run, declaration, async () => {
+            await acquireNativeDispatch();
             await attempted(connection, record);
             if (op.action === "pause") hub.revoke(attemptID);
           });
@@ -341,6 +398,7 @@ export function createFactoryboxExecution(
         // Continue only the same preparation. The native record positively
         // proves no restore was dispatched; unknown/attempted outcomes remain
         // observation-only. Keep the original Factory intent and first stamp.
+        await acquireNativeDispatch();
         const continued = await executeFactoryboxOperation(request, identity, op, run, declaration);
         if (!continued.confirmed) throw factoryboxOperationFailure("resume", continued.stderr);
         result = nativeResult.parse(JSON.parse(continued.stdout));
@@ -378,6 +436,7 @@ export function createFactoryboxExecution(
       // before activation; uncertain or held restores remain refused natively.
       // Keep the existing intent and first attempt.
       // No new Start, prompt, source write or native identity is admitted.
+      await acquireNativeDispatch();
       const continued = await executeFactoryboxOperation(request, identity, op, run, declaration);
       if (!continued.confirmed) throw factoryboxOperationFailure("delete", continued.stderr);
       result = nativeResult.parse(JSON.parse(continued.stdout));
@@ -433,25 +492,16 @@ export function createFactoryboxExecution(
     else await completed(connection, record, compact);
     return compact;
   }
-  async function reclaimAttempt(
-    connection: SQL,
-    attemptID: string,
-    saved: Retained,
-    background = false,
-  ) {
-    if (!saved.identity)
-      throw new Error("Checkpoint retirement requires its original worker identity");
+  async function reclaimAttempt(connection: SQL, attemptID: string, saved: Retained) {
+    const identity = saved.identity;
+    if (!identity) throw new Error("Checkpoint retirement requires its original worker identity");
     const operations = await connection<
       Operation[]
     >`SELECT id,action,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,false AS completed,request,observation
       FROM factory.factorybox_lifecycle_operation
       WHERE runtime_attempt_id=${attemptID} AND action IN ('retire-checkpoint','retire-resume') AND completed_at IS NULL
       ORDER BY intended_at,id`;
-    let retired = 0;
     for (const operation of operations) {
-      // The remaining retirements stay pending for the next sweep.
-      if (background && retired > 0 && waiting > 0) return;
-      retired += 1;
       const request = factoryboxCheckpointRequest.parse(operation.request);
       if (operation.action !== "retire-checkpoint" && operation.action !== "retire-resume")
         throw new Error("Unknown Factorybox retirement action");
@@ -460,27 +510,37 @@ export function createFactoryboxExecution(
         request.snapshot_id !== operation.snapshotID
       )
         throw new Error("Checkpoint retirement intent belongs to another Sandbox or snapshot");
-      if (!operation.attempted) await attempted(connection, operation);
       // Unlike Start/Resume, native retirement explicitly continues one exact
       // durable deletion inventory after interruption. Reusing this request
       // never selects a fresh checkpoint or removes a successor at its path.
-      const result = await executeFactoryboxOperation(
-        factoryboxRuntimeRequest(saved.request),
-        saved.identity,
-        {
-          action: operation.action,
-          sandboxID: request.source_id,
-          snapshotID: request.snapshot_id,
-          sourceOwner: request.source_owner,
-          checkpointSHA256: request.checkpoint_sha256,
-        },
-        run,
-        factoryboxRuntimeDeclaration(saved.request),
-      );
+      let result: Awaited<ReturnType<typeof executeFactoryboxOperation>>;
+      try {
+        result = await phase(operation.action, () =>
+          executeFactoryboxOperation(
+            factoryboxRuntimeRequest(saved.request),
+            identity,
+            {
+              action: operation.action as "retire-checkpoint" | "retire-resume",
+              sandboxID: request.source_id,
+              snapshotID: request.snapshot_id,
+              sourceOwner: request.source_owner,
+              checkpointSHA256: request.checkpoint_sha256,
+            },
+            run,
+            factoryboxRuntimeDeclaration(saved.request),
+            async () => {
+              await acquireNativeDispatch();
+              if (!operation.attempted) await attempted(connection, operation);
+            },
+          ),
+        );
+      } finally {
+        await releaseNativeDispatch();
+      }
       if (!result.confirmed) throw factoryboxOperationFailure(operation.action, result.stderr);
       const receipt = readFactoryboxCheckpointRetirement(
         request,
-        saved.identity.controllerRoot,
+        identity.controllerRoot,
         JSON.parse(result.stdout),
         operation.action === "retire-resume" ? "resume-images" : undefined,
       );
@@ -501,7 +561,8 @@ export function createFactoryboxExecution(
     saved: Retained,
     deleted: unknown,
   ) {
-    if (!saved.identity) throw new Error("Sandbox backing retirement requires its original worker");
+    const identity = saved.identity;
+    if (!identity) throw new Error("Sandbox backing retirement requires its original worker");
     const record = z
       .object({
         id: z.literal(saved.request.sandboxID),
@@ -521,24 +582,34 @@ export function createFactoryboxExecution(
     // persisted ownership. A lost reply never selects new paths or credentials.
     const [fork] = await connection`SELECT id FROM factory.execution_slot
       WHERE assigned_attempt_id=${attemptID} AND template_id IS NOT NULL`;
-    if (!fork) await releaseFactoryboxRuntime(saved.request, saved.identity, false, run);
-    if (!operation.attempted) await attempted(connection, operation);
-    const result = await executeFactoryboxOperation(
-      factoryboxRuntimeRequest(saved.request),
-      saved.identity,
-      {
-        action: "retire-sandbox",
-        sandboxID: request.sandbox_id,
-        sandboxOwner: request.sandbox_owner,
-        inputSHA256: request.input_sha256,
-      },
-      run,
-      factoryboxRuntimeDeclaration(saved.request),
-    );
+    if (!fork) await releaseFactoryboxRuntime(saved.request, identity, false, run);
+    let result: Awaited<ReturnType<typeof executeFactoryboxOperation>>;
+    try {
+      result = await phase("retire-sandbox", () =>
+        executeFactoryboxOperation(
+          factoryboxRuntimeRequest(saved.request),
+          identity,
+          {
+            action: "retire-sandbox",
+            sandboxID: request.sandbox_id,
+            sandboxOwner: request.sandbox_owner,
+            inputSHA256: request.input_sha256,
+          },
+          run,
+          factoryboxRuntimeDeclaration(saved.request),
+          async () => {
+            await acquireNativeDispatch();
+            if (!operation.attempted) await attempted(connection, operation);
+          },
+        ),
+      );
+    } finally {
+      await releaseNativeDispatch();
+    }
     if (!result.confirmed) throw factoryboxOperationFailure("retire-sandbox", result.stderr);
     const receipt = readFactoryboxBackingRetirement(
       request,
-      saved.identity.controllerRoot,
+      identity.controllerRoot,
       JSON.parse(result.stdout),
     );
     await completed(connection, operation, {
@@ -612,20 +683,33 @@ export function createFactoryboxExecution(
       await completed(connection, operation, observed);
       return observed;
     }
-    if (!saved.identity) throw new Error("Factorybox preparation identity is missing");
-    const result = await prepareFactoryboxRuntime(
-      saved.request,
-      saved.identity,
-      run,
-      nativeLifecycleWindowMS,
-      () => attempted(connection, operation),
-    );
-    await completed(connection, operation, result);
-    return result;
+    const workerIdentity = saved.identity;
+    if (!workerIdentity) throw new Error("Factorybox preparation identity is missing");
+    // The consumer image export runs unlocked inside this call. Only the final
+    // private-input command holds the native lease, taken before the attempt
+    // is recorded.
+    try {
+      const result = await phase("prepare", () =>
+        prepareFactoryboxRuntime(
+          saved.request,
+          workerIdentity,
+          run,
+          nativeLifecycleWindowMS,
+          async () => {
+            await acquireNativeDispatch();
+            await attempted(connection, operation);
+          },
+        ),
+      );
+      await completed(connection, operation, result);
+      return result;
+    } finally {
+      await releaseNativeDispatch();
+    }
   }
   return {
     async hasExited(attemptID: string) {
-      return locked(attemptID, async (connection) => {
+      return locked(attemptID, "observe-exit", async (connection) => {
         const saved = await retained(connection, attemptID);
         if (!saved) return false;
         if (saved.released) return true;
@@ -698,6 +782,7 @@ export function createFactoryboxExecution(
           try {
             await locked(
               current.id,
+              "sweep-storage",
               async (connection) => {
                 const saved = await retained(connection, current.id);
                 if (!saved?.identity) return;
@@ -705,7 +790,11 @@ export function createFactoryboxExecution(
                   importedExportsAt = performance.now();
                   try {
                     await retireImportedFactoryboxExports(saved.request, saved.identity, run);
-                  } catch {
+                  } catch (cause) {
+                    if (cause instanceof NativeSlotBusyError) {
+                      importedExportsAt = Number.NEGATIVE_INFINITY;
+                      throw cause;
+                    }
                     console.error("Factorybox imported export retirement needs observation");
                   }
                 }
@@ -722,9 +811,12 @@ export function createFactoryboxExecution(
               undefined,
               true,
             );
-          } catch {
-            reclaim?.backoff.failed("retained-backing");
-            console.error("Factorybox retained backing retirement needs observation");
+          } catch (cause) {
+            // Foreground work kept the worker busy; nothing was dispatched.
+            if (!(cause instanceof NativeSlotBusyError)) {
+              reclaim?.backoff.failed("retained-backing");
+              console.error("Factorybox retained backing retirement needs observation");
+            }
           }
         }
         const attempts = await database.client<
@@ -739,18 +831,20 @@ export function createFactoryboxExecution(
           try {
             await locked(
               attempt.id,
+              "sweep-checkpoints",
               async (connection) => {
                 const saved = await retained(connection, attempt.id);
                 if (!saved) throw new Error("Checkpoint retirement lost its retained Sandbox");
-                await reclaimAttempt(connection, attempt.id, saved, true);
+                await reclaimAttempt(connection, attempt.id, saved);
               },
               undefined,
               true,
             );
             reclaim?.backoff.succeeded(attempt.id);
-          } catch {
+          } catch (cause) {
             // Execution stays usable. The exact attempted intent remains for
             // the next sweep, including after a Factory process restart.
+            if (cause instanceof NativeSlotBusyError) continue;
             reclaim?.backoff.failed(attempt.id);
             console.error("Factorybox checkpoint retirement needs observation", attempt.id);
           }
@@ -816,7 +910,7 @@ export function createFactoryboxExecution(
       return [factoryboxRuntimeDeclaration(input).pod];
     },
     async deleteSandbox(attemptID: string, nativeDeleteObserved = false) {
-      return locked(attemptID, async (connection) => {
+      return locked(attemptID, "delete", async (connection) => {
         const saved = await retained(connection, attemptID);
         if (!saved?.identity) return;
         if (saved.released) return;
@@ -854,6 +948,7 @@ export function createFactoryboxExecution(
     async ensureStarted(attemptID: string, resources?: readonly unknown[], deadline?: number) {
       return locked(
         attemptID,
+        "start",
         async (connection) => {
           if (!resources) {
             const saved = await retained(connection, attemptID);
@@ -1067,7 +1162,7 @@ export function createFactoryboxExecution(
       );
     },
     async pause(attemptID: string) {
-      return locked(attemptID, async (connection) => {
+      return locked(attemptID, "pause", async (connection) => {
         const saved = await retained(connection, attemptID);
         if (!saved?.identity)
           throw new Error("Runtime Attempt has no admitted Factorybox execution");
@@ -1135,6 +1230,7 @@ export function createFactoryboxExecution(
     async resume(attemptID: string, deadline?: number) {
       return locked(
         attemptID,
+        "resume",
         async (connection) => {
           const saved = await retained(connection, attemptID);
           if (!saved?.identity)

@@ -5,6 +5,7 @@ import {
 } from "../../../../packages/runtime-domain/src/identity";
 import { modelEnvironment } from "../models/controller";
 import { runtimeFactoryURL } from "./endpoints";
+
 type Database = ReturnType<typeof createDatabase>;
 const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
 export async function agentConfiguration(

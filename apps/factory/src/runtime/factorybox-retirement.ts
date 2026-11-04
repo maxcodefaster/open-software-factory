@@ -19,6 +19,7 @@ import {
   factoryboxWorkerIdentity,
   runFactoryboxKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
+import { NativeSlotBusyError } from "./native-lock";
 import { completeSlotRetirement, completeSlotRetirementPart } from "./reserve-store";
 
 type SQL = ReturnType<typeof createDatabase>["client"];
@@ -170,7 +171,8 @@ export async function reclaimRetiredFactoryboxBacking(
           WHERE pending.runtime_attempt_id=${source.ownerID}
             AND pending.action IN ('retire-checkpoint','retire-resume','retire-sandbox')
             AND pending.completed_at IS NULL)`;
-    } catch {
+    } catch (cause) {
+      if (cause instanceof NativeSlotBusyError) throw cause;
       failed += 1;
       console.error("Factorybox retained backing needs observation", source.ownerID);
     }
@@ -239,7 +241,8 @@ export async function reclaimRetiredFactoryboxBacking(
               WHERE pending.runtime_attempt_id=attempt.id
                 AND pending.action IN ('retire-checkpoint','retire-resume','retire-sandbox')
                 AND pending.completed_at IS NULL)`;
-    } catch {
+    } catch (cause) {
+      if (cause instanceof NativeSlotBusyError) throw cause;
       failed += 1;
       console.error("Factorybox retained slot backing needs observation", source.id);
     }

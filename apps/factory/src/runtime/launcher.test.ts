@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { launchRuntimeResources } from "./launcher";
 import { ownedFactoryboxProfile } from "../../../../test/fixtures/runtime-configuration";
+import { launchRuntimeResources } from "./launcher";
 
 const runtimeHostImage = `registry.invalid/host@sha256:${"a".repeat(64)}`;
 const observedPod = {

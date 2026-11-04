@@ -4,8 +4,8 @@ import { resolve } from "node:path";
 import {
   resolveRepositoryRevision,
   runtimeSourceCapability,
-  validRuntimeSourceCapability,
   serveRuntimeRepository,
+  validRuntimeSourceCapability,
 } from "./git-http";
 
 const repositories: string[] = [];

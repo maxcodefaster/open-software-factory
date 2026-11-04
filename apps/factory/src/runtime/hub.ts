@@ -154,12 +154,18 @@ export class RuntimeHub {
     }
   >();
   readonly #idleClaims = new Set<string>();
+  readonly #appRunning: Array<(attemptID: string, app: string) => void> = [];
 
   constructor(
     onStatus: (attemptID: string, phase: string, error?: string) => Promise<void>,
     private readonly now = Date.now,
   ) {
     this.#onStatus = onStatus;
+  }
+
+  /** Called when a declared App process first reports running after not running. */
+  onAppRunning(listener: (attemptID: string, app: string) => void) {
+    this.#appRunning.push(listener);
   }
 
   #observeStatus(producer: ServerWebSocket<RuntimeSocketData>, phase: string, error?: string) {
@@ -361,7 +367,10 @@ export class RuntimeHub {
         message.processState === "failed")
     ) {
       const process = this.#process(socket.data.attemptID, message.process);
+      const wasRunning = process.state === "running";
       process.state = message.processState;
+      if (message.processState === "running" && !wasRunning)
+        for (const listener of this.#appRunning) listener(socket.data.attemptID, message.process);
       if (message.processLabel?.trim() && message.processLabel.length <= 64) {
         process.label = message.processLabel;
       }
@@ -846,15 +855,28 @@ export class RuntimeHub {
     return true;
   }
 
-  claimIdle(attemptID: string, idleMS: number) {
+  /** Whether an IDE, Terminal or App socket, or any browser HTTP request, is open for this attempt. */
+  attended(attemptID: string) {
+    for (const browser of this.#browsers.values())
+      if (browser.socket.data.kind === "browser" && browser.socket.data.attemptID === attemptID)
+        return true;
+    for (const pending of this.#pendingHTTP.values())
+      if (pending.attemptID === attemptID) return true;
+    return false;
+  }
+
+  // An unattended Workspace (no open connection, nothing in flight) may pause
+  // after quietMS. Every other fence below applies to both thresholds.
+  claimIdle(attemptID: string, idleMS: number, quietMS = idleMS) {
     const activity = this.#activity.get(attemptID);
+    const graceMS = this.attended(attemptID) ? idleMS : Math.min(quietMS, idleMS);
     if (
       // Native PTY Resume currently fails to reopen /dev/tty. Do not admit
       // automatic Pause of an open terminal, including a detached idle shell.
       activity?.terminals !== 0 ||
       activity?.busyTerminals !== 0 ||
       this.now() - activity.terminalObservedAt > 15_000 ||
-      this.now() - activity.lastUse < idleMS ||
+      this.now() - activity.lastUse < graceMS ||
       !this.connected(attemptID) ||
       this.#idleClaims.has(attemptID) ||
       [...this.#pendingHTTP.values()].some(

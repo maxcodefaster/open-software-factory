@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { RuntimeProcessEvents } from "./process-events";
 import type { RuntimeProcessSnapshot } from "./hub";
+import { RuntimeProcessEvents } from "./process-events";
 
 function eventReader(response: Response) {
   if (!response.body) throw new Error("Process event stream has no body");

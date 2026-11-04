@@ -180,6 +180,85 @@ test("idle admission retains detached PTYs and unknown observations, not unatten
   }
 });
 
+test("an unattended Workspace pauses after the quiet grace; an open IDE keeps the full grace", () => {
+  let now = 0;
+  const hub = new RuntimeHub(
+    async () => {},
+    () => now,
+  );
+  const parent = connectorSocket("parent");
+  const child = connectorSocket("child");
+  hub.open(parent);
+  hub.open(child);
+  hub.message(
+    child,
+    JSON.stringify({
+      type: "terminal-state",
+      terminalCount: 0,
+      terminalBusy: 0,
+      terminalRevision: 1,
+    }),
+  );
+  const ide = {
+    data: { kind: "browser", attemptID: "attempt", channel: "ide", path: "/" },
+    send: () => 1,
+    close() {},
+  } as unknown as ServerWebSocket<RuntimeSocketData>;
+  try {
+    now = 2_000;
+    hub.message(
+      child,
+      JSON.stringify({
+        type: "terminal-state",
+        terminalCount: 0,
+        terminalBusy: 0,
+        terminalRevision: 1,
+      }),
+    );
+    // 2 s of quiet is shorter than both graces.
+    expect(hub.claimIdle("attempt", 10_000, 3_000)).toBe(false);
+    hub.open(ide);
+    expect(hub.attended("attempt")).toBe(true);
+    now = 5_000;
+    hub.message(
+      child,
+      JSON.stringify({
+        type: "terminal-state",
+        terminalCount: 0,
+        terminalBusy: 0,
+        terminalRevision: 1,
+      }),
+    );
+    // Attended: the full grace applies even though the quiet grace has passed.
+    expect(hub.claimIdle("attempt", 10_000, 3_000)).toBe(false);
+    hub.close(ide);
+    expect(hub.attended("attempt")).toBe(false);
+    expect(hub.claimIdle("attempt", 10_000, 3_000)).toBe(true);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test("an App reports running once per transition for readiness timing", () => {
+  const hub = new RuntimeHub(async () => {});
+  const seen: string[] = [];
+  hub.onAppRunning((attemptID, app) => seen.push(`${attemptID}:${app}`));
+  const child = connectorSocket("child");
+  hub.open(child);
+  const state = (processState: string) =>
+    hub.message(child, JSON.stringify({ type: "process-state", process: "app", processState }));
+  try {
+    state("starting");
+    state("running");
+    state("running");
+    state("stopped");
+    state("running");
+    expect(seen).toEqual(["attempt:app", "attempt:app"]);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
 test("open terminals block automatic Pause even when the shell reports an idle prompt", () => {
   let now = 0;
   const hub = new RuntimeHub(

@@ -377,12 +377,16 @@ function standbyEvidence(slot: ExecutionSlot, input: FactoryboxRuntimeInput, val
     snapshotResidentBytes: 0,
   };
 }
-async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxWorkerIdentity) {
+async function reserveState(
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  transport: typeof runFactoryboxKubernetes,
+) {
   const result = await executeFactoryboxOperation(
     factoryboxRuntimeRequest(input),
     identity,
     { action: "state", sandboxID: input.sandboxID },
-    runFactoryboxKubernetes,
+    transport,
     factoryboxRuntimeDeclaration(input),
   );
   if (!result.confirmed)
@@ -395,18 +399,19 @@ async function standby(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
   action: "pause" | "resume",
-  options?: StandbyIntent,
+  options: StandbyIntent | undefined,
+  transport: typeof runFactoryboxKubernetes,
 ) {
   if (!options) throw new Error("Standby lifecycle requires durable command admission");
   return settleFactoryboxStandby(input.sandboxID, slot.id.replaceAll("-", ""), action, {
-    state: () => reserveState(input, identity),
+    state: () => reserveState(input, identity, transport),
     intend: options.intendStandby,
     async execute(operation) {
       const result = await executeFactoryboxOperation(
         factoryboxRuntimeRequest(input),
         identity,
         operation,
-        runFactoryboxKubernetes,
+        transport,
         factoryboxRuntimeDeclaration(input),
       );
       return readFactoryboxStandbyResult(action, result);
@@ -419,12 +424,13 @@ async function reserveGuestCommand(
   identity: FactoryboxWorkerIdentity,
   runtimeID: string,
   script: string,
-  body?: string,
+  body: string | undefined,
+  transport: typeof runFactoryboxKubernetes,
 ) {
   await inspectFactoryboxWorker(
     factoryboxRuntimeRequest(input),
     identity,
-    runFactoryboxKubernetes,
+    transport,
     factoryboxRuntimeDeclaration(input),
   );
   const program = `import json,subprocess,sys
@@ -437,7 +443,7 @@ command=['/opt/factorybox/components/sysbox-runc','--root',request['root']+'/run
 result=subprocess.run(command,input=payload,timeout=15)
 sys.exit(result.returncode)
 `;
-  return runFactoryboxKubernetes(
+  return transport(
     [
       "exec",
       ...(body === undefined ? [] : ["-i"]),
@@ -472,6 +478,7 @@ export function createReserveClient(
     release: releaseFactoryboxRuntime,
     retired: factoryboxOriginalWorkerRetired,
   },
+  transport: typeof runFactoryboxKubernetes = runFactoryboxKubernetes,
 ): ReserveClient {
   async function read(slot: ExecutionSlot) {
     const request = factoryboxRuntimeRequest(factoryboxReserveInput(slot));
@@ -506,13 +513,13 @@ export function createReserveClient(
     if (pod.metadata.uid !== identity.podUID)
       throw new Error("Execution slot worker UID changed before native cleanup");
     const input = factoryboxReserveInput(slot);
-    if (await native.retired(input, identity)) return;
+    if (await native.retired(input, identity, transport)) return;
     if (slot.factoryboxStartAttempted || slot.factoryboxForkAttempted) {
       const observation = await native.execute(
         factoryboxRuntimeRequest(input),
         identity,
         { action: "state", sandboxID: input.sandboxID },
-        runFactoryboxKubernetes,
+        transport,
         factoryboxRuntimeDeclaration(input),
       );
       if (!observation.confirmed) throw new Error("Execution slot native state is unconfirmed");
@@ -520,14 +527,19 @@ export function createReserveClient(
         .object({ record: z.object({ phase: z.string() }).passthrough() })
         .parse(JSON.parse(observation.stdout));
       if (state.record.phase !== "deleted") {
-        if (slot.factoryboxDeleteAttempted || !options || !(await options.intendDelete()))
+        if (slot.factoryboxDeleteAttempted || !options)
           throw new Error("Execution slot Delete is unconfirmed; observe its original outcome");
         const result = await native.execute(
           factoryboxRuntimeRequest(input),
           identity,
           { action: "delete", sandboxID: input.sandboxID },
-          runFactoryboxKubernetes,
+          transport,
           factoryboxRuntimeDeclaration(input),
+          // Recorded immediately before dispatch, after the preflight reads.
+          async () => {
+            if (!(await options.intendDelete()))
+              throw new Error("Execution slot Delete is unconfirmed; observe its original outcome");
+          },
         );
         if (!result.confirmed) throw new Error("Execution slot native Delete is unconfirmed");
         state = z
@@ -584,7 +596,7 @@ export function createReserveClient(
               sourceOwner: generation.source_owner,
               checkpointSHA256: generation.checkpoint_sha256,
             },
-            runFactoryboxKubernetes,
+            transport,
             factoryboxRuntimeDeclaration(input),
           );
           if (!result.confirmed) throw new Error(`Execution slot ${action} remains unconfirmed`);
@@ -609,7 +621,7 @@ export function createReserveClient(
           receipts.push(part);
         }
       }
-      if (!slot.templateID) await native.release(input, identity, false);
+      if (!slot.templateID) await native.release(input, identity, false, transport);
       const result = await native.execute(
         factoryboxRuntimeRequest(input),
         identity,
@@ -619,7 +631,7 @@ export function createReserveClient(
           sandboxOwner: backing.sandbox_owner,
           inputSHA256: backing.input_sha256,
         },
-        runFactoryboxKubernetes,
+        transport,
         factoryboxRuntimeDeclaration(input),
       );
       if (!result.confirmed)
@@ -647,7 +659,7 @@ export function createReserveClient(
       throw new Error("Unconfirmed template preparation remains retained for inspection");
     if (slot.sourceImportSHA256 && !slot.sourceImportObservation)
       throw new Error("Original template source import is unconfirmed; backing was retained");
-    await native.release(input, identity, true);
+    await native.release(input, identity, true, transport);
   }
   async function cleanup(slot: ExecutionSlot, options?: DeleteIntent) {
     if (slot.namespace !== factoryboxLocation(slot.workerID).namespace)
@@ -734,7 +746,7 @@ export function createReserveClient(
         slot.factoryboxIdentity
           ? factoryboxWorkerIdentity.parse(slot.factoryboxIdentity)
           : undefined,
-        runFactoryboxKubernetes,
+        transport,
         factoryboxRuntimeDeclaration(input),
       );
       if (!slot.factoryboxIdentity)
@@ -774,18 +786,23 @@ export function createReserveClient(
         )
           throw new Error("Fork ancestry differs from its original intent");
         if (!slot.factoryboxForkAttempted) {
-          if (!options.intendFork || !(await options.intendFork(request)))
-            throw new Error("Fork outcome requires observation");
+          const intendFork = options.intendFork;
+          if (!intendFork) throw new Error("Fork outcome requires observation");
           const created = await native.execute(
             factoryboxRuntimeRequest(input),
             identity,
             request,
-            runFactoryboxKubernetes,
+            transport,
             factoryboxRuntimeDeclaration(input),
+            // Recorded immediately before dispatch, after the preflight reads.
+            async () => {
+              if (!(await intendFork(request)))
+                throw new Error("Fork outcome requires observation");
+            },
           );
           if (!created.confirmed) throw new Error("Fork outcome is unconfirmed; never repeat it");
         }
-        const state = await reserveState(input, identity);
+        const state = await reserveState(input, identity, transport);
         z.object({
           start: z.object({ completed_at: z.string().min(1) }),
           fork: z.object({
@@ -811,7 +828,7 @@ export function createReserveClient(
             ready: false,
             factoryboxPreparation: { version: 1, kind: "fork", request },
           };
-        const paused = await standby(slot, input, identity, "pause", options);
+        const paused = await standby(slot, input, identity, "pause", options, transport);
         return {
           ...observed,
           ready: true,
@@ -826,7 +843,7 @@ export function createReserveClient(
           factoryboxPreparation: await prepareFactoryboxRuntime(
             input,
             identity,
-            runFactoryboxKubernetes,
+            transport,
             180_000,
           ),
         };
@@ -852,7 +869,7 @@ export function createReserveClient(
           factoryboxRuntimeRequest(input),
           identity,
           { action: "start", sandboxID: input.sandboxID, bundle: prepared.bundle },
-          runFactoryboxKubernetes,
+          transport,
           factoryboxRuntimeDeclaration(input),
         );
         if (!started.confirmed)
@@ -862,9 +879,9 @@ export function createReserveClient(
       }
       if (!slot.factoryboxStartAttempted && !options.startAllowed)
         return { ...observed, ready: false };
-      const state = await reserveState(input, identity);
+      const state = await reserveState(input, identity, transport);
       if (state.record.phase !== "running") {
-        const paused = await standby(slot, input, identity, "pause", options);
+        const paused = await standby(slot, input, identity, "pause", options, transport);
         return {
           ...observed,
           ready: true,
@@ -883,9 +900,11 @@ export function createReserveClient(
         identity,
         state.record.runtime_id,
         "test -f /home/coder/.factory-reserve/ready && cat /home/coder/.factory-reserve/ready",
+        undefined,
+        transport,
       );
       if (ready.exitCode !== 0 || ready.stdout !== slot.id) return { ...observed, ready: false };
-      const paused = await standby(slot, input, identity, "pause", options);
+      const paused = await standby(slot, input, identity, "pause", options, transport);
       return {
         ...observed,
         ready: true,
@@ -992,7 +1011,7 @@ export function createReserveClient(
       const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
       if (slot.templateID) {
         const captured = capturedTemplate.parse(slot.factoryboxStandby);
-        const current = await reserveState(input, identity);
+        const current = await reserveState(input, identity, transport);
         z.object({
           id: z.literal(captured.sandboxID),
           owner: z.literal(captured.owner),
@@ -1003,13 +1022,14 @@ export function createReserveClient(
           }),
         }).parse(current.record);
       }
-      const state = await standby(slot, input, identity, "resume", options);
+      const state = await standby(slot, input, identity, "resume", options, transport);
       const activated = await reserveGuestCommand(
         input,
         identity,
         state.record.runtime_id,
         slotActivationCommand.replace("chown 100000:100000", "chown 0:0"),
         `${slot.podUID}\n${bundle}`,
+        transport,
       );
       if (activated.exitCode !== 0) throw new Error("Execution slot activation is unconfirmed");
       return observed;

@@ -245,6 +245,10 @@ export function createReserveStore(
       );
     },
     // Call in the transaction that inserts the immutable Runtime Attempt.
+    // Only Staging and Verification pass a role. A Change or Personal Sandbox
+    // never takes a Fork: its OCI bundle mounts that Workspace's canonical
+    // Source, which a reserve seed refuses (prepare.py rejects reserveSeed with
+    // sharedSource) and a native Fork refuses to copy (shared_source != null).
     async admit(
       sql: SQL,
       attemptID: string,

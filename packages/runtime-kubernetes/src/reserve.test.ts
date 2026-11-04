@@ -308,7 +308,8 @@ test("unused paused slot retirement releases checkpoint and private backing befo
       actions.push("release");
       return { version: 1, released: true };
     },
-    async execute(_request, _identity, operation) {
+    async execute(_request, _identity, operation, _run, _declaration, beforeDispatch) {
+      await beforeDispatch?.();
       actions.push(operation.action);
       if (operation.action === "delete") {
         record.phase = "deleted";
@@ -428,7 +429,8 @@ test.each(["delete", "retire-checkpoint", "retire-resume", "retire-sandbox"] as 
         actions.push("release");
         return { version: 1, released: true };
       },
-      async execute(_request, _identity, operation) {
+      async execute(_request, _identity, operation, _run, _declaration, beforeDispatch) {
+        if (operation.action === "delete") await beforeDispatch?.();
         actions.push(operation.action);
         if (operation.action === "delete") {
           expect(deleteIntended).toBe(true);

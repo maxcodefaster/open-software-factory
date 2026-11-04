@@ -1,14 +1,37 @@
-import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { reportFailure } from "../failure-log";
 import type { RuntimeHub } from "./hub";
 
 type Database = ReturnType<typeof createDatabase>;
 
-export function executionIdleMS(environment: Readonly<Record<string, string | undefined>>) {
-  const configured = environment["FACTORY_EXECUTION_IDLE_MINUTES"] ?? "5";
+// A Pause and Resume cost about 25 s together, so an attended Workspace keeps
+// compute for 15 minutes. One nobody is looking at pauses sooner.
+function minutes(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+  fallback: string,
+) {
+  const configured = environment[name] ?? fallback;
   if (!/^\d+$/.test(configured) || Number(configured) > 1440)
-    throw new Error("Execution idle retention requires 0–1440 minutes");
+    throw new Error(`${name} requires 0–1440 minutes`);
   return Number(configured) * 60_000;
+}
+
+export function executionIdleMS(environment: Readonly<Record<string, string | undefined>>) {
+  return minutes(environment, "FACTORY_EXECUTION_IDLE_MINUTES", "15");
+}
+
+/** Grace for a Workspace with no open IDE or Preview connection and nothing in flight. */
+export function executionQuietMS(environment: Readonly<Record<string, string | undefined>>) {
+  return Math.min(
+    minutes(environment, "FACTORY_EXECUTION_QUIET_MINUTES", "2"),
+    executionIdleMS(environment),
+  );
+}
+
+/** How long a submitted Change keeps its Sandbox warm for review and Verification. */
+export function executionReviewMS(environment: Readonly<Record<string, string | undefined>>) {
+  return minutes(environment, "FACTORY_EXECUTION_REVIEW_MINUTES", "30");
 }
 
 // Activity stays in memory. Restart starts a new grace; it never stores user heartbeats.
@@ -20,6 +43,8 @@ export function createIdleCompute(
     stop(attemptID: string): Promise<unknown>;
   },
   idleMS = executionIdleMS(process.env),
+  quietMS = Math.min(executionQuietMS(process.env), idleMS),
+  reviewMS = executionReviewMS(process.env),
 ) {
   let running: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -50,7 +75,9 @@ export function createIdleCompute(
           const [current] = await sql<Array<{ state: string }>>`
             SELECT state FROM factory.runtime_attempt WHERE id=${attempt.id} FOR UPDATE`;
           if (current?.state !== "ready") return false;
-          const [work] = await sql<Array<{ active: boolean; releasable: boolean }>>`
+          const [work] = await sql<
+            Array<{ active: boolean; releasable: boolean; reviewing: boolean }>
+          >`
             SELECT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${attempt.changeID}
               AND state IN ('pending','dispatching','running','uncertain'))
               OR EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${attempt.changeID}
@@ -74,8 +101,19 @@ export function createIdleCompute(
                       AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
                         WHERE intent.turn_id=turn.id AND intent.change_id=change.id
                           AND intent.runtime_attempt_id=${attempt.id}
-                          AND intent.session_id=session.opencode_session_id)))) AS releasable`;
-          if (work?.active || !hub.claimIdle(attempt.id, idleMS)) return false;
+                          AND intent.session_id=session.opencode_session_id)))) AS releasable,
+              ${reviewMS} > 0 AND (
+                EXISTS(SELECT 1 FROM factory.verification verification
+                  WHERE verification.change_id=${attempt.changeID}
+                    AND (verification.state IN ('pending','runner-starting','running')
+                      OR verification.updated_at > now() - make_interval(secs => ${reviewMS / 1000})))
+                OR EXISTS(SELECT 1 FROM factory.change_commit_operation commit
+                  WHERE commit.change_id=${attempt.changeID} AND commit.state='succeeded'
+                    AND commit.updated_at > now() - make_interval(secs => ${reviewMS / 1000}))) AS reviewing`;
+          // A submitted Change stays warm while Verification runs and for the
+          // review window after its last commit or verdict. Fences are unchanged.
+          if (work?.active || work?.reviewing || !hub.claimIdle(attempt.id, idleMS, quietMS))
+            return false;
           claimed = true;
           // Submitted work needs no checkpoint; a definite failure already
           // requires fresh, fenced execution on explicit retry. Preserve their
