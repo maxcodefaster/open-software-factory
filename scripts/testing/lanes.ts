@@ -67,6 +67,9 @@ export const browserFiles = {
     "starter-editor.live.spec.ts",
     "stabilization.live.spec.ts",
     "contributor-implementation.live.spec.ts",
+    // These read the retained installation's Forgejo token and listener.
+    "project-knowledge.spec.ts",
+    "project-runtime.spec.ts",
   ],
 };
 // These retain their ordinary UI cases in the default lane; only @paid cases
