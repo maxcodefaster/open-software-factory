@@ -22,11 +22,17 @@ export function createReviewMediaRoutes(
       const file = form.get("frame");
       if (!(file instanceof File) || file.size > 2_097_152)
         throw new CommandError("conflict", "Annotation frame exceeds the 2 MiB limit");
+      let context: unknown;
+      try {
+        context = JSON.parse(String(form.get("context")));
+      } catch {
+        throw new CommandError("conflict", "Annotation context is not valid JSON");
+      }
       return json(
         await media.still(
           changeID,
           userID,
-          JSON.parse(String(form.get("context"))),
+          context,
           new Uint8Array(await file.arrayBuffer()),
           z.uuid().parse(form.get("id")),
         ),
