@@ -208,7 +208,7 @@ test("provider saves persist intent before OpenBao, recover response loss, mask 
         version: 2,
         endpoint: "https://not-allowed.test/v1",
       }),
-    ).rejects.toThrow("not allowed");
+    ).rejects.toThrow("modelAllowedOrigins");
     expect(writes).toBe(2);
   } finally {
     await database.client.end({ timeout: 2 });
