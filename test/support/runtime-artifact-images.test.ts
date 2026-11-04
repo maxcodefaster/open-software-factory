@@ -37,11 +37,14 @@ test("both native release jobs prove configured Compose inputs before pushing th
     readFile("scripts/runtime/compose-inputs-proof.sh", "utf8"),
   ]);
   expect(workflow).toContain("runner: ubuntu-24.04-arm");
-  expect(workflow).toContain("exporter=(--load)");
+  const load = workflow.indexOf("--provenance=false --sbom=false --load");
   const gate = workflow.indexOf('bash scripts/runtime/compose-inputs-proof.sh "$image_id"');
-  const push = workflow.indexOf('docker push "$image"');
-  expect(gate).toBeGreaterThan(0);
+  const push = workflow.indexOf('"${attest[@]}" --push --metadata-file');
+  const sameImage = workflow.indexOf("containerimage.config.digest");
+  expect(load).toBeGreaterThan(0);
+  expect(gate).toBeGreaterThan(load);
   expect(push).toBeGreaterThan(gate);
+  expect(sameImage).toBeGreaterThan(push);
   expect(proof).toContain('test "$image_arch" = "$server_arch"');
   expect(proof).toContain("BUILDX_BAKE_ENTITLEMENTS_FS=1");
   expect(proof).toContain("--network=none --cpus=3 --memory=3g");
