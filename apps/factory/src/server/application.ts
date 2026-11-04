@@ -106,6 +106,7 @@ import { createDeveloperIDERuntime } from "../workspace/developer-ide-runtime";
 import { createWorkspaceService } from "../workspace/service";
 import { createWorkspaceSourceController } from "../workspace/source-controller";
 import { createWorkspaceSourceProtocol } from "../workspace/source-protocol";
+import { createPageHint } from "./page-hints";
 
 export async function createFactoryApplication() {
   const { FACTORY_ADMIN_PASSWORD, FACTORY_AUTH_SECRET, FACTORY_HOST, FACTORY_ZERO_CACHE_URL } =
@@ -298,7 +299,19 @@ export async function createFactoryApplication() {
     owner: forgeOwner,
   });
   const sourceProtocol = createWorkspaceSourceProtocol(workspaceSources);
-  const projectAppPreviews = createProjectAppPreviews(database, (id) => runtimeHub.appChannels(id));
+  const projectAppPreviews = createProjectAppPreviews(
+    database,
+    (id) => runtimeHub.appChannels(id),
+    (id, channel) => {
+      const process = runtimeHub.processes(id).find((candidate) => candidate.name === channel);
+      return process
+        ? {
+            state: process.state,
+            ...(process.exitCode === undefined ? {} : { exitCode: process.exitCode }),
+          }
+        : undefined;
+    },
+  );
   const idleCompute = createIdleCompute(database, runtimeHub, runtimeController);
   const developerEditors = createDeveloperIDEController(database);
   const developerIDEEdge = createDeveloperIDEEdge(
@@ -741,10 +754,13 @@ export async function createFactoryApplication() {
     publicFunctionIDs: serverFunctions.publicFunctionIDs,
     functionIDs: serverFunctions.functionIDs,
   });
-  const staticAssets = createStaticAssets(resolve(buildDirectory, "client"), async (request) => {
+  const clientDirectory = resolve(buildDirectory, "client");
+  const pageHint = createPageHint(clientDirectory);
+  const staticAssets = createStaticAssets(clientDirectory, async (request) => {
     const response = await serverFunctions.default.fetch(request, { context: {} });
     response.headers.set("cache-control", "no-store");
     response.headers.set("x-content-type-options", "nosniff");
+    if (pageHint) response.headers.append("link", pageHint);
     return response;
   });
   return {

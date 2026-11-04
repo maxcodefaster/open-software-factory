@@ -13,8 +13,7 @@ import type { AgentView, ConversationView, WriterView } from "../api-contracts";
 import { groupConversationActivities } from "../conversation-activity";
 import { conversationTimeline } from "../conversation-timeline";
 import { requirementContent } from "../projects/ticket-content";
-import type { WorkspaceView } from "../workspace-tabs";
-import type { WorkspaceTab } from "../workspace-tabs";
+import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import type { FactoryDesktopProps, TicketDetail } from "./contracts";
 
 interface AssistantPresentationDependencies {
@@ -161,8 +160,8 @@ export function createAssistantPresentation(dependencies: AssistantPresentationD
       (dependencies.assistantPending() &&
         dependencies.clarificationOrigins.has(dependencies.assistantKey())));
 
-  const ticketClarificationAction = () =>
-    clarificationAction({
+  const ticketClarificationAction = () => ({
+    ...clarificationAction({
       question: !!currentInterviewQuestion(),
       working: dependencies.assistantPending(),
       open: dependencies.agentOpen(),
@@ -172,7 +171,9 @@ export function createAssistantPresentation(dependencies: AssistantPresentationD
           .conversation()
           ?.entries.some((entry) => entry.kind === "question" || entry.kind === "requirement"),
       ),
-    });
+    }),
+    question: !!currentInterviewQuestion() && !dependencies.assistantPending(),
+  });
 
   const conversationPlaceholder = () =>
     conversationMode() === "plan"

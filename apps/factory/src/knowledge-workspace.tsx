@@ -32,6 +32,7 @@ import { SaveFeedback } from "./ui/feedback";
 import { WorkspaceActionBar } from "./ui/workspace-actions";
 import { createWorkspaceNavigation, WorkspaceNavigationToggle } from "./ui/workspace-navigation";
 import { VersionHistory } from "./version-history";
+import { wikiGenerationProgress } from "./wiki-progress";
 
 export type { KnowledgeDraft } from "./knowledge/draft";
 
@@ -71,6 +72,21 @@ export function KnowledgeWorkspace(props: {
   onRestore(pageID: string, revisionID: string, expectedVersion: number): Promise<KnowledgeSave>;
 }) {
   const draftStore = untrack(() => props.drafts);
+  const [generationStartedAt, setGenerationStartedAt] = createSignal<number>();
+  const [generationNow, setGenerationNow] = createSignal(Date.now());
+  createEffect(
+    () =>
+      ["pending", "running"].includes(props.generation?.state ?? "")
+        ? props.generation?.id
+        : undefined,
+    (id) => {
+      if (!id) return setGenerationStartedAt(undefined);
+      setGenerationStartedAt(Date.now());
+      setGenerationNow(Date.now());
+      const timer = setInterval(() => setGenerationNow(Date.now()), 15_000);
+      return () => clearInterval(timer);
+    },
+  );
   const hasPublishedPages = () => props.pages.some((page) => page.state === "active");
   const [editing, setEditing] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
@@ -445,6 +461,18 @@ export function KnowledgeWorkspace(props: {
                   <span class={`generation-dot ${props.generation?.state}`} />
                   <small role="status">Updating Wiki…</small>
                 </div>
+                <Show when={props.generation}>
+                  {(generation) => (
+                    <p class="generation-detail" aria-live="polite">
+                      {wikiGenerationProgress(
+                        generation(),
+                        generationStartedAt() === undefined
+                          ? undefined
+                          : generationNow() - (generationStartedAt() ?? 0),
+                      )}
+                    </p>
+                  )}
+                </Show>
               </Show>
               <Show when={props.generation?.failure}>
                 {(failure) => (
@@ -605,6 +633,7 @@ export function KnowledgeWorkspace(props: {
                             type="button"
                             class="knowledge-title-button"
                             aria-label="Edit Knowledge title"
+                            title="Edit Knowledge title"
                             onClick={beginEdit}
                           >
                             {draftTitle()}
@@ -631,6 +660,7 @@ export function KnowledgeWorkspace(props: {
                         type="button"
                         class="workspace-action workspace-menu-trigger"
                         aria-label="Page options"
+                        title="Page options"
                         aria-haspopup="menu"
                         aria-expanded={pageMenuOpen() ? "true" : "false"}
                         onClick={() => setPageMenuOpen((open) => !open)}

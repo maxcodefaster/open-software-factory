@@ -41,7 +41,8 @@
   flex: 1;
 }
 
-.editor-source-status {
+.editor-source-status,
+.runtime-app-notice {
   position: absolute;
   inset-inline-end: var(--space-3);
   inset-block-end: var(--space-3);

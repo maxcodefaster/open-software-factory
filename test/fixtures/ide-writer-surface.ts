@@ -83,3 +83,40 @@ if (new URL(window.location.href).searchParams.has("compute")) {
   context.select(workspaceID, true);
   context.setWritable(workspaceID, false);
 }
+
+if (new URL(window.location.href).searchParams.has("statusbar")) {
+  // The same structure Theia's status bar renders, styled by its own and Factory's CSS.
+  const bar = document.createElement("div");
+  bar.id = "theia-statusBar";
+  bar.style.cssText = "position:fixed;inset:auto 0 0";
+  const entry = (id: string, text: string) => {
+    const element = document.createElement("div");
+    element.id = `status-bar-${id}`;
+    element.className = "element";
+    const label = document.createElement("span");
+    label.textContent = text;
+    element.title = text;
+    element.append(label);
+    return element;
+  };
+  const left = document.createElement("div");
+  left.className = "area left";
+  left.append(
+    entry(
+      "factory-buffer-workspace",
+      "Ticket · A deliberately long Workspace name for this editor",
+    ),
+    entry(
+      "factory-writing",
+      "Agent working · requested by Local administrator with a long explanatory sentence. Observation mode. Files remain available to read.",
+    ),
+  );
+  const right = document.createElement("div");
+  right.className = "area right";
+  right.append(
+    entry("session-preference-status", "Save: manual"),
+    entry("editor-status-cursor-position", "Ln 12, Col 4"),
+  );
+  bar.append(left, right);
+  document.body.append(bar);
+}

@@ -21,6 +21,7 @@ export type TicketProgressInput = {
   canDevelop?: boolean | undefined;
   planning?: boolean | undefined;
   technicalPlanningOutstanding?: boolean | undefined;
+  awaitingAnswer?: boolean | undefined;
 };
 
 // A read projection of known state, never an inferred result or a work command.
@@ -70,6 +71,8 @@ export function ticketProgress(input: TicketProgressInput): string {
       ? "Factory is preparing the implementation. Approved requirements and existing code are retained. No action needed."
       : "The approved requirements are being implemented. Checks and independent review follow submission. No action needed.";
   if (!input.changeState) {
+    if (input.awaitingAnswer)
+      return "The Interview is waiting for your answer. Answer its question in the Assistant to continue; requirements are not ready to implement yet.";
     if (input.planning) return "Planning is in progress. Review the proposal when it is ready.";
     if (input.technicalPlanningOutstanding)
       return "Technical planning is unfinished. Continue technical planning before implementation.";

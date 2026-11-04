@@ -1,10 +1,10 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import { boardStages, type BoardStage } from "../../../packages/interface-domain/src/ticket-board";
 import { boardGroups } from "../../../packages/interface-domain/src/board-groups";
-import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
+import { type BoardStage, boardStages } from "../../../packages/interface-domain/src/ticket-board";
 import type { PrerequisiteView } from "../../../packages/ticket-domain/src/dependency";
+import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
 import type { Epic, Ticket } from "./api-contracts";
-import { EpicEditor, type EpicEdit } from "./epic-controls";
+import { type EpicEdit, EpicEditor } from "./epic-controls";
 import { Icon } from "./icon";
 
 export function TicketBoardContents(props: {
@@ -308,7 +308,13 @@ export function TicketBoardContents(props: {
                   >
                     Edit
                   </button>
-                  <button type="button" class="bare-icon" aria-label="Close Epic" onClick={close}>
+                  <button
+                    type="button"
+                    class="bare-icon"
+                    aria-label="Close Epic"
+                    title="Close Epic"
+                    onClick={close}
+                  >
                     <Icon name="close" />
                   </button>
                 </div>

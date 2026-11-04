@@ -94,7 +94,13 @@ export function WindowHeading(props: {
       </div>
       <Show when={props.onClose}>
         {(onClose) => (
-          <button type="button" class="bare-icon" aria-label="Close workspace" onClick={onClose()}>
+          <button
+            type="button"
+            class="bare-icon"
+            aria-label="Close workspace"
+            title="Close workspace"
+            onClick={onClose()}
+          >
             <Icon name="close" />
           </button>
         )}

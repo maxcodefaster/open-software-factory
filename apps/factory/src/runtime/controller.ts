@@ -1,7 +1,6 @@
-import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
-import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import type { ComputeClass } from "../../../../packages/runtime-domain/src/compute";
 import {
   hashConnectorToken,
@@ -9,6 +8,7 @@ import {
   runtimeIdentity,
   runtimePublicationToken,
 } from "../../../../packages/runtime-domain/src/identity";
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import {
   createKubernetesClient,
   type KubernetesClient,
@@ -64,6 +64,7 @@ import {
 } from "./launcher";
 import { recoveredConnectionObserver } from "./recovered-connections";
 import type { ExecutionReserve } from "./reserve-controller";
+import { createRetryBackoff } from "./retry-backoff";
 import { freezeStagingConfiguration } from "./staging-configuration";
 import type { RuntimeAttemptView } from "./types";
 import { prepareVerificationHandoff } from "./verification-handoff";
@@ -123,7 +124,10 @@ export function createRuntimeController(
   kubernetes: KubernetesClient = createKubernetesClient(),
   readRegistryCA: () => Promise<string> = readRuntimeRegistryCA,
   reserve?: ExecutionReserve,
-  factorybox = createFactoryboxExecution(database, hub),
+  factorybox = createFactoryboxExecution(database, hub, undefined, {
+    backoff: createRetryBackoff(15_000, 5 * 60_000),
+    importedExportsEveryMS: 2 * 60_000,
+  }),
 ) {
   const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(
     process.env["FACTORY_RUNTIME_HOST_IMAGE"],

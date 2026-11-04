@@ -41,6 +41,7 @@ test.beforeAll(async () => {
                 "/failed-document",
                 "/starting-document",
                 "/late-failure-document",
+                "/app-503-document",
               ].includes(path ?? "")
             ) {
               documents++;
@@ -79,6 +80,15 @@ test.beforeAll(async () => {
                 );
                 response.writeHead(failure.status, Object.fromEntries(failure.headers));
                 return response.end(await failure.text());
+              }
+              if (path === "/app-503-document") {
+                response.writeHead(503, {
+                  "content-type": "text/html",
+                  "cache-control": "no-store",
+                });
+                return response.end(
+                  '<!doctype html><html><body><p>Service Unavailable from the App</p><script src="/bridge.js"></script></body></html>',
+                );
               }
               response.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
               return response.end(
@@ -458,7 +468,8 @@ test("a permanent cross-origin Preview failure reloads only on request", async (
     await page.setViewportSize({ width, height: 844 });
     await page.goto(`${origin}/runtime-attachment.html?connection-error=1`);
     const connection = page.getByRole("status", { name: "Preview connection" });
-    await expect(connection).toContainText("Could not open Preview. Reload this view to retry.");
+    await expect(connection).toContainText("Could not open Preview.");
+    await expect(connection).toContainText("Factory refused the Preview request");
     await expect(page.locator('iframe[title="Factory Preview"]')).toHaveAttribute(
       "aria-hidden",
       "true",
@@ -527,7 +538,7 @@ test("Main Preview retry is explicit, deduplicated and leaves the old attempt un
   await expect(page.getByText("Scripted Main Preview starts: 1", { exact: true })).toBeVisible();
   await expect(page.getByText("missing configuration", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Finish scripted start", exact: true }).click();
-  await expect(page.getByText("Workspace starting", { exact: true })).toBeVisible();
+  await expect(page.getByText("Starting compute for the Preview…", { exact: true })).toBeVisible();
   await expect(page.getByText("Scripted Main Preview starts: 1", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry Main Preview", exact: true })).toHaveCount(
     0,
@@ -594,7 +605,9 @@ test("Main Preview errors wrap on desktop, narrow and synthetic touch layouts", 
     await phone.screenshot({ path: `${evidence}/main-error-touch.png`, fullPage: true });
     await phone.getByRole("button", { name: "Retry Main Preview", exact: true }).tap();
     await expect(phone.getByText("Scripted Main Preview starts: 1", { exact: true })).toBeVisible();
-    await expect(phone.getByText("Workspace starting", { exact: true })).toBeVisible();
+    await expect(
+      phone.getByText("Starting compute for the Preview…", { exact: true }),
+    ).toBeVisible();
   } finally {
     await touch.close();
   }
@@ -619,4 +632,63 @@ test("saved bare Wiki references navigate at desktop and phone widths without re
     );
     await page.screenshot({ path: `${evidence}/wiki-reference-${width}.png` });
   }
+});
+
+test("an App that answers 503 is shown as the App's own response, not a Factory failure", async ({
+  page,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  await page.goto(`${origin}/runtime-attachment.html?app=1&app-503=1`);
+  const frame = page.frameLocator('iframe[title="Factory Preview"]');
+  await expect(frame.getByText("Service Unavailable from the App")).toBeVisible();
+  await expect(page.getByRole("status", { name: "Preview connection" })).toHaveCount(0);
+  const notice = page.locator(".runtime-app-notice");
+  await expect(notice).toContainText("The App on port 3000 answered HTTP 503");
+  await expect(notice).toContainText("App's own response");
+  await expect(page.getByText("Could not open Preview")).toHaveCount(0);
+  await page.screenshot({ path: `${evidence}/preview-app-503.png` });
+});
+
+test("a Preview that waits names the stage, the App port and then admits the App is silent", async ({
+  page,
+}) => {
+  const documentGate = Promise.withResolvers<void>();
+  await page.route("**/document", async (route) => {
+    await documentGate.promise;
+    await route.fulfill({ contentType: "text/html", body: "<p>late</p>" }).catch(() => {});
+  });
+  await page.clock.install();
+  await page.goto(`${origin}/runtime-attachment.html?app=1`, { waitUntil: "domcontentloaded" });
+  const connection = page.getByRole("status", { name: "Preview connection" });
+  await expect(connection).toContainText("Waiting for the App on port 3000…");
+  await page.clock.fastForward(12_000);
+  await expect(connection).toContainText("Waiting for 12 s");
+  await page.clock.fastForward(20_000);
+  await expect(connection).toContainText("The App on port 3000 has not answered yet.");
+  await expect(connection).toContainText("Factory keeps waiting");
+  await expect(connection.getByRole("button", { name: "Reload view", exact: true })).toBeVisible();
+  await page.screenshot({ path: `${evidence}/preview-waiting-stages.png` });
+  documentGate.resolve();
+});
+
+test("an exited App process is named as the cause when the Preview cannot open", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/runtime-attachment.html?app=1&exited=1&connection-error=1`);
+  const connection = page.getByRole("status", { name: "Preview connection" });
+  await expect(connection).toContainText("Could not open Preview.");
+  await expect(connection).toContainText("The App process exited with code 1.");
+  await expect(connection.getByRole("button", { name: "Reload view", exact: true })).toBeVisible();
+});
+
+test("starting compute is a named stage with elapsed time and no failure wording", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto(`${origin}/runtime-attachment.html?ticket=1&state=starting&failed=1`);
+  await expect(page.getByText("Starting compute for the Preview…", { exact: true })).toBeVisible();
+  await page.clock.fastForward(11_000);
+  await expect(page.getByText(/Starting for 1\d s/)).toBeVisible();
+  await expect(page.getByText("Could not open")).toHaveCount(0);
 });

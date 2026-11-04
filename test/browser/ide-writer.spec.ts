@@ -88,3 +88,51 @@ for (const width of [1440, 900, 390]) {
     });
   });
 }
+
+for (const width of [1440, 900, 620, 390]) {
+  test(`IDE status entries never overlap at ${width}px and long Factory text truncates from the right`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 600 });
+    await page.goto(`${origin}/ide-writer.html?statusbar`);
+    const entries = page.locator("#theia-statusBar .element:visible");
+    const boxes = await entries.evaluateAll((elements) =>
+      elements.map((element) => {
+        const { left, right, top, bottom } = element.getBoundingClientRect();
+        return { id: element.id, left, right, top, bottom };
+      }),
+    );
+    expect(boxes.length).toBeGreaterThanOrEqual(2);
+    const sorted = [...boxes].sort((a, b) => a.left - b.left);
+    for (let index = 1; index < sorted.length; index++) {
+      const previous = sorted[index - 1];
+      const current = sorted[index];
+      if (!previous || !current) throw new Error("Missing status entry geometry");
+      expect(previous.right, `${previous.id} overlaps ${current.id}`).toBeLessThanOrEqual(
+        current.left + 0.5,
+      );
+    }
+    const save = page.locator("#status-bar-session-preference-status");
+    if (await save.isVisible()) {
+      const box = await save.boundingBox();
+      expect(box?.width).toBeGreaterThan(40);
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(width);
+    }
+    const writing = page.locator("#status-bar-factory-writing > span");
+    expect(
+      await writing.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          clipped: element.scrollWidth > element.clientWidth,
+          ellipsis: style.textOverflow,
+          nowrap: style.whiteSpace,
+        };
+      }),
+    ).toEqual({ clipped: true, ellipsis: "ellipsis", nowrap: "nowrap" });
+    await expect(page.locator("#status-bar-factory-writing")).toHaveAttribute(
+      "title",
+      /Files remain available to read\./,
+    );
+    await page.screenshot({ path: resolve(evidence, `status-bar-${width}.png`) });
+  });
+}

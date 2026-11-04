@@ -151,6 +151,7 @@ export type TicketWorkspaceProps = {
   onSaveDocument(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
   onConfirmRequirements(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
   clarificationAction: { label: string; status: boolean };
+  awaitingAnswer?: boolean;
   onFollowUp(): void;
   onOpenTicket(id: string): void;
   onOpenEpic(id: string): void;
@@ -360,6 +361,17 @@ function TicketDocument(props: TicketWorkspaceProps) {
       : undefined;
   const separateSummary = () =>
     Boolean((props.latestRevision || proposal()) && draftSummary() !== draftDescription());
+  // Until requirements exist the description is the only visible summary, so the
+  // requirement summary follows it. Later edits may deliberately diverge.
+  createEffect(
+    () => ({
+      description: draftDescription(),
+      linked: !props.latestRevision && !proposal(),
+    }),
+    ({ description, linked }) => {
+      if (linked) setDraftSummary(description);
+    },
+  );
   const [historyRevisionID, setHistoryRevisionID] = createSignal<string>();
   const versions = () => [
     ...props.current.documentRevisions,
@@ -1474,6 +1486,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                                 promotionState: props.delivery?.promotionState,
                                 canDevelop: props.canDevelop,
                                 planning: props.planningBusy,
+                                awaitingAnswer: props.awaitingAnswer,
                                 technicalPlanningOutstanding:
                                   props.current.technicalPlanningPending,
                               })}
@@ -1553,6 +1566,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                     type="button"
                     class="bare-icon"
                     aria-label="Dismiss document update"
+                    title="Dismiss document update"
                     onClick={dismissDocumentNotice}
                   >
                     ×

@@ -328,6 +328,10 @@ export function AttachmentPicker(props: {
             error: `${rejected.join(" ")} Your text and earlier attachments are unchanged.`,
           });
         };
+        if (file.size === 0) {
+          reject("The file is empty.");
+          continue;
+        }
         if (file.size > usage.limits.fileBytes) {
           reject(`Each file must be at most ${fileSize(usage.limits.fileBytes)}.`);
           continue;

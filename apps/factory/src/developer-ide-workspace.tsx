@@ -16,6 +16,7 @@ import {
   stopWorkspaceSource,
 } from "./server-functions/workspaces";
 import { recoverWorkspaceSource } from "./source-recovery";
+import { createWaitElapsed, waitLabel } from "./wait-elapsed";
 
 export function DeveloperIDEWorkspace(props: {
   userID: string;
@@ -44,6 +45,11 @@ export function DeveloperIDEWorkspace(props: {
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
   const [editorRecovering, setEditorRecovering] = createSignal(false);
   const [editorState, setEditorState] = createSignal<WorkspaceSourceState>();
+  const preparingFiles = () =>
+    !fileError() && ready() && (!props.workspaceID || selected() !== props.workspaceID);
+  const filesWaited = createWaitElapsed(() =>
+    preparingFiles() ? `${props.workspaceID ?? "selection"}:${sourceState() ?? ""}` : undefined,
+  );
   const [editorRetry, setEditorRetry] = createSignal(0);
   const [sourceRetry, setSourceRetry] = createSignal(0);
   let sourceRecovery: AbortController | undefined;
@@ -386,11 +392,20 @@ export function DeveloperIDEWorkspace(props: {
             </div>
           )}
         </Show>
-        <Show
-          when={!fileError() && ready() && (!props.workspaceID || selected() !== props.workspaceID)}
-        >
+        <Show when={preparingFiles()}>
           <div class="editor-source-status" role="status">
             Preparing Workspace files…
+            <Show when={filesWaited() >= 5_000}>
+              <small aria-live="off">
+                {" "}
+                {sourceState() === "ready"
+                  ? "Files are ready. Selecting them in the editor"
+                  : sourceState() === "preparing" || sourceState() === "create-intended"
+                    ? "File access is still preparing"
+                    : "Checking file access"}
+                , {waitLabel(filesWaited())} in this step.
+              </small>
+            </Show>
           </div>
         </Show>
         <Show when={editorError() || editorSlow() || fileError() || editorRecovering()}>

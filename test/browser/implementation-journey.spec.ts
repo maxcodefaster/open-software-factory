@@ -3545,8 +3545,8 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   const scope = navigation.getByRole("combobox", { name: "Settings scope", exact: true });
   await expect(scope.locator("option")).toHaveText([
     "Project · Implementation UX",
-    "Libraries",
-    "Personal",
+    "Libraries · Skills, MCP connections",
+    "Personal · Model overrides, Login & security",
     "Factory administration",
   ]);
   await expect(scope).toHaveValue("project");

@@ -2,15 +2,36 @@
   display: none;
 }
 
-#status-bar-factory-buffer-workspace {
-  max-width: min(220px, 35vw);
+/* Status entries never overlap. The left and right areas clip rather than
+   spill into each other, passive entries keep their width, and the long
+   Factory entries give way first, truncating from the right. Their full text
+   stays in the entry tooltip. */
+#theia-statusBar .area {
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+#theia-statusBar .area .element {
+  flex: 0 0 auto;
 }
 
 #status-bar-factory-writing {
   max-width: min(360px, 38vw);
+}
+
+#status-bar-factory-buffer-workspace {
+  max-width: min(220px, 35vw);
+}
+
+#theia-statusBar #status-bar-factory-buffer-workspace,
+#theia-statusBar #status-bar-factory-writing {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+#status-bar-factory-buffer-workspace > span:not(.codicon),
+#status-bar-factory-writing > span:not(.codicon) {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

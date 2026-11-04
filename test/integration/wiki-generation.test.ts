@@ -98,6 +98,14 @@ test.each([false, true])(
       await input.readFiles(["src/main.ts"]);
       const current = input.pages.find((value) => value.id === page);
       if (!current) throw new Error("Missing current Wiki fixture");
+      if (calls === 1) {
+        const recorded = { phase: "writing", topicsTotal: 2, topicsDone: 1, currentTopic: "Guide" };
+        await input.progress?.(recorded as never);
+        const [row] = await db.client<
+          Array<{ progress: unknown }>
+        >`SELECT progress FROM factory.knowledge_generation WHERE project_id=${project} AND state='running'`;
+        expect(row?.progress).toEqual(recorded);
+      }
       if (calls === 1)
         await wiki.edit(
           page,
@@ -144,6 +152,13 @@ test.each([false, true])(
       const initial = await completed();
       expect(inventoryReceived).toContain("drizzle/0000_auth.sql");
       expect(initial?.["state"]).toBe("succeeded");
+      // The final checked publication completes the progress the workflow recorded.
+      expect(initial?.["progress"]).toEqual({
+        phase: "done",
+        topicsTotal: 2,
+        topicsDone: 2,
+        currentTopic: null,
+      });
       expect(calls).toBe(2);
       const [saved] = await db.client<
         Array<{ body: string; icon: string; order: number; version: number }>

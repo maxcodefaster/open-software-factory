@@ -60,6 +60,9 @@ for (const width of [1440, 768, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(`${origin}/learning.html`);
     await expect(page.getByRole("heading", { name: "Work, quality & cost" })).toBeVisible();
+    await expect(page.locator("[data-waiting]")).toHaveText(
+      "2 selected cases are waiting for a review. It starts at six selected cases, or 24 hours after the oldest settled (Oct 28, 11:52 AM UTC).",
+    );
     await expect
       .poll(async () =>
         page
@@ -146,6 +149,7 @@ test("empty, read-only and private learning states are truthful", async ({ page 
   await expect(
     page.getByRole("heading", { name: "Learning starts with completed work" }),
   ).toBeVisible();
+  await expect(page.locator("[data-waiting]")).toHaveCount(0);
   await page.screenshot({ path: `${directory}/empty-390.png`, fullPage: true });
   await page.goto(`${origin}/learning.html?readonly`);
   await expect(page.getByRole("button", { name: "Pause learning" })).toHaveCount(0);

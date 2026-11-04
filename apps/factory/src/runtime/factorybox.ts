@@ -1,9 +1,9 @@
-import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import type postgres from "postgres";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import {
   retiredFactoryboxExportOwner,
   retireFactoryboxExports,
@@ -50,6 +50,8 @@ import {
   reclaimRetiredFactoryboxBacking,
 } from "./factorybox-retirement";
 import type { RuntimeHub } from "./hub";
+import { createInspectionReuse } from "./inspection-reuse";
+import type { RetryBackoff } from "./retry-backoff";
 import {
   factoryboxAllocation,
   rememberFactoryboxIdentity,
@@ -76,40 +78,86 @@ type Retained = {
   identity: FactoryboxWorkerIdentity | null;
   released: boolean;
 };
+// The same predicates reclaimRetiredFactoryboxBacking selects on, without its
+// identity and cursor checks, so an idle sweep can skip the worker entirely.
+async function retiredBackingPending(sql: SQL) {
+  const [pending] = await sql<Array<{ pending: boolean }>>`SELECT
+    EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation operation
+      JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+      JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
+      WHERE operation.action='retire-sandbox' AND operation.completed_at IS NULL
+        AND attempt.state IN ('stopped','failed') AND admission.retired_at IS NOT NULL
+        AND admission.retirement_observation->>'kind'='operator-recovery')
+    OR EXISTS(SELECT 1 FROM factory.execution_slot slot
+      JOIN factory.factorybox_worker_admission admission ON admission.id=slot.factorybox_admission_id
+      WHERE slot.state='deleted' AND slot.factorybox_retirement_request IS NOT NULL
+        AND slot.factorybox_retirement_observation IS NULL AND admission.retired_at IS NOT NULL
+        AND admission.retirement_observation->>'kind'='operator-recovery') AS pending`;
+  return pending?.pending === true;
+}
+
+// Background reclamation shares the worker lifecycle lock with Start, Resume and
+// Pause. A deployment passes this policy to space repeated failures and skip
+// sweeps that have nothing to do; without it every sweep runs its full checks.
+export type FactoryboxReclaimPolicy = {
+  backoff: RetryBackoff;
+  importedExportsEveryMS: number;
+};
 
 export function createFactoryboxExecution(
   database: Database,
   hub: RuntimeHub,
   transport = runFactoryboxKubernetes,
+  reclaim?: FactoryboxReclaimPolicy,
 ) {
   let reclaiming: Promise<void> | null = null;
+  let importedExportsAt = Number.NEGATIVE_INFINITY;
+  let waiting = 0;
   let reclaimAfter: string | null = null;
   let retiredCursor: RetiredBackingCursor = { attempts: null, slots: null };
   const deadlines = new AsyncLocalStorage<number>();
+  const inspections = createInspectionReuse();
   const run: typeof transport = (args, input, limits) => {
     const remaining =
       (deadlines.getStore() ?? performance.now() + nativeLifecycleWindowMS) - performance.now();
     if (remaining <= 0)
       throw new Error("Factorybox lifecycle deadline expired; original intent was retained");
-    return transport(args, input, {
-      timeoutMS: Math.min(remaining, limits?.timeoutMS ?? remaining),
-      outputBytes: limits?.outputBytes ?? 4 * 1024 ** 2,
-    });
+    return inspections.run(args, input, () =>
+      transport(args, input, {
+        timeoutMS: Math.min(remaining, limits?.timeoutMS ?? remaining),
+        outputBytes: limits?.outputBytes ?? 4 * 1024 ** 2,
+      }),
+    );
   };
+  // Lifecycle commands and background reclamation share one native lock. A
+  // sweep that holds it for several retirements lets a waiting Start or Resume
+  // go first once its current retirement finishes.
   async function locked<T>(
     attemptID: string,
     action: (connection: SQL) => Promise<T>,
     deadline = performance.now() + nativeLifecycleWindowMS,
+    background = false,
   ) {
+    let queued = !background;
+    if (queued) waiting += 1;
+    const dequeue = () => {
+      if (!queued) return;
+      queued = false;
+      waiting -= 1;
+    };
     const connection = database.coordination();
     try {
       await connection`SELECT pg_advisory_lock(hashtext(${`factorybox:${attemptID}`}))`;
       return await withFactoryboxWorkerLock(
         connection,
-        () => deadlines.run(deadline, () => action(connection)),
+        () => {
+          dequeue();
+          return deadlines.run(deadline, () => inspections.scope(() => action(connection)));
+        },
         deadline,
       );
     } finally {
+      dequeue();
       try {
         await connection`SELECT pg_advisory_unlock(hashtext(${`factorybox:${attemptID}`}))`;
       } finally {
@@ -385,7 +433,12 @@ export function createFactoryboxExecution(
     else await completed(connection, record, compact);
     return compact;
   }
-  async function reclaimAttempt(connection: SQL, attemptID: string, saved: Retained) {
+  async function reclaimAttempt(
+    connection: SQL,
+    attemptID: string,
+    saved: Retained,
+    background = false,
+  ) {
     if (!saved.identity)
       throw new Error("Checkpoint retirement requires its original worker identity");
     const operations = await connection<
@@ -394,7 +447,11 @@ export function createFactoryboxExecution(
       FROM factory.factorybox_lifecycle_operation
       WHERE runtime_attempt_id=${attemptID} AND action IN ('retire-checkpoint','retire-resume') AND completed_at IS NULL
       ORDER BY intended_at,id`;
+    let retired = 0;
     for (const operation of operations) {
+      // The remaining retirements stay pending for the next sweep.
+      if (background && retired > 0 && waiting > 0) return;
+      retired += 1;
       const request = factoryboxCheckpointRequest.parse(operation.request);
       if (operation.action !== "retire-checkpoint" && operation.action !== "retire-resume")
         throw new Error("Unknown Factorybox retirement action");
@@ -629,24 +686,44 @@ export function createFactoryboxExecution(
           JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
           WHERE admission.retired_at IS NULL AND saved.identity IS NOT NULL
           ORDER BY saved.runtime_attempt_id LIMIT 1`;
-        if (current) {
+        // An idle installation takes no lock and runs no kubectl here. Retained
+        // backing work and the imported export cache each earn a locked sweep.
+        const exportsDue =
+          !reclaim || performance.now() - importedExportsAt >= reclaim.importedExportsEveryMS;
+        const backingDue =
+          !reclaim ||
+          (reclaim.backoff.due("retained-backing") &&
+            (await retiredBackingPending(database.client)));
+        if (current && (exportsDue || backingDue)) {
           try {
-            await locked(current.id, async (connection) => {
-              const saved = await retained(connection, current.id);
-              if (!saved?.identity) return;
-              try {
-                await retireImportedFactoryboxExports(saved.request, saved.identity, run);
-              } catch {
-                console.error("Factorybox imported export retirement needs observation");
-              }
-              retiredCursor = await reclaimRetiredFactoryboxBacking(
-                connection,
-                { request: saved.request, identity: saved.identity },
-                retiredCursor,
-                run,
-              );
-            });
+            await locked(
+              current.id,
+              async (connection) => {
+                const saved = await retained(connection, current.id);
+                if (!saved?.identity) return;
+                if (exportsDue) {
+                  importedExportsAt = performance.now();
+                  try {
+                    await retireImportedFactoryboxExports(saved.request, saved.identity, run);
+                  } catch {
+                    console.error("Factorybox imported export retirement needs observation");
+                  }
+                }
+                if (!backingDue) return;
+                retiredCursor = await reclaimRetiredFactoryboxBacking(
+                  connection,
+                  { request: saved.request, identity: saved.identity },
+                  retiredCursor,
+                  run,
+                );
+                if (retiredCursor.failed) reclaim?.backoff.failed("retained-backing");
+                else reclaim?.backoff.succeeded("retained-backing");
+              },
+              undefined,
+              true,
+            );
           } catch {
+            reclaim?.backoff.failed("retained-backing");
             console.error("Factorybox retained backing retirement needs observation");
           }
         }
@@ -658,15 +735,23 @@ export function createFactoryboxExecution(
           ORDER BY id LIMIT 16`;
         reclaimAfter = attempts.length === 16 ? (attempts.at(-1)?.id ?? null) : null;
         for (const attempt of attempts) {
+          if (reclaim && !reclaim.backoff.due(attempt.id)) continue;
           try {
-            await locked(attempt.id, async (connection) => {
-              const saved = await retained(connection, attempt.id);
-              if (!saved) throw new Error("Checkpoint retirement lost its retained Sandbox");
-              await reclaimAttempt(connection, attempt.id, saved);
-            });
+            await locked(
+              attempt.id,
+              async (connection) => {
+                const saved = await retained(connection, attempt.id);
+                if (!saved) throw new Error("Checkpoint retirement lost its retained Sandbox");
+                await reclaimAttempt(connection, attempt.id, saved, true);
+              },
+              undefined,
+              true,
+            );
+            reclaim?.backoff.succeeded(attempt.id);
           } catch {
             // Execution stays usable. The exact attempted intent remains for
             // the next sweep, including after a Factory process restart.
+            reclaim?.backoff.failed(attempt.id);
             console.error("Factorybox checkpoint retirement needs observation", attempt.id);
           }
         }

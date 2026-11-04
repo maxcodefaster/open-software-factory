@@ -645,6 +645,20 @@ test("message size rejection names the file and keeps prose and earlier attachme
   expect(creates).toHaveLength(2);
 });
 
+test("an empty file is rejected by name before any upload starts", async ({ page }) => {
+  await open(page, "files");
+  await page.getByLabel("Choose attachments").setInputFiles({
+    name: "Empty.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.alloc(0),
+  });
+  await expect(page.getByRole("alert")).toContainText(
+    "Empty.txt was not attached. The file is empty.",
+  );
+  await expect(page.getByRole("alert")).not.toContainText("Invalid command");
+  expect(creates).toHaveLength(0);
+});
+
 test("an unsupported file does not prevent the next selected file from attaching", async ({
   page,
 }) => {

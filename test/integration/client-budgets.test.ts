@@ -18,6 +18,11 @@ test("the built desktop keeps Settings code split and stays within the measured 
     if (!file) throw new Error("Client entry missing");
     const bytes = (await readFile(resolve(assets, file))).byteLength;
     sizes[name] = bytes;
+    const compressed = (await readFile(resolve(assets, `${file}.br`))).byteLength;
+    sizes[`${name}.br`] = compressed;
+    expect(compressed, `${name} must ship a brotli build within budget`).toBeLessThanOrEqual(
+      maximum / 3,
+    );
     expect(bytes, `${name} must not eagerly import every feature`).toBeLessThanOrEqual(maximum);
   }
   await Bun.write(".factory/test-results/client-budgets.json", JSON.stringify(sizes, null, 2));

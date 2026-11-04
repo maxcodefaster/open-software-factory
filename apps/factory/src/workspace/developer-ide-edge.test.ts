@@ -242,3 +242,66 @@ test("temporary editor preparation keeps its grant and recovers the initial docu
     await backend.stop(true);
   }
 });
+
+test("Theia application files keep their negotiated compression and revalidate while editor data stays uncached", async () => {
+  const userID = "abdabd34-6496-40f1-afbf-86187708037c";
+  const script = Bun.gzipSync("console.log('theia');".repeat(2_000));
+  const backend = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/bundle.js") {
+        if (request.headers.get("if-none-match") === '"bundle-1"')
+          return new Response(null, { status: 304, headers: { etag: '"bundle-1"' } });
+        return new Response(script, {
+          headers: {
+            "content-type": "text/javascript",
+            "content-encoding": "gzip",
+            etag: '"bundle-1"',
+          },
+        });
+      }
+      return new Response("workspace file", {
+        headers: { "content-type": "text/javascript", etag: '"data-1"' },
+      });
+    },
+  });
+  const edge = createDeveloperIDEEdge(
+    editorAccessDatabase(),
+    {
+      get: async () => ({ epoch: 1, state: "ready" }),
+      connection: async () => backend.url.origin,
+    } as unknown as Parameters<typeof createDeveloperIDEEdge>[1],
+    {} as Parameters<typeof createDeveloperIDEEdge>[2],
+    "http://127.0.0.1:3000",
+    { revokeEditor() {}, route: async () => undefined } as unknown as Parameters<
+      typeof createDeveloperIDEEdge
+    >[4],
+  );
+  try {
+    const issued = await edge.issue(userID, "fixture-session", false);
+    const redeemed = await edge.route(new Request(issued));
+    const location = redeemed.headers.get("location");
+    const cookie = redeemed.headers.get("set-cookie")?.split(";")[0];
+    if (!location || !cookie) throw new Error("Expected the authenticated editor redirect");
+    const get = (path: string, headers: Record<string, string> = {}) =>
+      edge.route(new Request(new URL(path, location), { headers: { cookie, ...headers } }));
+    const bundle = await get("bundle.js", { "accept-encoding": "gzip" });
+    expect(bundle.headers.get("content-encoding")).toBe("gzip");
+    expect(bundle.headers.get("cache-control")).toBe("private, no-cache");
+    expect(bundle.headers.get("vary")).toBe("Accept-Encoding");
+    expect(new Uint8Array(await bundle.arrayBuffer())).toEqual(script);
+    const unchanged = await get("bundle.js", {
+      "accept-encoding": "gzip",
+      "if-none-match": '"bundle-1"',
+    });
+    expect(unchanged.status).toBe(304);
+    const data = await get("workspace/data.js", { "accept-encoding": "gzip" });
+    expect(data.headers.get("cache-control")).toBe("no-store");
+    expect(data.headers.has("content-encoding")).toBe(false);
+    expect(await data.text()).toBe("workspace file");
+  } finally {
+    await backend.stop(true);
+  }
+});

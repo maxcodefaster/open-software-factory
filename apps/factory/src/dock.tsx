@@ -23,7 +23,13 @@ export function DockButton(props: {
         props.count ? `${props.label}, ${props.count} items need your attention` : props.label
       }
       aria-pressed={props.active ? "true" : "false"}
-      data-tooltip={props.disabled ? `${props.label} waits for a ready runtime` : props.label}
+      data-tooltip={
+        props.disabled
+          ? `${props.label} waits for a ready runtime`
+          : props.count
+            ? `${props.label}, ${props.count} need your attention`
+            : props.label
+      }
       disabled={props.disabled}
       onClick={() => (props.active && props.onMinimize ? props.onMinimize() : props.onClick())}
     >
@@ -118,6 +124,7 @@ export function DockAppButton(props: {
           type="button"
           class="dock-instance-menu"
           aria-label={`Choose ${props.label} instance`}
+          data-tooltip={`Choose ${props.label} instance`}
           aria-haspopup="menu"
           aria-expanded={open() ? "true" : "false"}
           onClick={(event) => {

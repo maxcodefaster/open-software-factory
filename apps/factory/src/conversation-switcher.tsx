@@ -136,6 +136,7 @@ export function ConversationSwitcher(props: {
             type="button"
             class="bare-icon window-minimize-control conversation-minimize"
             aria-label="Minimize Agent panel"
+            title="Minimize Agent panel"
             onClick={() => {
               dismiss();
               props.onMinimize?.();

@@ -106,3 +106,24 @@ test("Start renders resource navigation but never missing assets, source or prot
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("bundled artwork revalidates with an ETag instead of reloading on every visit", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "factory-art-"));
+  try {
+    await mkdir(`${root}/art`);
+    await writeFile(`${root}/art/river.jpg`, "painting");
+    await writeFile(`${root}/robots.txt`, "plain");
+    const serve = createStaticAssets(root, async () => new Response("shell"));
+    const get = (path: string, headers?: HeadersInit) =>
+      serve(new Request(`http://factory.test/${path}`, { ...(headers ? { headers } : {}) }));
+    const art = await get("art/river.jpg");
+    expect(art.headers.get("cache-control")).toBe(
+      "public, max-age=3600, stale-while-revalidate=86400",
+    );
+    const etag = fixtureValue(art.headers.get("etag"), 'art.headers.get("etag")');
+    expect((await get("art/river.jpg", { "if-none-match": etag })).status).toBe(304);
+    expect((await get("robots.txt")).headers.get("cache-control")).toBe("no-store");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

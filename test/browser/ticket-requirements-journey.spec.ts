@@ -261,6 +261,40 @@ test("Ticket keystrokes and undo survive delayed autosave acknowledgement and re
   }
 });
 
+test("manual Requirements written after creating a Ticket without a description become implementable", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "New Ticket", exact: true }).click();
+  await page.getByRole("textbox", { name: "Ticket title", exact: true }).fill("Title-only ticket");
+  await page.getByRole("button", { name: "Write requirements", exact: true }).click();
+  await expect(page.getByRole("article", { name: "Ticket document" })).toBeVisible();
+  const [ticket] = await db.client<
+    Array<{ id: string }>
+  >`SELECT id FROM factory.ticket WHERE project_id=${projectID}`;
+  if (!ticket) throw new Error("Missing Ticket");
+  await page
+    .getByRole("textbox", { name: "Ticket description", exact: true })
+    .fill("The total is shown for the current user.");
+  await page
+    .getByRole("textbox", { name: "Acceptance criterion 1", exact: true })
+    .fill("The dashboard displays the exact total.");
+  await expect
+    .poll(async () => {
+      const [row] = await db.client<
+        Array<{ canonical: string }>
+      >`SELECT canonical_content AS canonical FROM factory.requirement_revision WHERE ticket_id=${ticket.id}`;
+      return row ? JSON.parse(row.canonical) : undefined;
+    })
+    .toMatchObject({
+      summary: "The total is shown for the current user.",
+      acceptanceCriteria: ["The dashboard displays the exact total."],
+    });
+  await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeEnabled();
+  expect(
+    await db.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${ticket.id}`,
+  ).toHaveLength(0);
+});
+
 test("a stale Assistant detail poll cannot undo completed Ticket autosave", async ({ page }) => {
   await draft(page, "Stale detail probe", "Original human intent.");
   await page.getByRole("button", { name: "Create as idea", exact: true }).click();

@@ -474,6 +474,9 @@ for (const device of [
       await expect(update).toBeEnabled();
       await update.click();
       await expect(page.getByText("Updating Wiki…", { exact: true })).toBeVisible();
+      await expect(page.locator(".generation-detail")).toContainText(
+        "Queued. Waiting for a free Wiki worker.",
+      );
       expect(updates).toBe(1);
       await expect(
         page.getByText("Keep this saved guide and human context.", { exact: true }),
@@ -492,6 +495,35 @@ for (const device of [
     });
   });
 }
+
+test("a running Wiki update shows its phase, guide position and published pages", async ({
+  page,
+}) => {
+  if (!database) throw new Error("Missing owned Wiki fixture database");
+  await database.client`INSERT INTO factory.knowledge_page
+    (id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
+    VALUES(${crypto.randomUUID()},${projectID},'progress-guide','Progress guide',
+      'Readable while the update runs.','Readable while the update runs.',
+      ${"a".repeat(40)},${userID})`;
+  let generation = knowledgeGenerationSchema.parse({
+    id: crypto.randomUUID(),
+    state: "running",
+    pageCount: 2,
+    progress: { phase: "writing", topicsTotal: 5, topicsDone: 2, currentTopic: "Billing" },
+  });
+  await mockFactoryFunctions(page, { knowledge: { generation: async () => generation } });
+  await signIn(page);
+  await selectProject(page);
+  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await expect(page.getByText("Updating Wiki…", { exact: true })).toBeVisible();
+  const detail = page.locator(".generation-detail");
+  await expect(detail).toContainText("Writing guide 3 of 5: Billing.");
+  await expect(detail).toContainText("2 pages published so far.");
+  await expect(detail).toContainText("Saved pages stay readable.");
+  await expect(page.getByText("Readable while the update runs.", { exact: true })).toBeVisible();
+  await page.screenshot({ path: `${evidenceDirectory}/wiki-update-progress.png`, fullPage: true });
+  generation = knowledgeGenerationSchema.parse({ ...generation, state: "succeeded" });
+});
 
 test("Wiki opening leaves collapsed Code docs unloaded and slow source inventory never blocks its pages", async ({
   page,

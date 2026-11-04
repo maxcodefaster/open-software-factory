@@ -329,6 +329,7 @@ export function PreviewReview(props: {
                 type="button"
                 class="quiet-button icon-button"
                 aria-label="Close feedback"
+                title="Close feedback"
                 onClick={closeFeedback}
               >
                 <Icon name="close" />

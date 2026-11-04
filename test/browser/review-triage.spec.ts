@@ -186,6 +186,7 @@ for (const compact of [false, true]) {
       thread.getByText("Latest reply: the draft is retained, ready to recheck.", { exact: true }),
     ).toBeHidden();
     await expect(draft).toHaveCount(0);
+    await expect(thread.getByRole("button", { name: "Reply", exact: true })).toBeFocused();
     await page.screenshot({
       path: `${directory}/${compact ? "compact" : "ticket"}-collapsed.png`,
       fullPage: true,

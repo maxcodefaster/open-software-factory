@@ -105,6 +105,9 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     await page.getByLabel("MCP endpoint", { exact: true }).fill("http://unsafe.example/mcp");
     await page.getByRole("button", { name: "Save definition", exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("HTTPS");
+    await page.getByLabel("MCP endpoint", { exact: true }).fill("https://localhost/mcp");
+    await page.getByRole("button", { name: "Save definition", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("public HTTPS endpoint");
     await page.getByLabel("MCP endpoint", { exact: true }).fill("https://source.example/mcp");
     await page
       .getByRole("navigation", { name: "Settings navigation" })

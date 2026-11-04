@@ -1269,6 +1269,7 @@ function FeedbackItem(props: {
   const [contextOpen, setContextOpen] = createSignal(false);
   const [thumbnailFailed, setThumbnailFailed] = createSignal(false);
   let replyInput: HTMLTextAreaElement | undefined;
+  let replyToggle: HTMLButtonElement | undefined;
   let source: HTMLDivElement | undefined;
   let sourceOpener: HTMLButtonElement | undefined;
   let contextPanel: HTMLDivElement | undefined;
@@ -1465,6 +1466,7 @@ function FeedbackItem(props: {
                     type="button"
                     class="bare-icon"
                     aria-label="Close context"
+                    title="Close context"
                     onClick={() => {
                       setContextOpen(false);
                       sourceOpener?.focus();
@@ -1551,6 +1553,7 @@ function FeedbackItem(props: {
             <button
               type="button"
               class="review-text-action"
+              ref={replyToggle}
               aria-expanded={replying() ? "true" : "false"}
               disabled={props.busy}
               onClick={() => setReplying((value) => !value)}
@@ -1591,6 +1594,7 @@ function FeedbackItem(props: {
                 if ((await props.onAction("reply", submitted)) && props.reply === submitted) {
                   props.onReply("");
                   setReplying(false);
+                  replyToggle?.focus();
                 }
               }}
             >

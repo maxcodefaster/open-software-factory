@@ -36,7 +36,11 @@ type PendingSlot = Source & {
   request: unknown;
   progress: unknown;
 };
-export type RetiredBackingCursor = { attempts: string | null; slots: string | null };
+export type RetiredBackingCursor = {
+  attempts: string | null;
+  slots: string | null;
+  failed?: number;
+};
 const storeRoot = "/var/lib/sysbox/fixed-store/data/store";
 
 export function retainedFactoryboxBackingOperation(
@@ -139,6 +143,7 @@ export async function reclaimRetiredFactoryboxBacking(
       availableBytesAfter: receipt.after.filesystem_available_bytes,
     };
   }
+  let failed = 0;
   for (const source of attempts) {
     try {
       const request = factoryboxBackingRequest.parse(source.request);
@@ -166,6 +171,7 @@ export async function reclaimRetiredFactoryboxBacking(
             AND pending.action IN ('retire-checkpoint','retire-resume','retire-sandbox')
             AND pending.completed_at IS NULL)`;
     } catch {
+      failed += 1;
       console.error("Factorybox retained backing needs observation", source.ownerID);
     }
   }
@@ -234,11 +240,13 @@ export async function reclaimRetiredFactoryboxBacking(
                 AND pending.action IN ('retire-checkpoint','retire-resume','retire-sandbox')
                 AND pending.completed_at IS NULL)`;
     } catch {
+      failed += 1;
       console.error("Factorybox retained slot backing needs observation", source.id);
     }
   }
   return {
     attempts: attempts.length === 16 ? (attempts.at(-1)?.id ?? null) : null,
     slots: slots.length === 16 ? (slots.at(-1)?.id ?? null) : null,
+    failed,
   };
 }

@@ -6,7 +6,7 @@ import {
   type MCPDefinition,
   type MCPLibraryView,
   type MCPRole,
-  mcpDefinition,
+  mcpSaveContent,
   type mcpSaveInput,
   recommendedMCPs,
   resolveMCPChoice,
@@ -310,7 +310,7 @@ export function MCPLibrary(props: {
     event.preventDefault();
     const current = draft();
     if (!current || setupBlocked() || (props.monitoringSetup && !draftForMonitoring())) return;
-    const parsed = mcpDefinition.safeParse(current.content);
+    const parsed = mcpSaveContent.safeParse(current.content);
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? "Check the MCP definition");
       return;

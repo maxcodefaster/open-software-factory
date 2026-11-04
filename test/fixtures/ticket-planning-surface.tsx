@@ -249,7 +249,11 @@ function Surface() {
               return undefined;
             }}
             onConfirmRequirements={async () => undefined}
-            clarificationAction={{ label: "Ask AI to clarify", status: false }}
+            clarificationAction={{
+              label: query.has("awaiting") ? "Continue clarification" : "Ask AI to clarify",
+              status: false,
+            }}
+            awaitingAnswer={query.has("awaiting")}
             onFollowUp={noop}
             onOpenTicket={noop}
             onOpenEpic={noop}

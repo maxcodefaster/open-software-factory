@@ -172,6 +172,10 @@ export function SettingsWorkspace(props: {
       (group) => group.scope === current.scope && group.categories.includes(current.category),
     );
   };
+  const scopeLabel = (group: ReturnType<typeof groups>[number]) =>
+    group.id === "project" || group.id === "system"
+      ? group.label
+      : `${group.label} · ${group.categories.map((value) => label(value, group.scope)).join(", ")}`;
   const label = (value: Category, scope: Scope = selection().scope) =>
     ({
       models: scope === "personal" ? "Model overrides" : "Models",
@@ -228,10 +232,15 @@ export function SettingsWorkspace(props: {
               }}
             >
               <For each={groups()}>
-                {(group) => <option value={group.id}>{group.label}</option>}
+                {(group) => <option value={group.id}>{scopeLabel(group)}</option>}
               </For>
             </select>
           </label>
+          <Show when={currentGroup()?.id !== "libraries"}>
+            <p class="settings-scope-hint">
+              Skills and MCP connections are in Libraries. Choose it in Settings for.
+            </p>
+          </Show>
           <div class="settings-navigation-groups">
             <For each={groups().filter((group) => group.id === currentGroup()?.id)}>
               {(group) => (

@@ -503,6 +503,14 @@ function installPreviewBridge(factoryOrigin: string) {
   // Factory appends this script after the complete HTML document. Show that
   // delivered content without waiting for deferred App modules to finish.
   // This acknowledges document delivery, not App health or hydration.
+  // The status is the App's own HTTP answer for this document, so Factory can
+  // tell an App error page from a connection it failed to make.
+  const documentTiming = performance.getEntriesByType("navigation")[0] as
+    | { responseStatus?: number }
+    | undefined;
   if (parent !== window)
-    parent.postMessage({ type: "factory-preview-document-ready" }, factoryOrigin);
+    parent.postMessage(
+      { type: "factory-preview-document-ready", status: documentTiming?.responseStatus },
+      factoryOrigin,
+    );
 }

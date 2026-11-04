@@ -2,40 +2,12 @@ import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import type { FetchLike } from "@modelcontextprotocol/client";
-import { mcpEndpoint } from "../../../../packages/conversation-domain/src/mcp-library";
+import {
+  mcpEndpoint,
+  publicMCPAddress,
+} from "../../../../packages/conversation-domain/src/mcp-library";
 
-// Public unicast only. Pin the checked address on the actual TLS request, not a
-// separate preflight followed by another DNS resolution.
-export function publicMCPAddress(value: string): boolean {
-  if (isIP(value) === 4) {
-    const [a = 0, b = 0, c = 0] = value.split(".").map(Number);
-    return !(
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      a >= 224 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && (b === 0 || b === 168 || (b === 88 && c === 99))) ||
-      (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
-      (a === 203 && b === 0 && c === 113)
-    );
-  }
-  // Accept global unicast, excluding documentation and transition mechanisms.
-  if (isIP(value) !== 6) return false;
-  const ip = new URL(`https://[${value}]/`).hostname.slice(1, -1);
-  const segments = ip.split(":");
-  return (
-    /^[23]/.test(ip) &&
-    !ip.startsWith("2002:") &&
-    !ip.startsWith("3fff:") &&
-    !(
-      segments[0] === "2001" &&
-      (Number.parseInt(segments[1] || "0", 16) < 0x200 || segments[1] === "db8")
-    )
-  );
-}
+export { publicMCPAddress };
 
 export const secureMCPFetch: FetchLike = async (input, init) => {
   const request = new Request(input instanceof URL ? input.href : input, init);

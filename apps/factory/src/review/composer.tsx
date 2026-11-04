@@ -1,7 +1,7 @@
 import { createEffect, Show } from "solid-js";
-import { Icon } from "../icon";
-import { TextareaAttachments } from "../attachments/ui";
 import { attachmentText, readAttachmentContent } from "../attachments/composer";
+import { TextareaAttachments } from "../attachments/ui";
+import { Icon } from "../icon";
 
 export function ReviewComposer(props: {
   attachmentScopeKey: string;
@@ -55,6 +55,7 @@ export function ReviewComposer(props: {
           type="button"
           class="quiet-button icon-button"
           aria-label="Cancel feedback"
+          title="Cancel feedback"
           disabled={props.busy || props.locked}
           onClick={props.onCancel}
         >

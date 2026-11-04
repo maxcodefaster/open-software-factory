@@ -150,7 +150,7 @@ export interface DocumentWindowModel {
   ) => Promise<
     { id: string; ticketVersion: number; requirementRevisionId: string | null } | undefined
   >;
-  ticketClarificationAction: () => { label: string; status: boolean };
+  ticketClarificationAction: () => { label: string; status: boolean; question: boolean };
   selectedChange: Accessor<Change | undefined>;
   delivery: Accessor<DeliveryView | undefined>;
   latestRevision: () =>
@@ -415,6 +415,10 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                     storageKey={`ticket-edit:${model.bootstrap.session.user.id}:${current().ticket.id}`}
                     onConfirmRequirements={model.confirmRequirements}
                     clarificationAction={model.ticketClarificationAction()}
+                    awaitingAnswer={
+                      model.ticketClarificationAction().question &&
+                      model.assistantTicketID() === current().ticket.id
+                    }
                     ticketReference={ticketReference(current().ticket.id)}
                     change={model.selectedChange()}
                     delivery={model.delivery()}

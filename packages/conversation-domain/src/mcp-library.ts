@@ -3,6 +3,54 @@ import { libraryCoverState } from "./library-covers";
 
 export const mcpScope = z.enum(["personal", "project", "system"]);
 export const mcpRole = z.enum(["planning", "build"]);
+// Public unicast only. The server pins the checked address on the actual TLS request.
+export function publicMCPAddress(value: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (v4) {
+    const [a = 0, b = 0, c = 0, d = 0] = v4.slice(1).map(Number);
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    return !(
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && (b === 0 || b === 168 || (b === 88 && c === 99))) ||
+      (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+      (a === 203 && b === 0 && c === 113)
+    );
+  }
+  // Accept global unicast, excluding documentation and transition mechanisms.
+  if (!value.includes(":")) return false;
+  let ip: string;
+  try {
+    ip = new URL(`https://[${value}]/`).hostname.slice(1, -1);
+  } catch {
+    return false;
+  }
+  const segments = ip.split(":");
+  return (
+    /^[23]/.test(ip) &&
+    !ip.startsWith("2002:") &&
+    !ip.startsWith("3fff:") &&
+    !(
+      segments[0] === "2001" &&
+      (Number.parseInt(segments[1] || "0", 16) < 0x200 || segments[1] === "db8")
+    )
+  );
+}
+
+// Stored definitions stay readable; only new saves must name a public host.
+function publicMCPHost(value: string) {
+  const url = new URL(value);
+  if (url.port) return false;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (/^[\d.]+$/.test(host) || host.includes(":")) return publicMCPAddress(host);
+  return host.includes(".") && !/\.(localhost|local|localdomain|internal|home\.arpa)$/i.test(host);
+}
+
 export const mcpEndpoint = z
   .url()
   .max(2048)
@@ -55,6 +103,13 @@ export const mcpRevision = z.object({
   content: mcpDefinition,
   digest: z.string(),
 });
+export const mcpSaveContent = mcpDefinition.refine(
+  (definition) => publicMCPHost(definition.endpoint),
+  {
+    path: ["endpoint"],
+    message: "Use a public HTTPS endpoint on port 443, not a local or private network address",
+  },
+);
 export const mcpSaveInput = z
   .object({
     libraryId: z.uuid(),
@@ -62,7 +117,7 @@ export const mcpSaveInput = z
     expectedRevision: z.number().int().nonnegative(),
     scope: mcpScope,
     projectId: z.uuid().optional(),
-    content: mcpDefinition,
+    content: mcpSaveContent,
   })
   .strict();
 export const mcpChoiceInput = z

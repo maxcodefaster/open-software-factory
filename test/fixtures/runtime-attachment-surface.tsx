@@ -49,7 +49,23 @@ function Surface() {
               title="Preview"
               attemptID={attemptID}
               active={!params.has("inactive")}
-              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("late-failure") ? "late-failure-document" : params.has("starting") ? "starting-document" : params.has("connection-error") ? "failed-document" : "document"}`}
+              attempt={params.has("app") ? { state: "ready" } : undefined}
+              app={
+                params.has("app")
+                  ? {
+                      attemptID,
+                      projectID,
+                      channel: "app",
+                      label: "App",
+                      state: "ready",
+                      port: 3000,
+                      ...(params.has("exited")
+                        ? { process: { state: "failed", exitCode: 1 } }
+                        : {}),
+                    }
+                  : undefined
+              }
+              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("late-failure") ? "late-failure-document" : params.has("starting") ? "starting-document" : params.has("app-503") ? "app-503-document" : params.has("connection-error") ? "failed-document" : "document"}`}
               loadingLabel="Opening Preview…"
             />
           }

@@ -45,6 +45,7 @@ export function AttachmentFiles(props: {
           type="button"
           class="quiet-button attachment-scroll attachment-scroll-back"
           aria-label="Scroll attachments left"
+          title="Scroll attachments left"
           aria-controls={id}
           disabled={!left()}
           onClick={() => scroll(-1)}
@@ -83,6 +84,7 @@ export function AttachmentFiles(props: {
           type="button"
           class="quiet-button attachment-scroll attachment-scroll-next"
           aria-label="Scroll attachments right"
+          title="Scroll attachments right"
           aria-controls={id}
           disabled={!right()}
           onClick={() => scroll(1)}

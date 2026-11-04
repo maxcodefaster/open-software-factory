@@ -168,8 +168,8 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
       navigation.getByRole("combobox", { name: "Settings scope" }).locator("option"),
     ).toHaveText([
       "Project · Invoice workspace",
-      "Libraries",
-      "Personal",
+      "Libraries · Skills, MCP connections",
+      "Personal · Model overrides, Login & security",
       "Factory administration",
     ]);
     const sizes = await navigation

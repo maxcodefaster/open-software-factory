@@ -7,6 +7,7 @@ import {
 } from "../../../packages/conversation-domain/src/conversation";
 import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
 import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
+import { wikiGenerationProgress } from "../../../packages/knowledge-domain/src/generation";
 import { requirementContentInput } from "../../../packages/requirement-domain/src/content";
 import { technicalDesignContentInput } from "../../../packages/requirement-domain/src/technical-design";
 import type { FactoryZeroSchema } from "../../../packages/zero-schema/src";
@@ -165,6 +166,8 @@ export const appPreviewsSchema = z.object({
       channel: z.string(),
       label: z.string(),
       state: z.string().optional(),
+      port: z.number().int().optional(),
+      process: z.object({ state: z.string(), exitCode: z.number().int().optional() }).optional(),
     }),
   ),
 });
@@ -462,6 +465,10 @@ export const knowledgeGenerationSchema = z.object({
   pageCount: optionalNumber,
   conflictCount: optionalNumber,
   failure: optionalString,
+  progress: z.preprocess(
+    (value) => (value === null ? undefined : value),
+    wikiGenerationProgress.optional(),
+  ),
 });
 export type KnowledgeGeneration = z.infer<typeof knowledgeGenerationSchema>;
 

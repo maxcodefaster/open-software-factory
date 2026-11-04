@@ -307,6 +307,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
               type="button"
               class="bare-icon window-minimize-control"
               aria-label="Minimize Agent panel"
+              title="Minimize Agent panel"
               onClick={model.dismissAgent}
             >
               <Icon name="minimize" />

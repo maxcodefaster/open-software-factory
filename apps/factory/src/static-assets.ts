@@ -43,9 +43,16 @@ export function createStaticAssets(
       } else return new Response(null, { status: 404 });
     }
     const immutable = /\/assets\/[^/]+-[\w-]{8,}\.[a-z0-9]+$/i.test(filePath);
+    // Bundled artwork keeps stable names, so it revalidates daily instead of reloading 1-2 MB per visit.
+    const artwork = /^\/(?:art|font-licenses)\//.test(path);
+    const revalidated = immutable || artwork;
     const headers = new Headers({
       "content-type": file.type || "application/octet-stream",
-      "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-store",
+      "cache-control": immutable
+        ? "public, max-age=31536000, immutable"
+        : artwork
+          ? "public, max-age=3600, stale-while-revalidate=86400"
+          : "no-store",
       vary: "Accept-Encoding",
       "x-content-type-options": "nosniff",
     });
@@ -68,7 +75,7 @@ export function createStaticAssets(
     if (encoding === "identity" && encodingQuality(accepted, "identity") === 0)
       return new Response(null, { status: 406, headers });
     const etag = `"${file.size.toString(16)}-${file.lastModified.toString(16)}-${encoding}"`;
-    if (immutable) {
+    if (revalidated) {
       headers.set("etag", etag);
       if (
         request.headers

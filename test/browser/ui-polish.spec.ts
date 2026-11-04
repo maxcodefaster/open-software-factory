@@ -132,6 +132,14 @@ test("Settings scope chooser exposes one compact group instead of every scope at
     await expect(navigation.getByRole("button")).toHaveText(group.labels);
   }
   await scope.selectOption("project");
+  const hint = navigation.getByText("Skills and MCP connections are in Libraries.");
+  await expect(hint).toBeVisible();
+  await expect(scope.locator("option", { hasText: "Libraries" })).toHaveText(
+    "Libraries · Skills, MCP connections",
+  );
+  await scope.selectOption("libraries");
+  await expect(hint).toHaveCount(0);
+  await scope.selectOption("project");
   await page.screenshot({ path: `${evidence}/compact-settings-1440.png` });
   await resize(page, { width: 390, height: 844 });
   await page.getByRole("button", { name: "Choose settings page", exact: true }).click();
@@ -146,6 +154,34 @@ test("Settings scope chooser exposes one compact group instead of every scope at
   await navigation.getByRole("button", { name: "Company sign-in", exact: true }).click();
   await expect(page.getByRole("region", { name: "Company sign-in", exact: true })).toBeVisible();
   await page.screenshot({ path: `${evidence}/compact-settings-scope-change-390.png` });
+});
+
+test("every icon-only dock and chrome button has a visible tooltip or title and a keyboard focus label", async ({
+  page,
+}) => {
+  await openSettings(page);
+  const unnamed = await page
+    .locator(".workspace-dock button, .topbar-end button.icon-button, .agent-toggle")
+    .evaluateAll((buttons) =>
+      buttons
+        .filter(
+          (button) =>
+            button instanceof HTMLElement &&
+            button.offsetParent !== null &&
+            !(button.textContent ?? "").trim() &&
+            !button.dataset["tooltip"] &&
+            !button.title,
+        )
+        .map((button) => button.getAttribute("aria-label") ?? button.outerHTML.slice(0, 80)),
+    );
+  expect(unnamed).toEqual([]);
+  const inbox = page
+    .getByRole("navigation", { name: "Workspace dock" })
+    .getByRole("button", { name: /^Inbox/ });
+  await inbox.focus();
+  await expect(inbox).toHaveAttribute("data-tooltip", /^Inbox/);
+  const label = await inbox.evaluate((button) => getComputedStyle(button, "::after").content);
+  expect(label).toContain("Inbox");
 });
 
 test("visual sweep keeps Project membership separate from Factory account actions", async ({

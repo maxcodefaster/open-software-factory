@@ -103,6 +103,16 @@ test("Contributor clarification remains product-only and does not commission tec
   await expect(page.getByRole("navigation", { name: "Ticket chapters" })).toHaveCount(0);
 });
 
+test("a waiting Interview question is not reported as saved requirements ready to implement", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/ticket-planning.html?empty&awaiting`);
+  const progress = page.getByLabel("Ticket progress", { exact: true });
+  await expect(progress).toContainText("waiting for your answer");
+  await expect(progress).not.toContainText("Confirm the scope with Implement");
+  await expect(progress).not.toContainText("Requirements are saved");
+});
+
 for (const width of [1440, 390]) {
   test(`unfinished technical planning resumes from the single Ticket action at ${width}px`, async ({
     page,

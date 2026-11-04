@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { workspacePresence } from "../../../packages/interface-domain/src/workspace-presence";
 import type { AppPreview, RuntimeAttempt } from "./api-contracts";
+import { appResponseNotice, previewStatus } from "./preview-status";
 import { PreviewReview } from "./review/preview";
 import { appRuntimeOrigin } from "./runtime-origins";
 import {
@@ -8,6 +9,7 @@ import {
   runtimeReconnecting,
   runtimeWorkspaceURL,
 } from "./runtime-workspace-state";
+import { createWaitElapsed, waitLabel } from "./wait-elapsed";
 import type { WorkspaceTab } from "./workspace-tabs";
 
 export function RuntimeWorkspaceTabs(props: {
@@ -45,7 +47,21 @@ export function RuntimeWorkspaceTabs(props: {
             active(),
           ),
         );
+        const app = () =>
+          props.previews.find(
+            (preview) =>
+              preview.attemptID === tab().attemptID &&
+              preview.projectID === props.projectID &&
+              preview.channel === tab().appChannel,
+          );
         const reconnecting = () => runtimeReconnecting(attempt());
+        const waited = createWaitElapsed(() =>
+          !url() && !reconnecting() ? (attempt()?.state ?? "pending") : undefined,
+        );
+        const startingPreview = () =>
+          tab().view === "preview" &&
+          ["create-intended", "starting"].includes(attempt()?.state ?? "") &&
+          !attempt()?.computeWait;
         const review = createMemo(() => {
           const changeID = attempt()?.changeId;
           if (!changeID) return undefined;
@@ -66,6 +82,13 @@ export function RuntimeWorkspaceTabs(props: {
             return "Main Preview failed to start.";
           if (current?.computeWait)
             return "Waiting for execution capacity. The Preview starts automatically when space is available.";
+          if (current && startingPreview())
+            return previewStatus({
+              attempt: current,
+              app: app(),
+              waited: waited(),
+              phase: "loading",
+            }).headline;
           if (current) return workspacePresence({ runtimeState: current.state });
           if (props.pending) return "Opening the Workspace…";
           return tab().view === "ide"
@@ -81,6 +104,13 @@ export function RuntimeWorkspaceTabs(props: {
               url={url()}
               reconnecting={reconnecting()}
               loadingLabel={status()}
+              loadingDetail={
+                startingPreview() && waited() >= 5_000
+                  ? `Starting for ${waitLabel(waited())}. Factory opens the Preview as soon as the App answers.`
+                  : undefined
+              }
+              attempt={attempt()}
+              app={app()}
               failure={
                 reconnecting() ? undefined : (attempt()?.failure ?? tab().preparationFailure)
               }
@@ -105,6 +135,9 @@ export function RuntimeWorkspace(props: {
   appChannel?: string | undefined;
   url?: string | undefined;
   loadingLabel: string;
+  loadingDetail?: string | undefined;
+  attempt?: Pick<RuntimeAttempt, "state" | "failure" | "computeWait"> | undefined;
+  app?: AppPreview | undefined;
   failure?: string | null | undefined;
   onRetry?: (() => Promise<void>) | undefined;
   reconnecting?: boolean;
@@ -142,6 +175,7 @@ export function RuntimeWorkspace(props: {
         fallback={
           <div class="empty-workspace runtime-start-state" role="status">
             <p>{props.loadingLabel}</p>
+            <Show when={props.loadingDetail}>{(detail) => <p aria-live="off">{detail()}</p>}</Show>
             <Show when={props.failure}>{(failure) => <p role="note">{failure()}</p>}</Show>
             <Show when={props.onRetry}>
               <button
@@ -162,6 +196,8 @@ export function RuntimeWorkspace(props: {
             title={props.title}
             attemptID={props.attemptID}
             appChannel={props.appChannel}
+            attempt={props.attempt}
+            app={props.app}
             url={url()}
             reconnecting={Boolean(props.reconnecting)}
             review={props.review}
@@ -177,6 +213,8 @@ function AttachedRuntimeFrame(props: {
   title: "IDE" | "Preview";
   attemptID: string | undefined;
   appChannel?: string | undefined;
+  attempt?: Pick<RuntimeAttempt, "state" | "failure" | "computeWait"> | undefined;
+  app?: AppPreview | undefined;
   url: string;
   reconnecting?: boolean;
   active?: boolean | undefined;
@@ -194,6 +232,19 @@ function AttachedRuntimeFrame(props: {
   const [delayed, setDelayed] = createSignal(false);
   const [documentFailed, setDocumentFailed] = createSignal(false);
   const [retryable, setRetryable] = createSignal(false);
+  const [appStatus, setAppStatus] = createSignal<number>();
+  const [manualReloads, setManualReloads] = createSignal(0);
+  const waited = createWaitElapsed(() =>
+    phase() === "loaded" ? undefined : `${props.url}:${manualReloads()}`,
+  );
+  const status = () =>
+    previewStatus({
+      attempt: props.attempt,
+      app: props.app,
+      waited: delayed() ? Math.max(waited(), 30_000) : Math.min(waited(), 29_999),
+      phase: phase() === "failed" ? "failed" : "loading",
+      unreachable: retryable(),
+    });
   let attached = false;
   let retryDelay = 1000;
   let frame: HTMLIFrameElement | undefined;
@@ -215,6 +266,7 @@ function AttachedRuntimeFrame(props: {
       setRetryable(false);
       setDocumentFailed(false);
       setDelayed(false);
+      setAppStatus(undefined);
       setPhase("loading");
     },
   );
@@ -287,6 +339,7 @@ function AttachedRuntimeFrame(props: {
         // The document is attached even if a nonessential image is still loading.
         // This is not App health, runtime readiness or review evidence.
         attached = true;
+        setAppStatus(typeof event.data.status === "number" ? event.data.status : undefined);
         setRetryable(false);
         setDocumentFailed(false);
         setDelayed(false);
@@ -303,10 +356,12 @@ function AttachedRuntimeFrame(props: {
     if (resetBackoff) {
       attached = false;
       retryDelay = 1000;
+      setManualReloads((value) => value + 1);
     }
     setRetryable(false);
     setDocumentFailed(false);
     setDelayed(false);
+    setAppStatus(undefined);
     setPhase("loading");
     frame.src = props.url;
   }
@@ -371,6 +426,13 @@ function AttachedRuntimeFrame(props: {
           />
         )}
       </Show>
+      <Show when={phase() === "loaded" ? appResponseNotice(appStatus(), props.app) : undefined}>
+        {(notice) => (
+          <div class="runtime-app-notice" role="status">
+            {notice()}
+          </div>
+        )}
+      </Show>
       <Show when={phase() !== "loaded" || props.reconnecting}>
         <div
           class="runtime-frame-state empty-workspace"
@@ -378,24 +440,33 @@ function AttachedRuntimeFrame(props: {
           aria-label={`${props.title} connection`}
         >
           <Show
-            when={phase() === "failed" && !props.reconnecting}
+            when={props.title === "Preview" && !props.reconnecting}
             fallback={
               <p>
                 {props.reconnecting
                   ? "Connection interrupted. Reconnecting to the same Workspace…"
-                  : delayed()
-                    ? `${props.title} is taking longer to open. You can keep waiting.`
-                    : props.title === "IDE"
-                      ? "Workspace is running. Opening IDE…"
-                      : "Opening Preview…"}
+                  : phase() === "failed"
+                    ? "Could not open IDE. Reload this view to retry."
+                    : delayed()
+                      ? "IDE is taking longer to open. You can keep waiting."
+                      : "Workspace is running. Opening IDE…"}
               </p>
             }
           >
             <p>
-              {retryable()
+              {phase() === "failed" && retryable()
                 ? "Preview could not be reached. Reconnecting…"
-                : `Could not open ${props.title}. Reload this view to retry.`}
+                : status().headline}
             </p>
+            <Show when={status().cause}>{(cause) => <p role="note">{cause()}</p>}</Show>
+            <Show when={phase() === "failed" || delayed() ? status().detail : undefined}>
+              {(detail) => <p>{detail()}</p>}
+            </Show>
+            <Show when={waited() >= 5_000}>
+              <p aria-live="off">
+                {phase() === "failed" ? "Trying for" : "Waiting for"} {waitLabel(waited())}.
+              </p>
+            </Show>
           </Show>
           <Show when={!props.reconnecting && (phase() === "failed" || delayed())}>
             <button

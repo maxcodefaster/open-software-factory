@@ -21,6 +21,7 @@ import {
 } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
+import { modelProbeExplanation } from "./probe-explanation";
 import { reasoningLabels } from "./reasoning";
 
 type Catalogue = Extract<Awaited<ReturnType<typeof getModelConnections>>, { ok: true }>["value"];
@@ -517,7 +518,7 @@ function ModelRoleSettings(props: {
     if (check?.state === "probing") return "Access check in progress";
     if (check?.state === "uncertain") return "Last check interrupted. Nothing was resent.";
     if (check?.result && check.result.status !== "ready")
-      return `Last check: ${check.result.status.replaceAll("-", " ")}`;
+      return `Last check failed. ${modelProbeExplanation(check.result.status, connection()?.endpoint)}`;
     if (check?.result?.status === "ready") return "Access checked";
     return active()?.active || deployment() ? "Access not checked" : "Not configured";
   };
@@ -665,7 +666,7 @@ function ModelRoleSettings(props: {
             <p role="status" class="model-settings-note">
               {checked().status === "ready"
                 ? "Model saved. Access checked."
-                : `Not saved: ${checked().status.replaceAll("-", " ")}. Previous settings remain active.`}
+                : `Not saved. ${modelProbeExplanation(checked().status, connection()?.endpoint)} Previous settings remain active.`}
             </p>
           )}
         </Show>

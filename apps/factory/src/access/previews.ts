@@ -5,14 +5,17 @@ import { parseSystemContract } from "../../../../packages/system-contract/src/sy
 import { factoryForgeSource } from "../knowledge/forge-source";
 import { createAccessController } from "./controller";
 
+export type PreviewProcess = { state: string; exitCode?: number };
+
 const declaredApps = z.array(z.string().regex(/^app(?:-[a-z][a-z0-9-]{0,26})?$/)).max(64);
 
 export function createProjectAppPreviews(
   database: ReturnType<typeof createDatabase>,
   channels: (attemptID: string) => readonly string[],
+  processes: (attemptID: string, channel: string) => PreviewProcess | undefined = () => undefined,
 ) {
   const access = createAccessController(database);
-  const contracts = new Map<string, Promise<{ channel: string; label: string }[]>>();
+  const contracts = new Map<string, Promise<{ channel: string; label: string; port: number }[]>>();
   function source(repositoryURL: string) {
     const apiURL = process.env["FACTORY_FORGEJO_API_URL"];
     const owner = process.env["FACTORY_FORGEJO_OWNER"];
@@ -35,6 +38,7 @@ export function createProjectAppPreviews(
       return contract.apps.map((app) => ({
         channel: app.id === contract.primaryApp ? "app" : `app-${app.id}`,
         label: app.label,
+        port: app.port,
       }));
     })();
     contracts.set(key, read);
@@ -95,7 +99,24 @@ export function createProjectAppPreviews(
       channel: string;
       label: string;
       state: string;
+      port?: number;
+      process?: PreviewProcess;
     }[] = [];
+    // The Staging branch and contract reads share nothing with the development
+    // reads below. Start them first so one Forge round trip is not added after.
+    const stagingRead = staging
+      ? (async () => {
+          let revision = staging.revision;
+          if (!revision) {
+            const { repository, forge } = source(staging.repositoryURL);
+            const branch = await forge.getBranch(repository, staging.defaultBranch);
+            if (!branch) throw new Error("Project Preview source branch is unavailable");
+            revision = branch.headSha;
+          }
+          return contractApps(staging.repositoryURL, revision);
+        })()
+      : null;
+    stagingRead?.catch(() => {});
     const nameReads = new Map<string, ReturnType<typeof contractApps>>();
     for (let offset = 0; offset < attempts.length; offset += 4) {
       const batch = await Promise.all(
@@ -113,29 +134,27 @@ export function createProjectAppPreviews(
             nameReads.set(key, names);
           }
           const labels = await names;
-          return visible.map((channel) => ({
-            attemptID: attempt.id,
-            projectID,
-            channel,
-            label: `${
-              labels.find((app) => app.channel === channel)?.label ??
-              (channel === "app" ? "App" : channel.slice(4))
-            } · ${attempt.title ?? attempt.owner ?? "Development"}`,
-            state: attempt.state,
-          }));
+          return visible.map((channel) => {
+            const declared = labels.find((app) => app.channel === channel);
+            const process = processes(attempt.id, channel);
+            return {
+              attemptID: attempt.id,
+              projectID,
+              channel,
+              label: `${declared?.label ?? (channel === "app" ? "App" : channel.slice(4))} · ${
+                attempt.title ?? attempt.owner ?? "Development"
+              }`,
+              state: attempt.state,
+              ...(declared ? { port: declared.port } : {}),
+              ...(process ? { process } : {}),
+            };
+          });
         }),
       );
       development.push(...batch.flat());
     }
-    if (!staging) return development;
-    let revision = staging.revision;
-    if (!revision) {
-      const { repository, forge } = source(staging.repositoryURL);
-      const branch = await forge.getBranch(repository, staging.defaultBranch);
-      if (!branch) throw new Error("Project Preview source branch is unavailable");
-      revision = branch.headSha;
-    }
-    const apps = await contractApps(staging.repositoryURL, revision);
+    if (!staging || !stagingRead) return development;
+    const apps = await stagingRead;
     const usable = [
       "create-intended",
       "starting",
@@ -147,13 +166,19 @@ export function createProjectAppPreviews(
     // Discovering declared Apps is a read. Only an explicit selection may
     // commission their compute; terminal attempts are not live access targets.
     return [
-      ...apps.map(({ channel, label }) => ({
-        ...(usable && staging.attemptID ? { attemptID: staging.attemptID } : {}),
-        projectID,
-        channel,
-        label: `Staging · ${label}`,
-        state: staging.state ?? "not-started",
-      })),
+      ...apps.map(({ channel, label, port }) => {
+        const process =
+          usable && staging.attemptID ? processes(staging.attemptID, channel) : undefined;
+        return {
+          ...(usable && staging.attemptID ? { attemptID: staging.attemptID } : {}),
+          projectID,
+          channel,
+          label: `Staging · ${label}`,
+          state: staging.state ?? "not-started",
+          port,
+          ...(process ? { process } : {}),
+        };
+      }),
       ...development,
     ];
   };

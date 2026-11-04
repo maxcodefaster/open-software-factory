@@ -16,6 +16,25 @@ test("unfinished technical planning is not described as an active model operatio
   expect(text).not.toContain("in progress");
 });
 
+test("a waiting Interview question never reads as saved requirements ready to implement", () => {
+  const text = ticketProgress({ ticketState: "ready", awaitingAnswer: true });
+  expect(text).toContain("waiting for your answer");
+  expect(text).not.toContain("Confirm the scope with Implement");
+  expect(
+    ticketProgress({
+      ticketState: "ready",
+      awaitingAnswer: true,
+      technicalPlanningOutstanding: true,
+    }),
+  ).toContain("waiting for your answer");
+});
+
+test("a failed change points to the Coding conversation and keeps retained work", () => {
+  const text = ticketProgress({ ...submitted, changeState: "failed", turnState: "failed" });
+  expect(text).toContain("Coding conversation");
+  expect(text).toContain("Retry");
+});
+
 test("failed review preparation keeps the recovery action scoped to the submitted candidate", () => {
   const text = ticketProgress({
     ...submitted,

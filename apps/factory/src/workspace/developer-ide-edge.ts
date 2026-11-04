@@ -34,6 +34,8 @@ interface Connection {
 const editorRoute =
   /^\/editor\/([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})\/([1-9][0-9]*)(\/.*)$/;
 
+const editorApplicationFile = /^\/[\w.-]+\.(?:js|css|wasm|woff2?|ttf)$/;
+
 function reconnectingEditorDocument() {
   // Only the initial, unsuccessful document retries its read. A working Theia
   // document never receives this timer, so dirty buffers are not reloaded.
@@ -230,6 +232,11 @@ export function createDeveloperIDEEdge(
             const value = request.headers.get(name);
             if (value) headers.set(name, value);
           }
+          // Theia's own application files are large and identical for every user. They
+          // pass through in the encoding the browser negotiated and revalidate by ETag.
+          const application = request.method === "GET" && editorApplicationFile.test(suffix);
+          const encoding = request.headers.get("accept-encoding");
+          if (application && encoding) headers.set("accept-encoding", encoding);
           const token = theiaConnectionToken(request.headers);
           if (token) headers.set("cookie", `theia-connection-token=${token}`);
           const target = new URL(`${suffix}${url.search}`, origin);
@@ -245,6 +252,7 @@ export function createDeveloperIDEEdge(
               : {}),
             signal: controller.signal,
             redirect: "manual",
+            ...(application ? { decompress: false } : {}),
           }).catch(() => {
             throw new CommandError("unavailable", "Editor connection is temporarily unavailable");
           });
@@ -255,9 +263,19 @@ export function createDeveloperIDEEdge(
           }
           const outgoing = new Headers(upstream.headers);
           outgoing.delete("set-cookie");
-          outgoing.delete("content-length");
-          outgoing.delete("content-encoding");
-          outgoing.set("cache-control", "no-store");
+          if (application) {
+            outgoing.set("vary", "Accept-Encoding");
+            outgoing.set(
+              "cache-control",
+              [200, 304].includes(upstream.status) && upstream.headers.has("etag")
+                ? "private, no-cache"
+                : "no-store",
+            );
+          } else {
+            outgoing.delete("content-length");
+            outgoing.delete("content-encoding");
+            outgoing.set("cache-control", "no-store");
+          }
           const location = upstream.headers.get("location");
           if (location) {
             const redirected = new URL(location, target);
