@@ -235,6 +235,54 @@ test("a slow initial document stays loading and can finish without a reload", as
   }
 });
 
+test("a delivered Preview is visible while deferred App modules are still loading", async ({
+  browser,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  for (const [label, width, touch] of [
+    ["desktop", 1440, false],
+    ["narrow", 390, false],
+    ["touch", 390, true],
+  ] as const) {
+    const context = await browser.newContext({
+      viewport: { width, height: 844 },
+      hasTouch: touch,
+      isMobile: touch,
+      reducedMotion: "reduce",
+    });
+    const moduleGate = Promise.withResolvers<void>();
+    let modules = 0;
+    try {
+      const page = await context.newPage();
+      await page.route("**/document", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<!doctype html><html><body><p>Usable Preview document</p><script type="module" src="/delayed-module.js"></script><p>Final document content</p><script src="/bridge.js"></script></body></html>',
+        }),
+      );
+      await page.route("**/delayed-module.js", async (route) => {
+        modules++;
+        await moduleGate.promise;
+        await route.fulfill({ contentType: "text/javascript", body: "" }).catch(() => {});
+      });
+      await page.goto(`${origin}/runtime-attachment.html`, { waitUntil: "domcontentloaded" });
+      await expect.poll(() => modules).toBe(1);
+      await expect(page.getByRole("status", { name: "Preview connection" })).toHaveCount(0, {
+        timeout: 3000,
+      });
+      const preview = page.frameLocator('iframe[title="Factory Preview"]');
+      await expect(preview.getByText("Final document content")).toBeVisible();
+      await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "false");
+      expect(modules).toBe(1);
+      await page.screenshot({ path: `${evidence}/preview-before-deferred-module-${label}.png` });
+    } finally {
+      moduleGate.resolve();
+      await context.close();
+    }
+  }
+});
+
 test("reloading a delayed Preview rearms its waiting hint without automatic replay", async ({
   page,
 }) => {

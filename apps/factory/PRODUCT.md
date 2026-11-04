@@ -203,6 +203,8 @@ while its view is active. Permanent failures and documents already used by a per
 explicit reload; App writes and runtime Starts are never repeated by this recovery.
 A slow document keeps its loading state and can finish without a reload. After a delayed-opening
 hint, a person can choose to reload that view; elapsed time alone is not a failed connection.
+Once the complete HTML document arrives, Preview exposes it while deferred App modules still load.
+Document delivery does not establish App health, completed hydration or Verification evidence.
 
 A merged Ticket whose replacement Main Preview failed offers one developer-only Retry Main
 Preview action. It retains the failed attempt and original merge, starting a separately recorded

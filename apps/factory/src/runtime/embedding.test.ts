@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { scopeRuntimeEmbedding } from "./embedding";
 import { brotliCompressSync, gzipSync } from "node:zlib";
+import { scopeRuntimeEmbedding } from "./embedding";
 
 test("the Starter can be framed by Factory while retaining its other security directives", async () => {
   const response = scopeRuntimeEmbedding(
@@ -36,7 +36,7 @@ test("the selection bridge uses a fixed protected runtime script without weakeni
   expect(response.headers.get("content-security-policy")).toContain("script-src 'nonce-app'");
   expect(response.headers.get("content-security-policy")).not.toContain("unsafe-inline");
   expect(response.headers.get("content-length")).toBeNull();
-  expect(await response.text()).toContain(`<script src="${path}"></script>`);
+  expect(await response.text()).toEndWith(`</body></html><script src="${path}"></script>`);
   expect(() =>
     scopeRuntimeEmbedding(
       new Response("<body>", { headers: { "content-type": "text/html" } }),

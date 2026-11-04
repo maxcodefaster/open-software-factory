@@ -500,11 +500,9 @@ function installPreviewBridge(factoryOrigin: string) {
     attributes: true,
     subtree: true,
   });
-  const documentReady = () => {
-    if (parent !== window)
-      parent.postMessage({ type: "factory-preview-document-ready" }, factoryOrigin);
-  };
-  if (document.readyState === "loading")
-    document.addEventListener("DOMContentLoaded", documentReady, { once: true });
-  else documentReady();
+  // Factory appends this script after the complete HTML document. Show that
+  // delivered content without waiting for deferred App modules to finish.
+  // This acknowledges document delivery, not App health or hydration.
+  if (parent !== window)
+    parent.postMessage({ type: "factory-preview-document-ready" }, factoryOrigin);
 }
