@@ -1,10 +1,10 @@
-import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
-import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
@@ -211,7 +211,11 @@ for (const touch of [false, true]) {
           await page.screenshot({
             path: `${evidence}/settings-menu-${viewport.width}-${suffix}.png`,
           });
-          if (viewport.width === 390) {
+          // A scope lists only its own pages, so the menu scrolls only when they overflow.
+          const scrollable = await navigation.evaluate(
+            (node) => node.scrollHeight > node.clientHeight + 1,
+          );
+          if (viewport.width === 390 && scrollable) {
             const before = await navigation.evaluate((node) => node.scrollTop);
             if (touch && menu) {
               const cdp = await page.context().newCDPSession(page);
@@ -236,7 +240,7 @@ for (const touch of [false, true]) {
             await expect(chooser).toHaveText("Inputs");
           }
           await page.keyboard.press("End");
-          const last = navigation.getByRole("button", { name: "Company sign-in", exact: true });
+          const last = navigation.getByRole("button").last();
           await expect(last).toBeFocused();
           await test.info().attach(`navigation-end-${viewport.width}-${suffix}`, {
             contentType: "application/json",

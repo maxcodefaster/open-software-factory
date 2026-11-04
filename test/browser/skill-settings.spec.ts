@@ -3,12 +3,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
@@ -407,13 +407,8 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
       .fill("Use our blue #1646a0 and generous spacing.");
     await editor.getByRole("button", { name: "Back to library", exact: true }).click();
     await library.getByRole("button", { name: "Resume draft", exact: true }).click();
-    const navigation = author.getByRole("navigation", { name: "Settings navigation" });
-    await navigation
-      .locator("section")
-      .filter({ has: author.getByRole("heading", { name: "Personal", exact: true }) })
-      .getByRole("button", { name: "Login & security", exact: true })
-      .click();
-    await navigation.getByRole("button", { name: "Skills", exact: true }).click();
+    await chooseSettingsPage(author, "Login & security", "Personal");
+    await chooseSettingsPage(author, "Skills");
     await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Corporate design");
     await expect(editor.getByLabel("Instructions", { exact: true })).toHaveValue(
       "Use our blue #1646a0 and generous spacing.",
