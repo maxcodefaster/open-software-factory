@@ -56,13 +56,12 @@ The standalone README describes native-base and bounded builder preparation.
 Optional `sysboxBuild` and `retainedCandidate` reuse exact verified completed component
 builds. All components must match `platform`. An AMD64 build on ARM64 remains a
 cross-build; Factory runs the native `doctor` probe only on a matching Linux Docker
-host. Even a matching doctor is not a lifecycle qualification.
+host.
 
-The current ARM64 candidate implements timer continuation and has native functional
-Start, shared-source Pause/Resume and Connector proofs. Full ARM64 release qualification
-remains open in the standalone repository. Build success is not qualification, and
-selecting a candidate profile requires native acceptance of its exact bytes on the target
-node. The existing installation stays unchanged when a build or runtime probe fails.
+The ARM64 candidate implements timer continuation and passes native Start, shared-source
+Pause/Resume and Connector checks. Select a candidate profile only after the standalone
+repository's native checks pass on the target node with its exact bytes. The existing
+installation stays unchanged when a build or runtime probe fails.
 
 ## Request and deployment
 
@@ -90,13 +89,12 @@ and `--worker-epoch`. The previous first-release image does not expose these opt
 
 Replace the example store and trust-domain IDs with random 32-character hexadecimal identities.
 Factory renders and validates either Linux ARM64 or AMD64 using the same worker protocol.
-The current standalone runtime candidate is qualified only on its exact Linux AMD64 kernel
-and 4096-byte pages. ARM64 has its own native acceptance requirements. Selecting
-`arm64`, building an image or changing `kernel` does not qualify that runtime. Inspection checks the node's OS,
+The standalone runtime is qualified on its exact Linux AMD64 kernel and 4096-byte pages;
+ARM64 qualifies per kernel on the target node. Inspection checks the node's OS,
 architecture and kernel against the live worker. Node-reported and kernel-reported boot IDs
 are pinned separately; a later change to either refuses the original admission. Worker startup checks its actual
-cgroups, component identities, store lease and filesystem. Another node profile needs native
-qualification before use.
+cgroups, component identities, store lease and filesystem. Another node profile needs the
+standalone native checks before use.
 
 The Pod has a 3 CPU / 3 GiB limit and reservation, a private PID namespace and privileged access.
 Required kernel facilities must already be present on the admitted node. Factory does not mount
@@ -212,11 +210,9 @@ The explicit native transport proof in `scripts/runtime/factorybox-worker-native
 Factorybox's owned `tools/kubernetes_worker_probe.py`. It uses fixture Kubernetes observations
 and executes the real delivered worker CLI. It proves Start, useful work, RAM mutation, zero
 anonymous/snapshot residency after Pause, exact RAM/file retention after Resume, completed replay
-without a second process and Delete. This is not an API-server, kubelet, CSI or Kubernetes
-qualification. A connected target cluster is still required for that acceptance.
+without a second process and Delete.
 
 Factory's product path binds the canonical Source directory under the admitted shared-source
 contract. Native acceptance must preserve atomic editor saves made while paused, the same app RAM
 and the original Dev Container after Resume. The actual Factory Connector and reserve activation
-are exercised by Factorybox's `tools/factory_consumer_native.py`; this still does not qualify a
-target cluster's CNI or CSI. Independent Theia remains outside worker resource accounting.
+are exercised by Factorybox's `tools/factory_consumer_native.py`. Independent Theia remains outside worker resource accounting.

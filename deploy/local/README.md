@@ -9,7 +9,7 @@ configures separate retained service credentials, starts encrypted local OpenBao
 exact runtime artifacts when needed and starts the source server. Disposable test installations
 have their own recorded identity and data services. Never use `down --volumes` on retained data.
 
-The [application image command](../../README.md#development-and-checks) embeds the available exact
+The [application image command](../../docs/development/README.md) embeds the available exact
 runtime references. It does not rebuild Factorybox, the IDE or browser tools. The installed image uses
 Kubernetes Services and a ServiceAccount, not this Compose file or the host Docker socket.
 

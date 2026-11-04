@@ -4,9 +4,11 @@
 
 - Implement the requested task. Keep temporary plans/status in the task or issue; do not activate
   later work, prepare speculative APIs or reopen completed programmes.
-- Use the root README for commands/layout, `docs/README.md` for domain and service boundaries,
+- Use the root README for orientation, `docs/development/README.md` for commands and test lanes,
+  `docs/operations/README.md` for installation, `docs/product/README.md` for current behavior,
+  `docs/README.md` for domain and service boundaries,
   and the relevant `docs/adr` decision when changing that boundary. Read what the task needs.
-- Maintained Markdown is limited to `README.md`, `AGENTS.md`, numbered ADRs in `docs/adr`
+- Maintained Markdown is limited to READMEs, `AGENTS.md`, `SECURITY.md`, numbered ADRs in `docs/adr`
   and the UI product brief at `apps/factory/PRODUCT.md`. The product brief summarizes durable
   product facts and links to the existing documentation; task plans and design specifications
   still belong in the task or issue.

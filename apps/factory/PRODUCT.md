@@ -68,7 +68,7 @@ manual synchronization and removal that preserves the external repository. They 
 Git history, not Factory accounts, Tickets, secrets, uploads or unpushed Workspace work.
 Configured mirrors lead with status; another target opens an explicit form. Token guidance
 identifies Forgejo's unencrypted Git configuration rather than claiming OpenBao storage.
-See [repository mirrors](../../README.md#repository-mirrors).
+See [repository mirrors](../../docs/product/README.md#repository-mirrors).
 Small screens use a grouped title menu instead of a sidebar; desktop windows
 keep their sidebars, including alongside the assistant.
 
@@ -118,7 +118,7 @@ not authorize Factory guidance, required rules, packages, Build, Wiki, Inputs or
 Compared changes exposes actual responses and verdicts. Later sampled uses identify the exact
 adopted revision; counts are not a causal score. Repeated problems can commission one compared,
 version-protected recovery, while newer human choices and writing remain authoritative.
-See [work review and monitoring](../../README.md#work-review-and-monitoring).
+See [work review and monitoring](../../docs/product/README.md#work-review-and-monitoring).
 
 Desktop navigation puts the Project selector beside the Assistant toggle and a compact
 New ticket action on the right, with matching control heights. Phones keep the single dock row,

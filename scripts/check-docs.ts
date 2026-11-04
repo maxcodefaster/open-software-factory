@@ -47,9 +47,10 @@ for (const path of paths) {
   requireValid(
     basename(path) === "README.md" ||
       basename(path) === "AGENTS.md" ||
+      name === "SECURITY.md" ||
       name === "apps/factory/PRODUCT.md" ||
       /^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(name),
-    `${name}: use a README, AGENTS.md, numbered ADR or apps/factory/PRODUCT.md`,
+    `${name}: use a README, AGENTS.md, SECURITY.md, numbered ADR or apps/factory/PRODUCT.md`,
   );
   const document = readFileSync(path, "utf8");
   requireValid((document.match(/^```/gm) ?? []).length % 2 === 0, `${name}: unbalanced fences`);

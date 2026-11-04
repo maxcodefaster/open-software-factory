@@ -322,8 +322,7 @@ their exact 3 CPU / 3 GiB declaration. See
 [resource admission](adr/0030-select-aggregate-worker-resources-before-admission.md).
 The same Factory commands render and check either architecture;
 the control-plane host does not select the worker's CPU. Node mismatch fails before the first
-worker exec. This adapter contract is not native runtime qualification; the exact Linux profile
-still needs the standalone Factorybox qualification gates for its architecture.
+worker exec.
 RAM snapshots do not move between CPU architectures.
 
 Every Sandbox uses the same topology:
@@ -718,7 +717,7 @@ work rather than silently resending it or clearing product rows.
 Historical slice records and captures are archived locally under
 `.factory/archives/repository-cleanup-20261013/`. Maintained tests provide repeatable checks; new
 local screenshots and results belong under `.factory/test-results/`. See the root
-[development commands](../README.md#development-and-checks) and
+[development commands](development/README.md) and
 [runtime artifact guide](../deploy/runtime-host/README.md) for running the relevant checks.
 
 The 2026-10-13 documentation cleanup passes documentation checks, affected formatting/lint,
