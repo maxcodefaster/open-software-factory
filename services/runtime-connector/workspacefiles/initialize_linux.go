@@ -40,6 +40,31 @@ func sourceRepositoryURL(value string) bool {
 	return repositoryurl.Valid(value)
 }
 
+// transientSourceError marks a connection failure that a short wait can resolve, for example
+// while a new Pod's NetworkPolicy rules are still reaching its node.
+type transientSourceError struct{ message string }
+
+func (e *transientSourceError) Error() string { return e.message }
+
+// retryTransientSource retries operation while it fails with a transient connection error,
+// waiting between attempts, and gives up when the delays are exhausted or ctx ends.
+func retryTransientSource(ctx context.Context, delays []time.Duration, operation func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := operation()
+		var transient *transientSourceError
+		if err == nil || !errors.As(err, &transient) || attempt >= len(delays) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delays[attempt]):
+		}
+	}
+}
+
+var sourceConnectDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
+
 func initGit(ctx context.Context, directory string, args ...string) (string, error) {
 	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.logAllRefUpdates=false", "-c", "safe.directory=" + directory}
 	if directory != "" {
@@ -54,7 +79,11 @@ func initGit(ctx context.Context, directory string, args ...string) (string, err
 			message := string(exit.Stderr)
 			for _, category := range []string{"Could not resolve host", "Failed to connect", "403", "503", "Permission denied", "dubious ownership", "RPC failed", "SSL", "not a git command", "not found"} {
 				if strings.Contains(message, category) {
-					return "", errors.New("source checkout preparation failed: " + category)
+					failure := "source checkout preparation failed: " + category
+					if category == "Failed to connect" || category == "Could not resolve host" {
+						return "", &transientSourceError{failure}
+					}
+					return "", errors.New(failure)
 				}
 			}
 		}
@@ -155,7 +184,10 @@ func Initialize(ctx context.Context, parent string, input Initialization) error 
 		return errors.New("source initialization checkout is unavailable")
 	}
 	if !preparedCheckout(ctx, checkout, input.ProjectID) {
-		if _, err := initGit(ctx, "", "clone", "--no-checkout", "--no-hardlinks", "--", input.RepositoryURL, checkout); err != nil {
+		if err := retryTransientSource(ctx, sourceConnectDelays, func() error {
+			_, err := initGit(ctx, "", "clone", "--no-checkout", "--no-hardlinks", "--", input.RepositoryURL, checkout)
+			return err
+		}); err != nil {
 			return err
 		}
 		checkoutArgs := []string{"checkout", "--detach", input.Revision}
