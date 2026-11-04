@@ -692,6 +692,7 @@ identities, grouped by concern rather than presented as twenty independent subsy
 | Knowledge and retained content | [0004 revisioned Knowledge](adr/0004-generated-project-knowledge.md), [0017 private attachments](adr/0017-private-revision-bound-attachments.md), [0027 one installation-owned file store](adr/0027-chart-managed-private-file-storage.md) |
 | External context and delegated Inputs | [0015 MCP library](adr/0015-managed-mcp-library.md), [0016 bounded monitoring Autofix](adr/0016-delegated-monitoring-autofix.md), [0018 Project Inputs](adr/0018-project-inputs.md) |
 | Visual system | [0005 desktop and shared UI](adr/0005-curated-desktop-visual-system.md) |
+| Production hardening | [0038 hardening baseline](adr/0038-production-hardening-baseline.md) |
 
 ## Verification and operating limits
 

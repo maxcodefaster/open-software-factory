@@ -21,9 +21,12 @@ const origin = "https://factory.example";
 let server: Awaited<ReturnType<typeof ownedPostgresServer>>;
 let restore: () => void;
 let previousOrigin: string | undefined;
+let previousSecret: string | undefined;
 beforeAll(async () => {
   restore = installOwnedRuntimeConfiguration();
   previousOrigin = process.env["FACTORY_BASE_URL"];
+  previousSecret = process.env["FACTORY_AUTH_SECRET"];
+  process.env["FACTORY_AUTH_SECRET"] = "owned-public-origin-signing-secret-0123456789";
   server = process.env["FACTORY_TEST_POSTGRES"]
     ? { identity: JSON.parse(process.env["FACTORY_TEST_POSTGRES"]), dispose: async () => {} }
     : await ownedPostgresServer();
@@ -33,6 +36,8 @@ afterAll(async () => {
   restore?.();
   if (previousOrigin === undefined) delete process.env["FACTORY_BASE_URL"];
   else process.env["FACTORY_BASE_URL"] = previousOrigin;
+  if (previousSecret === undefined) delete process.env["FACTORY_AUTH_SECRET"];
+  else process.env["FACTORY_AUTH_SECRET"] = previousSecret;
 });
 
 const resource = z
