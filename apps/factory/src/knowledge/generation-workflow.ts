@@ -18,18 +18,25 @@ import { createMastraUsage } from "../usage/mastra";
 import { findReadableCodePaths } from "./code-read";
 import type { WikiGenerationInput } from "./generation-agent";
 import {
+  describeStructuredFailure,
   rejectedWikiStructuredResult,
+  type StructuredFailure,
+  structuredFailure,
   WikiSourceEvidenceError,
   WikiStructuredResultError,
   WikiTopicCoverageError,
   WikiTopicPlanError,
   WikiTopicQualityError,
 } from "./generation-failure";
+import { createWikiMetrics } from "./generation-metrics";
 import { documentationLanguage } from "./language";
+import { stripSourcesFooter, unlinkUnavailableGuides } from "./page-tidy";
 import { type RateLimitState, retryRateLimited } from "./provider-retry";
+import { documentedReaderAreas, minimumDocumentedAreas } from "./reader-areas";
 import { listDirectory, repositoryMap } from "./repository-map";
 import { pageExcerpt, promptSources, sourceExcerpt } from "./source-excerpt";
 import { wikiLinkIssues } from "./wiki-links";
+import { wordingOnlyChange } from "./wording-change";
 
 const topicSchema = z.object({
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
@@ -46,10 +53,25 @@ const providerPauses = new Map<string, RateLimitState>();
 const readSourceCall = { perFile: 12_000, total: 24_000 };
 const writerSources = { perFile: 8_000, total: 60_000 };
 const planCheckSources = { perFile: 2_000, total: 16_000 };
+// Tool rounds an agent may spend before it must answer. Every round is a sequential provider call.
+const toolRoundLimits: Record<string, number> = {
+  "topic-planner": 8,
+  investigator: 3,
+  writer: 2,
+  checker: 2,
+  "topic-plan-checker": 2,
+};
+// A topic with at most this many seed files is investigated and written by one agent run.
+const mergedTopicPaths = 8;
+// The initial write and one repair; a second failed repair is a quality failure, not another loop.
+export const maximumWriteRounds = 2;
+// The writer is asked for 1200 characters; a little more is not worth a repair round.
+const overviewHardLimit = 1_500;
+const outputTokens = { default: 8_000, writer: 12_000, maximum: 32_000 };
 const planSchema = z.object({ topics: z.array(topicSchema).max(maximumTopics) });
 const researchSchema = z.object({
   findings: z
-    .array(z.object({ claim: z.string().max(1200), paths: z.array(z.string()).min(1).max(8) }))
+    .array(z.object({ claim: z.string().max(6000), paths: z.array(z.string()).min(1).max(8) }))
     .max(24),
   uncertainties: z.array(z.string().max(400)).max(8),
 });
@@ -123,6 +145,10 @@ export const wikiReviewTask =
   "Judge the current draft, not an earlier rejected version or the source code's quality. A source defect accurately described in the Wiki is not a documentation defect. Never request source-code changes from this read-only writing task. Clearly labelled advice for improving an example is not a claim that the existing example already follows that advice. Do not infer application-wide guarantees from a statement explicitly scoped to one helper, instance or connection pool. " +
   "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands. Also report these repairable style flaws: prose that talks about the inspected evidence or code instead of stating verified behavior, a language that differs from the Project's documentation language, and a guide that mixes several reader tasks or exceeds roughly 1,000 words.";
 
+// The one repair is judged against the first check's issues, so a moving target cannot fail a topic.
+export const wikiFinalReviewTask =
+  "This is the final check, after one repair. previousIssues lists what the first check found. Report a previous issue only if the draft still has it. Report a new issue only if it is an unsupported claim or a contradiction with the sources. Do not raise new scope, coverage, density, structure or wording issues that the first check did not raise.";
+
 export const wikiPlanReviewTask =
   "Review the whole proposed Wiki topic plan against the current pages and inspected repository evidence. This is a coverage check before progressive publication, not a review of one page draft. " +
   "Treat each proposed title and purpose as research intent, not confirmed product behavior. A scheduled topic covers its reader task at this planning stage. Do not require its investigation, focused tests, final prose, preview or security guarantees to have been completed before research starts. Researchers, writers and page checkers own those factual gates later. " +
@@ -175,9 +201,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     topicsDone: 0,
     currentTopic: null,
   } as WikiGenerationProgress;
+  const metrics = createWikiMetrics();
   let progressWrites: Promise<unknown> = Promise.resolve();
   function report(patch: Partial<WikiGenerationProgress>) {
-    Object.assign(progress, patch);
+    Object.assign(progress, patch, { stats: metrics.totals() });
     const progressSink = input.progress;
     if (!progressSink) return;
     const snapshot = { ...progress };
@@ -310,6 +337,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       readFiles,
     };
   }
+  type AskOptions = { toolRounds?: number; merged?: boolean };
   async function ask<T extends z.ZodType>(
     id: string,
     schema: T,
@@ -317,8 +345,11 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     sources: ReturnType<typeof sourceScope>,
     task: string,
     validate?: (value: z.output<T>) => void | Promise<void>,
+    options: AskOptions = {},
   ): Promise<z.output<T>> {
     activeSignal.throwIfAborted();
+    const toolRounds = options.toolRounds ?? toolRoundLimits[id] ?? 2;
+    const run = metrics.begin(id);
     const agent = new Agent({
       id,
       name: `Factory Wiki ${id}`,
@@ -328,13 +359,18 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         state: rateLimit,
         requests: providerRequests,
         authorize: input.authorize,
+        onWait: run.wait,
       }),
       tools: sources.tools,
-      instructions: `${wikiInstructions}\n${task}`,
+      instructions: `${wikiInstructions}\n${task}\nYou have at most ${toolRounds} rounds of tool calls. Once the supplied and already read sources support your claims, stop reading and return the structured result.`,
     });
     const mastra = new Mastra({ agents: { wiki: agent }, logger: noopLogger });
     let rejectedResult: unknown;
-    const generate = async (correction?: string) => {
+    const baseTokens = id === "writer" ? outputTokens.writer : outputTokens.default;
+    const generate = async (
+      correction?: string,
+      retry: { tokens?: number; tools?: boolean } = {},
+    ) => {
       const usage = createMastraUsage(
         input.usageSink?.(crypto.randomUUID()),
         connection.provider ?? "openai",
@@ -356,9 +392,16 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             {
               maxSteps: Infinity,
               abortSignal: activeSignal,
-              onStepFinish: usage.onStepFinish,
-              prepareStep: guard,
-              modelSettings: { maxRetries: 0, maxOutputTokens: 8000 },
+              onStepFinish: async (step) => {
+                run.step((step as { toolCalls?: unknown[] }).toolCalls?.length ?? 0);
+                await usage.onStepFinish(step);
+              },
+              prepareStep: async (step) => {
+                await guard(step);
+                if (retry.tools === false || step.stepNumber >= toolRounds)
+                  return { toolChoice: "none" as const };
+              },
+              modelSettings: { maxRetries: 0, maxOutputTokens: retry.tokens ?? baseTokens },
               ...(providerOptions ? { providerOptions } : {}),
               structuredOutput: { schema, jsonPromptInjection: "auto" },
             },
@@ -371,8 +414,23 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         await usage.finish(failed);
       }
     };
+    const logRefusal = (stage: string, failure: StructuredFailure, cause?: unknown) => {
+      const raw = cause === undefined ? undefined : rejectedWikiStructuredResult(cause);
+      const found = raw === undefined ? undefined : schema.safeParse(raw);
+      // Paths and codes only, from validating the rejected value again; never its text.
+      if (found && !found.success && !failure.issues.length)
+        failure.issues = found.error.issues
+          .slice(0, 6)
+          .map((issue) => `${issue.path.join(".") || "result"}:${issue.code}`);
+      console.error(`[factory] Wiki ${id} ${stage} refused: ${describeStructuredFailure(failure)}`);
+    };
     try {
-      rejectedResult = (await generate()).object;
+      try {
+        rejectedResult = (await generate()).object;
+      } catch (cause) {
+        if (isStructuredOutputFailure(cause)) logRefusal("result", structuredFailure(cause), cause);
+        throw cause;
+      }
       const result = schema.parse(rejectedResult);
       await validate?.(result);
       return result;
@@ -385,41 +443,71 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         throw cause;
       activeSignal.throwIfAborted();
       rejectedResult ??= rejectedWikiStructuredResult(cause);
+      const refusal = isStructuredOutputFailure(cause) ? structuredFailure(cause) : undefined;
+      // A cut-off or empty answer ran out of output budget: allow more and ask for less.
+      const outOfBudget = refusal?.kind === "truncated" || refusal?.kind === "empty";
       const bounds =
         id === "topic-planner"
           ? "Each topic purpose is at most 800 characters, with at most 16 existing seed paths and 12 existing pageIDs. Topics must have unique slugs and cannot claim the same pageID."
           : id === "investigator"
-            ? "Return at most 24 findings, each at most 1200 characters with at most 8 inspected paths, and at most 8 uncertainties of 400 characters each."
+            ? "Return at most 24 findings, each at most 6000 characters with at most 8 inspected paths, and at most 8 uncertainties of 400 characters each."
             : id === "checker" || id === "topic-plan-checker"
               ? "Return at most 12 concise issues, each at most 800 characters."
               : "Respect the declared page and source bounds and this topic's writing instructions.";
+      const shorter = outOfBudget
+        ? " Your previous answer ended before it was complete. Return a shorter result: fewer, tighter sentences, no repeated points, and finish the JSON."
+        : "";
+      const retryTokens = outOfBudget ? Math.min(baseTokens * 2, outputTokens.maximum) : baseTokens;
       let repaired: unknown;
+      let repairFailure: StructuredFailure | undefined;
       try {
         repaired = (
           await generate(
-            `Your result did not pass this task's local validation. ${bounds} ${cause instanceof Error ? cause.message : "Respect every declared array/string bound."} Correct the rejectedResult using the original input and inspected source. For unread citations, use readSource to inspect those files before verifying their claims, or remove unsupported claims. Do not invent content or omit useful facts merely to satisfy the format.`,
+            `Your result did not pass this task's local validation. ${bounds} ${cause instanceof Error ? cause.message : "Respect every declared array/string bound."} Correct the rejectedResult using the original input and inspected source. For unread citations, use readSource to inspect those files before verifying their claims, or remove unsupported claims. Do not invent content or omit useful facts merely to satisfy the format.${shorter}`,
+            { tokens: retryTokens },
           )
         ).object;
-      } catch (repairFailure) {
-        if (isStructuredOutputFailure(repairFailure)) {
-          console.error(`[factory] Wiki ${id} repair did not produce structured output`);
+        const checked = schema.safeParse(repaired);
+        if (checked.success) {
+          await validate?.(checked.data);
+          return checked.data;
+        }
+        // Paths and codes only: never the model's prose.
+        repairFailure = structuredFailure(checked.error);
+        logRefusal("repair", repairFailure);
+      } catch (failure) {
+        if (!isStructuredOutputFailure(failure)) throw failure;
+        repairFailure = structuredFailure(failure);
+        logRefusal("repair", repairFailure, failure);
+      }
+      // One last attempt with a minimal instruction, no tools and the larger budget.
+      activeSignal.throwIfAborted();
+      const lastTokens =
+        repairFailure.kind === "truncated" || repairFailure.kind === "empty" || outOfBudget
+          ? Math.min(baseTokens * 2, outputTokens.maximum)
+          : baseTokens;
+      try {
+        const last = (
+          await generate(
+            "Return only the JSON for this schema. No tools, no commentary, no code fence. Keep every string within its bound and keep pages short.",
+            { tokens: lastTokens, tools: false },
+          )
+        ).object;
+        const checked = schema.safeParse(last);
+        if (!checked.success) {
+          logRefusal("final attempt", structuredFailure(checked.error));
           throw new WikiStructuredResultError();
         }
-        throw repairFailure;
-      }
-      const checked = schema.safeParse(repaired);
-      if (!checked.success) {
-        // Paths and codes only: never the model's prose.
-        console.error(
-          `[factory] Wiki ${id} result stayed invalid after one repair: ${checked.error.issues
-            .slice(0, 6)
-            .map((issue) => `${issue.path.join(".") || "result"}:${issue.code}`)
-            .join(", ")}`,
-        );
+        await validate?.(checked.data);
+        return checked.data;
+      } catch (failure) {
+        if (failure instanceof WikiStructuredResultError) throw failure;
+        if (!isStructuredOutputFailure(failure)) throw failure;
+        logRefusal("final attempt", structuredFailure(failure), failure);
         throw new WikiStructuredResultError();
       }
-      await validate?.(checked.data);
-      return checked.data;
+    } finally {
+      run.end();
     }
   }
   const planSources = sourceScope(input.sources);
@@ -473,13 +561,84 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     };
   }
   const plannerTask =
-    "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add a child guide for each distinct reader task the Project's own documentation names, such as setup and verification, architecture, or a main workflow. There is no target page count and no padding. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.";
+    "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add a child guide for each distinct reader task the Project's own documentation names, such as setup and verification, architecture, or a main workflow. When documentedAreas lists three or more areas, a single overview page is not a complete plan: plan a guide for each distinct area that is a reader task (merge near-duplicates, at most five guides). There is no target page count and no padding. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.";
+  const documentedAreas = documentedReaderAreas(input.inventory, input.sources);
+  const emptyWiki = !pages.some((page) => page.state === "active");
+  // The coverage review never removes a topic, so topics start while it runs and its gaps are
+  // added afterwards. Only an empty plan has to wait for it.
+  let coverageReview: Promise<Topic[]> | undefined;
+  async function reviewCoverage(remaining: z.infer<typeof planSchema>): Promise<Topic[]> {
+    const coverage = await ask(
+      "topic-plan-checker",
+      reviewSchema,
+      {
+        project: input.name,
+        repository,
+        changedPaths: input.changedPaths,
+        currentPages: pages,
+        completedPageIDs: [...completedPageIDs],
+        proposedTopics: remaining.topics,
+        sources: promptSources(planSources.read.values(), planCheckSources),
+      },
+      planSources,
+      wikiPlanReviewTask,
+    );
+    const issues = [...coverage.issues];
+    // A new Wiki with several documented reader areas is not complete as one overview page.
+    if (
+      !issues.length &&
+      emptyWiki &&
+      remaining.topics.length === 1 &&
+      documentedAreas.length >= minimumDocumentedAreas
+    )
+      issues.push(
+        `The repository documents ${documentedAreas.length} reader areas (${documentedAreas
+          .slice(0, 8)
+          .join(
+            "; ",
+          )}) but the plan holds one topic. Plan a child guide for each distinct reader task among them.`,
+      );
+    if (!issues.length) return [];
+    // A gap is closed by adding the missing guides, never by silently publishing less.
+    const room = maximumTopics - remaining.topics.length;
+    const additional = room
+      ? await ask(
+          "topic-planner",
+          z.object({ topics: z.array(topicSchema).max(room) }),
+          {
+            project: input.name,
+            repository,
+            currentPages: pages,
+            completedPageIDs: [...completedPageIDs],
+            plannedTopics: remaining.topics,
+            documentedAreas: documentedAreas.slice(0, 12),
+            missingCoverage: issues,
+          },
+          planSources,
+          "Return only the additional topics that close the missing coverage, as a coverage repair of plannedTopics. Do not repeat or change plannedTopics. Plan no topic when a missing item is already covered by plannedTopics or current pages. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic.",
+          (extra) => validatePlan({ topics: [...remaining.topics, ...extra.topics] }),
+        )
+      : { topics: [] };
+    if (!remaining.topics.length && !additional.topics.length)
+      throw new WikiTopicCoverageError(issues);
+    return additional.topics;
+  }
+  // A new Wiki is one overview with guides beneath it, whatever parent the planner left empty.
+  function underOverview(list: Topic[], overview: Topic | undefined = list[0]) {
+    if (!emptyWiki || !overview || overview.parentSlug !== null) return list;
+    return list.map((topic) =>
+      topic === overview || topic.parentSlug !== null
+        ? topic
+        : { ...topic, parentSlug: overview.slug },
+    );
+  }
   const planning = createStep({
     id: "plan-wiki-topics",
     inputSchema: z.object({}),
     outputSchema: planSchema,
     execute: () =>
       recordFailure(async () => {
+        const started = performance.now();
         const plan = await ask(
           "topic-planner",
           planSchema,
@@ -489,51 +648,21 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             changedPaths: input.changedPaths,
             currentPages: pages,
             completedPageIDs: [...completedPageIDs],
+            documentedAreas: documentedAreas.slice(0, 12),
             initialSources: input.sources.map(sourcePreview),
           },
           planSources,
           plannerTask,
           (plan) => validatePlan(remainingPlan(plan)),
         );
+        metrics.stage("plan", "planner", performance.now() - started);
         const remaining = remainingPlan(plan);
-        const coverage = await ask(
-          "topic-plan-checker",
-          reviewSchema,
-          {
-            project: input.name,
-            repository,
-            changedPaths: input.changedPaths,
-            currentPages: pages,
-            completedPageIDs: [...completedPageIDs],
-            proposedTopics: remaining.topics,
-            sources: promptSources(planSources.read.values(), planCheckSources),
-          },
-          planSources,
-          wikiPlanReviewTask,
-        );
-        if (!coverage.issues.length) return remaining;
-        // A gap is closed by adding the missing guides, never by silently publishing less.
-        const room = maximumTopics - remaining.topics.length;
-        const additional = room
-          ? await ask(
-              "topic-planner",
-              z.object({ topics: z.array(topicSchema).max(room) }),
-              {
-                project: input.name,
-                repository,
-                currentPages: pages,
-                completedPageIDs: [...completedPageIDs],
-                plannedTopics: remaining.topics,
-                missingCoverage: coverage.issues,
-              },
-              planSources,
-              "Return only the additional topics that close the missing coverage, as a coverage repair of plannedTopics. Do not repeat or change plannedTopics. Plan no topic when a missing item is already covered by plannedTopics or current pages. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic.",
-              (extra) => validatePlan({ topics: [...remaining.topics, ...extra.topics] }),
-            )
-          : { topics: [] };
-        const merged = { topics: [...remaining.topics, ...additional.topics] };
-        if (!merged.topics.length) throw new WikiTopicCoverageError(coverage.issues);
-        return merged;
+        remaining.topics = underOverview(remaining.topics);
+        const review = reviewCoverage(remaining);
+        if (!remaining.topics.length) return { topics: await review };
+        review.catch(() => undefined);
+        coverageReview = review;
+        return remaining;
       }),
   });
   const activeTopics: Topic[] = [];
@@ -560,10 +689,14 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       // failure so a retry continues with only what remains (published pages are completed).
       // Topics start in plan order, up to maximumTopicConcurrency at once. A child researches
       // while its parent is written, then waits for the parent's publication before writing.
-      const topics = inputData.topics;
+      const topics = [...inputData.topics];
       const failed = new Map<string, unknown>();
       let fatal: { cause: unknown } | undefined;
-      const outcomes = new Map(topics.map((topic) => [topic.slug, deferred()]));
+      const outcomes = new Map<string, ReturnType<typeof deferred>>();
+      const track = (list: Topic[]) => {
+        for (const topic of list) outcomes.set(topic.slug, deferred());
+      };
+      track(topics);
       let settled = 0;
       report({
         phase: "writing",
@@ -582,6 +715,31 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         fatal = { cause };
         stop.abort(cause);
       };
+      // Guides the coverage review adds join the queue once it finishes; a plan or format
+      // failure there lets running topics finish and is reported last.
+      let coverageFailure: unknown;
+      let coverageDone = !coverageReview;
+      const coverageSettled = (coverageReview ?? Promise.resolve([] as Topic[])).then(
+        (extra) => {
+          coverageDone = true;
+          if (!extra.length) return;
+          const added = underOverview(extra, topics[0]);
+          topics.push(...added);
+          track(added);
+          report({ topicsTotal: topics.length });
+        },
+        (cause: unknown) => {
+          coverageDone = true;
+          if (
+            !activeSignal.aborted &&
+            (cause instanceof WikiTopicPlanError ||
+              cause instanceof WikiStructuredResultError ||
+              isStructuredOutputFailure(cause))
+          )
+            coverageFailure = cause;
+          else noteFatal(cause);
+        },
+      );
       async function settle(topic: Topic) {
         const outcome = outcomes.get(topic.slug);
         if (!outcome) throw new Error("Wiki topic outcome is missing");
@@ -621,14 +779,25 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       let next = 0;
       async function worker() {
         while (!fatal) {
-          const topic = topics[next++];
-          if (!topic) return;
-          await settle(topic);
+          const topic = topics[next];
+          if (topic) {
+            next++;
+            await settle(topic);
+          } else if (coverageDone) return;
+          else await coverageSettled;
         }
       }
       await Promise.all(
-        Array.from({ length: Math.min(maximumTopicConcurrency, topics.length) }, worker),
+        Array.from(
+          {
+            length: coverageDone
+              ? Math.min(maximumTopicConcurrency, topics.length)
+              : maximumTopicConcurrency,
+          },
+          worker,
+        ),
       );
+      await coverageSettled;
       const [firstFailure] = failed.values();
       if (fatal) {
         // A provider or budget failure after an earlier topic failed reports that first failure.
@@ -637,9 +806,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         generationFailure.set(reported);
         throw reported;
       }
-      if (firstFailure !== undefined) {
-        generationFailure.set(firstFailure);
-        throw firstFailure;
+      const incomplete = firstFailure !== undefined ? firstFailure : coverageFailure;
+      if (incomplete !== undefined) {
+        generationFailure.set(incomplete);
+        throw incomplete;
       }
       report({ phase: "publishing", topicsDone: topics.length, currentTopic: null });
       return { pages: [] };
@@ -662,35 +832,57 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       const wanted = new Set(paths);
       return [...sources.read.values()].filter((file) => wanted.has(file.path));
     };
+    // A small topic with no unpublished parent is researched and written by one agent run.
+    // A child under an unpublished parent still researches early, while its parent is written.
+    const merged = !awaitParent && topic.paths.length <= mergedTopicPaths;
+    let checksSkipped = 0;
+    let rounds = 0;
+    const timed = async <T>(stage: string, work: () => Promise<T>) => {
+      const began = performance.now();
+      try {
+        return await work();
+      } finally {
+        metrics.stage(topic.slug, stage, performance.now() - began);
+      }
+    };
     const research = createStep({
       id: "investigate-topic",
       inputSchema: z.object({}),
       outputSchema: researchSchema,
       execute: async () =>
         recordFailure(async () => {
-          for (let offset = 0; offset < topic.paths.length; offset += 8)
-            await sources.readFiles(topic.paths.slice(offset, offset + 8));
-          const findings = await ask(
-            "investigator",
-            researchSchema,
-            {
-              topic,
-              repository,
-              currentPages: ownPages(),
-              sources: promptSources(sources.read.values(), writerSources),
-            },
-            sources,
-            "Follow relationships from seed files to actual flows, state, boundaries, failures and focused tests. Return individual concise verified findings with inspected paths and explicit uncertainties. Each claim is at most 1200 characters and 8 paths; split independent facts. Distinguish returned in-memory values from stored records, inventory mutation, or durable history. Never infer features from filenames.",
-            (result) => {
-              const unread = [
-                ...new Set(
-                  result.findings.flatMap((finding) =>
-                    finding.paths.filter((path) => !sources.read.has(path)),
+          const preload = timed("read", async () => {
+            for (let offset = 0; offset < topic.paths.length; offset += 8)
+              await sources.readFiles(topic.paths.slice(offset, offset + 8));
+          });
+          if (merged) {
+            await preload;
+            return { findings: [], uncertainties: [] };
+          }
+          await preload;
+          const findings = await timed("investigate", () =>
+            ask(
+              "investigator",
+              researchSchema,
+              {
+                topic,
+                repository,
+                currentPages: ownPages(),
+                sources: promptSources(sources.read.values(), writerSources),
+              },
+              sources,
+              "Follow relationships from seed files to actual flows, state, boundaries, failures and focused tests. Return individual concise verified findings with inspected paths and explicit uncertainties. Each claim is short, at most 600 characters, with at most 8 paths; split independent facts. Distinguish returned in-memory values from stored records, inventory mutation, or durable history. Never infer features from filenames.",
+              (result) => {
+                const unread = [
+                  ...new Set(
+                    result.findings.flatMap((finding) =>
+                      finding.paths.filter((path) => !sources.read.has(path)),
+                    ),
                   ),
-                ),
-              ];
-              if (unread.length) throw new WikiSourceEvidenceError(unread);
-            },
+                ];
+                if (unread.length) throw new WikiSourceEvidenceError(unread);
+              },
+            ),
           );
           return findings;
         }),
@@ -703,7 +895,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       execute: async ({ inputData }) =>
         recordFailure(async () => {
           findings = inputData;
-          await awaitParent?.();
+          await timed("wait-parent", async () => awaitParent?.());
           return { round: 0, issues: [], output: { pages: [] } };
         }),
     });
@@ -713,12 +905,12 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       outputSchema: loopSchema,
       execute: async ({ inputData }) =>
         recordFailure(async () => {
-          const content = wikiGenerationOutput.shape.pages.element
-            .pick({
-              body: true,
-              sources: true,
-            })
-            .strict();
+          // A fresh object schema: picking from the strict output page would stay strict.
+          const content = z.object(
+            wikiGenerationOutput.shape.pages.element.pick({ body: true, sources: true }).shape,
+          );
+          // An existing page keeps its Factory-owned identity, so any extra key is refused. A new
+          // topic's identity comes from the plan, so a stray title or slug is dropped, not fatal.
           const writingSchema = topic.pageIDs.length
             ? z
                 .object({
@@ -734,36 +926,61 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                     .max(2),
                 })
                 .strict()
-            : z.object({ pages: z.array(content).length(1) }).strict();
+            : z.object({ pages: z.array(content).length(1) });
           // The writer needs the evidence behind its findings, not every file the research read.
-          const evidence = readFiles(
-            findings.findings.length
-              ? findings.findings.flatMap((item) => item.paths)
-              : topic.paths,
-          );
-          const draft = await ask(
-            "writer",
-            writingSchema,
-            {
-              topic,
-              plannedTopics,
-              ...(language ? { language } : {}),
-              findings,
-              currentPages: ownPages(),
-              otherPages: otherPages(),
-              sources: promptSources(evidence, writerSources),
-              previousDraft: {
-                pages: inputData.output.pages.map((page) =>
-                  topic.pageIDs.length
-                    ? { id: page.id, title: page.title, body: page.body, sources: page.sources }
-                    : { body: page.body, sources: page.sources },
-                ),
+          rounds = inputData.round + 1;
+          // A merged run has no findings and may have read more files than the seeds.
+          const evidence = merged
+            ? [...sources.read.values()]
+            : readFiles(
+                findings.findings.length
+                  ? findings.findings.flatMap((item) => item.paths)
+                  : topic.paths,
+              );
+          const draft = await timed("write", () =>
+            ask(
+              "writer",
+              writingSchema,
+              {
+                topic,
+                plannedTopics,
+                ...(language ? { language } : {}),
+                ...(merged ? {} : { findings }),
+                currentPages: ownPages(),
+                otherPages: otherPages(),
+                sources: promptSources(evidence, writerSources),
+                // An empty first draft in the prompt invites an empty answer, so only a repair has one.
+                ...(inputData.round
+                  ? {
+                      previousDraft: {
+                        pages: inputData.output.pages.map((page) =>
+                          topic.pageIDs.length
+                            ? {
+                                id: page.id,
+                                title: page.title,
+                                body: page.body,
+                                sources: page.sources,
+                              }
+                            : { body: page.body, sources: page.sources },
+                        ),
+                      },
+                    }
+                  : {}),
+                issues: inputData.issues,
               },
-              issues: inputData.issues,
-            },
-            sources,
-            "Write only this topic package. For a new topic return exactly one page containing body and sources only; Factory supplies its planned identity, title and parent. Existing updates contain only id, title, body and sources, using only this topic's pageIDs and at most two pages. Do not return slugs or parents. Preserve complete human context. A new root overview is at most 1200 characters, concise reader orientation without code examples or a catalogue of interfaces/tests. Child guides will publish later, so do not add or link them now. No sources footer. Omit unchanged existing pages. Never edit another topic's published page to resolve duplication; shorten this package instead.",
+              sources,
+              `${merged ? "No separate research was done for this topic: sources holds its seed files. Read further files with readSource only when a claim needs them. " : ""}Write only this topic package. pages:[] is valid only when updating existing pages without material change; a new topic always returns its one page. For a new topic return exactly one page containing body and sources only; Factory supplies its planned identity, title and parent. Existing updates contain only id, title, body and sources, using only this topic's pageIDs and at most two pages. Do not return slugs or parents. Preserve complete human context. A new root overview is at most 1200 characters, concise reader orientation without code examples or a catalogue of interfaces/tests. Child guides will publish later, so do not add or link them now. No sources footer. When issues are listed, resolve each by removing the claim or narrowing it to exactly what the sources state; add no new claims, so the next check finds nothing new. Omit unchanged existing pages. Never edit another topic's published page to resolve duplication; shorten this package instead.`,
+              undefined,
+              merged ? { toolRounds: 3 } : {},
+            ),
           );
+          // Only published pages can be linked: a guide planned for later or a mistyped slug
+          // becomes plain text, and a stray footer is Factory's to supply.
+          const published = new Set(
+            pages.filter((page) => page.state === "active").map((page) => page.slug),
+          );
+          const tidy = (body: string) =>
+            unlinkUnavailableGuides(stripSourcesFooter(body), published);
           const output: WikiGenerationOutput = {
             pages: draft.pages.map((page) => {
               if ("id" in page && "title" in page) {
@@ -775,7 +992,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                 return {
                   id: page.id,
                   title: page.title,
-                  body: page.body,
+                  body: tidy(page.body),
                   sources: page.sources,
                   slug: current.slug,
                   parentSlug: null,
@@ -783,6 +1000,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               }
               return {
                 ...page,
+                body: tidy(page.body),
                 id: null,
                 slug: topic.slug,
                 title: topic.title,
@@ -808,15 +1026,47 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           )
             issues.push("Writer escaped planned topic package");
           for (const page of output.pages) {
-            if (!page.id && page.parentSlug === null && page.body.length > 1200)
+            if (
+              !page.id &&
+              page.parentSlug === null &&
+              emptyWiki &&
+              topic.slug === plannedTopics[0]?.slug &&
+              page.body.length > overviewHardLimit
+            )
               issues.push(
-                "Shorten the new root overview to at most 1200 characters; put interfaces/tests in child guides",
+                `Shorten the new root overview from ${page.body.length} to at most 1200 characters; put interfaces/tests in child guides`,
               );
             if (/^(?:#{1,6}\s+)?sources\s*:?\s*$/im.test(page.body))
               issues.push("Source footer belongs in Factory");
             issues.push(...wikiLinkIssues(page.body, pages));
           }
-          if (issues.length) return { round: inputData.round + 1, issues, output };
+          if (issues.length) {
+            // Factory-authored messages only; a checker's issues are model prose and stay out.
+            console.error(
+              `[factory] Wiki topic ${topic.slug} round ${inputData.round + 1} rejected before the check: ${[...new Set(issues)].join(" | ").slice(0, 600)}`,
+            );
+            return { round: inputData.round + 1, issues, output };
+          }
+          // Nothing to publish, or only rewording of checked pages whose cited files are unchanged:
+          // the independent check is for new facts, so a wording pass does not pay two more calls.
+          if (
+            topic.pageIDs.length &&
+            output.pages.every((page) => {
+              const current = pages.find((candidate) => candidate.id === page.id);
+              return (
+                current &&
+                wordingOnlyChange({
+                  current: current.body,
+                  draft: page.body,
+                  cited: page.sources,
+                  changedPaths: input.changedPaths,
+                })
+              );
+            })
+          ) {
+            checksSkipped++;
+            return { round: inputData.round + 1, issues: [], output };
+          }
           if (providerRequests?.remaining === 0)
             return {
               round: inputData.round + 1,
@@ -825,24 +1075,28 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               ],
               output,
             };
-          const review = await ask(
-            "checker",
-            reviewSchema,
-            {
-              topic,
-              plannedTopics,
-              ...(language ? { language } : {}),
-              currentPages: ownPages(),
-              otherPages: otherPages(),
-              draft: output,
-              // Only the files the draft cites; readSource covers anything else it must verify.
-              sources: promptSources(
-                readFiles(output.pages.flatMap((page) => page.sources)),
-                writerSources,
-              ),
-            },
-            sources,
-            wikiReviewTask,
+          const finalCheck = inputData.round > 0;
+          const review = await timed("check", () =>
+            ask(
+              "checker",
+              reviewSchema,
+              {
+                topic,
+                plannedTopics,
+                ...(language ? { language } : {}),
+                currentPages: ownPages(),
+                otherPages: otherPages(),
+                draft: output,
+                ...(finalCheck ? { previousIssues: inputData.issues } : {}),
+                // Only the files the draft cites; readSource covers anything else it must verify.
+                sources: promptSources(
+                  readFiles(output.pages.flatMap((page) => page.sources)),
+                  writerSources,
+                ),
+              },
+              sources,
+              finalCheck ? `${wikiReviewTask} ${wikiFinalReviewTask}` : wikiReviewTask,
+            ),
           );
           return { round: inputData.round + 1, issues: [...issues, ...review.issues], output };
         }),
@@ -857,15 +1111,29 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       .then(prepare)
       .dountil(
         repair,
-        async ({ inputData }) => inputData.issues.length === 0 || providerRequests?.remaining === 0,
+        async ({ inputData }) =>
+          inputData.issues.length === 0 ||
+          inputData.round >= maximumWriteRounds ||
+          providerRequests?.remaining === 0,
       )
       .commit();
-    const result = await (await workflow.createRun()).start({ inputData: {} });
-    if (result.status !== "success")
-      throw topicFailureRecorder.error() ?? new Error("Wiki topic workflow did not complete");
-    if (result.result.issues.length)
-      throw new WikiTopicQualityError(topic.slug, result.result.issues);
-    await publishPackage(topic, result.result.output);
+    let outcome = "failed";
+    try {
+      const result = await (await workflow.createRun()).start({ inputData: {} });
+      if (result.status !== "success")
+        throw topicFailureRecorder.error() ?? new Error("Wiki topic workflow did not complete");
+      if (result.result.issues.length)
+        throw new WikiTopicQualityError(topic.slug, result.result.issues);
+      await timed("publish", () => publishPackage(topic, result.result.output));
+      outcome = "published";
+    } finally {
+      console.info(
+        `[factory] Wiki ${metrics.topicLine(
+          topic.slug,
+          `${outcome} merged=${merged} rounds=${rounds} checksSkipped=${checksSkipped}`,
+        )}`,
+      );
+    }
   }
   const workflow = createWorkflow({
     id: "factory-wiki-generation",
@@ -883,6 +1151,11 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     return result.result;
   } finally {
     input.signal.removeEventListener("abort", relayAbort);
+    report({});
+    const totals = metrics.totals();
+    console.info(
+      `[factory] Wiki generation elapsed=${(metrics.elapsedMs() / 1000).toFixed(1)}s modelSteps=${totals.modelSteps} toolRounds=${totals.toolRounds} paused=${(totals.pausedMs / 1000).toFixed(1)}s planner=${metrics.stageSeconds("plan", "planner")} ${metrics.roleLines().join(" | ")}`,
+    );
     await progressWrites;
   }
 }

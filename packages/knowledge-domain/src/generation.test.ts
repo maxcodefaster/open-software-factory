@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { validateWikiGeneration, wikiGenerationOutput, type WikiPageSnapshot } from "./generation";
+import { validateWikiGeneration, type WikiPageSnapshot, wikiGenerationOutput } from "./generation";
 
 const page: WikiPageSnapshot = {
   id: crypto.randomUUID(),

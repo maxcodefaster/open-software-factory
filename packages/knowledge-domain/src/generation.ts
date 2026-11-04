@@ -25,6 +25,14 @@ export const wikiGenerationProgress = z
     topicsTotal: z.number().int().min(0).max(100),
     topicsDone: z.number().int().min(0).max(100),
     currentTopic: z.string().max(200).nullable(),
+    stats: z
+      .object({
+        modelSteps: z.number().int().min(0),
+        toolRounds: z.number().int().min(0),
+        pausedMs: z.number().int().min(0),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type WikiGenerationProgress = z.infer<typeof wikiGenerationProgress>;

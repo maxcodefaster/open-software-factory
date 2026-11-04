@@ -53,6 +53,8 @@ export type RetryOptions = {
   /** A longer requested wait is not retried; the 429 fails the step as before. */
   maximumWaitMs?: number;
   now?: () => number;
+  /** Reports each pause, so a generation can tell waiting on the provider from working. */
+  onWait?: (milliseconds: number) => void;
 };
 
 function sleep(milliseconds: number, signal: AbortSignal) {
@@ -85,6 +87,14 @@ export function retryRateLimited<T>(model: T, options: RetryOptions): T {
   const retries = options.retries ?? 4;
   const maximumWait = options.maximumWaitMs ?? 60_000;
   const clock = options.now ?? Date.now;
+  const waited = async (milliseconds: number) => {
+    const began = clock();
+    try {
+      await sleep(milliseconds, options.signal);
+    } finally {
+      options.onWait?.(Math.max(0, clock() - began));
+    }
+  };
   const wrapped = Object.create(model as object) as T;
   for (const name of methods) {
     const original = source[name] as Callable;
@@ -98,7 +108,7 @@ export function retryRateLimited<T>(model: T, options: RetryOptions): T {
             wait > 0;
             wait = options.state.until - clock()
           )
-            await sleep(wait, options.signal);
+            await waited(wait);
           options.signal.throwIfAborted();
           try {
             return await original.call(model, call);
@@ -114,7 +124,7 @@ export function retryRateLimited<T>(model: T, options: RetryOptions): T {
             )
               throw cause;
             options.state.until = Math.max(options.state.until, clock() + wait);
-            await sleep(Math.max(0, options.state.until - clock()), options.signal);
+            await waited(Math.max(0, options.state.until - clock()));
             await options.authorize?.();
             if (options.requests) {
               if (options.requests.remaining <= 0) throw new ModelExecutionBoundError("requests");

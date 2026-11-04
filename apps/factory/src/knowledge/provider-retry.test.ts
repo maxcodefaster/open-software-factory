@@ -135,3 +135,25 @@ test("one refusal pauses every concurrent step of the generation", async () => {
   expect(Date.now() - started).toBeGreaterThanOrEqual(50);
   expect(second.calls).toHaveLength(1);
 });
+
+test("every pause, from a refusal or a shared wait, is reported", async () => {
+  const { model } = fakeModel([refusal({ "retry-after-ms": "30" })]);
+  const waits: number[] = [];
+  const wrapped = retryRateLimited(model, {
+    signal: new AbortController().signal,
+    state: { until: 0 },
+    onWait: (milliseconds) => waits.push(milliseconds),
+  });
+  await wrapped.doGenerate({});
+  expect(waits).toHaveLength(1);
+  expect(waits[0]).toBeGreaterThanOrEqual(25);
+  // Another agent's pause is waited out before the call and counts as waiting too.
+  const shared = retryRateLimited(fakeModel([]).model, {
+    signal: new AbortController().signal,
+    state: { until: Date.now() + 40 },
+    onWait: (milliseconds) => waits.push(milliseconds),
+  });
+  await shared.doGenerate({});
+  expect(waits).toHaveLength(2);
+  expect(waits[1]).toBeGreaterThanOrEqual(30);
+});

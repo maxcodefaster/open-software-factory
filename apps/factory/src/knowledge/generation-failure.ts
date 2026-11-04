@@ -101,3 +101,61 @@ export function rejectedWikiStructuredResult(cause: unknown): unknown {
     return undefined;
   }
 }
+
+export type StructuredFailure = {
+  kind: "truncated" | "empty" | "invalid" | "malformed";
+  /** Zod issue paths and codes only, never the model's text. */
+  issues: string[];
+  chars?: number;
+};
+
+/**
+ * Why a structured result was refused. A cut-off answer (finish reason length) and an empty one
+ * (the whole output budget spent before any JSON) need a larger budget and a shorter answer,
+ * not another identical request.
+ */
+export function structuredFailure(cause: unknown): StructuredFailure {
+  const issues: string[] = [];
+  let kind: StructuredFailure["kind"] = "malformed";
+  let chars: number | undefined;
+  let current = cause;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
+    const record = current as Record<string, unknown>;
+    const id = record["id"];
+    const details = record["details"];
+    if (details && typeof details === "object") {
+      const value = (details as Record<string, unknown>)["value"];
+      if (typeof value === "string") chars ??= value.length;
+    }
+    if (id === "STRUCTURED_OUTPUT_TRUNCATED") kind = "truncated";
+    else if (id === "STRUCTURED_OUTPUT_OBJECT_UNDEFINED" && kind === "malformed") kind = "empty";
+    else if (id === "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED" && kind === "malformed")
+      kind = "invalid";
+    const zodIssues = record["issues"];
+    if (Array.isArray(zodIssues) && !issues.length) {
+      if (kind === "malformed") kind = "invalid";
+      for (const issue of zodIssues.slice(0, 6)) {
+        const item = issue as { path?: unknown; code?: unknown };
+        const path = Array.isArray(item.path) ? item.path.join(".") : "";
+        issues.push(`${path || "result"}:${String(item.code ?? "invalid")}`);
+      }
+    }
+    // The SDK error lists each failed path in its text; keep the paths and drop the messages.
+    const message = record["message"];
+    if (typeof message === "string" && !issues.length && kind === "invalid")
+      for (const match of message.matchAll(/^- (\S+?): (\S+(?: \S+){0,3})/gm))
+        if (issues.length < 6) issues.push(`${match[1]}:${match[2]?.slice(0, 40)}`);
+    current = record["cause"];
+  }
+  // No object at all reaches validation as one root-level type error: the model spent its
+  // output budget before writing any JSON.
+  if (kind === "invalid" && issues.length === 1 && issues[0] === "result:invalid_type")
+    kind = "empty";
+  return { kind, issues, ...(chars === undefined ? {} : { chars }) };
+}
+
+export function describeStructuredFailure(failure: StructuredFailure) {
+  return `${failure.kind}${failure.chars === undefined ? "" : ` chars=${failure.chars}`}${
+    failure.issues.length ? ` issues=${failure.issues.join(",")}` : ""
+  }`;
+}

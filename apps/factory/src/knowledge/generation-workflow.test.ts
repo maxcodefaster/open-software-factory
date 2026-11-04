@@ -68,14 +68,17 @@ test.each([
       topicsTotal: number;
       topicsDone: number;
       currentTopic: string | null;
+      stats?: { modelSteps: number; toolRounds: number; pausedMs: number } | undefined;
     }> = [];
     const budget = {
       remaining:
         scenario === "execution-bound"
           ? 1
-          : scenario === "checker-budget-exhausted" || scenario === "shared-budget-exhausted"
-            ? 5
-            : 32,
+          : scenario === "checker-budget-exhausted"
+            ? 4
+            : scenario === "shared-budget-exhausted"
+              ? 5
+              : 32,
     };
     const researchCalls = new Map<string, number>();
     let fetchedPaths = 0,
@@ -208,7 +211,7 @@ test.each([
           sourcePaths = [files[96 + topicIndex * 3 + replies]?.path ?? ""];
         }
         const rejectedResearchAvailable =
-          parsed.rejectedResult?.findings?.[0]?.claim?.length === 1201 &&
+          parsed.rejectedResult?.findings?.[0]?.claim?.length === 6001 &&
           parsed.correction?.includes("findings.0.claim");
         if (parsed.correction && scenario.startsWith("unread-research")) {
           expect(parsed.correction).toContain("Research cites unread source: src/flow-63.ts");
@@ -224,7 +227,7 @@ test.each([
                   overview &&
                   nth <= 2 &&
                   !rejectedResearchAvailable)
-                  ? "x".repeat(1201)
+                  ? "x".repeat(6001)
                   : "Verified workflow",
               paths:
                 scenario === "unread-research-always" ||
@@ -262,7 +265,7 @@ test.each([
                           : scenario === "verbose-overview" &&
                               !prompt.issues?.length &&
                               prompt.topic.slug === "overview"
-                            ? "x".repeat(1201)
+                            ? "x".repeat(1501)
                             : !prompt.issues?.length && prompt.topic.slug === "overview"
                               ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
                               : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
@@ -385,6 +388,11 @@ test.each([
           publishing--;
           for (const page of output.pages) {
             publishedSlugs.add(page.slug);
+            // A link to a page that does not exist becomes plain text, never a broken link.
+            if (scenario === "broken-link") expect(page.body).not.toContain("#wiki/missing-page");
+            // A parent the writer names is dropped; the plan binds it.
+            if (scenario === "wrong-parent")
+              expect(page.parentSlug).toBe(page.slug === "overview" ? null : "overview");
             expect(page.body).not.toContain("## Sources");
             if (scenario === "bare-wiki-reference")
               expect(page.body).not.toContain("See #wiki/overview");
@@ -441,7 +449,7 @@ test.each([
       }
       if (scenario === "checker-budget-exhausted") {
         await expect(run).rejects.toThrow("Wiki topic failed bounded quality checks");
-        expect(receivedRequests).toBe(5);
+        expect(receivedRequests).toBe(4);
         expect(checks).toBe(0);
         expect(publications).toBe(0);
         return;
@@ -465,6 +473,8 @@ test.each([
       if (
         ![
           "success",
+          "broken-link",
+          "wrong-parent",
           "invalid-research",
           "repair-needs-rejected-research",
           "unread-research-once",
@@ -483,7 +493,7 @@ test.each([
         await expect(run).rejects.toThrow(
           scenario === "publication-conflict"
             ? "Controlled revision conflict"
-            : ["wrong-parent", "empty-topic"].includes(scenario)
+            : scenario === "empty-topic"
               ? "Structured output validation failed"
               : "Wiki topic failed bounded quality checks",
         );
@@ -517,7 +527,8 @@ test.each([
       }
       expect(result.pages).toEqual([]);
       expect(overlappingPublications).toBe(0);
-      expect(maximumInFlight).toBeLessThanOrEqual(3);
+      // Three topics plus the coverage review that runs beside the first of them.
+      expect(maximumInFlight).toBeLessThanOrEqual(4);
       if (scenario === "rate-limited-once") {
         // The refused request repeated once and finished the same generation.
         expect(publications).toBe(4);
@@ -527,7 +538,7 @@ test.each([
       if (scenario === "success") {
         // Child topics research while their parent is written, so provider calls overlap.
         expect(maximumInFlight).toBeGreaterThan(1);
-        expect(progressLog[0]).toEqual({
+        expect(progressLog[0]).toMatchObject({
           phase: "writing",
           topicsTotal: 4,
           topicsDone: 0,
@@ -537,12 +548,17 @@ test.each([
           [...progressLog.map((entry) => entry.topicsDone)].sort((a, b) => a - b),
         );
         expect(progressLog.some((entry) => entry.phase === "publishing")).toBe(true);
-        expect(progressLog.at(-1)).toEqual({
+        expect(progressLog.at(-1)).toMatchObject({
           phase: "publishing",
           topicsTotal: 4,
           topicsDone: 4,
           currentTopic: null,
         });
+        // Step counters are persisted with the phase, as numbers only.
+        const stats = progressLog.at(-1)?.stats;
+        expect(stats?.modelSteps).toBeGreaterThanOrEqual(receivedRequests - 1);
+        expect(stats?.toolRounds).toBe(0);
+        expect(stats?.pausedMs).toBe(0);
       }
       if (scenario === "many-topics") {
         expect(receivedRequests).toBeGreaterThan(32);
@@ -552,12 +568,10 @@ test.each([
       }
       expect(read.size).toBe(64);
       expect(publications).toBe(4);
+      // Footers and links to guides planned for later are fixed without another writer round;
+      // a long overview or a bare reference costs exactly one repair.
       expect(writes).toBe(
-        scenario === "planned-links-need-more-repair"
-          ? 7
-          : scenario === "bare-wiki-reference"
-            ? 6
-            : 5,
+        scenario === "verbose-overview" || scenario === "bare-wiki-reference" ? 5 : 4,
       );
       expect(checks).toBe(
         scenario === "source-hungry-checker" || scenario === "large-source" ? 8 : 4,
