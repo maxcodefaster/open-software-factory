@@ -40,7 +40,7 @@ The claim belongs to a one-container StatefulSet instead of a stand-alone Persis
 Storage classes with WaitForFirstConsumer binding (the AKS default among them) leave a claim
 Pending until a Pod uses it, and `helm --wait` would then never finish. The holder Pod only
 sleeps; it binds the claim and keeps it on the node where Factory and the backup Job run.
-*/ -}}
+*/}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -286,6 +286,8 @@ spec:
                 - {name: openbao-tls, mountPath: /bao/tls, readOnly: true}
                 {{- if .Values.backup.openbao.tokenSecret }}
                 - {name: openbao-token, mountPath: /openbao-token, readOnly: true}
+                {{- else }}
+                - {name: openbao-login, mountPath: /openbao-login, readOnly: true}
                 {{- end }}
           containers:
             - name: finalize
@@ -328,6 +330,14 @@ spec:
               secret:
                 secretName: {{ .Values.backup.openbao.tokenSecret }}
                 items: [{key: token, path: token}]
+            {{- else }}
+            {{- /* Factory creates this Secret when it bootstraps OpenBao. Optional, so a first run
+            before that, or an installation not yet adopted, writes openbao.skipped and warns. */}}
+            - name: openbao-login
+              secret:
+                secretName: {{ $name }}-backup-openbao
+                optional: true
+                items: [{key: role-id, path: role-id}, {key: secret-id, path: secret-id}]
             {{- end }}
             {{- if .Values.backup.remote.existingSecret }}
             - name: remote

@@ -6,9 +6,12 @@ OrbStack, Docker, a VM, an Ingress controller or a cluster.
 
 ## Prerequisites
 
-- An admitted Linux AMD64 node/kernel profile for the pinned Factorybox worker. The cluster must permit
-  privileged outer execution Pods and the read-only `/lib/modules` host mount. Factory does not
-  disable cluster security policies to obtain these permissions.
+- A Linux node (Ubuntu 22.04 or newer, kernel 5.15 or newer, cgroup v2, 4 KiB pages) for the pinned
+  Factorybox worker. The worker's own capability gate decides whether the node's kernel is usable;
+  Factory does not pin a kernel release. The cluster must permit privileged outer execution Pods.
+  The worker Pod has no hostPath volumes and mounts no host `/lib/modules`. Factory labels the
+  Namespaces it creates for Sandboxes and workers `pod-security.kubernetes.io/enforce=privileged`
+  and does not otherwise disable cluster security policies.
 - Dynamically provisioned RWO persistent storage with normal POSIX filesystem behavior. Set
   `storageClass` when the cluster has no appropriate default.
 - A reachable application image containing the complete exact `runtime-artifacts.json` bundle.
@@ -93,7 +96,7 @@ factorybox:
   executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
   architecture: amd64 # or arm64, matching the independently qualified worker package
   nodeName: YOUR_ADMITTED_NODE
-  kernel: YOUR_ADMITTED_KERNEL_RELEASE
+  # kernel: "5.15.0-*-azure,6.8.0-*-azure" # optional; omit to admit any kernel
 publicURL: https://factory.example.com
 forgejoPublicURL: https://git.example.com
 ingress:
@@ -140,7 +143,10 @@ unresolved backing from any admission sharing the old claim. It records a new st
 keeps the old claim and history, and retains canonical Source on its original claim and node.
 Omitting `storage` retains the exact original store. Retry a request only with the same UUID and
 storage selection. See [ADR 0003](../../../docs/adr/0003-worker-recovery-and-storage-retirement.md#admit-fresh-execution-storage-only-after-confirmed-drain).
-A new node, kernel or storage backend still needs its own native admission.
+A new node, storage backend or architecture still needs its own native admission.
+`factorybox.kernel` is optional. Leave it empty (or `"*"`) to let the worker decide, or list
+releases with `*` wildcards to restrict which nodes Factory admits. Run `helm test` to see the
+node's kernel capability report.
 
 Fresh worker resource admission checks the configured node's readiness and allocatable resources
 and its assigned Pods before selecting a finite aggregate budget. The worker reserves the remaining
@@ -285,7 +291,7 @@ mirror always contains the objects the database dump refers to:
 | PostgreSQL | `pg_dump --format=custom` from the pinned postgres image, checked with `pg_restore --list` | `postgres.dump` |
 | Forgejo | `forgejo dump` run in the Forgejo container through `kubectl exec`, streamed back and checked | `forgejo.tar.gz` (`forgejo-db.sql`, repositories, attachments, configuration) |
 | Objects | `rclone sync` of the Garage bucket | one mirror at `objects/`; replaced or deleted objects move to `objects-changed/<timestamp>/` |
-| OpenBao | `bao operator raft snapshot save` | `openbao.snap` |
+| OpenBao | `bao operator raft snapshot save`, logged in as the `factory-backup` AppRole | `openbao.snap` |
 | State | `tar` of the Factory state claim, mounted read-only | `state.tar.gz` (unseal key, AppRole login, installation identity) |
 
 A failed step leaves `<step>.failed` and does not stop the others. The last container writes
@@ -297,13 +303,14 @@ Pod can be refused by NetworkPolicy for a few seconds. The NetworkPolicy lets Po
 
 Limits to know before relying on this:
 
-- **OpenBao needs an operator token that Factory does not create.** Its AppRole policy cannot
-  read snapshots, and it revokes the root token after bootstrap. OpenBao 2.7 also disables
-  unauthenticated root generation, so the retained unseal key cannot mint a new one. Make a
-  periodic token from an admin credential you hold. Its policy needs `read` on
-  `sys/storage/raft/snapshot` and `update` on `auth/token/renew-self`. Put it in a Secret under the
-  key `token` and set `backup.openbao.tokenSecret`. Each run renews it. Without it the Job still
-  succeeds, but it writes `openbao.skipped`, warns, and the set holds no OpenBao data.
+- **OpenBao is backed up with a login Factory creates.** At bootstrap Factory creates the
+  `factory-backup` AppRole, whose policy allows only `read` on `sys/storage/raft/snapshot` and
+  `update` on `auth/token/renew-self`, and writes its `role-id` and `secret-id` to the Secret
+  `<release>-backup-openbao`. The Job logs in with it on every run, so no token expires. To use your
+  own credential instead, put a token in a Secret under the key `token` and set
+  `backup.openbao.tokenSecret`; each run renews it. Without either, the Job still succeeds but
+  writes `openbao.skipped`, warns, and the set holds no OpenBao data. An installation created before
+  this identity existed needs the one-time adoption below.
 - **Backups hold everything needed to decrypt OpenBao.** `state.tar.gz` contains the unseal key.
   Treat the backup claim and any remote as sensitive as the cluster's Secrets and encrypt them.
   An rclone `crypt` remote does that for the optional copy.
@@ -323,6 +330,46 @@ To copy sets off the cluster, create a Secret with an `rclone.conf` key that def
 `backup.remote.existingSecret` and `backup.remote.path` (`offsite:container/factory`). The upload
 uses `rclone copy`, so deletion is the remote's lifecycle rule. The image is
 `docker.io/rclone/rclone`, pinned by digest in `upstream.json`.
+
+### OpenBao identities
+
+Factory logs in to OpenBao as the `factory-environments` AppRole and revokes the root token at the
+end of its first bootstrap. Three more things are created in the same step, and their logins stay in
+the Factory state claim next to the unseal key:
+
+| AppRole | Policy | Token |
+| --- | --- | --- |
+| `factory-backup` | `read` snapshots, `update` `auth/token/renew-self` | 2 hours, used by the backup Job |
+| `factory-admin` | write the `factory-environments` and `factory-backup` policies and AppRoles, plus a login for `factory-backup`. It cannot touch mounts, the seal, snapshots or its own policy | 15 minutes, used only on upgrade |
+
+When an upgrade changes either policy, Factory starts, notices the stored policy version differs and
+logs in as `factory-admin` to rewrite them. Nothing needs the root token and nothing needs an
+operator. `factory-admin` is not a boundary against a compromised Factory, which already holds the
+unseal key and can rewrite the policies it manages. It keeps routine upgrades away from root.
+
+OpenBao 2.7 disables the unauthenticated `sys/generate-root` endpoints on its Service listener, so
+the retained unseal key alone cannot mint a root token there. **An installation that was bootstrapped
+before this change has no `factory-admin` or `factory-backup` and needs one adoption.** Upgrade once
+with the chart's loopback recovery listener on, let Factory start, then turn it off. OpenBao restarts
+sealed whenever its Pod spec changes and only Factory's start unseals it, so restart Factory after
+each upgrade unless the upgrade already rolled it:
+
+```sh
+helm upgrade factory ./deploy/helm/factory --namespace factory \
+  --values /path/to/private-values.yaml --set openbao.recovery.enabled=true --wait=legacy --timeout 20m
+kubectl --namespace factory rollout restart deployment/factory
+kubectl --namespace factory rollout status deployment/factory --timeout=20m   # adoption ran when this succeeds
+helm upgrade factory ./deploy/helm/factory --namespace factory \
+  --values /path/to/private-values.yaml --wait=legacy --timeout 20m
+kubectl --namespace factory rollout restart deployment/factory
+kubectl --namespace factory rollout status deployment/factory --timeout=20m
+```
+
+The listener binds `127.0.0.1:8210` inside the OpenBao Pod. It is not in the Service or the
+NetworkPolicy, so only `kubectl port-forward` through the Pod reaches it, and Factory is the only
+caller. Factory generates a root token with the unseal key, creates the three identities, revokes
+that token and cancels the generation attempt. If the listener is off when adoption is needed,
+Factory stops before becoming ready and says so. Data is untouched either way.
 
 ### Reach the files
 
@@ -358,8 +405,9 @@ kubectl --namespace factory cp restore-toolbox:/backup/20261104T021700Z ./set
 mise exec -- bun scripts/kubernetes/restore-check.ts ./set
 ```
 
-A pass proves the dump, both archives and the snapshot are readable. It does not prove a full
-restore, so rehearse one in a scratch Namespace on your own schedule.
+A pass proves the dump and both archives are readable and the snapshot has a gzip header, a
+plausible size, `meta.json`, `state.bin` and `SHA256SUMS`, with both files matching their sums. It
+does not prove a full restore, so rehearse one in a scratch Namespace on your own schedule.
 
 ### Restore
 
@@ -401,20 +449,35 @@ new installation and holds nothing yet.
    toolbox so Zero rebuilds it from the restored database.
 6. OpenBao. Its snapshot only restores onto the key it was taken with. Mount
    `data-<release>-openbao-0` at `/bao/data` and empty it. Scale OpenBao to one. It starts
-   uninitialized. Port-forward `<release>-openbao` and, with `BAO_ADDR=https://127.0.0.1:8200` and
-   `BAO_CACERT` set to the `ca.crt` of the OpenBao TLS Secret, run
-   `bao operator init -key-shares=1 -key-threshold=1`, `bao operator unseal`, then
-   `BAO_TOKEN=<that root token> bao operator raft snapshot restore -force openbao.snap`. OpenBao
-   reseals. Unseal it with the original key, the `keys_base64` value in `openbao/bootstrap.json`
-   inside `state.tar.gz`. Without `openbao.snap`, Factory cannot decrypt the secrets it stored.
+   uninitialized and its readiness probe stays failing until the original TLS Secret is in place;
+   exec still works. Copy `openbao.snap` into the Pod, then run the steps inside it:
+
+   ```sh
+   kubectl cp openbao.snap <release>-openbao-0:/tmp/openbao.snap -c openbao
+   kubectl exec <release>-openbao-0 -c openbao -- sh -c '
+     export BAO_ADDR=https://127.0.0.1:8200 BAO_CACERT=/bao/tls/ca.crt
+     bao operator init -key-shares=1 -key-threshold=1 -format=json > /tmp/init.json'
+   ```
+
+   Read `unseal_keys_b64[0]` and `root_token` from `/tmp/init.json`, unseal with that temporary key
+   (`bao operator unseal <key>`; the CLI refuses piped input), then restore with
+   `BAO_TOKEN=<root_token> bao operator raft snapshot restore -force /tmp/openbao.snap`. OpenBao
+   reseals and the temporary key and root token stop working. Unseal it with the original key, the
+   `keys_base64` value in `openbao/bootstrap.json` inside `state.tar.gz`, then
+   `rm /tmp/init.json /tmp/openbao.snap`. Without `openbao.snap`, Factory cannot decrypt the secrets
+   it stored. Restoring the state claim in the next step gives Factory the matching AppRole logins,
+   so it signs in to the restored OpenBao on start.
 7. Factory state. Mount `<release>-state` at `/var/lib/factory`, empty it, extract `state.tar.gz`
    into it as root so tar restores the original owners (uid 1000).
 8. Scale Zero, Forgejo and Factory back to one and wait for readiness. Startup runs the migrator,
    which refuses a database newer than the image, so restore with an image at least as new as the
    backup.
 
-The PostgreSQL, Forgejo and OpenBao parts of these steps were exercised with the pinned images
-outside a cluster. The Zero reset and the full ordering have not been rehearsed end to end.
+The PostgreSQL, Forgejo and OpenBao parts of these steps were exercised with the pinned images.
+The OpenBao part ran in a scratch Namespace: a snapshot taken by the backup Job's script was restored
+onto a fresh OpenBao, and Factory's bootstrap then signed in with the original state and read a
+secret written before the snapshot. The Zero reset and the full ordering have not been rehearsed
+end to end.
 
 ## Maintenance and upgrades
 

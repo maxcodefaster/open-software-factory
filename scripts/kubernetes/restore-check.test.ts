@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkDump, checkSet } from "./restore-check";
+import { checkDump, checkSet, checkSnapshot } from "./restore-check";
 
 async function tar(directory: string, name: string, files: Record<string, string>) {
   const source = await mkdtemp(join(tmpdir(), "restore-source-"));
@@ -13,6 +13,22 @@ async function tar(directory: string, name: string, files: Record<string, string
   const child = Bun.spawn(["tar", "-czf", join(directory, name), "-C", source, "."]);
   expect(await child.exited).toBe(0);
   await rm(source, { recursive: true });
+}
+
+function sha256(content: string) {
+  return new Bun.CryptoHasher("sha256").update(content).digest("hex");
+}
+
+// The layout OpenBao 2.7 writes for `bao operator raft snapshot save`.
+function snapshotFiles(overrides: Record<string, string> = {}) {
+  const meta = '{"Version":1,"ID":"bolt-snapshot","Index":145,"Term":4}';
+  const state = "s".repeat(2048);
+  return {
+    "meta.json": meta,
+    "state.bin": state,
+    SHA256SUMS: `${sha256(meta)}  meta.json\n${sha256(state)}  state.bin\n`,
+    ...overrides,
+  };
 }
 
 // Stands in for pg_restore: it accepts only files that start like a custom-format archive.
@@ -57,7 +73,7 @@ test("a backup set is complete only with every part and the completion marker", 
     await writeFile(join(set, "postgres.dump"), "PGDMP-archive");
     await tar(set, "forgejo.tar.gz", { "forgejo-db.sql": "select 1;", "data/git": "" });
     await tar(set, "state.tar.gz", { "openbao/bootstrap.json": "{}" });
-    await tar(set, "openbao.snap", { "meta.json": "{}", "state.bin": "x" });
+    await tar(set, "openbao.snap", snapshotFiles());
     const partial = await checkSet(set, pgRestore);
     expect(partial.filter((result) => !result.ok).map((result) => result.name)).toEqual([
       "COMPLETE",
@@ -74,6 +90,44 @@ test("a backup set is complete only with every part and the completion marker", 
     expect(
       (await checkSet(set, pgRestore)).filter((result) => !result.ok).map((result) => result.name),
     ).toEqual(["forgejo.tar.gz"]);
+  } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
+test("a raft snapshot needs its gzip header, size, members and matching checksums", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "restore-check-"));
+  try {
+    await tar(directory, "good.snap", snapshotFiles());
+    expect(await checkSnapshot(join(directory, "good.snap"))).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining("match SHA256SUMS"),
+    });
+    await tar(directory, "corrupt.snap", snapshotFiles({ "state.bin": "t".repeat(2048) }));
+    expect(await checkSnapshot(join(directory, "corrupt.snap"))).toMatchObject({
+      ok: false,
+      detail: "state.bin does not match SHA256SUMS",
+    });
+    await tar(directory, "nosums.snap", { ...snapshotFiles(), SHA256SUMS: "" });
+    expect(await checkSnapshot(join(directory, "nosums.snap"))).toMatchObject({ ok: false });
+    await tar(directory, "nostate.snap", {
+      "meta.json": Buffer.from(crypto.getRandomValues(new Uint8Array(2048))).toString("hex"),
+    });
+    expect(await checkSnapshot(join(directory, "nostate.snap"))).toMatchObject({
+      ok: false,
+      detail: "state.bin is missing",
+    });
+    await writeFile(join(directory, "tiny.snap"), "\x1f\x8b");
+    expect(await checkSnapshot(join(directory, "tiny.snap"))).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining("too small"),
+    });
+    await writeFile(join(directory, "plain.snap"), "x".repeat(2048));
+    expect(await checkSnapshot(join(directory, "plain.snap"))).toMatchObject({
+      ok: false,
+      detail: "does not start with a gzip header",
+    });
+    expect(await checkSnapshot(join(directory, "absent.snap"))).toMatchObject({ ok: false });
   } finally {
     await rm(directory, { recursive: true });
   }

@@ -2,19 +2,19 @@ import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { resolve } from "node:path";
 import { z } from "zod";
 import { finishInstallationMaintenance } from "../../apps/factory/src/installation/maintenance";
+import { requireObjectStorage } from "../../apps/factory/src/storage/bootstrap";
 import { createDatabase } from "../../packages/db/src/client";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
 import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
-import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { runtimeArtifactsSchema } from "../factory/artifacts";
 import { ensureLocalForgeIdentity } from "../factory/forge-identity";
 import { installForgeBrowserLogout } from "../factory/forge-logout";
+import { bootstrapOpenBao } from "../factory/openbao-bootstrap";
 import { waitForFactory } from "../factory/readiness";
 import { requireWritableRuntimeStorage } from "../factory/storage-readiness";
-import { bootstrapOpenBao } from "../factory/openbao-bootstrap";
-import { requireObjectStorage } from "../../apps/factory/src/storage/bootstrap";
 
 function required(name: string) {
   const value = process.env[name];
@@ -115,11 +115,95 @@ await requireWritableRuntimeStorage({
   image: artifacts["workspace-files"],
 });
 console.log("Preparing encrypted secrets and retained data services");
+const openbaoAddress = required("FACTORY_OPENBAO_URL");
+const openbaoName = new URL(openbaoAddress).hostname.split(".")[0] ?? "";
+if (!/^[a-z0-9][a-z0-9-]{0,62}-openbao$/.test(openbaoName))
+  throw new Error("Invalid OpenBao Service name");
+
+// Only an installation that predates the factory-admin identity gets here. The chart's loopback
+// listener (openbao.recovery.enabled) serves the quorum-only generate-root endpoints that OpenBao
+// 2.7 disables on the Service listener. kubectl reaches it through the Pod; nothing else can.
+async function openRecovery() {
+  const forward = Bun.spawn(
+    kubernetesCommand(["port-forward", `pod/${openbaoName}-0`, "-n", namespace, ":8210"]),
+    { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+  );
+  const close = async () => {
+    forward.kill();
+    await forward.exited;
+  };
+  try {
+    const reader = forward.stdout.getReader();
+    const decoder = new TextDecoder();
+    const deadline = Date.now() + 30_000;
+    let output = "";
+    let port: string | undefined;
+    let pending: ReturnType<typeof reader.read> | undefined;
+    while (!port && Date.now() < deadline) {
+      // A read that loses the race keeps its data, so one read stays pending until it settles.
+      pending ??= reader.read();
+      const read = await Promise.race([pending, Bun.sleep(1_000).then(() => null)]);
+      if (!read) continue;
+      pending = undefined;
+      if (read.done) break;
+      output += decoder.decode(read.value);
+      port = /127\.0\.0\.1:(\d+) ->/.exec(output)?.[1];
+    }
+    if (!port) throw new Error("kubectl could not forward to the OpenBao Pod");
+    const address = `https://127.0.0.1:${port}`;
+    const probe = await fetch(new URL("/v1/sys/generate-root/attempt", address), {
+      tls: { ca: await readFile(required("FACTORY_OPENBAO_CA_FILE"), "utf8") },
+      signal: AbortSignal.timeout(5_000),
+    }).catch(() => null);
+    await probe?.body?.cancel();
+    if (!probe?.ok)
+      throw new Error(
+        "This OpenBao predates Factory's admin identity and its recovery listener is off. Upgrade once with openbao.recovery.enabled=true, then set it back to false.",
+      );
+    return { address, close };
+  } catch (cause) {
+    await close();
+    throw cause;
+  }
+}
+
 const openbao = await bootstrapOpenBao({
   directory: resolve(directory, "openbao"),
-  address: required("FACTORY_OPENBAO_URL"),
+  address: openbaoAddress,
   caFile: required("FACTORY_OPENBAO_CA_FILE"),
+  openRecovery,
 });
+// The backup Job mounts this Secret. The state claim stays the source; the Secret is a projection
+// that is rewritten on every start, so deleting it only needs a Factory restart.
+await execute(
+  [
+    "apply",
+    "--server-side",
+    "--force-conflicts",
+    "--field-manager=factory-bootstrap",
+    "-n",
+    namespace,
+    "-f",
+    "-",
+  ],
+  JSON.stringify({
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: {
+      name: `${openbaoName.slice(0, -"-openbao".length)}-backup-openbao`,
+      labels: {
+        "app.kubernetes.io/name": "factory",
+        "app.kubernetes.io/instance": release,
+        "app.kubernetes.io/component": "backup",
+      },
+    },
+    type: "Opaque",
+    data: {
+      "role-id": Buffer.from(openbao.backup.role_id).toString("base64"),
+      "secret-id": Buffer.from(openbao.backup.secret_id).toString("base64"),
+    },
+  }),
+);
 const migrated = Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
   env: process.env,
   stdin: "ignore",

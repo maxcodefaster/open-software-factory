@@ -63,6 +63,53 @@ async function checkArchive(file: string, member: RegExp, label: string): Promis
     : { name, ok: false, detail: `${label} is missing` };
 }
 
+const snapshotMinimumBytes = 512;
+
+// A raft snapshot is a gzip tar of meta.json, state.bin and SHA256SUMS. The sums are checked, so
+// a truncated or corrupted copy fails here instead of at restore time.
+export async function checkSnapshot(file: string): Promise<Result> {
+  const name = basename(file);
+  const info = await stat(file).catch(() => null);
+  if (!info?.isFile() || info.size === 0) return { name, ok: false, detail: "missing or empty" };
+  if (info.size < snapshotMinimumBytes)
+    return { name, ok: false, detail: `only ${info.size} bytes; too small to be a snapshot` };
+  const header = new Uint8Array(await Bun.file(file).slice(0, 2).arrayBuffer());
+  if (header[0] !== 0x1f || header[1] !== 0x8b)
+    return { name, ok: false, detail: "does not start with a gzip header" };
+  const listed = await run(["tar", "-tzf", file]);
+  if (listed.exitCode !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
+  const members = new Set(listed.stdout.split("\n").map((line) => line.replace(/^\.\//, "")));
+  for (const member of ["meta.json", "state.bin", "SHA256SUMS"])
+    if (!members.has(member)) return { name, ok: false, detail: `${member} is missing` };
+  async function read(member: string) {
+    const child = Bun.spawn(["tar", "-xzOf", file, member], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const [bytes, exitCode] = await Promise.all([new Response(child.stdout).bytes(), child.exited]);
+    return exitCode === 0 ? bytes : null;
+  }
+  const sums = await read("SHA256SUMS");
+  if (!sums) return { name, ok: false, detail: "SHA256SUMS is unreadable" };
+  const expected = new Map(
+    new TextDecoder()
+      .decode(sums)
+      .split("\n")
+      .flatMap((line) => {
+        const match = /^([0-9a-f]{64}) [ *](.+)$/.exec(line);
+        return match?.[1] && match[2] ? [[match[2], match[1]] as const] : [];
+      }),
+  );
+  for (const member of ["meta.json", "state.bin"]) {
+    const bytes = await read(member);
+    if (!bytes) return { name, ok: false, detail: `${member} is unreadable` };
+    if (new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected.get(member))
+      return { name, ok: false, detail: `${member} does not match SHA256SUMS` };
+  }
+  return { name, ok: true, detail: `${info.size} bytes; meta.json and state.bin match SHA256SUMS` };
+}
+
 export async function checkSet(directory: string, pgRestore?: string): Promise<Result[]> {
   const results = [
     await checkDump(join(directory, "postgres.dump"), pgRestore),
@@ -80,11 +127,11 @@ export async function checkSet(directory: string, pgRestore?: string): Promise<R
   const snapshot = join(directory, "openbao.snap");
   results.push(
     (await exists(snapshot))
-      ? await checkArchive(snapshot, /^(\.\/)?meta\.json$/, "meta.json")
+      ? await checkSnapshot(snapshot)
       : {
           name: "openbao.snap",
           ok: await present(join(directory, "openbao.skipped")),
-          detail: "absent; this set was taken without an OpenBao snapshot token",
+          detail: "absent; this set was taken without an OpenBao snapshot credential",
         },
   );
   results.push({

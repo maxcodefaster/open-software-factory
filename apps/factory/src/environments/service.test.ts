@@ -1,6 +1,6 @@
 import { expect, mock, test } from "bun:test";
-import { createEnvironmentService } from "./service";
 import type { EnvironmentSettingsView } from "../../../../packages/project-domain/src/environment";
+import { createEnvironmentService } from "./service";
 
 test("only successful environment saves admit preparation, without replaying saved secrets", async () => {
   const saved = { version: 1 } as EnvironmentSettingsView;

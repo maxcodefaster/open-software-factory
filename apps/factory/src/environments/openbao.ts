@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
-  environmentBundle,
   type EnvironmentBundle,
+  environmentBundle,
 } from "../../../../packages/project-domain/src/environment";
 import { createOpenBaoKV, type OpenBaoOptions } from "../secrets/openbao";
 

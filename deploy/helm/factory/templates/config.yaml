@@ -78,7 +78,11 @@ data:
   FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB: {{ $memoryHeadroomMiB | quote }}
   FACTORY_FACTORYBOX_ARCHITECTURE: {{ required "factorybox.architecture must be arm64 or amd64" .Values.factorybox.architecture | quote }}
   FACTORY_FACTORYBOX_NODE: {{ required "factorybox.nodeName is required" .Values.factorybox.nodeName | quote }}
-  FACTORY_FACTORYBOX_KERNEL: {{ required "factorybox.kernel is required" .Values.factorybox.kernel | quote }}
+  {{- with .Values.factorybox.kernel }}
+  {{- if ne (toString .) "*" }}
+  FACTORY_FACTORYBOX_KERNEL: {{ . | quote }}
+  {{- end }}
+  {{- end }}
   FACTORY_FACTORYBOX_BOUNDED_BYTES: {{ mul $storeGiB 1073741824 | quote }}
   FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES: {{ mul $minimumStoreGiB 1073741824 | quote }}
   FACTORY_FACTORYBOX_CLAIM_GIB: {{ $claimGiB | quote }}

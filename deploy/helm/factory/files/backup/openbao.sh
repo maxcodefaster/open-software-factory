@@ -2,13 +2,24 @@
 . /scripts/common.sh
 load_set
 
-# A raft snapshot needs a token that may read sys/storage/raft/snapshot. Factory's own scoped
-# AppRole token cannot, and the root token is revoked after bootstrap, so the operator supplies
-# one in a Secret (backup.openbao.tokenSecret). A periodic token is renewed on every run.
+# A raft snapshot needs a token that may read sys/storage/raft/snapshot. By default Factory
+# creates a least-privilege AppRole for it and stores its login in the Secret
+# <release>-backup-openbao, mounted at /openbao-login. backup.openbao.tokenSecret replaces that
+# with an operator token at /openbao-token, which is renewed on every run.
+login() {
+  BAO_TOKEN="$(bao write -field=token auth/approle/login role_id=@/openbao-login/role-id secret_id=@/openbao-login/secret-id)" &&
+    [ -n "$BAO_TOKEN" ]
+}
+
 snapshot() {
-  BAO_TOKEN="$(cat /openbao-token/token)"
-  export BAO_TOKEN
-  bao token renew > /dev/null || echo "The snapshot token could not be renewed" >&2
+  if [ -s /openbao-token/token ]; then
+    BAO_TOKEN="$(cat /openbao-token/token)"
+    export BAO_TOKEN
+    bao token renew > /dev/null || echo "The snapshot token could not be renewed" >&2
+  else
+    login || return 1
+    export BAO_TOKEN
+  fi
   rm -f "$DIR/openbao.snap.part"
   bao operator raft snapshot save "$DIR/openbao.snap.part" &&
     tar -tzf "$DIR/openbao.snap.part" > /tmp/snapshot.list &&
@@ -27,9 +38,9 @@ state() {
 }
 
 step state state
-if [ -s /openbao-token/token ]; then
+if [ -s /openbao-token/token ] || [ -s /openbao-login/secret-id ]; then
   step openbao retry 3 snapshot
 else
-  echo "WARNING: no OpenBao snapshot token is configured. This set does not contain OpenBao data." >&2
+  echo "WARNING: no OpenBao snapshot credential exists yet. This set does not contain OpenBao data." >&2
   : > "$DIR/openbao.skipped"
 fi

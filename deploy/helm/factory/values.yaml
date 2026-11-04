@@ -16,10 +16,9 @@ factorybox:
   executableSHA256: ""
   architecture: ""
   nodeName: ""
-  # One kernel release or a comma-separated list. `*` is a wildcard, for example
-  # "5.15.0-*-azure,6.8.0-*-azure" on AKS, where node image upgrades change the release.
-  # Factory only gates admission with it. The pinned worker binary checks its own kernel on
-  # startup and the node boot ID still pins every retained worker. Run `helm test` first.
+  # Optional. Empty or "*" admits any node kernel; the worker's own capability gate and the
+  # node boot ID decide. To restrict nodes, list releases separated by commas, with `*` as a
+  # wildcard, for example "5.15.0-*-azure,6.8.0-*-azure". It only gates Factory's admission.
   kernel: ""
   # Scheduling reserve, not a fixed CPU allocation. Fresh workers select their
   # aggregate ceiling from the admitted node; retained profiles are not resized.
@@ -66,6 +65,10 @@ openbao:
   resources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
+  # Only for an installation created before Factory's `factory-admin` OpenBao identity existed.
+  # Enable for the one upgrade that adopts it, then set back to false. See the chart README.
+  recovery:
+    enabled: false
 
 zero:
   resources:
@@ -114,8 +117,10 @@ backup:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
   openbao:
-    # Secret with a `token` key. The token needs `read` on sys/storage/raft/snapshot and `update`
-    # on auth/token/renew-self. Without it, sets contain no OpenBao data.
+    # Override. By default the Job logs in with the least-privilege AppRole that Factory creates
+    # and stores in the Secret `<release>-backup-openbao`. To use your own credential instead, set
+    # a Secret with a `token` key: `read` on sys/storage/raft/snapshot, `update` on
+    # auth/token/renew-self. Each run renews that token.
     tokenSecret: ""
   remote:
     # Secret with an `rclone.conf` key that defines the remote named in `path`.

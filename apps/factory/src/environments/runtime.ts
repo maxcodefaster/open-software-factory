@@ -2,15 +2,15 @@ import { timingSafeEqual } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
-  environmentMetadata,
-  environmentManifest,
   type EnvironmentBundle,
+  environmentManifest,
+  environmentMetadata,
   type ProjectEnvironment,
 } from "../../../../packages/project-domain/src/environment";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
+import { json } from "../http";
 import type { EnvironmentSecrets } from "./openbao";
 import { emptyEnvironment } from "./openbao";
-import { json } from "../http";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | TransactionSql;

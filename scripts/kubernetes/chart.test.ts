@@ -22,8 +22,6 @@ const localValues = [
   "--set",
   "factorybox.nodeName=owned-node",
   "--set",
-  "factorybox.kernel=6.12.0",
-  "--set",
   "factorybox.architecture=amd64",
 ];
 async function helm(args: string[]) {
@@ -35,8 +33,6 @@ async function helm(args: string[]) {
       `factorybox.executableSHA256=${"b".repeat(64)}`,
       "--set",
       "factorybox.nodeName=owned-node",
-      "--set",
-      "factorybox.kernel=6.12.0",
     );
   if (args[0] === "template" && !args.some((value) => value.startsWith("factorybox.architecture=")))
     args.push("--set", "factorybox.architecture=amd64");
@@ -438,6 +434,25 @@ test("native mirror hosts share the import allowlist without permitting private 
     expect(invalid.exitCode).not.toBe(0);
     expect(invalid.stderr).toContain("gitAllowedOrigins");
   }
+});
+
+test("the worker kernel is optional and only a real restriction reaches Factory", async () => {
+  const kernelOf = async (...extra: string[]) => {
+    const result = await helm(["template", "portable", chart, ...localValues, ...extra]);
+    expect(result.exitCode).toBe(0);
+    const config = parseAllDocuments(result.stdout)
+      .map((document) => document.toJSON() as Resource)
+      .find(
+        (resource) =>
+          resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
+      );
+    return config?.data?.["FACTORY_FACTORYBOX_KERNEL"];
+  };
+  expect(await kernelOf()).toBeUndefined();
+  expect(await kernelOf("--set", "factorybox.kernel=*")).toBeUndefined();
+  expect(await kernelOf("--set", "factorybox.kernel=5.15.0-*-azure\\,6.8.0-*-azure")).toBe(
+    "5.15.0-*-azure,6.8.0-*-azure",
+  );
 });
 
 test("the chart rejects an unsupported worker architecture before installing resources", async () => {
@@ -1467,6 +1482,86 @@ test("backups retry network calls and keep failed steps from hiding behind later
   expect(scripts["finalize.sh"]).toContain("exit 1");
 });
 
+test("a default install backs OpenBao up with the AppRole login Factory stores in a Secret", async () => {
+  const all = await resources();
+  const pod = workloads(all).find((item) => item.kind === "CronJob")?.spec.template.spec;
+  const openbao = pod?.initContainers?.find((container) => container.name === "openbao");
+  expect(openbao?.volumeMounts).toContainEqual({
+    name: "openbao-login",
+    mountPath: "/openbao-login",
+    readOnly: true,
+  });
+  expect(openbao?.volumeMounts?.some((mount) => mount.name === "openbao-token")).toBe(false);
+  // Optional, so the first run before Factory's bootstrap writes openbao.skipped instead of failing.
+  expect(pod?.volumes as unknown[]).toContainEqual({
+    name: "openbao-login",
+    secret: {
+      secretName: "portable-backup-openbao",
+      optional: true,
+      items: [
+        { key: "role-id", path: "role-id" },
+        { key: "secret-id", path: "secret-id" },
+      ],
+    },
+  });
+  // No other container sees the login.
+  const mounting = (pod?.initContainers ?? [])
+    .concat(pod?.containers ?? [])
+    .filter((container) => container.volumeMounts?.some((mount) => mount.name === "openbao-login"));
+  expect(mounting.map((container) => container.name)).toEqual(["openbao"]);
+  const scripts = all.find(
+    (item) => item.metadata.name === "portable-backup" && item.kind === "ConfigMap",
+  )?.data as Record<string, string>;
+  expect(scripts["openbao.sh"]).toContain("auth/approle/login");
+  expect(scripts["openbao.sh"]).toContain("role_id=@/openbao-login/role-id");
+  expect(scripts["openbao.sh"]).toContain("secret_id=@/openbao-login/secret-id");
+  expect(scripts["openbao.sh"]).toContain("openbao.skipped");
+  // The chart does not render the Secret; Factory creates it, and it carries no placeholder values.
+  expect(all.some((item) => item.metadata.name === "portable-backup-openbao")).toBe(false);
+});
+
+test("the OpenBao recovery listener is off by default and loopback-only when enabled", async () => {
+  const bao = (all: Resource[]) =>
+    workloads(all).find((item) => item.metadata.name === "portable-openbao")?.spec.template.spec
+      .containers[0];
+  const defaults = (await renderAll()).all;
+  expect(defaults.some((item) => item.metadata.name === "portable-openbao-recovery")).toBe(false);
+  expect(bao(defaults)?.command).toEqual([
+    "/usr/bin/bao",
+    "server",
+    "-config=/bao/config/config.json",
+  ]);
+  const enabled = (await renderAll(["--set", "openbao.recovery.enabled=true"])).all;
+  expect(bao(enabled)?.command).toEqual([
+    "/usr/bin/bao",
+    "server",
+    "-config=/bao/config/config.json",
+    "-config=/bao/recovery/recovery.json",
+  ]);
+  const config = enabled.find(
+    (item) => item.kind === "ConfigMap" && item.metadata.name === "portable-openbao-recovery",
+  )?.data as Record<string, string>;
+  const listener = JSON.parse(config["recovery.json"] as string).listener.tcp;
+  expect(listener.address).toBe("127.0.0.1:8210");
+  expect(listener.cluster_address).toBe("127.0.0.1:8211");
+  expect(listener.disable_unauthed_generate_root_endpoints).toBe(false);
+  // The shared listener keeps the 2.7 default, and no Service or NetworkPolicy opens the new port.
+  const sharedConfig = enabled.find(
+    (item) => item.kind === "ConfigMap" && item.metadata.name === "portable-openbao",
+  )?.data as Record<string, string>;
+  const shared = JSON.parse(sharedConfig["config.json"] as string).listener.tcp;
+  expect(shared.address).toBe("0.0.0.0:8200");
+  expect(shared.disable_unauthed_generate_root_endpoints).toBeUndefined();
+  expect(JSON.stringify(enabled.filter((item) => item.kind === "Service"))).not.toContain("8210");
+  expect(JSON.stringify(policies(enabled))).not.toContain("8210");
+  const openbaoPolicy = policies(enabled).find(
+    (policy) => policy.metadata.name === "portable-allow-openbao",
+  );
+  expect(
+    openbaoPolicy?.spec.ingress?.flatMap((rule) => rule.ports ?? []).map((entry) => entry.port),
+  ).toEqual([8200]);
+});
+
 test("backups can send sets to an operator remote and carry an OpenBao snapshot token", async () => {
   const { all } = await renderAll([
     "--set",
@@ -1493,6 +1588,9 @@ test("backups can send sets to an operator remote and carry an OpenBao snapshot 
     mountPath: "/openbao-token",
     readOnly: true,
   });
+  // The override replaces the default login instead of adding to it.
+  expect(openbao?.volumeMounts?.some((mount) => mount.name === "openbao-login")).toBe(false);
+  expect(pod?.volumes?.some((volume) => volume.name === "openbao-login")).toBe(false);
   expect(pod?.volumes?.some((volume) => volume.secret?.secretName === "backup-remote")).toBe(true);
 });
 
