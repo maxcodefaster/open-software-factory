@@ -462,6 +462,8 @@ test.each([
   { storeGiB: 8, claimGiB: 32 },
   { storeGiB: 24, claimGiB: 48 },
   { storeGiB: 32, claimGiB: 64 },
+  { storeGiB: 64, claimGiB: 128 },
+  { storeGiB: 256, claimGiB: 512 },
 ])("operator storage profile retains $storeGiB GiB within its $claimGiB GiB claim", (capacity) => {
   const profile = configuredFactoryboxRuntimeProfile({
     FACTORY_FACTORYBOX_WORKER_IMAGE: input.profile.image,
@@ -486,7 +488,7 @@ test.each([
 
 test.each([
   { bytes: String(7 * 1024 ** 3), claim: "32" },
-  { bytes: String(33 * 1024 ** 3), claim: "64" },
+  { bytes: String(64 * 1024 ** 3), claim: "80" },
   { bytes: String(8 * 1024 ** 3 + 1), claim: "32" },
   { bytes: String(24 * 1024 ** 3), claim: "40" },
   { bytes: String(8 * 1024 ** 3), claim: "32.5" },

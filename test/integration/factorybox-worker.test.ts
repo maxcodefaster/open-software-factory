@@ -631,6 +631,200 @@ test("explicit operator recovery keeps one store and Source while admitting a di
   }
 }, 30_000);
 
+test("explicit fresh storage recovery admits a new store without resizing or moving retained Source", async () => {
+  const f = await admittedWorker();
+  try {
+    const oldAttempt = await f.attempt("failed");
+    const before = [
+      ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${oldAttempt}`),
+    ];
+    const source = structuredClone(f.kube.objects.get("persistentvolumeclaim/runtime-data"));
+    const oldClaim = structuredClone(
+      f.kube.objects.get(`persistentvolumeclaim/store-${f.identity.storeID}`),
+    );
+    const request = {
+      actorID: f.actorID,
+      requestID: crypto.randomUUID(),
+      storage: "fresh" as const,
+    };
+    const selected = { ...profile, boundedBytes: 16 * 1024 ** 3, claimGiB: 48 };
+    const writes = f.kube.writes.length;
+    const recovery = await recoverFactoryboxWorker(
+      f.database,
+      f.kube.kubernetes,
+      selected,
+      runtimeImage,
+      request,
+    );
+    expect(f.kube.writes).toHaveLength(writes);
+    const current = await factoryboxAllocation(f.database.client);
+    expect(current.claimUID).toBeNull();
+    expect(current.sourceClaimUID).toBe(f.original.sourceClaimUID);
+    expect(current.namespaceUID).toBe(f.original.namespaceUID);
+    const retained = await retainedFactoryboxProfile(f.database.client);
+    expect(retained.boundedBytes).toBe(selected.boundedBytes);
+    expect(retained.retainedStore).toBeUndefined();
+    const location = await f.worker.location();
+    await f.worker.provision(resources(location, runtimeImage, retained), retained, runtimeImage);
+    const next = await factoryboxAllocation(f.database.client);
+    expect(next.claimUID).not.toBe(f.original.claimUID);
+    expect(next.podUID).not.toBe(f.original.podUID);
+    expect(f.kube.objects.get("persistentvolumeclaim/runtime-data")).toEqual(source);
+    expect(f.kube.objects.get(`persistentvolumeclaim/store-${f.identity.storeID}`)).toEqual(
+      oldClaim,
+    );
+    expect(
+      f.kube.objects.has(`persistentvolumeclaim/store-${request.requestID.replaceAll("-", "")}`),
+    ).toBe(true);
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${oldAttempt}`),
+    ]).toEqual(before);
+    expect(
+      await recoverFactoryboxWorker(f.database, f.kube.kubernetes, selected, runtimeImage, request),
+    ).toEqual(recovery);
+    await expect(
+      recoverFactoryboxWorker(f.database, f.kube.kubernetes, selected, runtimeImage, {
+        ...request,
+        storage: "retain",
+      }),
+    ).rejects.toThrow("another admission or actor");
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
+test("fresh storage refuses unreleased private backing after logical Stop", async () => {
+  const f = await admittedWorker();
+  try {
+    const attemptID = await f.attempt("starting");
+    const request: FactoryboxRuntimeInput = {
+      ...f.location,
+      attemptID,
+      sandboxID: factoryboxSandboxID(attemptID),
+      runtimeOwnerID: attemptID,
+      labels: {},
+      sharedSource: false,
+      runtimeHostImage: runtimeImage,
+      profile,
+    };
+    await f.database
+      .client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request,identity)
+      VALUES(${attemptID},${JSON.stringify(request)}::jsonb,${JSON.stringify(f.identity)}::jsonb)`;
+    await f.database.client`UPDATE factory.runtime_attempt
+      SET state='stopped',stop_intended_at=now(),stopped_at=now() WHERE id=${attemptID}`;
+    const before = [
+      ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+    ];
+    await expect(
+      recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, {
+        actorID: f.actorID,
+        requestID: crypto.randomUUID(),
+        storage: "fresh",
+      }),
+    ).rejects.toThrow("confirmed private backing cleanup");
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+    ]).toEqual(before);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
+test("database fresh storage guard rejects reattaching a retained store and rolls retirement back", async () => {
+  const f = await admittedWorker();
+  try {
+    const before = [
+      ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+    ];
+    await expect(
+      recoverFactoryboxWorker(
+        f.database,
+        f.kube.kubernetes,
+        profile,
+        runtimeImage,
+        { actorID: f.actorID, requestID: crypto.randomUUID(), storage: "fresh" },
+        async (input) => ({
+          ...input,
+          retainedStore: {
+            storeID: f.identity.storeID,
+            initializedByPodUID: f.identity.podUID,
+            boundedBytes: profile.boundedBytes,
+          },
+        }),
+      ),
+    ).rejects.toThrow("distinct uncreated store");
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+    ]).toEqual(before);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
+test.each(["command", "database"] as const)(
+  "fresh storage %s refuses pending backing from an earlier admission sharing the store",
+  async (boundary) => {
+    const f = await admittedWorker();
+    try {
+      const attemptID = await f.attempt("starting");
+      const request: FactoryboxRuntimeInput = {
+        ...f.location,
+        attemptID,
+        sandboxID: factoryboxSandboxID(attemptID),
+        runtimeOwnerID: attemptID,
+        labels: {},
+        sharedSource: false,
+        runtimeHostImage: runtimeImage,
+        profile,
+      };
+      await f.database
+        .client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request,identity)
+        VALUES(${attemptID},${JSON.stringify(request)}::jsonb,${JSON.stringify(f.identity)}::jsonb)`;
+      await f.database.client`UPDATE factory.runtime_attempt
+        SET state='stopped',stop_intended_at=now(),stopped_at=now() WHERE id=${attemptID}`;
+      await recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, {
+        actorID: f.actorID,
+        requestID: crypto.randomUUID(),
+      });
+      const selected = await retainedFactoryboxProfile(f.database.client);
+      const location = await f.worker.location();
+      await f.worker.provision(resources(location, runtimeImage, selected), selected, runtimeImage);
+      const current = await factoryboxAllocation(f.database.client);
+      expect(current.claimUID).toBe(f.original.claimUID);
+      const pod = f.kube.objects.get(`pod/${current.podName}`);
+      if (!pod) throw new Error("Missing retained successor Pod");
+      Reflect.set(pod, "status", { phase: "Succeeded" });
+      const before = [
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission ORDER BY id`),
+      ];
+      const fresh = {
+        actorID: f.actorID,
+        requestID: crypto.randomUUID(),
+        storage: "fresh" as const,
+      };
+      const recovering =
+        boundary === "command"
+          ? recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, fresh)
+          : f.database.client`UPDATE factory.factorybox_worker_admission
+            SET retired_at=now(),retirement_observation=${JSON.stringify({
+              version: 1,
+              kind: "operator-recovery",
+              podUID: current.podUID,
+              phase: "Succeeded",
+              namespaceUID: current.namespaceUID,
+              ...fresh,
+            })}::jsonb WHERE id=${current.admissionID}`.then(() => {});
+      await expect(recovering).rejects.toThrow("confirmed private backing cleanup");
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission ORDER BY id`),
+      ]).toEqual(before);
+    } finally {
+      await f.dispose();
+    }
+  },
+  30_000,
+);
+
 test.each([
   "running",
   "missing",

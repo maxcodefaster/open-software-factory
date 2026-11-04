@@ -24,11 +24,13 @@
 {{- if or (lt $minimumStoreGiB 8) (gt $minimumStoreGiB $storeGiB) }}
 {{- fail "factorybox.minimumStoreGiB must be a whole number between 8 and storeGiB" }}
 {{- end }}
-{{- if or (ne (toString .Values.factorybox.storeGiB) (printf "%d" $storeGiB)) (lt $storeGiB 8) (gt $storeGiB 32) }}
-{{- fail "factorybox.storeGiB must be a whole number between 8 and 32" }}
+{{- /* Largest whole-GiB quantity whose byte count is a safe JavaScript integer. */}}
+{{- $maxSafeStorageGiB := 8388607 }}
+{{- if or (ne (toString .Values.factorybox.storeGiB) (printf "%d" $storeGiB)) (lt $storeGiB 8) (gt $storeGiB $maxSafeStorageGiB) }}
+{{- fail "factorybox.storeGiB must be a whole number of at least 8 with a safely representable byte count" }}
 {{- end }}
-{{- if or (ne (toString .Values.factorybox.claimGiB) (printf "%d" $claimGiB)) (lt $claimGiB 32) (gt $claimGiB 1024) (lt $claimGiB (add $storeGiB 17)) }}
-{{- fail "factorybox.claimGiB must be a whole number between 32 and 1024 and at least storeGiB + 17" }}
+{{- if or (ne (toString .Values.factorybox.claimGiB) (printf "%d" $claimGiB)) (lt $claimGiB 32) (gt $claimGiB $maxSafeStorageGiB) (lt $claimGiB (add $storeGiB 17)) }}
+{{- fail "factorybox.claimGiB must be a safely representable whole-GiB quantity of at least 32 and at least storeGiB + 17" }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap

@@ -78,7 +78,7 @@ test.skipIf(process.env["FACTORY_STORAGE_ADMISSION_LIVE"] !== "1")(
         JSON.stringify({ nativeImageStartAndChecksMs: Math.round(performance.now() - started) }),
       );
       expect(code).toBe(0);
-      expect(error).toContain("Ran 6 tests");
+      expect(error).toContain("Ran 7 tests");
       expect(error).toMatch(/\nOK\s*$/);
     } finally {
       await dispose();

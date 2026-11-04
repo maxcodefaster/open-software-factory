@@ -64,18 +64,27 @@ validation exceeded the former ten-minute default before bootstrap settled; a
 timeout does not authorize resetting retained state or deleting an in-flight claim.
 
 Size private execution storage before the first execution pins the worker profile.
-`factorybox.storeGiB` defaults to a 32 GiB maximum and accepts whole sizes from 8 through 32 GiB.
+`factorybox.storeGiB` defaults to a 64 GiB maximum and accepts whole sizes of at least 8 GiB
+whose byte counts are safe integers.
 `factorybox.minimumStoreGiB` defaults to 8 and must not exceed that maximum.
 The pinned worker must support the `bounded-min-bytes` contract. On its actual backing
 filesystem it chooses the largest whole-GiB size in the range while preserving its 12 GiB
 host floor and existing 4 GiB operating write reserve. Factory retains the actual selected size in its native identity, not as a mutable
 installation setting. Existing admitted profiles and stores are never resized by an upgrade.
-`factorybox.claimGiB` defaults to 64 and must cover the maximum bounded image plus 17 GiB
+`factorybox.claimGiB` defaults to 128 and must cover the maximum bounded image plus 17 GiB
 for the host admission floor and metadata. For example, a 24 GiB bounded image needs
 at least a 41 GiB claim; a 48 GiB claim leaves additional room. Canonical Project source remains on its separate
 claim; source files are not moved into the bounded image.
 Changing these values is not an in-place storage expansion. An already observed
 worker refuses a different profile and retains its original objects and data.
+If an admitted store is undersized, the authenticated System Manager command
+`POST /api/admin/worker/recover` accepts `{"requestID":"<new UUID>","storage":"fresh"}`.
+First Stop all execution and observe its private backing cleanup, then terminate the exact
+original worker while retaining its Pod object for terminal observation. Fresh recovery refuses
+unresolved backing from any admission sharing the old claim. It records a new store intent,
+keeps the old claim and history, and retains canonical Source on its original claim and node.
+Omitting `storage` retains the exact original store. Retry a request only with the same UUID and
+storage selection. See [ADR 0036](../../../docs/adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
 Larger storage does not qualify a new node, kernel or storage backend; native
 admission and lifecycle verification still apply.
 

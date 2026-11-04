@@ -310,6 +310,9 @@ lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execu
 An explicit System Manager recovery may admit a successor after the original exact-UID Pod
 terminates and prior execution settles. It keeps the original store and Source claim, with new
 worker/epoch and export identities. See [admitted worker recovery](adr/0031-recover-an-admitted-worker-with-its-retained-store.md).
+Explicit fresh-storage recovery instead admits a distinct store only after confirmed backing
+cleanup across all admissions sharing the previous claim. The original store, history and
+canonical Source claim remain unchanged. See [fresh execution storage](adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
 
 Each immutable worker profile includes its explicit `arm64` or `amd64` architecture, exact image
 and executable, node and kernel. Fresh automatic admissions also retain the aggregate CPU and

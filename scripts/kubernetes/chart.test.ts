@@ -164,11 +164,11 @@ test("worker storage capacity is explicit before its immutable first admission",
     (resource) =>
       resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
   );
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(32 * 1024 ** 3));
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(64 * 1024 ** 3));
   expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]).toBe(
     String(8 * 1024 ** 3),
   );
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("64");
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("128");
   const result = await helm([
     "template",
     "portable",
@@ -191,7 +191,7 @@ test("worker storage capacity is explicit before its immutable first admission",
   expect(config?.data?.["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]).toBe(String(8 * 1024 ** 3));
 });
 
-test.each(["0", "7", "8.5", "33"])(
+test.each(["0", "7", "8.5", "65"])(
   "worker rejects an invalid automatic minimum %s",
   async (minimum) => {
     const result = await helm([
@@ -206,6 +206,28 @@ test.each(["0", "7", "8.5", "33"])(
     expect(result.stderr).toContain("factorybox.minimumStoreGiB");
   },
 );
+
+test("worker chart accepts a larger store with actual claim headroom", async () => {
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "factorybox.storeGiB=256",
+    "--set",
+    "factorybox.claimGiB=512",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const config = parseAllDocuments(result.stdout)
+    .map((document) => document.toJSON() as Resource)
+    .find(
+      (resource) =>
+        resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
+    );
+  expect(config?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(256 * 1024 ** 3));
+  expect(config?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("512");
+});
 
 test("fresh worker CPU requests are distinct from their qualified burst ceiling", async () => {
   const defaults = (await resources()).find(
@@ -313,12 +335,12 @@ test("operators can right-size dependency CPU reservations without raising their
 
 test.each([
   { store: "7", claim: "32" },
-  { store: "33", claim: "64" },
+  { store: "64", claim: "80" },
   { store: "8.5", claim: "32" },
   { store: "24", claim: "40" },
   { store: "8", claim: "31" },
   { store: "8", claim: "32.5" },
-  { store: "8", claim: "2048" },
+  { store: "8", claim: "8388608" },
 ])("worker storage capacity rejects invalid operator values $store/$claim", async (capacity) => {
   const result = await helm([
     "template",

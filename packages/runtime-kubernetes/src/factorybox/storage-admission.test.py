@@ -87,9 +87,26 @@ class StorageAdmission(unittest.TestCase):
                 self.admit()
 
     def test_invalid_profiles_refuse(self):
-        for capacity in (0, 7 * GIB, 8 * GIB + 1, 33 * GIB, True):
+        for capacity in (0, 7 * GIB, 8 * GIB + 1, 2 ** 53, True):
             with self.subTest(capacity=capacity), self.assertRaises(ValueError):
                 required_capacity(capacity)
+
+    def test_large_profiles_keep_actual_capacity_admission(self):
+        for size in (64, 256, 2048):
+            with self.subTest(size=size):
+                required = (size + 16) * GIB
+                self.assertEqual(required_capacity(size * GIB), required)
+                for available in (required - 1, required):
+                    with patch("os.fstatvfs", return_value=SimpleNamespace(
+                            f_bavail=available, f_blocks=available, f_frsize=1, f_bsize=1)):
+                        if available < required:
+                            with self.assertRaisesRegex(RuntimeError, "insufficient.*storage"):
+                                admit_capacity(self.root, POD, STORE, size * GIB,
+                                               observe=self.messages.append)
+                        else:
+                            self.assertEqual(admit_capacity(
+                                self.root, POD, STORE, size * GIB,
+                                observe=self.messages.append)["state"], "ready")
 
 
 unittest.main()

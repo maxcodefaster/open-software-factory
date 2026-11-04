@@ -21,6 +21,8 @@ export const ownedRuntimeConfiguration = {
   FACTORY_FACTORYBOX_WORKER_IMAGE: ownedFactoryboxProfile.image,
   FACTORY_FACTORYBOX_EXECUTABLE_SHA256: ownedFactoryboxProfile.executableSHA256,
   FACTORY_FACTORYBOX_CPU_REQUEST_MILLI: String(ownedFactoryboxProfile.cpuRequestMilli),
+  FACTORY_FACTORYBOX_BOUNDED_BYTES: String(ownedFactoryboxProfile.boundedBytes),
+  FACTORY_FACTORYBOX_CLAIM_GIB: String(ownedFactoryboxProfile.claimGiB),
   FACTORY_FACTORYBOX_ARCHITECTURE: ownedFactoryboxProfile.architecture,
   FACTORY_FACTORYBOX_NODE: ownedFactoryboxProfile.nodeName,
   FACTORY_FACTORYBOX_KERNEL: ownedFactoryboxProfile.kernel,

@@ -99,11 +99,17 @@ export function createApiProtocol(services: ApiServices) {
         if (!session) return json({ error: "Authentication required" }, 401);
         await accessController.authorizeAPI(request, session.user.id);
         if (url.pathname === "/api/admin/worker/recover" && request.method === "POST") {
-          const input = z.strictObject({ requestID: z.uuid() }).parse(await request.json());
+          const input = z
+            .strictObject({
+              requestID: z.uuid(),
+              storage: z.enum(["retain", "fresh"]).optional(),
+            })
+            .parse(await request.json());
           return json(
             await runtimeController.recoverWorker({
               actorID: session.user.id,
               requestID: input.requestID,
+              ...(input.storage ? { storage: input.storage } : {}),
             }),
           );
         }

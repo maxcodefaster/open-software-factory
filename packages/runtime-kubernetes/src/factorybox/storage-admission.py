@@ -14,7 +14,7 @@ HOST_WRITE_RESERVE = 4 * 1024 ** 3
 
 def required_capacity(bounded_bytes):
     if (type(bounded_bytes) is not int or
-            bounded_bytes < 8 * 1024 ** 3 or bounded_bytes > 32 * 1024 ** 3 or
+            bounded_bytes < 8 * 1024 ** 3 or bounded_bytes > 2 ** 53 - 1 or
             bounded_bytes % (1024 ** 3)):
         raise ValueError('Storage admission requires the exact bounded worker capacity')
     return bounded_bytes + HOST_FREE_FLOOR + HOST_WRITE_RESERVE

@@ -3,9 +3,11 @@ import { factoryboxLocation } from "./factorybox-location";
 import {
   configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeInput,
+  factoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
+import { factoryboxWorkerIdentity } from "./factorybox-worker";
 
 const retainedProfile = {
   image: `registry.example/worker@sha256:${"a".repeat(64)}`,
@@ -26,6 +28,44 @@ const input: FactoryboxRuntimeInput = {
   profile: retainedProfile,
   sharedSource: true,
 };
+
+test("fresh storage budgets are bounded by safe quantities and their claim, not a 32 GiB ceiling", () => {
+  for (const sizeGiB of [64, 256, 2048]) {
+    const profile = factoryboxRuntimeProfile.parse({
+      ...retainedProfile,
+      boundedBytes: sizeGiB * 1024 ** 3,
+      minimumBoundedBytes: 20 * 1024 ** 3,
+      claimGiB: sizeGiB + 32,
+    });
+    const request = factoryboxRuntimeRequest({ ...input, profile });
+    expect(request.boundedBytes).toBe(profile.boundedBytes);
+    const rendered = renderFactoryboxRuntime({ ...input, profile });
+    expect(rendered.claim.spec.resources.requests.storage).toBe(`${sizeGiB + 32}Gi`);
+    expect(rendered.pod.spec.containers[0]?.args).toContain(String(profile.boundedBytes));
+    expect(
+      factoryboxWorkerIdentity.parse({
+        version: 1,
+        namespaceUID: "owned-namespace",
+        podUID: "owned-pod",
+        claimUID: "owned-claim",
+        storeID: "a".repeat(32),
+        epoch: "b".repeat(32),
+        bootID: "owned-boot",
+        nodeBootID: "owned-node-boot",
+        executableSHA256: profile.executableSHA256,
+        controllerRoot: "/owned/controller",
+        boundedBytes: profile.boundedBytes,
+      }).boundedBytes,
+    ).toBe(profile.boundedBytes);
+  }
+  for (const invalid of [
+    { boundedBytes: 64 * 1024 ** 3, claimGiB: 64 },
+    { boundedBytes: Number.MAX_SAFE_INTEGER + 1, claimGiB: 32 },
+    { boundedBytes: 64 * 1024 ** 3, claimGiB: Number.MAX_SAFE_INTEGER },
+  ]) {
+    expect(() => factoryboxRuntimeProfile.parse({ ...retainedProfile, ...invalid })).toThrow();
+  }
+});
 
 test("fresh worker admission checks its real backing capacity before native startup", () => {
   const profile = configuredFactoryboxRuntimeProfile({

@@ -22,6 +22,11 @@ import { CommandError } from "../command-error";
 import { factoryboxAllocation, withFactoryboxWorkerLock } from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
+export type WorkerRecoveryInput = {
+  actorID: string;
+  requestID: string;
+  storage?: "retain" | "fresh";
+};
 const refused = (message: string) => new CommandError("conflict", message);
 
 export async function recoverFactoryboxWorker(
@@ -29,10 +34,11 @@ export async function recoverFactoryboxWorker(
   kubernetes: KubernetesClient,
   configured: FactoryboxRuntimeProfile,
   bootstrapImage: string,
-  input: { actorID: string; requestID: string },
+  input: WorkerRecoveryInput,
   admitResources = admitFactoryboxWorkerResources,
 ) {
   z.uuid().parse(input.requestID);
+  const storage = z.enum(["retain", "fresh"]).parse(input.storage ?? "retain");
   factoryboxRuntimeImage.parse(bootstrapImage);
   const sql = database.coordination();
   try {
@@ -51,10 +57,17 @@ export async function recoverFactoryboxWorker(
             await transaction`SELECT id FROM factory.factorybox_worker WHERE singleton`;
           if (!original) throw refused("No retained worker exists to recover");
           const [completed] = await transaction<
-            Array<{ workerID: string; previousID: string; actorID: string; kind: string | null }>
+            Array<{
+              workerID: string;
+              previousID: string;
+              actorID: string;
+              kind: string | null;
+              storage: string | null;
+            }>
           >`
             SELECT admitted.worker_id AS "workerID",admitted.previous_id AS "previousID",
-              admitted.created_by AS "actorID",previous.retirement_observation->>'kind' AS kind
+              admitted.created_by AS "actorID",previous.retirement_observation->>'kind' AS kind,
+              previous.retirement_observation->>'storage' AS storage
             FROM factory.factorybox_worker_admission admitted
             LEFT JOIN factory.factorybox_worker_admission previous ON previous.id=admitted.previous_id
             WHERE admitted.id=${input.requestID}`;
@@ -63,7 +76,8 @@ export async function recoverFactoryboxWorker(
               completed.workerID !== original["id"] ||
               completed.actorID !== input.actorID ||
               !completed.previousID ||
-              completed.kind !== "operator-recovery"
+              completed.kind !== "operator-recovery" ||
+              (completed.storage ?? "retain") !== storage
             )
               throw refused("Recovery request belongs to another admission or actor");
             return {
@@ -127,21 +141,48 @@ export async function recoverFactoryboxWorker(
             throw refused(
               "Worker recovery cannot move Source or the retained store to another platform",
             );
+          if (storage === "fresh") {
+            const [pending] = await transaction`WITH store_admissions AS (
+              SELECT id FROM factory.factorybox_worker_admission
+              WHERE worker_id=${current.id} AND claim_uid=${current.claimUID}
+            ) SELECT 1 WHERE
+              EXISTS(SELECT 1 FROM factory.factorybox_runtime runtime
+                JOIN factory.runtime_attempt attempt ON attempt.id=runtime.runtime_attempt_id
+                WHERE attempt.factorybox_admission_id IN (SELECT id FROM store_admissions)
+                  AND runtime.inputs_released_at IS NULL)
+              OR EXISTS(SELECT 1 FROM factory.execution_slot slot
+                WHERE slot.factorybox_admission_id IN (SELECT id FROM store_admissions)
+                  AND slot.assigned_attempt_id IS NULL
+                  AND (slot.factorybox_start_attempted OR slot.factorybox_fork_attempted)
+                  AND slot.factorybox_retirement_observation IS NULL)
+              OR EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation operation
+                JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+                WHERE attempt.factorybox_admission_id IN (SELECT id FROM store_admissions)
+                  AND operation.action IN ('retire-checkpoint','retire-resume','retire-sandbox')
+                  AND operation.completed_at IS NULL)`;
+            if (pending)
+              throw refused(
+                "Fresh storage requires confirmed private backing cleanup; retain the store to continue unresolved retirement",
+              );
+          }
           const previousStore = profile.retainedStore ?? {
             storeID: current.identity?.storeID,
             initializedByPodUID: current.podUID,
             boundedBytes: current.identity?.boundedBytes ?? profile.boundedBytes,
           };
+          const selection =
+            storage === "fresh"
+              ? { ...next, storageAdmission: 1 as const }
+              : {
+                  ...next,
+                  boundedBytes: profile.boundedBytes,
+                  minimumBoundedBytes: profile.minimumBoundedBytes,
+                  claimGiB: profile.claimGiB,
+                  retainedStore: previousStore,
+                };
+          if (storage === "fresh") delete selection.retainedStore;
           const selected = factoryboxRuntimeProfile.parse(
-            await admitResources(
-              factoryboxRuntimeProfile.parse({
-                ...next,
-                boundedBytes: profile.boundedBytes,
-                minimumBoundedBytes: profile.minimumBoundedBytes,
-                claimGiB: profile.claimGiB,
-                retainedStore: previousStore,
-              }),
-            ),
+            await admitResources(factoryboxRuntimeProfile.parse(selection)),
           );
           const location = factoryboxLocation(current.id, input.requestID);
           const rendered = renderFactoryboxRuntime({
@@ -157,13 +198,14 @@ export async function recoverFactoryboxWorker(
           const originalDeclaration = factoryboxWorkerDeclaration.parse(current.declaration);
           const declaration = factoryboxWorkerDeclaration.parse({
             namespace: originalDeclaration.namespace,
-            claim: originalDeclaration.claim,
+            claim: storage === "fresh" ? rendered.claim : originalDeclaration.claim,
             pod: rendered.pod,
           });
           await transaction`UPDATE factory.factorybox_worker_admission
             SET retired_at=now(),retirement_observation=${JSON.stringify({
               version: 1,
               kind: "operator-recovery",
+              ...(storage === "fresh" ? { storage } : {}),
               podUID: pod.uid,
               phase: pod.phase,
               namespaceUID: namespace.uid,
@@ -173,7 +215,7 @@ export async function recoverFactoryboxWorker(
           await transaction`INSERT INTO factory.factorybox_worker_admission(
             id,worker_id,previous_id,profile,runtime_host_image,claim_uid,declaration,created_by)
             VALUES(${input.requestID},${current.id},${current.admissionID},
-              ${JSON.stringify(selected)}::text::jsonb,${bootstrapImage},${current.claimUID},
+              ${JSON.stringify(selected)}::text::jsonb,${bootstrapImage},${storage === "fresh" ? null : current.claimUID},
               ${JSON.stringify(declaration)}::text::jsonb,${input.actorID})`;
           return {
             workerID: current.id,

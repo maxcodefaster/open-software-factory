@@ -49,8 +49,8 @@ export const factoryboxRuntimeProfile = z
         boundedBytes: z
           .number()
           .int()
-          .min(8 * 1024 ** 3)
-          .max(32 * 1024 ** 3),
+          .safe()
+          .min(8 * 1024 ** 3),
       })
       .optional(),
     resourceAdmission: z
@@ -73,17 +73,21 @@ export const factoryboxRuntimeProfile = z
     boundedBytes: z
       .number()
       .int()
+      .safe()
       .min(8 * 1024 ** 3)
-      .max(32 * 1024 ** 3)
       .multipleOf(1024 ** 3),
     minimumBoundedBytes: z
       .number()
       .int()
+      .safe()
       .min(8 * 1024 ** 3)
-      .max(32 * 1024 ** 3)
       .multipleOf(1024 ** 3)
       .optional(),
-    claimGiB: z.number().int().min(32).max(1024),
+    claimGiB: z
+      .number()
+      .int()
+      .min(32)
+      .max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 ** 3)),
   })
   .refine((value) => (value.cpuRequestMilli ?? 3000) <= (value.resources?.cpuMilli ?? 3000), {
     message: "Worker CPU scheduling reserve exceeds its selected CPU ceiling",
@@ -119,13 +123,13 @@ export function configuredFactoryboxRuntimeProfile(
     architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
-    boundedBytes: Number(environment["FACTORY_FACTORYBOX_BOUNDED_BYTES"] ?? 8 * 1024 ** 3),
+    boundedBytes: Number(environment["FACTORY_FACTORYBOX_BOUNDED_BYTES"] ?? 64 * 1024 ** 3),
     ...(environment["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"] === undefined
       ? {}
       : {
           minimumBoundedBytes: Number(environment["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]),
         }),
-    claimGiB: Number(environment["FACTORY_FACTORYBOX_CLAIM_GIB"] ?? 32),
+    claimGiB: Number(environment["FACTORY_FACTORYBOX_CLAIM_GIB"] ?? 128),
   });
 }
 

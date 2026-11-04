@@ -25,10 +25,10 @@ factorybox:
   memoryHeadroomMiB: 2048
   # A fresh worker selects within these bounds from actual backing capacity.
   # The admitted size and existing worker profiles remain immutable.
-  storeGiB: 32
+  storeGiB: 64
   minimumStoreGiB: 8
   # Includes the bounded image, 16 GiB admission floor and metadata headroom.
-  claimGiB: 64
+  claimGiB: 128
 executionReserveTarget: 2
 
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.

@@ -102,10 +102,15 @@ was recorded and all previous execution is settled. The new admission has its ow
 store; canonical Source, old Pods, stores and Runtime Attempts retain their original identities.
 Opening a Project or reconnecting does not replace a worker. Recovery of an already admitted
 worker requires an explicit System Manager command after its exact original Pod has terminated
-and prior execution has settled. The successor reuses the original private store and Source claim;
+and prior execution has settled. By default the successor reuses the original private store and Source claim;
 it has a new Pod and native epoch, without replaying Agent work. See
 [admitted worker recovery](docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md)
 and [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
+An explicit `storage: "fresh"` recovery can admit a distinct store with the configured capacity
+only after private backing cleanup is confirmed across every admission sharing the old claim.
+The old store and execution history remain unchanged, and canonical Source keeps its exact claim,
+Namespace and node. This does not resize or migrate a retained store. See
+[fresh execution storage](docs/adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
 The successor can finish an exact private-backing retirement whose native Delete
 and preceding checkpoint retirements were already confirmed. Factory retains each
 reserve retirement receipt as it arrives, instead of losing completed steps when
@@ -122,7 +127,8 @@ native import. Later preparations reuse that verified base without the tar file.
 sweep performs this automatically; Source, snapshots and native backing remain retained.
 See [consumer transport retirement](docs/adr/0035-retire-transport-archives-after-native-import.md).
 Fresh admissions check actual backing-filesystem availability before native allocation. The chart
-defaults to an 8 GiB minimum, 32 GiB maximum and 64 GiB claim. The pinned worker selects a fixed
+defaults to an 8 GiB minimum, 64 GiB maximum and 128 GiB claim. Larger safe whole-GiB budgets
+are accepted when the claim covers the maximum plus 17 GiB. The pinned worker selects a fixed
 size in that range on the actual volume while preserving its native host floor and operating
 write reserve. Factory records the
 selected size in its immutable native identity. The worker must support `bounded-min-bytes` and pass

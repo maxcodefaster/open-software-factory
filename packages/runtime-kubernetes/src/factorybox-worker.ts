@@ -70,18 +70,22 @@ export const factoryboxWorkerRequest = z
     boundedBytes: z
       .number()
       .int()
+      .safe()
       .min(512 * 1024 ** 2)
-      .max(32 * 1024 ** 3)
       .multipleOf(4096),
     minimumBoundedBytes: z
       .number()
       .int()
+      .safe()
       .min(1024 ** 3)
-      .max(32 * 1024 ** 3)
       .multipleOf(1024 ** 3)
       .optional(),
     // Leave at least the worker's 12 GiB host reserve + 4 GiB admission headroom.
-    claimGiB: z.number().int().min(20).max(1024),
+    claimGiB: z
+      .number()
+      .int()
+      .min(20)
+      .max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 ** 3)),
     storageClass: z
       .string()
       .max(253)
@@ -118,8 +122,8 @@ export const factoryboxWorkerIdentity = z.strictObject({
   boundedBytes: z
     .number()
     .int()
+    .safe()
     .min(1024 ** 3)
-    .max(32 * 1024 ** 3)
     .multipleOf(1024 ** 3)
     .optional(),
 });
