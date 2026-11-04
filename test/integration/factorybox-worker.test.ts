@@ -1431,7 +1431,9 @@ test("lost worker create output observes only the original worker and cannot rec
     expect(kube.writes.filter((write) => write.kind === "Pod")).toHaveLength(1);
     const before = kube.writes.length;
     kube.objects.delete("pod/worker");
-    await expect(worker.provision(requested, profile, runtimeImage)).rejects.toThrow("no longer exists");
+    await expect(worker.provision(requested, profile, runtimeImage)).rejects.toThrow(
+      "no longer exists",
+    );
     expect(kube.writes).toHaveLength(before);
   } finally {
     await database.client.end({ timeout: 2 });
