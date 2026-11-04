@@ -1,3 +1,4 @@
+import { nativeLifecycleWindowMS } from "../../runtime-domain/src/timing";
 import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 import { z } from "zod";
 import { runCommand } from "./command";
@@ -640,7 +641,7 @@ export async function executeFactoryboxOperation(
   declaration?: FactoryboxWorkerDeclaration,
   beforeDispatch?: () => Promise<void>,
 ) {
-  const deadline = performance.now() + 420_000;
+  const deadline = performance.now() + nativeLifecycleWindowMS;
   const input = factoryboxWorkerRequest.parse(request);
   const admitted = factoryboxWorkerIdentity.parse(identity);
   const op = factoryboxOperation.parse(operation);

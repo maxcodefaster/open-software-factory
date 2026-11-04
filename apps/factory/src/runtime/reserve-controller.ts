@@ -14,6 +14,7 @@ import {
   factoryboxReserveInput,
   type ReserveClient,
 } from "../../../../packages/runtime-kubernetes/src/reserve";
+import { reportFailure } from "../failure-log";
 import { createReserveStore } from "./reserve-store";
 import { createStagingTemplateProducer } from "./staging-template";
 import {
@@ -175,7 +176,7 @@ export function createExecutionReserve(
         await reconcile();
       } while (requested && !closed);
     })()
-      .catch(() => {})
+      .catch(reportFailure("Execution reserve reconciliation"))
       .finally(() => {
         running = null;
       });

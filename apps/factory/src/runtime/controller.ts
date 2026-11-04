@@ -1,5 +1,7 @@
+import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { createForgejoClient, type ForgeRepository } from "../../../../packages/forge/src/forge";
+import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import type { ComputeClass } from "../../../../packages/runtime-domain/src/compute";
 import {
   hashConnectorToken,
@@ -36,6 +38,7 @@ import {
 } from "../../../../packages/workspace-domain/src/workspace";
 import { createAccessController } from "../access/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
+import { logFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
 import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
 import { createComputeWait } from "../usage/compute-wait";
@@ -112,18 +115,6 @@ function requirePinnedRuntimeHostImage(value: string | undefined) {
   return value;
 }
 
-function repositoryFromURL(value: string): ForgeRepository {
-  const url = new URL(value);
-  const parts = url.pathname
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  const owner = parts.at(-2);
-  const name = parts.at(-1);
-  if (!owner || !name) throw new SystemContractError("Project repository URL is invalid");
-  return { owner, name };
-}
-
 export function createRuntimeController(
   database: Database,
   hub: RuntimeHub,
@@ -169,10 +160,12 @@ export function createRuntimeController(
     if (reconnectObservations.has(attemptID)) return;
     const timer = setTimeout(() => {
       reconnectObservations.delete(attemptID);
-      void updateStatus(attemptID, "disconnected", "Waiting for runtime connectors").catch(() => {
-        console.error("Runtime reconnect observation failed");
-        observeReconnectLater(attemptID);
-      });
+      void updateStatus(attemptID, "disconnected", "Waiting for runtime connectors").catch(
+        (cause) => {
+          logFailure("Runtime reconnect observation", cause);
+          observeReconnectLater(attemptID);
+        },
+      );
     }, 15_000);
     timer.unref();
     reconnectObservations.set(attemptID, timer);
@@ -319,7 +312,10 @@ export function createRuntimeController(
       if (repositoryURL.startsWith("file://")) {
         content = await readRepositoryFileAtRevision(repositoryURL, revision, systemContractPath);
       } else {
-        const repository = repositoryFromURL(repositoryURL);
+        const repository = forgeRepositoryFromURL(
+          repositoryURL,
+          () => new SystemContractError("Project repository URL is invalid"),
+        );
         if (repository.owner !== FACTORY_FORGEJO_OWNER) {
           throw new Error("Project Forge owner is not allowed");
         }
@@ -644,7 +640,7 @@ export function createRuntimeController(
     podName: string,
     resources: readonly unknown[],
   ) {
-    let deadline = performance.now() + 420_000;
+    let deadline = performance.now() + nativeLifecycleWindowMS;
     let workerReady = false;
     // Reconcile Start once per observer, including after Factory recovery.
     // Waiting for repository hooks must not repeat native preparation checks.
@@ -683,7 +679,7 @@ export function createRuntimeController(
           // Worker/PVC admission is platform preparation, not time spent on
           // this Sandbox's qualified lifecycle. Keep each window bounded.
           workerReady = true;
-          deadline = performance.now() + 420_000;
+          deadline = performance.now() + nativeLifecycleWindowMS;
         }
         try {
           if (!startConfirmed) {
@@ -702,7 +698,7 @@ export function createRuntimeController(
             // A verified refusal precedes native dispatch. Admission waiting
             // must not spend the Sandbox's qualified lifecycle window.
             // Unknown outcomes keep the original deadline and are not replayed.
-            deadline = performance.now() + 420_000;
+            deadline = performance.now() + nativeLifecycleWindowMS;
           }
           const failure =
             cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed";

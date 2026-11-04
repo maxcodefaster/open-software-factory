@@ -1,5 +1,6 @@
 import { setTimeout as wait } from "node:timers/promises";
 import { z } from "zod";
+import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import {
   type AgentTurnCommand,
   agentTurnCommandInput,
@@ -35,6 +36,7 @@ import { attachmentContextIn, readableAttachmentIn } from "../attachments/store"
 import { createAttachmentTools } from "../attachments/tools";
 import type { ChangeView } from "../change/types";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import { codeReadInput } from "../knowledge/code-read";
 import type { createKnowledgeController } from "../knowledge/controller";
 import { type LearningSourceArtifact, retainLearningArtifactsIn } from "../learning/artifacts";
@@ -137,7 +139,7 @@ export function createProjectAgentController(
   const modelConnections = createModelConnections(
     database,
     createOpenBaoModelSecrets(),
-    process.env["FACTORY_AUTH_SECRET"] ?? "local-development-secret-change-before-production",
+    factorySigningSecret(),
     process.env["FACTORY_MODEL_ALLOWED_ORIGINS"]
       ?.split(",")
       .map((origin) => origin.trim())
@@ -682,7 +684,7 @@ export function createProjectAgentController(
     // Observe normal dispatches too, not only work found at process startup.
     // A provider promise may outlive its lease, or settlement may correctly
     // refuse an expired owner. Neither may leave the UI busy indefinitely.
-    void track(recoverTurn(owner.id)).catch(() => {});
+    void track(recoverTurn(owner.id)).catch(reportFailure("Project agent turn recovery"));
     try {
       let output: ProjectAgentOutput;
       const learningArtifacts: LearningSourceArtifact[] = [];
@@ -1032,7 +1034,7 @@ export function createProjectAgentController(
           if (record.state === "pending") {
             // Dispatch is tracked independently. Awaiting a provider here would
             // stop this very watcher from observing its lost lease.
-            void respond(record).catch(() => {});
+            void respond(record).catch(reportFailure("Project agent dispatch"));
           } else if (record.state === "dispatching" || record.state === "running") {
             if (await turns.quarantineExpiredProject(id)) {
               await createUsageJournal(database).abandon(`turn:${id}`);
@@ -1100,7 +1102,8 @@ export function createProjectAgentController(
       for (const record of pending) {
         // respond records unavailable/failed/uncertain outcomes itself. A DB
         // failure leaves durable intent for the next startup, not a paid retry.
-        if (!closed) void track(recoverTurn(record.id)).catch(() => {});
+        if (!closed)
+          void track(recoverTurn(record.id)).catch(reportFailure("Project agent turn recovery"));
       }
     },
     async get(projectID: string, ticketID: string | undefined, userID: string, contextID?: string) {

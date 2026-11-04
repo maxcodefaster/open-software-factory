@@ -1,3 +1,4 @@
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import type postgres from "postgres";
@@ -86,7 +87,8 @@ export function createFactoryboxExecution(
   let retiredCursor: RetiredBackingCursor = { attempts: null, slots: null };
   const deadlines = new AsyncLocalStorage<number>();
   const run: typeof transport = (args, input, limits) => {
-    const remaining = (deadlines.getStore() ?? performance.now() + 420_000) - performance.now();
+    const remaining =
+      (deadlines.getStore() ?? performance.now() + nativeLifecycleWindowMS) - performance.now();
     if (remaining <= 0)
       throw new Error("Factorybox lifecycle deadline expired; original intent was retained");
     return transport(args, input, {
@@ -97,7 +99,7 @@ export function createFactoryboxExecution(
   async function locked<T>(
     attemptID: string,
     action: (connection: SQL) => Promise<T>,
-    deadline = performance.now() + 420_000,
+    deadline = performance.now() + nativeLifecycleWindowMS,
   ) {
     const connection = database.coordination();
     try {
@@ -554,8 +556,12 @@ export function createFactoryboxExecution(
       return observed;
     }
     if (!saved.identity) throw new Error("Factorybox preparation identity is missing");
-    const result = await prepareFactoryboxRuntime(saved.request, saved.identity, run, 420_000, () =>
-      attempted(connection, operation),
+    const result = await prepareFactoryboxRuntime(
+      saved.request,
+      saved.identity,
+      run,
+      nativeLifecycleWindowMS,
+      () => attempted(connection, operation),
     );
     await completed(connection, operation, result);
     return result;

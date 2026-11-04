@@ -1,3 +1,4 @@
+import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { changeIdentity } from "../../../../packages/change-domain/src/change";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
@@ -5,7 +6,6 @@ import {
   createForgejoClient,
   ForgeAmbiguousWriteError,
   ForgeConflictError,
-  type ForgeRepository,
 } from "../../../../packages/forge/src/forge";
 import {
   createRequirementRevision,
@@ -14,6 +14,7 @@ import {
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { technicalPlanningOutstandingIn } from "../technical-design/store";
 import { codingBudgetIn } from "../usage/policy";
@@ -32,18 +33,6 @@ type ImplementationAdmission = {
   expectedBaseSHA?: string;
   admitBuild(sql: AgentTurnTransaction, changeID: string): Promise<unknown>;
 };
-
-function repositoryFromURL(value: string): ForgeRepository {
-  const url = new URL(value);
-  const parts = url.pathname
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  const owner = parts.at(-2);
-  const name = parts.at(-1);
-  if (!owner || !name) throw new Error("Project repository is not a Forge repository URL");
-  return { owner, name };
-}
 
 export function createChangeController(
   database: Database,
@@ -275,7 +264,9 @@ export function createChangeController(
         }
         if (change.state === "cancelling") {
           if (change.runtimeAttemptID) {
-            void runtime.stop(change.runtimeAttemptID).catch(() => undefined);
+            void runtime
+              .stop(change.runtimeAttemptID)
+              .catch(reportFailure("Cancelled change runtime stop"));
           }
           observeCancellation(change.id);
         }
@@ -526,7 +517,7 @@ export function createChangeController(
         `;
         if (!input)
           throw new CommandError("conflict", "Ticket requires an approved Requirement Revision");
-        const repository = repositoryFromURL(input.repositoryURL);
+        const repository = forgeRepositoryFromURL(input.repositoryURL);
         if (new URL(input.repositoryURL).origin !== new URL(FACTORY_FORGEJO_API_URL).origin)
           throw new Error("Project repository is not on the configured Forge");
         if (repository.owner !== FACTORY_FORGEJO_OWNER)

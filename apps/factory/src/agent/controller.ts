@@ -1,3 +1,4 @@
+import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import {
   candidateReviewPermissions,
   candidateReviewResultInput,
@@ -8,6 +9,7 @@ import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createChangeWriterController } from "../access/writer-controller";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createOpenBaoModelSecrets } from "../models/secrets";
@@ -176,7 +178,7 @@ export function createAgentController(
   const modelConnections = createModelConnections(
     database,
     createOpenBaoModelSecrets(),
-    process.env["FACTORY_AUTH_SECRET"] ?? "local-development-secret-change-before-production",
+    factorySigningSecret(),
     process.env["FACTORY_MODEL_ALLOWED_ORIGINS"]
       ?.split(",")
       .map((origin) => origin.trim())
@@ -201,12 +203,10 @@ export function createAgentController(
 
   function run(work: Promise<void>) {
     background.add(work);
-    void work
-      .catch(() => {})
-      .finally(() => {
-        background.delete(work);
-        notifyActivity();
-      });
+    void work.catch(reportFailure("Background agent work")).finally(() => {
+      background.delete(work);
+      notifyActivity();
+    });
   }
 
   async function row(changeID: string) {

@@ -1,3 +1,5 @@
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
+
 export function runtimeDocumentRequest(request: Request) {
   return request.method === "GET" && request.headers.get("sec-fetch-mode") === "navigate";
 }
@@ -14,7 +16,7 @@ export function createRuntimeDemand(
   now = () => performance.now(),
 ) {
   return async (attemptID: string, userID: string) => {
-    const deadline = now() + 420_000;
+    const deadline = now() + nativeLifecycleWindowMS;
     let requested = false;
     while (now() < deadline) {
       const current = await runtime.get(attemptID);

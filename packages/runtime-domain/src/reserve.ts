@@ -1,3 +1,5 @@
+import { nativeLifecycleWindowMS } from "./timing";
+
 export type ReserveRole = "staging" | "verification";
 export type ReserveState = "creating" | "ready" | "assigned" | "retiring" | "deleted";
 
@@ -55,7 +57,7 @@ export const defaultReservePolicy: ReservePolicy = {
   expiryMS: 15 * 60_000,
   // Native Fork preparation retains its lifecycle window. A cold Project
   // template also runs dependency hooks and uses its admitted expiry lease.
-  preparationMS: 420_000,
+  preparationMS: nativeLifecycleWindowMS,
   retryMS: 30_000,
 };
 

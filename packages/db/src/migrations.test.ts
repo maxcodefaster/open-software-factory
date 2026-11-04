@@ -1,22 +1,34 @@
-import { expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { describe, expect, test } from "bun:test";
+import { migrationFiles, pendingMigrations, readMigration, shippedMigrations } from "./migrations";
 
-test("Factory ships its Greenfield baseline and concrete retained-operation upgrades", async () => {
-  const directory = resolve(import.meta.dir, "../migrations");
-  const files = (await readdir(directory)).filter((file) => /^\d{4}_.+\.sql$/.test(file)).sort();
-  expect(files).toEqual([
-    "0001_baseline.sql",
-    "0002_worker_admissions.sql",
-    "0003_worker_declarations.sql",
-    "0004_worker_store_recovery.sql",
-    "0005_promotion_retries.sql",
-    "0006_ticket_execution_revision.sql",
-    "0007_execution_template_basis.sql",
-    "0008_public_image_build_inputs.sql",
-    "0009_execution_template_availability.sql",
-    "0010_slot_retirement_progress.sql",
-    "0011_fresh_worker_storage.sql",
-    "0012_runtime_app_origins.sql",
-  ]);
+describe("migration sequence", () => {
+  test("shipped files are one contiguous sequence that registers its own version", async () => {
+    const files = await shippedMigrations();
+    expect(files[0]?.name).toBe("0001_baseline.sql");
+    for (const file of files) {
+      const sql = await readMigration(file);
+      expect(sql).toMatch(
+        new RegExp(
+          `INSERT INTO factory\\.schema_migration\\(version\\)\\s*VALUES\\s*\\(${file.version}\\)`,
+        ),
+      );
+      if (file.version > 1) {
+        expect(sql.trimStart().startsWith("BEGIN;")).toBe(true);
+        expect(sql.trimEnd().endsWith("COMMIT;")).toBe(true);
+      }
+    }
+  });
+
+  test("applies only newer files and refuses unknown history or downgrades", () => {
+    const files = migrationFiles(["0001_a.sql", "0002_b.sql", "0003_c.sql", "notes.txt"]);
+    expect(pendingMigrations(files, [1]).map((file) => file.version)).toEqual([2, 3]);
+    expect(pendingMigrations(files, [1, 2, 3])).toEqual([]);
+    expect(() => pendingMigrations(files, [1, 3])).toThrow("Greenfield baseline");
+    expect(() => pendingMigrations(files, [2])).toThrow("Greenfield baseline");
+    expect(() => pendingMigrations(files, [1, 2, 3, 4])).toThrow("downgrade");
+  });
+
+  test("a gap in the shipped files is a build error", () => {
+    expect(() => migrationFiles(["0001_a.sql", "0003_c.sql"])).toThrow("contiguous");
+  });
 });

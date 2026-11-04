@@ -1,3 +1,4 @@
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { isDeepStrictEqual } from "node:util";
 import type { TransactionSql } from "postgres";
 import { z } from "zod";
@@ -42,7 +43,7 @@ export const terminatedFactoryboxWorkerFailure =
 export async function withFactoryboxWorkerLock<T>(
   sql: Database["client"],
   action: () => Promise<T>,
-  deadline = performance.now() + 420_000,
+  deadline = performance.now() + nativeLifecycleWindowMS,
 ) {
   const remaining = Math.ceil(deadline - performance.now());
   if (remaining <= 0) throw new Error("Factorybox worker deadline expired before admission");

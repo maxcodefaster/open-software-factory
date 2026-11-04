@@ -20,6 +20,7 @@ import {
   projectDevelopmentAuthorityIn,
 } from "../access/controller";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import type { ReleaseSecrets } from "./secrets";
 import { publicationWorkflow, validatePublicationWorkflow } from "./workflow";
 
@@ -803,7 +804,8 @@ export function createReleaseController(options: {
       const rows = await database.client<{ id: string }[]>`
         SELECT id FROM factory.project_release WHERE state NOT IN ('published','failed') AND ended_at IS NULL
         OR EXISTS(SELECT 1 FROM factory.release_attempt attempt WHERE attempt.release_id=project_release.id AND attempt.cleaned_at IS NULL)`;
-      for (const row of rows) await reconcileOne(row.id).catch(() => {});
+      for (const row of rows)
+        await reconcileOne(row.id).catch(reportFailure("Release reconciliation"));
       const grants = await database.client<
         { id: string; projectID: string }[]
       >`SELECT id,project_id AS "projectID" FROM factory.release_access WHERE state IN ('pending','revoking','uncertain') AND scope <> 'publish'`;
@@ -812,7 +814,7 @@ export function createReleaseController(options: {
           const [current] =
             await sql`SELECT id FROM factory.release_access WHERE id=${grant.id} AND state IN ('pending','revoking','uncertain')`;
           if (current) await revoke(grant.id);
-        }).catch(() => {});
+        }).catch(reportFailure("Release access revocation"));
     },
   };
 }

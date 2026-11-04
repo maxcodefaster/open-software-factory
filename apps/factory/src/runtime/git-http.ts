@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { runEnvironmentCommand } from "../../../../packages/runtime-kubernetes/src/command";
 
@@ -16,9 +17,9 @@ export async function removeRuntimeRepository(attemptID: string) {
 }
 
 export function runtimeSourceCapability(attemptID: string) {
-  const { FACTORY_AUTH_SECRET } = process.env;
-  const secret = FACTORY_AUTH_SECRET ?? "local-development-secret-change-before-production";
-  return createHmac("sha256", secret).update(`runtime-source:${attemptID}`).digest("hex");
+  return createHmac("sha256", factorySigningSecret())
+    .update(`runtime-source:${attemptID}`)
+    .digest("hex");
 }
 
 export function validRuntimeSourceCapability(attemptID: string, candidate: string) {

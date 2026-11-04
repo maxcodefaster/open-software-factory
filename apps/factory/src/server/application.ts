@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoAccess } from "../../../../packages/forge/src/access";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
@@ -44,6 +45,7 @@ import { createEnvironmentController } from "../environments/controller";
 import { createOpenBaoEnvironmentSecrets } from "../environments/openbao";
 import { createRuntimeEnvironmentEndpoint } from "../environments/runtime";
 import { createEnvironmentService } from "../environments/service";
+import { reportFailure } from "../failure-log";
 import { createInboxService } from "../inbox/service";
 import { installationInMaintenance } from "../installation/maintenance";
 import { createKnowledgeController } from "../knowledge/controller";
@@ -135,7 +137,7 @@ export async function createFactoryApplication() {
   const ticketDocuments = createTicketDocumentController(database, (sql, input) =>
     projectAgentController.admitTechnicalIn(sql, input),
   );
-  const runtimeSecret = FACTORY_AUTH_SECRET ?? "local-development-secret-change-before-production";
+  const runtimeSecret = factorySigningSecret();
   const factoryAuth = createIdentityConfiguration(database, runtimeSecret, undefined, [
     "https://login.microsoftonline.com",
     ...(process.env["FACTORY_IDENTITY_ALLOWED_ORIGINS"]
@@ -427,7 +429,7 @@ export async function createFactoryApplication() {
     runtimeSecret,
     factoryOrigin,
     (projectId) => {
-      void monitoringWorker.project(projectId).catch(() => {});
+      void monitoringWorker.project(projectId).catch(reportFailure("Monitoring project run"));
     },
   );
   const monitoringWorker = createMonitoringWorker(database, {

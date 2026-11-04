@@ -1,3 +1,4 @@
+import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -144,7 +145,7 @@ export function createConformanceRuntime(
   const resources = conformanceResources(owner, image, profile, certificate, project);
   const { input, declaration } = resources;
   const request = factoryboxRuntimeRequest(input);
-  const workloadDeadline = performance.now() + 420_000;
+  const workloadDeadline = performance.now() + nativeLifecycleWindowMS;
   let deadline = workloadDeadline;
   let cleanupStarted = false;
   let identity: FactoryboxWorkerIdentity | undefined;
@@ -441,7 +442,7 @@ print(json.dumps({'importSourceRetired':True,'nativeBaseReverified':True,'sealed
       await save("workload-complete.json", {
         owner,
         passed: true,
-        elapsedMS: performance.now() - (workloadDeadline - 420_000),
+        elapsedMS: performance.now() - (workloadDeadline - nativeLifecycleWindowMS),
       });
       succeeded = true;
     },
@@ -450,7 +451,7 @@ print(json.dumps({'importSourceRetired':True,'nativeBaseReverified':True,'sealed
       // own bounded window, without extending workload admission or restarting
       // that window when a retirement failure recursively fences this worker.
       if (!cleanupStarted) {
-        deadline = performance.now() + 420_000;
+        deadline = performance.now() + nativeLifecycleWindowMS;
         cleanupStarted = true;
       }
       if (started && !succeeded) {

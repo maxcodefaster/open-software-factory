@@ -1,3 +1,5 @@
+import { logFailure } from "../failure-log";
+
 // One process owns these observations. Skipped ticks are not queued or replayed.
 export function createBackgroundJobs() {
   const timers = new Set<ReturnType<typeof setInterval>>();
@@ -19,7 +21,7 @@ export function createBackgroundJobs() {
         .then(operation)
         .then(
           () => {},
-          () => console.error(failure),
+          (cause) => logFailure(failure, cause),
         )
         .finally(() => {
           active = false;

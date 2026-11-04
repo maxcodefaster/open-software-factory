@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { createDatabase } from "./client";
+import { pendingMigrations, readMigration, shippedMigrations } from "./migrations";
 
 const { client } = createDatabase(1);
 let locked = false;
@@ -16,6 +15,7 @@ try {
   }
   await client`SELECT pg_advisory_lock(hashtext('factory-schema-migration'))`;
   locked = true;
+  const files = await shippedMigrations();
   const current = await client<{ relation: string }[]>`
     SELECT COALESCE(to_regclass('factory.schema_migration')::text, '') AS relation
   `;
@@ -26,98 +26,22 @@ try {
       throw new Error(
         "Factory requires an empty database for its Greenfield baseline; existing schemas were not changed",
       );
-    const baseline = await readFile(
-      resolve(import.meta.dir, "../migrations/0001_baseline.sql"),
-      "utf8",
-    );
-    await client.unsafe(baseline);
+    const [baseline] = files;
+    if (!baseline) throw new Error("Factory ships no baseline migration");
+    await client.unsafe(await readMigration(baseline));
   }
-  const versions = await client<{ version: number }[]>`
+  const applied = await client<{ version: number }[]>`
     SELECT version FROM factory.schema_migration ORDER BY version
   `;
-  if (
-    versions[0]?.version !== 1 ||
-    versions.length > 12 ||
-    versions.some((value, index) => value.version !== index + 1)
-  )
-    throw new Error(
-      "Factory requires its Greenfield baseline in a fresh database; historical migration state was not changed",
-    );
-  if (versions.length === 1)
-    await client.unsafe(
-      await readFile(resolve(import.meta.dir, "../migrations/0002_worker_admissions.sql"), "utf8"),
-    );
-  if (versions.length <= 2)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0003_worker_declarations.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 3)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0004_worker_store_recovery.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 4)
-    await client.unsafe(
-      await readFile(resolve(import.meta.dir, "../migrations/0005_promotion_retries.sql"), "utf8"),
-    );
-  if (versions.length <= 5)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0006_ticket_execution_revision.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 6)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0007_execution_template_basis.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 7)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0008_public_image_build_inputs.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 8)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0009_execution_template_availability.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 9)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0010_slot_retirement_progress.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 10)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0011_fresh_worker_storage.sql"),
-        "utf8",
-      ),
-    );
-  if (versions.length <= 11)
-    await client.unsafe(
-      await readFile(
-        resolve(import.meta.dir, "../migrations/0012_runtime_app_origins.sql"),
-        "utf8",
-      ),
-    );
+  for (const file of pendingMigrations(
+    files,
+    applied.map((row) => row.version),
+  ))
+    await client.unsafe(await readMigration(file));
 } catch (cause) {
   // A failed transactional step must roll back before releasing the session
   // lock, otherwise 25P02 masks the actual migration error.
-  await client`ROLLBACK`;
+  await client`ROLLBACK`.catch(() => undefined);
   throw cause;
 } finally {
   if (locked) await client`SELECT pg_advisory_unlock(hashtext('factory-schema-migration'))`;

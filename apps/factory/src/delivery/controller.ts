@@ -1,3 +1,4 @@
+import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import type { z } from "zod";
 import type { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
 import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
@@ -19,6 +20,7 @@ import {
   projectDevelopmentAuthorityIn,
 } from "../access/controller";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import { monitoringChangeAuthorityIn } from "../monitoring/authority";
 import { monitoringCandidate } from "../monitoring/candidate";
 import type { RuntimeAttemptView } from "../runtime/types";
@@ -47,18 +49,6 @@ type AgentController = {
 
 const workflowPath = ".forgejo/workflows/factory-verification.yml";
 const workflowID = "factory-verification.yml";
-
-function repositoryFromURL(value: string): ForgeRepository {
-  const url = new URL(value);
-  const parts = url.pathname
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  const owner = parts.at(-2);
-  const name = parts.at(-1);
-  if (!owner || !name) throw new Error("Project repository is not a Forge repository URL");
-  return { owner, name };
-}
 
 function bounded(value: string, limit = 2_000) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
@@ -142,7 +132,7 @@ export function createDeliveryController(
   }
 
   async function ensurePullRequest(change: NonNullable<Awaited<ReturnType<typeof changeRow>>>) {
-    const repository = repositoryFromURL(change.repositoryURL);
+    const repository = forgeRepositoryFromURL(change.repositoryURL);
     if (repository.owner !== allowedOwner) {
       throw new Error("Project Forge owner is not allowed");
     }
@@ -246,7 +236,9 @@ export function createDeliveryController(
       // Stop is durable intent, not completed cleanup. Its runtime owner keeps
       // reconciling; another Delivery sweep must not reset its retry policy.
       if (attempt && attempt.state !== "stopped" && !attempt.stopping)
-        await runtime.stop(verification.runtimeAttemptID).catch(() => undefined);
+        await runtime
+          .stop(verification.runtimeAttemptID)
+          .catch(reportFailure("Verification runtime stop"));
     }
     if (verification.runnerID) {
       try {
@@ -855,7 +847,7 @@ export function createDeliveryController(
       }
       if (change.trashed || ["cancelling", "cancelled"].includes(change.state)) {
         if (integration) await coordination.release(change.id);
-        await cancelVerifications(change.id, repositoryFromURL(change.repositoryURL));
+        await cancelVerifications(change.id, forgeRepositoryFromURL(change.repositoryURL));
         return;
       }
       if (!change.commitSHA || change.state === "failed") {
@@ -864,11 +856,11 @@ export function createDeliveryController(
       }
       await cancelVerifications(
         change.id,
-        repositoryFromURL(change.repositoryURL),
+        forgeRepositoryFromURL(change.repositoryURL),
         change.commitSHA,
       );
       if (change.state === "delivered") {
-        await reconcilePromotion(change, repositoryFromURL(change.repositoryURL));
+        await reconcilePromotion(change, forgeRepositoryFromURL(change.repositoryURL));
         if (integration) await coordination.release(change.id);
         return;
       }
@@ -916,7 +908,9 @@ export function createDeliveryController(
         }
         if (!(await coordination.claim(change.projectID, change.id))) return;
         if (change.state === "active") {
-          const currentBase = await forge.getDefaultBranch(repositoryFromURL(change.repositoryURL));
+          const currentBase = await forge.getDefaultBranch(
+            forgeRepositoryFromURL(change.repositoryURL),
+          );
           if (currentBase.headSha !== change.baseSHA) {
             if (!(await integration.reconcile(changeID, currentBase.headSha))) {
               await coordination.release(changeID);
@@ -1086,7 +1080,7 @@ export function createDeliveryController(
         if (delegated.userId !== userID)
           throw new CommandError("forbidden", "Autofix must use its recorded Project delegation");
       }
-      const repository = repositoryFromURL(change.repositoryURL);
+      const repository = forgeRepositoryFromURL(change.repositoryURL);
       const pullRequest = await forge.getPullRequest(
         repository,
         change.defaultBranch,
@@ -1263,7 +1257,7 @@ export function createDeliveryController(
     async cancel(changeID: string) {
       const change = await changeRow(changeID);
       if (!change) return;
-      const repository = repositoryFromURL(change.repositoryURL);
+      const repository = forgeRepositoryFromURL(change.repositoryURL);
       await cancelVerifications(changeID, repository);
     },
     async retryPromotion(changeID: string, userID: string, commandID: string, promotionID: string) {
@@ -1273,7 +1267,7 @@ export function createDeliveryController(
         userID,
         commandID,
         promotionID,
-        async (url) => (await forge.getDefaultBranch(repositoryFromURL(url))).headSha,
+        async (url) => (await forge.getDefaultBranch(forgeRepositoryFromURL(url))).headSha,
       );
       if (admitted) await reconcile(changeID);
       return this.get(changeID);
@@ -1459,7 +1453,7 @@ export function createDeliveryController(
     async stopForTrash(changeID: string) {
       const change = await changeRow(changeID);
       if (!change) return;
-      const repository = repositoryFromURL(change.repositoryURL);
+      const repository = forgeRepositoryFromURL(change.repositoryURL);
       await cancelVerifications(changeID, repository);
       const deadline = Date.now() + 60_000;
       while (running.has(changeID) && Date.now() < deadline) await Bun.sleep(50);

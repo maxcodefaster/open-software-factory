@@ -10,8 +10,8 @@ import {
   externalIdentity,
   identitySetup,
 } from "../../db/src/schema";
-import { factoryForgeIssuer, forgeClientID, forgeClientSecret } from "./forge-issuer";
 import { forgeBackchannelMetadata, forgeBackchannelOrigin } from "./backchannel";
+import { factoryForgeIssuer, forgeClientID, forgeClientSecret } from "./forge-issuer";
 import { requireLocalForgeIssuer } from "./local-issuer";
 import {
   directoryProvisioning,
@@ -21,10 +21,12 @@ import {
   requireAccountAccess,
   resolveIdentity,
 } from "./policy";
+import { factorySigningSecret } from "./signing-secret";
 
 type Database = ReturnType<typeof createDatabase>;
 
 const administratorID = emergencyAdministratorID;
+const developmentAdministratorPassword = "factory-local-password";
 
 export function createFactoryAuth(
   database: Database,
@@ -36,12 +38,11 @@ export function createFactoryAuth(
     FACTORY_ADMIN_EMAIL,
     FACTORY_ADMIN_NAME,
     FACTORY_ADMIN_PASSWORD,
-    FACTORY_AUTH_SECRET,
     FACTORY_BASE_URL,
     FACTORY_AUTH_COOKIE_PREFIX,
   } = process.env;
   const baseURL = FACTORY_BASE_URL ?? "http://127.0.0.1:3000";
-  const secret = FACTORY_AUTH_SECRET ?? "local-development-secret-change-before-production";
+  const secret = factorySigningSecret();
   const development =
     process.env["NODE_ENV"] !== "production" &&
     ["localhost", "127.0.0.1", "[::1]"].includes(new URL(baseURL).hostname);
@@ -61,10 +62,7 @@ export function createFactoryAuth(
   if (
     (process.env["NODE_ENV"] === "production" ||
       !["localhost", "127.0.0.1", "[::1]"].includes(new URL(baseURL).hostname)) &&
-    (!FACTORY_AUTH_SECRET ||
-      FACTORY_AUTH_SECRET === "local-development-secret-change-before-production" ||
-      !FACTORY_ADMIN_PASSWORD ||
-      FACTORY_ADMIN_PASSWORD === "factory-local-password")
+    (!FACTORY_ADMIN_PASSWORD || FACTORY_ADMIN_PASSWORD === developmentAdministratorPassword)
   )
     throw new Error(
       "Non-development installations require a unique signing secret and emergency administrator password",
@@ -300,7 +298,7 @@ export function createFactoryAuth(
     async bootstrap() {
       const email = (FACTORY_ADMIN_EMAIL ?? "admin@factory.local").toLowerCase();
       const name = FACTORY_ADMIN_NAME ?? "Local administrator";
-      const password = FACTORY_ADMIN_PASSWORD ?? "factory-local-password";
+      const password = FACTORY_ADMIN_PASSWORD ?? developmentAdministratorPassword;
       const context = await auth.$context;
       const existing = await context.internalAdapter.findUserByEmail(email, {
         includeAccounts: true,
@@ -327,6 +325,21 @@ export function createFactoryAuth(
           userId: administratorID,
           password: await context.password.hash(password),
         });
+      } else if (password !== developmentAdministratorPassword) {
+        // A database first started with the development password must not keep it
+        // once the installation is configured with a real one.
+        const credential = existing.accounts.find((account) => account.providerId === "credential");
+        if (
+          credential?.password &&
+          (await context.password.verify({
+            hash: credential.password,
+            password: developmentAdministratorPassword,
+          }))
+        )
+          await context.internalAdapter.updatePassword(
+            existing.user.id,
+            await context.password.hash(password),
+          );
       }
       await client`
         INSERT INTO factory.administrator(user_id)

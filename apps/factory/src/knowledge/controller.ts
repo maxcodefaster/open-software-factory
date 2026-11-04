@@ -1,3 +1,4 @@
+import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
@@ -7,6 +8,7 @@ import {
 import type { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createOpenBaoModelSecrets } from "../models/secrets";
@@ -251,7 +253,9 @@ export function createKnowledgeController(
     if (lifetime.signal.aborted) return Promise.resolve();
     const execution = executeGeneration(generationID);
     executions.add(execution);
-    void execution.finally(() => executions.delete(execution)).catch(() => {});
+    void execution
+      .finally(() => executions.delete(execution))
+      .catch(reportFailure("Knowledge generation"));
     return execution;
   }
 
@@ -321,7 +325,7 @@ export function createKnowledgeController(
       const modelConnections = createModelConnections(
         database,
         createOpenBaoModelSecrets(),
-        process.env["FACTORY_AUTH_SECRET"] ?? "local-development-secret-change-before-production",
+        factorySigningSecret(),
         process.env["FACTORY_MODEL_ALLOWED_ORIGINS"]
           ?.split(",")
           .map((origin) => origin.trim())

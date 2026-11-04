@@ -796,9 +796,7 @@ async function startServer(
       : process.env,
     {
       email: installation ? `admin-${installation.name}@factory.local` : "admin@factory.local",
-      password: installation
-        ? await localSecret(resolve(stateDirectory, "admin-password"))
-        : "factory-local-password",
+      password: await localSecret(resolve(stateDirectory, "admin-password")),
     },
   );
   const authSecret = await localSecret(authSecretFile);
@@ -914,9 +912,9 @@ async function startPlanningCache() {
 
 function announceReady() {
   console.log(`Factory is ready at ${factoryBaseURL}`);
-  if (!installation && !process.env["FACTORY_ADMIN_PASSWORD"])
+  if (!process.env["FACTORY_ADMIN_PASSWORD"])
     console.log(
-      "Local development bootstrap credentials are in README.md. Configure FACTORY_ADMIN_PASSWORD before first startup for shared access; this never resets an existing password.",
+      `The generated administrator password is in ${resolve(stateDirectory, "admin-password")}. Set FACTORY_ADMIN_PASSWORD before first startup to choose your own; this never resets an existing password.`,
     );
 }
 

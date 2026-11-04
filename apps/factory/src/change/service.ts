@@ -13,6 +13,7 @@ import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/con
 import type { createAgentController } from "../agent/controller";
 import { changeSchema, requirementRevisionSchema, ticketDetailSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import type { createProjectAgentController } from "../project-agent/controller";
 import { renderArchitectureDiagrams } from "../technical-design/diagrams";
 import { saveTechnicalDesignIn, technicalPlanningOutstandingIn } from "../technical-design/store";
@@ -229,7 +230,8 @@ export function createTicketService(options: {
     async save(userID: string, ticketID: string, input: TicketDocumentInput) {
       await access.requireTicket(userID, ticketID);
       const saved = await options.documents.save(ticketID, userID, input);
-      if (input.proposalEntryId) void options.planning?.recover().catch(() => {});
+      if (input.proposalEntryId)
+        void options.planning?.recover().catch(reportFailure("Planning recovery"));
       return saved;
     },
     async followUp(userID: string, ticketID: string, input: TicketFollowUpInput) {

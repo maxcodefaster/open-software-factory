@@ -1,10 +1,12 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import { z } from "zod";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { createRequirementRevision } from "../../../../packages/requirement-domain/src/requirement";
+import { projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
 import type { createChangeController } from "../change/controller";
 import { CommandError } from "../command-error";
 import type { createDeliveryController } from "../delivery/controller";
+import { reportFailure } from "../failure-log";
 import type { createKnowledgeController } from "../knowledge/controller";
 import type { createMCPConnections } from "../mcp/connections";
 import { createModelConnections } from "../models/connections";
@@ -12,20 +14,19 @@ import { createModelSettingsController } from "../models/controller";
 import { knownModelRejection } from "../models/execution-policy";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { projectModelConnection } from "../project-agent/adapter";
+import { ProjectContextLimitError } from "../project-agent/context";
+import {
+  clarifyProjectInput,
+  type InputClarification,
+  inputClarification,
+  type inputSkillAssignment,
+} from "../project-agent/input";
+import { ProjectAgentOutputError } from "../project-agent/structured-output";
+import { admittedProjectContext } from "../project-agent/ticket-context";
+import { createSkillController } from "../skills/controller";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { monitoringAuthorityIn } from "./authority";
-import {
-  clarifyProjectInput,
-  inputClarification,
-  type inputSkillAssignment,
-  type InputClarification,
-} from "../project-agent/input";
-import { createSkillController } from "../skills/controller";
-import { admittedProjectContext } from "../project-agent/ticket-context";
-import { ProjectAgentOutputError } from "../project-agent/structured-output";
-import { ProjectContextLimitError } from "../project-agent/context";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { diagnoseMonitoringIncident, MonitoringDiagnosisError } from "./diagnosis";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -434,7 +435,8 @@ export function createMonitoringWorker(
       for (const item of expired) await createUsageJournal(database).abandon(usageId(item.id));
       const projects = await database.client<{ id: string }[]>`SELECT DISTINCT project_id AS id
         FROM factory.monitoring_incident WHERE state IN ('queued','implementing') ORDER BY project_id LIMIT 50`;
-      for (const row of projects) void project(row.id).catch(() => {});
+      for (const row of projects)
+        void project(row.id).catch(reportFailure("Monitoring project sweep"));
     } finally {
       sweeping = false;
     }

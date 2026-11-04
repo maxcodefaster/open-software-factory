@@ -1,3 +1,4 @@
+import { nativeLifecycleWindowMS } from "../../runtime-domain/src/timing";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { runCommand } from "./command";
@@ -496,7 +497,7 @@ export async function prepareFactoryboxRuntime(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
   run: typeof runCommand = runFactoryboxKubernetes,
-  timeoutMS = 420_000,
+  timeoutMS = nativeLifecycleWindowMS,
   beforeDispatch?: () => Promise<void>,
 ) {
   const deadline = performance.now() + timeoutMS;
