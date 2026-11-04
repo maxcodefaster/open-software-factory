@@ -16,6 +16,10 @@ import (
 
 const AssignmentVersion = 1
 
+// unassignedControlURL marks a Project preparation assignment that has no
+// Factory connection and never dials.
+const unassignedControlURL = "ws://unassigned.invalid/"
+
 var (
 	identityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	channelPattern  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -110,12 +114,12 @@ func (assignment Assignment) Validate() error {
 		key, err := projectImageKey(assignment.PreparedImage.Image)
 		if err != nil || !regexpIdentity(assignment.PreparedImage.Identity) ||
 			!strings.HasSuffix(strings.Split(key, "@")[0], "/"+assignment.RepositoryIdentity) ||
-			assignment.ControlURL != "ws://unassigned.invalid/" ||
+			assignment.ControlURL != unassignedControlURL ||
 			assignment.Prebuild != nil || assignment.EnvironmentVersion != nil {
 			return errors.New("prepared image must be an exact credential-free Project artifact")
 		}
 	}
-	if assignment.DeferRuntimeProcesses && assignment.ControlURL != "ws://unassigned.invalid/" {
+	if assignment.DeferRuntimeProcesses && assignment.ControlURL != unassignedControlURL {
 		return errors.New("required Runtime processes may be deferred only in unassigned Project preparation")
 	}
 	if assignment.Prebuild != nil && (assignment.Prebuild.ID == "" || (assignment.Prebuild.Platform != "native" && assignment.Prebuild.Platform != "linux/arm64" && assignment.Prebuild.Platform != "linux/amd64") || !strings.HasSuffix(assignment.Prebuild.ImageRepository, "/"+assignment.RepositoryIdentity)) {
@@ -157,6 +161,11 @@ func (assignment Assignment) Validate() error {
 	control, err := url.Parse(assignment.ControlURL)
 	if err != nil || (control.Scheme != "ws" && control.Scheme != "wss") || control.Host == "" || control.User != nil {
 		return errors.New("control URL must be an absolute ws or wss URL without user information")
+	}
+	// The Bearer capability crosses this connection. Plain ws is limited to the
+	// unassigned Project preparation placeholder and local or private endpoints.
+	if control.Scheme == "ws" && assignment.ControlURL != unassignedControlURL && !repositoryurl.PrivateHost(control.Hostname()) {
+		return errors.New("control URL must use wss unless it targets a loopback or private installation endpoint")
 	}
 	if len(assignment.Channels) == 0 || len(assignment.Channels) > 8 {
 		return errors.New("assignment must declare between one and eight channels")

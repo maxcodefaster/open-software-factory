@@ -25,17 +25,22 @@ func Valid(value string) bool {
 	case "file":
 		return parsed.Host == "" && filepath.IsAbs(parsed.Path)
 	case "http":
-		host := parsed.Hostname()
-		if host == "host.orb.internal" || host == "localhost" || serviceName.MatchString(host) {
-			return true
-		}
-		address, err := netip.ParseAddr(host)
-		if err != nil || address.Zone() != "" {
-			return false
-		}
-		address = address.Unmap()
-		return address.IsPrivate() || address.IsLoopback()
+		return PrivateHost(parsed.Hostname())
 	default:
 		return false
 	}
+}
+
+// PrivateHost reports whether a host is the local machine, an installation
+// Service or a private address, the only places Factory permits plain HTTP.
+func PrivateHost(host string) bool {
+	if host == "host.orb.internal" || host == "localhost" || serviceName.MatchString(host) {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil || address.Zone() != "" {
+		return false
+	}
+	address = address.Unmap()
+	return address.IsPrivate() || address.IsLoopback()
 }

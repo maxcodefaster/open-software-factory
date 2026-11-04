@@ -206,7 +206,7 @@ func TestPreparedRecipeHasNoRuntimeGrantsOrExecutionTools(t *testing.T) {
 		func(a *Assignment) {
 			a.Channels = []Channel{{Name: "agent", Kind: "agent", Target: "http://127.0.0.1:4300"}}
 		},
-		func(a *Assignment) { a.ControlURL = "ws://factory.invalid/internal/runtime-connect" },
+		func(a *Assignment) { a.ControlURL = "wss://factory.invalid/internal/runtime-connect" },
 	} {
 		slot, _ := preparedFixture(t)
 		mutate(slot.Project)

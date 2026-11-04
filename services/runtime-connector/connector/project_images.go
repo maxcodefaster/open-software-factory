@@ -73,7 +73,7 @@ func prepareProjectImagesWith(parent context.Context, references []string, acqui
 	if len(unique) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(parent, 180*time.Second)
+	ctx, cancel := context.WithTimeout(parent, projectImagePullTimeout)
 	defer cancel()
 	jobs := make(chan string, len(unique))
 	for _, reference := range unique {

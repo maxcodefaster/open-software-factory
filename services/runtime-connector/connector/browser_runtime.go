@@ -301,7 +301,7 @@ func validateBrowserIsolation(container inspectedContainer, assignment Assignmen
 }
 
 func (manager *browserRuntimeManager) start(runtime *browserRuntime) error {
-	ctx, end := context.WithTimeout(runtime.ctx, 25*time.Second)
+	ctx, end := context.WithTimeout(runtime.ctx, browserOpenTimeout)
 	defer end()
 	if _, err := manager.inspectPrimary(ctx); err != nil {
 		return err
@@ -559,11 +559,11 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 			manager.closeSession(scope)
 		}()
 	}
-	timeout := 15 * time.Second
+	timeout := browserCallTimeout
 	if scope.Call.Name == "browser_open" {
 		// Upstream's ten-second navigation timeout starts after cold Chrome
 		// launch. Keep both inside one bounded open without replaying navigation.
-		timeout = 25 * time.Second
+		timeout = browserOpenTimeout
 	}
 	bounded, end := context.WithTimeout(runtime.ctx, timeout)
 	defer end()

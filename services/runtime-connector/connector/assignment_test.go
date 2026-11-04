@@ -101,3 +101,39 @@ func TestAgentChannelAndProcessEnvironment(t *testing.T) {
 		t.Fatal("invalid process environment passed validation")
 	}
 }
+
+func TestAssignmentControlURLRequiresTLSOutsideLocalEndpoints(t *testing.T) {
+	for _, accepted := range []string{
+		"wss://factory.example.test/internal/runtime-connect",
+		"ws://127.0.0.1:3000/internal/runtime-connect",
+		"ws://localhost:3000/internal/runtime-connect",
+		"ws://[::1]:3000/internal/runtime-connect",
+		"ws://factory.portable.svc:3000/internal/runtime-connect",
+		"ws://host.orb.internal:3000/internal/runtime-connect",
+		"ws://192.168.139.2:3000/internal/runtime-connect",
+	} {
+		assignment := validAssignment()
+		assignment.ControlURL = accepted
+		if err := assignment.Validate(); err != nil {
+			t.Fatalf("%s was rejected: %v", accepted, err)
+		}
+	}
+	for _, rejected := range []string{
+		"ws://factory.example.test/internal/runtime-connect",
+		"ws://203.0.113.10:3000/internal/runtime-connect",
+		"ws://unassigned.invalid:8080/",
+		"ws://unassigned.invalid/other",
+	} {
+		assignment := validAssignment()
+		assignment.ControlURL = rejected
+		if err := assignment.Validate(); err == nil {
+			t.Fatalf("%s would send the Bearer capability over plain HTTP", rejected)
+		}
+	}
+	// The unassigned Project preparation placeholder never dials.
+	assignment := validAssignment()
+	assignment.ControlURL = unassignedControlURL
+	if err := assignment.Validate(); err != nil {
+		t.Fatalf("placeholder control URL was rejected: %v", err)
+	}
+}

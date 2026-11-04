@@ -33,7 +33,7 @@ func validatePreparedProject(assignment Assignment) error {
 		assignment.Prebuild != nil || assignment.BrowserToolsImage != "" {
 		return errors.New("prepared Project must be clean private source without Runtime grants")
 	}
-	if assignment.ControlURL != "ws://unassigned.invalid/" {
+	if assignment.ControlURL != unassignedControlURL {
 		return errors.New("prepared Project cannot retain an admitted control endpoint")
 	}
 	for _, channel := range assignment.Channels {
@@ -249,17 +249,11 @@ func RunPreparedChild(ctx context.Context, assignment Assignment) error {
 	if err := validatePreparedProject(source); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(preparedChildSocket); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("prepared child socket already has an owner")
-	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: preparedChildSocket, Net: "unix"})
+	listener, err := listenPrivateUnix(preparedChildSocket)
 	if err != nil {
-		return err
+		return fmt.Errorf("prepared child socket unavailable: %w", err)
 	}
 	defer listener.Close()
-	if err := os.Chmod(preparedChildSocket, 0600); err != nil {
-		return err
-	}
 	processes := newProcessManager(ctx, assignment, io.Discard)
 	defer processes.stopAll()
 	if err := processes.startAll(); err != nil {

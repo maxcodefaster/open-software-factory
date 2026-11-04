@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,8 @@ const (
 )
 
 var errDevcontainerNotStarted = errors.New("Dev Container start not admitted")
+
+var errBrowserImageStartup = fmt.Errorf("browser tools image startup was cancelled or exceeded %d seconds", int(browserImagePullTimeout/time.Second))
 
 type devcontainerResult struct {
 	Outcome               string `json:"outcome"`
@@ -85,65 +88,21 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	assignment.PublicImageBuild = publicImageBuild(environment)
 	assignment.BuildEnvironmentSHA256 = imageBuildEnvironmentSHA256(environment)
-	if assignment.EnvironmentVersion != nil {
-		files, err := prepareEnvironmentFiles(environment)
-		if err != nil {
-			return errors.New("Runtime environment preparation failed")
-		}
-		defer files.cleanup()
-		assignment.EnvironmentSecretsFile = files.secretsFile
-		assignment.DockerConfigDirectory = files.dockerConfig
-		assignment.RegistryCAFile = files.caFile
-		ctx = context.WithValue(ctx, dockerConfigContextKey{}, files.dockerConfig)
-		ctx = context.WithValue(ctx, registryCAContextKey{}, files.caFile)
-		assignment.RuntimeEnvironment = map[string]string{}
-		for _, variable := range environment.Bundle.Variables {
-			if variable.Runtime {
-				assignment.RuntimeEnvironment[variable.Name] = variable.Value
-			}
-		}
-		ctx = context.WithValue(ctx, runtimeVariablesContextKey{}, assignment.RuntimeEnvironment)
-		for _, registry := range environment.Bundle.Registries {
-			if registry.Certificate != "" {
-				directory := filepath.Join("/etc/docker/certs.d", registry.Host)
-				if err := os.MkdirAll(directory, 0700); err != nil {
-					return errors.New("Registry trust preparation failed")
-				}
-				if err := os.WriteFile(filepath.Join(directory, "ca.crt"), []byte(registry.Certificate), 0600); err != nil {
-					return errors.New("Registry trust preparation failed")
-				}
-			}
-		}
+	ctx, releaseEnvironment, err := applyRuntimeEnvironment(ctx, &assignment, environment)
+	defer releaseEnvironment()
+	if err != nil {
+		return err
 	}
 	if token == "" || childToken == "" {
 		return errors.New("Factory parent and child connector tokens are required")
 	}
-	var preparedDependencies *preparedProject
+	prepared, preparedDependencies, err := reconcilePreparedProject(assignment, environment, prepared)
+	if err != nil {
+		return err
+	}
 	if prepared != nil {
-		// Runtime grants are read only after assignment. Never inject them into
-		// the captured clean processes, even when only their version changed.
-		if !samePreparedProject(prepared.assignment, assignment) ||
-			len(environment.Bundle.Variables) != 0 || len(environment.Bundle.Registries) != 0 {
-			if err := cleanupProject(prepared.state()); err != nil {
-				return err
-			}
-			// This is the Fork's separate clean checkout, never canonical
-			// Workspace source. Fresh grants require fresh processes and
-			// hooks, not deletion of its exact prepared dependency files.
-			// checkoutProject still verifies its Project, commit and clean
-			// tracked source before the ordinary Dev Container startup.
-			if reusablePreparedDependencies(prepared.assignment, assignment, environment) {
-				preparedDependencies = prepared
-			} else {
-				if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
-					return err
-				}
-			}
-			prepared = nil
-		} else {
-			origin := prepared.origin
-			assignment.containerOrigin = &origin
-		}
+		origin := prepared.origin
+		assignment.containerOrigin = &origin
 	}
 	finishDocker := startupPhase("private-docker")
 	dockerErr := waitForDocker(ctx)
@@ -178,50 +137,12 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		return err
 	}
 	if assignment.Prebuild != nil {
-		bounded, cancel := context.WithTimeout(ctx, 12*time.Minute)
-		defer cancel()
-		platform, err := runtimePrebuildPlatform(bounded)
-		var result PrebuildResult
-		if err == nil {
-			result, err = ProducePrebuild(bounded, assignment, PrebuildRequest{Commit: assignment.Revision, Platform: platform, ImageRepository: assignment.Prebuild.ImageRepository})
-		}
-		if err == nil {
-			err = publishRuntimePrebuild(bounded, assignment, token, result)
-		}
-		if err != nil {
-			control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-			return err
-		}
-		control.write(Message{Type: "status", Phase: "stopped"})
-		return nil
+		return runPrebuildAttempt(ctx, assignment, token, control)
 	}
 	if prepared == nil {
-		if preparedDependencies != nil && preparedDependencies.rootFSImage != "" {
-			image, err := preparedDependencies.inspectRootFS(ctx, preparedDependencies.rootFSImage)
-			if err != nil {
-				control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-				return err
-			}
-			consumer := assignment
-			consumer.preparedRootFSImage = image
-			path, cleanup, err := preparePrebuildConsumer(ctx, consumer, image)
-			if err == nil {
-				defer cleanup()
-				assignment.EffectiveConfiguration = path
-				assignment.preparedRootFSImage = image
-			}
-		}
-		if assignment.EffectiveConfiguration == "" {
-			assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, assignment, token)
-			if assignment.PrebuildCacheImage != "" {
-				path, cleanup, err := preparePrebuildConsumer(ctx, assignment, assignment.PrebuildCacheImage)
-				if err == nil {
-					defer cleanup()
-					assignment.EffectiveConfiguration = path
-				}
-			}
-		}
-		if err := prepareDevcontainerProject(ctx, assignment); err != nil {
+		cleanup, err := prepareFreshDevcontainer(ctx, &assignment, token, preparedDependencies)
+		defer cleanup()
+		if err != nil {
 			control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
 			return err
 		}
@@ -276,9 +197,7 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	browser := newBrowserRuntimeManager(ctx, assignment, result.ContainerID, result.RemoteUser)
 	browser.preparation = preparation
-	connectionContext, disconnect := browserConnectionContext(ctx)
 	defer func() {
-		disconnect()
 		if err := browser.closeAll(); err != nil {
 			control.write(Message{Type: "status", Phase: "cleanup-failed", Error: err.Error()})
 			returnError = errors.Join(returnError, err)
@@ -299,9 +218,153 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	if err := announceChildStarted(ctx, assignment, token, &control); err != nil {
 		return err
 	}
+	return serveParentControl(ctx, assignment, token, &control, browser, func(operationContext context.Context, message Message) Message {
+		return handleParentOperation(operationContext, assignment, message)
+	})
+}
+
+// applyRuntimeEnvironment materializes the Runtime environment bundle for this
+// attempt. The returned release function is always safe to call.
+func applyRuntimeEnvironment(ctx context.Context, assignment *Assignment, environment runtimeEnvironment) (context.Context, func(), error) {
+	if assignment.EnvironmentVersion == nil {
+		return ctx, func() {}, nil
+	}
+	files, err := prepareEnvironmentFiles(environment)
+	if err != nil {
+		return ctx, func() {}, errors.New("Runtime environment preparation failed")
+	}
+	assignment.EnvironmentSecretsFile = files.secretsFile
+	assignment.DockerConfigDirectory = files.dockerConfig
+	assignment.RegistryCAFile = files.caFile
+	ctx = context.WithValue(ctx, dockerConfigContextKey{}, files.dockerConfig)
+	ctx = context.WithValue(ctx, registryCAContextKey{}, files.caFile)
+	assignment.RuntimeEnvironment = map[string]string{}
+	for _, variable := range environment.Bundle.Variables {
+		if variable.Runtime {
+			assignment.RuntimeEnvironment[variable.Name] = variable.Value
+		}
+	}
+	ctx = context.WithValue(ctx, runtimeVariablesContextKey{}, assignment.RuntimeEnvironment)
+	for _, registry := range environment.Bundle.Registries {
+		if registry.Certificate != "" {
+			directory := filepath.Join("/etc/docker/certs.d", registry.Host)
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				return ctx, files.cleanup, errors.New("Registry trust preparation failed")
+			}
+			if err := os.WriteFile(filepath.Join(directory, "ca.crt"), []byte(registry.Certificate), 0600); err != nil {
+				return ctx, files.cleanup, errors.New("Registry trust preparation failed")
+			}
+		}
+	}
+	return ctx, files.cleanup, nil
+}
+
+// reconcilePreparedProject decides whether a captured prepared Project can serve
+// this assignment. It returns the prepared Project to keep, if any, and the
+// prepared Project whose dependency files may seed a fresh start.
+func reconcilePreparedProject(assignment Assignment, environment runtimeEnvironment, prepared *preparedProject) (*preparedProject, *preparedProject, error) {
+	if prepared == nil {
+		return nil, nil, nil
+	}
+	// Runtime grants are read only after assignment. Never inject them into
+	// the captured clean processes, even when only their version changed.
+	if samePreparedProject(prepared.assignment, assignment) &&
+		len(environment.Bundle.Variables) == 0 && len(environment.Bundle.Registries) == 0 {
+		return prepared, nil, nil
+	}
+	if err := cleanupProject(prepared.state()); err != nil {
+		return nil, nil, err
+	}
+	// This is the Fork's separate clean checkout, never canonical
+	// Workspace source. Fresh grants require fresh processes and
+	// hooks, not deletion of its exact prepared dependency files.
+	// checkoutProject still verifies its Project, commit and clean
+	// tracked source before the ordinary Dev Container startup.
+	if reusablePreparedDependencies(prepared.assignment, assignment, environment) {
+		return nil, prepared, nil
+	}
+	if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
+		return nil, nil, err
+	}
+	return nil, nil, nil
+}
+
+// runPrebuildAttempt produces and publishes a Project prebuild instead of
+// starting a Dev Container.
+func runPrebuildAttempt(ctx context.Context, assignment Assignment, token string, control *controlConnection) error {
+	bounded, cancel := context.WithTimeout(ctx, prebuildTimeout)
+	defer cancel()
+	platform, err := runtimePrebuildPlatform(bounded)
+	var result PrebuildResult
+	if err == nil {
+		result, err = ProducePrebuild(bounded, assignment, PrebuildRequest{Commit: assignment.Revision, Platform: platform, ImageRepository: assignment.Prebuild.ImageRepository})
+	}
+	if err == nil {
+		err = publishRuntimePrebuild(bounded, assignment, token, result)
+	}
+	if err != nil {
+		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
+		return err
+	}
+	control.write(Message{Type: "status", Phase: "stopped"})
+	return nil
+}
+
+// prepareFreshDevcontainer selects a prebuilt image when one is compatible and
+// validates the Dev Container configuration before the CLI can run any
+// lifecycle hook. The returned cleanup is always safe to call.
+func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token string, preparedDependencies *preparedProject) (func(), error) {
+	var cleanups []func()
+	cleanup := func() {
+		for index := len(cleanups) - 1; index >= 0; index-- {
+			cleanups[index]()
+		}
+	}
+	if preparedDependencies != nil && preparedDependencies.rootFSImage != "" {
+		image, err := preparedDependencies.inspectRootFS(ctx, preparedDependencies.rootFSImage)
+		if err != nil {
+			return cleanup, err
+		}
+		consumer := *assignment
+		consumer.preparedRootFSImage = image
+		path, remove, err := preparePrebuildConsumer(ctx, consumer, image)
+		if err == nil {
+			cleanups = append(cleanups, remove)
+			assignment.EffectiveConfiguration = path
+			assignment.preparedRootFSImage = image
+		}
+	}
+	if assignment.EffectiveConfiguration == "" {
+		assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, *assignment, token)
+		if assignment.PrebuildCacheImage != "" {
+			path, remove, err := preparePrebuildConsumer(ctx, *assignment, assignment.PrebuildCacheImage)
+			if err == nil {
+				cleanups = append(cleanups, remove)
+				assignment.EffectiveConfiguration = path
+			}
+		}
+	}
+	return cleanup, prepareDevcontainerProject(ctx, *assignment)
+}
+
+// serveParentControl reads Factory control messages until Stop or cancellation.
+// Git operations run on a single worker so a slow operation cannot hide a Stop
+// message from this read loop.
+func serveParentControl(
+	ctx context.Context,
+	assignment Assignment,
+	token string,
+	control **controlConnection,
+	browser *browserRuntimeManager,
+	handle func(context.Context, Message) Message,
+) error {
+	operations := startParentOperations(ctx, handle)
+	defer operations.stop()
+	connectionContext, disconnect := browserConnectionContext(ctx)
+	defer func() { disconnect() }()
 	for {
 		var message Message
-		if err := control.connection.ReadJSON(&message); err != nil {
+		if err := (*control).read(&message); err != nil {
 			disconnect()
 			if err := browser.closeAll(); err != nil {
 				return err
@@ -309,33 +372,83 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 			if ctx.Err() != nil {
 				return nil
 			}
-			control.close()
-			if err := announceChildStarted(ctx, assignment, token, &control); err != nil {
+			(*control).close()
+			if err := announceChildStarted(ctx, assignment, token, control); err != nil {
 				return nil
 			}
 			connectionContext, disconnect = browserConnectionContext(ctx)
 			continue
 		}
 		if message.Type == "stop" {
-			control.write(Message{Type: "status", Phase: "stopping"})
+			(*control).write(Message{Type: "status", Phase: "stopping"})
 			return nil
 		}
 		if message.Type == "operation-request" {
 			if strings.HasPrefix(message.Action, "browser-") {
-				captured := control
-				capturedContext := connectionContext
-				capturedDisconnect := disconnect
-				go handleBrowserControlOperation(capturedContext, capturedDisconnect, captured, browser, message)
+				go handleBrowserControlOperation(connectionContext, disconnect, *control, browser, message)
 				continue
 			}
-			response := handleParentOperation(ctx, assignment, message)
-			if err := control.write(response); err != nil {
-				// The operation may have completed. Recover the control connection,
-				// never replay the operation or tear down its admitted compute.
-				control.close()
+			if !operations.submit(*control, message) {
+				response := Message{Type: "operation-response", OperationID: message.OperationID, Action: message.Action, Error: "parent operation queue is full"}
+				if err := (*control).write(response); err != nil {
+					(*control).close()
+				}
 			}
 		}
 	}
+}
+
+// parentOperations runs non-browser Parent operations one at a time, in order,
+// off the control read loop. Cancelling its context kills an in-flight Git run.
+type parentOperations struct {
+	queue  chan parentOperation
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type parentOperation struct {
+	control *controlConnection
+	message Message
+}
+
+func startParentOperations(ctx context.Context, handle func(context.Context, Message) Message) *parentOperations {
+	ctx, cancel := context.WithCancel(ctx)
+	operations := &parentOperations{
+		queue:  make(chan parentOperation, parentOperationQueueLimit),
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	go func() {
+		defer close(operations.done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case operation := <-operations.queue:
+				response := handle(ctx, operation.message)
+				if err := operation.control.write(response); err != nil {
+					// The operation may have completed. Recover the control connection,
+					// never replay the operation or tear down its admitted compute.
+					operation.control.close()
+				}
+			}
+		}
+	}()
+	return operations
+}
+
+func (operations *parentOperations) submit(control *controlConnection, message Message) bool {
+	select {
+	case operations.queue <- parentOperation{control: control, message: message}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (operations *parentOperations) stop() {
+	operations.cancel()
+	<-operations.done
 }
 
 func handleBrowserControlOperation(ctx context.Context, disconnect context.CancelFunc, control *controlConnection, browser *browserRuntimeManager, message Message) {
@@ -349,6 +462,7 @@ func handleBrowserControlOperation(ctx context.Context, disconnect context.Cance
 }
 
 func announceChildStarted(ctx context.Context, assignment Assignment, token string, control **controlConnection) error {
+	var backoff reconnectBackoff
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -365,6 +479,7 @@ func announceChildStarted(ctx context.Context, assignment Assignment, token stri
 					Generation: assignment.Generation,
 				}); err == nil {
 					*control = connected
+					backoff.reset()
 					break
 				}
 				connected.close()
@@ -372,7 +487,7 @@ func announceChildStarted(ctx context.Context, assignment Assignment, token stri
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(time.Second):
+			case <-time.After(backoff.next()):
 			}
 		}
 	}
@@ -412,215 +527,6 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 		response.Error = "unsupported parent operation"
 	}
 	return response
-}
-
-func gitOutput(ctx context.Context, workspace string, arguments ...string) (string, error) {
-	return gitOutputWithEnv(ctx, workspace, nil, arguments...)
-}
-
-func workspaceGitCommand(ctx context.Context, workspace string, arguments ...string) *exec.Cmd {
-	// Parent Git owns writes, but the canonical Source and non-root Dev Container
-	// must still read its resulting refs and objects. Keep the Parent's private
-	// bootstrap umask; scope this mode to Git's own metadata only.
-	base := []string{"-c", "safe.directory=" + workspace, "-c", "core.sharedRepository=0644", "-C", workspace}
-	return exec.CommandContext(ctx, "git", append(base, arguments...)...)
-}
-
-func gitOutputWithEnv(ctx context.Context, workspace string, environment []string, arguments ...string) (string, error) {
-	command := workspaceGitCommand(ctx, workspace, arguments...)
-	if environment != nil {
-		command.Env = environment
-	}
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s failed: %w: %s", arguments[0], err, strings.TrimSpace(string(output)))
-	}
-	return strings.TrimSpace(string(output)), nil
-}
-
-func prepareCommit(ctx context.Context, workspace string, message Message) (string, error) {
-	if message.OperationID == "" || message.ExpectedSHA == "" || message.CommitMessage == "" || message.AuthorName == "" || message.AuthorEmail == "" {
-		return "", errors.New("commit operation is incomplete")
-	}
-	head, err := gitOutput(ctx, workspace, "rev-parse", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	commitMessage := message.CommitMessage + "\n\nFactory-Operation: " + message.OperationID
-	expectedParents := message.ExpectedSHA
-	if message.MergeParentSHA != "" {
-		if !validCommitSHA(message.MergeParentSHA) || message.MergeParentSHA == message.ExpectedSHA {
-			return "", errors.New("integration parent is invalid")
-		}
-		expectedParents += " " + message.MergeParentSHA
-	}
-	if head != message.ExpectedSHA {
-		body, bodyErr := gitOutput(ctx, workspace, "show", "-s", "--format=%B", "HEAD")
-		parents, parentErr := gitOutput(ctx, workspace, "show", "-s", "--format=%P", "HEAD")
-		if bodyErr == nil && parentErr == nil && body == strings.TrimSpace(commitMessage) && parents == expectedParents {
-			return head, nil
-		}
-		return "", errors.New("workspace HEAD no longer matches the commit intent")
-	}
-	if message.Action == "git-observe-commit" {
-		return "", errors.New("the exact prepared commit was not found; current files were not committed")
-	}
-	if message.Action == "git-prepare-integration" {
-		if message.MergeParentSHA == "" || message.RepositoryURL == "" {
-			return "", errors.New("integration intent is incomplete")
-		}
-		status, err := gitOutput(ctx, workspace, "status", "--porcelain")
-		if err != nil || status != "" {
-			return "", errors.New("integration requires a clean checkout")
-		}
-		if _, err := gitOutput(ctx, workspace, "rev-parse", "--verify", "MERGE_HEAD"); err == nil {
-			return "", errors.New("another integration is already in progress")
-		}
-		environment, cleanup, err := commitGitEnvironment(message)
-		if err != nil {
-			return "", err
-		}
-		defer cleanup()
-		if _, err := gitOutputWithEnv(ctx, workspace, environment, "fetch", "--no-tags", message.RepositoryURL, message.MergeParentSHA); err != nil {
-			return "", errors.New("integration source could not be fetched")
-		}
-		_, mergeError := gitOutput(ctx, workspace, "-c", "core.hooksPath=/dev/null",
-			"-c", "user.name="+message.AuthorName, "-c", "user.email="+message.AuthorEmail,
-			"merge", "--no-ff", "--no-commit", message.MergeParentSHA)
-		// Conflicts also materialize files that the retained implementer must
-		// be able to read and resolve in its normal development identity.
-		if err := ensureTrackedWorkspaceOwnership(ctx, workspace); err != nil {
-			return "", err
-		}
-		if mergeError != nil {
-			unmerged, observationErr := gitOutput(ctx, workspace, "ls-files", "--unmerged")
-			if observationErr == nil && unmerged != "" {
-				return "", errors.New("integration has conflicts")
-			}
-			return "", errors.New("integration outcome is unconfirmed")
-		}
-	}
-	mergeHead, mergeErr := gitOutput(ctx, workspace, "rev-parse", "--verify", "MERGE_HEAD")
-	if message.MergeParentSHA != "" {
-		if mergeErr != nil || mergeHead != message.MergeParentSHA {
-			return "", errors.New("workspace merge no longer matches the integration intent")
-		}
-	} else if mergeErr == nil {
-		return "", errors.New("an ordinary commit cannot accept an unadmitted merge")
-	}
-	status, err := gitOutput(ctx, workspace, "status", "--porcelain")
-	if err != nil {
-		return "", err
-	}
-	if status == "" && message.MergeParentSHA == "" {
-		return "", errors.New("workspace has no changes to commit")
-	}
-	if _, err := gitOutput(ctx, workspace, "add", "-A"); err != nil {
-		return "", err
-	}
-	command := workspaceGitCommand(
-		ctx, workspace,
-		"-c", "user.name="+message.AuthorName, "-c", "user.email="+message.AuthorEmail,
-		"commit", "--cleanup=verbatim", "-m", commitMessage,
-	)
-	if output, err := command.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git commit failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return gitOutput(ctx, workspace, "rev-parse", "HEAD")
-}
-
-func validCommitSHA(value string) bool {
-	if len(value) != 40 && len(value) != 64 {
-		return false
-	}
-	for _, char := range value {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
-
-func commitGitEnvironment(message Message) ([]string, func(), error) {
-	environment := os.Environ()
-	if message.Username == "" && message.Password == "" {
-		return environment, func() {}, nil
-	}
-	askpass, err := os.CreateTemp("", "factory-git-askpass-*")
-	if err != nil {
-		return nil, nil, err
-	}
-	path := askpass.Name()
-	cleanup := func() { os.Remove(path) }
-	if _, err := askpass.WriteString("#!/bin/sh\ncase \"$1\" in *Username*) printf %s \"$FACTORY_GIT_USERNAME\";; *) printf %s \"$FACTORY_GIT_PASSWORD\";; esac\n"); err != nil {
-		askpass.Close()
-		cleanup()
-		return nil, nil, err
-	}
-	if err := askpass.Close(); err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	if err := os.Chmod(path, 0700); err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	return append(environment, "GIT_ASKPASS="+path, "GIT_TERMINAL_PROMPT=0", "FACTORY_GIT_USERNAME="+message.Username, "FACTORY_GIT_PASSWORD="+message.Password), cleanup, nil
-}
-
-func pushCommit(ctx context.Context, workspace string, message Message) (string, error) {
-	if message.Branch == "" || message.ExpectedSHA == "" || message.CommitSHA == "" {
-		return "", errors.New("push operation is incomplete")
-	}
-	head, err := gitOutput(ctx, workspace, "rev-parse", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	if head != message.CommitSHA {
-		return "", errors.New("workspace HEAD no longer matches the push intent")
-	}
-	environment, cleanup, err := commitGitEnvironment(message)
-	if err != nil {
-		return "", err
-	}
-	defer cleanup()
-	ref := "refs/heads/" + message.Branch
-	destination := message.RepositoryURL
-	if destination == "" {
-		return "", errors.New("push destination is missing")
-	}
-	remote, err := gitOutputWithEnv(ctx, workspace, environment, "ls-remote", destination, ref)
-	if err != nil {
-		return "", errors.New("remote branch could not be observed")
-	}
-	remoteFields := strings.Fields(remote)
-	remoteSHA := ""
-	if len(remoteFields) > 0 {
-		remoteSHA = remoteFields[0]
-	}
-	if remoteSHA == message.CommitSHA {
-		return remoteSHA, nil
-	}
-	if remoteSHA != message.ExpectedSHA {
-		return "", errors.New("remote branch no longer matches the push intent")
-	}
-	command := exec.CommandContext(
-		ctx, "git", "-c", "safe.directory="+workspace, "-C", workspace,
-		"push", "--porcelain", destination, message.CommitSHA+":"+ref,
-	)
-	command.Env = environment
-	if output, err := command.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git push failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	remote, err = gitOutputWithEnv(ctx, workspace, environment, "ls-remote", destination, ref)
-	if err != nil {
-		return "", err
-	}
-	remoteFields = strings.Fields(remote)
-	if len(remoteFields) == 0 || remoteFields[0] != message.CommitSHA {
-		return "", errors.New("pushed commit was not observed on the remote branch")
-	}
-	return remoteFields[0], nil
 }
 
 func validateDevcontainer(ctx context.Context, assignment Assignment) ([]string, error) {
@@ -697,21 +603,22 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 		}
 		return nil, fmt.Errorf("read Dev Container configuration: %w", err)
 	}
+	type settings struct {
+		Privileged   bool     `json:"privileged"`
+		Mounts       []string `json:"mounts"`
+		RunArguments []string `json:"runArgs"`
+		CapAdd       []string `json:"capAdd"`
+		SecurityOpt  []string `json:"securityOpt"`
+	}
 	var result struct {
 		Configuration struct {
+			settings
 			Image             string   `json:"image"`
 			DockerComposeFile any      `json:"dockerComposeFile"`
 			Service           string   `json:"service"`
 			RunServices       []string `json:"runServices"`
-			Privileged        bool     `json:"privileged"`
-			Mounts            []string `json:"mounts"`
-			RunArguments      []string `json:"runArgs"`
 		} `json:"configuration"`
-		Merged struct {
-			Privileged   bool     `json:"privileged"`
-			Mounts       []string `json:"mounts"`
-			RunArguments []string `json:"runArgs"`
-		} `json:"mergedConfiguration"`
+		Merged settings `json:"mergedConfiguration"`
 	}
 	valid := false
 	for _, line := range strings.Split(string(output), "\n") {
@@ -729,28 +636,11 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 	if !valid {
 		return nil, errors.New("Dev Containers CLI returned an incomplete configuration")
 	}
-	if result.Configuration.Privileged || result.Merged.Privileged {
-		return nil, errors.New("Dev Container privileged mode is not allowed")
-	}
-	if err := validateRunArguments(result.Configuration.RunArguments); err != nil {
-		return nil, err
-	}
-	if err := validateRunArguments(result.Merged.RunArguments); err != nil {
-		return nil, err
-	}
-	for _, mount := range append(result.Configuration.Mounts, result.Merged.Mounts...) {
-		if strings.Contains(mount, "/var/run/docker.sock") || strings.Contains(mount, "/factory/assignment") {
-			return nil, errors.New("Dev Container cannot mount infrastructure paths")
-		}
-		if strings.Contains(mount, "type=bind") {
-			for _, field := range strings.Split(mount, ",") {
-				if strings.HasPrefix(field, "source=") || strings.HasPrefix(field, "src=") {
-					source := strings.TrimPrefix(strings.TrimPrefix(field, "source="), "src=")
-					if !pathWithin(assignment.WorkspaceFolder, source) {
-						return nil, errors.New("Dev Container bind mounts must stay within the assigned checkout")
-					}
-				}
-			}
+	// This runs before `devcontainer up`, so a forbidden setting from the
+	// Project or its Features is refused before any lifecycle hook executes.
+	for _, configured := range []settings{result.Configuration.settings, result.Merged} {
+		if err := validateDevcontainerSettings(assignment.WorkspaceFolder, configured.Privileged, configured.Mounts, configured.RunArguments, configured.CapAdd, configured.SecurityOpt); err != nil {
+			return nil, err
 		}
 	}
 	images, err := validateCompose(
@@ -770,15 +660,94 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 	return images, nil
 }
 
-func validateRunArguments(arguments []string) error {
+// validateDevcontainerSettings refuses Dev Container settings that cross the
+// assigned boundary. Mounts and run arguments may only bind paths inside the
+// assigned checkout.
+func validateDevcontainerSettings(workspace string, privileged bool, mounts, runArguments, capAdd, securityOpt []string) error {
+	if privileged {
+		return errors.New("Dev Container privileged mode is not allowed")
+	}
+	if len(capAdd) > 0 {
+		return errors.New("Dev Container added capabilities are not allowed")
+	}
+	for _, option := range securityOpt {
+		if forbiddenSecurityOption(option) {
+			return errors.New("Dev Container security options cannot disable confinement")
+		}
+	}
+	if err := validateRunArguments(workspace, runArguments); err != nil {
+		return err
+	}
+	for _, mount := range mounts {
+		if err := validateMountSpec(workspace, mount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateMountSpec checks one `type=bind,source=...,target=...` style mount.
+func validateMountSpec(workspace string, mount string) error {
+	if strings.Contains(mount, "/var/run/docker.sock") || strings.Contains(mount, "/factory/assignment") {
+		return errors.New("Dev Container cannot mount infrastructure paths")
+	}
+	if strings.Contains(mount, "type=bind") {
+		for _, field := range strings.Split(mount, ",") {
+			if strings.HasPrefix(field, "source=") || strings.HasPrefix(field, "src=") {
+				source := strings.TrimPrefix(strings.TrimPrefix(field, "source="), "src=")
+				if !pathWithin(workspace, source) {
+					return errors.New("Dev Container bind mounts must stay within the assigned checkout")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateVolumeSpec checks a `-v source:target[:options]` value. A first field
+// that is a path is a host bind; anything else is a named or anonymous volume.
+func validateVolumeSpec(workspace string, volume string) error {
+	if strings.Contains(volume, "docker.sock") || strings.Contains(volume, "/factory/assignment") {
+		return errors.New("Dev Container cannot mount infrastructure paths")
+	}
+	source, _, hasTarget := strings.Cut(volume, ":")
+	if hasTarget && (strings.HasPrefix(source, "/") || strings.HasPrefix(source, ".") || strings.HasPrefix(source, "~")) &&
+		!pathWithin(workspace, source) {
+		return errors.New("Dev Container bind mounts must stay within the assigned checkout")
+	}
+	return nil
+}
+
+func forbiddenSecurityOption(option string) bool {
+	option = strings.ToLower(strings.ReplaceAll(option, ":", "="))
+	return strings.Contains(option, "unconfined") || strings.HasPrefix(option, "label=disable")
+}
+
+func validateRunArguments(workspace string, arguments []string) error {
 	for index, argument := range arguments {
 		name, value, hasValue := strings.Cut(argument, "=")
+		if len(argument) > 2 && strings.HasPrefix(argument, "-v") && !strings.HasPrefix(argument, "--") {
+			// Docker accepts the short volume flag with its value attached.
+			name, value, hasValue = "-v", argument[2:], true
+			if strings.HasPrefix(value, "=") {
+				value = value[1:]
+			}
+		}
 		if !hasValue && index+1 < len(arguments) {
 			value = arguments[index+1]
 		}
 		switch name {
-		case "--privileged", "--device", "--volumes-from", "--cap-add":
+		case "--privileged", "--device", "--device-cgroup-rule", "--volumes-from", "--cap-add",
+			"--security-opt", "--userns", "--runtime", "--cgroup-parent", "--env-file", "--label-file", "--cidfile":
 			return fmt.Errorf("Dev Container run argument %q is not allowed", name)
+		case "-v", "--volume":
+			if err := validateVolumeSpec(workspace, value); err != nil {
+				return err
+			}
+		case "--mount":
+			if err := validateMountSpec(workspace, value); err != nil {
+				return err
+			}
 		case "--pid", "--ipc", "--network", "--net", "--uts", "--cgroupns":
 			if value == "host" || strings.HasPrefix(value, "container:") {
 				return fmt.Errorf("Dev Container run argument %q crosses the assigned boundary", name)
@@ -792,6 +761,11 @@ func validateContainerBoundary(container inspectedContainer, assignment Assignme
 	host := container.HostConfig
 	if host.Privileged || host.PidMode != "" || host.IpcMode == "host" || strings.HasPrefix(host.IpcMode, "container:") || host.NetworkMode == "host" || strings.HasPrefix(host.NetworkMode, "container:") || host.UTSMode == "host" || host.CgroupnsMode == "host" || len(host.CapAdd) > 0 || len(host.Devices) > 0 || len(host.VolumesFrom) > 0 {
 		return errors.New("resolved Dev Container crosses a forbidden host boundary")
+	}
+	for _, option := range host.SecurityOpt {
+		if forbiddenSecurityOption(option) {
+			return errors.New("resolved Dev Container disables a confinement profile")
+		}
 	}
 	dropped := map[string]bool{}
 	for _, capability := range host.CapDrop {
@@ -973,76 +947,10 @@ func cleanupAttempt(assignment Assignment) error {
 	return nil
 }
 
-func checkoutProject(ctx context.Context, assignment Assignment) error {
-	if _, err := os.Stat(assignment.WorkspaceFolder); err == nil {
-		if _, gitErr := os.Stat(filepath.Join(assignment.WorkspaceFolder, ".git")); gitErr != nil {
-			return errors.New("workspace folder exists but is not the assigned Git checkout")
-		}
-		repositoryIdentity, identityErr := exec.CommandContext(
-			ctx,
-			"git", "-c", "safe.directory="+assignment.WorkspaceFolder, "-C", assignment.WorkspaceFolder,
-			"config", "--get", "factory.repositoryIdentity",
-		).Output()
-		if identityErr != nil || strings.TrimSpace(string(repositoryIdentity)) != assignment.RepositoryIdentity {
-			return errors.New("workspace folder exists but its repository identity does not match the assignment")
-		}
-		if originErr := workspaceGitCommand(
-			ctx, assignment.WorkspaceFolder,
-			"remote", "set-url", "origin", assignment.RepositoryURL,
-		).Run(); originErr != nil {
-			return errors.New("Workspace Git origin could not be refreshed")
-		}
-		if assignment.PreserveWorkspace {
-			if err := ensureSharedGitReadable(assignment.WorkspaceFolder); err != nil {
-				return err
-			}
-			return ensureTrackedWorkspaceOwnership(ctx, assignment.WorkspaceFolder)
-		}
-		head, headErr := workspaceGitCommand(
-			ctx, assignment.WorkspaceFolder, "rev-parse", "HEAD",
-		).Output()
-		if headErr != nil || strings.TrimSpace(string(head)) != assignment.Revision {
-			return errors.New("workspace folder does not contain the assigned revision")
-		}
-		status, statusErr := workspaceGitCommand(
-			ctx, assignment.WorkspaceFolder, "status", "--porcelain",
-		).Output()
-		if statusErr != nil || len(bytes.TrimSpace(status)) != 0 {
-			return errors.New("workspace folder is not a clean checkout")
-		}
-		return ensureSharedGitReadable(assignment.WorkspaceFolder)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect workspace folder: %w", err)
-	}
-	if assignment.PreserveWorkspace {
-		return errors.New("canonical Workspace source is not initialized")
-	}
-	if err := os.MkdirAll(filepath.Dir(assignment.WorkspaceFolder), 0755); err != nil {
-		return fmt.Errorf("create workspace parent: %w", err)
-	}
-	command := exec.CommandContext(ctx, "git", "clone", "--no-checkout", "--", assignment.RepositoryURL, assignment.WorkspaceFolder)
-	if err := command.Run(); err != nil {
-		return errors.New("Project repository checkout failed; check repository access and connectivity")
-	}
-	if err := exec.CommandContext(ctx, "git", "-C", assignment.WorkspaceFolder, "checkout", "--detach", assignment.Revision).Run(); err != nil {
-		return errors.New("Assigned Project revision could not be checked out")
-	}
-	if output, err := exec.CommandContext(
-		ctx,
-		"git", "-C", assignment.WorkspaceFolder, "config", "factory.repositoryIdentity", assignment.RepositoryIdentity,
-	).CombinedOutput(); err != nil {
-		return fmt.Errorf("record workspace repository identity: %w: %s", err, output)
-	}
-	if output, err := exec.CommandContext(ctx, "chown", "-R", "1000:1000", assignment.WorkspaceFolder).CombinedOutput(); err != nil {
-		return fmt.Errorf("assign Project checkout ownership: %w: %s", err, output)
-	}
-	return nil
-}
-
 func waitForDocker(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, dockerReadyTimeout)
 	defer cancel()
-	for attempt := 0; attempt < 120; attempt++ {
+	for attempt := 0; attempt < dockerReadyAttempts; attempt++ {
 		command := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
 		if err := command.Run(); err == nil {
 			return nil
@@ -1050,7 +958,7 @@ func waitForDocker(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(dockerReadyPollInterval):
 		}
 	}
 	return errors.New("private Docker daemon did not become ready")
@@ -1065,7 +973,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 	if !browserImagePattern.MatchString(reference) {
 		return errors.New("browser tools image must be pinned by exact digest")
 	}
-	ctx, end := context.WithTimeout(parent, 180*time.Second)
+	ctx, end := context.WithTimeout(parent, browserImagePullTimeout)
 	defer end()
 	confirmed := func() bool {
 		if strings.HasPrefix(reference, "sha256:") {
@@ -1088,7 +996,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 		return nil
 	}
 	if ctx.Err() != nil {
-		return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
+		return errBrowserImageStartup
 	}
 	retryDelay := 250 * time.Millisecond
 	for {
@@ -1104,7 +1012,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 			return nil
 		}
 		if ctx.Err() != nil {
-			return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
+			return errBrowserImageStartup
 		}
 		failure := strings.ToLower(string(diagnostic.Bytes()))
 		if strings.Contains(failure, "no space left on device") || strings.Contains(failure, "disk quota exceeded") {
@@ -1120,7 +1028,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
+			return errBrowserImageStartup
 		case <-timer.C:
 		}
 		if confirmed() {
@@ -1316,8 +1224,18 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start Connector child: %w", err)
 	}
-	go command.Wait()
+	go func() { reportChildExit(os.Stderr, assignment, command.Wait()) }()
 	return nil
+}
+
+// reportChildExit records how the injected child process ended. Credentials
+// travel only on its stdin, so the exit status is safe to log.
+func reportChildExit(output io.Writer, assignment Assignment, err error) {
+	if err == nil {
+		fmt.Fprintf(output, "Connector child for attempt %s generation %d exited\n", assignment.RuntimeAttemptID, assignment.Generation)
+		return
+	}
+	fmt.Fprintf(output, "Connector child for attempt %s generation %d exited: %v\n", assignment.RuntimeAttemptID, assignment.Generation, err)
 }
 
 func injectApprovedTools(ctx context.Context, assignment Assignment, containerID string) error {

@@ -112,12 +112,11 @@ func TestUnconfirmedPrepareRecoveryNeverCommitsLaterManualWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	commands := t.TempDir()
-	shim := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = commit ]; then exit 73; fi\ndone\nexec \"$FACTORY_RECOVERY_REAL_GIT\" \"$@\"\n"
+	shim := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = commit ]; then exit 73; fi\ndone\nexec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(commands, "git"), []byte(shim), 0700); err != nil {
 		t.Fatal(err)
 	}
 	originalPath := os.Getenv("PATH")
-	t.Setenv("FACTORY_RECOVERY_REAL_GIT", realGit)
 	t.Setenv("PATH", commands+string(os.PathListSeparator)+originalPath)
 	if _, err := prepareCommit(context.Background(), workspace, message); err == nil {
 		t.Fatal("fixture did not lose preparation after staging")
@@ -157,7 +156,7 @@ func TestPushCommitRecoveryObservesExactRemote(t *testing.T) {
 	// Canonical checkout origin is a read-only, startup-scoped endpoint. Push
 	// must use the exact forge destination supplied by the authorized operation.
 	commitGit(t, workspace, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "expired-source"))
-	message.RepositoryURL = remote
+	message.RepositoryURL = "file://" + remote
 	commitFile(t, workspace, "app.txt", "implementation\n")
 	sha, err := prepareCommit(context.Background(), workspace, message)
 	if err != nil {
@@ -178,11 +177,10 @@ func TestPushCommitRecoveryObservesExactRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 	commands := t.TempDir()
-	shim := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = push ]; then exit 73; fi\ndone\nexec \"$FACTORY_RECOVERY_REAL_GIT\" \"$@\"\n"
+	shim := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = push ]; then exit 73; fi\ndone\nexec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(commands, "git"), []byte(shim), 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FACTORY_RECOVERY_REAL_GIT", realGit)
 	t.Setenv("PATH", commands+string(os.PathListSeparator)+os.Getenv("PATH"))
 	second, err := pushCommit(context.Background(), workspace, message)
 	if err != nil || second != first {
@@ -199,7 +197,7 @@ func TestPushCommitRecoveryObservesExactRemote(t *testing.T) {
 	}
 	message.ExpectedSHA = commitGit(t, workspace, "rev-parse", "HEAD^")
 	destination := message.RepositoryURL
-	message.RepositoryURL = filepath.Join(t.TempDir(), "unavailable-forge")
+	message.RepositoryURL = "file://" + filepath.Join(t.TempDir(), "unavailable-forge")
 	if _, err := pushCommit(context.Background(), workspace, message); err == nil || err.Error() != "remote branch could not be observed" {
 		t.Fatalf("remote read failure was reported as a branch conflict: %v", err)
 	}

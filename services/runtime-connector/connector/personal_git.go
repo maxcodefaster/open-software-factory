@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/repositoryurl"
 )
@@ -133,7 +132,7 @@ func personalGit(ctx context.Context, assignment Assignment, message Message) (s
 	if len(message.Data) > 8192 || decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF {
 		return "", errors.New("Invalid Workspace Git request")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, gitOperationTimeout)
 	defer cancel()
 	git := func(args ...string) (string, error) {
 		return personalGitCommand(ctx, assignment.WorkspaceFolder, args...)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -31,6 +32,12 @@ type browserAppRoute struct {
 // The browser will have no network interface outside loopback. Its only App
 // connection is a Unix socket to this proxy, outside the browser container.
 // Never dial a hostname or destination supplied by a page or an agent.
+const (
+	browserMaxApps = 8
+	// Each App is routed by its declared factory.invalid origin and its target origin.
+	browserRoutesPerApp = 2
+)
+
 type browserAppProxy struct {
 	authority    context.Context
 	routes       map[string]browserAppRoute
@@ -90,8 +97,8 @@ func newBrowserAppProxyDestination(authority context.Context, channels []Channel
 			proxy.routes[key] = route
 		}
 	}
-	if len(proxy.routes) == 0 || len(proxy.routes) > 16 {
-		return nil, errors.New("browser requires between one and eight declared Apps")
+	if len(proxy.routes) == 0 || len(proxy.routes) > browserMaxApps*browserRoutesPerApp {
+		return nil, fmt.Errorf("browser requires between one and %d declared Apps", browserMaxApps)
 	}
 	return proxy, nil
 }

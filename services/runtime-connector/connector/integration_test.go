@@ -23,7 +23,7 @@ func integrationFixture(t *testing.T, conflict bool) (string, Message) {
 	commitGit(t, workspace, "add", "-A")
 	commitGit(t, workspace, "commit", "-m", "Ticket A")
 	message.MergeParentSHA = commitGit(t, workspace, "rev-parse", "HEAD")
-	message.RepositoryURL = workspace
+	message.RepositoryURL = "file://" + workspace
 	message.Action = "git-prepare-integration"
 	commitGit(t, workspace, "checkout", message.Branch)
 	return workspace, message

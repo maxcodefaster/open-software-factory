@@ -26,3 +26,16 @@ func TestKubernetesServiceTransport(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivateHostPermitsOnlyLocalAndInstallationHosts(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "::1", "host.orb.internal", "factory.portable.svc", "10.0.0.5", "192.168.1.2", "fd00::2"} {
+		if !PrivateHost(host) {
+			t.Fatalf("%s should be private", host)
+		}
+	}
+	for _, host := range []string{"factory.example.com", "203.0.113.10", "8.8.8.8", "", "evil.svc.example.com", "fe80::1%eth0"} {
+		if PrivateHost(host) {
+			t.Fatalf("%s should not be private", host)
+		}
+	}
+}

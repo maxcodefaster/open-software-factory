@@ -14,7 +14,17 @@ import (
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/connector"
 )
 
+// takeConnectorToken reads the inherited token and removes it from the process
+// environment so no child process (Dev Container hooks, Git, process manager)
+// inherits it. Children that need a token receive it explicitly.
+func takeConnectorToken() string {
+	token := os.Getenv("FACTORY_CONNECTOR_TOKEN")
+	os.Unsetenv("FACTORY_CONNECTOR_TOKEN")
+	return token
+}
+
 func main() {
+	inheritedToken := takeConnectorToken()
 	if err := connector.ProtectProcess(); err != nil {
 		fail("protect Connector process: " + err.Error())
 	}
@@ -77,7 +87,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if os.Args[1] == "prepared-child" {
-		if *tokenPath != "" || *childTokenPath != "" || *tokenStdin || os.Getenv("FACTORY_CONNECTOR_TOKEN") != "" {
+		if *tokenPath != "" || *childTokenPath != "" || *tokenStdin || inheritedToken != "" {
 			fail("prepared Project processes cannot read Runtime credentials")
 		}
 		if err := connector.RunPreparedChild(ctx, assignment); err != nil {
@@ -85,7 +95,7 @@ func main() {
 		}
 		return
 	}
-	token := os.Getenv("FACTORY_CONNECTOR_TOKEN")
+	token := inheritedToken
 	if *tokenPath != "" {
 		content, readErr := os.ReadFile(*tokenPath)
 		if readErr != nil {

@@ -141,7 +141,7 @@ func ProducePrebuild(parent context.Context, assignment Assignment, request Preb
 func producePrebuildWith(parent context.Context, assignment Assignment, request PrebuildRequest,
 	build func(context.Context, prebuildOperation, string) (string, error), push func(context.Context, prebuildOperation, string) (string, error), read prebuildConfigurationReader) (PrebuildResult, error) {
 	var result PrebuildResult
-	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, prebuildProduceTimeout)
 	defer cancel()
 	root, err := prebuildRoot(assignment)
 	if err != nil {

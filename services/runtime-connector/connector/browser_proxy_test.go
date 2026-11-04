@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -403,5 +404,25 @@ func TestBrowserLoopbackBridgeRetainsOriginAndUsesOnlyAssignedUnixSocket(t *test
 	}
 	if hits.Load() != 1 {
 		t.Fatal("Unix bridge dialled an undeclared App")
+	}
+}
+
+func TestBrowserProxyAllowsEightAppsAndNamesTheLimitInApps(t *testing.T) {
+	channels := func(count int) []Channel {
+		var result []Channel
+		for index := 0; index < count; index++ {
+			result = append(result, Channel{
+				Name: fmt.Sprintf("app-%d", index), Kind: "app",
+				Target: fmt.Sprintf("http://127.0.0.1:%d", 4300+index), HealthPath: "/health",
+			})
+		}
+		return result
+	}
+	if _, err := newBrowserLoopbackAppProxy(context.Background(), channels(browserMaxApps)); err != nil {
+		t.Fatalf("eight Apps were rejected: %v", err)
+	}
+	_, err := newBrowserLoopbackAppProxy(context.Background(), channels(browserMaxApps+1))
+	if err == nil || err.Error() != "browser requires between one and 8 declared Apps" {
+		t.Fatalf("nine Apps produced %v", err)
 	}
 }

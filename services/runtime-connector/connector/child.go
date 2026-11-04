@@ -50,6 +50,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		return errors.New("Factory connector token is required")
 	}
 	resetStartupTimings()
+	var backoff reconnectBackoff
 	control, err := dialControl(ctx, assignment, "child", token)
 	for err != nil {
 		// Injection can finish while Factory is restarting. The admitted child
@@ -57,10 +58,11 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(time.Second):
+		case <-time.After(backoff.next()):
 		}
 		control, err = dialControl(ctx, assignment, "child", token)
 	}
+	backoff.reset()
 	fail := func(err error) error {
 		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
 		control.close()
@@ -170,6 +172,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		for {
 			control, err = dialControl(ctx, assignment, "child", token)
 			if err == nil {
+				backoff.reset()
 				break
 			}
 			select {
@@ -177,7 +180,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 				return nil
 			case processErr := <-processes.fatal:
 				return processErr
-			case <-time.After(time.Second):
+			case <-time.After(backoff.next()):
 			}
 		}
 	}
@@ -198,7 +201,7 @@ func waitForChannelsWithClient(ctx context.Context, assignment Assignment, proce
 	// A refused TCP connection is fast, not evidence that an App exhausted its
 	// startup window. Share one elapsed lifecycle window across all required
 	// channels; caller cancellation and real process failures still end it early.
-	ctx, cancel := context.WithTimeout(ctx, 420*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, channelReadinessTimeout)
 	defer cancel()
 	for _, channel := range assignment.Channels {
 		healthURL := strings.TrimSuffix(channel.Target, "/") + channel.HealthPath
@@ -252,7 +255,7 @@ func waitForChannelsWithClient(ctx context.Context, assignment Assignment, proce
 func (runtime *childRuntime) readLoop(ctx context.Context, control *controlConnection) error {
 	for {
 		var message Message
-		if err := control.connection.ReadJSON(&message); err != nil {
+		if err := control.read(&message); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -343,7 +346,7 @@ func (runtime *childRuntime) startHTTPRequest(ctx context.Context, message Messa
 		cancel()
 		// Bound observation, not model execution. A mutation timeout before
 		// headers is unknown admission and blocks later ordered requests.
-		requestContext, cancel = context.WithTimeout(ctx, 60*time.Second)
+		requestContext, cancel = context.WithTimeout(ctx, orderedRequestTimeout)
 	}
 	runtime.streamLock.Lock()
 	if runtime.httpCancels == nil {
@@ -576,7 +579,7 @@ func (runtime *childRuntime) openWebSocket(ctx context.Context, message Message)
 	if channel.Kind == "ide" && validTheiaConnectionToken(message.TheiaConnectionToken) {
 		headers.Add("Cookie", "theia-connection-token="+message.TheiaConnectionToken)
 	}
-	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: controlHandshakeTimeout}
 	if message.Protocol != "" {
 		dialer.Subprotocols = []string{message.Protocol}
 	}

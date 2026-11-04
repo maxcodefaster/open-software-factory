@@ -303,11 +303,11 @@ func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures
 
 func TestRunArgumentBoundaryVariants(t *testing.T) {
 	for _, arguments := range [][]string{{"--pid", "host"}, {"--pid=host"}, {"--net", "host"}, {"--network=host"}, {"--ipc", "host"}, {"--privileged=true"}, {"--cap-add=SYS_ADMIN"}, {"--device", "/dev/sda"}} {
-		if err := validateRunArguments(arguments); err == nil {
+		if err := validateRunArguments("/workspace", arguments); err == nil {
 			t.Fatalf("accepted forbidden arguments: %v", arguments)
 		}
 	}
-	if err := validateRunArguments([]string{"--cap-drop", "NET_RAW", "--cap-drop=SYS_PTRACE"}); err != nil {
+	if err := validateRunArguments("/workspace", []string{"--cap-drop", "NET_RAW", "--cap-drop=SYS_PTRACE"}); err != nil {
 		t.Fatal(err)
 	}
 }
