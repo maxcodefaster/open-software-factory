@@ -9,6 +9,10 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const factoryboxBuildRequest = z
   .strictObject({
     repository: z.string().refine(isAbsolute, "Factorybox repository must use an absolute path"),
+    commit: z.string().regex(/^[a-f0-9]{40}$/, "Factorybox build requires an exact 40-hex commit"),
+    upstreamVersion: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, "Factorybox build requires an upstream version"),
     platform: z.enum(["linux/arm64", "linux/amd64"]),
     nativeBaseBuild: artifact("factorybox-build-native-base-"),
     sysboxBuild: artifact("factorybox-build-sysbox-").optional(),
@@ -19,10 +23,7 @@ export const factoryboxBuildRequest = z
       .optional(),
     boundedBuild: z.boolean().default(true),
     network: z.enum(["default", "host"]).default("default"),
-    dockerContext: z
-      .string()
-      .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/)
-      .default("orbstack"),
+    dockerContext: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/),
     nodeName: factoryboxRuntimeProfile.shape.nodeName,
     kernel: factoryboxRuntimeProfile.shape.kernel,
   })
@@ -103,14 +104,45 @@ async function saveNew(path: string, value: unknown) {
   }
 }
 
+const allowedEnvironment = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "DOCKER_CONFIG",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+]);
+
+// The build tool receives only what mise, Docker and Go need, never ambient credentials.
+export function factoryboxBuildEnvironment(
+  dockerContext: string,
+  source: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const [name, value] of Object.entries(source))
+    if (value !== undefined && (allowedEnvironment.has(name) || name.startsWith("MISE_")))
+      environment[name] = value;
+  return {
+    ...environment,
+    FACTORYBOX_DOCKER_CONTEXT: dockerContext,
+    FACTORYBOX_DOCKER_ELEVATION: "",
+  };
+}
+
 async function run(args: string[], cwd: string, dockerContext: string) {
   const child = Bun.spawn(args, {
     cwd,
-    env: {
-      ...process.env,
-      FACTORYBOX_DOCKER_CONTEXT: dockerContext,
-      FACTORYBOX_DOCKER_ELEVATION: "",
-    },
+    env: factoryboxBuildEnvironment(dockerContext),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -123,7 +155,56 @@ async function run(args: string[], cwd: string, dockerContext: string) {
   return { stdout, stderr, exitCode };
 }
 
-export async function main(args: string[], ports = { run }) {
+type Ports = { run: typeof run };
+
+// Refuse to build from anything but the exact requested commit with no local changes.
+export async function verifyFactoryboxSource(request: BuildRequest, ports: Ports) {
+  const git = (...args: string[]) =>
+    ports.run(
+      ["git", "-C", request.repository, ...args],
+      request.repository,
+      request.dockerContext,
+    );
+  const head = await git("rev-parse", "HEAD");
+  if (head.exitCode !== 0) throw new Error("Cannot read the Factorybox repository commit");
+  const observed = head.stdout.trim();
+  if (observed !== request.commit)
+    throw new Error(
+      `Factorybox repository is at ${observed}, not the requested commit ${request.commit}`,
+    );
+  const status = await git("status", "--porcelain", "--untracked-files=all");
+  if (status.exitCode !== 0) throw new Error("Cannot read the Factorybox repository state");
+  if (status.stdout.trim() !== "")
+    throw new Error(
+      "Factorybox repository has uncommitted or untracked changes; refusing to build",
+    );
+  return { repository: request.repository, commit: observed, treeClean: true as const };
+}
+
+async function toolVersions(request: BuildRequest, ports: Ports) {
+  const probe = async (args: string[]) => {
+    const result = await ports
+      .run(args, request.repository, request.dockerContext)
+      .catch(() => null);
+    return result?.exitCode === 0 ? result.stdout.trim() || result.stderr.trim() : "unavailable";
+  };
+  return {
+    bun: Bun.version,
+    git: await probe(["git", "--version"]),
+    mise: await probe(["mise", "--version"]),
+    python3: await probe(["mise", "exec", "--", "python3", "--version"]),
+    docker: await probe([
+      "docker",
+      "--context",
+      request.dockerContext,
+      "version",
+      "--format",
+      "client {{.Client.Version}} server {{.Server.Version}}",
+    ]),
+  };
+}
+
+export async function main(args: string[], ports: Ports = { run }) {
   if (args.length !== 1 || !args[0]) throw new Error("Usage: factorybox:build REQUEST_JSON");
   const request = factoryboxBuildRequest.parse(await readJSON(args[0]));
   request.repository = await realpath(request.repository);
@@ -135,9 +216,28 @@ export async function main(args: string[], ports = { run }) {
   // Record intent before any external build. Nothing here selects an installed profile.
   await saveNew(resolve(evidence, "intent.json"), { request, command });
   console.log(JSON.stringify({ building: evidence }));
+  const source = await verifyFactoryboxSource(request, ports);
+  const startedAt = new Date().toISOString();
+  const tools = await toolVersions(request, ports);
   const built = await ports.run(command, request.repository, request.dockerContext);
+  const finishedAt = new Date().toISOString();
   await saveNew(resolve(evidence, "build.json"), built);
   if (built.exitCode !== 0) throw new Error(`Factorybox build failed; inspect ${evidence}`);
+  const after = await ports.run(
+    ["git", "-C", request.repository, "rev-parse", "HEAD"],
+    request.repository,
+    request.dockerContext,
+  );
+  if (after.exitCode !== 0 || after.stdout.trim() !== request.commit)
+    throw new Error("Factorybox repository changed during the build");
+  const provenance = {
+    ...source,
+    upstreamVersion: request.upstreamVersion,
+    tools,
+    startedAt,
+    finishedAt,
+  };
+  await saveNew(resolve(evidence, "provenance.json"), provenance);
   let last: unknown;
   for (const line of built.stdout.trim().split("\n").reverse()) {
     try {
@@ -225,6 +325,7 @@ export async function main(args: string[], ports = { run }) {
     platformMatches: doctor?.exitCode === 0,
     nativeLifecycleQualified: false,
     installed: false,
+    provenance,
     evidence,
   };
   await saveNew(resolve(evidence, "result.json"), result);

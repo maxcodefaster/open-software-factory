@@ -41,6 +41,8 @@ The request names exact completed inputs, not a floating tag or latest artifact:
 ```json
 {
   "repository": "/absolute/path/to/factorybox",
+  "commit": "REPLACE_WITH_40_HEX_CHARACTER_HEAD_COMMIT",
+  "upstreamVersion": "REPLACE_WITH_FACTORYBOX_VERSION",
   "platform": "linux/arm64",
   "nativeBaseBuild": "factorybox-build-native-base-REPLACE_WITH_32_HEX_CHARACTERS",
   "builder": "REPLACE_WITH_RUNNING_BOUNDED_BUILDER",
@@ -51,6 +53,10 @@ The request names exact completed inputs, not a floating tag or latest artifact:
   "kernel": "REPLACE_WITH_ACTUAL_KERNEL_RELEASE"
 }
 ```
+
+The build refuses a repository whose `HEAD` differs from `commit` or whose working tree has any
+change, and records the commit, tool versions and timestamps in `provenance.json` beside the
+candidate. The build tool receives an allowlisted environment, not Factory's.
 
 The standalone README describes native-base and bounded builder preparation.
 Optional `sysboxBuild` and `retainedCandidate` reuse exact verified completed component

@@ -58,9 +58,7 @@ test("only published releases build and publish both architectures natively", as
     expect(build.run).toContain(
       '--label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"',
     );
-    expect(build.run).toContain(
-      '--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"',
-    );
+    expect(build.run).toContain('--label "org.opencontainers.image.revision=$REVISION"');
     expect(build.run).toContain('--label "org.opencontainers.image.version=$RELEASE"');
   }
   for (const job of ["roles", "manifests", "factory", "distribution"])
@@ -132,6 +130,85 @@ test("release images wait for the same non-live checks on both native architectu
   expect(JSON.stringify(checks)).not.toMatch(/secrets\.|test:(?:live|native|browser:paid)/);
 });
 
+test("release publication is attested, signed and scoped to the jobs that need credentials", async () => {
+  const text = await readFile(
+    new URL("../../.github/workflows/images.yaml", import.meta.url),
+    "utf8",
+  );
+  const workflow = parse(text);
+  expect(workflow.permissions).toEqual({ contents: "read" });
+  for (const job of ["roles", "manifests", "factory", "distribution"])
+    expect(workflow.jobs[job].permissions).toEqual({
+      contents: "read",
+      packages: "write",
+      "id-token": "write",
+    });
+  for (const job of ["release", "verify"])
+    expect(workflow.jobs[job].permissions?.packages).toBeUndefined();
+  expect(text).not.toContain('--provenance=false"');
+  expect(text).toContain("--provenance=mode=max");
+  expect(text).toContain("--sbom=generator=$SBOM_GENERATOR");
+  expect(workflow.env.BUILDKIT_IMAGE).toMatch(/@sha256:[a-f0-9]{64}$/);
+  expect(text).toContain('--driver-opt "image=$BUILDKIT_IMAGE"');
+  expect(text).not.toMatch(/docker buildx create --use$/m);
+  for (const job of Object.values(workflow.jobs) as {
+    steps?: { uses?: string; with?: Record<string, unknown> }[];
+  }[])
+    for (const step of job.steps ?? []) {
+      if (step.uses) expect(step.uses).toMatch(/^[\w/-]+@[a-f0-9]{40}$/);
+      if (step.uses?.startsWith("actions/checkout@"))
+        expect(step.with?.["persist-credentials"]).toBe(false);
+    }
+  const factory = workflow.jobs.factory.steps as {
+    uses?: string;
+    run?: string;
+    with?: Record<string, unknown>;
+  }[];
+  const scan = factory.find((step) => step.uses?.startsWith("aquasecurity/trivy-action@"));
+  expect(scan?.with).toMatchObject({
+    severity: "CRITICAL",
+    "ignore-unfixed": true,
+    "exit-code": 1,
+  });
+  expect(factory.findIndex((step) => step.run?.includes("image-smoke.ts"))).toBeGreaterThan(
+    factory.findIndex((step) => step.run?.includes("docker buildx build")),
+  );
+  expect(workflow.jobs.distribution.steps.at(-1).run).toContain("GITHUB_STEP_SUMMARY");
+  const library = await readFile(new URL("./release-lib.sh", import.meta.url), "utf8");
+  expect(library).toContain("Choose a new release version.");
+  expect(library).toContain("cosign sign --yes");
+});
+
+test("the native lane is a separate scheduled workflow that never runs for pull requests", async () => {
+  const native = parse(
+    await readFile(new URL("../../.github/workflows/native.yaml", import.meta.url), "utf8"),
+  );
+  expect(Object.keys(native.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
+  expect(native.jobs.native["runs-on"]).toEqual(["self-hosted", "sysbox"]);
+  const commands = native.jobs.native.steps.flatMap((step: { run?: string }) =>
+    step.run ? [step.run] : [],
+  );
+  expect(commands).toContain("mise exec -- bun run test:native");
+  expect(commands).toContain("mise exec -- bun run runtime:conformance");
+  const images = await readFile(
+    new URL("../../.github/workflows/images.yaml", import.meta.url),
+    "utf8",
+  );
+  expect(images).not.toMatch(/test:(?:live|native|browser:paid)|runtime:conformance/);
+});
+
+test("the pull request checks build the Factory image so a broken COPY fails before release", async () => {
+  const checks = parse(
+    await readFile(new URL("../../.github/workflows/checks.yaml", import.meta.url), "utf8"),
+  );
+  const commands = checks.jobs["factory-image"].steps.flatMap((step: { run?: string }) =>
+    step.run ? [step.run] : [],
+  );
+  expect(commands[0]).toContain("docker build --file deploy/factory/Dockerfile");
+  expect(commands[0]).not.toContain("--push");
+  expect(commands[1]).toContain("image-smoke.ts");
+});
+
 test("native Compose prebuild and required hooks gate runtime publication on both architectures", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
@@ -143,7 +220,7 @@ test("native Compose prebuild and required hooks gate runtime publication on bot
     'bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"',
   );
   expect(build.run.indexOf("project-compose-prebuild-proof.sh")).toBeLessThan(
-    build.run.indexOf('docker push "$image"'),
+    build.run.indexOf("--push --metadata-file"),
   );
   expect(
     workflow.jobs.roles.steps.find((step: { uses?: string }) =>

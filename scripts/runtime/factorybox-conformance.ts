@@ -1,7 +1,7 @@
-import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
 import {

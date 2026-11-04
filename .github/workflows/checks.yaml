@@ -43,7 +43,37 @@ jobs:
         run: mise exec -- mkcert -install
       - name: Prove private database and container callbacks before the full suite
         run: mise exec -- bun run test:controllers /planning-cache-network.test.ts
+      - name: Lint and render the Helm chart against the Kubernetes schemas
+        run: |
+          set -euo pipefail
+          zeros="$(printf '0%.0s' {1..64})"
+          chart=(deploy/helm/factory --namespace factory
+            --values deploy/helm/factory/values.local.yaml
+            --set "image=ghcr.io/example/factory@sha256:$zeros"
+            --set "factorybox.image=registry.invalid/worker@sha256:$zeros"
+            --set "factorybox.executableSHA256=$zeros"
+            --set factorybox.nodeName=ci-node
+            --set factorybox.kernel=6.12.0
+            --set factorybox.architecture=amd64)
+          mise exec -- helm lint "${chart[@]}"
+          mise exec -- helm template factory "${chart[@]}" \
+            | mise exec -- kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.35.0
       - name: Check source, Connector and owned controllers
         run: mise exec -- bun run check:integration
       - name: Check owned UI journeys
         run: mise exec -- bun run test:browser
+  factory-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build the Factory image without publishing it
+        run: docker build --file deploy/factory/Dockerfile --tag factory-image-check .
+      - name: Start the Factory image
+        run: |
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
+            --env FACTORY_SMOKE_ARTIFACTS=optional \
+            --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \
+            factory-image-check /smoke/image-smoke.ts

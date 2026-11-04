@@ -818,3 +818,409 @@ test("the local preset is installable with one image setting and keeps all brows
   expect(config?.["FACTORY_ZERO_CACHE_PUBLIC_URL"]).toBe("http://127.0.0.1:58002/zero");
   expect(all.some((resource) => resource.kind === "Ingress")).toBe(false);
 });
+
+type Container = {
+  name: string;
+  image: string;
+  securityContext?: {
+    runAsUser?: number;
+    runAsNonRoot?: boolean;
+    allowPrivilegeEscalation?: boolean;
+    readOnlyRootFilesystem?: boolean;
+    capabilities?: { drop?: string[]; add?: string[] };
+    seccompProfile?: { type: string };
+  };
+  env?: Array<{ name: string; value?: string; valueFrom?: { secretKeyRef?: { name: string } } }>;
+  livenessProbe?: { periodSeconds?: number; failureThreshold?: number; timeoutSeconds?: number };
+  readinessProbe?: unknown;
+  startupProbe?: unknown;
+};
+type Workload = {
+  kind: string;
+  metadata: { name: string };
+  spec: {
+    template: {
+      metadata?: { annotations?: Record<string, string> };
+      spec: {
+        securityContext?: {
+          seccompProfile?: { type: string };
+          fsGroup?: number;
+          runAsUser?: number;
+        };
+        containers: Container[];
+        initContainers?: Container[];
+        volumes?: Array<{ name: string; secret?: { secretName: string } }>;
+      };
+    };
+  };
+};
+type Policy = {
+  kind: string;
+  metadata: { name: string };
+  spec: {
+    podSelector: {
+      matchLabels?: Record<string, string>;
+      matchExpressions?: Array<{ values: string[] }>;
+    };
+    policyTypes: string[];
+    ingress?: Array<{
+      from?: Array<{
+        podSelector?: { matchLabels: Record<string, string> };
+        namespaceSelector?: { matchLabels?: Record<string, string> };
+      }>;
+      ports?: Array<{ port: number }>;
+    }>;
+    egress?: Array<{ to?: unknown[]; ports?: Array<{ port: number; protocol: string }> }>;
+  };
+};
+
+async function renderAll(extra: string[] = []) {
+  const result = await helm(["template", "portable", chart, ...localValues, ...extra]);
+  if (result.exitCode !== 0) throw new Error(result.stderr);
+  return {
+    text: result.stdout,
+    all: parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource),
+  };
+}
+function workloads(all: Resource[]) {
+  return (all as unknown as Workload[]).filter((item) =>
+    ["Deployment", "StatefulSet", "Job"].includes(item.kind),
+  );
+}
+function policies(all: Resource[]) {
+  return (all as unknown as Policy[]).filter((item) => item.kind === "NetworkPolicy");
+}
+
+test.each([
+  ["default local preset", []],
+  [
+    "operator-owned secrets",
+    [
+      "--set",
+      "existingSecrets.credentials=owned-credentials",
+      "--set",
+      "existingSecrets.objects=owned-objects",
+      "--set",
+      "existingSecrets.openbaoTLS=owned-tls",
+    ],
+  ],
+  [
+    "Ingress with a controller namespace",
+    [
+      "--set",
+      "development=false",
+      "--set",
+      "developmentZeroURL=",
+      "--set",
+      "publicURL=https://factory.example.com",
+      "--set",
+      "forgejoPublicURL=https://git.example.com",
+      "--set",
+      "ingress.enabled=true",
+      "--set",
+      "networkPolicy.ingressControllerNamespaceSelector.matchLabels.team=edge",
+    ],
+  ],
+  ["policies disabled", ["--set", "networkPolicy.enabled=false"]],
+])(
+  "the %s renders valid Kubernetes objects",
+  async (_name, extra) => {
+    const { text } = await renderAll(extra);
+    const checker = Bun.spawn(
+      [
+        "kubeconform",
+        "-strict",
+        "-summary",
+        "-ignore-missing-schemas",
+        "-kubernetes-version",
+        "1.35.0",
+      ],
+      { stdin: new Response(text), stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(checker.stdout).text(),
+      new Response(checker.stderr).text(),
+      checker.exited,
+    ]);
+    expect(`${stdout}${stderr}`).toContain("Invalid: 0, Errors: 0");
+    expect(exitCode).toBe(0);
+  },
+  60_000,
+);
+
+test("the application ServiceAccount has no cluster-wide Secret watch, update or wildcard grants", async () => {
+  const role = (await resources()).find((resource) => resource.kind === "ClusterRole");
+  const rules = role?.rules ?? [];
+  const granted = (group: string, resource: string) =>
+    rules
+      .filter((rule) => rule.apiGroups?.includes(group) && rule.resources?.includes(resource))
+      .flatMap((rule) => rule.verbs ?? []);
+  expect(granted("", "secrets").sort()).toEqual(["create", "delete", "get", "list", "patch"]);
+  for (const rule of rules) {
+    expect(rule.verbs).not.toContain("watch");
+    expect(rule.verbs).not.toContain("deletecollection");
+    expect(rule.verbs).not.toContain("escalate");
+    expect(rule.verbs).not.toContain("impersonate");
+    if (rule.verbs?.includes("update")) expect(rule.resources).toEqual(["namespaces/finalize"]);
+  }
+  expect(granted("", "pods/exec").sort()).toEqual(["create", "get"]);
+  expect(granted("", "pods/portforward").sort()).toEqual(["create", "get"]);
+  expect(granted("", "nodes")).toEqual(["get"]);
+  expect(granted("", "events")).toEqual([]);
+  expect(granted("storage.k8s.io", "storageclasses")).toEqual([]);
+});
+
+test("every workload container drops capabilities and uses the runtime seccomp profile", async () => {
+  const { all } = await renderAll();
+  const found = workloads(all);
+  expect(found.map((item) => item.metadata.name).sort()).toEqual([
+    "portable",
+    "portable-forgejo",
+    "portable-maintenance",
+    "portable-objects",
+    "portable-openbao",
+    "portable-postgres",
+    "portable-zero",
+  ]);
+  for (const workload of found) {
+    const pod = workload.spec.template.spec;
+    expect(pod.securityContext?.seccompProfile?.type).toBe("RuntimeDefault");
+    for (const container of [...pod.containers, ...(pod.initContainers ?? [])]) {
+      const security = container.securityContext;
+      expect(security?.allowPrivilegeEscalation).toBe(false);
+      expect(security?.capabilities?.drop).toEqual(["ALL"]);
+      expect(security?.readOnlyRootFilesystem).toBe(true);
+      expect(security?.seccompProfile?.type).toBe("RuntimeDefault");
+    }
+  }
+});
+
+test("only Factory and the volume-ownership init containers run as root", async () => {
+  const { all } = await renderAll();
+  const roots: string[] = [];
+  for (const workload of workloads(all)) {
+    const pod = workload.spec.template.spec;
+    for (const container of [...pod.containers, ...(pod.initContainers ?? [])]) {
+      if (container.securityContext?.runAsNonRoot !== true)
+        roots.push(`${workload.metadata.name}/${container.name}`);
+    }
+  }
+  expect(roots.sort()).toEqual([
+    "portable-openbao/own-data",
+    "portable-zero/own-data",
+    "portable/factory",
+  ]);
+  const added = workloads(all).flatMap((workload) =>
+    (workload.spec.template.spec.initContainers ?? []).flatMap(
+      (container) => container.securityContext?.capabilities?.add ?? [],
+    ),
+  );
+  expect(new Set(added)).toEqual(new Set(["CHOWN", "DAC_OVERRIDE", "FOWNER"]));
+});
+
+test("unprivileged services use the user their images define", async () => {
+  const { all } = await renderAll();
+  const user = (name: string) =>
+    workloads(all).find((item) => item.metadata.name === name)?.spec.template.spec.securityContext
+      ?.runAsUser;
+  expect(user("portable-postgres")).toBe(999);
+  expect(user("portable-forgejo")).toBe(1000);
+  expect(user("portable-zero")).toBe(1000);
+  expect(user("portable-openbao")).toBe(100);
+  expect(user("portable-objects")).toBe(1000);
+});
+
+test("every long-running service has liveness separate from readiness", async () => {
+  const { all } = await renderAll();
+  for (const workload of workloads(all).filter((item) => item.kind !== "Job")) {
+    const container = workload.spec.template.spec.containers[0];
+    expect(container?.livenessProbe).toBeDefined();
+    expect(container?.readinessProbe).toBeDefined();
+    expect(container?.livenessProbe).not.toEqual(container?.readinessProbe);
+    expect(container?.livenessProbe?.timeoutSeconds).toBeGreaterThanOrEqual(10);
+    expect(
+      (container?.livenessProbe?.periodSeconds ?? 0) *
+        (container?.livenessProbe?.failureThreshold ?? 0),
+    ).toBeGreaterThanOrEqual(120);
+  }
+  for (const name of ["portable", "portable-forgejo", "portable-zero", "portable-openbao"])
+    expect(
+      workloads(all).find((item) => item.metadata.name === name)?.spec.template.spec.containers[0]
+        ?.startupProbe,
+    ).toBeDefined();
+});
+
+test("default-deny ingress is followed by only the flows Factory uses", async () => {
+  const { all } = await renderAll();
+  const found = policies(all);
+  const byName = new Map(found.map((policy) => [policy.metadata.name, policy]));
+  expect(byName.get("portable-default-deny-ingress")?.spec).toMatchObject({
+    podSelector: { matchLabels: { "app.kubernetes.io/instance": "portable" } },
+    policyTypes: ["Ingress"],
+  });
+  const sources = (name: string) =>
+    byName
+      .get(`portable-allow-${name}`)
+      ?.spec.ingress?.flatMap((rule) => rule.from ?? [])
+      .map(
+        (peer) =>
+          peer.podSelector?.matchLabels["app.kubernetes.io/component"] ??
+          `namespace:${peer.namespaceSelector?.matchLabels?.["app.kubernetes.io/managed-by"]}`,
+      );
+  expect(sources("factory")).toEqual(["zero", "forgejo", "namespace:open-software-factory"]);
+  expect(sources("forgejo")).toEqual(["factory", "namespace:open-software-factory"]);
+  expect(sources("zero")).toEqual(["factory"]);
+  expect(sources("postgres")).toEqual(["factory", "zero", "maintenance"]);
+  expect(sources("openbao")).toEqual(["factory", "openbao"]);
+  expect(sources("objects")).toEqual(["factory"]);
+  for (const backend of ["postgres", "openbao", "objects"])
+    expect(sources(backend)?.some((source) => source.startsWith("namespace:"))).toBe(false);
+  const egress = byName.get("portable-restrict-backend-egress")?.spec;
+  expect(egress?.policyTypes).toEqual(["Egress"]);
+  expect(egress?.egress?.[0]?.to).toBeUndefined();
+  expect(egress?.egress?.[0]?.ports).toEqual([
+    { protocol: "UDP", port: 53 },
+    { protocol: "TCP", port: 53 },
+  ]);
+});
+
+test("Ingress controller access follows the Ingress setting and namespace selector", async () => {
+  const none = policies((await renderAll()).all)
+    .flatMap((policy) => policy.spec.ingress ?? [])
+    .flatMap((rule) => rule.from ?? []);
+  expect(none.some((peer) => peer.namespaceSelector?.matchLabels?.["team"])).toBe(false);
+  const { all } = await renderAll([
+    "--set",
+    "development=false",
+    "--set",
+    "developmentZeroURL=",
+    "--set",
+    "publicURL=https://factory.example.com",
+    "--set",
+    "forgejoPublicURL=https://git.example.com",
+    "--set",
+    "ingress.enabled=true",
+    "--set",
+    "networkPolicy.ingressControllerNamespaceSelector.matchLabels.team=edge",
+  ]);
+  const edge = policies(all).filter((policy) =>
+    policy.spec.ingress?.some((rule) =>
+      rule.from?.some((peer) => peer.namespaceSelector?.matchLabels?.["team"] === "edge"),
+    ),
+  );
+  expect(edge.map((policy) => policy.metadata.name).sort()).toEqual([
+    "portable-allow-factory",
+    "portable-allow-forgejo",
+    "portable-allow-zero",
+  ]);
+  const open = policies(
+    (
+      await renderAll([
+        "--set",
+        "development=false",
+        "--set",
+        "developmentZeroURL=",
+        "--set",
+        "publicURL=https://factory.example.com",
+        "--set",
+        "forgejoPublicURL=https://git.example.com",
+        "--set",
+        "ingress.enabled=true",
+      ])
+    ).all,
+  ).find((policy) => policy.metadata.name === "portable-allow-zero");
+  expect(open?.spec.ingress?.[0]?.from).toContainEqual({ namespaceSelector: {} });
+});
+
+test("network policies can be disabled", async () => {
+  expect(policies((await renderAll(["--set", "networkPolicy.enabled=false"])).all)).toHaveLength(0);
+});
+
+test("operator-owned Secrets replace generated ones and roll the pods that read them", async () => {
+  const generated = await renderAll();
+  const generatedSecrets = generated.all.filter((item) => item.kind === "Secret");
+  expect(generatedSecrets.map((item) => item.metadata.name).sort()).toEqual([
+    "portable-credentials",
+    "portable-objects",
+    "portable-openbao-tls",
+  ]);
+  for (const workload of workloads(generated.all))
+    expect(
+      workload.spec.template.metadata?.annotations?.["checksum/existing-secrets"],
+    ).toBeUndefined();
+  const owned = await renderAll([
+    "--set",
+    "existingSecrets.credentials=owned-credentials",
+    "--set",
+    "existingSecrets.objects=owned-objects",
+    "--set",
+    "existingSecrets.openbaoTLS=owned-tls",
+    "--set",
+    "existingSecrets.revision=7",
+  ]);
+  expect(owned.all.filter((item) => item.kind === "Secret")).toEqual([]);
+  const secretNames = new Set(
+    workloads(owned.all).flatMap((workload) =>
+      [
+        ...workload.spec.template.spec.containers,
+        ...(workload.spec.template.spec.initContainers ?? []),
+      ].flatMap((container) =>
+        (container.env ?? []).flatMap((entry) =>
+          entry.valueFrom?.secretKeyRef ? [entry.valueFrom.secretKeyRef.name] : [],
+        ),
+      ),
+    ),
+  );
+  expect(secretNames).toEqual(new Set(["owned-credentials", "owned-objects"]));
+  const claimed = (name: string) =>
+    workloads(owned.all).find((item) => item.metadata.name === name)?.spec.template.metadata
+      ?.annotations?.["checksum/existing-secrets"];
+  for (const name of ["portable", "portable-zero", "portable-objects", "portable-openbao"])
+    expect(claimed(name)).toMatch(/^[a-f0-9]{64}$/);
+  expect(claimed("portable-postgres")).toBeUndefined();
+  const rolled = await renderAll([
+    "--set",
+    "existingSecrets.credentials=owned-credentials",
+    "--set",
+    "existingSecrets.revision=8",
+  ]);
+  const before = await renderAll([
+    "--set",
+    "existingSecrets.credentials=owned-credentials",
+    "--set",
+    "existingSecrets.revision=7",
+  ]);
+  const checksum = (rendered: Resource[]) =>
+    workloads(rendered).find((item) => item.metadata.name === "portable")?.spec.template.metadata
+      ?.annotations?.["checksum/existing-secrets"];
+  expect(checksum(rolled.all)).not.toBe(checksum(before.all));
+  const tls = workloads(owned.all)
+    .find((item) => item.metadata.name === "portable-openbao")
+    ?.spec.template.spec.volumes?.find((volume) => volume.name === "tls");
+  expect(tls?.secret?.secretName).toBe("owned-tls");
+});
+
+test("an empty application image is refused with an actionable message", async () => {
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set-string",
+    "image=",
+  ]);
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr).toContain("image is required");
+});
+
+test("every chart-owned service image is pinned by digest", async () => {
+  const { all } = await renderAll();
+  for (const workload of workloads(all).filter((item) => item.metadata.name !== "portable")) {
+    if (workload.kind === "Job") continue;
+    for (const container of [
+      ...workload.spec.template.spec.containers,
+      ...(workload.spec.template.spec.initContainers ?? []),
+    ])
+      expect(container.image).toMatch(/@sha256:[a-f0-9]{64}$/);
+  }
+});

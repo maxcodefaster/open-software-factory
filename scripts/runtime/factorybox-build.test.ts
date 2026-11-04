@@ -4,12 +4,16 @@ import { resolve } from "node:path";
 import {
   factoryboxBuildCandidate,
   factoryboxBuildCommand,
+  factoryboxBuildEnvironment,
   factoryboxBuildRequest,
   main,
 } from "./factorybox-build";
 
 const request = factoryboxBuildRequest.parse({
   repository: "/owned/factorybox",
+  commit: "9".repeat(40),
+  upstreamVersion: "1.2.3",
+  dockerContext: "owned-context",
   platform: "linux/arm64",
   nativeBaseBuild: `factorybox-build-native-base-${"a".repeat(32)}`,
   sysboxBuild: `factorybox-build-sysbox-${"b".repeat(32)}`,
@@ -71,6 +75,9 @@ async function fixture(
     hostArchitecture?: string;
     hash?: string;
     doctorCode?: number;
+    head?: string;
+    dirty?: boolean;
+    headAfterBuild?: string;
   } = {},
 ) {
   const parent = resolve(".factory/test-results");
@@ -80,15 +87,34 @@ async function fixture(
   await writeFile(input, JSON.stringify({ ...request, repository: root }));
   const calls: string[][] = [];
   let evidence: string | undefined;
+  let built = false;
   const run: NonNullable<Parameters<typeof main>[1]>["run"] = async (args) => {
     calls.push(args);
-    if (args[0] === "mise") {
+    if (!evidence) {
       const directories = new Bun.Glob("factorybox-build-*/intent.json");
       for await (const path of directories.scan(parent)) {
         const intent = await Bun.file(resolve(parent, path)).json();
         if (intent.request?.repository === root) evidence = resolve(parent, path, "..");
       }
       expect(evidence).toBeDefined();
+    }
+    if (args[0] === "git") {
+      if (args.includes("--version"))
+        return { exitCode: 0, stdout: "git version 2.50.0\n", stderr: "" };
+      if (args.includes("rev-parse"))
+        return {
+          exitCode: 0,
+          stdout: `${built ? (overrides.headAfterBuild ?? request.commit) : (overrides.head ?? request.commit)}\n`,
+          stderr: "",
+        };
+      return { exitCode: 0, stdout: overrides.dirty ? " M tools/build.py\n" : "", stderr: "" };
+    }
+    if (args[0] === "mise" && !args.includes("tools/build_worker_pipeline.py"))
+      return { exitCode: 0, stdout: "tool 1.0\n", stderr: "" };
+    if (args.includes("version"))
+      return { exitCode: 0, stdout: "client 28 server 28\n", stderr: "" };
+    if (args[0] === "mise") {
+      built = true;
       return { exitCode: 0, stdout: JSON.stringify(receipt), stderr: "" };
     }
     if (args.includes("inspect"))
@@ -155,7 +181,19 @@ test("a real-target build records native refusal and leaves installed Factory st
     );
     expect(profile.architecture).toBe("arm64");
     expect(profile.executableSHA256).toBe(receipt.executable_sha256);
-    expect(owned.calls.filter((args) => args[0] === "mise")).toHaveLength(1);
+    expect(
+      owned.calls.filter((args) => args.includes("tools/build_worker_pipeline.py")),
+    ).toHaveLength(1);
+    expect(result.provenance).toMatchObject({
+      commit: request.commit,
+      treeClean: true,
+      upstreamVersion: "1.2.3",
+      tools: { git: "git version 2.50.0", python3: "tool 1.0" },
+    });
+    expect(Date.parse(result.provenance.startedAt)).toBeLessThanOrEqual(
+      Date.parse(result.provenance.finishedAt),
+    );
+    expect(await Bun.file(resolve(result.evidence, "provenance.json")).exists()).toBe(true);
     expect(owned.calls.some((args) => args.includes("push") || args.includes("apply"))).toBe(false);
   } finally {
     await owned.cleanup();
@@ -199,4 +237,58 @@ test("wrong image architecture or changed delivered bytes produce no candidate p
       await owned.cleanup();
     }
   }
+});
+
+test("a build needs an exact commit, upstream version and Docker context", () => {
+  for (const missing of ["commit", "upstreamVersion", "dockerContext"]) {
+    const input: Record<string, unknown> = { ...request };
+    delete input[missing];
+    expect(() => factoryboxBuildRequest.parse(input)).toThrow();
+  }
+  for (const commit of ["main", "abc123", "9".repeat(39), "G".repeat(40)])
+    expect(() => factoryboxBuildRequest.parse({ ...request, commit })).toThrow();
+});
+
+test("a repository at another commit or with local changes is refused before any build", async () => {
+  for (const [overrides, message] of [
+    [{ head: "8".repeat(40) }, "not the requested commit"],
+    [{ dirty: true }, "uncommitted or untracked"],
+  ] as const) {
+    const owned = await fixture(overrides);
+    try {
+      await expect(main([owned.input], { run: owned.run })).rejects.toThrow(message);
+      expect(owned.calls.some((args) => args.includes("tools/build_worker_pipeline.py"))).toBe(
+        false,
+      );
+    } finally {
+      await owned.cleanup();
+    }
+  }
+});
+
+test("a repository that moves during the build produces no candidate", async () => {
+  const owned = await fixture({ headAfterBuild: "7".repeat(40) });
+  try {
+    await expect(main([owned.input], { run: owned.run })).rejects.toThrow("changed during");
+  } finally {
+    await owned.cleanup();
+  }
+});
+
+test("the build tool receives an allowlisted environment, not ambient credentials", () => {
+  const environment = factoryboxBuildEnvironment("owned-context", {
+    PATH: "/bin",
+    HOME: "/home/owned",
+    MISE_DATA_DIR: "/data",
+    GITHUB_TOKEN: "secret",
+    OPENAI_API_KEY: "secret",
+    FACTORYBOX_DOCKER_CONTEXT: "ambient",
+  });
+  expect(environment).toEqual({
+    PATH: "/bin",
+    HOME: "/home/owned",
+    MISE_DATA_DIR: "/data",
+    FACTORYBOX_DOCKER_CONTEXT: "owned-context",
+    FACTORYBOX_DOCKER_ELEVATION: "",
+  });
 });

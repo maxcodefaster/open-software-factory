@@ -4,10 +4,12 @@ on:
     types: [published]
 permissions:
   contents: read
-  packages: write
 concurrency:
   group: distribution-${{ github.event.release.tag_name }}
   cancel-in-progress: false
+env:
+  BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+  SBOM_GENERATOR: docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 jobs:
   release:
     runs-on: ubuntu-24.04
@@ -17,6 +19,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Validate release tag and consolidated source
         id: version
         env:
@@ -30,9 +33,15 @@ jobs:
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
   verify:
     needs: release
+    permissions:
+      contents: read
     uses: ./.github/workflows/checks.yaml
   roles:
     needs: [release, verify]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +57,9 @@ jobs:
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Read native proof tool pins
         id: proof-tools
         run: |
@@ -63,45 +75,57 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          source scripts/factory/release-lib.sh
           IMAGE_ROOT="${IMAGE_ROOT,,}"
+          REVISION="$(git rev-parse HEAD)"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if docker buildx imagetools inspect "$IMAGE_ROOT/factory:$RELEASE" > /dev/null 2>&1; then
+          if release_exists "$IMAGE_ROOT/factory:$RELEASE"; then
             echo 'This distribution version is already published. Choose a new version.'
             exit 1
           fi
-          docker buildx create --use
+          docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
-            if docker buildx imagetools inspect "$image" > /dev/null 2>&1; then
-              echo "Architecture image already exists: $image"
-              exit 1
+            if release_exists "$image"; then
+              release_require_revision "$image" "$REVISION"
+              echo "Reusing the architecture image from an earlier attempt: $image"
+            else
+              dockerfile=deploy/runtime-host/Dockerfile
+              target=(--target "$role")
+              if [[ "$role" == browser-tools || "$role" == workspace-files ]]; then
+                dockerfile="deploy/$role/Dockerfile"
+                target=()
+              fi
+              build=(docker buildx build --platform "linux/$ARCH"
+                --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
+                --label "org.opencontainers.image.revision=$REVISION"
+                --label "org.opencontainers.image.version=$RELEASE"
+                --file "$dockerfile" "${target[@]}" --tag "$image")
+              attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")
+              if [[ "$role" == runtime-host ]]; then
+                "${build[@]}" --provenance=false --sbom=false --load .
+                image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+                bash scripts/runtime/compose-inputs-proof.sh "$image_id"
+                registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
+                bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
+                test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
+                # The proven layers come from the build cache. Publish them with attestations
+                # and refuse any result whose image configuration is not the proven one.
+                "${build[@]}" "${attest[@]}" --push --metadata-file "$RUNNER_TEMP/runtime-host.json" .
+                test "$(jq -r '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host.json")" = "$image_id"
+              else
+                "${build[@]}" "${attest[@]}" --push .
+              fi
             fi
-            dockerfile=deploy/runtime-host/Dockerfile
-            target=(--target "$role")
-            if [[ "$role" == browser-tools || "$role" == workspace-files ]]; then
-              dockerfile="deploy/$role/Dockerfile"
-              target=()
-            fi
-            exporter=(--push)
-            if [[ "$role" == runtime-host ]]; then
-              exporter=(--load)
-            fi
-            docker buildx build --platform "linux/$ARCH" --provenance=false "${exporter[@]}" \
-              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-              --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
-              --label "org.opencontainers.image.version=$RELEASE" \
-              --file "$dockerfile" "${target[@]}" --tag "$image" .
-            if [[ "$role" == runtime-host ]]; then
-              image_id="$(docker image inspect --format '{{.Id}}' "$image")"
-              bash scripts/runtime/compose-inputs-proof.sh "$image_id"
-              registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
-              bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
-              test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
-              docker push "$image"
-            fi
+            digest="$(release_digest "$image")"
+            release_sign "$IMAGE_ROOT/$role@$digest"
           done
   manifests:
     needs: [release, roles]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     runs-on: ubuntu-24.04
     outputs:
       artifacts: ${{ steps.publish.outputs.artifacts }}
@@ -109,25 +133,33 @@ jobs:
       RELEASE: ${{ needs.release.outputs.version }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Publish multi-architecture role manifests
         id: publish
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          source scripts/factory/release-lib.sh
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           artifacts='{}'
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE"
-            docker buildx imagetools create --tag "$image" "$image-amd64" "$image-arm64"
-            digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"
-            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            digest="$(release_combine "$image" "$image-amd64" "$image-arm64")"
+            release_sign "$IMAGE_ROOT/$role@$digest"
             artifacts="$(jq -c --arg role "$role" --arg ref "$IMAGE_ROOT/$role@$digest" '. + {($role): $ref}' <<< "$artifacts")"
           done
           printf 'artifacts=%s\n' "$artifacts" >> "$GITHUB_OUTPUT"
   factory:
     needs: [release, manifests]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -143,38 +175,99 @@ jobs:
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Build native Factory with exact runtime references
+        id: build
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FACTORY_RUNTIME_ARTIFACTS: ${{ needs.manifests.outputs.artifacts }}
         run: |
           set -euo pipefail
+          source scripts/factory/release-lib.sh
           IMAGE_ROOT="${IMAGE_ROOT,,}"
+          REVISION="$(git rev-parse HEAD)"
+          image="$IMAGE_ROOT/factory:$RELEASE-$ARCH"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx create --use
-          if docker buildx imagetools inspect "$IMAGE_ROOT/factory:$RELEASE-$ARCH" > /dev/null 2>&1; then
-            echo 'Factory architecture image already exists. Choose a new release version.'
+          if release_exists "$IMAGE_ROOT/factory:$RELEASE"; then
+            echo 'This distribution version is already published. Choose a new release version.'
             exit 1
           fi
-          docker buildx build --platform "linux/$ARCH" --provenance=false --push \
-            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
-            --label "org.opencontainers.image.version=$RELEASE" \
-            --file deploy/factory/Dockerfile --build-arg FACTORY_RUNTIME_ARTIFACTS \
-            --tag "$IMAGE_ROOT/factory:$RELEASE-$ARCH" .
+          if release_exists "$image"; then
+            release_require_revision "$image" "$REVISION"
+            echo "Reusing the Factory architecture image from an earlier attempt: $image"
+          else
+            docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
+            docker buildx build --platform "linux/$ARCH" \
+              --provenance=mode=max "--sbom=generator=$SBOM_GENERATOR" --push \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$REVISION" \
+              --label "org.opencontainers.image.version=$RELEASE" \
+              --file deploy/factory/Dockerfile --build-arg FACTORY_RUNTIME_ARTIFACTS \
+              --tag "$image" .
+          fi
+          digest="$(release_digest "$image")"
+          printf 'ref=%s@%s\n' "$IMAGE_ROOT/factory" "$digest" >> "$GITHUB_OUTPUT"
+      - name: Start the pushed Factory image
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
+            --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \
+            "$IMAGE_REF" /smoke/image-smoke.ts
+      - name: Scan the Factory image for fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ steps.build.outputs.ref }}
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+      - name: Sign the Factory architecture image
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          set -euo pipefail
+          source scripts/factory/release-lib.sh
+          release_sign "$IMAGE_REF"
   distribution:
     needs: [release, factory]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     runs-on: ubuntu-24.04
     env:
       RELEASE: ${{ needs.release.outputs.version }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Publish multi-architecture Factory manifest
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          source scripts/factory/release-lib.sh
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx imagetools create --tag "$IMAGE_ROOT/factory:$RELEASE" \
-            "$IMAGE_ROOT/factory:$RELEASE-amd64" "$IMAGE_ROOT/factory:$RELEASE-arm64"
+          image="$IMAGE_ROOT/factory:$RELEASE"
+          digest="$(release_combine "$image" "$image-amd64" "$image-arm64")"
+          release_sign "$IMAGE_ROOT/factory@$digest"
+          {
+            echo "### Factory $RELEASE"
+            echo
+            echo 'Pin this digest in the Helm chart `image` value:'
+            echo
+            echo '```'
+            echo "$IMAGE_ROOT/factory@$digest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

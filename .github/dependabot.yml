@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories:
+      - /deploy/factory
+      - /deploy/runtime-host
+      - /deploy/browser-tools
+      - /deploy/workspace-files
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directory: /services/runtime-connector
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      javascript:
+        patterns: ["*"]
