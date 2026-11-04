@@ -7,6 +7,8 @@ export function TrashWorkspace(props: {
   onOpen(id: string): void;
   onRestore(id: string): void;
   onRetry(id: string): void;
+  hasMore?: boolean;
+  onShowMore?(): void;
 }) {
   return (
     <section class="trash-workspace" aria-label="Trash">
@@ -57,6 +59,11 @@ export function TrashWorkspace(props: {
               </div>
             )}
           </For>
+          <Show when={props.hasMore && props.onShowMore}>
+            <button type="button" class="quiet-button trash-show-more" onClick={props.onShowMore}>
+              Show more removed Tickets
+            </button>
+          </Show>
         </div>
       </Show>
     </section>

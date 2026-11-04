@@ -18,3 +18,19 @@ test("Factory's light IDE gives active and inactive navigation icons readable co
     ).toBeGreaterThanOrEqual(3);
   }
 });
+
+test("line numbers meet text contrast on the editor and its highlighted line", () => {
+  const colors: Readonly<Record<string, string>> = factoryTheme.json.colors;
+  const light = (key: string) => {
+    const value = colors[key];
+    if (!value) throw new Error(`Missing IDE color ${key}`);
+    return luminance([1, 3, 5].map((start) => Number.parseInt(value.slice(start, start + 2), 16)));
+  };
+  const number = light("editorLineNumber.foreground");
+  for (const surface of ["editor.background", "editor.lineHighlightBackground"]) {
+    const background = light(surface);
+    expect(
+      (Math.max(background, number) + 0.05) / (Math.min(background, number) + 0.05),
+    ).toBeGreaterThanOrEqual(4.5);
+  }
+});

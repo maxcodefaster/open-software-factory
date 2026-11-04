@@ -19,7 +19,7 @@ export function createDeveloperIDERuntime(
   database: ReturnType<typeof createDatabase>,
   runtimes: Pick<
     ReturnType<typeof createRuntimeController>,
-    "start" | "startPersisted" | "processOutput" | "processAction" | "closeTerminal"
+    "start" | "startPersisted" | "startFresh" | "processOutput" | "processAction" | "closeTerminal"
   >,
   hub: RuntimeHub,
   access: ReturnType<typeof createRuntimeAccess>,
@@ -60,9 +60,11 @@ export function createDeveloperIDERuntime(
         failure: "This implementation is no longer active. Source files remain available.",
       };
     const [attempt] = await database.client<
-      Array<{ attemptID: string; state: string; failure: string | null }>
+      Array<{ attemptID: string; state: string; failure: string | null; restoreFailed: boolean }>
     >`
-      SELECT id AS "attemptID",state,failure FROM factory.runtime_attempt
+      SELECT id AS "attemptID",state,failure,
+        (state='resuming' AND resume_failed_at IS NOT NULL) AS "restoreFailed"
+      FROM factory.runtime_attempt
       WHERE workspace_id=${workspaceID} AND project_id=${source.projectID}
         AND ((${source.changeID}::uuid IS NULL AND change_id IS NULL)
           OR (change_id=${source.changeID} AND id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${source.changeID})))
@@ -76,6 +78,7 @@ export function createDeveloperIDERuntime(
           ? "reconnecting"
           : (attempt?.state ?? "stopped"),
       failure: attempt?.failure ?? null,
+      restoreFailed: attempt?.restoreFailed ?? false,
     };
   }
   async function exactAttempt(workspaceID: string, attemptID: string, userID: string) {
@@ -192,7 +195,7 @@ export function createDeveloperIDERuntime(
         return new Response(null, { status: 405 });
       }
       const selection = suffix.match(
-        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime(?:\/(ensure|activity))?$/,
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime(?:\/(ensure|activity|start-fresh))?$/,
       );
       if (selection?.[1]) {
         const workspaceID = selection[1];
@@ -212,6 +215,13 @@ export function createDeveloperIDERuntime(
           if (!current.attemptID || current.state !== "ready" || !hub.use(current.attemptID))
             throw new CommandError("conflict", "Workspace compute is not running");
           return new Response(null, { status: 204 });
+        }
+        if (selection[2] === "start-fresh") {
+          const current = await context(workspaceID, authorized.grant.userID);
+          if (!current.attemptID || !current.restoreFailed)
+            throw new CommandError("conflict", "This Sandbox is not waiting to be restored");
+          await runtimes.startFresh(current.attemptID, authorized.grant.userID);
+          return json(await context(workspaceID, authorized.grant.userID), 202);
         }
         if (source.changeID)
           await runtimes.startPersisted(source.changeID, authorized.grant.userID);

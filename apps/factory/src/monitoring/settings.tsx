@@ -385,7 +385,7 @@ export function MonitoringSettings(props: {
       aria-label="Project inputs"
       aria-busy={loading() || busy() ? "true" : "false"}
     >
-      <Show when={props.project}>
+      <Show when={!draft() && !secret() && !view() && props.project}>
         {(project) => <DeliverySettings projectID={project().id} active={props.active !== false} />}
       </Show>
       <Show when={readError()}>
@@ -710,6 +710,11 @@ export function MonitoringSettings(props: {
                 </p>
               </div>
             </header>
+            <Show when={props.project}>
+              {(project) => (
+                <DeliverySettings projectID={project().id} active={props.active !== false} />
+              )}
+            </Show>
             <Show when={!current().canManage}>
               <p class="input-help">
                 Project managers configure Inputs. You can inspect received requests and prepared

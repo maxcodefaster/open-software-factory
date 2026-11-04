@@ -10,6 +10,8 @@ export interface FactoryRuntimeState {
   readonly kind?: string;
   readonly state: string;
   readonly failure: string | null;
+  /** The native record proves the paused Sandbox's Resume failed. Start fresh is offered. */
+  readonly restoreFailed?: boolean;
 }
 const identity = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const preparingStates = new Set([
@@ -64,14 +66,35 @@ export function readyRuntime(
     ? { workspaceID: value.workspaceID, attemptID: value.attemptID }
     : undefined;
 }
+// Native restore failures can carry whole log excerpts and host paths. Keep a readable bound.
+function boundedFailure(failure: string, limit = 240) {
+  const text = failure.replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), limit - 40))}…`;
+}
+
+// A confirmed failed restore is settled: only the owner's Start fresh moves it on.
+export function runtimeSettled(value: FactoryRuntimeState | undefined) {
+  return !value || value.restoreFailed === true || !preparingStates.has(value.state);
+}
+
+export const restoreFailedCopy =
+  "The paused Sandbox could not be restored. Your files are unchanged. Start fresh to continue; the paused memory and private container data are discarded.";
+
 export function runtimePreparationCopy(value: FactoryRuntimeState | undefined) {
   if (!value) return "Select a Workspace to use its compute.";
-  if (value.failure) return value.failure;
+  if (value.restoreFailed) return restoreFailedCopy;
+  if (value.state === "resuming" && value.failure)
+    return "Restoring the paused Sandbox could not be confirmed. Factory keeps it untouched until its state is known. Your files are unchanged.";
+  if (value.failure) return boundedFailure(value.failure);
   if (["loading", "create-intended", "starting", "reconnecting", "resuming"].includes(value.state))
     return "Preparing Workspace compute. Your source files remain available.";
   if (value.state === "pausing" || value.state === "paused")
     return "Workspace compute is paused. Continue working to resume it.";
-  if (["stop-intended", "stopping", "cleanup-failed"].includes(value.state))
+  if (value.state === "cleanup-failed")
+    return "Cleanup of the previous compute is unconfirmed. A new Start is blocked until it is confirmed. Your source files remain available.";
+  if (["stop-intended", "stopping"].includes(value.state))
     return "Workspace compute is stopping. Your source files remain available.";
   return "Workspace compute starts automatically when you open it for editing.";
 }
@@ -178,15 +201,14 @@ export class FactoryRuntimeContext {
       !signal ||
       signal.aborted ||
       this.#observing ||
-      preparingStates.has(current.state)
+      (preparingStates.has(current.state) && !current.restoreFailed)
     )
       return;
     const selection = this.#selection;
     this.#observing = true;
     try {
       await this.#request(current.workspaceID, selection, signal);
-      if (preparingStates.has(this.#value?.state ?? ""))
-        await this.#read(current.workspaceID, selection, signal);
+      if (!runtimeSettled(this.#value)) await this.#read(current.workspaceID, selection, signal);
     } catch (cause) {
       this.#fail(current.workspaceID, selection, signal, cause);
     } finally {
@@ -217,12 +239,44 @@ export class FactoryRuntimeContext {
       this.#fail(current.workspaceID, selection, signal, cause);
     }
   }
+  // Discards a paused Sandbox whose failed restore is confirmed and starts a new one.
+  // The command returns once the new Attempt exists; its own progress follows from reads.
+  async startFresh() {
+    const current = this.#value;
+    if (!current?.restoreFailed || !this.#writable) return;
+    const selection = this.#selection;
+    this.#preparationFailure = undefined;
+    this.#cancel?.abort();
+    this.#cancel = new AbortController();
+    const signal = this.#cancel.signal;
+    this.#set({ ...current, state: "starting", failure: null, restoreFailed: false });
+    try {
+      const response = await this.fetcher(
+        `${factoryWorkspaceRuntimePath(current.workspaceID, this.href())}/start-fresh`,
+        { method: "POST", credentials: "same-origin", cache: "no-store", signal },
+      );
+      if (!response.ok) {
+        const value: unknown = await response.json().catch(() => null);
+        throw new Error(
+          typeof value === "object" &&
+            value !== null &&
+            "error" in value &&
+            typeof value.error === "string"
+            ? value.error
+            : "Start fresh could not be confirmed. Try again.",
+        );
+      }
+      if (!signal.aborted) await this.#read(current.workspaceID, selection, signal);
+    } catch (cause) {
+      this.#fail(current.workspaceID, selection, signal, cause);
+    }
+  }
   async #read(workspaceID: string, selection: number, signal: AbortSignal) {
     try {
       const deadline = Date.now() + 300_000;
       while (!signal.aborted && selection === this.#selection) {
         await this.#request(workspaceID, selection, signal);
-        if (!this.#value || !preparingStates.has(this.#value.state)) return;
+        if (runtimeSettled(this.#value)) return;
         if (Date.now() > deadline)
           throw new Error(
             "Compute is still preparing. Reopen this Workspace to check its progress.",
@@ -301,7 +355,8 @@ export class FactoryRuntimeContext {
       this.#value?.workspaceID === value.workspaceID &&
       this.#value.attemptID === value.attemptID &&
       this.#value.state === value.state &&
-      this.#value.failure === value.failure
+      this.#value.failure === value.failure &&
+      this.#value.restoreFailed === value.restoreFailed
     )
       return;
     this.#value = value;

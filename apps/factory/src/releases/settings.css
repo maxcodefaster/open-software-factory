@@ -164,6 +164,14 @@
   flex: 0 0 auto;
   margin-inline-start: auto;
 }
+@media (pointer: coarse) {
+  .release-reference-row > button {
+    min-width: var(--touch-target);
+  }
+  .release-list summary {
+    box-sizing: border-box;
+  }
+}
 .release-reference {
   min-width: 0;
   overflow-wrap: anywhere;

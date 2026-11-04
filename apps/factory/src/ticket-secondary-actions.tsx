@@ -36,7 +36,7 @@ export function TicketSecondaryActions(props: {
   const [query, setQuery] = createSignal("");
   let root: HTMLDivElement | undefined;
   let opener: HTMLButtonElement | undefined;
-  let panel: HTMLElement | undefined;
+  let panel: HTMLDivElement | undefined;
   const panelID = `ticket-actions-${crypto.randomUUID()}`;
   const matches = (title: string) =>
     query()
@@ -104,7 +104,8 @@ export function TicketSecondaryActions(props: {
       </button>
       <Show when={view()}>
         <Portal>
-          <section
+          {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: The role is menu or dialog by view. */}
+          <div
             class="ticket-action-menu"
             ref={panel}
             id={panelID}
@@ -213,23 +214,25 @@ export function TicketSecondaryActions(props: {
                   <span>Assign to Epic…</span>
                   <Icon name="chevron" />
                 </button>
-                <Show
-                  when={
-                    !props.trashed &&
-                    !props.dependencies.admitted &&
-                    props.dependencies.candidates.length
-                  }
-                >
+                <Show when={!props.trashed && props.dependencies.candidates.length}>
                   <button
                     type="button"
                     role="menuitem"
                     class="quiet-button"
-                    disabled={props.pending || props.dependencies.pending}
+                    disabled={
+                      props.pending || props.dependencies.pending || props.dependencies.admitted
+                    }
                     onClick={() => show("dependency")}
                   >
                     <Icon name="link" />
-                    <span>Add dependency…</span>
-                    <Icon name="chevron" />
+                    <span>
+                      {props.dependencies.admitted
+                        ? "Dependencies are fixed once work starts"
+                        : "Add dependency…"}
+                    </span>
+                    <Show when={!props.dependencies.admitted}>
+                      <Icon name="chevron" />
+                    </Show>
                   </button>
                 </Show>
                 <Show when={props.pullRequestUrl}>
@@ -379,6 +382,9 @@ export function TicketSecondaryActions(props: {
                     <Show when={!dependencies().length}>
                       <p class="ticket-picker-empty">No matching Tickets</p>
                     </Show>
+                    <p class="ticket-picker-empty">
+                      Tickets that already depend on this one are not listed.
+                    </p>
                   </Show>
                 </div>
               </Show>
@@ -393,7 +399,7 @@ export function TicketSecondaryActions(props: {
                 </div>
               </Show>
             </Show>
-          </section>
+          </div>
         </Portal>
       </Show>
     </div>

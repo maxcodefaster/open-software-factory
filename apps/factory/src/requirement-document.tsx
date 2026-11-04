@@ -16,7 +16,7 @@ export function RequirementDocument(props: {
       <header class="ticket-document-heading">
         <h2>{props.title}</h2>
         <div class="ticket-status-context">
-          <small>Revision {props.ordinal} · Read only</small>
+          <small>Version {props.ordinal} · Read only</small>
         </div>
       </header>
       <Show when={props.description}>
@@ -30,7 +30,7 @@ export function RequirementDocument(props: {
           <>
             <div class="markdown-body" innerHTML={markdownHTML(content().summary)} />
             <section class="specification-block">
-              <h4>Acceptance criteria</h4>
+              <h3>Acceptance criteria</h3>
               <ul class="requirement-checklist">
                 <For each={content().acceptanceCriteria}>
                   {(value) => (
@@ -46,7 +46,7 @@ export function RequirementDocument(props: {
             </section>
             <Show when={content().nonGoals.length}>
               <section class="specification-block">
-                <h4>Non-goals</h4>
+                <h3>Non-goals</h3>
                 <ul>
                   <For each={content().nonGoals}>
                     {(value) => <li class="markdown-body" innerHTML={markdownHTML(value)} />}

@@ -387,7 +387,7 @@ test("persists curated backgrounds and centers the active app around the Agent p
   await expect(page.locator(".workspace-window")).toHaveCount(1);
   await ticketDockButton.click();
   await expect(workspaceTabs.getByRole("tab", { name: "Inbox", exact: true })).toBeVisible();
-  await workspaceTabs.getByRole("button", { name: "Close Inbox" }).click();
+  await page.getByRole("button", { name: "Close Inbox" }).click();
   await page.getByRole("button", { name: "Minimize workspace" }).click();
   await ticketDockButton.click();
   await expect(workspaceTabs.getByRole("tab", { name: "Inbox", exact: true })).toHaveCount(0);

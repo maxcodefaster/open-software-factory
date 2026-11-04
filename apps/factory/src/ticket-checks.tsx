@@ -16,6 +16,7 @@ export type TicketCheckDetails = {
   reviewCurrent?: boolean | undefined;
   reviewSummary?: string | undefined;
   reviewFindings?: CandidateReviewResult["findings"] | undefined;
+  approvedAt?: string | undefined;
   promotionState?: string | undefined;
   promotionFailure?: string | undefined;
   cleanupError?: string | undefined;
@@ -111,7 +112,11 @@ export function TicketChecks(props: {
                       ? "The submitted version is retained. Resume checks to continue verification and independent review without repeating implementation."
                       : props.details?.promotionState
                         ? "The exact verified version was merged. Main Preview status is reported separately."
-                        : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
+                        : props.details?.approvedAt
+                          ? "Checks and independent review assessed the exact submitted version. Delivery is approved."
+                          : passed()
+                            ? "Checks and independent review assess the exact submitted version. Delivery still needs your approval."
+                            : "Checks and independent review assess the exact submitted version. Delivery stays blocked until both pass."}
                 </p>
               </Show>
             }

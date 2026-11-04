@@ -15,6 +15,9 @@ export function workspacePresence(input: WorkspacePresenceInput): string {
     return "Workspace stopping";
   }
   if (input.runtimeState === "stopped") return "Workspace stopped";
+  if (input.runtimeState === "pausing") return "Workspace pausing";
+  if (input.runtimeState === "paused") return "Workspace paused";
+  if (input.runtimeState === "resuming") return "Workspace resuming";
   if (input.runtimeState === "failed") return "Workspace failed";
   if (input.connectionInterrupted && ["starting", "ready"].includes(input.runtimeState ?? ""))
     return "Workspace reconnecting";

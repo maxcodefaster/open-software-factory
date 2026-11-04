@@ -1,10 +1,13 @@
 import type { z } from "zod";
-import { emergencyAdministratorID } from "../../../../packages/auth/src/policy";
+import {
+  emergencyAdministratorID,
+  PasswordChangeError,
+} from "../../../../packages/auth/src/policy";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { ProjectRole } from "../../../../packages/project-domain/src/access";
 import { CommandError } from "../command-error";
 import { createAccountCommands } from "./accounts";
-import type { managedUserInput, memberInput } from "./commands";
+import type { managedUserInput, memberInput, passwordChangeInput } from "./commands";
 import { createAccessController } from "./controller";
 import type { createIdentityConfiguration } from "./identity-configuration";
 import { createMembershipCommands } from "./membership";
@@ -13,7 +16,7 @@ export function createAccessService(options: {
   database: ReturnType<typeof createDatabase>;
   identity: Pick<
     ReturnType<typeof createIdentityConfiguration>,
-    "policy" | "createManagedUser" | "view" | "save" | "activate"
+    "policy" | "createManagedUser" | "changePassword" | "view" | "save" | "activate"
   >;
   revokeMember(projectID: string, userID: string): Promise<void>;
   revokeAccount(userID: string, disabled: boolean): Promise<void>;
@@ -36,6 +39,37 @@ export function createAccessService(options: {
         email: person?.email ?? "",
         companySignIn: identity.policy.companySignIn && userID !== emergencyAdministratorID,
       };
+    },
+    /** Only accounts holding a Factory password are offered a change. Company sign-in accounts are not. */
+    async passwordChange(userID: string) {
+      const [credential] = await database.client<{ id: string }[]>`
+        SELECT id FROM auth.account WHERE user_id=${userID} AND provider_id='credential' AND password IS NOT NULL`;
+      return {
+        available:
+          Boolean(credential) &&
+          !(identity.policy.companySignIn && userID !== emergencyAdministratorID),
+      };
+    },
+    async changePassword(
+      userID: string,
+      sessionID: string,
+      input: z.output<typeof passwordChangeInput>,
+    ) {
+      try {
+        await identity.changePassword(userID, sessionID, input);
+      } catch (cause) {
+        if (cause instanceof PasswordChangeError)
+          throw new CommandError(
+            cause.kind === "unavailable"
+              ? "forbidden"
+              : cause.kind === "locked"
+                ? "conflict"
+                : "invalid",
+            cause.message,
+          );
+        throw cause;
+      }
+      await options.revokeAccount(userID, false);
     },
     async signOutDestination() {
       return {
@@ -64,7 +98,12 @@ export function createAccessService(options: {
         (access.directory_disabled_at IS NOT NULL) AS "directoryDisabled",
         EXISTS(SELECT 1 FROM factory.administrator WHERE user_id = auth."user".id) AS "systemManager"
         FROM auth."user" JOIN factory.account_access access ON access.user_id=auth."user".id ORDER BY name, auth."user".id`;
-      return { users: [...users] };
+      return {
+        users: users.map((user) => ({
+          ...user,
+          emergency: user.id === emergencyAdministratorID,
+        })),
+      };
     },
     async createUser(userID: string, input: z.output<typeof managedUserInput>) {
       await access.requireSystemManager(userID);

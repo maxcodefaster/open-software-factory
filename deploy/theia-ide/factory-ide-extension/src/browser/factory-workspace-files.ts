@@ -1,33 +1,37 @@
-import URI from "@theia/core/lib/common/uri";
-import { Emitter, Event } from "@theia/core/lib/common/event";
 import type { Disposable } from "@theia/core/lib/common/disposable";
+import { Emitter, Event } from "@theia/core/lib/common/event";
+import URI from "@theia/core/lib/common/uri";
 import type {
   FileService,
   FileServiceContribution,
 } from "@theia/filesystem/lib/browser/file-service";
 import {
-  FileChangeType,
-  FileOperationError,
-  FileOperationResult,
-  FileSystemProviderCapabilities,
-  FileSystemProviderErrorCode,
-  FileType,
   createFileSystemProviderError,
   type FileChange,
+  FileChangeType,
   type FileDeleteOptions,
+  FileOperationError,
+  FileOperationResult,
   type FileOverwriteOptions,
+  FileSystemProviderCapabilities,
+  FileSystemProviderErrorCode,
   type FileSystemProviderWithFileReadWriteCapability,
+  FileType,
   type FileWriteOptions,
   type Stat,
   type WatchOptions,
 } from "@theia/filesystem/lib/common/files";
 import {
-  SourceResponseError,
   type SourceChange,
+  SourceResponseError,
   type SourceTransport,
 } from "./factory-source-client";
 
 export const workspaceScheme = "factory-workspace";
+
+// Theia probes these on every start and they are usually absent. A failed request
+// is logged by the browser even when Theia handles it, so ask the parent listing first.
+const optionalConfiguration = /^\.(?:theia|vscode)\/(?:settings|tasks|launch)\.json$/;
 
 export function workspaceResource(resource: URI): {
   readonly workspaceID: string;
@@ -152,6 +156,10 @@ export class FactoryWorkspaceFiles
   readonly onWatchConnectionChanged = this.connectionChanges.event;
   private readonly versions = new Map<string, string>();
   private readonly directoryMetadata = new Map<string, { stat: Stat; expires: number }>();
+  private readonly configurationListings = new Map<
+    string,
+    { names: Promise<ReadonlySet<string>>; expires: number }
+  >();
   private readonly watches = new Map<string, { references: number; close: () => void }>();
 
   constructor(private readonly transport: SourceTransport) {}
@@ -190,11 +198,52 @@ export class FactoryWorkspaceFiles
     }
   }
 
+  private async absentConfiguration(resource: URI): Promise<boolean> {
+    const { workspaceID, path } = workspaceResource(resource);
+    if (!optionalConfiguration.test(path)) return false;
+    let directory = new URI(`${workspaceScheme}://${workspaceID}/`);
+    for (const part of path.split("/")) {
+      const key = directory.toString();
+      const now = performance.now();
+      let listing = this.configurationListings.get(key);
+      if (!listing || listing.expires <= now) {
+        const names = this.request(directory, "list").then(
+          (entries) =>
+            new Set(
+              Array.isArray(entries)
+                ? entries.flatMap((entry) =>
+                    entry && typeof entry.name === "string" ? [entry.name] : [],
+                  )
+                : [],
+            ),
+        );
+        listing = { names, expires: now + 2000 };
+        this.configurationListings.set(key, listing);
+        names.catch(() => this.configurationListings.delete(key));
+      }
+      let names: ReadonlySet<string>;
+      try {
+        names = await listing.names;
+      } catch {
+        // Unknown is not absent. Let the real request report its own failure.
+        return false;
+      }
+      if (!names.has(part)) return true;
+      directory = directory.resolve(part);
+    }
+    return false;
+  }
+
   async stat(resource: URI): Promise<Stat> {
     // Metadata refresh must never replace the content version a dirty buffer read.
     const listed = this.directoryMetadata.get(resource.toString());
     this.directoryMetadata.delete(resource.toString());
     if (listed && listed.expires > performance.now()) return listed.stat;
+    if (await this.absentConfiguration(resource))
+      throw createFileSystemProviderError(
+        "Source entry was not found",
+        FileSystemProviderErrorCode.FileNotFound,
+      );
     return sourceStat(await this.request(resource, "stat"));
   }
 
@@ -233,6 +282,11 @@ export class FactoryWorkspaceFiles
   }
 
   async readFile(resource: URI): Promise<Uint8Array> {
+    if (await this.absentConfiguration(resource))
+      throw createFileSystemProviderError(
+        "Source entry was not found",
+        FileSystemProviderErrorCode.FileNotFound,
+      );
     const file = sourceFile(await this.request(resource, "read"));
     this.versions.set(resource.toString(), file.version);
     return file.content;
@@ -348,6 +402,8 @@ export class FactoryWorkspaceFiles
 
   private clearDirectoryMetadata(workspaceID: string): void {
     const prefix = `${workspaceScheme}://${workspaceID}/`;
+    for (const key of this.configurationListings.keys())
+      if (key.startsWith(prefix)) this.configurationListings.delete(key);
     for (const key of this.directoryMetadata.keys())
       if (key.startsWith(prefix)) this.directoryMetadata.delete(key);
   }
@@ -357,6 +413,7 @@ export class FactoryWorkspaceFiles
     this.watches.clear();
     this.versions.clear();
     this.directoryMetadata.clear();
+    this.configurationListings.clear();
     this.changes.dispose();
     this.connectionChanges.dispose();
   }

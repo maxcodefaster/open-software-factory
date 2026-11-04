@@ -16,15 +16,25 @@ export function WorkspaceTabbar(props: {
 }) {
   const [overflow, setOverflow] = createSignal(false);
   const [menuOpen, setMenuOpen] = createSignal(false);
-  let tablist: HTMLDivElement | undefined;
+  let scroller: HTMLDivElement | undefined;
   let chooser: HTMLButtonElement | undefined;
   let menu: HTMLDivElement | undefined;
+
+  // A tab and its actions are separate elements, so reveal both ends of the pill.
+  function revealTab(id: string) {
+    const button = document.getElementById(workspaceTabElementID(id));
+    const actions = button
+      ?.closest(".workspace-tabs")
+      ?.querySelector(`[data-tab-actions="${CSS.escape(id)}"]`);
+    actions?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    button?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+  }
 
   function focusTab(id: string | undefined) {
     if (!id) return;
     const button = document.getElementById(workspaceTabElementID(id));
     button?.focus({ preventScroll: true });
-    button?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    revealTab(id);
   }
 
   function activate(tab: WorkspaceTab) {
@@ -73,12 +83,18 @@ export function WorkspaceTabbar(props: {
   createEffect(
     () => true,
     () => {
-      if (!tablist) return;
+      if (!scroller) return;
+      let shown = scroller.clientWidth > 0;
       const measure = () => {
-        if (tablist) setOverflow(tablist.scrollWidth > tablist.clientWidth + 1);
+        if (!scroller) return;
+        setOverflow(scroller.scrollWidth > scroller.clientWidth + 1);
+        // A minimized window cannot scroll, so reveal the active tab when it returns.
+        const visible = scroller.clientWidth > 0;
+        if (visible && !shown && props.activeTabID) revealTab(props.activeTabID);
+        shown = visible;
       };
       const observer = new ResizeObserver(measure);
-      observer.observe(tablist);
+      observer.observe(scroller);
       measure();
       return () => observer.disconnect();
     },
@@ -87,11 +103,8 @@ export function WorkspaceTabbar(props: {
     () => [props.tabs, props.activeTabID] as const,
     () => {
       queueMicrotask(() => {
-        if (tablist) setOverflow(tablist.scrollWidth > tablist.clientWidth + 1);
-        const active = props.activeTabID
-          ? document.getElementById(workspaceTabElementID(props.activeTabID))
-          : undefined;
-        active?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        if (scroller) setOverflow(scroller.scrollWidth > scroller.clientWidth + 1);
+        if (props.activeTabID) revealTab(props.activeTabID);
       });
     },
   );
@@ -149,26 +162,50 @@ export function WorkspaceTabbar(props: {
 
   return (
     <div class="workspace-tabbar">
-      <div class="workspace-tabs" role="tablist" aria-label="Open workspace views" ref={tablist}>
+      <div class="workspace-tabs" ref={scroller}>
+        {/* Tabs are the only children of the tablist. Their close and open actions follow it and
+            are interleaved visually with CSS order, so assistive technology sees a valid tablist. */}
+        <div class="workspace-tab-list" role="tablist" aria-label="Open workspace views">
+          <For each={props.tabs}>
+            {(tab) => {
+              const active = () => props.activeTabID === tab.id;
+              return (
+                <div
+                  class={`workspace-tab${active() ? " active" : ""}`}
+                  role="presentation"
+                  style={{
+                    order: props.tabs.indexOf(tab) * 2,
+                    "--tab-action-count": workspaceTabRuntimeURL(tab) ? 2 : 1,
+                  }}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    id={workspaceTabElementID(tab.id)}
+                    class="workspace-tab-label"
+                    title={tab.label}
+                    aria-selected={active() ? "true" : "false"}
+                    aria-controls={workspacePanelID}
+                    tabindex={active() ? 0 : -1}
+                    onClick={() => props.onActivate(tab)}
+                    onKeyDown={(event) => navigate(event, tab)}
+                  >
+                    {tab.label}
+                  </button>
+                </div>
+              );
+            }}
+          </For>
+        </div>
         <For each={props.tabs}>
           {(tab) => {
             const active = () => props.activeTabID === tab.id;
             return (
-              <div class={`workspace-tab${active() ? " active" : ""}`} role="presentation">
-                <button
-                  type="button"
-                  role="tab"
-                  id={workspaceTabElementID(tab.id)}
-                  class="workspace-tab-label"
-                  title={tab.label}
-                  aria-selected={active() ? "true" : "false"}
-                  aria-controls={workspacePanelID}
-                  tabindex={active() ? 0 : -1}
-                  onClick={() => props.onActivate(tab)}
-                  onKeyDown={(event) => navigate(event, tab)}
-                >
-                  {tab.label}
-                </button>
+              <div
+                class={`workspace-tab-actions${active() ? " active" : ""}`}
+                data-tab-actions={tab.id}
+                style={{ order: props.tabs.indexOf(tab) * 2 + 1 }}
+              >
                 <Show when={workspaceTabRuntimeURL(tab)}>
                   {(url) => (
                     <a

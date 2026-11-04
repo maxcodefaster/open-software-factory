@@ -2786,7 +2786,7 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
     .getByRole("navigation", { name: "Workspace dock" })
     .getByRole("button", { name: "Inbox", exact: true })
     .click();
-  await tabs.getByRole("button", { name: "Close Preview · Staging", exact: true }).click();
+  await page.getByRole("button", { name: "Close Preview · Staging", exact: true }).click();
   await expect(frame).toHaveCount(0);
   await expect(tabs.getByRole("tab", { name: "Inbox", exact: true })).toHaveAttribute(
     "aria-selected",

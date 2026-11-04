@@ -90,6 +90,9 @@
   .ticket-find-search input {
     min-height: 44px;
   }
+  .ticket-find-trigger {
+    width: 44px;
+  }
   .ticket-find-search input {
     font-size: var(--text-lg);
   }

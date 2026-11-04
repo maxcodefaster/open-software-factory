@@ -43,12 +43,10 @@ export function AgentBlockers(props: {
         .then(([models, skills]) => {
           if (!abort.signal.aborted) setConfiguration({ models, skills });
         })
-        .catch((cause: unknown) => {
+        .catch(() => {
           if (!abort.signal.aborted)
             setError(
-              cause instanceof Error
-                ? cause.message
-                : "Configuration unavailable. Open Agent settings to check access.",
+              "Agent configuration could not be checked. Retry, or open settings to check access.",
             );
         });
     },
@@ -88,7 +86,7 @@ export function AgentBlockers(props: {
         </p>
       </Show>
       <Show when={blocked() || error()}>
-        <p class="agent-configuration-note" role="status">
+        <p class="agent-configuration-note" role={blocked() ? "status" : "alert"}>
           {blocked() ?? error()}
         </p>
       </Show>

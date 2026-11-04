@@ -24,6 +24,8 @@ unchanged state. Board History and Trash load in explicit batches; Ticket quick-
 retained work independently of those batches. Wiki navigation syncs metadata without every page
 body. Sync failures and expired sessions keep cached work and drafts visible with explicit recovery.
 
+Settings → Personal → Login & security changes a Factory-managed password from the current password after a fresh sign-in, locks changes for fifteen minutes after five wrong current passwords and ends all other browser sessions; Better Auth's own password routes stay closed.
+
 Projects, Tickets, Wiki pages, Settings and Inbox have shareable URLs. Copy link in a document
 window copies its resource URL. Opening a link still requires sign-in and current access; it does
 not share a draft, start an Agent or grant runtime access. Back and Forward select resources

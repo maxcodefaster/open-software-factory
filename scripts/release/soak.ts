@@ -69,7 +69,7 @@ type Options = {
 };
 
 async function sh(command: string[], cwd?: string) {
-  const child = Bun.spawn(command, { cwd, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(command, { ...(cwd ? { cwd } : {}), stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),

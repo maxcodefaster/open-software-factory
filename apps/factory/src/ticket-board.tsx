@@ -232,6 +232,18 @@ export function TicketBoardContents(props: {
                         {(epic) => <Folder epic={epic()} tickets={[]} />}
                       </For>
                     </Show>
+                    <Show
+                      when={
+                        stage.id === "ideas" &&
+                        !props.tickets.length &&
+                        !props.epics.length &&
+                        !props.ticketsIncomplete
+                      }
+                    >
+                      <p class="lane-empty" role="status">
+                        No Tickets yet. Choose New ticket to write the first one.
+                      </p>
+                    </Show>
                   </div>
                 </section>
               );

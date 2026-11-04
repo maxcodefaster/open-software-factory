@@ -244,10 +244,18 @@ export function createProjectSetupController(options: {
         !draft["slug"]
       )
         throw conflict();
-      const sourceURL =
-        draft["kind"] === "import"
-          ? projectImportURL(String(draft["source_url"]), options.importOrigins)
-          : "";
+      let sourceURL = "";
+      if (draft["kind"] === "import")
+        try {
+          sourceURL = projectImportURL(String(draft["source_url"]), options.importOrigins);
+        } catch (cause) {
+          throw new CommandError(
+            "invalid",
+            cause instanceof Error && cause.message.startsWith("Use ")
+              ? cause.message
+              : "Enter a valid HTTPS Git URL.",
+          );
+        }
       if (value.importToken && draft["kind"] !== "import") throw conflict();
       if (value.importToken && !options.secrets.configured) throw unavailable();
       const projectID = crypto.randomUUID();

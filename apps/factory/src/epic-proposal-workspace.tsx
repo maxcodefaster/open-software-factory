@@ -4,6 +4,7 @@ import {
   epicProposalInput,
 } from "../../../packages/conversation-domain/src/epic-proposal";
 import { MarkdownEditor } from "./markdown-editor";
+import { epicProposalProblem } from "./proposal-problems";
 import { WorkspaceActionBar } from "./ui/workspace-actions";
 
 export function EpicProposalWorkspace(props: {
@@ -41,7 +42,7 @@ export function EpicProposalWorkspace(props: {
   async function confirm() {
     const parsed = epicProposalInput.safeParse(proposal());
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Review the proposed work");
+      setError(epicProposalProblem(proposal(), parsed.error.issues[0]?.message));
       return;
     }
     setError("");
@@ -61,6 +62,7 @@ export function EpicProposalWorkspace(props: {
             class="ticket-draft-title workspace-heading-title"
             rows={1}
             aria-label="Epic title"
+            placeholder="Epic title"
             value={proposal().epic.title}
             onInput={(event) =>
               update({
@@ -81,7 +83,13 @@ export function EpicProposalWorkspace(props: {
             </button>
           </WorkspaceActionBar>
           <span class="ticket-status-context workspace-heading-meta">Proposed work</span>
+          <Show when={error()}>
+            <p class="inline-error workspace-heading-meta" role="alert">
+              {error()}
+            </p>
+          </Show>
         </header>
+        <p class="epic-proposal-label">Outcome</p>
         <MarkdownEditor
           label="Epic outcome"
           value={proposal().epic.description}
@@ -103,6 +111,7 @@ export function EpicProposalWorkspace(props: {
                   class="ticket-inline-title"
                   rows={1}
                   aria-label={`Member ${index() + 1} title`}
+                  placeholder="Ticket title"
                   readonly={Boolean(item().existingTicketId)}
                   value={item().title}
                   onInput={(event) => member(item().key, { title: event.currentTarget.value })}
@@ -111,11 +120,13 @@ export function EpicProposalWorkspace(props: {
                   when={!item().existingTicketId}
                   fallback={<p class="muted">{item().description}</p>}
                 >
+                  <p class="epic-proposal-label">Description</p>
                   <MarkdownEditor
                     label={`Member ${index() + 1} description`}
                     value={item().description}
                     onChange={(description) => member(item().key, { description })}
                   />
+                  <p class="epic-proposal-label">Outcome</p>
                   <MarkdownEditor
                     label={`Member ${index() + 1} outcome`}
                     value={item().requirement.summary}
@@ -123,7 +134,7 @@ export function EpicProposalWorkspace(props: {
                       member(item().key, { requirement: { ...item().requirement, summary } })
                     }
                   />
-                  <h4>Acceptance criteria</h4>
+                  <h3>Acceptance criteria</h3>
                   <For each={item().requirement.acceptanceCriteria.map((_, i) => i)}>
                     {(criterionIndex) => (
                       <div class="specification-list-item">
@@ -132,6 +143,7 @@ export function EpicProposalWorkspace(props: {
                           class="specification-rich-text"
                           rows={1}
                           aria-label={`Member ${index() + 1} criterion ${criterionIndex + 1}`}
+                          placeholder="Add a verifiable outcome"
                           value={item().requirement.acceptanceCriteria[criterionIndex] ?? ""}
                           onInput={(event) =>
                             member(item().key, {
@@ -162,7 +174,7 @@ export function EpicProposalWorkspace(props: {
                   </p>
                 </Show>
                 <details>
-                  <summary>Dependencies</summary>
+                  <summary>Depends on</summary>
                   <For
                     each={proposal().members.filter((candidate) => candidate.key !== item().key)}
                     keyed={(candidate) => candidate.key}
@@ -189,11 +201,6 @@ export function EpicProposalWorkspace(props: {
             )}
           </For>
         </div>
-        <Show when={error()}>
-          <p class="inline-error" role="alert">
-            {error()}
-          </p>
-        </Show>
       </div>
     </section>
   );

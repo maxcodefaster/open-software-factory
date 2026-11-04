@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { unattemptedFactoryboxResume } from "./factorybox-resume";
+import { confirmedFailedFactoryboxResume, unattemptedFactoryboxResume } from "./factorybox-resume";
 
 const id = "runtime-owned";
 const snapshot = "a".repeat(32);
@@ -110,4 +110,67 @@ test("missing, changed or already attempted native outcomes never authorize Resu
   ]) {
     expect(() => unattemptedFactoryboxResume(native(), id, snapshot, start, saved)).toThrow();
   }
+});
+
+const failedRestore = "restore backend exited before its pre-resume hold: mnt-v2 EAGAIN";
+const failedNative = () => {
+  const value = native();
+  value.record.pause.resume = {
+    requested_at: "2026-11-02T05:43:07Z",
+    attempted: true,
+    error: failedRestore,
+  } as never;
+  return value;
+};
+
+test("a dispatched Resume that recorded its failure is a confirmed failed restore", () => {
+  expect(confirmedFailedFactoryboxResume(failedNative(), id, snapshot, start, pause)).toBe(
+    failedRestore,
+  );
+});
+
+test("unknown outcomes are never classified as a failed restore", () => {
+  const changes: Array<(value: ReturnType<typeof failedNative>) => void> = [
+    (v) => {
+      v.record.pause.resume = { requested_at: "x", attempted: false } as never;
+    },
+    (v) => {
+      v.record.pause.resume = { requested_at: "x", attempted: true } as never;
+    },
+    (v) => {
+      v.record.pause.resume = { requested_at: "x", attempted: true, error: "  " } as never;
+    },
+    (v) => {
+      v.record.pause.resume = {
+        requested_at: "x",
+        attempted: true,
+        error: failedRestore,
+        completed_at: "2026-11-02T05:44:00Z",
+      } as never;
+    },
+    (v) => {
+      v.record.phase = "running";
+    },
+    (v) => {
+      v.record.owner = "e".repeat(32);
+    },
+    (v) => {
+      v.record.pause.snapshot_id = "f".repeat(32);
+    },
+    (v) => {
+      v.runtime = { status: "running", pid: 42 };
+    },
+  ];
+  for (const change of changes) {
+    const value = failedNative();
+    change(value);
+    expect(confirmedFailedFactoryboxResume(value, id, snapshot, start, pause)).toBeUndefined();
+  }
+  expect(confirmedFailedFactoryboxResume(failedNative(), id, snapshot, undefined, pause)).toBe(
+    undefined,
+  );
+  expect(confirmedFailedFactoryboxResume(failedNative(), id, snapshot, start, undefined)).toBe(
+    undefined,
+  );
+  expect(confirmedFailedFactoryboxResume(null, id, snapshot, start, pause)).toBeUndefined();
 });

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import type { KnowledgeSearchResult } from "../api-contracts";
 import { bindDialogKeyboard } from "../dialog-keyboard";
 import { Icon } from "../icon";
@@ -7,12 +7,32 @@ export function WikiSearch(props: {
   query: string;
   results: KnowledgeSearchResult[];
   canDevelop: boolean;
-  onSearch(query: string): void;
+  onSearch(query: string): Promise<"found" | "failed" | "superseded">;
   onSelect(result: KnowledgeSearchResult): void;
   onClose(): void;
 }) {
-  const [text, setText] = createSignal(props.query);
+  const [text, setText] = createSignal(untrack(() => props.query));
+  const [status, setStatus] = createSignal<"idle" | "searching" | "failed">("idle");
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let sequence = 0;
+  function search(query: string) {
+    const current = ++sequence;
+    const pending = props.onSearch(query);
+    if (!query.trim()) {
+      setStatus("idle");
+      return;
+    }
+    setStatus("searching");
+    void pending.then(
+      (outcome) => {
+        if (current === sequence && outcome !== "superseded")
+          setStatus(outcome === "failed" ? "failed" : "idle");
+      },
+      () => {
+        if (current === sequence) setStatus("failed");
+      },
+    );
+  }
   let unbind: (() => void) | undefined;
   createEffect(
     () => props.query,
@@ -47,7 +67,7 @@ export function WikiSearch(props: {
           onSubmit={(event) => {
             event.preventDefault();
             clearTimeout(timer);
-            props.onSearch(text());
+            search(text());
           }}
         >
           <Icon name="search" />
@@ -60,8 +80,11 @@ export function WikiSearch(props: {
               const query = event.currentTarget.value;
               setText(query);
               clearTimeout(timer);
-              if (!query.trim()) props.onSearch(query);
-              else timer = setTimeout(() => props.onSearch(query), 180);
+              if (!query.trim()) search(query);
+              else {
+                setStatus("searching");
+                timer = setTimeout(() => search(query), 180);
+              }
             }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {
@@ -83,9 +106,27 @@ export function WikiSearch(props: {
             <Icon name="close" />
           </button>
         </form>
-        <div class="wiki-search-results">
+        <div class="wiki-search-results" aria-busy={status() === "searching" ? "true" : "false"}>
           <Show when={text().trim()} fallback={<p>Search titles and page content.</p>}>
-            <For each={results()} fallback={<p>No matching pages.</p>}>
+            <Show when={status() === "failed"}>
+              <p role="alert">
+                Search failed. Your connection or the server may be unavailable.{" "}
+                <button type="button" class="quiet-button" onClick={() => search(text())}>
+                  Try again
+                </button>
+              </p>
+            </Show>
+            <Show when={status() === "searching"}>
+              <p role="status">Searching…</p>
+            </Show>
+            <For
+              each={status() === "failed" ? [] : results()}
+              fallback={
+                <Show when={status() === "idle"}>
+                  <p>No matching pages.</p>
+                </Show>
+              }
+            >
               {(result) => (
                 <button
                   type="button"

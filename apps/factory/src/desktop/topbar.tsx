@@ -16,7 +16,6 @@ import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import type { DesktopProject, FactoryDesktopProps, TicketDetail } from "./contracts";
 
 export interface DesktopTopbarModel {
-  registrationOpen: SourceAccessor<boolean>;
   agentOpen: SourceAccessor<boolean>;
   agentToggleElement: HTMLButtonElement | undefined;
   rememberAgentOpener: () => void;
@@ -116,7 +115,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
   // The model identity is stable; its accessors retain live state.
   const model = untrack(() => props.model);
   return (
-    <header class="factory-topbar" inert={model.registrationOpen()}>
+    <header class="factory-topbar">
       <div class="topbar-start">
         <button
           type="button"
@@ -184,6 +183,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                 <div class="project-search">
                   <input
                     type="search"
+                    data-popover-search
                     aria-label="Search projects"
                     placeholder="Find a project"
                     value={model.projectSearchQuery()}
@@ -192,6 +192,13 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                 </div>
               </Show>
               <div class="project-list">
+                <Show when={!model.filteredProjects().length}>
+                  <p class="project-list-empty" role="status">
+                    {model.projectSearchQuery().trim()
+                      ? `No Project matches "${model.projectSearchQuery().trim()}".`
+                      : "No Projects yet."}
+                  </p>
+                </Show>
                 <For each={model.filteredProjects()} keyed={(project) => project.id}>
                   {(project) => (
                     <article
@@ -204,6 +211,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                       <button
                         type="button"
                         class="project-choice"
+                        data-popover-option
                         aria-current={
                           model.selectedProjectID() === project().id ? "true" : undefined
                         }
@@ -387,6 +395,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                   class="settings-model-link settings-project-link"
                   aria-label="Open project menu"
                   aria-controls="project-popover"
+                  aria-expanded="false"
                   onClick={() => {
                     model.setSettingsOpen(false);
                     model.setProjectMenuOpen(true);

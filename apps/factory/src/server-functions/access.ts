@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { identityConfigurationWrite } from "../../../../packages/identity-domain/src/configuration";
-import { managedUserInput, memberInput } from "../access/commands";
+import { managedUserInput, memberInput, passwordChangeInput } from "../access/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 
@@ -17,6 +17,26 @@ export const getAuthenticationState = createServerFn({ method: "POST" })
     return factoryFunction(async () => {
       const context = factoryFunctionContext();
       return context.access.authentication(context.actorID, await context.isFresh());
+    });
+  });
+
+export const getPasswordChangeState = createServerFn({ method: "POST" })
+  .validator((args: never[]) => args)
+  .handler(async () => {
+    return factoryFunction(async () => {
+      const context = factoryFunctionContext();
+      return context.access.passwordChange(context.actorID);
+    });
+  });
+
+export const changeOwnPassword = createServerFn({ method: "POST" })
+  .validator((args: [input: z.input<typeof passwordChangeInput>]) => args)
+  .handler(async ({ data: [input] }) => {
+    return factoryFunction(async () => {
+      const command = passwordChangeInput.parse(input);
+      const context = factoryFunctionContext();
+      await context.beforeWrite(true);
+      await context.access.changePassword(context.actorID, context.sessionID, command);
     });
   });
 

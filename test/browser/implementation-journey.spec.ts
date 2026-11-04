@@ -2163,7 +2163,7 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const rows = page.locator("details.agent-activity");
   await expect(rows).toHaveCount(3);
-  const group = page.getByRole("region", { name: "Grouped tool activity" });
+  const group = page.getByRole("group", { name: "Grouped tool activity" });
   const expandActivities = group.getByRole("button", { name: /2 commands · 1 file read/ });
   await expect(expandActivities).toHaveAttribute("aria-expanded", "false");
   await expect(rows.first()).toBeHidden();

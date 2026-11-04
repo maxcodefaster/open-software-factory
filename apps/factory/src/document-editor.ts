@@ -160,6 +160,18 @@ export function createDocumentEditor(input: {
   editor.view.dispatch(
     editor.state.tr.setMeta("preventUpdate", true).setMeta("addToHistory", false),
   );
+  // A wide table scrolls inside its wrapper; keyboard users need that region to take focus.
+  function markTableScroll() {
+    for (const wrapper of input.host.querySelectorAll<HTMLElement>(".tableWrapper")) {
+      if (wrapper.hasAttribute("tabindex")) continue;
+      wrapper.setAttribute("tabindex", "0");
+      wrapper.setAttribute("role", "group");
+      wrapper.setAttribute("aria-label", "Table");
+    }
+  }
+  const tableObserver = new MutationObserver(markTableScroll);
+  tableObserver.observe(input.host, { childList: true, subtree: true });
+  markTableScroll();
   function notifyBlock() {
     const { $from } = editor.state.selection;
     for (let depth = $from.depth; depth > 0; depth--) {
@@ -347,6 +359,7 @@ export function createDocumentEditor(input: {
     slash,
     destroy: () => {
       disposed = true;
+      tableObserver.disconnect();
       document.removeEventListener("mouseup", finishPointerSelection);
       editor.destroy();
     },

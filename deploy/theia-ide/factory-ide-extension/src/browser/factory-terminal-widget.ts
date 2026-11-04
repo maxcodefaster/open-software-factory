@@ -4,16 +4,16 @@ import { injectable } from "@theia/core/shared/inversify";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { factoryTerminalTheme } from "./factory-theme";
-import { factoryWriteContext } from "./factory-write-context";
 import {
-  factoryRuntimeContext,
-  readyRuntime,
-  runtimePreparationCopy,
   type FactoryRuntimeReference,
+  factoryRuntimeContext,
   factoryTerminalClosePath,
   factoryTerminalPath,
+  readyRuntime,
+  runtimePreparationCopy,
 } from "./factory-runtime-context";
+import { factoryTerminalTheme } from "./factory-theme";
+import { factoryWriteContext } from "./factory-write-context";
 
 export const factoryTerminalWidgetID = "factory-terminal";
 
@@ -351,11 +351,17 @@ export class FactoryTerminalWidget extends BaseWidget {
       const copy = document.createElement("p");
       copy.textContent = runtimePreparationCopy(state);
       this.#status.append(copy);
-      if (state?.state === "failed") {
+      if (state?.state === "failed" || state?.restoreFailed) {
         const start = document.createElement("button");
         start.type = "button";
-        start.textContent = "Retry compute";
-        start.addEventListener("click", () => void factoryRuntimeContext.prepare());
+        start.textContent = state.restoreFailed ? "Start fresh" : "Retry compute";
+        start.addEventListener(
+          "click",
+          () =>
+            void (state.restoreFailed
+              ? factoryRuntimeContext.startFresh()
+              : factoryRuntimeContext.prepare()),
+        );
         this.#status.append(start);
       }
       return;

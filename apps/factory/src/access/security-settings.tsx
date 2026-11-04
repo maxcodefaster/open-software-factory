@@ -2,6 +2,7 @@ import { createEffect, createSignal, Show } from "solid-js";
 import { emptyResponseSchema, protocolRequest } from "../api-client";
 import {
   endOwnSessions,
+  getPasswordChangeState,
   getSecurityPolicy,
   getSignOutDestination,
 } from "../server-functions/access";
@@ -9,12 +10,15 @@ import { type ServerValue, serverCall } from "../server-functions/result";
 import "./settings.css";
 import { FreshAuthentication } from "./fresh-authentication";
 import { IdentitySettings } from "./identity-settings";
+import { PasswordChange } from "./password-change";
 
 export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?: () => void }) {
   const [policy, setPolicy] = createSignal<ServerValue<ReturnType<typeof getSecurityPolicy>>>();
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [confirm, setConfirm] = createSignal(false);
+  const [fresh, setFresh] = createSignal(true);
+  const [canChangePassword, setCanChangePassword] = createSignal(false);
   createEffect(
     () => undefined,
     () => {
@@ -23,6 +27,9 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
         .catch((cause) =>
           setError(cause instanceof Error ? cause.message : "Could not load security settings"),
         );
+      void serverCall(getPasswordChangeState({ data: [] }))
+        .then((value) => setCanChangePassword(value.available))
+        .catch(() => setCanChangePassword(false));
     },
   );
   async function endAll() {
@@ -54,7 +61,7 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
       class="access-settings model-settings-body access-settings-body"
       aria-label={props.company ? "Company sign-in" : "Login & security"}
     >
-      <FreshAuthentication beforeCompanySignIn={props.beforeCompanySignIn} />
+      <FreshAuthentication beforeCompanySignIn={props.beforeCompanySignIn} onFresh={setFresh} />
       <Show
         when={props.company}
         fallback={
@@ -72,6 +79,9 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
         }
       >
         <IdentitySettings beforeCompanySignIn={props.beforeCompanySignIn} />
+      </Show>
+      <Show when={!props.company && canChangePassword()}>
+        <PasswordChange fresh={fresh()} />
       </Show>
       <Show when={!props.company}>
         <section>

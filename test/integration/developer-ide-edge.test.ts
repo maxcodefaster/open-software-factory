@@ -171,6 +171,7 @@ async function verifyEditorIngress(protocol: string) {
       {
         start: noCompute,
         startPersisted: noCompute,
+        startFresh: noCompute,
         processOutput: noCompute,
         processAction: noCompute,
         closeTerminal: noCompute,
@@ -300,6 +301,7 @@ async function verifyEditorIngress(protocol: string) {
       attemptID: null,
       state: "stopped",
       failure: null,
+      restoreFailed: false,
     });
     expect(
       (

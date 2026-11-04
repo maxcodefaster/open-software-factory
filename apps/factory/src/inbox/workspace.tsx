@@ -456,7 +456,9 @@ export function InboxWorkspace(props: {
                     </span>
                     <span class="inbox-item-content">
                       <span class="inbox-item-topline">
-                        <strong title={item().ticketTitle}>{item().ticketTitle}</strong>
+                        <strong id={`inbox-ticket-${item().id}`} title={item().ticketTitle}>
+                          {item().ticketTitle}
+                        </strong>
                         <time
                           datetime={item().createdAt}
                           title={new Date(item().createdAt).toLocaleString()}
@@ -506,6 +508,7 @@ export function InboxWorkspace(props: {
                           disabled={working() || !props.onMark}
                           data-tooltip={item().unread ? "Mark as read" : "Mark as unread"}
                           aria-label={`${item().unread ? "Mark read" : "Mark unread"}: ${item().title}`}
+                          aria-describedby={`inbox-ticket-${item().id}`}
                           aria-keyshortcuts="u"
                           onClick={(event) =>
                             void mark(
@@ -524,6 +527,7 @@ export function InboxWorkspace(props: {
                         disabled={working() || !props.onMark}
                         data-tooltip={item().archived ? "Move to Activity" : "Archive"}
                         aria-label={`${item().archived ? "Move to Activity" : "Archive"}: ${item().title}`}
+                        aria-describedby={`inbox-ticket-${item().id}`}
                         aria-keyshortcuts={item().archived ? undefined : "e"}
                         onClick={(event) =>
                           void mark(

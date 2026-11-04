@@ -222,7 +222,12 @@ dt {
     min-height: 42vh;
   }
   .runtime-diagram {
-    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .runtime-diagram i {
+    flex: 1 1 var(--space-2);
+    width: auto;
+    min-width: var(--space-2);
   }
 }
 
@@ -271,6 +276,8 @@ dt {
   --blue: var(--color-river-deep);
   --blue-soft: var(--color-river-soft);
   --red: var(--color-danger);
+  --notices-inset: 0px;
+  --window-top: calc(var(--topbar-height) + var(--space-2) + var(--notices-inset));
   position: relative;
   width: 100%;
   height: 100dvh;
@@ -503,6 +510,9 @@ dt {
   min-width: 0;
   flex: 1;
   text-align: left;
+}
+.trash-show-more {
+  margin-block-start: var(--space-3);
 }
 .settings-workspace {
   min-height: 100%;
@@ -833,6 +843,14 @@ dt {
   padding: 0 0 var(--space-2);
 }
 
+.project-list-empty {
+  margin: 0;
+  padding: var(--space-2);
+  overflow-wrap: anywhere;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+
 .project-row {
   padding: var(--space-1) var(--space-2);
   border: 1px solid transparent;
@@ -898,6 +916,10 @@ dt {
   transition:
     opacity var(--duration-normal) var(--ease-standard),
     filter var(--duration-normal) var(--ease-standard);
+}
+
+.factory-desktop .kanban-desktop {
+  top: calc(var(--topbar-height) + var(--notices-inset));
 }
 
 .board-toolbar {
@@ -1114,6 +1136,19 @@ dt {
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   line-height: var(--leading-label);
+}
+
+.lane-empty {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
+  background: var(--material-chrome);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
+  color: var(--ink);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
 }
 
 .lane-tickets {
@@ -1384,10 +1419,27 @@ dt {
   scrollbar-width: none;
 }
 
+.workspace-tab-list {
+  display: contents;
+}
+
 .workspace-tab {
+  --tab-actions-width: calc(
+    var(--workspace-tab-close-size) *
+    var(--tab-action-count, 1) +
+    var(--space-1)
+  );
   display: flex;
-  min-width: var(--workspace-tab-min-width);
-  max-width: var(--workspace-tab-max-width);
+  min-width: calc(var(--workspace-tab-min-width) - var(--tab-actions-width));
+  max-width: calc(var(--workspace-tab-max-width) - var(--tab-actions-width));
+  height: var(--workspace-tab-height);
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--color-ink-muted);
+}
+
+.workspace-tab-actions {
+  display: flex;
   height: var(--workspace-tab-height);
   flex-shrink: 0;
   align-items: center;
@@ -1471,6 +1523,15 @@ dt {
   min-height: 0;
   flex: 1;
   grid-template-columns: minmax(0, 1fr) 13.5rem;
+}
+
+.workspace-view-body:focus {
+  outline: none;
+}
+
+.workspace-view-body:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
 }
 
 .ticket-workspace,
@@ -1567,10 +1628,16 @@ dt {
 }
 .ticket-requirements-intro {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
 }
 
 .ticket-draft-title {
+  display: block;
+  field-sizing: content;
+  resize: none;
+  overflow: hidden;
+  overflow-wrap: anywhere;
   width: 100%;
   padding: var(--space-2) 0;
   margin: var(--space-3) 0;
@@ -1629,6 +1696,7 @@ dt {
 .ticket-status-context {
   min-width: 0;
   flex-wrap: wrap;
+  align-items: baseline;
   gap: var(--space-2);
   color: var(--color-ink-muted);
   font-size: var(--text-sm);
@@ -1819,6 +1887,16 @@ dt {
   align-items: center;
   padding: var(--space-1);
 }
+@media (pointer: coarse) {
+  .epic-dependency-choice {
+    min-height: var(--touch-target);
+  }
+}
+.epic-proposal-label {
+  margin: var(--space-4) 0 0;
+  color: var(--muted-ink);
+  font-size: var(--text-xs);
+}
 .epic-dependencies {
   color: var(--muted-ink);
   font-size: var(--text-sm);
@@ -1991,6 +2069,23 @@ dt {
   color: var(--red);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
+}
+
+.ticket-document .markdown-body a {
+  color: var(--color-river-deep);
+  text-underline-offset: var(--space-1);
+}
+
+.ticket-save-error {
+  display: grid;
+  gap: var(--space-2);
+  margin-block-start: var(--space-4);
+}
+.ticket-save-error p {
+  margin: 0;
+}
+.ticket-save-error .control-actions {
+  justify-content: flex-start;
 }
 
 .desktop-notices {
@@ -2347,6 +2442,10 @@ dt {
 
 .agent-activity-group {
   min-width: 0;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .activity-group-toggle {
@@ -2868,9 +2967,14 @@ dt {
   width: var(--text-lg);
   height: var(--text-lg);
 }
+.settings-model-link span {
+  white-space: nowrap;
+}
 .settings-model-link small {
+  min-width: 0;
   margin-left: auto;
   color: var(--color-ink-muted);
+  text-align: right;
 }
 
 .model-settings-heading small {
@@ -3389,6 +3493,13 @@ dt {
 .ticket-check-details a {
   color: var(--color-river-deep);
 }
+@media (pointer: coarse) {
+  .ticket-check-details a {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch-target);
+  }
+}
 
 .ticket-checks > summary {
   display: flex;
@@ -3397,6 +3508,17 @@ dt {
   gap: var(--space-2);
   cursor: pointer;
   list-style: none;
+}
+
+@media (pointer: coarse) {
+  .ticket-checks summary {
+    box-sizing: border-box;
+    min-height: 44px;
+    align-items: center;
+  }
+  .ticket-checks > summary {
+    padding-block: var(--space-2);
+  }
 }
 
 .ticket-check-details p,
@@ -3436,12 +3558,6 @@ dt {
   text-align: left;
 }
 
-.spec-section h3 {
-  margin: 0;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-}
-
 .spec-section p,
 .spec-section li {
   color: var(--color-ink-muted);
@@ -3449,12 +3565,12 @@ dt {
   line-height: var(--leading-body);
 }
 
-.specification-block h4 {
+.specification-block h3 {
   margin: 0;
   color: var(--color-ink);
   font: var(--weight-medium) var(--text-sm) / var(--leading-label) var(--font-interface);
 }
-.epic-proposal-member h4 {
+.epic-proposal-member h3 {
   margin: var(--space-4) 0 var(--space-2);
   font: var(--weight-medium) var(--text-sm) / var(--leading-label) var(--font-interface);
 }
@@ -3832,7 +3948,10 @@ dt {
   }
 }
 .markdown-body table {
+  display: block;
   width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
 }
 .markdown-body :is(th, td) {
@@ -4174,6 +4293,19 @@ dt {
   }
 }
 
+/* The dock row has no spare width on a 390px phone (five to seven controls inside about 270px),
+   so a 44px-wide hit area per control would overlap its neighbours. Each control instead claims
+   half of the gap on both sides, the most that never overlaps. */
+@media (pointer: coarse) {
+  .workspace-dock > button::before,
+  .workspace-dock .dock-app:not(.has-instances) > button::before {
+    position: absolute;
+    inset-block: 0;
+    inset-inline: calc(var(--space-0-5) / -2);
+    content: "";
+  }
+}
+
 .workspace-dock .notification-dot {
   position: absolute;
   top: 0.3rem;
@@ -4197,7 +4329,9 @@ dt {
   top: calc(100% + 0.65rem);
   left: 50%;
   display: grid;
-  width: 13.5rem;
+  width: max-content;
+  min-width: 13.5rem;
+  max-width: min(18rem, calc(100vw - 2rem));
   gap: var(--space-1);
   padding: var(--space-1-5);
   border: 1px solid var(--hairline);
@@ -4370,7 +4504,8 @@ dt {
   padding: var(--space-1-5) var(--space-1-5) var(--space-4);
 }
 
-.workspace-tab.active {
+.workspace-tab.active,
+.workspace-tab-actions.active {
   color: var(--ink);
   background: var(--material-accent);
   box-shadow: inset 0 calc(-1 * var(--workspace-tab-active-line-size)) var(--color-river-deep);
@@ -4460,6 +4595,12 @@ dt {
   width: auto;
   margin: 0;
   padding-block: var(--space-1);
+}
+@media (max-width: 520px) {
+  /* A long title gets the full line; its actions wrap beneath, right-aligned. */
+  .workspace-heading > :is(.ticket-inline-title, .ticket-draft-title) {
+    flex-basis: 100%;
+  }
 }
 
 .ticket-draft-workspace .ticket-description {
@@ -4893,17 +5034,23 @@ dt {
 
 .workspace-dock .dock-switcher span {
   max-width: 100%;
-  overflow: hidden;
   color: var(--ink);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .workspace-dock .dock-switcher small {
   color: var(--muted-ink);
   font-size: var(--text-xs);
+}
+
+@media (max-width: 640px) {
+  .workspace-dock .dock-switcher {
+    position: fixed;
+    top: 4.25rem;
+    left: 50%;
+  }
 }
 .model-provider-setup input:not([type="checkbox"]) {
   width: 100%;
@@ -5174,7 +5321,7 @@ dt {
   background: var(--material-chrome-hover);
 }
 
-.workspace-tab.active .workspace-tab-action {
+.workspace-tab-actions.active .workspace-tab-action {
   opacity: 1;
 }
 
@@ -5317,6 +5464,15 @@ dt {
 .agent-composer .agent-control.primary svg {
   width: var(--control-icon-size);
   height: var(--control-icon-size);
+}
+@media (max-width: 760px), (pointer: coarse) {
+  .agent-composer .agent-control.primary {
+    min-width: 44px;
+    height: 44px;
+  }
+  .agent-composer textarea {
+    min-height: 44px;
+  }
 }
 .ticket-status-context .ticket-checks summary > span:last-child {
   white-space: normal;

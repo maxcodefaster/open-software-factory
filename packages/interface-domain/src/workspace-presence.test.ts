@@ -28,6 +28,9 @@ describe("Workspace presence", () => {
     ["stop-intended", "Workspace stopping"],
     ["stopping", "Workspace stopping"],
     ["stopped", "Workspace stopped"],
+    ["pausing", "Workspace pausing"],
+    ["paused", "Workspace paused"],
+    ["resuming", "Workspace resuming"],
   ])("describes runtime %s as %s", (runtimeState, label) => {
     expect(workspacePresence({ changeState: "active", runtimeState })).toBe(label);
   });

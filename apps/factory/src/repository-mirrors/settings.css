@@ -5,10 +5,20 @@
   padding: var(--space-3) var(--space-6) var(--space-6);
   max-width: 56rem;
   min-width: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
 }
 .repository-mirrors p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+.repository-mirrors [role="alert"] {
+  color: var(--color-danger);
+}
+.repository-mirrors h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
 }
 .repository-mirror-form,
 .repository-mirror-list,
@@ -37,9 +47,6 @@
 .repository-mirrors dd {
   margin: 0;
   overflow-wrap: anywhere;
-}
-.repository-mirror-form h3 {
-  margin: 0;
 }
 .repository-mirror-access {
   display: grid;

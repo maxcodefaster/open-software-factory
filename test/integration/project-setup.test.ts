@@ -302,3 +302,69 @@ test("a rejected private import can start another setup without discarding or re
     await process.dispose();
   }
 }, 30_000);
+
+test("an import URL outside the approved hosts is refused with its reason and keeps the draft editable", async () => {
+  const process = await factoryProcess();
+  const database = process.connect(1);
+  const manager = crypto.randomUUID();
+  const forge = createForgejoClient({
+    apiURL: "https://forge.test/api/v1/",
+    token: "owned-fixture",
+    fetch: async () => {
+      throw new Error("A refused URL must not reach the forge");
+    },
+  });
+  const controller = createProjectSetupController({
+    database,
+    forge,
+    forgeOwner: "factory",
+    forgeOrigin: "https://forge.test",
+    signingKey: "owned-refusal",
+    importOrigins: ["https://github.com"],
+    secrets: {
+      configured: true,
+      read: async () => undefined,
+      create: async () => {},
+      remove: async () => {},
+    },
+    onCreated: async () => {},
+  });
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${manager},'Owned user',${`${manager}@setup.test`})`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
+    const draft = await controller.begin(manager);
+    if (!draft) throw new Error("Missing draft");
+    for (const sourceURL of [
+      "https://127.0.0.1/team/none.git",
+      "https://evil.example/team/none.git",
+    ]) {
+      const current = await controller.view(manager);
+      if (!current) throw new Error("Missing current draft");
+      const saved = await controller.save(manager, {
+        id: draft.id,
+        version: current.version,
+        name: "Refused import",
+        slug: "refused-import",
+        kind: "import",
+        sourceURL,
+      });
+      if (!saved) throw new Error("Missing saved draft");
+      await expect(
+        controller.create(manager, {
+          id: draft.id,
+          version: saved.version,
+          commandID: crypto.randomUUID(),
+        }),
+      ).rejects.toThrow(
+        "Use a Git URL from an approved HTTPS repository host, without credentials.",
+      );
+      expect((await controller.view(manager))?.state).toBe("draft");
+    }
+    expect(
+      (await database.client`SELECT command_id FROM factory.project_repository_intent`).length,
+    ).toBe(0);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await process.dispose();
+  }
+}, 30_000);

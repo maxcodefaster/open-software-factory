@@ -16,7 +16,9 @@ import { z } from "zod";
 
 const sessionPolicyFields = z.object({ loginMethod: z.string(), authenticatedAt: z.coerce.date() });
 
+export * from "./password-policy";
 export const emergencyAdministratorID = "01994a7d-0000-7000-8000-000000000001";
+
 export type IdentityPolicy = {
   sessionDays: number;
   provider?: NonNullable<SSOOptions["defaultSSO"]>[number];

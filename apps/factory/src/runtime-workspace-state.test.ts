@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { RuntimeAttempt } from "./api-contracts";
-import { retryableMainPreview, runtimeWorkspaceURL } from "./runtime-workspace-state";
+import {
+  retryableMainPreview,
+  runtimeStateLabel,
+  runtimeWorkspaceURL,
+} from "./runtime-workspace-state";
 import type { WorkspaceTab } from "./workspace-tabs";
 
 const projectID = "project-1";
@@ -163,4 +167,13 @@ describe("runtime workspace frame identity", () => {
     );
     expect(runtimeWorkspaceURL({ ...ide, view: "ticket" }, projectID, [ready])).toBeUndefined();
   });
+});
+
+test("chooser details name every recorded compute state in plain words", () => {
+  expect(runtimeStateLabel("ready")).toBe("Running");
+  expect(runtimeStateLabel("create-intended")).toBe("Starting");
+  expect(runtimeStateLabel("paused")).toBe("Paused");
+  expect(runtimeStateLabel("cleanup-failed")).toBe("Cleanup unconfirmed");
+  expect(runtimeStateLabel(undefined)).toBe("Preparing");
+  expect(runtimeStateLabel("quarantined")).toBe("Quarantined");
 });

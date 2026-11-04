@@ -38,6 +38,7 @@ import {
 } from "../../../../packages/workspace-domain/src/workspace";
 import { createAccessController } from "../access/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
+import { CommandError } from "../command-error";
 import { logFailure, reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
 import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
@@ -491,6 +492,20 @@ export function createRuntimeController(
         cleanupRetries.delete(attemptID);
       }
     })();
+  }
+  // Resume an existing paused attempt. A Resume whose native record positively
+  // proves it failed is classified once (see observeFailedResume) and then left
+  // for the owner's explicit decision; nothing here dispatches another restore.
+  async function resumeExisting(attemptID: string, deadline?: number) {
+    const [classified] = await database.client<Array<{ failed: boolean }>>`
+      SELECT resume_failed_at IS NOT NULL AS failed FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    if (classified?.failed) return;
+    try {
+      await factorybox.resume(attemptID, deadline);
+    } catch (cause) {
+      if (await factorybox.observeFailedResume(attemptID).catch(() => false)) return;
+      throw cause;
+    }
   }
   async function beginCleanup(attemptID: string, failure?: string, observedAt?: string) {
     clearReconnectObservation(attemptID);
@@ -1180,7 +1195,10 @@ export function createRuntimeController(
         if (!observed || !["starting", "ready"].includes(observed.state)) {
           await database.client`UPDATE factory.runtime_attempt SET
             failure=${cause instanceof Error ? cause.message : "Factorybox Resume is unconfirmed"},updated_at=now()
-            WHERE id=${attemptID} AND state='resuming'`;
+            WHERE id=${attemptID} AND state='resuming' AND resume_failed_at IS NULL`;
+          // A positively recorded native failure lets the owner start fresh. An
+          // unknown outcome stays exactly as recorded.
+          await factorybox.observeFailedResume(attemptID).catch(() => false);
           throw cause;
         }
       }
@@ -1494,7 +1512,7 @@ export function createRuntimeController(
         }
         if (attempt.state === "resuming") {
           deferredCreates.push(async () => {
-            await factorybox.resume(attempt.id);
+            await resumeExisting(attempt.id);
             if (hub.ready(attempt.id)) await updateStatus(attempt.id, "ready");
           });
           continue;
@@ -1649,7 +1667,7 @@ export function createRuntimeController(
           const current = await this.get(existing.id);
           const currentState = current?.state;
           if (currentState === "paused" || currentState === "resuming") {
-            await factorybox.resume(existing.id);
+            await resumeExisting(existing.id);
             if (hub.ready(existing.id)) await updateStatus(existing.id, "ready");
             return this.get(existing.id);
           }
@@ -2028,7 +2046,7 @@ export function createRuntimeController(
           ].includes(existingAttempt.state)
         ) {
           if (["paused", "resuming"].includes(existingAttempt.state)) {
-            await factorybox.resume(existingAttempt.id);
+            await resumeExisting(existingAttempt.id);
             if (hub.ready(existingAttempt.id)) await updateStatus(existingAttempt.id, "ready");
             return this.get(existingAttempt.id);
           }
@@ -2538,7 +2556,8 @@ export function createRuntimeController(
           attempt.state, (SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS "computeWait", attempt.kubernetes_namespace AS "kubernetesNamespace",
           attempt.kubernetes_pod_name AS "kubernetesPodName", attempt.failure,
           attempt.created_at AS "createdAt", attempt.updated_at AS "updatedAt",
-          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt"
+          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt",
+          (attempt.state='resuming' AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
         FROM factory.runtime_attempt attempt
         LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
@@ -2617,7 +2636,8 @@ export function createRuntimeController(
           attempt.state, (SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS "computeWait", attempt.failure, attempt.created_at AS "createdAt",
           COALESCE(staging.runtime_attempt_id = attempt.id, false) AS "currentStaging",
           attempt.updated_at AS "updatedAt",
-          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt"
+          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt",
+          (attempt.state='resuming' AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
         FROM factory.runtime_attempt attempt
         LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
@@ -2636,6 +2656,59 @@ export function createRuntimeController(
       `;
     },
     status: updateStatus,
+    // Discards a paused Sandbox whose Resume positively failed (the native record
+    // proves it), then starts a normal new Attempt for the same Workspace. Workspace
+    // source is untouched; only the paused memory and private container data go.
+    // The command is idempotent: a repeat continues the Stop already in progress,
+    // and a Stop that finished earlier goes straight to Start, which returns an
+    // already active Attempt instead of creating another.
+    async startFresh(attemptID: string, userID: string) {
+      const [row] = await database.client<
+        Array<{
+          projectID: string;
+          changeID: string | null;
+          workspaceID: string | null;
+          kind: string | null;
+          state: string;
+          confirmed: boolean;
+        }>
+      >`SELECT attempt.project_id AS "projectID",attempt.change_id AS "changeID",
+          attempt.workspace_id AS "workspaceID",workspace.kind::text AS kind,attempt.state,
+          attempt.resume_failed_at IS NOT NULL AS confirmed
+        FROM factory.runtime_attempt attempt
+        LEFT JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+        WHERE attempt.id=${attemptID}`;
+      if (!row?.workspaceID || !row.kind) throw new Error("Runtime Attempt is not a Workspace");
+      if (!row.confirmed)
+        throw new CommandError(
+          "conflict",
+          "Factory has not confirmed that the restore failed. It keeps the paused Sandbox untouched until its state is known.",
+        );
+      // Stop from cleanup-failed is the designed retry of the same discard.
+      if (["resuming", "cleanup-failed"].includes(row.state)) await this.stop(attemptID);
+      else if (!["stop-intended", "stopping", "stopped"].includes(row.state))
+        throw new CommandError("conflict", "This Sandbox is not waiting to be restored.");
+      const deadline = performance.now() + 100_000;
+      for (;;) {
+        const [current] = await database.client<Array<{ state: string }>>`
+          SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+        if (current?.state === "stopped") break;
+        if (!current || ["cleanup-failed", "failed"].includes(current.state))
+          throw new CommandError(
+            "unavailable",
+            "Discarding the paused Sandbox could not be confirmed. Nothing new was started; try again.",
+          );
+        if (performance.now() > deadline)
+          throw new CommandError(
+            "unavailable",
+            "Discarding the paused Sandbox is still in progress. Start fresh again to continue.",
+          );
+        await Bun.sleep(500);
+      }
+      return row.kind === "ticket" && row.changeID
+        ? this.startPersisted(row.changeID, userID)
+        : this.start(row.projectID, userID);
+    },
     async stop(attemptID: string) {
       clearReconnectObservation(attemptID);
       const projects = await database.client<Array<{ projectID: string }>>`

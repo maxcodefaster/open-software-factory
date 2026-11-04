@@ -4,6 +4,15 @@ import type { deliverySettingsView } from "../../../../packages/change-domain/sr
 import { configureDelivery, getDeliverySettings } from "../server-functions/delivery";
 import { serverCall } from "../server-functions/result";
 
+function blocked(view: z.infer<typeof deliverySettingsView>) {
+  if (view.enabled)
+    return view.canManage ? undefined : "Only a Project manager can turn off automatic Delivery.";
+  if (view.canDelegate) return undefined;
+  return view.canManage
+    ? "Enabling automatic Delivery needs Developer access to this Project."
+    : "Only a Project manager with Developer access can enable automatic Delivery.";
+}
+
 export function DeliverySettings(props: { projectID: string; active: boolean }) {
   const [view, setView] = createSignal<z.infer<typeof deliverySettingsView>>();
   const [error, setError] = createSignal("");
@@ -87,7 +96,7 @@ export function DeliverySettings(props: { projectID: string; active: boolean }) 
       aria-busy={busy() || (!view() && !error()) ? "true" : "false"}
       class="input-delivery-settings"
     >
-      <h3>Automatic Ticket Delivery</h3>
+      <h2>Automatic Ticket Delivery</h2>
       <p class="input-help">
         Deliver approved application changes after fresh Verification and independent review.
         Prerequisite Tickets must be delivered first. Infrastructure, migrations, dependency
@@ -128,7 +137,8 @@ export function DeliverySettings(props: { projectID: string; active: boolean }) 
                 type="button"
                 class="workspace-action"
                 data-primary={!value().enabled ? "true" : undefined}
-                disabled={busy() || (value().enabled ? !value().canManage : !value().canDelegate)}
+                aria-describedby={blocked(value()) ? "delivery-authority-reason" : undefined}
+                disabled={busy() || Boolean(blocked(value()))}
                 onClick={() => (value().enabled ? void save(false) : setConfirming(true))}
               >
                 {busy()
@@ -146,6 +156,13 @@ export function DeliverySettings(props: { projectID: string; active: boolean }) 
                 >
                   Revoke inactive delegation
                 </button>
+              </Show>
+              <Show when={blocked(value())}>
+                {(reason) => (
+                  <p class="input-help" id="delivery-authority-reason">
+                    {reason()}
+                  </p>
+                )}
               </Show>
             </Show>
             <Show when={confirming()}>

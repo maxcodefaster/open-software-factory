@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import type { LearningView } from "../../../../packages/conversation-domain/src/learning";
+import { APIRequestError } from "../api-client";
 import {
   decideLearning,
   getLearning,
@@ -33,7 +34,10 @@ export function LearningSettings(props: {
       (cause: unknown) => ({
         scope,
         version,
-        error: cause instanceof Error ? cause.message : "Monitoring is unavailable",
+        error:
+          cause instanceof APIRequestError
+            ? cause.message
+            : "Monitoring could not be loaded. Check your connection and refresh.",
       }),
     );
   });
@@ -152,9 +156,16 @@ export function LearningSettings(props: {
       <Show
         when={view()}
         fallback={
-          <div class="work-loading" role="status" aria-label="Loading monitoring" aria-busy="true">
-            Loading monitoring…
-          </div>
+          <Show when={!error()}>
+            <div
+              class="work-loading"
+              role="status"
+              aria-label="Loading monitoring"
+              aria-busy="true"
+            >
+              Loading monitoring…
+            </div>
+          </Show>
         }
       >
         {(current) => (

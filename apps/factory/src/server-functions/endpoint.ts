@@ -33,7 +33,7 @@ type FunctionHandler = (
 
 export function createServerFunctionEndpoint(dependencies: {
   origin: string;
-  session(request: Request): Promise<{ user: { id: string } } | null>;
+  session(request: Request): Promise<{ user: { id: string }; session?: { id: string } } | null>;
   services: FactoryServices;
   maintenance(): Promise<boolean>;
   requireFresh(request: Request): Promise<unknown>;
@@ -68,6 +68,10 @@ export function createServerFunctionEndpoint(dependencies: {
       get actorID() {
         if (!session) throw new CommandError("forbidden", "Authentication required");
         return session.user.id;
+      },
+      get sessionID() {
+        if (!session?.session) throw new CommandError("forbidden", "Authentication required");
+        return session.session.id;
       },
       readBootstrap: () => dependencies.services.bootstrap.get(session),
       signal: request.signal,

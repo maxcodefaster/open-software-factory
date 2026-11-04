@@ -1,5 +1,5 @@
-import { setTimeout as delay } from "node:timers/promises";
 import { isAbsolute } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import upstream from "../../upstream.json";

@@ -215,8 +215,11 @@ test("visual sweep keeps Project membership separate from Factory account action
     height,
     0,
   );
+  // The signed-in administrator cannot disable their own account, and the menu says why.
+  await expect(menu.getByRole("menuitem", { name: "Disable account" })).toBeDisabled();
+  await expect(menu.getByText("Your own account must remain available.")).toBeVisible();
   await page.keyboard.press("ArrowDown");
-  await expect(menu.getByRole("menuitem").last()).toBeFocused();
+  await expect(menu.getByRole("menuitem", { name: "End browser sessions" })).toBeFocused();
   for (const viewport of auditViewports) {
     await resize(page, viewport);
     const bounds = await menu.boundingBox();
@@ -751,7 +754,8 @@ for (const touch of [false, true])
       await wakeFactoryReads(page);
       const chooser = page.getByRole("button", { name: "Choose Preview instance", exact: true });
       if (touch) {
-        // The chevron keeps its 24px look but answers a 44px-wide, 44px-tall touch target.
+        // The dock keeps one row: touch targets are at least 44px where the layout allows and never
+        // below 24px. The chevron keeps its 24px look and its full 44px height.
         const box = await chooser.boundingBox();
         if (!box) throw new Error("The Preview chooser has no box");
         expect(box.width).toBe(24);
@@ -760,7 +764,7 @@ for (const touch of [false, true])
           const owner = (px: number, py: number) =>
             document.elementFromPoint(px, py)?.closest("button")?.getAttribute("aria-label");
           return {
-            inside: Array.from({ length: 44 }, (_, index) => owner(x + index, y + height / 2)),
+            inside: Array.from({ length: 24 }, (_, index) => owner(x + index, y + height / 2)),
             top: owner(x + 12, y + 1),
             bottom: owner(x + 12, y + height - 1),
             beyond: owner(x + 45, y + height / 2),
@@ -770,7 +774,7 @@ for (const touch of [false, true])
         expect(owners.top).toBe("Choose Preview instance");
         expect(owners.bottom).toBe("Choose Preview instance");
         expect(owners.beyond).not.toBe("Choose Preview instance");
-        // Room for the target is reserved beside the group, never taken from a neighbour.
+        // The target never overlaps a neighbour.
         const neighbours = await page.evaluate(() =>
           [...document.querySelectorAll(".workspace-dock button")].map((button) => {
             const bounds = button.getBoundingClientRect();
@@ -782,7 +786,7 @@ for (const touch of [false, true])
           }),
         );
         const after = neighbours.find((item) => item.left > box.x + 24);
-        expect(after && after.left >= box.x + 43.5).toBe(true);
+        expect(after && after.left >= box.x + 24 - 0.5).toBe(true);
       }
       if (touch) await chooser.tap();
       else await chooser.click();
@@ -796,6 +800,14 @@ for (const touch of [false, true])
         await expect(
           menu.getByRole("menuitem", { name: new RegExp(`^${app.label}`) }),
         ).toBeVisible();
+      // Long names wrap instead of ending in an ellipsis that hides which target they open.
+      expect(
+        await menu
+          .locator("span")
+          .evaluateAll(
+            (labels) => labels.filter((el) => el.scrollWidth > el.clientWidth + 1).length,
+          ),
+      ).toBe(0);
       await page.screenshot({
         path: `${evidence}/development-app-names-${touch ? "touch" : "desktop"}.png`,
         animations: "disabled",
@@ -883,7 +895,7 @@ test("silent Preview attachment keeps waiting and offers a local reload of the s
     await expect(chooser).toBeVisible();
     await page.clock.install();
     await chooser.click();
-    await page.getByRole("menuitem", { name: /^Staging ready$/ }).click();
+    await page.getByRole("menuitem", { name: /^Staging Running$/ }).click();
     await expect.poll(() => documents).toBe(1);
     await page.clock.fastForward(31_000);
     await expect(page.getByRole("status", { name: "Preview connection" })).toContainText(

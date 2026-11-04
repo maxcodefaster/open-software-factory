@@ -2,10 +2,12 @@ import { createEffect, createSignal, Show } from "solid-js";
 import { factoryIdentityClient } from "../auth-client";
 import { getAuthenticationState } from "../server-functions/access";
 import { type ServerValue, serverCall } from "../server-functions/result";
+import "./settings.css";
 
 export function FreshAuthentication(props: {
   active?: boolean | undefined;
   beforeCompanySignIn?: (() => void) | undefined;
+  onFresh?: ((fresh: boolean) => void) | undefined;
 }) {
   const [state, setState] = createSignal<ServerValue<ReturnType<typeof getAuthenticationState>>>();
   const [busy, setBusy] = createSignal(false);
@@ -26,7 +28,10 @@ export function FreshAuthentication(props: {
         pending = true;
         try {
           const current = await serverCall(getAuthenticationState({ data: [] }));
-          if (!disposed) setState(current);
+          if (!disposed) {
+            setState(current);
+            props.onFresh?.(current.fresh);
+          }
         } catch {
           if (!disposed)
             setError(
@@ -70,7 +75,11 @@ export function FreshAuthentication(props: {
           });
       if (result.error) throw new Error(result.error.message ?? "Sign-in failed");
       if (current.companySignIn && result.data?.url) location.assign(result.data.url);
-      else setState(await serverCall(getAuthenticationState({ data: [] })));
+      else {
+        const current = await serverCall(getAuthenticationState({ data: [] }));
+        setState(current);
+        props.onFresh?.(current.fresh);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-in failed");
     } finally {
@@ -95,7 +104,7 @@ export function FreshAuthentication(props: {
                 void signIn(password).finally(() => form.reset());
               }}
             >
-              <label>
+              <label class="control-field">
                 Password
                 <input
                   name="password"

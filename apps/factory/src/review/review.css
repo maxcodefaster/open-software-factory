@@ -76,8 +76,7 @@
   width: 100%;
 }
 .review-scenarios {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: var(--space-2);
   min-inline-size: 0;
   border: 0;
@@ -133,7 +132,7 @@
 }
 .review-message-byline {
   display: flex;
-  flex: 1;
+  flex: 1 1 9rem;
   min-width: 0;
   flex-direction: column;
   gap: var(--space-0-5);
@@ -160,6 +159,10 @@
 }
 .review-message-body {
   white-space: pre-wrap;
+}
+.review-message-body a {
+  color: var(--color-river-deep);
+  text-underline-offset: 0.16em;
 }
 .review-replies {
   margin-block: var(--space-3);
@@ -466,10 +469,11 @@
   border-radius: var(--radius-xs);
 }
 .review-scenarios button {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  width: 100%;
   max-width: 100%;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line-default);
@@ -605,10 +609,18 @@
   .preview-review button {
     min-height: 44px;
   }
-  .review-earlier-replies > summary {
+  .review-earlier-replies > summary,
+  .review-resolved > summary {
     box-sizing: border-box;
     min-height: 44px;
     padding-block: var(--space-3);
+  }
+  .review-player-controls .bare-icon {
+    min-width: 44px;
+  }
+  .review-timeline input {
+    top: calc(-1 * var(--space-3));
+    height: 44px;
   }
   .visual-review textarea,
   .visual-review select {
@@ -802,6 +814,9 @@
 .review-heading > div:first-child {
   min-width: 0;
 }
+.review-scenarios button small {
+  grid-column: 2;
+}
 .review-scenarios button[aria-pressed="true"] {
   background: var(--material-accent);
   border-color: var(--color-river-deep);
@@ -898,4 +913,11 @@
 }
 .visual-review button:not(.primary-button, .review-video-selection):hover:not(:disabled) {
   background-color: var(--material-chrome-hover);
+}
+@media (pointer: coarse) {
+  .visual-review .review-text-action {
+    min-width: 44px;
+    min-height: 44px;
+    padding-inline: var(--space-2);
+  }
 }

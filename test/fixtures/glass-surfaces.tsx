@@ -1,12 +1,12 @@
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
-import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
 import type { KnowledgePage, Ticket } from "../../apps/factory/src/api-contracts";
 import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge-workspace";
 import { SignIn } from "../../apps/factory/src/sign-in";
 import { TicketBoardContents } from "../../apps/factory/src/ticket-board";
-import { TicketWorkspace, type TicketDraft } from "../../apps/factory/src/ticket-workspace";
+import { type TicketDraft, TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
+import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/knowledge-workspace.css";
@@ -74,7 +74,7 @@ function Wiki() {
       onSelectPage={setSelected}
       onOpenDocument={noAction}
       onGenerate={noAction}
-      onSearch={noAction}
+      onSearch={async () => "found"}
       onSavePage={async (...input) => {
         wikiSaveAttempts.push(input);
         throw new Error("This visual fixture does not persist edits.");

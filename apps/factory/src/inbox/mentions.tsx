@@ -1,6 +1,6 @@
 import { Portal } from "@solidjs/web";
 import { createEffect, createSignal, For, Show } from "solid-js";
-import { mentionText } from "../../../../packages/ticket-domain/src/attention";
+import { chooseMention, mentionEndingAt } from "../attachments/mention-text";
 import { getAttentionPeople } from "../server-functions/inbox";
 import { serverCall } from "../server-functions/result";
 import type { AttentionPerson } from "./contracts";
@@ -24,7 +24,7 @@ export function MentionSupport(props: {
     end = 0,
     generation = 0;
   let people: AttentionPerson[] = [];
-  let popup: HTMLDivElement | undefined;
+  let popup: HTMLElement | undefined;
   const listID = `mention-options-${crypto.randomUUID()}`;
   function close() {
     generation++;
@@ -47,7 +47,7 @@ export function MentionSupport(props: {
   function choose(person: AttentionPerson) {
     const target = input;
     if (!target || target.disabled) return;
-    target.setRangeText(`${mentionText(person)} `, start, end, "end");
+    target.setRangeText(`${chooseMention(person, target)} `, start, end, "end");
     close();
     target.dispatchEvent(new Event("input", { bubbles: true }));
     target.focus();
@@ -115,6 +115,24 @@ export function MentionSupport(props: {
         if (event.target instanceof HTMLTextAreaElement) void update(event.target);
       };
       const onKey = (event: KeyboardEvent) => {
+        const field = event.target;
+        if (
+          event.key === "Backspace" &&
+          field instanceof HTMLTextAreaElement &&
+          field.selectionStart === field.selectionEnd &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey
+        ) {
+          // A chosen mention is one unit: remove it whole instead of leaving half a name.
+          const length = mentionEndingAt(field.value, field.selectionStart);
+          if (length) {
+            event.preventDefault();
+            field.setRangeText("", field.selectionStart - length, field.selectionStart, "end");
+            field.dispatchEvent(new Event("input", { bubbles: true }));
+            return;
+          }
+        }
         if (!open() || event.target !== input) return;
         if (event.key === "Tab" && event.shiftKey) {
           close();
@@ -160,8 +178,9 @@ export function MentionSupport(props: {
   return (
     <Show when={open()}>
       <Portal>
-        <div
+        <section
           class="mention-picker"
+          aria-label="Project members"
           ref={popup}
           style={{
             left: `${position().left}px`,
@@ -195,7 +214,7 @@ export function MentionSupport(props: {
           <Show when={!loading() && !error() && !options().length}>
             <p>No matching Project members.</p>
           </Show>
-        </div>
+        </section>
       </Portal>
     </Show>
   );

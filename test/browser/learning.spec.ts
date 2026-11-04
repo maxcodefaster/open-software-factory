@@ -53,6 +53,35 @@ test.beforeEach(async ({ page, context }) => {
 test.afterEach(({ context }) => {
   expect(reactivityDiagnostics.get(context)).toEqual([]);
 });
+test("touch monitoring keeps every disclosure at least 44px and the metric choices in two rows", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 900 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${origin}/learning.html?flow`);
+    await expect(page.getByRole("heading", { name: "Work, quality & cost" })).toBeVisible();
+    const small = await page.locator(".learning-dashboard summary").evaluateAll((summaries) =>
+      summaries
+        .filter((summary) => summary.getBoundingClientRect().height > 0)
+        .map((summary) => Math.round(summary.getBoundingClientRect().height))
+        .filter((height) => height < 44),
+    );
+    expect(small).toEqual([]);
+    const rows = await page
+      .locator(".work-chart-metrics button")
+      .evaluateAll((buttons) => [
+        ...new Set(buttons.map((button) => Math.round(button.getBoundingClientRect().top))),
+      ]);
+    expect(rows).toHaveLength(2);
+  } finally {
+    await context.close();
+  }
+});
 for (const width of [1440, 768, 390]) {
   test(`monitoring trends, evidence and improvement decisions at ${width}px`, async ({ page }) => {
     const errors: string[] = [];
@@ -89,6 +118,10 @@ for (const width of [1440, 768, 390]) {
     await expect(page.locator(".work-chart-reading")).toContainText("plus unknown costs");
     await page.getByText("View daily data", { exact: true }).click();
     await expect(page.getByRole("table")).toBeVisible();
+    const daily = page.getByRole("region", { name: "Daily data" });
+    await expect(daily).toHaveAttribute("tabindex", "0");
+    await daily.focus();
+    await expect(daily).toBeFocused();
     await page.getByText("View daily data", { exact: true }).click();
     await page.getByText("Why this change, and how to check it", { exact: true }).click();
     await expect(

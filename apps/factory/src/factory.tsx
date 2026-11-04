@@ -19,6 +19,7 @@ import {
   codingReasoningInput,
 } from "../../../packages/conversation-domain/src/model-settings";
 import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
+import { deliveryBlocker } from "../../../packages/interface-domain/src/ticket-progress";
 import {
   type FactoryZeroContext,
   type FactoryZeroSchema,
@@ -75,6 +76,7 @@ import { bindPopoverKeyboard } from "./popover-keyboard";
 import { createConversationSelection } from "./project-agent/selection";
 import { createProjectPlanning } from "./projects/planning";
 import { ticketReference } from "./projects/ticket-content";
+import { runtimeStateLabel } from "./runtime-workspace-state";
 import { getModelAvailability } from "./server-functions/bootstrap";
 import { serverCall } from "./server-functions/result";
 import { createProjectSetupInteraction } from "./setup/panel";
@@ -82,7 +84,6 @@ import type { PersonalTicketDraft } from "./ticket-draft-workspace";
 import type { TicketDraft } from "./ticket-workspace";
 import { createWindowPresence } from "./window-presence";
 import { createWorkspaceState } from "./workspace/state";
-import { ProjectRegistration } from "./workspace-chrome";
 import { workspacePanelID, workspaceTabElementID } from "./workspace-tabbar";
 import { selectedWorkspaceTab, type WorkspaceTab } from "./workspace-tabs";
 import { FactoryReadProvider } from "./zero/reads";
@@ -230,6 +231,35 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   const [workspaceFocusTarget, setWorkspaceFocusTarget] = createSignal<string>();
   let workspaceElement: HTMLElement | undefined;
   let workspaceOpener: HTMLElement | undefined;
+  let desktopElement: HTMLElement | undefined;
+  let noticesElement: HTMLDivElement | undefined;
+  // Lasting notices take layout space so they never hide the window tab bar or Board controls.
+  createEffect(
+    () => true,
+    () => {
+      const root = desktopElement;
+      const notices = noticesElement;
+      if (!root || !notices) return;
+      const measure = () => {
+        const lasting = Array.from(notices.children).filter(
+          (child): child is HTMLElement =>
+            child instanceof HTMLElement && !child.hasAttribute("data-transient"),
+        );
+        const last = lasting.at(-1);
+        root.style.setProperty(
+          "--notices-inset",
+          last ? `${last.offsetTop + last.offsetHeight + 8}px` : "0px",
+        );
+      };
+      const observer = new ResizeObserver(measure);
+      observer.observe(notices);
+      measure();
+      return () => {
+        observer.disconnect();
+        root.style.removeProperty("--notices-inset");
+      };
+    },
+  );
   function setWorkspaceVisible(value: boolean) {
     const restore =
       !value &&
@@ -268,7 +298,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   const [narrowViewport, setNarrowViewport] = createSignal(false);
   const agentOverlay = () => agentOpen() && narrowViewport();
   const [projectSearchQuery, setProjectSearchQuery] = createSignal("");
-  const [registrationOpen, setRegistrationOpen] = createSignal(false);
   const [boardHistoryOpen, setBoardHistoryOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [correctionTarget, setCorrectionTarget] = createSignal<string>();
@@ -800,7 +829,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
 
   const updateWorkspaceTab = workspaces.update;
 
-  function activateWorkspaceTab(tab: WorkspaceTab) {
+  function activateWorkspaceTab(tab: WorkspaceTab, publish = true) {
     const reopening = !workspaceVisible();
     if (reopening && document.activeElement instanceof HTMLElement)
       workspaceOpener = document.activeElement;
@@ -813,7 +842,19 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     if (tab.ticketID && tab.ticketID !== selectedTicketID()) {
       loadTicketContext(tab.ticketID);
     }
-    publishWorkspaceLocation(tab);
+    if (publish) publishWorkspaceLocation(tab);
+  }
+
+  // An unavailable link keeps its URL and notice, but leaves no blank Ticket window or stray tab.
+  function discardUnavailableTicket(ticketID: string) {
+    const result = workspaces.close(`ticket:${ticketID}`);
+    if (selectedTicketID() === ticketID) {
+      setSelectedTicketID(undefined);
+      setDetail(undefined);
+    }
+    if (!result?.closed) return;
+    if (result.next) activateWorkspaceTab(result.next, false);
+    else if (!result.state.tabs.length) setWorkspaceVisible(false);
   }
 
   function closeWorkspaceTab(tabID: string) {
@@ -1079,7 +1120,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   }
 
   const {
-    register,
     saveEpic,
     assignTicketEpic,
     editDependency,
@@ -1090,7 +1130,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     mutate,
     setSelectedProjectID,
     setProjectMenuOpen,
-    setRegistrationOpen,
     zero,
     selectedProjectID,
     commitZeroMutation,
@@ -1530,9 +1569,15 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
         selectTicket(destination.ticketID, false, false, false);
         await Promise.resolve();
         if (!current()) return;
-        const loaded = await refreshTicketDetail(destination.ticketID);
+        const loaded = await refreshTicketDetail(destination.ticketID).catch((cause) => {
+          if (current()) discardUnavailableTicket(destination.ticketID);
+          throw cause;
+        });
         if (!current()) return;
-        if (!loaded) throw new Error(unavailableLink);
+        if (!loaded) {
+          discardUnavailableTicket(destination.ticketID);
+          throw new Error(unavailableLink);
+        }
         updateWorkspaceTab({
           id: `ticket:${destination.ticketID}`,
           view: "ticket",
@@ -1590,6 +1635,19 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       : undefined;
   };
 
+  // The Project's saved Change list already carries every merge and Promotion, so a queued
+  // Delivery names its blocker without another read.
+  const deliveryBlockFor = (change: Change | undefined) => {
+    if (!change || !["delivering", "active"].includes(change.state)) return undefined;
+    const block = deliveryBlocker(
+      change,
+      changes().filter((candidate) => candidate.projectId === change.projectId),
+    );
+    if (!block) return undefined;
+    const ticket = ticketList().find((candidate) => candidate.id === block.ticketId);
+    return { reason: block.reason, title: ticket?.title ?? ticketReference(block.ticketId) };
+  };
+
   const ideTargets = (): RuntimeDockTarget[] => {
     const project = selectedProject();
     if (!project || !canDevelopProject() || lifecycleProjectID() !== project.id) return [];
@@ -1612,8 +1670,11 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
           attempt.workspaceKind === "personal"
             ? `personal:${project.id}`
             : `change:${attempt.changeId}`,
-        label: attempt.workspaceKind === "personal" ? "My workspace" : (ticket?.title ?? "Ticket"),
-        detail: attempt.state,
+        label:
+          attempt.workspaceKind === "personal"
+            ? "My workspace"
+            : (ticket?.title ?? (change ? ticketReference(change.ticketId) : "Ticket")),
+        detail: runtimeStateLabel(attempt.state),
         attemptId: attempt.id,
         ...(attempt.changeId ? { changeId: attempt.changeId } : {}),
       };
@@ -1635,7 +1696,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       const ticket = ticketList().find((candidate) => candidate.id === change.ticketId);
       targets.push({
         id: `change:${change.id}`,
-        label: ticket?.title ?? "Ticket",
+        label: ticket?.title ?? ticketReference(change.ticketId),
         detail: "Open source",
         changeId: change.id,
       });
@@ -1658,7 +1719,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
             {
               id: `staging:${project.id}`,
               label: "Staging",
-              detail: staging.state,
+              detail: runtimeStateLabel(staging.state),
               attemptId: staging.id,
             },
           ]
@@ -1680,7 +1741,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
         detail: !preview.attemptID
           ? "Starts when selected"
           : staged
-            ? (staging?.state ?? preview.state ?? "Preparing")
+            ? runtimeStateLabel(staging?.state ?? preview.state)
             : "Development",
         ...(preview.attemptID ? { attemptId: preview.attemptID } : { projectId: project.id }),
         appChannel: preview.channel,
@@ -1702,6 +1763,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     openChatActivity,
     openPreviewTarget,
     retryMainPreview,
+    startFreshPreview,
     ticketPreviewTarget,
     openDevelopmentPreview,
   } = createRuntimeNavigation({
@@ -1764,7 +1826,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     workspaceVisible,
     workspaceTabs,
     agentOverlay,
-    registrationOpen,
     activeWorkspaceTab,
     shareableURL,
     activateWorkspaceTab,
@@ -1824,6 +1885,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     ticketPreviewTarget,
     openPreviewTarget,
     retryMainPreview,
+    startFreshPreview,
     approveDelivery,
     retryReview,
     retryPromotion,
@@ -1864,6 +1926,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     attempts,
     appPreviews,
     changes,
+    deliveryBlockFor,
     projectMenuOpen,
     ideNavigation,
     setIDENavigation,
@@ -1876,7 +1939,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     agentPresence,
     agentOpen,
     agentOverlay,
-    registrationOpen,
     get agentPanelElement() {
       return agentPanelElement;
     },
@@ -1975,7 +2037,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   const projectBoardModel: ProjectBoardModel = {
     workspaceVisible,
     agentOverlay,
-    registrationOpen,
     setupVisible,
     selectedProject,
     setProjectMenuOpen,
@@ -2009,7 +2070,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   };
 
   const desktopTopbarModel: DesktopTopbarModel = {
-    registrationOpen,
     agentOpen,
     get agentToggleElement() {
       return agentToggleElement;
@@ -2100,11 +2160,12 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       scopeKey={`${contextKey()}:${assistantKey()}:${selectedKnowledgePageID() ?? ""}:${activeWorkspaceTab()?.id ?? ""}`}
     >
       <main
+        ref={desktopElement}
         class={`factory-desktop${agentOpen() ? " agent-is-open" : ""}${agentOverlay() ? " agent-is-overlay" : ""}`}
         data-background={desktopBackgroundKey()}
       >
         <h1 class="sr-only">Delivery floor</h1>
-        <Show when={!workspaceVisible() && !registrationOpen()}>
+        <Show when={!workspaceVisible()}>
           <SkipToBoard />
         </Show>
         <MentionSupport
@@ -2127,9 +2188,9 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
 
         <DesktopTopbar model={desktopTopbarModel} />
 
-        <div class="desktop-notices">
+        <div class="desktop-notices" ref={noticesElement}>
           <Show when={desktopNavigation.pending()}>
-            <div class="sync-notice" role="status">
+            <div class="sync-notice" role="status" data-transient>
               <span>Opening linked view…</span>
             </div>
           </Show>
@@ -2141,7 +2202,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
               </button>
             </div>
           </Show>
-          <Show when={error() && !registrationOpen()}>
+          <Show when={error()}>
             <p class="error-toast" role="alert">
               {error()}
             </p>
@@ -2167,15 +2228,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
 
         <ProjectBoard model={projectBoardModel} />
 
-        <Show when={registrationOpen()}>
-          <ProjectRegistration
-            pending={pending()}
-            error={error()}
-            opener={projectMenuOpener()}
-            onSubmit={register}
-            onClose={() => setRegistrationOpen(false)}
-          />
-        </Show>
         <Show when={agentOverlay()}>
           <button
             type="button"

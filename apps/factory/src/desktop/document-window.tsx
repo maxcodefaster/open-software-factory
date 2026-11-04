@@ -13,6 +13,7 @@ import {
 import type { PlanningIntent } from "../../../../packages/conversation-domain/src/conversation";
 import type { EpicProposal } from "../../../../packages/conversation-domain/src/epic-proposal";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import type { DeliveryBlock } from "../../../../packages/interface-domain/src/ticket-progress";
 import type { TechnicalDesignContent } from "../../../../packages/requirement-domain/src/technical-design";
 import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
 import {
@@ -81,7 +82,6 @@ export interface DocumentWindowModel {
   workspaceVisible: SourceAccessor<boolean>;
   workspaceTabs: () => WorkspaceTab[];
   agentOverlay: () => boolean;
-  registrationOpen: SourceAccessor<boolean>;
   activeWorkspaceTab: () => WorkspaceTab | undefined;
   shareableURL: () => string | undefined;
   activateWorkspaceTab: (tab: WorkspaceTab) => void;
@@ -237,6 +237,7 @@ export interface DocumentWindowModel {
   ticketPreviewTarget: (changeID: string | undefined) => RuntimeDockTarget | undefined;
   openPreviewTarget: (target: RuntimeDockTarget) => Promise<void>;
   retryMainPreview: (tab: WorkspaceTab) => Promise<void>;
+  startFreshPreview: (tab: WorkspaceTab) => Promise<void>;
   approveDelivery: (changeID: string) => Promise<void>;
   retryReview: (changeID: string) => Promise<void>;
   retryPromotion: (changeID: string) => Promise<void>;
@@ -308,6 +309,7 @@ export interface DocumentWindowModel {
   attempts: Accessor<RuntimeAttempt[]>;
   appPreviews: Accessor<AppPreview[]>;
   changes: Accessor<Change[]>;
+  deliveryBlockFor: (change: Change | undefined) => DeliveryBlock | undefined;
   projectMenuOpen: ReturnType<typeof createProjectPlanning>["projectMenuOpen"];
   ideNavigation: SourceAccessor<ActivityNavigationRequest | undefined>;
   setIDENavigation: Setter<ActivityNavigationRequest | undefined>;
@@ -355,7 +357,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
       }}
       aria-hidden={model.workspaceVisible() ? "false" : "true"}
       hidden={!model.workspaceWindow.present() || model.workspaceTabs().length === 0}
-      inert={!model.workspaceVisible() || model.agentOverlay() || model.registrationOpen()}
+      inert={!model.workspaceVisible() || model.agentOverlay()}
     >
       <WorkspaceTabbar
         tabs={model.workspaceTabs()}
@@ -462,6 +464,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                     ticketReference={ticketReference(current().ticket.id)}
                     change={model.selectedChange()}
                     delivery={model.delivery()}
+                    deliveryBlock={model.deliveryBlockFor(model.selectedChange())}
                     latestRevision={model.latestRevision()}
                     latestRequirement={model.latestRequirement()}
                     pending={model.pending()}
@@ -576,7 +579,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                 onOpenDocument={(path) => void model.openDocument(path)}
                 onLoadDocuments={model.loadRepositoryDocuments}
                 onGenerate={() => void model.mutate(model.generateKnowledge)}
-                onSearch={(query) => void model.searchProjectKnowledge(query)}
+                onSearch={(query) => model.searchProjectKnowledge(query)}
                 onSavePage={model.editKnowledgePage}
                 onHistory={model.loadKnowledgeHistory}
                 onSources={async (pageID) =>
@@ -645,16 +648,9 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                 onOpen={model.selectTicket}
                 onRestore={(id) => void model.ticketTrashCommand(id, "restore")}
                 onRetry={(id) => void model.ticketTrashCommand(id, "trash")}
+                hasMore={(model.trashTickets.data()?.length ?? 0) > model.trashLimit()}
+                onShowMore={() => model.setTrashLimit((limit) => limit + 50)}
               />
-              <Show when={(model.trashTickets.data()?.length ?? 0) > model.trashLimit()}>
-                <button
-                  type="button"
-                  class="quiet-button"
-                  onClick={() => model.setTrashLimit((limit) => limit + 50)}
-                >
-                  Show more removed Tickets
-                </button>
-              </Show>
             </Match>
           </Switch>
         </Loading>
@@ -708,6 +704,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
           userID={model.bootstrap.session.user.id}
           canDevelop={model.canDevelopProject()}
           onRetryMainPreview={model.retryMainPreview}
+          onStartFresh={model.startFreshPreview}
           onOpenTicket={(changeID) => {
             const change = props.model
               .changes()

@@ -221,6 +221,14 @@ export function createIdentityConfiguration(
       await refresh();
       return active.createManagedUser(input);
     },
+    async changePassword(
+      userID: string,
+      sessionID: string,
+      input: { currentPassword: string; newPassword: string; confirmPassword: string },
+    ) {
+      await refresh();
+      return active.changePassword(userID, sessionID, input);
+    },
     get policy() {
       return active.policy;
     },

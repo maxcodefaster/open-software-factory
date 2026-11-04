@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { createDeveloperIDERuntime } from "../../apps/factory/src/workspace/developer-ide-runtime";
-import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
+import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
+import { createDeveloperIDERuntime } from "../../apps/factory/src/workspace/developer-ide-runtime";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -11,6 +11,7 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
   const owned = await fixture(undefined, undefined, database);
   const sessionID = crypto.randomUUID();
   let starts = 0;
+  const fresh: Array<[string, string]> = [];
   const closed: Array<[string, string]> = [];
   const actions: Array<[string, string, string]> = [];
   const access = createRuntimeAccess(database, (token) => owned.hub.revokeAccess(token));
@@ -25,6 +26,10 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
         expect(changeID).toBe(owned.changeID);
         expect(userID).toBe(owned.userID);
         starts++;
+        return null;
+      },
+      async startFresh(attemptID, userID) {
+        fresh.push([attemptID, userID]);
         return null;
       },
       async processOutput(attemptID) {
@@ -67,6 +72,7 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
       attemptID: owned.attemptID,
       state: "ready",
       failure: null,
+      restoreFailed: false,
     });
     expect(starts).toBe(0);
     const terminal = `${prefix}/${owned.attemptID}/terminal/terminal-a`;
@@ -82,6 +88,23 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     expect(actions).toHaveLength(0);
     await database.client`UPDATE factory.change_writer SET state='human',user_id=${owned.userID} WHERE change_id=${owned.changeID}`;
     expect((await runtime.route(`${prefix}/activity`, request("POST"), auth))?.status).toBe(204);
+    expect(starts).toBe(0);
+    // A Resume that is only unknown offers no Start fresh. A confirmed failed Resume does,
+    // and then only for this exact Workspace's current Attempt.
+    await database.client`UPDATE factory.runtime_attempt SET state='resuming',failure='restore outcome lost' WHERE id=${owned.attemptID}`;
+    await expect(runtime.route(`${prefix}/start-fresh`, request("POST"), auth)).rejects.toThrow(
+      "not waiting to be restored",
+    );
+    expect((await (await runtime.route(prefix, request(), auth))?.json())?.restoreFailed).toBe(
+      false,
+    );
+    await database.client`UPDATE factory.runtime_attempt SET resume_failed_at=now(),failure='The paused Sandbox could not be restored: EAGAIN' WHERE id=${owned.attemptID}`;
+    const confirmed = await (await runtime.route(prefix, request(), auth))?.json();
+    expect(confirmed).toMatchObject({ state: "resuming", restoreFailed: true });
+    expect((await runtime.route(`${prefix}/start-fresh`, request("POST"), auth))?.status).toBe(202);
+    expect(fresh).toEqual([[owned.attemptID, owned.userID]]);
+    expect((await runtime.route(`${prefix}/start-fresh`, request("GET"), auth))?.status).toBe(405);
+    await database.client`UPDATE factory.runtime_attempt SET state='ready',failure=NULL,resume_failed_at=NULL WHERE id=${owned.attemptID}`;
     expect(starts).toBe(0);
     const data = await runtime.socketData(terminal, auth);
     expect(data?.kind).toBe("browser");

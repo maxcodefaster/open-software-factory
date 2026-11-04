@@ -79,11 +79,8 @@ test("release images wait for the same non-live checks on both native architectu
   const checks = parse(
     await readFile(new URL("../../.github/workflows/checks.yaml", import.meta.url), "utf8"),
   );
-  expect(checks.on).toEqual({
-    push: { branches: ["main"] },
-    pull_request: { branches: ["main"] },
-    workflow_call: null,
-  });
+  // Releases call these lanes; nothing runs per push. `bun run beta:gate` judges each commit locally.
+  expect(Object.keys(checks.on).sort()).toEqual(["workflow_call", "workflow_dispatch"]);
   expect(checks.permissions).toEqual({ contents: "read" });
   const verify = checks.jobs.verify;
   expect(verify.strategy["fail-fast"]).toBe(false);
@@ -179,11 +176,11 @@ test("release publication is attested, signed and scoped to the jobs that need c
   expect(library).toContain("cosign sign --yes");
 });
 
-test("the native lane is a separate scheduled workflow that never runs for pull requests", async () => {
+test("the native lane is a separate manual workflow that never runs for pull requests", async () => {
   const native = parse(
     await readFile(new URL("../../.github/workflows/native.yaml", import.meta.url), "utf8"),
   );
-  expect(Object.keys(native.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
+  expect(Object.keys(native.on)).toEqual(["workflow_dispatch"]);
   expect(native.jobs.native["runs-on"]).toEqual(["self-hosted", "sysbox"]);
   const commands = native.jobs.native.steps.flatMap((step: { run?: string }) =>
     step.run ? [step.run] : [],

@@ -56,6 +56,7 @@ function Reference(props: { value: string; label: string }) {
         value={props.value}
         label="Copy"
         accessibleLabel={`Copy ${props.label}`}
+        iconOnly={true}
         class="quiet-button"
       />
     </div>
@@ -409,10 +410,20 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                           </p>
                         </Show>
                       </fieldset>
+                      <Show when={!version() && data().candidateSHA && !activePublication()}>
+                        <p id="release-version-hint" class="release-note">
+                          Enter or choose a version to review the publication.
+                        </p>
+                      </Show>
                       <button
                         type="submit"
                         class="primary-button"
                         disabled={busy() || !canReview()}
+                        aria-describedby={
+                          !version() && data().candidateSHA && !activePublication()
+                            ? "release-version-hint"
+                            : undefined
+                        }
                       >
                         Review publication
                       </button>

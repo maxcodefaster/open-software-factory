@@ -120,7 +120,7 @@ function Wiki() {
             failure: null,
           });
         }}
-        onSearch={noAction}
+        onSearch={async () => "found"}
         onSavePage={async (id, expectedVersion, title, body) => {
           // Synthetic component callback, not a Factory command transport.
           const response = await fetch("/fixture/wiki-save", {

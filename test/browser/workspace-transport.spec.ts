@@ -178,6 +178,64 @@ async function fixture(page: Page, unconfirmedEditor = false) {
   return calls;
 }
 
+test("a rejected editor keeps its recovery action right under its message", async ({ page }) => {
+  const source = () => ({
+    workspaceID: "10000000-0000-4000-8000-000000000003",
+    label: "Owned source",
+    serviceID: "owned-source",
+    epoch: 1,
+    state: "ready" as WorkspaceSourceState,
+    failure: null,
+  });
+  const editor = () => ({
+    serviceID: "owned-editor",
+    epoch: 1,
+    state: "ready" as WorkspaceSourceState,
+    failure: null,
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      async ensurePersonalSource() {
+        return source();
+      },
+      async getSource() {
+        return source();
+      },
+      async ensureSource() {
+        return source();
+      },
+      async stopSource() {},
+      async getEditor() {
+        return editor();
+      },
+      async ensureEditor() {
+        return editor();
+      },
+      async stopEditor() {},
+    },
+  });
+  await page.route("**/api/developer-ide/access?*", (route) =>
+    route.fulfill({ status: 403, json: { error: "Owned editor access was rejected." } }),
+  );
+  await page.goto(`${origin}/workspace-transport.html`);
+  const retry = page.getByRole("button", { name: "Retry editor connection", exact: true });
+  await expect(retry).toBeVisible();
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    const message = await page
+      .getByText("Editor access was rejected. Retry opening it.", { exact: true })
+      .boundingBox();
+    const action = await retry.boundingBox();
+    if (!message || !action) throw new Error("The rejected editor shows no message or action");
+    expect(action.y).toBeGreaterThan(message.y + message.height);
+    expect(action.y - (message.y + message.height)).toBeLessThan(120);
+    expect(Math.abs(action.x + action.width / 2 - (message.x + message.width / 2))).toBeLessThan(
+      40,
+    );
+    await page.screenshot({ path: `${directory}/editor-rejected-${width}.png` });
+  }
+});
+
 test("Workspace source restart observes confirmed Stop before preparing another access epoch", async ({
   page,
 }) => {

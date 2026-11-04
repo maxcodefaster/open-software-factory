@@ -1,7 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
@@ -14,10 +13,14 @@ import {
   type ProjectEnvironment,
   replaceEnvironment,
 } from "../../packages/project-domain/src/environment";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { test } from "../fixtures/browser-test";
+import {
+  factoryFunctionMatcher,
+  factoryFunctionMatches,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
-import { factoryFunctionMatcher, factoryFunctionMatches } from "../fixtures/server-functions";
 
 const evidence = ".factory/test-results/environment-configurator";
 const cache = resolve(".factory/test-results/vite", `environment-ui-${crypto.randomUUID()}`);
@@ -357,6 +360,13 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await expect(replacement).toHaveValue("");
   await replacement.pressSequentially("replacement-value");
   await expect(replacement).toBeFocused();
+  // Typed secrets are masked until the person asks to see them.
+  await expect(replacement).toHaveCSS("-webkit-text-security", "disc");
+  const reveal = area.getByRole("checkbox", { name: "Show what I type", exact: true });
+  await reveal.check();
+  await expect(replacement).toHaveCSS("-webkit-text-security", "none");
+  await reveal.uncheck();
+  await expect(replacement).toHaveCSS("-webkit-text-security", "disc");
   await rows
     .filter({ hasText: "API_KEY" })
     .getByRole("checkbox", { name: "Verification", exact: true })
@@ -400,6 +410,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await importAction.click();
   const paste = area.getByRole("textbox", { name: "Paste environment variables" });
   await expect(paste).toBeFocused();
+  await expect(paste).toHaveCSS("-webkit-text-security", "disc");
   await paste.fill("DUPLICATE=1\nDUPLICATE=2");
   await area.getByRole("button", { name: "Preview import", exact: true }).click();
   await expect(area.getByRole("alert")).toHaveText(

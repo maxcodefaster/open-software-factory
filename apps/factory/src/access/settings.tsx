@@ -18,6 +18,7 @@ import "./settings.css";
 type Member = ServerValue<ReturnType<typeof getProjectMembers>>["members"][number];
 
 export function AccessSettings(props: {
+  userID?: string | undefined;
   systemManager: boolean;
   project?: { id: string; name: string } | undefined;
   beforeCompanySignIn?: () => void;
@@ -179,6 +180,13 @@ export function AccessSettings(props: {
                           name={user.name}
                           disabled={user.disabled}
                           busy={busy()}
+                          protectedReason={
+                            user.id === props.userID
+                              ? "Your own account must remain available."
+                              : user.emergency
+                                ? "The emergency administrator must remain available."
+                                : undefined
+                          }
                           onSessions={() => setAccountAction({ id: user.id, kind: "sessions" })}
                           onDisable={() => setAccountAction({ id: user.id, kind: "disable" })}
                           onEnable={() => void act(() => changeAccount(user.id, "access", false))}

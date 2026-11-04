@@ -672,6 +672,114 @@ test("a Preview that waits names the stage, the App port and then admits the App
   documentGate.resolve();
 });
 
+test("a paused Preview says it is resuming compute, not that compute is running", async ({
+  page,
+}) => {
+  const documentGate = Promise.withResolvers<void>();
+  await page.route("**/document", async (route) => {
+    await documentGate.promise;
+    await route.fulfill({ contentType: "text/html", body: "<p>late</p>" }).catch(() => {});
+  });
+  await page.clock.install();
+  for (const state of ["paused", "resuming"]) {
+    await page.goto(`${origin}/runtime-attachment.html?app=1&attempt-state=${state}`, {
+      waitUntil: "domcontentloaded",
+    });
+    const connection = page.getByRole("status", { name: "Preview connection" });
+    await expect(connection).toContainText("Resuming compute for the Preview…");
+    await expect(connection).not.toContainText("Compute is running");
+    await expect(connection).not.toContainText("Waiting for the App on port");
+  }
+  documentGate.resolve();
+});
+
+test("a confirmed failed restore explains itself and offers one idempotent Start fresh", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/runtime-attachment.html?failed=1&ticket=1&restore=confirmed&defer=1`);
+  await expect(
+    page.getByText("The paused Sandbox could not be restored.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Your files are unchanged. Start fresh to continue; the paused memory and private container data are discarded.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.locator("iframe")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry Main Preview" })).toHaveCount(0);
+  const fresh = page.getByRole("button", { name: "Start fresh", exact: true });
+  await fresh.click();
+  const pending = page.getByRole("button", { name: "Starting fresh…", exact: true });
+  await expect(pending).toBeDisabled();
+  await expect(
+    page.getByText(/Discarding the paused Sandbox, then starting a new one/),
+  ).toBeVisible();
+  await pending.click({ force: true }).catch(() => {});
+  await expect(page.getByText("Scripted Start fresh commands: 1", { exact: true })).toBeVisible();
+  await page.screenshot({ path: `${evidence}/restore-failed-starting-fresh.png` });
+  await page.getByRole("button", { name: "Finish scripted start", exact: true }).click();
+  await expect(page.getByText("Starting compute for the Preview…", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Start fresh|Starting fresh/ })).toHaveCount(0);
+  await expect(page.getByText("Scripted Start fresh commands: 1", { exact: true })).toBeVisible();
+});
+
+test("an unknown restore outcome is explained and offers no action", async ({ page }) => {
+  await page.goto(`${origin}/runtime-attachment.html?failed=1&ticket=1&restore=unknown`);
+  await expect(
+    page.getByText("Restoring the paused Sandbox could not be confirmed.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/keeps the paused Sandbox untouched/)).toBeVisible();
+  await expect(page.getByRole("button")).toHaveCount(0);
+  await page.screenshot({ path: `${evidence}/restore-unknown.png` });
+});
+
+test("a failed Start fresh keeps the explanation and can be tried again", async ({ page }) => {
+  await page.goto(
+    `${origin}/runtime-attachment.html?failed=1&ticket=1&restore=confirmed&fresh-error=1`,
+  );
+  const fresh = page.getByRole("button", { name: "Start fresh", exact: true });
+  await fresh.click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "Discarding the paused Sandbox could not be confirmed.",
+  );
+  await expect(fresh).toBeEnabled();
+  await expect(
+    page.getByText("The paused Sandbox could not be restored.", { exact: true }),
+  ).toBeVisible();
+  await fresh.click();
+  await expect(page.getByText("Scripted Start fresh commands: 2", { exact: true })).toBeVisible();
+});
+
+test("the restore recovery fits desktop, narrow and touch layouts", async ({ page, browser }) => {
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`${origin}/runtime-attachment.html?failed=1&ticket=1&restore=confirmed`);
+    await expect(page.getByRole("button", { name: "Start fresh", exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({ path: `${evidence}/restore-failed-${width}.png`, fullPage: true });
+  }
+  const touch = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  try {
+    const phone = await touch.newPage();
+    await phone.goto(`${origin}/runtime-attachment.html?failed=1&ticket=1&restore=confirmed`);
+    expect(
+      await phone
+        .getByRole("button", { name: "Start fresh", exact: true })
+        .evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
+    await phone.screenshot({ path: `${evidence}/restore-failed-touch.png`, fullPage: true });
+  } finally {
+    await touch.close();
+  }
+});
+
 test("an exited App process is named as the cause when the Preview cannot open", async ({
   page,
 }) => {

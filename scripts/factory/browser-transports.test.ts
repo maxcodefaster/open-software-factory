@@ -25,7 +25,6 @@ test("the entire SPA import graph has only classified, necessary browser HTTP pr
     "learning",
     "mcp",
     "models",
-    "projects",
     "releases",
     "review",
     "runtime",

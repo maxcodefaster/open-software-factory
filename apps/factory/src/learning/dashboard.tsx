@@ -298,7 +298,7 @@ export function WorkChart(props: { days: LearningDay[] }) {
       </p>
       <details class="work-chart-data">
         <summary>View daily data</summary>
-        <div class="work-data-scroll">
+        <section class="work-data-scroll" aria-label="Daily data" tabindex="0">
           <table>
             <caption>Last 28 days, UTC. Empty quality cells mean no reviewed evidence.</caption>
             <thead>
@@ -337,7 +337,7 @@ export function WorkChart(props: { days: LearningDay[] }) {
               </For>
             </tbody>
           </table>
-        </div>
+        </section>
       </details>
     </section>
   );

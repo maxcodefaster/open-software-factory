@@ -1,9 +1,9 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { test } from "../fixtures/browser-test";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 
 const directory = ".factory/test-results/glass-surfaces";
@@ -158,7 +158,10 @@ test("a failed Wiki autosave retains the draft and retries only after an explici
       const source = "/glass-surfaces.tsx";
       return (await import(source)).wikiSaveAttempts.length as number;
     });
-  await expect(page.getByRole("alert")).toContainText("Your draft is retained");
+  await expect(page.getByRole("alert")).toContainText(
+    "This visual fixture does not persist edits.",
+  );
+  await expect(page.getByText("Not saved. Your draft is retained.")).toBeVisible();
   expect(await attempts()).toBe(1);
   await page.clock.runFor(3_000);
   expect(await attempts()).toBe(1);

@@ -254,23 +254,25 @@ export function createKnowledgeState(options: {
         return false;
       }
     },
-    async search(text: string) {
+    async search(text: string): Promise<"found" | "failed" | "superseded"> {
       const projectId = options.projectID(),
         request = ++searchRequest;
       setQuery(text);
       if (!projectId || !text.trim()) {
         setResults([]);
-        return;
+        return "found";
       }
       try {
         const body = await serverCall(searchKnowledge({ data: [projectId, text.trim()] }));
-        if (request === searchRequest && options.projectID() === projectId)
-          setResults(body.results);
+        if (request !== searchRequest || options.projectID() !== projectId) return "superseded";
+        setResults(body.results);
+        return "found";
       } catch (cause) {
-        if (request === searchRequest && options.projectID() === projectId)
-          options.onError(
-            cause instanceof Error ? cause.message : "Knowledge search could not be loaded.",
-          );
+        if (request !== searchRequest || options.projectID() !== projectId) return "superseded";
+        options.onError(
+          cause instanceof Error ? cause.message : "Knowledge search could not be loaded.",
+        );
+        return "failed";
       }
     },
   };

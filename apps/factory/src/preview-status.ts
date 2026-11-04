@@ -14,6 +14,23 @@ export type PreviewStatusInput = {
 export type PreviewStatus = { headline: string; detail?: string; cause?: string };
 
 const starting = ["create-intended", "starting"];
+const asleep = ["pausing", "paused", "resuming"];
+
+export const restoreUnknownHeadline = "Restoring the paused Sandbox could not be confirmed.";
+export const restoreUnknownDetail =
+  "Factory has not confirmed whether it restored, so it keeps the paused Sandbox untouched. Your files are unchanged.";
+export const restoreFailedHeadline = "The paused Sandbox could not be restored.";
+export const restoreFailedDetail =
+  "Your files are unchanged. Start fresh to continue; the paused memory and private container data are discarded.";
+
+// Native restore and build failures can carry whole log excerpts and host paths.
+// Show the recorded cause up to a readable bound; the full text stays in the record.
+export function boundedCause(cause: string, limit = 240) {
+  const text = cause.replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), limit - 40))}…`;
+}
 
 function appName(app: PreviewStatusInput["app"]) {
   return app?.port ? `the App on port ${app.port}` : "the App";
@@ -38,12 +55,20 @@ export function previewStatus(input: PreviewStatusInput): PreviewStatus {
     const cause =
       processCause ??
       (attempt?.failure
-        ? attempt.failure
+        ? boundedCause(attempt.failure)
         : attempt && starting.includes(attempt.state)
           ? "Compute is still starting."
           : input.unreachable
             ? `Factory could not get an answer from ${appName(app)}. It may still be starting, or its health check may be failing.`
             : "Factory refused the Preview request. Reload the view; if it persists, reopen the Preview.");
+    // An unknown restore outcome stays untouched: reloading cannot settle it.
+    if (attempt?.state === "resuming" && attempt.failure)
+      return {
+        headline: "Could not open Preview.",
+        cause,
+        detail:
+          "Factory has not confirmed whether the paused Sandbox restored, so it keeps it untouched. Your files are unchanged.",
+      };
     return { headline: "Could not open Preview.", cause, detail: "Retry with Reload view." };
   }
   if (attempt?.computeWait)
@@ -54,6 +79,12 @@ export function previewStatus(input: PreviewStatusInput): PreviewStatus {
   if (attempt && starting.includes(attempt.state))
     return {
       headline: "Starting compute for the Preview…",
+      detail: "Factory opens the Preview as soon as the App is reachable.",
+    };
+  // Opening a paused Workspace resumes it. Its App has not been asked yet.
+  if (attempt && asleep.includes(attempt.state))
+    return {
+      headline: "Resuming compute for the Preview…",
       detail: "Factory opens the Preview as soon as the App is reachable.",
     };
   if (processCause)

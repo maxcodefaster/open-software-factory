@@ -35,6 +35,7 @@
     "factory:build": "vite build --config apps/factory/vite.config.ts && bun scripts/factory/compress-assets.ts && bun scripts/factory/build-retained-stop.ts",
     "factory:image": "bun scripts/factory/image.ts",
     "factory:connect": "bun scripts/kubernetes/connect.ts",
+    "restore:rehearsal": "bun scripts/kubernetes/restore-rehearsal.ts",
     "factory:up": "bun scripts/factory/index.ts up",
     "factory:restart": "bun scripts/factory/index.ts restart",
     "factory:status": "bun scripts/factory/index.ts status",

@@ -137,6 +137,9 @@ export function useAttachmentProject() {
 }
 const accepted = ".png,.jpg,.jpeg,.webp,.pdf,.docx,.txt,.md,.markdown";
 type Privacy = "save" | "autosave" | "send" | "personal" | "create" | "feedback";
+function endSentence(text: string) {
+  return /[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`;
+}
 function fileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   return bytes >= 1024 * 1024
@@ -407,9 +410,9 @@ export function AttachmentPicker(props: {
         transfer(index, { state: index === currentFile ? "failed" : "waiting" });
       drafts.update(key, {
         status: "",
-        error: `${files[currentFile]?.name ?? "File"} was not attached. ${
-          cause instanceof Error ? cause.message : "Upload failed. Choose the file again to retry."
-        } Your text and earlier attachments are unchanged.`,
+        error: `${files[currentFile]?.name ?? "File"} was not attached. ${endSentence(
+          cause instanceof Error ? cause.message : "Upload failed. Choose the file again to retry.",
+        )} Your text and earlier attachments are unchanged.`,
         retryFiles: attempts.size ? files.slice(currentFile) : [],
       });
     } finally {

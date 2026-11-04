@@ -11,3 +11,19 @@ dump() {
 }
 
 step postgres retry 5 dump
+
+# A bulk delete with triggers disabled leaves rows whose parent is gone. pg_dump still writes them
+# and pg_restore then cannot recreate the foreign key, so the set restores with errors. The set is
+# kept, the Job warns, and postgres.orphans lists the constraints and row counts.
+orphans() {
+  psql --no-password -X -At -f /scripts/foreign-keys.sql | awk -F'|' '$3 > 0'
+}
+
+rm -f "$DIR/postgres.orphans"
+if [ -f "$DIR/postgres.ok" ]; then
+  found="$(orphans 2> /dev/null || true)"
+  if [ -n "$found" ]; then
+    printf '%s\n' "$found" > "$DIR/postgres.orphans"
+    echo "WARNING: the database has rows without a parent row (see postgres.orphans); pg_restore will fail to recreate those foreign keys" >&2
+  fi
+fi

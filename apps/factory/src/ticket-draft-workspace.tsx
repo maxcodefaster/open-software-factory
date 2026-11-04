@@ -165,13 +165,21 @@ export function TicketDraftWorkspace(props: {
       <div class="ticket-editor-frame" ref={frame}>
         <div class="ticket-document">
           <header class="ticket-document-heading workspace-heading">
-            <input
+            <textarea
               class="ticket-draft-title workspace-heading-title"
               aria-label="Ticket title"
               placeholder="What should change?"
               maxlength={200}
+              rows={1}
               value={draft().title}
-              onInput={(event) => retain({ title: event.currentTarget.value })}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.preventDefault();
+              }}
+              onInput={(event) => {
+                const flat = event.currentTarget.value.replace(/\s*\n+\s*/g, " ");
+                if (flat !== event.currentTarget.value) event.currentTarget.value = flat;
+                retain({ title: flat });
+              }}
             />
             <TicketActionBar
               actions={[

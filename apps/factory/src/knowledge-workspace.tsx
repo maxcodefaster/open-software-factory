@@ -36,6 +36,15 @@ import { wikiGenerationProgress } from "./wiki-progress";
 
 export type { KnowledgeDraft } from "./knowledge/draft";
 
+const revisionTime = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+function sentence(text: string) {
+  const value = text.trim();
+  return /[.!?]$/.test(value) ? value : `${value}.`;
+}
+
 export function KnowledgeWorkspace(props: {
   pages: KnowledgePageOutline[];
   selectedPage?: KnowledgePage | undefined;
@@ -56,7 +65,7 @@ export function KnowledgeWorkspace(props: {
   onOpenDocument(path: string): void;
   onLoadDocuments?: (() => Promise<void>) | undefined;
   onGenerate(): void;
-  onSearch(query: string): void;
+  onSearch(query: string): Promise<"found" | "failed" | "superseded">;
   onSavePage(
     pageId: string,
     expectedVersion: number,
@@ -115,6 +124,7 @@ export function KnowledgeWorkspace(props: {
   const [saveState, setSaveState] = createSignal<"idle" | "saving" | "saved" | "failed">("idle");
   const [saveError, setSaveError] = createSignal("");
   const [compareOpen, setCompareOpen] = createSignal(false);
+  const [linkNotice, setLinkNotice] = createSignal("");
   const [pageMenuOpen, setPageMenuOpen] = createSignal(false);
   let pageMenu: HTMLDivElement | undefined;
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -163,9 +173,10 @@ export function KnowledgeWorkspace(props: {
     if (!slug) return false;
     const page = props.pages.find((page) => page.slug === slug && page.state === "active");
     if (page) {
+      setLinkNotice("");
       closeHistory();
       props.onSelectPage(page.id);
-    }
+    } else setLinkNotice("That Wiki page is not available. It may have been archived or renamed.");
     return true;
   }
   async function openHistory() {
@@ -235,6 +246,7 @@ export function KnowledgeWorkspace(props: {
       setSaveState("idle");
       setSaveError("");
       setCompareOpen(false);
+      setLinkNotice("");
       setPageMenuOpen(false);
       sourceRequest += 1;
       setSources(undefined);
@@ -381,11 +393,7 @@ export function KnowledgeWorkspace(props: {
       failed = true;
       if (draftKey === key) {
         setSaveState("failed");
-        setSaveError(
-          cause instanceof Error
-            ? cause.message
-            : "Your changes could not be saved. Your draft is retained.",
-        );
+        setSaveError(cause instanceof Error ? cause.message : "Your changes could not be saved.");
         const page = props.selectedPage;
         const current = draft();
         if (page && current) setDraft(reconcileDraft(current, pageSnapshot(page)));
@@ -441,16 +449,20 @@ export function KnowledgeWorkspace(props: {
             results={props.searchResults}
             canDevelop={props.canDevelop}
             onSearch={props.onSearch}
-            onClose={() => setSearchOpen(false)}
+            onClose={() => {
+              setSearchOpen(false);
+              navigation.close(true);
+            }}
             onSelect={(result) => {
               if (result.kind === "page") props.onSelectPage(result.id);
               else if (props.canDevelop) props.onOpenDocument(result.path);
               setSearchOpen(false);
+              navigation.close(true);
             }}
           />
         </Show>
 
-        <main class="knowledge-content">
+        <div class="knowledge-content">
           <Show when={!props.selectedPage && !props.openDocument}>
             <div class="wiki-empty-navigation">{navigationTitle()}</div>
           </Show>
@@ -504,6 +516,11 @@ export function KnowledgeWorkspace(props: {
                 </button>
               </Show>
             </div>
+          </Show>
+          <Show when={linkNotice()}>
+            <p class="knowledge-link-notice" role="status">
+              {linkNotice()}
+            </p>
           </Show>
           <Show
             when={props.selectedPage || props.openDocument}
@@ -591,7 +608,7 @@ export function KnowledgeWorkspace(props: {
                       {revision().kind === "human"
                         ? (revision().author ?? "Human edit")
                         : "AI update"}{" "}
-                      · {new Date(revision().createdAt).toLocaleString()}
+                      · {revisionTime.format(new Date(revision().createdAt))}
                     </small>
                   </header>
                   <MarkdownReader
@@ -610,7 +627,12 @@ export function KnowledgeWorkspace(props: {
             </Show>
             <div class="knowledge-document" hidden={Boolean(historicalRevision())}>
               <header class="knowledge-heading workspace-heading">
-                <div class="knowledge-title-row workspace-heading-title">
+                <div
+                  class="knowledge-title-row workspace-heading-title"
+                  data-long={
+                    (props.openDocument?.title ?? draftTitle()).length > 20 ? "true" : undefined
+                  }
+                >
                   <Show
                     when={!props.openDocument && props.selectedPage}
                     fallback={<Icon name="ticket" />}
@@ -758,10 +780,11 @@ export function KnowledgeWorkspace(props: {
                             </button>
                             <Show when={sources()}>
                               {(items) => (
-                                <div class="knowledge-menu-sources">
+                                <fieldset class="knowledge-menu-sources" aria-label="Sources">
                                   <For each={items()}>
                                     {(citation) => (
                                       <a
+                                        role="menuitem"
                                         href={repositoryLink(
                                           props.repositoryURL,
                                           citation.commitSha,
@@ -777,11 +800,13 @@ export function KnowledgeWorkspace(props: {
                                   <Show when={items().length === 0}>
                                     <small>No linked sources.</small>
                                   </Show>
-                                </div>
+                                </fieldset>
                               )}
                             </Show>
                             <Show when={sourcesError()}>
-                              <p role="alert">{sourcesError()}</p>
+                              <fieldset class="knowledge-menu-sources" aria-label="Sources">
+                                <p role="alert">{sourcesError()}</p>
+                              </fieldset>
                             </Show>
                           </Show>
                           <button
@@ -861,7 +886,7 @@ export function KnowledgeWorkspace(props: {
               </header>
               <Show when={saveState() === "failed" || saveError()}>
                 <div class="knowledge-save-error" role="alert">
-                  <span>{saveError()} Your draft is retained.</span>
+                  <span>{sentence(saveError() || "Your changes could not be saved.")}</span>
                   <button
                     type="button"
                     class="quiet-button"
@@ -952,7 +977,7 @@ export function KnowledgeWorkspace(props: {
               </Show>
             </div>
           </Show>
-        </main>
+        </div>
         <Show when={historyOpen()}>
           <div class="knowledge-version-panel">
             <Show when={historyError()}>

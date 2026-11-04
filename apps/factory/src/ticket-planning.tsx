@@ -14,6 +14,7 @@ import {
 } from "../../../packages/requirement-domain/src/technical-design";
 import type { TechnicalDesignRevision } from "./api-contracts";
 import { MarkdownReader } from "./markdown-reader";
+import { technicalDesignProblem } from "./proposal-problems";
 import "./ticket-planning.css";
 
 // Private drafts may be incomplete or contain a syntax error. Only the stronger
@@ -154,7 +155,7 @@ function ArchitectureFigure(props: {
     <figure class="ticket-architecture-figure">
       <figcaption>
         <div class="ticket-architecture-heading">
-          <h4>{props.diagram.title}</h4>
+          <h3>{props.diagram.title}</h3>
           <Show when={url()}>
             <a class="workspace-action" href={url()} target="_blank" rel="noopener noreferrer">
               Open diagram
@@ -174,7 +175,7 @@ function ArchitectureFigure(props: {
         </a>
       </Show>
       <Show when={!props.svg}>
-        <p role="status">
+        <p class="ticket-diagram-status" role="status">
           Diagram not rendered. The technical design and diagram source are retained.
         </p>
       </Show>
@@ -252,7 +253,10 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
     const revisionID = baseID();
     const parsed = technicalDesignContentInput.safeParse(draft());
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Complete the technical design before saving.");
+      const issue = parsed.error.issues[0];
+      setError(
+        issue ? technicalDesignProblem(issue) : "Complete the technical design before saving.",
+      );
       return;
     }
     if (baseID() !== props.revision.id) {
@@ -288,7 +292,7 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
         tabindex="-1"
       >
         <div class="ticket-chapter-heading">
-          <h3>Technical design</h3>
+          <h2>Technical design</h2>
           <div class="ticket-chapter-actions">
             <Show when={editing()}>
               <button
@@ -354,9 +358,9 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
           when={editing()}
           fallback={
             <>
-              <h4>Current system</h4>
+              <h3>Current system</h3>
               {read(props.revision.content.context, "Current system")}
-              <h4>Proposed changes</h4>
+              <h3>Proposed changes</h3>
               {read(props.revision.content.proposedChanges, "Proposed technical changes")}
               <For
                 each={[
@@ -367,7 +371,7 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
               >
                 {(group) => (
                   <div class="ticket-design-list">
-                    <h4>{group.label}</h4>
+                    <h3>{group.label}</h3>
                     <ul>
                       <For each={group.values}>
                         {(value) => <li>{read(value, group.label)}</li>}
@@ -560,7 +564,7 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
           tabindex="-1"
         >
           <div class="ticket-chapter-heading">
-            <h3>Architecture</h3>
+            <h2>Architecture</h2>
           </div>
           <For each={props.revision.content.diagrams} keyed={false}>
             {(diagram, index) => (
@@ -574,7 +578,7 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
       </Show>
       <section id="ticket-validation" class="ticket-chapter" aria-label="Validation" tabindex="-1">
         <div class="ticket-chapter-heading">
-          <h3>Validation</h3>
+          <h2>Validation</h2>
         </div>
         <p class="ticket-chapter-description">Checks against the product acceptance criteria.</p>
         <ol class="ticket-validation-list">

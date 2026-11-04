@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { appResponseNotice, previewStatus } from "./preview-status";
+import { appResponseNotice, boundedCause, previewStatus } from "./preview-status";
 
 const app = { label: "App", port: 3000, state: "ready" };
 
@@ -12,6 +12,15 @@ test("starting compute is named before the App is awaited", () => {
   });
   expect(status.headline).toContain("Starting compute");
 });
+
+test.each(["pausing", "paused", "resuming"])(
+  "a %s Workspace is resumed before its App is awaited",
+  (state) => {
+    const status = previewStatus({ attempt: { state }, app, waited: 0, phase: "loading" });
+    expect(status.headline).toBe("Resuming compute for the Preview…");
+    expect(status.detail).toContain("as soon as the App is reachable");
+  },
+);
 
 test("a running compute names the App and its port, then admits it has not answered", () => {
   const waiting = previewStatus({
@@ -92,4 +101,18 @@ test("an App-served 5xx page is described as the App's answer, never a Factory f
   expect(appResponseNotice(503, app)).toContain("HTTP 503");
   expect(appResponseNotice(200, app)).toBeUndefined();
   expect(appResponseNotice(undefined, app)).toBeUndefined();
+});
+
+test("a native failure log is bounded before it reaches the Preview", () => {
+  const log = `restore failed: ${"criu failed: type NOTIFY errno 0 log file /var/lib/sysbox/store ".repeat(20)}`;
+  const cause = previewStatus({
+    attempt: { state: "resuming", failure: log },
+    waited: 0,
+    phase: "failed",
+  }).cause;
+  expect(cause?.length).toBeLessThanOrEqual(241);
+  expect(cause?.endsWith("…")).toBe(true);
+  expect(boundedCause("App exited with code 7: missing configuration")).toBe(
+    "App exited with code 7: missing configuration",
+  );
 });

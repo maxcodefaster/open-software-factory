@@ -66,6 +66,18 @@
   font-size: var(--text-sm);
 }
 
+/* While the editor itself is unavailable its message sits in the middle of the frame.
+   Its recovery actions belong right under that message, not in a corner. */
+.runtime-workspace:is(:has(> .runtime-frame > .runtime-frame-state), :has(> .empty-workspace))
+> .editor-recovery:not(:has(p)) {
+  inset-block: calc(50% + 2.5rem) auto;
+  inset-inline: 0;
+  inline-size: fit-content;
+  margin-inline: auto;
+  padding: 0;
+  background: transparent;
+}
+
 .editor-recovery p {
   margin: 0 0 var(--space-2);
   overflow-wrap: anywhere;

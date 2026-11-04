@@ -1,14 +1,14 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer } from "vite";
 import { releaseSettingsView } from "../../packages/project-domain/src/release";
+import { test } from "../fixtures/browser-test";
+import { invalidateFixtureRead } from "../fixtures/read-invalidation";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
-import { invalidateFixtureRead } from "../fixtures/read-invalidation";
 import { fixtureValue } from "../fixtures/value";
 
 test("release settings retain human version choice and show read-only handoff without deployment targets", async ({
@@ -162,6 +162,9 @@ test("release settings retain human version choice and show read-only handoff wi
     await expect(releases.getByText("1.4.2", { exact: true })).toBeVisible();
     await expect(releases.getByLabel("Version", { exact: true })).toHaveValue("");
     await expect(releases.getByRole("button", { name: "Review publication" })).toBeDisabled();
+    await expect(
+      releases.getByRole("button", { name: "Review publication" }),
+    ).toHaveAccessibleDescription("Enter or choose a version to review the publication.");
     await releases.getByLabel("Version", { exact: true }).fill("v1.5.0");
     await expect(releases.getByRole("button", { name: "Review publication" })).toBeDisabled();
     expect(published).toHaveLength(0);

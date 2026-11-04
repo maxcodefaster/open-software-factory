@@ -33,6 +33,16 @@ export const stopRuntimeAttempt = createServerFn({ method: "POST" })
       return context.runtime.stop(context.actorID, id);
     });
   });
+export const startFreshRuntimeAttempt = createServerFn({ method: "POST" })
+  .validator((args: [attemptID: string]) => args)
+  .handler(async ({ data: [attemptID] }) => {
+    return factoryFunction(async () => {
+      const id = z.uuid().parse(attemptID),
+        context = factoryFunctionContext();
+      await context.beforeWrite(false);
+      return context.runtime.startFresh(context.actorID, id);
+    });
+  });
 export const cancelChange = createServerFn({ method: "POST" })
   .validator((args: [changeID: string]) => args)
   .handler(async ({ data: [changeID] }) => {

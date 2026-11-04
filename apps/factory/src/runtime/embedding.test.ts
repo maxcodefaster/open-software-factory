@@ -98,3 +98,27 @@ test("coalesced policies keep their independent script restrictions", () => {
     "default-src 'none'; frame-ancestors 'self' https://factory.example, script-src 'nonce-test'; frame-ancestors 'self' https://factory.example",
   );
 });
+
+test("a report-only frame-ancestors policy no longer reports Factory's own embedding", () => {
+  const response = scopeRuntimeEmbedding(
+    new Response("app", {
+      headers: {
+        "content-security-policy-report-only":
+          "default-src 'self'; frame-ancestors 'self' http://localhost:3002; report-uri /csp",
+      },
+    }),
+    "http://127.0.0.1:3000",
+  );
+  expect(response.headers.get("content-security-policy-report-only")).toBe(
+    "default-src 'self'; frame-ancestors 'self' http://127.0.0.1:3000; report-uri /csp",
+  );
+  // A report-only policy without that directive is left exactly as the App sent it.
+  expect(
+    scopeRuntimeEmbedding(
+      new Response("app", {
+        headers: { "content-security-policy-report-only": "default-src 'self'" },
+      }),
+      "http://127.0.0.1:3000",
+    ).headers.get("content-security-policy-report-only"),
+  ).toBe("default-src 'self'");
+});

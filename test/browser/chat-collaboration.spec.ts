@@ -525,7 +525,7 @@ test("grouping keeps active work and failures visible and preserves disclosure o
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${origin}/chat-collaboration.html`);
-  const group = page.getByRole("region", { name: "Grouped tool activity" });
+  const group = page.getByRole("group", { name: "Grouped tool activity" });
   const toggle = group.getByRole("button", { name: /1 file read · 2 commands/ });
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
   await expect(group.getByTitle("Read src/view.tsx", { exact: true })).not.toBeVisible();
@@ -556,7 +556,7 @@ test("confirmed Stop interrupts retained tool indicators without claiming a pass
   page,
 }) => {
   await page.goto(`${origin}/chat-collaboration.html`);
-  const group = page.getByRole("region", { name: "Grouped tool activity" });
+  const group = page.getByRole("group", { name: "Grouped tool activity" });
   const command = group.locator("details").filter({ hasText: "Running view checks." });
   await expect(command.locator("summary")).toContainText("Running");
   await expect(group.locator(".activity-group-state")).toHaveText("1 active · 1 failed");

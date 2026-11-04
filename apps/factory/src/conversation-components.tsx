@@ -259,9 +259,15 @@ export function ChangeAgentMessage(props: {
                 </Show>
               </div>
             </Show>
-            <pre class="activity-command-full">{props.message.text}</pre>
+            <pre class="activity-command-full" tabindex="0">
+              {props.message.text}
+            </pre>
             <Show when={activity().detail}>
-              {(detail) => <pre class="activity-output">{detail()}</pre>}
+              {(detail) => (
+                <pre class="activity-output" tabindex="0">
+                  {detail()}
+                </pre>
+              )}
             </Show>
             <Show when={activity().truncated}>
               <p class="activity-truncation" role="note">
@@ -285,7 +291,7 @@ export function ChangeAgentActivityGroup(props: {
   const contentID = () =>
     `activity-group-${props.messages[0]?.id.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
-    <section class="agent-activity-group" aria-label="Grouped tool activity">
+    <fieldset class="agent-activity-group" aria-label="Grouped tool activity">
       <Show when={props.messages.length > 1}>
         <button
           type="button"
@@ -333,7 +339,7 @@ export function ChangeAgentActivityGroup(props: {
           )}
         </For>
       </div>
-    </section>
+    </fieldset>
   );
 }
 

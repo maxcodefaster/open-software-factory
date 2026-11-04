@@ -66,7 +66,6 @@ export function ChatSkillPicker(props: {
     () => [open(), active(), matches().map((skill) => skill.key)] as const,
     ([visible, index, keys]) => {
       if (!textarea) return;
-      textarea.setAttribute("aria-expanded", String(visible));
       const key = keys[index];
       if (visible && key) textarea.setAttribute("aria-activedescendant", `${id}-${key}`);
       else textarea.removeAttribute("aria-activedescendant");
@@ -149,7 +148,6 @@ export function ChatSkillPicker(props: {
     if (textarea?.getAttribute("aria-controls") === id) {
       for (const attribute of [
         "aria-controls",
-        "aria-expanded",
         "aria-activedescendant",
         "aria-autocomplete",
         "aria-haspopup",
@@ -205,7 +203,6 @@ export function ChatSkillPicker(props: {
           textarea.setAttribute("aria-controls", id);
           textarea.setAttribute("aria-autocomplete", "list");
           textarea.setAttribute("aria-haspopup", "listbox");
-          textarea.setAttribute("aria-expanded", "false");
           textarea.addEventListener("input", sync);
           textarea.addEventListener("click", sync);
           textarea.addEventListener("select", sync);

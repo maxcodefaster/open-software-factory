@@ -56,3 +56,54 @@ export function unattemptedFactoryboxResume(
     ? source.data.record.pause.resume === undefined
     : source.data.record.pause.resume !== undefined;
 }
+
+// The native record of a Resume that was dispatched and positively failed before
+// activation: attempted, an error recorded, no completion, and the original process
+// stopped. Native Delete accepts exactly this proof. Anything else (a lost reply,
+// a missing error, a running or unreadable runtime) is an unknown outcome and the
+// caller must not treat it as failed. Returns the native error text.
+export function confirmedFailedFactoryboxResume(
+  value: unknown,
+  sandboxID: string,
+  snapshotID: string,
+  start: unknown,
+  pause: unknown,
+) {
+  const original = z
+    .object({
+      id: z.literal(sandboxID),
+      owner: z.string().regex(/^[a-f0-9]{32}$/),
+      inputSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .safeParse(start);
+  if (!original.success) return undefined;
+  const saved = z
+    .object({
+      owner: z.literal(original.data.owner),
+      snapshotID: z.literal(snapshotID),
+      checkpointSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .safeParse(pause);
+  if (!saved.success) return undefined;
+  const source = z
+    .object({
+      record: z.object({
+        id: z.literal(sandboxID),
+        owner: z.literal(original.data.owner),
+        input_sha256: z.literal(original.data.inputSHA256),
+        phase: z.literal("resuming"),
+        pause: z.object({
+          snapshot_id: z.literal(snapshotID),
+          checkpoint_sha256: z.literal(saved.data.checkpointSHA256),
+          resume: z.object({
+            attempted: z.literal(true),
+            error: z.string().trim().min(1),
+            completed_at: z.undefined().optional(),
+          }),
+        }),
+      }),
+      runtime: z.object({ status: z.literal("stopped") }),
+    })
+    .safeParse(value);
+  return source.success ? source.data.record.pause.resume.error : undefined;
+}

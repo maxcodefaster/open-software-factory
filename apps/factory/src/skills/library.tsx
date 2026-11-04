@@ -256,7 +256,7 @@ export function SkillLibrary(props: {
         content: { ...result.content, key: revision.content.key, name: revision.content.name },
         warnings: [
           ...result.warnings,
-          "A newer pinned source is available. Compare it with the saved version. Factory adaptations and your edits are not merged automatically.",
+          "A newer pinned source is available. Compare it with the saved version under Files, source & options. Factory adaptations and your edits are not merged automatically.",
         ],
       });
       setEditorOpen(true);

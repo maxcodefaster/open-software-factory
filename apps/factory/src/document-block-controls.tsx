@@ -63,7 +63,8 @@ export function DocumentBlockControls(props: {
         if (!controls || !state.element.isConnected) return;
         const root = host.getBoundingClientRect();
         const block = state.element.getBoundingClientRect();
-        controls.style.top = `${block.top - root.top}px`;
+        // The editor reserves a strip above code and tables, so the controls never cover content.
+        controls.style.top = `${block.top - root.top - controls.offsetHeight - 2}px`;
         controls.style.right = "0px";
       };
       const resize = new ResizeObserver(place);

@@ -4,6 +4,7 @@ import {
   factoryProcessActionPath,
   factoryTerminalClosePath,
   factoryTerminalPath,
+  runtimePreparationCopy,
 } from "../../deploy/theia-ide/factory-ide-extension/src/browser/factory-runtime-context";
 import { fixtureValue } from "../fixtures/value";
 
@@ -269,4 +270,83 @@ test("failed automatic preparation is visible and is never repeated by observati
   await context.use();
   context.setWritable(runtime.workspaceID, true);
   expect(calls.filter((method) => method === "POST")).toHaveLength(1);
+});
+
+test("every compute state is described honestly in the Run, Git and Terminal panels", () => {
+  const copy = (state: string, failure: string | null = null) =>
+    runtimePreparationCopy({ ...runtime, state, failure });
+  expect(copy("paused")).toContain("paused");
+  expect(copy("resuming")).toContain("Preparing");
+  expect(copy("stopping")).toContain("stopping");
+  expect(copy("cleanup-failed")).toContain("unconfirmed");
+  expect(copy("cleanup-failed")).toContain("Start is blocked");
+  expect(copy("cleanup-failed")).not.toContain("is stopping");
+  expect(copy("failed", "Dev Container build failed")).toBe("Dev Container build failed");
+  expect(
+    copy("resuming", `restore failed ${"criu log line ".repeat(60)}`).length,
+  ).toBeLessThanOrEqual(241);
+});
+
+test("a confirmed failed restore settles, explains itself and starts fresh exactly once", async () => {
+  const calls: string[] = [];
+  let state = "resuming";
+  let restoreFailed = true;
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (input, init) => {
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${String(input).split("/runtime")[1] ?? ""}`);
+      if (method === "POST" && String(input).endsWith("/start-fresh")) {
+        state = "starting";
+        restoreFailed = false;
+        await Bun.sleep(10);
+        state = "ready";
+        return Response.json({ ...runtime, state, failure: null, restoreFailed }, { status: 202 });
+      }
+      return Response.json({
+        ...runtime,
+        state,
+        failure: restoreFailed ? "The paused Sandbox could not be restored: EAGAIN" : null,
+        restoreFailed,
+      });
+    },
+  );
+  context.select(runtime.workspaceID);
+  await Bun.sleep(30);
+  // Settled: the read loop stops instead of polling until its deadline.
+  expect(context.value).toMatchObject({ state: "resuming", restoreFailed: true });
+  const reads = calls.length;
+  await Bun.sleep(1100);
+  expect(calls.length).toBe(reads);
+  expect(runtimePreparationCopy(context.value)).toContain("Start fresh to continue");
+  expect(runtimePreparationCopy(context.value)).toContain("Your files are unchanged");
+  // Observation-only (no writing authority) never starts anything.
+  await context.startFresh();
+  expect(calls.filter((call) => call.startsWith("POST"))).toHaveLength(0);
+  context.setWritable(runtime.workspaceID, true);
+  await Promise.all([context.startFresh(), context.startFresh()]);
+  expect(calls.filter((call) => call.startsWith("POST"))).toEqual(["POST /start-fresh"]);
+  expect(context.value).toMatchObject({ state: "ready", restoreFailed: false });
+});
+
+test("an unknown restore outcome stays quarantined with no Start fresh", async () => {
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (input, init) => {
+      calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+      return Response.json({
+        ...runtime,
+        state: "resuming",
+        failure: "Factorybox resume outcome is unconfirmed: reply lost",
+      });
+    },
+  );
+  context.select(runtime.workspaceID, true);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(50);
+  await context.startFresh();
+  expect(calls.every((call) => call.startsWith("GET"))).toBe(true);
+  expect(runtimePreparationCopy(context.value)).toContain("could not be confirmed");
+  expect(runtimePreparationCopy(context.value)).not.toContain("Start fresh");
 });

@@ -13,6 +13,11 @@
   padding-bottom: var(--space-6);
   border-bottom: 1px solid var(--line-subtle);
 }
+.input-delivery-settings h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+}
 .input-settings ::selection {
   background: var(--material-accent-strong);
   color: var(--color-ink);

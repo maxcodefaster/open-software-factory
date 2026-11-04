@@ -3,13 +3,13 @@ import { BaseWidget, type Message } from "@theia/core/lib/browser/widgets/widget
 import { inject, injectable } from "@theia/core/shared/inversify";
 import { FileNavigatorContribution } from "@theia/navigator/lib/browser/navigator-contribution";
 import {
+  type FactoryRuntimeReference,
   factoryProcessActionPath,
+  factoryRuntimeContext,
   factoryRuntimePath,
   openFactoryPreview,
-  factoryRuntimeContext,
   readyRuntime,
   runtimePreparationCopy,
-  type FactoryRuntimeReference,
 } from "./factory-runtime-context";
 import { factoryWriteContext } from "./factory-write-context";
 
@@ -92,6 +92,7 @@ export class FactoryRuntimeWidget extends BaseWidget {
     this.title.closable = true;
     this.node.classList.add("factory-runtime-widget");
     this.#processList.className = "factory-runtime-processes";
+    this.#processList.setAttribute("role", "group");
     this.#processList.setAttribute("aria-label", "Declared App processes");
     this.#main.className = "factory-runtime-main";
     this.#output.className = "factory-runtime-output wrap";
@@ -108,7 +109,15 @@ export class FactoryRuntimeWidget extends BaseWidget {
       this.#processList.replaceChildren();
       this.#main.replaceChildren(this.#output);
       this.#output.textContent = runtimePreparationCopy(state);
-      if (!this.#runtime && state?.state === "failed") {
+      if (state?.restoreFailed) {
+        const fresh = controlButton("Start fresh", () => void factoryRuntimeContext.startFresh());
+        fresh.className = "factory-runtime-primary";
+        fresh.disabled = !factoryWriteContext.allows(state.workspaceID);
+        const controls = document.createElement("div");
+        controls.className = "factory-compute-status";
+        controls.append(fresh);
+        this.#main.prepend(controls);
+      } else if (!this.#runtime && state?.state === "failed") {
         const start = controlButton("Retry compute", () => void factoryRuntimeContext.prepare());
         start.disabled = !factoryWriteContext.allows(state.workspaceID);
         const controls = document.createElement("div");
@@ -120,9 +129,11 @@ export class FactoryRuntimeWidget extends BaseWidget {
     });
     this.#writeSubscription = factoryWriteContext.subscribe(() => {
       if (this.#runtime) this.#render();
-      const start = this.node.querySelector<HTMLButtonElement>('[data-control="Retry compute"]');
       const workspaceID = factoryRuntimeContext.value?.workspaceID;
-      if (start) start.disabled = !workspaceID || !factoryWriteContext.allows(workspaceID);
+      for (const label of ["Retry compute", "Start fresh"]) {
+        const start = this.node.querySelector<HTMLButtonElement>(`[data-control="${label}"]`);
+        if (start) start.disabled = !workspaceID || !factoryWriteContext.allows(workspaceID);
+      }
     });
     document.addEventListener("visibilitychange", this.#visibility);
   }

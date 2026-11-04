@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createEffect, createSignal, Show } from "solid-js";
 import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import { factoryIdentityClient } from "./auth-client";
 
@@ -10,6 +10,14 @@ export function SignIn(props: {
 }) {
   const [pending, setPending] = createSignal(false);
   const [emergency, setEmergency] = createSignal(false);
+  let errorElement: HTMLParagraphElement | undefined;
+  // On a phone the form sits below the brand text, so a failure can land under the fold.
+  createEffect(
+    () => props.error,
+    (error) => {
+      if (error) errorElement?.scrollIntoView({ block: "nearest" });
+    },
+  );
   async function company() {
     setPending(true);
     props.setError("");
@@ -99,7 +107,7 @@ export function SignIn(props: {
             </button>
           </div>
           <Show when={props.error}>
-            <p class="error" role="alert">
+            <p class="error" role="alert" ref={errorElement}>
               {props.error}
             </p>
           </Show>

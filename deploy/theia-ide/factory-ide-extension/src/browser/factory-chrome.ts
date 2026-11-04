@@ -1,20 +1,22 @@
-import { ApplicationShell } from "@theia/core/lib/browser/shell/application-shell";
 import type { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
+import { ApplicationShell } from "@theia/core/lib/browser/shell/application-shell";
+import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
 import { ThemeService } from "@theia/core/lib/browser/theming";
 import type { Disposable } from "@theia/core/lib/common/disposable";
-import { inject, injectable } from "@theia/core/shared/inversify";
-import { MonacoThemingService } from "@theia/monaco/lib/browser/monaco-theming-service";
-import { factoryTheme } from "./factory-theme";
-import { bindFactoryFrameFocus } from "./factory-frame-focus";
 import { PreferenceService } from "@theia/core/lib/common/preferences";
-import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
+import { inject, injectable } from "@theia/core/shared/inversify";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
+import { MonacoThemingService } from "@theia/monaco/lib/browser/monaco-theming-service";
+import { installAccessibility } from "./factory-accessibility";
+import { bindFactoryFrameFocus } from "./factory-frame-focus";
+import { factoryTheme } from "./factory-theme";
 import { FactoryWorkspaceFiles, workspaceScheme } from "./factory-workspace-files";
 import { FactoryWorkspaceLabels } from "./factory-workspace-labels";
 
 @injectable()
 export class FactoryChromeContribution implements FrontendApplicationContribution {
   #resizeObserver: ResizeObserver | undefined;
+  #stopAccessibility: (() => void) | undefined;
   #themeRegistration: Disposable | undefined;
   #unbindFrameFocus: (() => void) | undefined;
   #preferenceSubscription: Disposable | undefined;
@@ -37,7 +39,15 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
 
   onDidInitializeLayout(): void {
     const updateBufferWorkspace = () => this.#bufferWorkspace();
-    this.#editorSubscription = this.editors.onCurrentEditorChanged(updateBufferWorkspace);
+    const editorSubscription = this.editors.onCurrentEditorChanged(updateBufferWorkspace);
+    // A phone cannot show the Explorer beside a file. Opening a file gives the editor the width.
+    const narrowSubscription = this.editors.onCreated(() => this.#collapseExplorerWhenNarrow());
+    this.#editorSubscription = {
+      dispose: () => {
+        editorSubscription.dispose();
+        narrowSubscription.dispose();
+      },
+    };
     this.#labelSubscription = this.labels.onDidChange(updateBufferWorkspace);
     this.#bufferWorkspace();
     this.#sourceSubscription = this.files.onWatchConnectionChanged((disconnected) => {
@@ -56,6 +66,7 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
       });
     });
     this.#unbindFrameFocus = bindFactoryFrameFocus(window);
+    this.#stopAccessibility = installAccessibility(document);
     this.#themeRegistration = this.monacoThemes.registerParsedTheme(factoryTheme);
     this.themes.setCurrentTheme(factoryTheme.id, false);
     this.shell.rightPanelHandler.container.hide();
@@ -91,6 +102,12 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
         if (event.preferenceName === "files.autoSave") this.#saveMode();
       });
     });
+  }
+
+  #collapseExplorerWhenNarrow() {
+    const width = this.shell.node.clientWidth;
+    if (width > 0 && width < 600 && this.shell.leftPanelHandler.dockPanel.isVisible)
+      void this.shell.collapsePanel("left");
   }
 
   #saveMode() {
@@ -133,6 +150,7 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
     void this.statusBar.removeElement("factory-editor-save-mode");
     void this.statusBar.removeElement("factory-buffer-workspace");
     this.#unbindFrameFocus?.();
+    this.#stopAccessibility?.();
     this.#resizeObserver?.disconnect();
     this.#themeRegistration?.dispose();
   }

@@ -132,3 +132,62 @@
 .access-account-menu button:hover {
   background: var(--material-accent);
 }
+.access-reauth {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.access-reauth h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+}
+.access-reauth form {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.access-reauth form button {
+  justify-self: end;
+}
+.access-reauth [role="alert"] {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+@media (pointer: coarse) {
+  .access-account-actions > button {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+  .access-account-menu button {
+    min-height: var(--touch-target);
+  }
+}
+.access-settings .access-account-menu small {
+  padding: 0 var(--space-3) var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+.access-settings section > p + .quiet-button,
+.access-settings section > p + .access-confirm {
+  margin-top: var(--space-2);
+}
+.access-settings p + form {
+  margin-top: var(--space-3);
+}
+.access-password-form {
+  display: grid;
+  gap: var(--space-4);
+  max-width: 28rem;
+  min-width: 0;
+  margin-top: var(--space-3);
+}
+.access-settings .access-password-form button {
+  justify-self: start;
+}
+.access-error {
+  margin: var(--space-3) 0 0;
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}

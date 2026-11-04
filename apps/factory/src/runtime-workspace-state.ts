@@ -36,6 +36,8 @@ export function runtimeWorkspaceURL(
       preview.projectID === projectID &&
       preview.channel === tab.appChannel,
   );
+  // A confirmed failed restore has nothing to open. The panel explains and offers Start fresh.
+  if (attempt?.restoreFailed) return undefined;
   const state = attempt?.state ?? projection?.state;
   const available =
     state &&
@@ -57,4 +59,24 @@ export function runtimeWorkspaceURL(
     (runtimeReconnecting(attempt) && attachedURL === url)
     ? url
     : undefined;
+}
+
+const runtimeStateLabels: Record<string, string> = {
+  "create-intended": "Starting",
+  starting: "Starting",
+  ready: "Running",
+  pausing: "Pausing",
+  paused: "Paused",
+  resuming: "Resuming",
+  "stop-intended": "Stopping",
+  stopping: "Stopping",
+  stopped: "Stopped",
+  failed: "Failed",
+  "cleanup-failed": "Cleanup unconfirmed",
+};
+
+// Menu detail for a recorded compute state. Unknown states stay readable instead of raw.
+export function runtimeStateLabel(state: string | undefined) {
+  if (!state) return "Preparing";
+  return runtimeStateLabels[state] ?? `${state.charAt(0).toUpperCase()}${state.slice(1)}`;
 }

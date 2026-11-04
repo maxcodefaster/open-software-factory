@@ -16,7 +16,6 @@ import type { DesktopProject } from "./contracts";
 export interface ProjectBoardModel {
   workspaceVisible: SourceAccessor<boolean>;
   agentOverlay: () => boolean;
-  registrationOpen: SourceAccessor<boolean>;
   setupVisible: () => boolean;
   selectedProject: Accessor<DesktopProject | undefined>;
   setProjectMenuOpen: ReturnType<typeof createProjectPlanning>["setProjectMenuOpen"];
@@ -67,7 +66,7 @@ export function ProjectBoard(props: { model: ProjectBoardModel }) {
       class={model.workspaceVisible() ? "kanban-desktop obscured" : "kanban-desktop"}
       aria-label="Ticket board"
       tabindex="-1"
-      inert={model.workspaceVisible() || model.agentOverlay() || model.registrationOpen()}
+      inert={model.workspaceVisible() || model.agentOverlay()}
     >
       <Show
         when={!model.setupVisible() && model.selectedProject()}

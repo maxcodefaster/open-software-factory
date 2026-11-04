@@ -417,6 +417,12 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await panel().getByRole("button", { name: "Full screen", exact: true }).click();
     await panel().getByRole("button", { name: "Comment", exact: true }).click();
     await visible.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+    await panel().getByRole("button", { name: "Cancel selection", exact: true }).press("Escape");
+    await visible(panel().getByRole("button", { name: "Comment", exact: true })).toBeFocused();
+    await visible(
+      panel().getByRole("button", { name: "Choose a point on the paused QA frame" }),
+    ).toHaveCount(0);
+    await panel().getByRole("button", { name: "Comment", exact: true }).click();
     await panel()
       .getByRole("button", { name: "Choose a point on the paused QA frame" })
       .click({ position: { x: 100, y: 80 } });

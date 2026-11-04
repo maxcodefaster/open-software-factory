@@ -67,6 +67,7 @@ Settings show one selected scope at a time: Project, Libraries, Personal or admi
 administration. The scope chooser replaces a repeated list of all scopes. Libraries holds Skills
 and MCP connections, Personal holds model overrides and login & security, and Project holds
 Environments, Inputs, Releases, Monitoring and, with the authority, Models and People & access.
+Login & security lets people with a Factory password change it after confirming their identity, ending their other browser sessions; company sign-in accounts have no such form.
 Repository mirrors in Factory administration configure native Forgejo push
 mirrors for a selected Project, with explicit target-overwrite consent, native attempt status,
 manual synchronization and removal that preserves the external repository. They copy pushed
@@ -204,6 +205,11 @@ The IDE's Git tab shows personal-Workspace status and diffs, commits saved chang
 Fetch/Pull. Pull never resets or stashes work and stops on divergent history. Unsaved buffers block
 Commit and Pull. Ticket commits and Delivery remain in Factory's reviewed workflow.
 
+When a paused Sandbox cannot be restored and its native record positively proves the failed Resume,
+the Preview, Run and Terminal panels say so and offer Start fresh. It discards the paused memory and
+private container data, keeps the Workspace files, and starts a new Attempt. An unknown outcome
+offers no action and keeps the paused Sandbox untouched.
+
 A starting Preview names its recorded stage: waiting for execution capacity, starting compute,
 waiting for the App on its port, then opening the document. After a delay it says the App has
 not answered yet and keeps waiting. An unavailable Preview shows its recorded startup cause. A settled current Main Preview offers
@@ -316,7 +322,7 @@ remain distinguishable without relying on color alone.
 
 Controls have consistent hover, keyboard focus, disabled, pending and invalid states.
 Touch targets remain usable on phones, while desktop controls stay compact. The dock's instance
-choosers keep their small look and answer a 44 px touch target where the window is 390 px or wider.
+choosers keep their small look and answer the same rule below.
 Tab starts at a Skip to board control that moves past the header and dock to the first Ticket. A feature looks
 the same when opened alone or after another workspace. Shared changes are checked in the
 control fixture and the affected product flows; implementation and verification rules belong
@@ -332,6 +338,7 @@ in [AGENTS.md](../../AGENTS.md).
 
 ## Accessibility and inclusion
 
+Touch targets are at least 44 px where the layout allows and never below 24 px; the dock keeps one row.
 Core flows must work with keyboard navigation and visible focus. Name controls and regions,
 communicate status without color alone, respect reduced motion and keep long content usable.
 Adapt layouts to narrow screens without horizontal page overflow or hiding essential actions.

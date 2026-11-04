@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import { documentationLanguage } from "./knowledge/language";
 import { markdownHTML } from "./markdown";
 import { createClipboardFeedback, setCopyButtonState } from "./ui/clipboard";
 import "./ui/feedback.css";
@@ -13,6 +14,7 @@ export function MarkdownReader(props: {
   wikiPages?: readonly { slug: string; title: string }[] | undefined;
 }) {
   const scope = createMemo(() => ({ value: props.value, key: props.scopeKey }));
+  const language = createMemo(() => documentationLanguage([props.value]));
   const clipboard = createClipboardFeedback(scope);
   const [copyButton, setCopyButton] = createSignal<HTMLButtonElement>();
   createEffect(
@@ -33,6 +35,7 @@ export function MarkdownReader(props: {
         class={props.class}
         tabindex={props.onEdit ? "0" : undefined}
         aria-label={props.label}
+        lang={language()}
         innerHTML={markdownHTML(props.value, true, [], props.wikiPages)}
         onClick={async (event) => {
           const target = event.target;

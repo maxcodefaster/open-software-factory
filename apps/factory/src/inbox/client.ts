@@ -1,8 +1,17 @@
 import { createEffect, createSignal } from "solid-js";
+import { APIRequestError } from "../api-client";
 import { getInbox, markInboxItem } from "../server-functions/inbox";
 import { serverCall } from "../server-functions/result";
 import { observeFactoryRead } from "../zero/reads";
 import type { InboxItem, InboxView } from "./contracts";
+
+// Transport failures carry framework wording. People see a plain sentence instead.
+function failureMessage(cause: unknown, fallback: string) {
+  if (cause instanceof APIRequestError && cause.message) return cause.message;
+  if (cause instanceof Error && /status 401\b/.test(cause.message))
+    return "Your session expired. Reload the page and sign in again; your drafts are retained.";
+  return fallback;
+}
 
 export function createInboxClient() {
   const [view, setView] = createSignal<InboxView>();
@@ -22,7 +31,12 @@ export function createInboxClient() {
       }
     } catch (cause) {
       if (!disposed && read === generation)
-        setError(cause instanceof Error ? cause.message : "Your Inbox could not be refreshed.");
+        setError(
+          failureMessage(
+            cause,
+            "Your Inbox could not be refreshed. Check your connection, then refresh.",
+          ),
+        );
     } finally {
       if (!disposed && read === generation) setLoading(false);
     }
@@ -38,7 +52,7 @@ export function createInboxClient() {
       await refresh();
     } catch (cause) {
       setError(
-        `${cause instanceof Error ? cause.message : "Your Inbox change could not be confirmed."} Refresh the Inbox, then repeat the action if needed.`,
+        `${failureMessage(cause, "Your Inbox change could not be confirmed.")} Refresh the Inbox, then repeat the action if needed.`,
       );
     } finally {
       setBusy(false);

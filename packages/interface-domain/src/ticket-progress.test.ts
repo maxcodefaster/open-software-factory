@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type TicketProgressInput, ticketProgress } from "./ticket-progress";
+import { deliveryBlocker, type TicketProgressInput, ticketProgress } from "./ticket-progress";
 
 const submitted: TicketProgressInput = {
   ticketState: "in-progress",
@@ -165,4 +165,62 @@ test("automatic correction names the observed failed check, without inventing a 
       correctionState: "running",
     }),
   ).toContain("Validate invoice. Automatic correction");
+});
+
+const queued: TicketProgressInput = { ...submitted, changeState: "delivering" };
+test("an approved Delivery names the Ticket whose failed promotion pauses the queue", () => {
+  const text = ticketProgress({
+    ...queued,
+    deliveryBlock: { title: "Export invoices", reason: "promotion-failed" },
+  });
+  expect(text).toContain('Waiting for "Export invoices"');
+  expect(text).toContain("Delivery is paused");
+  expect(text).not.toContain("Delivery is in progress");
+});
+
+test("queue wording separates an unconfirmed merge from a merely busy queue", () => {
+  expect(
+    ticketProgress({ ...queued, deliveryBlock: { title: "A", reason: "merge-unconfirmed" } }),
+  ).toContain("unconfirmed");
+  const busy = ticketProgress({ ...queued, deliveryBlock: { title: "A", reason: "in-progress" } });
+  expect(busy).toContain("one at a time");
+  expect(busy).not.toContain("paused");
+  expect(
+    ticketProgress({ ...queued, deliveryBlock: { title: "x".repeat(200), reason: "in-progress" } })
+      .length,
+  ).toBeLessThan(260);
+});
+
+test("a failed Main Preview of this Ticket outranks any queue explanation", () => {
+  expect(
+    ticketProgress({
+      ...queued,
+      promotionState: "failed",
+      deliveryBlock: { title: "A", reason: "in-progress" },
+    }),
+  ).toContain("retry Main Preview");
+});
+
+test("only an unfinished merge or Staging Promotion of another Change blocks the queue", () => {
+  const own = { id: "own", mergeState: "pending" };
+  const other = (id: string, mergeState?: string, promotionState?: string) => ({
+    id,
+    ticketId: `ticket-${id}`,
+    mergeState,
+    promotionState,
+  });
+  expect(deliveryBlocker(own, [other("a", "succeeded", "succeeded")])).toBeUndefined();
+  expect(deliveryBlocker(own, [other("a", "failed")])).toBeUndefined();
+  expect(deliveryBlocker(own, [other("a"), other("own", "pending")])).toBeUndefined();
+  expect(deliveryBlocker(own, [other("a", "executing")])).toEqual({
+    ticketId: "ticket-a",
+    reason: "in-progress",
+  });
+  expect(
+    deliveryBlocker(own, [other("a", "executing"), other("b", "succeeded", "failed")]),
+  ).toEqual({ ticketId: "ticket-b", reason: "promotion-failed" });
+  expect(deliveryBlocker(own, [other("a", "ambiguous")])?.reason).toBe("merge-unconfirmed");
+  expect(deliveryBlocker({ id: "own", mergeState: "executing" }, [other("a", "executing")])).toBe(
+    undefined,
+  );
 });

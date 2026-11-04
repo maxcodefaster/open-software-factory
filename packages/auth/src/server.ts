@@ -14,10 +14,14 @@ import { forgeBackchannelMetadata, forgeBackchannelOrigin } from "./backchannel"
 import { factoryForgeIssuer, forgeClientID, forgeClientSecret } from "./forge-issuer";
 import { requireLocalForgeIssuer } from "./local-issuer";
 import {
+  checkPasswordChange,
   directoryProvisioning,
   emergencyAdministratorID,
   type IdentityPolicy,
   identityPolicy,
+  PasswordChangeError,
+  passwordChangeMessage,
+  passwordPolicy,
   requireAccountAccess,
   resolveIdentity,
 } from "./policy";
@@ -26,6 +30,18 @@ import { factorySigningSecret } from "./signing-secret";
 type Database = ReturnType<typeof createDatabase>;
 
 const administratorID = emergencyAdministratorID;
+// Failed current-password checks per account. Five failures lock changes for fifteen minutes,
+// in the same process that answers sign-in, and a success clears them.
+const passwordChangeWindow = 15 * 60_000;
+const passwordChangeFailures = new Map<string, number[]>();
+function recentPasswordFailures(userID: string) {
+  const recent = (passwordChangeFailures.get(userID) ?? []).filter(
+    (at) => Date.now() - at < passwordChangeWindow,
+  );
+  if (recent.length) passwordChangeFailures.set(userID, recent);
+  else passwordChangeFailures.delete(userID);
+  return recent;
+}
 const developmentAdministratorPassword = "factory-local-password";
 
 export function createFactoryAuth(
@@ -158,8 +174,8 @@ export function createFactoryAuth(
     emailAndPassword: {
       enabled: true,
       disableSignUp: true,
-      minPasswordLength: 12,
-      maxPasswordLength: 128,
+      minPasswordLength: passwordPolicy.minLength,
+      maxPasswordLength: passwordPolicy.maxLength,
     },
     session: {
       expiresIn: 60 * 60 * 24 * policy.sessionDays,
@@ -365,6 +381,70 @@ export function createFactoryAuth(
           VALUES (${crypto.randomUUID()}, ${id}, 'credential', ${id}, ${password})`;
         return users[0];
       });
+    },
+    /**
+     * Self-service password rotation. Better Auth's own /change-password stays blocked; this is the
+     * only path. Callers must already have passed the fresh-session write gate, which is checked
+     * again here against the named session. Other sessions end; the current one stays.
+     */
+    async changePassword(
+      userID: string,
+      sessionID: string,
+      input: { currentPassword: string; newPassword: string; confirmPassword: string },
+    ) {
+      const refusal = checkPasswordChange(input);
+      if (refusal) throw new PasswordChangeError("refused", passwordChangeMessage(refusal));
+      const [session] = await client<
+        { loginMethod: string; authenticatedAt: Date | string; expiresAt: Date | string }[]
+      >`SELECT login_method AS "loginMethod", authenticated_at AS "authenticatedAt", expires_at AS "expiresAt"
+        FROM auth.session WHERE id=${sessionID} AND user_id=${userID}`;
+      if (!session || new Date(session.expiresAt).getTime() <= Date.now())
+        throw new PasswordChangeError(
+          "unavailable",
+          "Sign in again before changing your password.",
+        );
+      if (Date.now() - new Date(session.authenticatedAt).getTime() > 5 * 60_000)
+        throw new PasswordChangeError(
+          "unavailable",
+          "Sign in again before changing protected settings.",
+        );
+      const [credential] = await client<{ id: string; password: string | null }[]>`
+        SELECT id, password FROM auth.account WHERE user_id=${userID} AND provider_id='credential'`;
+      if (
+        !credential?.password ||
+        (session.loginMethod !== "password" && session.loginMethod !== "emergency")
+      )
+        throw new PasswordChangeError(
+          "refused",
+          "This account signs in through company sign-in and has no Factory password.",
+        );
+      const failures = recentPasswordFailures(userID);
+      if (failures.length >= 5) {
+        const minutes = Math.max(
+          1,
+          Math.ceil(((failures[0] ?? Date.now()) + passwordChangeWindow - Date.now()) / 60_000),
+        );
+        throw new PasswordChangeError(
+          "locked",
+          `Too many incorrect current passwords. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+        );
+      }
+      const context = await auth.$context;
+      if (
+        !(await context.password.verify({
+          hash: credential.password,
+          password: input.currentPassword,
+        }))
+      ) {
+        passwordChangeFailures.set(userID, [...failures, Date.now()]);
+        throw new PasswordChangeError("wrong-password", "The current password is incorrect.");
+      }
+      const hash = await context.password.hash(input.newPassword);
+      await client.begin(async (sql) => {
+        await sql`UPDATE auth.account SET password=${hash}, updated_at=now() WHERE id=${credential.id}`;
+        await sql`DELETE FROM auth.session WHERE user_id=${userID} AND id<>${sessionID}`;
+      });
+      passwordChangeFailures.delete(userID);
     },
     async session(request: Request) {
       const session = await auth.api.getSession({ headers: request.headers });

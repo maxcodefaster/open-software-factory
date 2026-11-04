@@ -1,7 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
@@ -9,6 +8,7 @@ import type {
   ReviewFeedback,
   VisualReview,
 } from "../../packages/conversation-domain/src/visual-review";
+import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
@@ -275,6 +275,55 @@ test("standalone revision actions show the eligible Thread count and explain the
   await expect(single).toBeVisible();
 });
 
+test("a thread status never wraps the author name and links use the Factory colour", async ({
+  page,
+}) => {
+  const item = feedback(2);
+  item.state = "implemented";
+  fixtureValue(item.messages[0], "item.messages[0]").body =
+    "See https://example.invalid/a/b for the failing page.";
+  await fixture(page, review(item));
+  await page.setViewportSize({ width: 320, height: 960 });
+  await page.goto(`${origin}/review-triage.html`);
+  const thread = page.getByRole("article", { name: "thread by Morgan Lee", exact: true });
+  await expect(thread.getByText("Ready to recheck", { exact: true })).toBeVisible();
+  const name = thread.locator(".review-message-byline strong").first();
+  const box = fixtureValue(await name.boundingBox(), "author name box");
+  const line = await name.evaluate((node) => parseFloat(getComputedStyle(node).lineHeight));
+  expect(box.height).toBeLessThanOrEqual(line * 1.5);
+  await expect(thread.getByRole("link", { name: /example\.invalid/ })).toHaveCSS(
+    "color",
+    "rgb(63, 94, 99)",
+  );
+});
+
+test("touch review controls are at least 44px", async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 900 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await context.newPage();
+  try {
+    await fixture(page, review());
+    await page.goto(`${origin}/review-triage.html`);
+    const panel = page.getByRole("region", { name: "Visual review", exact: true });
+    await expect(panel.getByRole("button", { name: "Reply", exact: true })).toBeVisible();
+    const small = await panel.locator("button, summary, a[href]").evaluateAll((controls) =>
+      controls
+        .filter((control) => control.getBoundingClientRect().height > 0)
+        .map((control) => {
+          const box = control.getBoundingClientRect();
+          return { name: control.textContent?.trim().slice(0, 30), w: box.width, h: box.height };
+        })
+        .filter((control) => control.h < 44 || control.w < 44),
+    );
+    expect(small).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
+
 test("scenario outcomes remain distinguishable without color at desktop and narrow widths", async ({
   page,
 }) => {
@@ -299,6 +348,12 @@ test("scenario outcomes remain distinguishable without color at desktop and narr
         page.getByRole("definition").filter({ hasText: "The entered draft" }),
       ).toBeVisible();
     }
+    const rows = await scenarios
+      .getByRole("button")
+      .evaluateAll((buttons) =>
+        buttons.map((button) => Math.round(button.getBoundingClientRect().width)),
+      );
+    expect(new Set(rows).size).toBe(1);
     await page.screenshot({ path: `${directory}/scenarios-${width}.png`, fullPage: true });
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
@@ -342,7 +397,16 @@ for (const externalActions of [false, true]) {
       await expect(add).toHaveAttribute("title", "Reload review before adding feedback.");
     }
     unavailable = false;
-    await page.getByRole("button", { name: "Reload review", exact: true }).click();
+    // A host that keeps Reload review in its own bar still gets a recovery control beside the message.
+    const reload = page.getByRole("button", { name: "Reload review", exact: true });
+    await expect(reload).toHaveCount(externalActions ? 2 : 1);
+    await expect(
+      page
+        .getByRole("status")
+        .filter({ hasText: "Reload review before adding feedback." })
+        .getByRole("button"),
+    ).toHaveCount(externalActions ? 1 : 0);
+    await reload.first().click();
     await expect(add).toBeEnabled();
     await add.click();
     await expect(page.getByRole("textbox", { name: "Review comment", exact: true })).toBeFocused();

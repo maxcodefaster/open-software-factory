@@ -99,24 +99,53 @@ if (new URL(window.location.href).searchParams.has("statusbar")) {
     element.append(label);
     return element;
   };
+  const full = new URL(window.location.href).searchParams.get("statusbar") === "full";
   const left = document.createElement("div");
   left.className = "area left";
-  left.append(
-    entry(
-      "factory-buffer-workspace",
-      "Ticket · A deliberately long Workspace name for this editor",
-    ),
-    entry(
-      "factory-writing",
-      "Agent working · requested by Local administrator with a long explanatory sentence. Observation mode. Files remain available to read.",
-    ),
-  );
-  const right = document.createElement("div");
-  right.className = "area right";
-  right.append(
-    entry("session-preference-status", "Save: manual"),
-    entry("editor-status-cursor-position", "Ln 12, Col 4"),
-  );
-  bar.append(left, right);
-  document.body.append(bar);
+  if (full) {
+    // The entries the running IDE shows beside a TypeScript file.
+    left.append(
+      entry("factory-editor-settings", "Editor settings"),
+      entry("factory-editor-save-mode", "Save: manual"),
+      entry("factory-buffer-workspace", "File · Personal · ACME Astro"),
+      entry("factory-writing", "You are editing this implementation."),
+      entry("problem-marker-status", "0 0"),
+      entry("session-preference-status", "Session Preferences (1)"),
+    );
+    const right = document.createElement("div");
+    right.className = "area right";
+    right.append(
+      entry("editor-status-cursor-position", "Ln 1, Col 1"),
+      entry("editor-status-eol", "LF"),
+      entry("editor-status-encoding", "UTF-8"),
+      entry("editor-status-tabbing-config", "Spaces: 2"),
+      entry("factory-language-tools", "TypeScript · Start tools"),
+      entry("editor-language-status-items", "{}"),
+      entry("editor-status-language", "JavaScript"),
+      entry("theia-notification-center", "!"),
+      entry("bottom-panel-toggle", "^"),
+    );
+    bar.append(left, right);
+    document.body.append(bar);
+  } else
+    left.append(
+      entry(
+        "factory-buffer-workspace",
+        "Ticket · A deliberately long Workspace name for this editor",
+      ),
+      entry(
+        "factory-writing",
+        "Agent working · requested by Local administrator with a long explanatory sentence. Observation mode. Files remain available to read.",
+      ),
+    );
+  if (!full) {
+    const right = document.createElement("div");
+    right.className = "area right";
+    right.append(
+      entry("session-preference-status", "Save: manual"),
+      entry("editor-status-cursor-position", "Ln 12, Col 4"),
+    );
+    bar.append(left, right);
+    document.body.append(bar);
+  }
 }

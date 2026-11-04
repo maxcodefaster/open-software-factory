@@ -158,6 +158,7 @@ export const runtimeAttemptSchema = z.object({
   updatedAt: optionalString,
   readyAt: optionalString,
   appReadyAt: z.record(z.string(), z.string()).optional(),
+  restoreFailed: z.boolean().optional(),
 });
 export type RuntimeAttempt = z.infer<typeof runtimeAttemptSchema>;
 export const appPreviewsSchema = z.object({

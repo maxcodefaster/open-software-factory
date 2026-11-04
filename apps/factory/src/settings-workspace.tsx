@@ -438,6 +438,7 @@ export function SettingsWorkspace(props: {
             <Show when={category() === "people" && canManage()}>
               <div hidden={category() !== "people"}>
                 <AccessSettings
+                  userID={props.userID}
                   project={selection().scope === "project" ? props.project : undefined}
                   systemManager={props.systemManager}
                   beforeCompanySignIn={beforeCompanySignIn}

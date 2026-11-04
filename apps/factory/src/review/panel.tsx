@@ -411,6 +411,14 @@ export function ReviewPanel(props: {
     setSelectedScenario("");
     syncPlayhead();
   };
+  const cancelMarkingOnEscape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || !markingVideo()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setMarkingVideo(false);
+    // The selection overlay disappears with the mode, so keep keyboard focus on the Comment button.
+    surface?.querySelector<HTMLElement>(".review-comment-fab")?.focus();
+  };
   const togglePlayback = () => {
     if (!video || !duration() || videoFailed()) return;
     if (!video.paused) video.pause();
@@ -875,7 +883,7 @@ export function ReviewPanel(props: {
           >
             <p role="status">
               Review is unavailable. Reload review before adding feedback.
-              <Show when={props.compact}>
+              <Show when={props.compact || props.onActions}>
                 {" "}
                 <button type="button" class="quiet-button" onClick={() => void reloadReview()}>
                   Reload review
@@ -1007,6 +1015,7 @@ export function ReviewPanel(props: {
                       class="review-comment-fab quiet-button"
                       disabled={!videoReady() || busy() || Boolean(retry)}
                       aria-pressed={markingVideo() ? "true" : "false"}
+                      onKeyDown={cancelMarkingOnEscape}
                       onClick={() => {
                         if (markingVideo()) setMarkingVideo(false);
                         else void annotateFrame();
@@ -1021,6 +1030,7 @@ export function ReviewPanel(props: {
                       type="button"
                       class="review-video-selection"
                       aria-label="Choose a point on the paused QA frame"
+                      onKeyDown={cancelMarkingOnEscape}
                       onClick={(event) => {
                         const rect = event.currentTarget.getBoundingClientRect();
                         const x =

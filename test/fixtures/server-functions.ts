@@ -50,6 +50,7 @@ const serviceFunctions = {
     startPersonalWorkspace: "startPersonal",
     startTicketWorkspace: "startTicket",
     stopRuntimeAttempt: "stop",
+    startFreshRuntimeAttempt: "startFresh",
     cancelChange: "cancelChange",
     getChanges: "changes",
     getRuntimeAttempts: "attempts",
@@ -238,6 +239,8 @@ const serviceFunctions = {
   access: {
     getSecurityPolicy: "policy",
     getAuthenticationState: "authentication",
+    getPasswordChangeState: "passwordChange",
+    changeOwnPassword: "changePassword",
     getSignOutDestination: "signOutDestination",
     endOwnSessions: "endOwnSessions",
     getAccounts: "users",
@@ -362,7 +365,10 @@ export async function mockFactoryFunctions(
     const endpoint = await compiledFactoryEndpoint({
       origin,
       services: services as FactoryServices,
-      session: async () => ({ user: { id: "owned-browser-fixture" } }),
+      session: async () => ({
+        user: { id: "owned-browser-fixture" },
+        session: { id: "owned-browser-session" },
+      }),
       maintenance: async () => false,
       requireFresh: async () => {},
     });
@@ -437,7 +443,10 @@ export async function mockFactoryFunctions(
     const endpoint = createServerFunctionEndpoint({
       origin: new URL(input.url()).origin,
       services: services as FactoryServices,
-      session: async () => ({ user: { id: "owned-browser-fixture" } }),
+      session: async () => ({
+        user: { id: "owned-browser-fixture" },
+        session: { id: "owned-browser-session" },
+      }),
       maintenance: async () => false,
       requireFresh: async () => {},
       handle: async (request, options) => entry.default.fetch(request, options),

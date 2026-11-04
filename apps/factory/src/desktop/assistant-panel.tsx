@@ -54,7 +54,6 @@ export interface AssistantPanelModel {
   agentPresence: ReturnType<typeof createWindowPresence>;
   agentOpen: SourceAccessor<boolean>;
   agentOverlay: () => boolean;
-  registrationOpen: SourceAccessor<boolean>;
   agentPanelElement: HTMLElement | undefined;
   inboxSourceActive: () => boolean;
   nextInboxItem: Accessor<InboxItem | undefined>;
@@ -267,7 +266,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
   const model = untrack(() => props.model);
   return (
     <Show when={model.agentPresence.present()}>
-      <aside
+      <section
         class="agent-panel"
         data-closing={model.agentPresence.closing() ? "true" : "false"}
         onAnimationEnd={(event) => {
@@ -279,7 +278,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
           ? { role: "dialog" as const, "aria-modal": "false" as const }
           : { role: "complementary" as const })}
         aria-label="Agent panel"
-        inert={!model.agentOpen() || model.registrationOpen()}
+        inert={!model.agentOpen()}
         ref={model.agentPanelElement}
       >
         <Show when={model.inboxSourceActive() && model.agentOverlay()}>
@@ -1145,7 +1144,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
             </Show>
           </div>
         </Show>
-      </aside>
+      </section>
     </Show>
   );
 }

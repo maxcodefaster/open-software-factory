@@ -111,7 +111,13 @@ test("saved chat stays tidy across screen sizes, long Markdown and a growing dra
         await expect(history.locator(".copy-feedback").first()).toHaveCSS("min-height", "44px");
         const bounds = await shell.boundingBox();
         if (!bounds) throw new Error("Chat composer is missing");
-        expect(bounds.height).toBeLessThanOrEqual(108);
+        // A 44px draft and a 44px Send button are the touch-target floor; anything taller is wasted space.
+        expect(bounds.height).toBeLessThanOrEqual(124);
+        await expect(draft).toHaveCSS("min-height", "44px");
+        await expect(panel.getByRole("button", { name: "Send message", exact: true })).toHaveCSS(
+          "min-width",
+          "44px",
+        );
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
       await history.evaluate((element) => {

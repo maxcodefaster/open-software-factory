@@ -6,6 +6,7 @@ export function AccountActions(props: {
   name: string;
   disabled: boolean;
   busy: boolean;
+  protectedReason?: string | undefined;
   onSessions(): void;
   onDisable(): void;
   onEnable(): void;
@@ -74,12 +75,16 @@ export function AccountActions(props: {
           <button
             type="button"
             role="menuitem"
-            disabled={props.busy}
+            disabled={props.busy || (!props.disabled && Boolean(props.protectedReason))}
+            aria-describedby={!props.disabled && props.protectedReason ? `${id}-reason` : undefined}
             onClick={() => choose(props.disabled ? props.onEnable : props.onDisable)}
           >
             <Icon name={props.disabled ? "check" : "stop"} />
             <span>{props.disabled ? "Enable account" : "Disable account"}</span>
           </button>
+          <Show when={!props.disabled && props.protectedReason}>
+            <small id={`${id}-reason`}>{props.protectedReason}</small>
+          </Show>
         </div>
       </Show>
     </div>

@@ -508,8 +508,16 @@ test("responsibility is optional and mentions work in the real feedback composer
   await page.screenshot({ path: `${directory}/mention-picker-1440.png`, fullPage: true });
   await comment.press("ArrowDown");
   await comment.press("Enter");
-  await expect(comment).toHaveValue(/Please check \[@Tom Development\]\(factory-person:/);
+  // The composer shows a readable mention; the link form exists only in the stored feedback.
+  await expect(comment).toHaveValue("Please check @Tom Development ");
   await expect(members).toHaveCount(0);
+  await comment.press("Backspace");
+  await comment.press("Backspace");
+  await expect(comment).toHaveValue("Please check ");
+  await comment.fill("Please check @");
+  await comment.press("ArrowDown");
+  await comment.press("Enter");
+  await expect(comment).toHaveValue("Please check @Tom Development ");
   await source.getByRole("button", { name: "Save feedback", exact: true }).click();
   await expect(source.getByLabel("Saved feedback").locator(".factory-mention")).toHaveText(
     "@Tom Development",

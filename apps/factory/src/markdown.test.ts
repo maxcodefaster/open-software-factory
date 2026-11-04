@@ -29,7 +29,7 @@ test("renders tables, nested lists and disabled tasks consistently in read views
   const rendered = markdownHTML(
     "| Name | Status |\n| --- | --- |\n| Counter | Ready |\n\n- outer\n  - inner\n\n- [x] done",
   );
-  expect(rendered).toContain("<table>");
+  expect(rendered).toContain('<table tabindex="0">');
   expect(rendered).toContain("<td>Ready</td>");
   expect(rendered.match(/<ul>/g)?.length).toBe(2);
   expect(rendered).toContain('disabled=""');
@@ -141,4 +141,16 @@ test("Wiki references link only known pages without changing code, existing link
   expect(html).not.toContain('href="#wiki/task-management-extra"');
   expect(html.match(/href="#wiki\/task-management"/g)).toHaveLength(2);
   expect(markdownHTML("See #wiki/task-management.")).not.toContain("href=");
+});
+
+test("scrollable chat code and tables are keyboard focusable while document code keeps its own controls", () => {
+  const source = "```ts\nconst wide = 1;\n```\n\n| A |\n| --- |\n| 1 |";
+  const chat = markdownHTML(source);
+  expect(chat).toContain('<pre tabindex="0">');
+  expect(chat).toContain('<table tabindex="0">');
+  const document = markdownHTML(source, true);
+  expect(document).toContain("<pre>");
+  expect(document).not.toContain('<pre tabindex="0">');
+  expect(document).toContain('<table tabindex="0">');
+  expect(markdownHTML("`<table>` and &lt;table&gt;")).not.toContain("<table");
 });

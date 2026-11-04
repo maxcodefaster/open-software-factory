@@ -22,6 +22,42 @@ const grantLabels = { runtime: "Runtime", build: "Image build", verification: "V
 
 type EnvironmentSettingsProps = { projectID: string; navigation?: JSX.Element };
 
+function ProtectedValueField(props: {
+  label: string;
+  name: string;
+  placeholder: string;
+  value: string;
+  onInput(value: string): void;
+}) {
+  const [shown, setShown] = createSignal(false);
+  return (
+    <div class="environment-value-field">
+      <label>
+        {props.label}
+        <textarea
+          rows="2"
+          class="environment-protected-value"
+          data-masked={shown() ? "false" : "true"}
+          aria-label={`Value for ${props.name}`}
+          autocomplete="off"
+          spellcheck={false}
+          placeholder={props.placeholder}
+          value={props.value}
+          onInput={(event) => props.onInput(event.currentTarget.value)}
+        />
+      </label>
+      <label class="environment-check">
+        <input
+          type="checkbox"
+          checked={shown()}
+          onChange={(event) => setShown(event.currentTarget.checked)}
+        />
+        Show what I type
+      </label>
+    </div>
+  );
+}
+
 export function EnvironmentSettings(props: EnvironmentSettingsProps) {
   const [environment, setEnvironment] = createSignal<ProjectEnvironment>("development");
   const [sort, setSort] = createSignal("name-asc");
@@ -63,6 +99,7 @@ function EnvironmentDocument(
   const [paste, setPaste] = createSignal("");
   const [preview, setPreview] = createSignal<Array<{ name: string; value: string }>>([]);
   const [pasteError, setPasteError] = createSignal("");
+  const [pasteShown, setPasteShown] = createSignal(false);
   const [importOpen, setImportOpen] = createSignal(false);
   const importID = `environment-import-${crypto.randomUUID()}`;
   const variableAccessID = `environment-access-${crypto.randomUUID()}`;
@@ -444,6 +481,12 @@ function EnvironmentDocument(
                     : "Using normal Dev Container startup. No compatible prepared image is available."}
               </p>
             </Show>
+            <Show when={!current().canManage}>
+              <p class="model-settings-note">
+                Only Project managers can change variables. You can see names and kinds; values stay
+                hidden.
+              </p>
+            </Show>
             <Show when={!current().storeConfigured}>
               <p role="status">
                 Connect OpenBao to manage protected values. Existing editing remains available.
@@ -547,6 +590,8 @@ function EnvironmentDocument(
                       }
                       aria-label="Paste environment variables"
                       rows="4"
+                      class="environment-protected-value"
+                      data-masked={pasteShown() ? "false" : "true"}
                       autocomplete="off"
                       spellcheck={false}
                       value={paste()}
@@ -556,6 +601,14 @@ function EnvironmentDocument(
                         setPasteError("");
                       }}
                     />
+                  </label>
+                  <label class="environment-check">
+                    <input
+                      type="checkbox"
+                      checked={pasteShown()}
+                      onChange={(event) => setPasteShown(event.currentTarget.checked)}
+                    />
+                    Show pasted text
                   </label>
                   <Show when={preview().length > 0}>
                     <p class="model-settings-note">
@@ -660,28 +713,25 @@ function EnvironmentDocument(
                               }
                             />
                           </label>
-                          <label>
-                            {current().variables.some((item) => item.name === entry().variable.name)
-                              ? "Replace value"
-                              : "Value"}
-                            <textarea
-                              rows="2"
-                              aria-label={`Value for ${entry().variable.name || "new variable"}`}
-                              autocomplete="off"
-                              spellcheck={false}
-                              placeholder={
-                                current().variables.some(
-                                  (item) => item.name === entry().variable.name,
-                                )
-                                  ? "Leave unchanged or enter a replacement"
-                                  : "Enter value"
-                              }
-                              value={entry().variable.value ?? ""}
-                              onInput={(event) =>
-                                changeVariable(entry().index, { value: event.currentTarget.value })
-                              }
-                            />
-                          </label>
+                          <ProtectedValueField
+                            label={
+                              current().variables.some(
+                                (item) => item.name === entry().variable.name,
+                              )
+                                ? "Replace value"
+                                : "Value"
+                            }
+                            name={entry().variable.name || "new variable"}
+                            placeholder={
+                              current().variables.some(
+                                (item) => item.name === entry().variable.name,
+                              )
+                                ? "Leave unchanged or enter a replacement"
+                                : "Enter value"
+                            }
+                            value={entry().variable.value ?? ""}
+                            onInput={(value) => changeVariable(entry().index, { value })}
+                          />
                           <fieldset class="environment-grants" aria-describedby={variableAccessID}>
                             <legend>Available to</legend>
                             <For each={grants}>

@@ -1,19 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
-import { FileOperationError } from "../../deploy/theia-ide/node_modules/@theia/filesystem/lib/common/files";
 // Exercise the extension compiled by its pinned TypeScript build. Theia's
 // published const enums have no runtime exports for Bun's isolated transpiler.
 import {
-  SourceResponseError,
   FactorySourceClient,
   type SourceChange,
+  SourceResponseError,
   type SourceTransport,
 } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-source-client";
 import {
   FactoryWorkspaceFiles,
   workspaceResource,
 } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-files";
+import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
+import { FileOperationError } from "../../deploy/theia-ide/node_modules/@theia/filesystem/lib/common/files";
 
 test.each([401, 403, 404, 503])(
   "source watch closes rejected access %s without a native watcher-capacity warning",
@@ -279,6 +279,54 @@ describe("pinned Theia Workspace provider", () => {
     expect(calls.at(-1)).toBe("stat");
     watch.dispose();
     provider.dispose();
+  });
+
+  test("optional editor settings are answered from parent listings without a failed request", async () => {
+    const calls: string[] = [];
+    const metadata = { kind: "file", size: 4, mtime: 100, ctime: 100 };
+    const directory = { ...metadata, kind: "directory" };
+    const present = new Set<string>();
+    const provider = new FactoryWorkspaceFiles({
+      async request(_workspaceID, operation, body) {
+        calls.push(`${operation}:${String(body["path"])}`);
+        if (operation === "list" && body["path"] === "")
+          return [
+            { name: "app.ts", ...metadata },
+            { name: ".vscode", ...directory },
+          ];
+        if (operation === "list" && body["path"] === ".vscode")
+          return present.has("settings") ? [{ name: "settings.json", ...metadata }] : [];
+        if (operation === "stat" || operation === "read")
+          return { ...metadata, content: "", version: "a".repeat(64) };
+        throw new SourceResponseError(404);
+      },
+      watch: () => () => {},
+    });
+    const root = new URI("factory-workspace://workspace-a/");
+    for (const path of [".theia/settings.json", ".vscode/settings.json"]) {
+      const error = await provider.stat(root.resolve(path)).catch((cause: unknown) => cause);
+      expect(String((error as Error).message)).toBe("Source entry was not found");
+      expect((error as { code?: string }).code).toBe("EntryNotFound");
+      await expect(provider.readFile(root.resolve(path))).rejects.toThrow("not found");
+    }
+    expect(calls).toEqual(["list:", "list:.vscode"]);
+    present.add("settings");
+    provider.dispose();
+    const fresh = new FactoryWorkspaceFiles({
+      async request(_workspaceID, operation, body) {
+        calls.push(`${operation}:${String(body["path"])}`);
+        if (operation === "list" && body["path"] === "") return [{ name: ".vscode", ...directory }];
+        if (operation === "list") return [{ name: "settings.json", ...metadata }];
+        return { ...metadata, content: "", version: "a".repeat(64) };
+      },
+      watch: () => () => {},
+    });
+    calls.length = 0;
+    await fresh.stat(root.resolve(".vscode/settings.json"));
+    expect(calls).toEqual(["list:", "list:.vscode", "stat:.vscode/settings.json"]);
+    await fresh.stat(root.resolve("app.ts"));
+    expect(calls.at(-1)).toBe("stat:app.ts");
+    fresh.dispose();
   });
 
   test("retains Workspace-qualified source identity through another Workspace read", async () => {

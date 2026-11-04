@@ -8,6 +8,7 @@ const notShared = new Set([
   "observeChangeWriter",
   "getSignOutDestination",
   "getAuthenticationState",
+  "getPasswordChangeState",
   "checkSkillSourceUpdate",
   "getBootstrap",
 ]);

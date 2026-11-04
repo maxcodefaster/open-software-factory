@@ -102,7 +102,9 @@ for (const width of [1440, 900, 620, 390]) {
         return { id: element.id, left, right, top, bottom };
       }),
     );
-    expect(boxes.length).toBeGreaterThanOrEqual(2);
+    // A phone keeps the writer status and drops the passive entries.
+    expect(boxes.length).toBeGreaterThanOrEqual(width <= 600 ? 1 : 2);
+    expect(boxes.map((box) => box.id)).toContain("status-bar-factory-writing");
     const sorted = [...boxes].sort((a, b) => a.left - b.left);
     for (let index = 1; index < sorted.length; index++) {
       const previous = sorted[index - 1];
@@ -115,7 +117,8 @@ for (const width of [1440, 900, 620, 390]) {
     const save = page.locator("#status-bar-session-preference-status");
     if (await save.isVisible()) {
       const box = await save.boundingBox();
-      expect(box?.width).toBeGreaterThan(40);
+      // The session override keeps only its icon so it cannot crowd out the writer status.
+      expect(box?.width).toBeGreaterThan(0);
       expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(width);
     }
     const writing = page.locator("#status-bar-factory-writing > span");
@@ -134,5 +137,27 @@ for (const width of [1440, 900, 620, 390]) {
       /Files remain available to read\./,
     );
     await page.screenshot({ path: resolve(evidence, `status-bar-${width}.png`) });
+  });
+}
+
+for (const width of [1150, 900, 390]) {
+  test(`the full IDE status bar keeps the writer status and language tools in view at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 600 });
+    await page.goto(`${origin}/ide-writer.html?statusbar=full`);
+    const boxes = await page.locator("#theia-statusBar .element").evaluateAll((elements) =>
+      elements.map((element) => {
+        const { left, right, width } = element.getBoundingClientRect();
+        return { id: element.id, left, right, width };
+      }),
+    );
+    for (const box of boxes.filter((entry) => entry.width > 0))
+      expect(box.right, `${box.id} is cut off by the right edge`).toBeLessThanOrEqual(width + 0.5);
+    const writing = boxes.find((box) => box.id === "status-bar-factory-writing");
+    expect(writing?.width ?? 0).toBeGreaterThanOrEqual(120);
+    const tools = boxes.find((box) => box.id === "status-bar-factory-language-tools");
+    expect(tools?.width ?? 0).toBeGreaterThan(100);
+    await page.screenshot({ path: resolve(evidence, `status-bar-full-${width}.png`) });
   });
 }

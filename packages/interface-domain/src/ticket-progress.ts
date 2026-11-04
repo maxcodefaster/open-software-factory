@@ -1,3 +1,52 @@
+export type DeliveryBlockReason = "promotion-failed" | "merge-unconfirmed" | "in-progress";
+export type DeliveryBlock = { title: string; reason: DeliveryBlockReason };
+type DeliveryQueueChange = {
+  id: string;
+  ticketId: string;
+  mergeState?: string | null | undefined;
+  promotionState?: string | null | undefined;
+};
+
+// Mirrors the Delivery claim: one Change per Project owns an unfinished merge or Staging
+// Promotion, and later approved Deliveries wait behind it. A failed merge releases the slot.
+export function deliveryBlocker(
+  own: { id: string; mergeState?: string | null | undefined },
+  changes: readonly DeliveryQueueChange[],
+): { ticketId: string; reason: DeliveryBlockReason } | undefined {
+  if (own.mergeState && own.mergeState !== "pending") return undefined;
+  const reasons = new Map<DeliveryBlockReason, string>();
+  for (const change of changes) {
+    if (change.id === own.id || !change.mergeState || change.mergeState === "failed") continue;
+    const finished = change.mergeState === "succeeded" && change.promotionState === "succeeded";
+    if (finished) continue;
+    const reason: DeliveryBlockReason =
+      change.promotionState === "failed"
+        ? "promotion-failed"
+        : change.mergeState === "ambiguous"
+          ? "merge-unconfirmed"
+          : "in-progress";
+    // A stopped queue explains more than one that is merely busy.
+    if (!reasons.has(reason)) reasons.set(reason, change.ticketId);
+  }
+  for (const reason of ["promotion-failed", "merge-unconfirmed", "in-progress"] as const) {
+    const ticketId = reasons.get(reason);
+    if (ticketId) return { ticketId, reason };
+  }
+  return undefined;
+}
+
+function deliveryBlockMessage(block: DeliveryBlock) {
+  const title = block.title.length > 80 ? `${block.title.slice(0, 79)}…` : block.title;
+  switch (block.reason) {
+    case "promotion-failed":
+      return `Waiting for "${title}". Its Main Preview failed, so Delivery is paused for this Project until that Ticket retries Main Preview. The approved version is retained and merges afterwards.`;
+    case "merge-unconfirmed":
+      return `Waiting for "${title}". Its merge is unconfirmed, so Delivery is paused until Factory confirms the outcome. The approved version is retained and merges afterwards.`;
+    default:
+      return `Waiting for "${title}" to finish Delivery. Deliveries run one at a time; the approved version merges next. No action needed.`;
+  }
+}
+
 export type TicketProgressInput = {
   ticketState: string;
   changeState?: string | undefined;
@@ -18,6 +67,7 @@ export type TicketProgressInput = {
   approved?: boolean | undefined;
   cleanupError?: string | undefined;
   promotionState?: string | undefined;
+  deliveryBlock?: DeliveryBlock | undefined;
   canDevelop?: boolean | undefined;
   planning?: boolean | undefined;
   technicalPlanningOutstanding?: boolean | undefined;
@@ -53,10 +103,12 @@ export function ticketProgress(input: TicketProgressInput): string {
       (input.turnState === "failed" || input.implementationState === "failed"))
   )
     return "Implementation could not finish. The Coding conversation shows the saved failure and offers Retry; retained work is kept.";
-  if (input.changeState === "delivering")
-    return input.promotionState === "failed"
-      ? "The verified version is merged, but Main Preview failed. Correct its setup and retry Main Preview. The previous Preview is retained."
-      : "Delivery is in progress. Factory keeps the existing Staging Preview until the replacement is ready.";
+  if (input.changeState === "delivering") {
+    if (input.promotionState === "failed")
+      return "The verified version is merged, but Main Preview failed. Correct its setup and retry Main Preview. The previous Preview is retained.";
+    if (input.deliveryBlock) return deliveryBlockMessage(input.deliveryBlock);
+    return "Delivery is in progress. Factory keeps the existing Staging Preview until the replacement is ready.";
+  }
   if (["pending", "dispatching", "running"].includes(input.correctionState ?? "")) {
     const failure =
       input.verificationState === "failed" &&
@@ -112,6 +164,7 @@ export function ticketProgress(input: TicketProgressInput): string {
     if (input.reviewState === "passed") {
       if (input.threads)
         return "Checks and independent review passed. Recheck and resolve the open Threads before Delivery.";
+      if (input.approved && input.deliveryBlock) return deliveryBlockMessage(input.deliveryBlock);
       return input.approved
         ? "Delivery is approved for the exact verified version. Factory is preparing its merge and Staging Preview."
         : input.canDevelop

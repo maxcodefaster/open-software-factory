@@ -1,9 +1,9 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
@@ -108,10 +108,37 @@ test("contributors cannot enable Ticket Delivery by reading Settings", async ({ 
     },
   });
   await page.goto(`${origin}/delivery-settings.html`);
+  const enable = page.getByRole("button", { name: "Enable automatic Delivery", exact: true });
+  await expect(enable).toBeDisabled();
+  const reason = page.getByText(
+    "Only a Project manager with Developer access can enable automatic Delivery.",
+  );
+  await expect(reason).toBeVisible();
+  await expect(enable).toHaveAccessibleDescription(await reason.innerText());
+  expect(writes).toBe(0);
+});
+
+test("a manager without Developer access is told why Delivery cannot be enabled", async ({
+  page,
+}) => {
+  await mockFactoryFunctions(page, {
+    delivery: {
+      settings: async () => ({
+        policyId: null,
+        enabled: false,
+        delegatedBy: null,
+        canManage: true,
+        canDelegate: false,
+      }),
+    },
+  });
+  await page.goto(`${origin}/delivery-settings.html`);
   await expect(
     page.getByRole("button", { name: "Enable automatic Delivery", exact: true }),
   ).toBeDisabled();
-  expect(writes).toBe(0);
+  await expect(
+    page.getByText("Enabling automatic Delivery needs Developer access to this Project."),
+  ).toBeVisible();
 });
 
 test("an unconfirmed enable is observed before a different Delivery decision gets a new identity", async ({

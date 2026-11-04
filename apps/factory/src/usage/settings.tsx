@@ -191,7 +191,7 @@ export function UsageSettings(props: {
                 <summary>
                   {value().detailScope === "own" ? "Your model usage" : "Model usage"}
                 </summary>
-                <div class="usage-table">
+                <section class="usage-table" aria-label="Model usage table" tabindex="0">
                   <table>
                     <thead>
                       <tr>
@@ -209,7 +209,7 @@ export function UsageSettings(props: {
                               {row.model}
                               <small>{row.provider}</small>
                             </td>
-                            <td>{row.purpose}</td>
+                            <td class="usage-label">{row.purpose}</td>
                             <td>
                               {tokens(row.input)} / {tokens(row.output)}
                               <small>
@@ -225,15 +225,16 @@ export function UsageSettings(props: {
                       </For>
                     </tbody>
                   </table>
-                </div>
+                </section>
               </details>
             </Show>
             <section>
               <h3>Compute allocation</h3>
               <p class="usage-note">
-                {value().allocation.sandboxes} execution Sandboxes · {value().allocation.cpuMilli}{" "}
-                millicores · {value().allocation.memoryMiB} MiB reserved. Includes preparation and
-                pending cleanup.
+                {value().allocation.sandboxes} execution{" "}
+                {value().allocation.sandboxes === 1 ? "Sandbox" : "Sandboxes"} ·{" "}
+                {value().allocation.cpuMilli} millicores · {value().allocation.memoryMiB} MiB
+                reserved. Includes preparation and pending cleanup.
               </p>
               <Show
                 when={compute()}
@@ -249,7 +250,7 @@ export function UsageSettings(props: {
                         <For each={current().observations}>
                           {(observation) => (
                             <li>
-                              <span>{observation.kind}</span>
+                              <span class="usage-label">{observation.kind}</span>
                               <span>
                                 {observation.status === "available" ||
                                 observation.status === "stale"
@@ -263,7 +264,12 @@ export function UsageSettings(props: {
                                     ? "Cluster access denied"
                                     : "No current observation"}{" "}
                                 · Running since{" "}
-                                {new Date(observation.startedAt).toLocaleTimeString()}
+                                {new Date(observation.startedAt).toLocaleString(undefined, {
+                                  month: "short",
+                                  day: "numeric",
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })}
                               </small>
                             </li>
                           )}

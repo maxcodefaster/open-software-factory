@@ -30,7 +30,7 @@ metadata:
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 data:
-{{- range $path, $_ := .Files.Glob "files/backup/*.sh" }}
+{{- range $path, $_ := .Files.Glob "files/backup/*" }}
   {{ base $path }}: |
     {{- $.Files.Get $path | nindent 4 }}
 {{- end }}

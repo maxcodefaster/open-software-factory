@@ -1466,6 +1466,7 @@ test("backups retry network calls and keep failed steps from hiding behind later
   expect(Object.keys(scripts).sort()).toEqual([
     "common.sh",
     "finalize.sh",
+    "foreign-keys.sql",
     "forgejo.sh",
     "objects.sh",
     "openbao.sh",
@@ -1477,6 +1478,10 @@ test("backups retry network calls and keep failed steps from hiding behind later
     expect(scripts[`${name}.sh`]).toMatch(/step \w+ retry \d+/);
   expect(scripts["postgres.sh"]).toContain("pg_dump --format=custom");
   expect(scripts["postgres.sh"]).toContain("pg_restore --list");
+  // A source with orphaned rows is kept but flagged, because pg_restore cannot recreate its keys.
+  expect(scripts["postgres.sh"]).toContain("/scripts/foreign-keys.sql");
+  expect(scripts["postgres.sh"]).toContain("postgres.orphans");
+  expect(scripts["foreign-keys.sql"]).toContain("contype = 'f'");
   expect(scripts["forgejo.sh"]).toContain("forgejo dump");
   expect(scripts["openbao.sh"]).toContain("bao operator raft snapshot save");
   expect(scripts["finalize.sh"]).toContain("exit 1");

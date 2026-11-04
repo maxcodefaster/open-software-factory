@@ -15,3 +15,11 @@ export const memberInput = z
     manageProject: z.boolean().default(false),
   })
   .strict();
+
+export const passwordChangeInput = z
+  .object({
+    currentPassword: z.string().min(1).max(1024),
+    newPassword: z.string().max(1024),
+    confirmPassword: z.string().max(1024),
+  })
+  .strict();

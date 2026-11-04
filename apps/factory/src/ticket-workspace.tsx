@@ -13,7 +13,10 @@ import {
   type TicketBoardInput,
   ticketBoardStatus,
 } from "../../../packages/interface-domain/src/ticket-board";
-import { ticketProgress } from "../../../packages/interface-domain/src/ticket-progress";
+import {
+  type DeliveryBlock,
+  ticketProgress,
+} from "../../../packages/interface-domain/src/ticket-progress";
 import type { RequirementContent } from "../../../packages/requirement-domain/src/content";
 import { ticketDocumentInput } from "../../../packages/requirement-domain/src/document";
 import type { TechnicalDesignContent } from "../../../packages/requirement-domain/src/technical-design";
@@ -135,6 +138,7 @@ export type TicketWorkspaceProps = {
   storageKey: string;
   change?: ChangeView | undefined;
   delivery?: DeliveryView | undefined;
+  deliveryBlock?: DeliveryBlock | undefined;
   latestRevision?: RequirementRevisionView | undefined;
   latestRequirement?: RequirementContent | undefined;
   pending: boolean;
@@ -350,9 +354,18 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const [selectionToolbar, setSelectionToolbar] = createSignal<SelectionToolbar>();
   const [slashMenu, setSlashMenu] = createSignal<SlashMenu>();
   const [slashIndex, setSlashIndex] = createSignal(0);
-  const filteredSlashBlocks = () => filterDocumentBlocks(slashBlocks, slashMenu()?.query ?? "");
+  const specificationVisible = () =>
+    Boolean(props.latestRevision || proposal() || props.current.ticket.state === "ready");
+  const filteredSlashBlocks = () =>
+    filterDocumentBlocks(
+      specificationVisible()
+        ? slashBlocks
+        : slashBlocks.filter((block) => block.id !== "acceptance" && block.id !== "non-goal"),
+      slashMenu()?.query ?? "",
+    );
   const [linkEditing, setLinkEditing] = createSignal(false);
   const [editorError, setEditorError] = createSignal("");
+  const [conflict, setConflict] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
   const [savedDocument, setSavedDocument] = createSignal(false);
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -663,8 +676,32 @@ function TicketDocument(props: TicketWorkspaceProps) {
   function scheduleAutosave() {
     retainDraft();
     clearTimeout(autosaveTimer);
-    if (proposal()) return;
+    if (proposal() || conflict()) return;
     autosaveTimer = setTimeout(() => void saveChanges(), 650);
+  }
+
+  // A save is stale when the saved Ticket moved on after this draft's base. The draft is kept
+  // either way; the person chooses whether it replaces the newer version or is dropped.
+  function rebaseOnSaved() {
+    baseVersion = props.current.ticket.version;
+    baseDocumentID = currentDocument()?.id ?? null;
+    baseRequirementRevisionID = props.latestRevision?.id ?? null;
+    setConflict(false);
+    setEditorError("");
+  }
+
+  function keepMyDraft() {
+    rebaseOnSaved();
+    void saveChanges();
+  }
+
+  function useSavedVersion() {
+    clearTimeout(autosaveTimer);
+    rebaseOnSaved();
+    if (draftKey) props.drafts.delete(draftKey);
+    setEditing(false);
+    resetDrafts();
+    retainDraft();
   }
 
   function beginEditing() {
@@ -974,12 +1011,19 @@ function TicketDocument(props: TicketWorkspaceProps) {
     }
     if (props.current.ticket.id !== ticketID) return;
     if (!saved) {
+      const stale =
+        baseVersion !== props.current.ticket.version ||
+        baseDocumentID !== (currentDocument()?.id ?? null);
+      setConflict(stale);
       setEditorError(
-        "Could not save. Your draft is retained; check the connection or changes made elsewhere.",
+        stale
+          ? "This Ticket was changed after you started editing. Your draft is retained."
+          : "Could not save. Your draft is retained; check the connection and retry.",
       );
       retainDraft();
       return;
     }
+    setConflict(false);
     baseVersion = saved.ticketVersion;
     baseDocumentID = saved.id;
     baseRequirementRevisionID = saved.requirementRevisionId;
@@ -1080,9 +1124,29 @@ function TicketDocument(props: TicketWorkspaceProps) {
     return undefined;
   };
   const implementationDisabled = () => Boolean(implementationDisabledReason());
+  // A Ticket is ready before its requirements are complete; saving creates the revision Implement needs.
+  const requirementsIncomplete = () =>
+    !props.current.ticket.trashedAt &&
+    !props.current.ticket.convertedToEpicId &&
+    props.current.ticket.state === "ready" &&
+    !props.latestRevision &&
+    !props.change &&
+    !proposal();
+  const incompleteReason =
+    "Add a summary and at least one acceptance criterion to enable Implement.";
+  // Transient reasons already show elsewhere (pending command, unsaved edits); the rest need visible text.
+  const visibleDisabledReason = () => {
+    if (!canImplement() || props.codingOptionsOpen) return undefined;
+    const reason = implementationDisabledReason();
+    return reason === "Finishing the current Ticket action." ||
+      reason === "Waiting for your requirements to save."
+      ? undefined
+      : reason;
+  };
   const canInterview = () =>
     !props.current.ticket.trashedAt &&
     !props.current.ticket.convertedToEpicId &&
+    props.current.ticket.state !== "cancelled" &&
     !props.latestRevision?.approvalId &&
     !props.change &&
     !proposal();
@@ -1172,6 +1236,16 @@ function TicketDocument(props: TicketWorkspaceProps) {
         disabled: props.pending || saving() || hasChanges(),
         run: props.onWriteRequirements,
       });
+    if (requirementsIncomplete())
+      actions.push({
+        id: "implement",
+        label: "Implement",
+        primary: true,
+        disabled: true,
+        title: incompleteReason,
+        describedBy: "ticket-action-reason",
+        run: () => {},
+      });
     if (canImplement() && !props.codingOptionsOpen)
       actions.push({
         id: "implement",
@@ -1181,6 +1255,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
         primary: true,
         disabled: implementationDisabled(),
         title: implementationDisabledReason(),
+        describedBy: visibleDisabledReason() ? "ticket-action-reason" : undefined,
         run: () => props.latestRevision && props.onImplement(props.latestRevision.id),
       });
     if (
@@ -1268,7 +1343,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                 title={revision().title ?? props.current.ticket.title}
                 description={revision().description}
                 content={parseRequirement(revision())}
-                ordinal={revision().ordinal}
+                ordinal={versions().length - versions().indexOf(revision())}
               />
             )}
           </Show>
@@ -1446,49 +1521,65 @@ function TicketDocument(props: TicketWorkspaceProps) {
                   }
                 >
                   <p class="ticket-progress" role="status" aria-label="Ticket progress">
-                    {props.current.implementationOrder?.state === "waiting"
-                      ? (props.current.implementationOrder.reason ??
-                        `Implementation queued. Waiting for ${
-                          props.dependencies.prerequisites
-                            .filter((item) => !item.delivered)
-                            .map((item) => item.title)
-                            .join(", ") || "prerequisite Delivery"
-                        }. It will start automatically.`)
-                      : props.current.implementationOrder?.state === "blocked"
+                    <span id={requirementsIncomplete() ? "ticket-action-reason" : undefined}>
+                      {props.current.implementationOrder?.state === "waiting"
                         ? (props.current.implementationOrder.reason ??
-                          "Queued implementation needs attention. Review the current scope and commission it again.")
-                        : technicalDirty()
-                          ? "Save design or Discard edits in the Technical design chapter before using Implement. Saving does not start work."
-                          : proposal() && !props.planningBusy
-                            ? "Review this proposal. Your edits stay private until you confirm."
-                            : ticketProgress({
-                                ticketState: props.current.ticket.state,
-                                changeState: props.change?.state,
-                                turnState: props.change?.buildTurnState,
-                                turnPurpose: props.change?.buildTurnPurpose,
-                                implementationState: props.change?.implementationState,
-                                building: implementationBusy(),
-                                preparing: implementationPreparing(),
-                                verificationState: props.delivery?.verificationState,
-                                verificationFailureKind: props.delivery?.verificationFailureKind,
-                                verificationSummary: props.delivery?.verificationSummary,
-                                verificationPreparationFailure:
-                                  props.delivery?.verificationPreparationFailure,
-                                correctionState: props.delivery?.correctionState,
-                                reviewState: props.delivery?.reviewState,
-                                checksPaused: Boolean(props.delivery?.checksStopId),
-                                checksRetryable: Boolean(props.delivery?.checksRetryAttemptId),
-                                threads: openReviewThreads() ?? props.delivery?.openReviewThreads,
-                                approved: Boolean(props.delivery?.approvedAt),
-                                cleanupError: props.delivery?.cleanupError,
-                                promotionState: props.delivery?.promotionState,
-                                canDevelop: props.canDevelop,
-                                planning: props.planningBusy,
-                                awaitingAnswer: props.awaitingAnswer,
-                                technicalPlanningOutstanding:
-                                  props.current.technicalPlanningPending,
-                              })}
+                          `Implementation queued. Waiting for ${
+                            props.dependencies.prerequisites
+                              .filter((item) => !item.delivered)
+                              .map((item) => item.title)
+                              .join(", ") || "prerequisite Delivery"
+                          }. It will start automatically.`)
+                        : props.current.implementationOrder?.state === "blocked"
+                          ? (props.current.implementationOrder.reason ??
+                            "Queued implementation needs attention. Review the current scope and commission it again.")
+                          : technicalDirty()
+                            ? "Save design or Discard edits in the Technical design chapter before using Implement. Saving does not start work."
+                            : proposal() && !props.planningBusy
+                              ? "Review this proposal. Your edits stay private until you confirm."
+                              : requirementsIncomplete() &&
+                                  !props.planningBusy &&
+                                  !props.awaitingAnswer
+                                ? incompleteReason
+                                : ticketProgress({
+                                    ticketState: props.current.ticket.state,
+                                    changeState: props.change?.state,
+                                    turnState: props.change?.buildTurnState,
+                                    turnPurpose: props.change?.buildTurnPurpose,
+                                    implementationState: props.change?.implementationState,
+                                    building: implementationBusy(),
+                                    preparing: implementationPreparing(),
+                                    verificationState: props.delivery?.verificationState,
+                                    verificationFailureKind:
+                                      props.delivery?.verificationFailureKind,
+                                    verificationSummary: props.delivery?.verificationSummary,
+                                    verificationPreparationFailure:
+                                      props.delivery?.verificationPreparationFailure,
+                                    correctionState: props.delivery?.correctionState,
+                                    reviewState: props.delivery?.reviewState,
+                                    checksPaused: Boolean(props.delivery?.checksStopId),
+                                    checksRetryable: Boolean(props.delivery?.checksRetryAttemptId),
+                                    threads:
+                                      openReviewThreads() ?? props.delivery?.openReviewThreads,
+                                    approved: Boolean(props.delivery?.approvedAt),
+                                    cleanupError: props.delivery?.cleanupError,
+                                    promotionState: props.delivery?.promotionState,
+                                    deliveryBlock: props.deliveryBlock,
+                                    canDevelop: props.canDevelop,
+                                    planning: props.planningBusy,
+                                    awaitingAnswer: props.awaitingAnswer,
+                                    technicalPlanningOutstanding:
+                                      props.current.technicalPlanningPending,
+                                  })}
+                    </span>
                   </p>
+                </Show>
+                <Show when={canImplement() && !props.codingOptionsOpen && visibleDisabledReason()}>
+                  {(reason) => (
+                    <p class="ticket-progress" id="ticket-action-reason">
+                      {reason()}
+                    </p>
+                  )}
                 </Show>
                 <Show
                   when={
@@ -1605,6 +1696,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                       aria-label="Implementation review"
                       tabindex="-1"
                     >
+                      <h2 class="sr-only">Implementation review</h2>
                       <ReviewPanel
                         projectID={props.projectID}
                         feedbackID={props.feedbackID}
@@ -1629,7 +1721,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                   aria-label="Ticket requirements"
                 >
                   <div class="ticket-chapter-heading">
-                    <h3>Product</h3>
+                    <h2>Product</h2>
                   </div>
                   <div class="ticket-requirements-intro">
                     <details
@@ -1677,17 +1769,13 @@ function TicketDocument(props: TicketWorkspaceProps) {
 
                   <TicketDependencies {...props.dependencies} />
 
-                  <Show
-                    when={
-                      props.latestRevision || proposal() || props.current.ticket.state === "ready"
-                    }
-                  >
+                  <Show when={specificationVisible()}>
                     <section class="spec-section revision-section" aria-label="Specification">
                       <div
                         class={`specification-document ${canEditSpecification() ? "editable" : "locked"}`}
                       >
                         <div class="specification-block">
-                          <h4>Acceptance criteria</h4>
+                          <h3>Acceptance criteria</h3>
                           <div class="criteria-list specification-block-list">
                             <For each={draftAcceptance()}>
                               {(criterion, index) => (
@@ -1719,7 +1807,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                           when={draftNonGoals().some((block) => block.value().trim()) || editing()}
                         >
                           <div class="specification-block">
-                            <h4>Out of scope</h4>
+                            <h3>Out of scope</h3>
                             <div class="plain-list specification-block-list">
                               <For each={draftNonGoals()}>
                                 {(nonGoal, index) => (
@@ -1776,9 +1864,43 @@ function TicketDocument(props: TicketWorkspaceProps) {
               </div>
             </div>
             <Show when={editorError()}>
-              <p class="inline-error" role="alert">
-                {editorError()}
-              </p>
+              <div class="ticket-save-error" role="alert">
+                <p class="inline-error">{editorError()}</p>
+                <div class="control-actions">
+                  <Show
+                    when={conflict()}
+                    fallback={
+                      <Show when={hasChanges() && !proposal() && draftTitle().trim()}>
+                        <button
+                          type="button"
+                          class="quiet-button"
+                          disabled={saving()}
+                          onClick={() => void saveChanges()}
+                        >
+                          Retry save
+                        </button>
+                      </Show>
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="quiet-button"
+                      disabled={saving()}
+                      onClick={useSavedVersion}
+                    >
+                      Discard my changes
+                    </button>
+                    <button
+                      type="button"
+                      class="primary-button"
+                      disabled={saving()}
+                      onClick={keepMyDraft}
+                    >
+                      Save my version as a new revision
+                    </button>
+                  </Show>
+                </div>
+              </div>
             </Show>
           </article>
         </div>

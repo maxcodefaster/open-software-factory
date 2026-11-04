@@ -58,6 +58,7 @@ export type FactoryServices = {
 
 export type FactoryFunctionContext = FactoryServices & {
   actorID: string;
+  sessionID: string;
   signal: AbortSignal;
   assertSession(): Promise<void>;
   readBootstrap(): Promise<Bootstrap>;

@@ -24,10 +24,13 @@ function Surface() {
       projectId: projectID,
       runtimeKind: params.has("ticket") ? "ticket" : "staging",
       currentStaging: !params.has("historical"),
-      state: params.get("state") ?? "failed",
-      failure: params.has("long")
-        ? `Health request failed at https://owned-preview.invalid/${"long-path".repeat(40)}`
-        : 'channel "app" process "app" exited with code 7: missing configuration',
+      state: params.has("restore") ? "resuming" : (params.get("state") ?? "failed"),
+      ...(params.get("restore") === "confirmed" ? { restoreFailed: true } : {}),
+      failure: params.has("restore")
+        ? "The paused Sandbox could not be restored: restore backend exited before its pre-resume hold"
+        : params.has("long")
+          ? `Health request failed at https://owned-preview.invalid/${"long-path".repeat(40)}`
+          : 'channel "app" process "app" exited with code 7: missing configuration',
     },
   ]);
   const [tab, setTab] = createSignal<WorkspaceTab>({
@@ -37,6 +40,7 @@ function Surface() {
     attemptID,
   });
   const [starts, setStarts] = createSignal(0);
+  const [freshStarts, setFreshStarts] = createSignal(0);
   const startGate = Promise.withResolvers<void>();
   return (
     <main style="max-width: 900px; margin: 20px auto; background: var(--surface-raised); padding: 20px">
@@ -49,7 +53,16 @@ function Surface() {
               title="Preview"
               attemptID={attemptID}
               active={!params.has("inactive")}
-              attempt={params.has("app") ? { state: "ready" } : undefined}
+              attempt={
+                params.has("app")
+                  ? {
+                      state: params.get("attempt-state") ?? "ready",
+                      ...(params.has("attempt-failure")
+                        ? { failure: "restore outcome lost after the native command" }
+                        : {}),
+                    }
+                  : undefined
+              }
               app={
                 params.has("app")
                   ? {
@@ -71,6 +84,7 @@ function Surface() {
           }
         >
           <p>Scripted Main Preview starts: {starts()}</p>
+          <p>Scripted Start fresh commands: {freshStarts()}</p>
           <Show when={params.has("defer")}>
             <button type="button" class="quiet-button" onClick={() => startGate.resolve()}>
               Finish scripted start
@@ -85,6 +99,20 @@ function Surface() {
             pending={false}
             userID="33333333-3333-4333-8333-333333333333"
             canDevelop
+            onStartFresh={async (requested) => {
+              if (requested.id !== "failed-preview" || requested.attemptID !== attemptID)
+                throw new Error("Scripted Start fresh received a different Preview identity");
+              setFreshStarts((value) => value + 1);
+              if (params.has("fresh-error"))
+                throw new Error("Discarding the paused Sandbox could not be confirmed.");
+              if (params.has("defer")) await startGate.promise;
+              const next = "55555555-5555-4555-8555-555555555555";
+              setAttempts((values) => [
+                ...values.map((attempt) => ({ ...attempt, state: "stopped" })),
+                { id: next, projectId: projectID, runtimeKind: "ticket", state: "starting" },
+              ]);
+              setTab((current) => ({ ...current, attemptID: next }));
+            }}
             onRetryMainPreview={async (requested) => {
               if (requested.id !== "failed-preview" || requested.attemptID !== attemptID)
                 throw new Error("Scripted retry received a different Preview identity");

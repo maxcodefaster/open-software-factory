@@ -121,7 +121,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
               void act(() => save(form));
             }}
           >
-            <label>
+            <label class="control-field">
               Sign-in method
               <select
                 value={mode()}
@@ -133,7 +133,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
               </select>
             </label>
             <Show when={mode() === "oidc"}>
-              <label>
+              <label class="control-field">
                 Issuer URL
                 <input
                   name="issuer"
@@ -146,7 +146,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
                 />
                 <small>Entra: use the tenant-specific issuer, never common or organizations.</small>
               </label>
-              <label>
+              <label class="control-field">
                 Client ID
                 <input
                   name="clientID"
@@ -156,7 +156,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
                   autocomplete="off"
                 />
               </label>
-              <label>
+              <label class="control-field">
                 Client secret
                 <input
                   name="clientSecret"
@@ -168,7 +168,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
                 />
                 <small>Encrypted in OpenBao. Never shown after saving.</small>
               </label>
-              <label>
+              <label class="control-field">
                 Company domain
                 <input
                   name="domain"
@@ -183,7 +183,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
               </p>
               <details>
                 <summary>Optional directory provisioning</summary>
-                <label>
+                <label class="control-field">
                   SCIM bearer token
                   <input
                     name="directoryToken"
@@ -193,7 +193,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
                     autocomplete="new-password"
                   />
                 </label>
-                <label>
+                <label class="control-field">
                   Stable directory claim
                   <input name="directorySubjectClaim" value="oid" disabled={busy()} />
                 </label>
@@ -203,7 +203,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
                 </p>
               </details>
             </Show>
-            <label>
+            <label class="control-field">
               Browser session duration
               <input
                 name="sessionDays"

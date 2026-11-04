@@ -37,6 +37,38 @@
   white-space: nowrap;
 }
 
+/* The session override is Factory's own launch setting, not a problem to fix. Its
+   explanation stays in the tooltip and popup, but the entry keeps only a quiet icon so
+   it cannot push the writer status or the language tools out of the bar. Theia sets the
+   prominent colors inline. */
+#theia-statusBar #status-bar-session-preference-status {
+  /* biome-ignore lint/complexity/noImportantStyles: Theia sets this entry's colors inline. */
+  background-color: transparent !important;
+  /* biome-ignore lint/complexity/noImportantStyles: Theia sets this entry's colors inline. */
+  color: inherit !important;
+}
+
+#theia-statusBar #status-bar-session-preference-status > span:not(.codicon) {
+  display: none;
+}
+
+/* Status entries with a command take keyboard focus (see factory-accessibility.ts). */
+#theia-statusBar .element[role="button"]:focus-visible {
+  outline: 1px solid var(--theia-focusBorder);
+  outline-offset: -1px;
+}
+
+/* Theia fades secondary tree text with opacity, which drops it below readable contrast. */
+.theia-Tree .theia-TreeNodeInfo {
+  color: var(--theia-descriptionForeground);
+  opacity: 1;
+}
+
+/* Links inside setting descriptions differ from the text only by color, which is not enough. */
+.theia-settings-container .pref-description a {
+  text-decoration-line: underline;
+}
+
 /* Hidden embedded startup must not persist the upstream 100px minimum as a
    barely usable Explorer. Wider saved layouts and normal sash resizing remain. */
 #theia-left-side-panel {
@@ -51,11 +83,16 @@
 
 /* Keep the active file's Workspace and the language-tools action visible.
    Passive editor details remain available through editor settings. */
-@media (max-width: 1000px) {
-  #theia-statusBar #status-bar-session-preference-status,
+@media (max-width: 1300px) {
   #theia-statusBar #status-bar-editor-status-encoding,
   #theia-statusBar #status-bar-editor-status-eol,
   #theia-statusBar #status-bar-editor-status-tabbing-config {
+    display: none;
+  }
+}
+
+@media (max-width: 1000px) {
+  #theia-statusBar #status-bar-session-preference-status {
     display: none;
   }
 
@@ -70,10 +107,20 @@
   }
 }
 
+/* On a phone the writer status and the language tools action are the entries that matter.
+   Everything hidden here stays reachable through the panel tabs and editor settings. */
 @media (max-width: 600px) {
   #theia-statusBar #status-bar-factory-editor-settings,
+  #theia-statusBar #status-bar-factory-editor-save-mode,
+  #theia-statusBar #status-bar-factory-buffer-workspace,
+  #theia-statusBar #status-bar-problem-marker-status,
+  #theia-statusBar #status-bar-editor-language-status-items,
   #theia-statusBar #status-bar-editor-status-language {
     display: none;
+  }
+
+  #status-bar-factory-writing {
+    max-width: none;
   }
 }
 
@@ -281,11 +328,17 @@
     grid-template-rows: auto minmax(0, 1fr);
   }
 
+  /* One scrolling row keeps the toolbar and the output inside a short bottom panel. */
   .factory-runtime-processes {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--theia-panel-border);
+  }
+
+  .factory-runtime-process {
+    flex: 0 0 auto;
   }
 }
 
@@ -502,6 +555,24 @@
   background-color: var(--theia-terminal-background, var(--theia-editor-background));
 }
 @media (pointer: coarse) {
+  /* Theia sizes every horizontal tab bar from this one variable. */
+  html:root {
+    --theia-private-horizontal-tab-height: 44px;
+  }
+  .factory-runtime-toolbar :is(button, summary),
+  .factory-runtime-process,
+  .factory-git-widget button,
+  .factory-compute-status button,
+  .factory-writer-actions .theia-button {
+    min-height: 44px;
+  }
+  .factory-runtime-toolbar summary {
+    display: flex;
+    align-items: center;
+  }
+  .factory-git-commit input {
+    min-height: 44px;
+  }
   .factory-terminal-toolbar {
     min-height: 44px;
   }

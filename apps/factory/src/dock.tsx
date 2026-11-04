@@ -16,18 +16,18 @@ export function DockButton(props: {
   onClick(): void;
   onMinimize?(): void;
 }) {
+  const attention = () =>
+    props.count === 1 ? "1 item needs your attention" : `${props.count} items need your attention`;
   return (
     <button
       type="button"
-      aria-label={
-        props.count ? `${props.label}, ${props.count} items need your attention` : props.label
-      }
+      aria-label={props.count ? `${props.label}, ${attention()}` : props.label}
       aria-pressed={props.active ? "true" : "false"}
       data-tooltip={
         props.disabled
           ? `${props.label} waits for a ready runtime`
           : props.count
-            ? `${props.label}, ${props.count} need your attention`
+            ? `${props.label}, ${attention()}`
             : props.label
       }
       disabled={props.disabled}

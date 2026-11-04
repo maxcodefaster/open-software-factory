@@ -8,6 +8,7 @@ export type TicketHeaderAction = {
   label: string;
   disabled?: boolean;
   title?: string | undefined;
+  describedBy?: string | undefined;
   primary?: boolean;
   run(): void;
 };
@@ -40,6 +41,7 @@ export function TicketActionBar(props: {
             data-primary={action().id === primary() ? "true" : undefined}
             disabled={action().disabled || uploading()}
             title={uploading() ? "Wait for file preparation to finish." : action().title}
+            aria-describedby={action().describedBy}
             onClick={() => action().run()}
           >
             {action().label}

@@ -45,7 +45,7 @@ import {
   runFactoryboxKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import { rejectedFactoryboxPause } from "./factorybox-pause";
-import { unattemptedFactoryboxResume } from "./factorybox-resume";
+import { confirmedFailedFactoryboxResume, unattemptedFactoryboxResume } from "./factorybox-resume";
 import {
   type RetiredBackingCursor,
   reclaimRetiredFactoryboxBacking,
@@ -769,6 +769,61 @@ export function createFactoryboxExecution(
             (!current.runtime ||
               (current.runtime.status === "stopped" && current.runtime.pid === 0)))
         );
+      });
+    },
+    // Reads the original native record of a Resume that did not complete. Only a
+    // positively recorded failure (see confirmedFailedFactoryboxResume) is stamped,
+    // which is what lets the owner discard the paused Sandbox and start fresh.
+    // Lost replies and unreadable records change nothing and stay quarantined.
+    async observeFailedResume(attemptID: string) {
+      return locked(attemptID, "observe-resume", async (connection) => {
+        const saved = await retained(connection, attemptID);
+        if (!saved?.identity || saved.released) return false;
+        const [attempt] = await connection<Array<{ stamped: boolean }>>`
+          SELECT resume_failed_at IS NOT NULL AS stamped FROM factory.runtime_attempt
+          WHERE id=${attemptID} AND state='resuming' AND stop_intended_at IS NULL`;
+        if (!attempt) return false;
+        if (attempt.stamped) return true;
+        const [resume] = await connection<Array<{ snapshot: string; attempted: boolean }>>`
+          SELECT snapshot_id AS snapshot,attempted_at IS NOT NULL AS attempted
+          FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${attemptID} AND action='resume' AND completed_at IS NULL`;
+        if (!resume?.attempted) return false;
+        const [started] = await connection<{ observation: unknown }[]>`
+          SELECT observation FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${attemptID} AND action='start' AND completed_at IS NOT NULL`;
+        const [paused] = await connection<{ observation: unknown }[]>`
+          SELECT observation FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${attemptID} AND action='pause' AND snapshot_id=${resume.snapshot}
+            AND completed_at IS NOT NULL`;
+        const observed = await executeFactoryboxOperation(
+          factoryboxRuntimeRequest(saved.request),
+          saved.identity,
+          { action: "state", sandboxID: saved.request.sandboxID },
+          run,
+          factoryboxRuntimeDeclaration(saved.request),
+        );
+        if (!observed.confirmed) return false;
+        let native: unknown;
+        try {
+          native = JSON.parse(observed.stdout);
+        } catch {
+          return false;
+        }
+        const error = confirmedFailedFactoryboxResume(
+          native,
+          saved.request.sandboxID,
+          resume.snapshot,
+          started?.observation,
+          paused?.observation,
+        );
+        if (!error) return false;
+        const cause = error.replace(/\s+/g, " ").slice(0, 500);
+        const changed = await connection`UPDATE factory.runtime_attempt
+          SET resume_failed_at=now(),failure=${`The paused Sandbox could not be restored: ${cause}`},updated_at=now()
+          WHERE id=${attemptID} AND state='resuming' AND stop_intended_at IS NULL
+            AND resume_failed_at IS NULL`;
+        return changed.count === 1;
       });
     },
     reclaimStorage() {

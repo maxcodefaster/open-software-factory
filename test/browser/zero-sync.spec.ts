@@ -152,7 +152,7 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
       VALUES(${question},${conversation},1,'question','project-agent','plan','Which invoice state?',
         '{"question":{"type":"free-text","prompt":"Which invoice state?","placeholder":"Describe the state"}}'::jsonb)`;
     await expect(
-      colleague.getByRole("button", { name: "Inbox, 1 items need your attention" }),
+      colleague.getByRole("button", { name: "Inbox, 1 item needs your attention" }),
     ).toBeVisible();
     await colleague.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await expect(colleague.locator(`#conversation-entry-${question}`)).toContainText(

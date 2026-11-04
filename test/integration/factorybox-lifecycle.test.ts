@@ -886,8 +886,16 @@ test.each([
         expect(before).toBeDefined();
         if (!before) throw new Error("Missing original Resume intent");
         const recovered = createFactoryboxExecution(database, hub, run);
+        const restoreState = () =>
+          database.client<
+            Array<{ state: string; failure: string | null; stamped: boolean }>
+          >`SELECT state,failure,resume_failed_at IS NOT NULL AS stamped
+            FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
         if (deleteContinuation === "resume-delete-diagnostic") {
           await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+          // The record names the failure. Native Delete still decides whether the cgroup is
+          // empty, so this stamp only offers the owner's choice and never deletes anything.
+          expect(await recovered.observeFailedResume(owned.attemptID)).toBe(true);
           const nativeResume = structuredClone(record.pause?.resume);
           await database.client`UPDATE factory.runtime_attempt
             SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
@@ -905,6 +913,23 @@ test.each([
         }
         if (deleteContinuation === "resume-failed-stop") {
           await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+          // Unknown until the native record is read: the attempt keeps the first cause.
+          const [unknown] = await restoreState();
+          expect(unknown?.stamped).toBe(false);
+          expect(unknown?.failure).toContain("could not allocate its copy");
+          const commandsBefore = mutations.length;
+          expect(await recovered.observeFailedResume(owned.attemptID)).toBe(true);
+          const [confirmed] = await restoreState();
+          expect(confirmed).toEqual({
+            state: "resuming",
+            stamped: true,
+            failure:
+              "The paused Sandbox could not be restored: original native restore failed before activation",
+          });
+          // Observation only: no Resume, Delete or retirement was dispatched, and repeating it is free.
+          expect(mutations).toHaveLength(commandsBefore);
+          expect(await recovered.observeFailedResume(owned.attemptID)).toBe(true);
+          expect(mutations).toHaveLength(commandsBefore);
           const nativeResume = structuredClone(record.pause?.resume);
           await database.client`UPDATE factory.runtime_attempt
             SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
@@ -933,6 +958,9 @@ test.each([
         }
         if (deleteContinuation === "resume-already-attempted") {
           await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+          // Attempted with no recorded error is an unknown outcome: no action is offered.
+          expect(await recovered.observeFailedResume(owned.attemptID)).toBe(false);
+          expect((await restoreState())[0]?.stamped).toBe(false);
           expect(resumeCommands).toBe(1);
           expect(mutations).toEqual(["start", "pause", "resume"]);
           return;

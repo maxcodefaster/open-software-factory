@@ -1,4 +1,5 @@
 import { attachmentIDs } from "../../../../packages/conversation-domain/src/attachments";
+import { readableMentions, serializeMentions } from "./mention-text";
 
 // Markdown remains the persisted format. The prose field and file controls edit
 // separate parts of that value; callers must retain/submit the complete content.
@@ -19,15 +20,17 @@ export function splitAttachmentContent(content: string) {
   return { text, files };
 }
 export function attachmentText(content: string) {
-  return splitAttachmentContent(content).text;
+  return readableMentions(splitAttachmentContent(content).text);
 }
 export function readAttachmentContent(input: HTMLTextAreaElement) {
   const files = references.get(input) ?? [];
-  return files.length ? [input.value, ...files].filter(Boolean).join("\n\n") : input.value;
+  const text = serializeMentions(input.value, input);
+  return files.length ? [text, ...files].filter(Boolean).join("\n\n") : text;
 }
 export function restoreAttachmentContent(input: HTMLTextAreaElement, content: string) {
   const draft = splitAttachmentContent(content);
   references.set(input, draft.files);
-  if (input.value !== draft.text) input.value = draft.text;
+  const visible = readableMentions(draft.text, input);
+  if (input.value !== visible) input.value = visible;
   input.dispatchEvent(new Event("factory-attachment-content"));
 }

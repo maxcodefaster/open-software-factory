@@ -1,11 +1,11 @@
-import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { projectSetupView } from "../../packages/project-domain/src/setup";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { signIn } from "../support/factory-fixture";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { projectSetupView } from "../../packages/project-domain/src/setup";
+import { signIn } from "../support/factory-fixture";
 
 test("an unconfirmed project creation becomes ready without a second button click", async ({
   page,
@@ -70,6 +70,13 @@ test("an unconfirmed project creation becomes ready without a second button clic
   const setup = page.getByRole("region", { name: "Project setup", exact: true });
   await setup.getByLabel("Project name", { exact: true }).fill("Observed project");
   await setup.getByLabel("Repository name", { exact: true }).fill("observed-project");
+  // Browsers compile pattern attributes with the unicode-sets flag, where a bare hyphen in a class throws.
+  const pattern = await setup
+    .getByLabel("Repository name", { exact: true })
+    .getAttribute("pattern");
+  const repositoryName = new RegExp(`^(?:${pattern})$`, "v");
+  expect(repositoryName.test("observed-project")).toBe(true);
+  expect(repositoryName.test("Observed_Project")).toBe(false);
   await setup.getByRole("button", { name: "Create project", exact: true }).click();
   await expect(setup.getByRole("button", { name: "Check setup", exact: true })).toBeVisible();
   created = true;

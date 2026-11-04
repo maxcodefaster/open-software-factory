@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { CommandError } from "../../apps/factory/src/command-error";
 import type { RepositoryMirrorView } from "../../packages/project-domain/src/repository-mirror";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
@@ -118,6 +119,7 @@ for (const width of [1440, 390, 320]) {
     await region.getByRole("checkbox").check();
     await expect(add).toBeEnabled();
     await expect(add).toHaveCSS("opacity", "1");
+    await expect(region.getByText("Git only.", { exact: false })).toHaveCSS("font-size", "13px");
     if (width !== 320) {
       await page.screenshot({
         path: `${evidence}/credentials-${width}.png`,
@@ -179,6 +181,41 @@ for (const width of [1440, 390, 320]) {
     expect(writes).toBe(3);
   });
 }
+test("a refused mirror target is explained in the danger colour and keeps no token", async ({
+  page,
+}) => {
+  const projectID = "10000000-0000-4000-8000-000000000001";
+  await mockFactoryFunctions(page, {
+    access: {
+      authentication: async () => ({
+        fresh: true,
+        companySignIn: false,
+        email: "admin@fixture.test",
+      }),
+    },
+    repositoryMirrors: {
+      projects: async () => [{ id: projectID, name: "Invoice workspace" }],
+      get: async () => ({ projectID, mirrors: [], pending: null }),
+      create: async () => {
+        throw new CommandError("conflict", "Use an approved HTTPS Git URL without credentials.");
+      },
+    },
+  });
+  await page.goto(`${origin}/repository-mirrors.html`);
+  await chooseSettingsPage(page, "Repository mirrors", "Factory administration");
+  const region = page.getByRole("region", { name: "Repository mirrors", exact: true });
+  await region.getByLabel("Target Git URL", { exact: true }).fill("https://evil.example/x.git");
+  await region.getByLabel("Git username", { exact: true }).fill("git-user");
+  await region.getByLabel("Access token", { exact: true }).fill("fixture-only-secret");
+  await region.getByRole("checkbox").check();
+  await region.getByRole("button", { name: "Add mirror", exact: true }).click();
+  const alert = region.getByRole("alert");
+  await expect(alert).toHaveText("Use an approved HTTPS Git URL without credentials.");
+  await expect(alert).toHaveCSS("color", "rgb(148, 85, 77)");
+  await expect(region.getByLabel("Access token", { exact: true })).toHaveValue("");
+  await expect(page.locator("body")).not.toContainText("fixture-only-secret");
+});
+
 test("Project contributors do not receive Factory mirror administration", async ({ page }) => {
   await mockFactoryFunctions(page, {
     access: {

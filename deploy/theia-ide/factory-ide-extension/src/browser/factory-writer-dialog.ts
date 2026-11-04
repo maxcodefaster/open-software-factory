@@ -3,6 +3,7 @@ export class FactoryWriterDialog {
   readonly element = document.createElement("dialog");
   readonly copy = document.createElement("p");
   readonly action = document.createElement("button");
+  readonly #close = document.createElement("button");
 
   constructor(onAction: () => void) {
     this.element.className = "factory-writer-status";
@@ -14,11 +15,10 @@ export class FactoryWriterDialog {
     this.action.className = "theia-button";
     this.action.hidden = true;
     this.action.addEventListener("click", onAction);
-    const close = document.createElement("button");
+    const close = this.#close;
     close.type = "button";
     close.className = "theia-button secondary";
     close.textContent = "Close";
-    close.autofocus = true;
     close.addEventListener("click", () => this.close());
     const actions = document.createElement("div");
     actions.className = "factory-writer-actions";
@@ -38,7 +38,10 @@ export class FactoryWriterDialog {
   }
 
   open() {
-    if (!this.element.open) this.element.showModal();
+    if (this.element.open) return;
+    this.element.showModal();
+    // An autofocus attribute logs a cross-origin warning when the closed dialog is inserted.
+    this.#close.focus();
   }
 
   close() {

@@ -27,6 +27,8 @@ export type RuntimeAttemptView = {
   readyAt?: string | null;
   /** First moment Factory saw each declared App healthy since `readyAt`. */
   appReadyAt?: Record<string, string>;
+  /** The native record proves the paused Sandbox's Resume failed; the owner may start fresh. */
+  restoreFailed?: boolean;
 };
 
 export type RuntimeProcessView = {

@@ -207,6 +207,14 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   navigations.length = 0;
   await expect(usage.getByText("Partial estimate.", { exact: false })).toBeVisible();
   await expect(usage.getByText("Stale ·", { exact: false })).toBeVisible();
+  await expect(
+    usage.getByText("1 execution Sandbox · 500 millicores", { exact: false }),
+  ).toBeVisible();
+  await expect(usage.locator(".usage-observations .usage-label")).toHaveText("development");
+  await expect(usage.locator(".usage-observations .usage-label")).toHaveCSS(
+    "text-transform",
+    "capitalize",
+  );
   await usage.getByLabel("Monthly Coding allowance").fill("1");
   await usage.getByRole("button", { name: "Save limits", exact: true }).click();
   await expect(usage.getByRole("alert")).toBeVisible();
@@ -216,6 +224,9 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   expect(writes[1]).toEqual(writes[0]);
   await usage.getByText("Model usage", { exact: true }).click();
   await expect(usage.getByRole("cell").filter({ hasText: "exact-coding" })).toBeVisible();
+  const usageTable = usage.getByRole("region", { name: "Model usage table" });
+  await usageTable.focus();
+  await expect(usageTable).toBeFocused();
   expect(navigations).toEqual([]);
   await mkdir(".factory/test-results/usage-limits", { recursive: true });
   await page.screenshot({ path: ".factory/test-results/usage-limits/desktop.png" });

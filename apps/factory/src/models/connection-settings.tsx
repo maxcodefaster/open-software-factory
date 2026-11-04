@@ -316,6 +316,13 @@ export function ModelConnectionSettings(props: {
                     class="model-credential-form"
                     onSubmit={(event) => void saveConnection(event)}
                   >
+                    <Show when={connection()}>
+                      {(entry) => (
+                        <p class="model-settings-note">
+                          Replacing the key for {connectionLabel(entry())}.
+                        </p>
+                      )}
+                    </Show>
                     <div class="model-role">
                       <label for="connection-provider">Provider</label>
                       <select
@@ -344,7 +351,7 @@ export function ModelConnectionSettings(props: {
                         onInput={(event) => setKey(event.currentTarget.value)}
                       />
                     </div>
-                    <details>
+                    <details open={Boolean(connection()?.endpoint)}>
                       <summary>Custom endpoint, including Azure</summary>
                       <label for="connection-endpoint">Approved HTTPS endpoint</label>
                       <input

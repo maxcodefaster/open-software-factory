@@ -8,8 +8,6 @@ import type { useZero } from "../../../../packages/zero-solid/src";
 import type { Epic, Ticket } from "../api-contracts";
 import type { EpicEdit } from "../epic-controls";
 import type { createProjectPlanning } from "../projects/planning";
-import { registerProject } from "../server-functions/projects";
-import { serverCall } from "../server-functions/result";
 import { type PersonalTicketDraft, readPersonalTicketDraft } from "../ticket-draft-workspace";
 import type { createWorkspaceState } from "../workspace/state";
 import type { WorkspaceTab } from "../workspace-tabs";
@@ -24,7 +22,6 @@ interface ProjectCommandsDependencies {
   mutate: DesktopMutation;
   setSelectedProjectID: Setter<string | undefined>;
   setProjectMenuOpen: ReturnType<typeof createProjectPlanning>["setProjectMenuOpen"];
-  setRegistrationOpen: Setter<boolean>;
   zero: ReturnType<typeof useZero<FactoryZeroSchema, undefined, FactoryZeroContext>>;
   selectedProjectID: SourceAccessor<string | undefined>;
   commitZeroMutation: (operation: Promise<unknown>) => Promise<void>;
@@ -52,31 +49,6 @@ interface ProjectCommandsDependencies {
 }
 
 export function createProjectCommands(dependencies: ProjectCommandsDependencies) {
-  async function register(event: SubmitEvent) {
-    event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    const data = new FormData(form);
-    await dependencies.mutate(async () => {
-      const project = await serverCall(
-        registerProject({
-          data: [
-            {
-              name: String(data.get("name") ?? ""),
-              slug: String(data.get("slug") ?? ""),
-              repositoryUrl: String(data.get("repositoryUrl") ?? ""),
-              defaultBranch: String(data.get("defaultBranch") ?? ""),
-              devcontainerPath: String(data.get("devcontainerPath") ?? ""),
-            },
-          ],
-        }),
-      );
-      dependencies.setSelectedProjectID(project.id);
-      dependencies.setProjectMenuOpen(false);
-      dependencies.setRegistrationOpen(false);
-      form.reset();
-    });
-  }
-
   async function saveEpic(input: EpicEdit, current?: Epic) {
     const client = dependencies.zero();
     const projectId = dependencies.selectedProjectID();
@@ -219,7 +191,6 @@ export function createProjectCommands(dependencies: ProjectCommandsDependencies)
   }
 
   return {
-    register,
     saveEpic,
     assignTicketEpic,
     editDependency,

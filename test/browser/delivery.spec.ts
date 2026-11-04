@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { requestFunction } from "../fixtures/server-functions";
 import { teardownFactoryProject } from "../support/factory-fixture";
@@ -325,7 +325,7 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
   await previewButton.click();
   const previewSwitcher = page.getByRole("menu", { name: "Preview instances" });
   if (await previewSwitcher.isVisible({ timeout: 1_000 }).catch(() => false)) {
-    await previewSwitcher.getByRole("menuitem").filter({ hasText: "ready" }).last().click();
+    await previewSwitcher.getByRole("menuitem").filter({ hasText: "Running" }).last().click();
   } else if (!(await page.getByRole("region", { name: "preview workspace" }).isVisible())) {
     await previewButton.click();
   }

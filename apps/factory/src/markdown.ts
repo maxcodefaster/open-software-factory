@@ -13,6 +13,10 @@ function escapeHTML(value: string) {
 function createReader(codeControls = false) {
   return new Marked({
     gfm: true,
+    hooks: {
+      // Wide tables scroll sideways, so keyboard users must be able to focus and scroll them.
+      postprocess: (html) => html.replaceAll("<table>", '<table tabindex="0">'),
+    },
     renderer: {
       code({ text, lang }) {
         const language = lang?.split(/\s+/)[0] ?? "plaintext";
@@ -20,7 +24,7 @@ function createReader(codeControls = false) {
         const controls = codeControls
           ? `<span class="reader-code-controls"><span>${escapeHTML(language === "plaintext" ? "Plain text" : language)}</span><button type="button" class="copy-feedback" data-feedback="idle" aria-label="Copy code"><span class="feedback-mark" aria-hidden="true"></span><span class="copy-feedback-label" aria-hidden="true"><span class="copy-feedback-reserve">Copy</span><span data-copy-label>Copy</span></span></button></span>`
           : "";
-        return `<pre>${controls}<code class="language-${escapeHTML(language)}">${content}</code></pre>\n`;
+        return `<pre${codeControls ? "" : ' tabindex="0"'}>${controls}<code class="language-${escapeHTML(language)}">${content}</code></pre>\n`;
       },
       html({ text }) {
         return /^<br\s*\/?>$/i.test(text) ? "<br>" : escapeHTML(text);

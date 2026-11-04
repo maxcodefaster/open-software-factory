@@ -11,7 +11,7 @@ export const factoryTheme = {
       "editor.selectionBackground": "#ccd9d7",
       "editor.inactiveSelectionBackground": "#e0e6e0",
       "editorCursor.foreground": "#315d64",
-      "editorLineNumber.foreground": "#737c73",
+      "editorLineNumber.foreground": "#5d665d",
       "editorLineNumber.activeForeground": "#39403b",
       "sideBar.background": "#eef0eb",
       "sideBar.foreground": "#39403b",

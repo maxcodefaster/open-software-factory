@@ -323,6 +323,10 @@ Limits to know before relying on this:
 - **The Forgejo archive is taken from a running server.** The database part is a consistent SQL
   dump; repositories are copied while Forgejo runs. A push during the dump can leave a repository
   slightly newer than the database.
+- **Orphaned rows are backed up and flagged.** A bulk delete with triggers disabled can leave rows
+  whose parent row is gone. `pg_dump` writes them and `pg_restore` then cannot recreate their
+  foreign keys. The Job keeps the set, warns, and lists the constraints with their row counts in
+  `postgres.orphans`.
 - The claim is a copy in the same cluster. Use `backup.remote` for protection against losing it.
 
 To copy sets off the cluster, create a Secret with an `rclone.conf` key that defines one remote
@@ -373,24 +377,52 @@ Factory stops before becoming ready and says so. Data is untouched either way.
 
 ### Reach the files
 
-The claims are not exposed. Mount them in a throwaway Pod that you delete afterwards. This one runs
-as root so extracted files keep their owners, and reads the backup claim; add the other claims
-from the restore steps below only while their owning workload is scaled to zero.
+The claims are not exposed. Mount them in a throwaway Pod that you delete afterwards. It runs as
+root so extracted files keep their owners. Use the rclone image the backup Job already pulled
+(BusyBox `sh`, `tar` and `gzip`, plus `rclone`). Read its reference with
+`kubectl get statefulset <release>-backup-store -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+The Pod mounts every claim a restore replaces, so apply it only while Forgejo, OpenBao and Zero are
+scaled to zero. Its labels let it through the NetworkPolicy to Garage, the same way the backup Job
+gets through.
 
 ```yaml
 apiVersion: v1
 kind: Pod
-metadata: {name: restore-toolbox, namespace: factory}
+metadata:
+  name: restore-toolbox
+  namespace: factory
+  labels: {app.kubernetes.io/instance: factory, app.kubernetes.io/component: backup}
 spec:
   restartPolicy: Never
   containers:
     - name: tools
-      image: YOUR_FACTORY_IMAGE # has sh, tar, gzip and kubectl
+      image: RCLONE_IMAGE
       command: [sleep, "7200"]
+      env:
+        - {name: HOME, value: /tmp}
+        - {name: RCLONE_CONFIG_S3_TYPE, value: s3}
+        - {name: RCLONE_CONFIG_S3_PROVIDER, value: Other}
+        - {name: RCLONE_CONFIG_S3_ENDPOINT, value: "http://factory-objects.factory.svc:3900"}
+        - {name: RCLONE_CONFIG_S3_REGION, value: garage}
+        - {name: RCLONE_CONFIG_S3_FORCE_PATH_STYLE, value: "true"}
+        - name: RCLONE_CONFIG_S3_ACCESS_KEY_ID
+          valueFrom: {secretKeyRef: {name: factory-objects, key: access-key-id}}
+        - name: RCLONE_CONFIG_S3_SECRET_ACCESS_KEY
+          valueFrom: {secretKeyRef: {name: factory-objects, key: secret-access-key}}
       volumeMounts:
         - {name: backup, mountPath: /backup, readOnly: true}
+        - {name: forgejo-data, mountPath: /var/lib/gitea}
+        - {name: forgejo-config, mountPath: /etc/gitea}
+        - {name: openbao-data, mountPath: /bao/data}
+        - {name: zero-data, mountPath: /zero}
+        - {name: state, mountPath: /var/lib/factory}
   volumes:
     - {name: backup, persistentVolumeClaim: {claimName: store-factory-backup-store-0, readOnly: true}}
+    - {name: forgejo-data, persistentVolumeClaim: {claimName: data-factory-forgejo-0}}
+    - {name: forgejo-config, persistentVolumeClaim: {claimName: config-factory-forgejo-0}}
+    - {name: openbao-data, persistentVolumeClaim: {claimName: data-factory-openbao-0}}
+    - {name: zero-data, persistentVolumeClaim: {claimName: data-factory-zero-0}}
+    - {name: state, persistentVolumeClaim: {claimName: factory-state}}
 ```
 
 ### Check a backup
@@ -407,7 +439,62 @@ mise exec -- bun scripts/kubernetes/restore-check.ts ./set
 
 A pass proves the dump and both archives are readable and the snapshot has a gzip header, a
 plausible size, `meta.json`, `state.bin` and `SHA256SUMS`, with both files matching their sums. It
-does not prove a full restore, so rehearse one in a scratch Namespace on your own schedule.
+does not prove a restore. The rehearsal below does.
+
+### Rehearse a restore
+
+```sh
+mise exec -- bun run restore:rehearsal --namespace factory --release factory [--context NAME]
+```
+
+The script needs `kubectl`, `helm`, `sqlite3` and a `pg_restore` of major version 16 (or Docker, which
+it wraps), and a cluster user who may create Namespaces, ValidatingAdmissionPolicies and a Helm
+release. It reads the live installation and changes it only by running one backup Job (and deleting
+that Job again) when the newest complete set is older than `--max-age-minutes` (default 60; `0`
+always takes a fresh one). Then it:
+
+1. checks the live database for rows without a parent row, copies the set to a temporary directory
+   and runs `restore-check`;
+2. installs the chart from this checkout into a new Namespace `factory-restore-rehearsal-<8 hex>`,
+   labelled `factory.dev/rehearsal-owner=<id>`, with the live release's values and image, backups
+   off, small scheduling requests and copies of the credentials, object-store and registry-CA
+   Secrets (never printed);
+3. runs the Restore steps below, scaling the owning workloads to zero, and starts Factory;
+4. compares the two installations: every table's row count and a checksum of every row of the key
+   tables (users, Projects, Epics, Changes, requirement documents, wiki pages and revisions, model and
+   MCP connections, attachment metadata), the Forgejo repositories with their refs, head commits and
+   users, the object listing, every OpenBao secret path the database names (read as Factory's own
+   AppRole, compared by digest), Factory's log, `/health/ready` and the administrator's sign-in;
+5. writes `.factory/test-results/restore-rehearsal/<timestamp>.json` with the counts and durations,
+   then deletes that exact Namespace, its policies and volumes. `--keep` skips the deletion, and
+   `--cleanup factory-restore-rehearsal-<id>` removes an interrupted run after checking the label.
+
+The scratch installation starts no Sandbox and cannot touch the live one. The restored database names
+the live Factorybox worker, and Factory's ServiceAccount is cluster-wide, so the script installs two
+admission policies for the run. One holds Factory and Zero Pods back until the data is restored. The
+other denies every write by the scratch ServiceAccount outside its own Namespace and the storage
+check Factory creates at start. The script proves both work before it relies on them, and after the
+run it checks that no Sandbox, worker or editor Pod or claim of the live installation changed.
+
+A rehearsal in another Namespace differs from a real restore in what the move forces:
+
+- the Helm release name and origins stay as they are, because the database records the origins;
+- the OpenBao TLS Secret is generated again, since its certificate names the Namespace;
+- the restored `kubernetes-installation.json` is rewritten to the new Namespace, which Factory
+  otherwise refuses as a changed installation identity;
+- Service addresses in `forge_connection.discovery_url`, `project.repository_url`,
+  `wiki_source_update.target_url` and the Forgejo SQL dump contain the Namespace and are rewritten.
+  The receipt compares the Factory tables before this rewrite.
+
+A source database that already violates its foreign keys, for example after a bulk delete with
+triggers disabled, cannot restore cleanly: `pg_restore` exits non-zero when it recreates those keys.
+The script reports the orphaned rows before it backs anything up and stops. `--allow-orphans`
+accepts that source if the restore fails on exactly those constraints and on nothing else. Repair the
+rows instead when you can.
+
+Compare against a live installation that is idle. The script runs the key-table checksums before and
+after its own backup and refuses to continue if they moved. Tables that changed during the backup
+(sessions, read versions) are left out of the all-table comparison.
 
 ### Restore
 
@@ -416,8 +503,10 @@ delete a retained claim to start clean; where a step empties a claim, that claim
 new installation and holds nothing yet.
 
 1. Install the chart with the same release name, Namespace, origins and storage class, using the
-   Secrets you backed up (`existingSecrets.*`). Factory refuses a changed installation identity.
-   Then scale Factory, Zero, OpenBao and Forgejo to zero. Leave PostgreSQL and Garage running.
+   Secrets you backed up (`existingSecrets.*`). Factory refuses a changed installation identity, and
+   the database records in-cluster addresses that contain the Namespace. Scale Factory and Zero to
+   zero before they run, then Forgejo and OpenBao. Leave PostgreSQL and Garage running. A Factory
+   that starts first creates its own OpenBao and Forgejo tokens, which steps 3 and 4 replace.
 2. PostgreSQL. Recreate the database and restore the dump over standard input:
 
    ```sh
@@ -426,58 +515,62 @@ new installation and holds nothing yet.
    kubectl exec -i <release>-postgres-0 -- pg_restore --no-owner -U factory -d factory < postgres.dump
    ```
 
-3. Forgejo. On your workstation, unpack `forgejo.tar.gz` into `./restore`, delete
-   `restore/data/data/forgejo.db*`, and rebuild the database with
-   `sqlite3 restore/data/data/forgejo.db < restore/forgejo-db.sql`. The archive's raw copy of the
-   database was taken while Forgejo ran, so use the SQL dump. Mount `data-<release>-forgejo-0` at
-   `/var/lib/gitea` and `config-<release>-forgejo-0` at `/etc/gitea` in the toolbox, then:
+   `pg_restore` must exit 0. A foreign key error means the source database held orphaned rows.
+3. Files. On your workstation, rebuild Forgejo's SQLite database from its SQL dump. The archive's raw
+   copy was taken while Forgejo ran, so never use it. Start the toolbox from the previous section,
+   then:
 
    ```sh
-   tar -C restore -cf - data | kubectl exec -i restore-toolbox -- tar -xf - -C /var/lib/gitea --strip-components=1
-   tar -C restore -cf - repos | kubectl exec -i restore-toolbox -- sh -c \
-     'mkdir -p /var/lib/gitea/git/repositories && tar -xf - -C /var/lib/gitea/git/repositories --strip-components=1'
-   tar -C restore -cf - app.ini | kubectl exec -i restore-toolbox -- tar -xf - -C /etc/gitea
+   kubectl exec restore-toolbox -- tar -xzOf /backup/<timestamp>/forgejo.tar.gz forgejo-db.sql | sqlite3 forgejo.db
+   kubectl exec restore-toolbox -- sh -ec '
+     S=/backup/<timestamp>
+     find /var/lib/gitea /etc/gitea /zero /bao/data /var/lib/factory -mindepth 1 -delete
+     tar -xzf $S/forgejo.tar.gz -C /var/lib/gitea --strip-components=1 \
+       --exclude "repos*" --exclude app.ini --exclude forgejo-db.sql --exclude "data/data/forgejo.db*"
+     mkdir -p /var/lib/gitea/git/repositories
+     tar -xzf $S/forgejo.tar.gz -C /var/lib/gitea/git/repositories --strip-components=1 \
+       --exclude "data*" --exclude app.ini --exclude forgejo-db.sql
+     tar -xzf $S/forgejo.tar.gz -C /etc/gitea app.ini
+     tar -xzf $S/state.tar.gz -C /var/lib/factory
+     rclone sync /backup/objects s3:factory --create-empty-src-dirs'
+   kubectl exec -i restore-toolbox -- sh -c 'cat > /var/lib/gitea/data/forgejo.db' < forgejo.db
    kubectl exec restore-toolbox -- chown -R 1000:1000 /var/lib/gitea /etc/gitea
    ```
 
-   `app.ini` holds the secret key that encrypts stored credentials, so the original must come back.
-4. Objects. Port-forward `<release>-objects` and run
-   `rclone sync ./objects :s3:factory` with the `access-key-id` and `secret-access-key` from the
-   objects Secret (`--s3-endpoint http://127.0.0.1:3900 --s3-region garage --s3-force-path-style`).
-   Earlier versions of replaced objects are in `objects-changed/<timestamp>/`.
-5. Planning cache. Zero's claim (`data-<release>-zero-0`) is a replica of PostgreSQL. Empty it in the
-   toolbox so Zero rebuilds it from the restored database.
-6. OpenBao. Its snapshot only restores onto the key it was taken with. Mount
-   `data-<release>-openbao-0` at `/bao/data` and empty it. Scale OpenBao to one. It starts
-   uninitialized and its readiness probe stays failing until the original TLS Secret is in place;
-   exec still works. Copy `openbao.snap` into the Pod, then run the steps inside it:
+   The `find` empties the claims of a new installation: Forgejo's data and configuration, Zero's
+   replica (it rebuilds from the restored database), OpenBao's data and the Factory state. BusyBox
+   `tar` cannot select a directory and matches `--exclude` against the whole member name, so each
+   extraction excludes the other parts of the archive. `app.ini` holds the secret key that encrypts
+   stored credentials, so the original must come back. `state.tar.gz` is extracted as root so tar
+   restores the original owners (uid 1000). Earlier versions of replaced objects are in
+   `objects-changed/<timestamp>/`.
+4. OpenBao. Its snapshot only restores onto the key it was taken with. Read the original key first:
+   `kubectl exec restore-toolbox -- tar -xzOf /backup/<timestamp>/state.tar.gz ./openbao/bootstrap.json`
+   holds it as `keys_base64`. Then delete the toolbox, scale OpenBao to one and copy the snapshot in.
+   OpenBao starts uninitialized and its readiness probe stays failing until the original TLS Secret is
+   in place; exec still works.
 
    ```sh
-   kubectl cp openbao.snap <release>-openbao-0:/tmp/openbao.snap -c openbao
+   kubectl delete pod restore-toolbox
+   kubectl scale statefulset <release>-openbao --replicas=1
+   kubectl exec -i <release>-openbao-0 -c openbao -- sh -c 'cat > /tmp/openbao.snap' < openbao.snap
    kubectl exec <release>-openbao-0 -c openbao -- sh -c '
      export BAO_ADDR=https://127.0.0.1:8200 BAO_CACERT=/bao/tls/ca.crt
-     bao operator init -key-shares=1 -key-threshold=1 -format=json > /tmp/init.json'
+     bao operator init -key-shares=1 -key-threshold=1 -format=json'
    ```
 
-   Read `unseal_keys_b64[0]` and `root_token` from `/tmp/init.json`, unseal with that temporary key
+   Read `unseal_keys_b64[0]` and `root_token` from that output. Unseal with that temporary key
    (`bao operator unseal <key>`; the CLI refuses piped input), then restore with
    `BAO_TOKEN=<root_token> bao operator raft snapshot restore -force /tmp/openbao.snap`. OpenBao
-   reseals and the temporary key and root token stop working. Unseal it with the original key, the
-   `keys_base64` value in `openbao/bootstrap.json` inside `state.tar.gz`, then
-   `rm /tmp/init.json /tmp/openbao.snap`. Without `openbao.snap`, Factory cannot decrypt the secrets
-   it stored. Restoring the state claim in the next step gives Factory the matching AppRole logins,
-   so it signs in to the restored OpenBao on start.
-7. Factory state. Mount `<release>-state` at `/var/lib/factory`, empty it, extract `state.tar.gz`
-   into it as root so tar restores the original owners (uid 1000).
-8. Scale Zero, Forgejo and Factory back to one and wait for readiness. Startup runs the migrator,
-   which refuses a database newer than the image, so restore with an image at least as new as the
-   backup.
+   reseals and the temporary key and root token stop working. Unseal it with the original key, then
+   `rm /tmp/openbao.snap`. Without `openbao.snap`, Factory cannot decrypt the secrets it stored. The
+   restored state claim gives Factory the matching AppRole logins, so it signs in to the restored
+   OpenBao on start.
+5. Scale Forgejo, Zero and Factory to one and wait for readiness. Startup runs the migrator, which
+   refuses a database newer than the image, so restore with an image at least as new as the backup.
 
-The PostgreSQL, Forgejo and OpenBao parts of these steps were exercised with the pinned images.
-The OpenBao part ran in a scratch Namespace: a snapshot taken by the backup Job's script was restored
-onto a fresh OpenBao, and Factory's bootstrap then signed in with the original state and read a
-secret written before the snapshot. The Zero reset and the full ordering have not been rehearsed
-end to end.
+`restore:rehearsal` runs exactly these steps against a scratch Namespace and compares the result, so
+run it after any change to the backup or restore procedure and on a schedule you trust.
 
 ## Maintenance and upgrades
 

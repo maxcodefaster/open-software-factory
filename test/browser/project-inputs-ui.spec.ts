@@ -163,6 +163,11 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     await page.goto(`${origin}/project-inputs.html`);
     await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
     await expect(inputs.getByText("Give external requests a place to land")).toBeVisible();
+    // The page title comes first; Automatic Ticket Delivery is a section under it.
+    await expect(inputs.getByRole("heading").first()).toHaveText("Inputs");
+    await expect(
+      inputs.getByRole("heading", { name: "Automatic Ticket Delivery", level: 2 }),
+    ).toBeVisible();
     await expect(navigation.locator("h3")).toHaveText(["Project · Invoice workspace"]);
     await expect(
       navigation.getByRole("combobox", { name: "Settings scope" }).locator("option"),

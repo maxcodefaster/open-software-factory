@@ -102,6 +102,16 @@
   font-size: var(--text-sm);
   cursor: pointer;
 }
+.usage-label {
+  text-transform: capitalize;
+}
+@media (pointer: coarse) {
+  .usage-breakdown summary {
+    box-sizing: border-box;
+    min-height: 44px;
+    padding-block: var(--space-3);
+  }
+}
 .usage-price-models,
 .usage-price-actions {
   display: flex;
@@ -127,6 +137,13 @@
 }
 .usage-table th {
   font-weight: var(--weight-medium);
+}
+.usage-table td:first-child {
+  white-space: nowrap;
+}
+.usage-table:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 .usage-table small {
   display: block;

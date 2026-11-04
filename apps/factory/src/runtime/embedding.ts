@@ -44,6 +44,14 @@ export function scopeRuntimeEmbedding(
         : `${policy}; ${ancestors}`
       : ancestors,
   );
+  // A report-only policy cannot block, but a conflicting frame-ancestors directive
+  // still logs a violation and sends a report for every legitimate Factory embedding.
+  const reportOnly = headers.get("content-security-policy-report-only");
+  if (reportOnly && new RegExp(directive).test(reportOnly))
+    headers.set(
+      "content-security-policy-report-only",
+      reportOnly.replace(new RegExp(directive), `$1 ${ancestors}`),
+    );
   // Factory is the authorized embedding shell. Keep App script/style policies, but
   // replace conflicting ancestor restrictions with this exact configured origin.
   headers.delete("x-frame-options");

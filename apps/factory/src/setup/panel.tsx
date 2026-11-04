@@ -390,7 +390,7 @@ export function ProjectSetupPanel(props: {
                   <input
                     disabled={props.setup.pending()}
                     required
-                    pattern="[a-z][a-z0-9-]{1,62}"
+                    pattern="[a-z](?:[a-z0-9]|-){1,62}"
                     value={fields().slug}
                     onInput={(event) => update({ slug: event.currentTarget.value })}
                   />
