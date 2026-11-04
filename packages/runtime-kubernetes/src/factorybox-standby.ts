@@ -6,7 +6,7 @@ const state = z.object({
     .object({
       id: z.string(),
       runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
-      phase: z.enum(["running", "paused"]),
+      phase: z.enum(["running", "paused", "pausing", "resuming"]),
       start: z
         .object({ completed_at: z.string().min(1).optional() })
         .passthrough()
@@ -32,6 +32,17 @@ interface StandbyCommands {
   state(): Promise<unknown>;
   intend(action: "pause" | "resume"): Promise<boolean>;
   execute(operation: FactoryboxOperation): Promise<unknown>;
+}
+
+export function readFactoryboxStandbyResult(
+  action: "pause" | "resume",
+  result: { confirmed: boolean; stdout: string; stderr: string },
+): unknown {
+  if (!result.confirmed) {
+    const cause = result.stderr.trim().slice(-2000);
+    throw new Error(`Standby ${action} outcome is unconfirmed${cause ? `: ${cause}` : ""}`);
+  }
+  return JSON.parse(result.stdout);
 }
 
 export function readFactoryboxStandbyState(sandboxID: string, value: unknown) {
@@ -72,6 +83,10 @@ export async function settleFactoryboxStandby(
   const expected = action === "pause" ? "paused" : "running";
   const before = read(await commands.state());
   if (before.record.phase === expected) return completed(before);
+  if (before.record.phase === "pausing" || before.record.phase === "resuming")
+    throw new Error(
+      `Standby original native ${before.record.phase} outcome remains unconfirmed; observe without replay`,
+    );
   if (action === "resume") {
     const pause = before.record.pause;
     if (pause?.snapshot_id !== snapshotID || !pause.completed_at)

@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybox-standby";
+import {
+  readFactoryboxStandbyResult,
+  readFactoryboxStandbyState,
+  settleFactoryboxStandby,
+} from "./factorybox-standby";
 
 const sandboxID = `runtime-${"a".repeat(32)}`;
 const snapshotID = "b".repeat(32);
@@ -19,6 +23,59 @@ function observation(phase: "running" | "paused", resumed = false) {
     },
     ...(phase === "running" ? { runtime: { status: "running" } } : {}),
   };
+}
+
+test("standby failures retain the bounded native cause without parsing unconfirmed output", () => {
+  const cause = "captured original source did not stop: guard source pidfd is exited or invalid";
+  for (const action of ["pause", "resume"] as const) {
+    expect(() =>
+      readFactoryboxStandbyResult(action, {
+        confirmed: false,
+        stdout: "not a confirmed native result",
+        stderr: `${"x".repeat(4000)}\n${cause}`,
+      }),
+    ).toThrow(
+      `Standby ${action} outcome is unconfirmed: ${"x".repeat(1999 - cause.length)}\n${cause}`,
+    );
+    expect(() =>
+      readFactoryboxStandbyResult(action, { confirmed: false, stdout: "", stderr: "" }),
+    ).toThrow(`Standby ${action} outcome is unconfirmed`);
+  }
+  const native = observation("paused");
+  expect(
+    readFactoryboxStandbyResult("pause", {
+      confirmed: true,
+      stderr: "",
+      stdout: JSON.stringify(native),
+    }),
+  ).toEqual(native);
+});
+
+for (const phase of ["pausing", "resuming"] as const) {
+  test(`an original native ${phase} transition remains observable without another command`, async () => {
+    const native = {
+      ...observation(phase === "pausing" ? "paused" : "running"),
+      record: { ...observation("paused").record, phase },
+    };
+    expect(readFactoryboxStandbyState(sandboxID, native).record.phase).toBe(phase);
+    let intended = 0,
+      executed = 0;
+    await expect(
+      settleFactoryboxStandby(sandboxID, snapshotID, phase === "pausing" ? "pause" : "resume", {
+        state: async () => native,
+        intend: async () => {
+          intended++;
+          return true;
+        },
+        execute: async () => {
+          executed++;
+          return observation("paused");
+        },
+      }),
+    ).rejects.toThrow(`Standby original native ${phase} outcome remains unconfirmed`);
+    expect(intended).toBe(0);
+    expect(executed).toBe(0);
+  });
 }
 
 test("a confirmed exited preparation process is distinct from an unknown or paused Sandbox", () => {

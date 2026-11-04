@@ -28,7 +28,11 @@ import {
   releaseFactoryboxRuntime,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
-import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybox-standby";
+import {
+  readFactoryboxStandbyResult,
+  readFactoryboxStandbyState,
+  settleFactoryboxStandby,
+} from "./factorybox-standby";
 import {
   executeFactoryboxOperation,
   type FactoryboxWorkerIdentity,
@@ -405,8 +409,7 @@ async function standby(
         runFactoryboxKubernetes,
         factoryboxRuntimeDeclaration(input),
       );
-      if (!result.confirmed) throw new Error(`Standby ${action} outcome is unconfirmed`);
-      return JSON.parse(result.stdout);
+      return readFactoryboxStandbyResult(action, result);
     },
   });
 }
@@ -860,7 +863,7 @@ export function createReserveClient(
       if (!slot.factoryboxStartAttempted && !options.startAllowed)
         return { ...observed, ready: false };
       const state = await reserveState(input, identity);
-      if (state.record.phase === "paused") {
+      if (state.record.phase !== "running") {
         const paused = await standby(slot, input, identity, "pause", options);
         return {
           ...observed,
