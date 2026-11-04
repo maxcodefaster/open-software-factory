@@ -1,12 +1,12 @@
-import { z } from "zod";
 import { createHash } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { z } from "zod";
 import { usageRate } from "../../../../packages/conversation-domain/src/usage";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { requireActiveAccountIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { lockUsageIn } from "./policy";
 import { usageCatalogue } from "./rates";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 
 export const contractRateCommand = z
   .object({

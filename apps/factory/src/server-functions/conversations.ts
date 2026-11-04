@@ -9,6 +9,7 @@ import {
 import { confirmEpicProposalInput } from "../../../../packages/conversation-domain/src/epic-proposal";
 import { conversationReadInput } from "../project-agent/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getConversation = createServerFn({ method: "POST", strict: { output: false } })
   .validator((args: [projectID: string, input?: z.input<typeof conversationReadInput>]) => args)
@@ -86,3 +87,5 @@ export const confirmEpicProposal = createServerFn({ method: "POST" })
       return context.conversations.confirmEpic(context.actorID, id, entry, command);
     });
   });
+
+registerSharedReads(getConversation);

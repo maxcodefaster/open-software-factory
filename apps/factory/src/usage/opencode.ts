@@ -1,8 +1,8 @@
-import { z } from "zod";
 import type { SessionLogOutput } from "@opencode/client";
+import { z } from "zod";
 import {
-  unknownCounters,
   type UsageCounters,
+  unknownCounters,
 } from "../../../../packages/conversation-domain/src/usage";
 import type { UsageEntry } from "./journal";
 

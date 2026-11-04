@@ -1,6 +1,7 @@
 import { type ActivityNavigation, activityNavigation } from "./activity-navigation";
 import { buildCompletionText } from "./build-completion";
 import { bounded, readableError } from "./native-errors";
+
 type ActivityStatus = "pending" | "streaming" | "running" | "completed" | "error";
 
 function activityStatus(value: string): ActivityStatus | undefined {

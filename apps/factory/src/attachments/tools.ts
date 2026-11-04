@@ -1,13 +1,13 @@
 import {
+  attachmentIDs,
   attachmentToolCallInput,
   attachmentToolCatalogue,
-  attachmentIDs,
 } from "../../../../packages/conversation-domain/src/attachments";
 import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { createAttachmentStore, readableAttachmentIn, attachmentContextIn } from "./store";
+import { attachmentContextIn, createAttachmentStore, readableAttachmentIn } from "./store";
 
 export function createAttachmentTools(
   database: ReturnType<typeof createDatabase>,

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show, onCleanup } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { Ticket } from "./api-contracts";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";

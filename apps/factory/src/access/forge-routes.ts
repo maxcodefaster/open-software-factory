@@ -1,9 +1,9 @@
-import { reportFailure } from "../failure-log";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import type { createIdentityConfiguration } from "./identity-configuration";
-import { createAccessController } from "./controller";
+import { reportFailure } from "../failure-log";
 import { json } from "../http";
+import { createAccessController } from "./controller";
+import type { createIdentityConfiguration } from "./identity-configuration";
 
 export function createForgeIdentityRoutes(options: {
   database: ReturnType<typeof createDatabase>;

@@ -1,5 +1,5 @@
-import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
 import type { LibraryCover } from "../../../../packages/conversation-domain/src/library-covers";
+import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
 import { libraryCoverURL } from "../library-covers/catalog";
 
 const covers: Readonly<Record<string, string>> = {

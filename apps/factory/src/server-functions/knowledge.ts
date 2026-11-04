@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getKnowledgeGeneration = createServerFn({ method: "POST" })
   .validator((args: [projectID: string]) => args)
@@ -103,3 +104,12 @@ export const getRepositoryDocument = createServerFn({ method: "POST" })
       return context.knowledge.document(context.actorID, id, value);
     });
   });
+
+registerSharedReads(
+  getKnowledgeGeneration,
+  getKnowledgeSources,
+  getKnowledgeHistory,
+  searchKnowledge,
+  getRepositoryDocuments,
+  getRepositoryDocument,
+);

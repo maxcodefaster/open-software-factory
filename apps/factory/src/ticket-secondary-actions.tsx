@@ -1,10 +1,10 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
 import { Portal } from "@solidjs/web";
+import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Epic } from "./api-contracts";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
-import type { TicketDependenciesProps } from "./ticket-dependencies";
 import type { TicketHeaderAction } from "./ticket-action-bar";
+import type { TicketDependenciesProps } from "./ticket-dependencies";
 
 type ActionView = "actions" | "epic" | "dependency" | "diagnostics";
 

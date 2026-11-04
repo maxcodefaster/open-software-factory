@@ -1,7 +1,6 @@
+import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-
-import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
 
 // Call after acquiring the dependent Ticket lock and checking Project access.
 export async function requireDeliveredPrerequisites(

@@ -25,4 +25,5 @@ self.onmessage = async (event: MessageEvent<{ source: string }>) => {
     self.postMessage({ error: "The diagram could not be rendered." });
   }
 };
+
 export {};

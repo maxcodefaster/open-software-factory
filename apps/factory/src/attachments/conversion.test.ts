@@ -6,9 +6,9 @@ import {
   attachmentPDF,
   scannedAttachmentPDF,
 } from "../../../../test/fixtures/attachment-files";
+import { fixtureValue } from "../../../../test/fixtures/value";
 import { convertAttachment, validateAttachmentType } from "./conversion";
 import { processAttachment } from "./process";
-import { fixtureValue } from "../../../../test/fixtures/value";
 
 test("attachment conversion retains digital PDF text and actual page pixels", async () => {
   const result = await convertAttachment(attachmentPDF("Reference 7319"), "application/pdf");

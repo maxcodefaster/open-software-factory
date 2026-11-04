@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import {
-  browserMcpResult,
-  decodeBuildBrowserCall,
-  createBuildBrowserEndpoint,
-} from "./browser-endpoint";
 import { buildBrowserResultInput } from "../../../../packages/conversation-domain/src/browser-tools";
 import { verificationToolCatalogue } from "../../../../packages/conversation-domain/src/verification";
+import {
+  browserMcpResult,
+  createBuildBrowserEndpoint,
+  decodeBuildBrowserCall,
+} from "./browser-endpoint";
 
 test("the fixed MCP facade routes Verification reads with server-owned authority and rejects extra arguments", async () => {
   const turnID = crypto.randomUUID();

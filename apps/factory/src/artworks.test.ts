@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
+import { wallpaperBudget } from "../../../scripts/factory/optimize-art";
 import { desktopBackgrounds, orderedDesktopBackgrounds } from "./artworks";
 
 test("the selected background comes first without changing the catalog or remaining order", () => {
@@ -32,6 +33,7 @@ test("each curated Project background has bundled artwork, a thumbnail and theme
       const image = Bun.file(resolve(import.meta.dir, `../public/art/${background.key}${suffix}`));
       expect(await image.exists()).toBe(true);
       expect(image.size).toBeGreaterThan(1000);
+      if (suffix === ".jpg") expect(image.size).toBeLessThanOrEqual(wallpaperBudget);
     }
     expect(tokens).toContain(`[data-background="${background.key}"]`);
     expect(css).toContain(`/art/${background.key}-thumb.jpg`);

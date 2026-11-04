@@ -1,7 +1,7 @@
 import { parse } from "yaml";
 import { z } from "zod";
 import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
-import { skillImportInput, repositorySkillImportInput } from "./commands";
+import { repositorySkillImportInput, skillImportInput } from "./commands";
 
 export function previewSkillImport(value: unknown) {
   const input = skillImportInput.parse(value);

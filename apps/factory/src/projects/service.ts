@@ -1,4 +1,3 @@
-import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createRegisterProjectInput,
@@ -7,6 +6,7 @@ import {
 import { createAccessController, requireActiveAccountIn } from "../access/controller";
 import { projectSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import { factoryForgeSource } from "../knowledge/forge-source";
 
 type Database = ReturnType<typeof createDatabase>;

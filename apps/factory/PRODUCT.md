@@ -50,7 +50,10 @@ technical design has no empty placeholder. Responsibility and following share on
 An unavailable optional diagram keeps the technical design and safe diagram source visible,
 with an explicit status instead of a broken image. It does not repeat inference.
 Implement approves the exact product and technical revisions;
-edits to an unconfirmed proposal stay private until confirmation.
+edits to an unconfirmed proposal stay private until confirmation. Edits after approval save as a new
+revision and leave the approved requirements pinned. "Document updated since implementation"
+appears only when the saved wording differs from the approved document; writing the approved text
+back clears it.
 Reading and ordinary saving never start Planning. See
 [Ticket technical planning](../../docs/adr/0004-agents-and-conversations.md#ticket-owned-technical-planning-follows-confirmed-product-intent).
 
@@ -61,7 +64,9 @@ human implementation approval unless bounded Autofix was explicitly delegated.
 See [Project Inputs](../../docs/adr/0008-external-context-mcp-inputs-and-autofix.md#project-inputs-prepare-requirements-without-granting-execution-authority).
 
 Settings show one selected scope at a time: Project, Libraries, Personal or admin-only Factory
-administration. The scope chooser replaces a repeated list of all scopes.
+administration. The scope chooser replaces a repeated list of all scopes. Libraries holds Skills
+and MCP connections, Personal holds model overrides and login & security, and Project holds
+Environments, Inputs, Releases, Monitoring and, with the authority, Models and People & access.
 Repository mirrors in Factory administration configure native Forgejo push
 mirrors for a selected Project, with explicit target-overwrite consent, native attempt status,
 manual synchronization and removal that preserves the external repository. They copy pushed
@@ -78,6 +83,9 @@ proposal before confirming any source changes. Preparation status and
 explicit retries remain available without creating another Project or starting inference on read.
 Developers without management authority can read preparation status without configuration or retry controls.
 
+While the Wiki updates, its window names the recorded phase (queued, planning, writing or
+publishing a numbered guide), counts pages published so far and shows the viewer's elapsed time.
+This progress comes from saved generation state, starts no inference and leaves saved pages readable.
 Wiki topic plans receive a whole-Wiki coverage check before progressive publication, including
 proposed no-op updates. A short overview that defers useful source-supported guides is not their
 replacement. Page options → Update Project Wiki explicitly requests another source-grounded update,
@@ -172,12 +180,14 @@ Terminal panel does not create an unused shell that prevents idle Pause. Closing
 leaves an empty session list until New terminal is chosen; it does not start another session on reload.
 
 Opening a Workspace for editing automatically starts or resumes its compute, without commissioning
-Coding. The editor backend may warm while hidden, but selects a Workspace only when opened.
+Coding. For developers on a wide pointer-driven window, the editor backend may warm while hidden,
+but only after the page has loaded, gone idle and received a first interaction or four seconds more.
+Narrow and touch windows start it when the IDE is opened. It selects a Workspace only when opened.
 Opening in observation mode does not retain a deferred Start: a later editing grant or
 Coding Stop cannot wake compute without renewed editing use or deliberately reopening the Workspace.
 An observation-only IDE stays observation-only after Coding settles. Status refreshes do not take
 human editing authority or block submitted Verification; taking over editing remains an explicit action.
-Eligible Personal or unsubmitted Development compute pauses after five minutes without genuine use.
+Eligible Personal or unsubmitted Development compute pauses after fifteen minutes without genuine use (two minutes when no IDE, Terminal or App is attached).
 Submitted, settled Ticket compute instead stops after the same idle period, retaining its Source,
 native Sessions and submitted result while releasing private execution storage. This never repeats
 implementation; a later commissioned operation prepares fresh compute.
@@ -194,7 +204,9 @@ The IDE's Git tab shows personal-Workspace status and diffs, commits saved chang
 Fetch/Pull. Pull never resets or stashes work and stops on divergent history. Unsaved buffers block
 Commit and Pull. Ticket commits and Delivery remain in Factory's reviewed workflow.
 
-An unavailable Preview shows its recorded startup cause. A settled current Main Preview offers
+A starting Preview names its recorded stage: waiting for execution capacity, starting compute,
+waiting for the App on its port, then opening the document. After a delay it says the App has
+not answered yet and keeps waiting. An unavailable Preview shows its recorded startup cause. A settled current Main Preview offers
 one explicit Retry in that error view, preserving the previous attempt until the command confirms
 the recorded successor. Reading, reconnecting, historical previews and unconfirmed cleanup cannot
 commission another Start. Ticket compute remains controlled from its existing work context.
@@ -303,7 +315,9 @@ together; form actions stay with their fields. Labels, help, validation and pend
 remain distinguishable without relying on color alone.
 
 Controls have consistent hover, keyboard focus, disabled, pending and invalid states.
-Touch targets remain usable on phones, while desktop controls stay compact. A feature looks
+Touch targets remain usable on phones, while desktop controls stay compact. The dock's instance
+choosers keep their small look and answer a 44 px touch target where the window is 390 px or wider.
+Tab starts at a Skip to board control that moves past the header and dock to the first Ticket. A feature looks
 the same when opened alone or after another workspace. Shared changes are checked in the
 control fixture and the affected product flows; implementation and verification rules belong
 in [AGENTS.md](../../AGENTS.md).

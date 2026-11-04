@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createBuildBrowserEndpoint } from "../agent/browser-endpoint";
 import { attachmentToolCatalogue } from "../../../../packages/conversation-domain/src/attachments";
+import { createBuildBrowserEndpoint } from "../agent/browser-endpoint";
 
 test("native attachment calls strip MCP progress metadata without accepting extra authority arguments", async () => {
   const id = crypto.randomUUID();

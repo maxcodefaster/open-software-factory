@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getWorkspaceSource = createServerFn({ method: "POST" })
   .validator((args: [workspaceID: string]) => args)
@@ -85,3 +86,5 @@ export const stopDeveloperIDE = createServerFn({ method: "POST" })
       return context.workspaces.stopEditor(context.actorID);
     });
   });
+
+registerSharedReads(getWorkspaceSource, getDeveloperIDE);

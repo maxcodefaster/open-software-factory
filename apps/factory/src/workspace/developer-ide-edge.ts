@@ -1,16 +1,16 @@
 import type { ServerWebSocket } from "bun";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { boundedSourceBody } from "../../../../packages/runtime-kubernetes/src/workspace-source";
+import { CommandError } from "../command-error";
+import { developerIDEOrigin } from "../developer-ide-origin";
 import { json } from "../http";
+import { factoryRequestURL } from "../request-origin";
 import { scopeRuntimeEmbedding } from "../runtime/embedding";
 import { scopeTheiaConnectionCookie, theiaConnectionToken } from "../runtime/hub";
 import { createDeveloperIDEAccess, developerIDEPath } from "./developer-ide-access";
-import { developerIDEOrigin } from "../developer-ide-origin";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import type { createDeveloperIDERuntime } from "./developer-ide-runtime";
 import type { createWorkspaceSourceController } from "./source-controller";
-import { CommandError } from "../command-error";
-import { factoryRequestURL } from "../request-origin";
 
 export interface DeveloperEditorSocketData {
   readonly kind: "developer-editor";

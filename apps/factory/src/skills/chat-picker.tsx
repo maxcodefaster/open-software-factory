@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
-import { serverCall, type ServerValue } from "../server-functions/result";
+import { type ServerValue, serverCall } from "../server-functions/result";
 import { getSkillInvocations } from "../server-functions/skills";
 import { insertSkillInvocation, skillInvocationQuery } from "./chat-invocation";
 

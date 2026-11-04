@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  defaultLibraryCover,
+  libraryCoverInput,
+} from "../../../../packages/conversation-domain/src/library-covers";
+import {
+  type MCPAssignment,
+  type MCPChoice,
+  type MCPRole,
+  type MCPTool,
   mcpChoiceInput,
   mcpDefinition,
   mcpLibraryView,
@@ -9,19 +17,11 @@ import {
   mcpTool,
   resolveMCPChoice,
   validateMCPSelection,
-  type MCPAssignment,
-  type MCPChoice,
-  type MCPRole,
-  type MCPTool,
 } from "../../../../packages/conversation-domain/src/mcp-library";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import {
-  defaultLibraryCover,
-  libraryCoverInput,
-} from "../../../../packages/conversation-domain/src/library-covers";
 import {
   initializeLibraryCoverIn,
   libraryCoversIn,

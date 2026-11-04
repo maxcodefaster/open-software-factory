@@ -750,6 +750,40 @@ for (const touch of [false, true])
       if (touch) await page.setViewportSize({ width: 390, height: 900 });
       await wakeFactoryReads(page);
       const chooser = page.getByRole("button", { name: "Choose Preview instance", exact: true });
+      if (touch) {
+        // The chevron keeps its 24px look but answers a 44px-wide, 44px-tall touch target.
+        const box = await chooser.boundingBox();
+        if (!box) throw new Error("The Preview chooser has no box");
+        expect(box.width).toBe(24);
+        expect(box.height).toBeGreaterThanOrEqual(44);
+        const owners = await page.evaluate(({ x, y, height }) => {
+          const owner = (px: number, py: number) =>
+            document.elementFromPoint(px, py)?.closest("button")?.getAttribute("aria-label");
+          return {
+            inside: Array.from({ length: 44 }, (_, index) => owner(x + index, y + height / 2)),
+            top: owner(x + 12, y + 1),
+            bottom: owner(x + 12, y + height - 1),
+            beyond: owner(x + 45, y + height / 2),
+          };
+        }, box);
+        expect(new Set(owners.inside)).toEqual(new Set(["Choose Preview instance"]));
+        expect(owners.top).toBe("Choose Preview instance");
+        expect(owners.bottom).toBe("Choose Preview instance");
+        expect(owners.beyond).not.toBe("Choose Preview instance");
+        // Room for the target is reserved beside the group, never taken from a neighbour.
+        const neighbours = await page.evaluate(() =>
+          [...document.querySelectorAll(".workspace-dock button")].map((button) => {
+            const bounds = button.getBoundingClientRect();
+            return {
+              label: button.getAttribute("aria-label"),
+              left: bounds.left,
+              right: bounds.right,
+            };
+          }),
+        );
+        const after = neighbours.find((item) => item.left > box.x + 24);
+        expect(after && after.left >= box.x + 43.5).toBe(true);
+      }
       if (touch) await chooser.tap();
       else await chooser.click();
       const menu = page.getByRole("menu", { name: "Preview instances" });

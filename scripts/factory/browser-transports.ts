@@ -115,6 +115,13 @@ export function browserProtocolDecision(call: BrowserNetworkCall): string | unde
   )
     return "Better Auth SSO redirect and cookie protocol.";
   if (
+    file === "apps/factory/src/server-functions/shared-reads.ts" &&
+    operation === "fetch" &&
+    args[0] === "address" &&
+    args[1] === "init"
+  )
+    return "The Server Function transport itself: identical in-flight reads share one request.";
+  if (
     file === "apps/factory/src/review/media-client.ts" &&
     operation === "protocolRequest" &&
     args[1] === "`/api/changes/${changeID}/review/stills`"

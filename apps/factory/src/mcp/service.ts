@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
 import {
   mcpChoiceInput,
   mcpConnectInput,
@@ -9,7 +10,6 @@ import {
 import { CommandError } from "../command-error";
 import { mcpGrantInput, mcpSharingInput } from "./commands";
 import type { createMCPConnections } from "./connections";
-import { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
 
 function command<T>(input: unknown, schema: z.ZodType<T>): T {
   let serialized: string | undefined;

@@ -5,6 +5,7 @@ import type {
   monitoringSave,
 } from "../../../../packages/conversation-domain/src/monitoring";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getProjectInputs = createServerFn({ method: "POST" })
   .validator((args: [projectID: string]) => args)
@@ -51,3 +52,5 @@ export const rotateProjectInput = createServerFn({ method: "POST" })
       return context.inputs.rotate(context.actorID, project, identity, input);
     });
   });
+
+registerSharedReads(getProjectInputs);

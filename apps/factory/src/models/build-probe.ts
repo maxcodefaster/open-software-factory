@@ -5,15 +5,15 @@ import { model as openaiModel } from "@opencode/ai/providers/openai/responses";
 import { RequestExecutor } from "@opencode/ai/route";
 import { Effect, Layer, Schema } from "effect";
 import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
-import type { ResolvedModelConnection } from "./native";
-import { modelProbeFailure, reportedModelLimits } from "./probe";
-import type { MastraUsageSink } from "../usage/mastra";
+import {
+  type CodingReasoning,
+  codingReasoningInput,
+} from "../../../../packages/conversation-domain/src/model-settings";
 import { unknownCounters, usageCounters } from "../../../../packages/conversation-domain/src/usage";
 import { openCodeModelConfiguration } from "../../../../packages/runtime-kubernetes/src/opencode-model";
-import {
-  codingReasoningInput,
-  type CodingReasoning,
-} from "../../../../packages/conversation-domain/src/model-settings";
+import type { MastraUsageSink } from "../usage/mastra";
+import type { ResolvedModelConnection } from "./native";
+import { modelProbeFailure, reportedModelLimits } from "./probe";
 
 // The exact native provider modules used by OpenCode 2, without starting compute
 // or copying the provider protocol. One inference, no retries and no fallback.

@@ -9,6 +9,7 @@ import type {
 } from "../../../../packages/conversation-domain/src/mcp-library";
 import type { mcpGrantInput, mcpSharingInput } from "../mcp/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getMCPLibrary = createServerFn({
   method: "POST",
@@ -108,3 +109,5 @@ export const disconnectMCP = createServerFn({ method: "POST" })
       return context.mcp.disconnect(context.actorID, identity);
     });
   });
+
+registerSharedReads(getMCPLibrary);

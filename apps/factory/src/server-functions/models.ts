@@ -10,6 +10,7 @@ import {
 } from "../../../../packages/conversation-domain/src/model-inheritance";
 import { modelDefaultsInput } from "../../../../packages/conversation-domain/src/model-settings";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getModelSettings = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
@@ -133,3 +134,5 @@ export const selectModelRole = createServerFn({ method: "POST" })
       return context.models.selectRole(context.actorID, command, context.signal);
     });
   });
+
+registerSharedReads(getModelSettings, getProjectModels, getModelConnections, getModelConnection);

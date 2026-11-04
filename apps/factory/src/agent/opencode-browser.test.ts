@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createOpenCodeClient } from "./opencode-client";
 import { connectOpenCodeBrowser } from "./opencode-browser";
+import { createOpenCodeClient } from "./opencode-client";
 
 test("native browser admission lets the pinned tool update propagate before its fresh readiness read", async () => {
   const calls: Array<{ method: string; path: string; at: number }> = [];

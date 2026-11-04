@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { InboxItem } from "./contracts";
-import { inboxSectionItems, nextInboxQueueItem, type InboxQueue } from "./navigation";
+import { type InboxQueue, inboxSectionItems, nextInboxQueueItem } from "./navigation";
 
 const item = (id: string, values: Partial<InboxItem> = {}): InboxItem => ({
   id,

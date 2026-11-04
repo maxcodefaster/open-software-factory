@@ -1,11 +1,12 @@
-import { createCanvas, loadImage, DOMMatrix, ImageData, Path2D } from "@napi-rs/canvas";
+import { fileURLToPath } from "node:url";
+import { createCanvas, DOMMatrix, ImageData, loadImage, Path2D } from "@napi-rs/canvas";
 import { unzipSync } from "fflate";
 import mammoth from "mammoth";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
-import { fileURLToPath } from "node:url";
 
 import type { ConvertedAttachment } from "./conversion-result";
+
 const maximumDerivedBytes = 100 * 1024 * 1024;
 const maximumTextBytes = 1024 * 1024;
 

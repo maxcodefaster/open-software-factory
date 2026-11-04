@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { brotliCompressSync, brotliDecompressSync, gunzipSync, gzipSync } from "node:zlib";
-import { createStaticAssets } from "./static-assets";
 import { fixtureValue } from "../../../test/fixtures/value";
+import { createStaticAssets } from "./static-assets";
 
 test("built public assets negotiate compression and immutable caching without caching the shell", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "factory-static-"));

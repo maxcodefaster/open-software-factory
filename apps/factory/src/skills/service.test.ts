@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { createSkillService } from "./service";
-import type { createSkillController } from "./controller";
 import { CommandError } from "../command-error";
+import type { createSkillController } from "./controller";
+import { createSkillService } from "./service";
 
 test("Skill library serializes validated DTOs rather than PostgreSQL row metadata", async () => {
   const proposals = Object.assign([], { count: 0, command: "SELECT", statement: "private SQL" });

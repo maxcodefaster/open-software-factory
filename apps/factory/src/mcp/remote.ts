@@ -1,10 +1,10 @@
 import {
   Client,
-  StreamableHTTPClientTransport,
   type FetchLike,
   type OAuthClientProvider,
+  StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
-import { mcpTool, type MCPTool } from "../../../../packages/conversation-domain/src/mcp-library";
+import { type MCPTool, mcpTool } from "../../../../packages/conversation-domain/src/mcp-library";
 import { mcpDigest } from "./controller";
 import { secureMCPFetch } from "./network";
 

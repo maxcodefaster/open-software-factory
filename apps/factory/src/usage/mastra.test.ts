@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createMastraUsage, mastraCounters } from "./mastra";
 import type { UsageEntry } from "./journal";
+import { createMastraUsage, mastraCounters } from "./mastra";
 
 test("native raw counters split cache without trusting synthesized totals", () => {
   expect(mastraCounters({ inputTokens: 50, outputTokens: 0 }, "openai").output).toBeNull();

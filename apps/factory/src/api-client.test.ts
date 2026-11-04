@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { z } from "zod";
-import { protocolRequest, apiUpload } from "./api-client";
 import { fixtureValue } from "../../../test/fixtures/value";
+import { apiUpload, protocolRequest } from "./api-client";
 
 test("shows a readable recovery error for an invalid successful response", async () => {
   const fetch = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));

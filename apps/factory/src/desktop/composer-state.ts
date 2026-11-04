@@ -1,7 +1,7 @@
 import { type Accessor, createEffect, createSignal, onCleanup } from "solid-js";
 import type { createAgentCommandIds } from "../agent-command-ids";
-import { readAttachmentContent, restoreAttachmentContent } from "../attachments/composer";
 import { resizeComposer } from "../assistant-interaction";
+import { readAttachmentContent, restoreAttachmentContent } from "../attachments/composer";
 export function createComposerState(input: {
   userID: string;
   commands: ReturnType<typeof createAgentCommandIds>;

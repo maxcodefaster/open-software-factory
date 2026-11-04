@@ -1,15 +1,15 @@
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { createAgentTurnStore } from "../agent/turn-store";
 import type { createBuildBrowserController } from "../agent/browser-controller";
+import { createAgentTurnStore } from "../agent/turn-store";
+import { createAttachmentTools } from "../attachments/tools";
 import { CommandError } from "../command-error";
 import { json } from "../http";
+import { projectResearchTools } from "../project-agent/build-tools";
 import type { createMCPConnections } from "./connections";
 import { mcpDigest } from "./controller";
-import { projectResearchTools } from "../project-agent/build-tools";
-import { createAttachmentTools } from "../attachments/tools";
-import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 
 export type MCPSourceTool = {
   name: string;

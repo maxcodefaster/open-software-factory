@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { fixtureValue } from "../../../../test/fixtures/value";
 import { createAttachmentRoutes } from "./routes";
 import type { createAttachmentStore } from "./store";
-import { fixtureValue } from "../../../../test/fixtures/value";
 
 test("Attachment HTTP only transfers protected bytes and retains exact upload bounds", async () => {
   const id = crypto.randomUUID(),

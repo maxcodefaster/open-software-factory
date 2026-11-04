@@ -3,10 +3,10 @@ import type {
   ConversationMode,
   sourceCitationInput,
 } from "../../../../packages/conversation-domain/src/conversation";
-import type { AgentTurnTransaction } from "../agent/turn-store";
-import { contextIn } from "./conversation-contexts";
 import { projectAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import { contextIn } from "./conversation-contexts";
 
 export type ConversationRow = {
   id: string;

@@ -1,5 +1,5 @@
-import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { reportFailure } from "../failure-log";
 
 type Database = ReturnType<typeof createDatabase>;
 type Revocation = { userID: string; version: string; disabled: boolean };

@@ -1,16 +1,16 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
-import { requireActiveAccountIn, projectAuthorityIn } from "../access/controller";
-import { CommandError } from "../command-error";
+import { createHash } from "node:crypto";
 import {
-  executionPolicy,
-  executionPolicyCommand,
+  codingDecision,
   defaultExecutionPolicy,
   effectiveExecutionPolicy,
+  executionPolicy,
+  executionPolicyCommand,
   tighterExecutionPolicy,
-  codingDecision,
 } from "../../../../packages/conversation-domain/src/execution-policy";
-import { createHash } from "node:crypto";
+import type { createDatabase } from "../../../../packages/db/src/client";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
 import { computeAllocationIn } from "./compute";
 
 function fingerprint(value: unknown) {

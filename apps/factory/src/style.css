@@ -239,6 +239,29 @@ dt {
   border: 0;
 }
 
+.skip-to-board {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: var(--layer-modal);
+  background: var(--material-popover);
+  box-shadow: var(--shadow-float);
+  transform: translateY(-200%);
+}
+
+.skip-to-board:focus-visible {
+  transform: none;
+}
+
+.kanban-desktop:focus {
+  outline: none;
+}
+
+.kanban-desktop:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
 .factory-desktop {
   --ink: var(--color-ink);
   --muted-ink: var(--color-ink-muted);
@@ -1500,6 +1523,11 @@ dt {
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+.ticket-document-revision-note {
+  margin: 0 0 var(--space-3);
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
 }
@@ -4128,6 +4156,22 @@ dt {
   width: var(--space-6);
   padding: 0;
   border-radius: 0 var(--radius-control) var(--radius-control) 0;
+}
+
+/* Touch: the 24px chevron keeps its look but answers a 44px-wide tap. The hit area grows into
+   space reserved beside the group, so it never covers a neighbouring dock button. Narrower
+   screens have no spare dock width and keep the 24px chevron. */
+@media (pointer: coarse) and (min-width: 390px) {
+  .workspace-dock .dock-app.has-instances {
+    margin-inline-end: calc(var(--touch-target) - var(--space-6) - var(--space-0-5));
+  }
+
+  .workspace-dock .dock-instance-menu::before {
+    position: absolute;
+    inset-block: 0;
+    inset-inline: 0 calc(var(--space-6) - var(--touch-target));
+    content: "";
+  }
 }
 
 .workspace-dock .notification-dot {

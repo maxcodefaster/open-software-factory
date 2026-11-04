@@ -1,5 +1,15 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
-import { For, Loading, lazy, Match, Show, Switch, untrack } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  For,
+  Loading,
+  lazy,
+  Match,
+  Show,
+  Switch,
+  untrack,
+} from "solid-js";
 import type { PlanningIntent } from "../../../../packages/conversation-domain/src/conversation";
 import type { EpicProposal } from "../../../../packages/conversation-domain/src/epic-proposal";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
@@ -42,18 +52,24 @@ import { TicketWorkspace } from "../ticket-workspace";
 import { TrashWorkspace } from "../trash-workspace";
 import type { createWindowPresence } from "../window-presence";
 import { InboxWorkspace } from "../workspace-chrome";
+import {
+  loadDeveloperIDEWorkspace,
+  loadRuntimeWorkspace,
+  prefetchDeveloperWorkspaceChunks,
+} from "../workspace-chunks";
 import { WorkspaceTabbar, workspacePanelID } from "../workspace-tabbar";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
+import { browserWarmupEnvironment, scheduleWarmup } from "../workspace-warmup";
 import type { DesktopMutation, FactoryDesktopProps, TicketDetail } from "./contracts";
 
 const KnowledgeWorkspace = lazy(async () => ({
   default: (await import("../knowledge-workspace")).KnowledgeWorkspace,
 }));
 const RuntimeWorkspaceTabs = lazy(async () => ({
-  default: (await import("../runtime-workspace")).RuntimeWorkspaceTabs,
+  default: (await loadRuntimeWorkspace()).RuntimeWorkspaceTabs,
 }));
 const DeveloperIDEWorkspace = lazy(async () => ({
-  default: (await import("../developer-ide-workspace")).DeveloperIDEWorkspace,
+  default: (await loadDeveloperIDEWorkspace()).DeveloperIDEWorkspace,
 }));
 const SettingsWorkspace = lazy(async () => ({
   default: (await import("../settings-workspace")).SettingsWorkspace,
@@ -303,6 +319,30 @@ export interface DocumentWindowModel {
 export function DocumentWindow(props: { model: DocumentWindowModel }) {
   // The model identity is stable; its accessors retain live state.
   const model = untrack(() => props.model);
+  // The editor's multi-megabyte bundle loads only once a developer has left the page idle,
+  // and never on a narrow or touch viewport until the IDE is opened.
+  const [idleWarm, setIdleWarm] = createSignal(false);
+  createEffect(
+    () => model.canDevelopProject(),
+    (developer) => {
+      if (!developer || idleWarm()) return;
+      return scheduleWarmup({
+        prefetch: prefetchDeveloperWorkspaceChunks,
+        warm: () => setIdleWarm(true),
+        environment: browserWarmupEnvironment(),
+      });
+    },
+  );
+  const [ideMounted, setIDEMounted] = createSignal(false);
+  createEffect(
+    () =>
+      model.workspaceView() === "ide" ||
+      model.workspaceTabs().some((tab) => tab.view === "ide") ||
+      (idleWarm() && model.canDevelopProject()),
+    (wanted) => {
+      if (wanted) setIDEMounted(true);
+    },
+  );
   return (
     <section
       ref={model.workspaceElement}
@@ -678,55 +718,59 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
             if (change) model.selectTicket(change.ticketId);
           }}
         />
-        <DeveloperIDEWorkspace
-          userID={model.bootstrap.session.user.id}
-          projectID={model.selectedProjectID()}
-          allowed={model.canDevelopProject()}
-          preparingSelection={model.projectMenuOpen()}
-          preparationFailure={
-            model.activeWorkspaceTab()?.view === "ide"
-              ? model.activeWorkspaceTab()?.preparationFailure
-              : undefined
-          }
-          onRetrySelection={() => {
-            const tab = model.activeWorkspaceTab();
-            const target = model.ideTargets().find((item) => `ide:${item.id}` === tab?.id);
-            if (target) void model.openIDETarget(target);
-          }}
-          workspaceID={
-            model.activeWorkspaceTab()?.view === "ide"
-              ? model.activeWorkspaceTab()?.workspaceID
-              : undefined
-          }
-          active={model.workspaceView() === "ide"}
-          navigation={model.ideNavigation()}
-          onNavigationOutcome={(id, error) => {
-            if (model.ideNavigation()?.id !== id) return;
-            model.setIDENavigation(undefined);
-            if (error) model.setError(error);
-          }}
-          onDevelopmentPreview={(message) => {
-            const projectID = model.selectedProjectID();
-            void props.model
-              .refreshServerState()
-              .then(() => {
-                if (model.selectedProjectID() !== projectID) return;
-                if (
-                  props.model
-                    .attempts()
-                    .some(
-                      (attempt) =>
-                        attempt.id === message.attemptID &&
-                        attempt.workspaceId === message.workspaceID,
-                    )
-                )
-                  model.openDevelopmentPreview(message.attemptID, message.process, message.label);
-              })
-              .catch((cause: unknown) =>
-                model.setError(cause instanceof Error ? cause.message : "Preview is unavailable."),
-              );
-          }}
-        />
+        <Show when={ideMounted()}>
+          <DeveloperIDEWorkspace
+            userID={model.bootstrap.session.user.id}
+            projectID={model.selectedProjectID()}
+            allowed={model.canDevelopProject()}
+            preparingSelection={model.projectMenuOpen()}
+            preparationFailure={
+              model.activeWorkspaceTab()?.view === "ide"
+                ? model.activeWorkspaceTab()?.preparationFailure
+                : undefined
+            }
+            onRetrySelection={() => {
+              const tab = model.activeWorkspaceTab();
+              const target = model.ideTargets().find((item) => `ide:${item.id}` === tab?.id);
+              if (target) void model.openIDETarget(target);
+            }}
+            workspaceID={
+              model.activeWorkspaceTab()?.view === "ide"
+                ? model.activeWorkspaceTab()?.workspaceID
+                : undefined
+            }
+            active={model.workspaceView() === "ide"}
+            navigation={model.ideNavigation()}
+            onNavigationOutcome={(id, error) => {
+              if (model.ideNavigation()?.id !== id) return;
+              model.setIDENavigation(undefined);
+              if (error) model.setError(error);
+            }}
+            onDevelopmentPreview={(message) => {
+              const projectID = model.selectedProjectID();
+              void props.model
+                .refreshServerState()
+                .then(() => {
+                  if (model.selectedProjectID() !== projectID) return;
+                  if (
+                    props.model
+                      .attempts()
+                      .some(
+                        (attempt) =>
+                          attempt.id === message.attemptID &&
+                          attempt.workspaceId === message.workspaceID,
+                      )
+                  )
+                    model.openDevelopmentPreview(message.attemptID, message.process, message.label);
+                })
+                .catch((cause: unknown) =>
+                  model.setError(
+                    cause instanceof Error ? cause.message : "Preview is unavailable.",
+                  ),
+                );
+            }}
+          />
+        </Show>
       </div>
     </section>
   );

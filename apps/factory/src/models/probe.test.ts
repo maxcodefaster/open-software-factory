@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { probeModel } from "./probe";
 import { fakeResponsesOutput } from "../../../../test/support/fake-openai-responses";
+import { probeModel } from "./probe";
 
 test.each(["gpt-6-luna", "gpt-6.1-sol"])(
   "native Planning probe uses Responses tools and structured output for %s",

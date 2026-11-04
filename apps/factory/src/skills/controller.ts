@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import {
   type InheritedSkillSettings,
   type PersonalSkillSettings,
@@ -8,7 +9,6 @@ import {
   resolveRoleSkills,
 } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import { librarySkillAssignments } from "../../../../packages/conversation-domain/src/skill-library";
-import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import {
   type SkillContent,
   type SkillPublish,

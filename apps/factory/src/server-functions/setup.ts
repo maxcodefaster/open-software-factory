@@ -8,6 +8,7 @@ import {
   setupTask,
 } from "../../../../packages/project-domain/src/setup";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getSetupDraft = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
@@ -141,3 +142,5 @@ export const retrySetupTask = createServerFn({ method: "POST" })
       return context.setup.retryTask(context.actorID, project, step);
     });
   });
+
+registerSharedReads(getSetupDraft, getSetupInspection, getSetupReadiness);

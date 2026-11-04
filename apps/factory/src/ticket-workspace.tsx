@@ -39,6 +39,7 @@ import { sourceReviewURL } from "./source-review";
 import { TicketActionBar, type TicketHeaderAction } from "./ticket-action-bar";
 import { TicketChecks } from "./ticket-checks";
 import { TicketDependencies, type TicketDependenciesProps } from "./ticket-dependencies";
+import { documentChangedSinceImplementation } from "./ticket-document-notice";
 import { TechnicalDesignSections, TicketChapterNavigation } from "./ticket-planning";
 import { TicketSecondaryActions } from "./ticket-secondary-actions";
 import { Feedback, SaveFeedback } from "./ui/feedback";
@@ -395,10 +396,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
     );
   const documentNotice = () =>
     Boolean(props.change) &&
-    currentDocument() &&
-    Boolean(implementationRevision()?.approvedAt) &&
-    Date.parse(currentDocument()?.createdAt ?? "") >
-      Date.parse(implementationRevision()?.approvedAt ?? "") &&
+    documentChangedSinceImplementation(props.current.documentRevisions, implementationRevision()) &&
     currentDocument()?.id !== dismissedDocumentID();
   function dismissDocumentNotice() {
     const id = currentDocument()?.id;
@@ -1572,6 +1570,15 @@ function TicketDocument(props: TicketWorkspaceProps) {
                     ×
                   </button>
                 </div>
+              </Show>
+              <Show
+                when={
+                  props.change && implementationRevision()?.approvedAt && canEditSpecification()
+                }
+              >
+                <p class="ticket-document-revision-note">
+                  Edits save as a new revision. Implementation keeps the requirements you approved.
+                </p>
               </Show>
             </header>
 

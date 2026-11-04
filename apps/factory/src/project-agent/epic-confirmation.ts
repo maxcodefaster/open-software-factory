@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   confirmEpicProposalInput,
   epicProposalInput,
 } from "../../../../packages/conversation-domain/src/epic-proposal";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../../../packages/requirement-domain/src/requirement";
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";

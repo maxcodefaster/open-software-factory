@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { classifyAgentTurn } from "./turn-outcome";
-import { projectMessages, navigationMessages } from "./message-projection";
 import { agentMessageSchema } from "../api-contracts";
+import { navigationMessages, projectMessages } from "./message-projection";
+import { classifyAgentTurn } from "./turn-outcome";
 
 describe("Change Agent turn state", () => {
   const activeUser = { id: "message-new", type: "user", created: 200 };

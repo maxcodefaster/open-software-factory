@@ -9,6 +9,7 @@ import {
   verificationResumeInput,
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getDeliverySettings = createServerFn({ method: "POST" })
   .validator((args: [projectID: string]) => args)
@@ -86,3 +87,5 @@ export const resumeVerification = createServerFn({ method: "POST" })
       return context.delivery.resumeChecks(context.actorID, id, value);
     });
   });
+
+registerSharedReads(getDeliverySettings, getDelivery);

@@ -4,10 +4,10 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import type { ProjectRole } from "../../../../packages/project-domain/src/access";
 import { CommandError } from "../command-error";
 import { createAccountCommands } from "./accounts";
-import type { createIdentityConfiguration } from "./identity-configuration";
-import { createAccessController } from "./controller";
-import { createMembershipCommands } from "./membership";
 import type { managedUserInput, memberInput } from "./commands";
+import { createAccessController } from "./controller";
+import type { createIdentityConfiguration } from "./identity-configuration";
+import { createMembershipCommands } from "./membership";
 
 export function createAccessService(options: {
   database: ReturnType<typeof createDatabase>;

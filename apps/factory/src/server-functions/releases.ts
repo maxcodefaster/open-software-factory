@@ -5,6 +5,7 @@ import {
   publishRelease,
 } from "../../../../packages/project-domain/src/release";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getProjectReleases = createServerFn({ method: "POST" })
   .validator((args: [projectID: string]) => args)
@@ -89,3 +90,5 @@ export const endProjectPublication = createServerFn({ method: "POST" })
       return context.releases.end(context.actorID, z.uuid().parse(projectID), z.uuid().parse(id));
     });
   });
+
+registerSharedReads(getProjectReleases);

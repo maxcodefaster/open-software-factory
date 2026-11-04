@@ -1,7 +1,7 @@
 import {
+  type Bootstrap,
   bootstrapSchema,
   sessionSchema,
-  type Bootstrap,
   type UIPreference,
 } from "../api-contracts";
 

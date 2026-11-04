@@ -1,17 +1,17 @@
 import { createSignal, For, Show, untrack } from "solid-js";
+import type { LibraryCoverKey } from "../../../../packages/conversation-domain/src/library-covers";
 import type {
   SkillLibraryEntry,
   SkillLibraryView,
   SkillScope,
 } from "../../../../packages/conversation-domain/src/skill-library";
 import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+import { LibraryCoverPicker } from "../library-covers/picker";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import { type ChooseSkill, SkillChoiceControls } from "./choice-controls";
 import { skillCover } from "./cover";
 import { skillAvailability, skillRoleLabel, skillScopeLabel } from "./gallery-state";
 import { SkillRevisionDetails, SkillRevisionSource } from "./revision-details";
-import { LibraryCoverPicker } from "../library-covers/picker";
-import type { LibraryCoverKey } from "../../../../packages/conversation-domain/src/library-covers";
 
 export function SkillGalleryDetail(props: {
   entry: SkillLibraryEntry;

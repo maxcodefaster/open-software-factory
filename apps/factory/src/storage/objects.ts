@@ -1,5 +1,5 @@
-import { S3Client } from "bun";
 import { createHash } from "node:crypto";
+import { S3Client } from "bun";
 import { CommandError } from "../command-error";
 
 export type PrivateObjects = {

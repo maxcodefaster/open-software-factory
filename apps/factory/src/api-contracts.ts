@@ -156,6 +156,8 @@ export const runtimeAttemptSchema = z.object({
   kubernetesPodName: z.string().optional(),
   createdAt: optionalString,
   updatedAt: optionalString,
+  readyAt: optionalString,
+  appReadyAt: z.record(z.string(), z.string()).optional(),
 });
 export type RuntimeAttempt = z.infer<typeof runtimeAttemptSchema>;
 export const appPreviewsSchema = z.object({

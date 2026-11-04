@@ -5,6 +5,7 @@ import {
   type RegisterProjectInput,
 } from "../../../../packages/project-domain/src/project";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getProjects = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
@@ -25,3 +26,5 @@ export const registerProject = createServerFn({ method: "POST" })
       return context.projects.register(context.actorID, value);
     });
   });
+
+registerSharedReads(getProjects);

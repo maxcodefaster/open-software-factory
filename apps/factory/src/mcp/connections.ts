@@ -1,17 +1,17 @@
 import { createHmac, randomBytes } from "node:crypto";
 import {
-  UnauthorizedError,
   checkResourceAllowed,
-  resourceUrlFromServerUrl,
   type FetchLike,
   type OAuthClientProvider,
   type OAuthDiscoveryState,
+  resourceUrlFromServerUrl,
   type StoredOAuthClientInformation,
   type StoredOAuthTokens,
+  UnauthorizedError,
 } from "@modelcontextprotocol/client";
 import {
-  mcpConnectInput,
   type MCPAssignment,
+  mcpConnectInput,
 } from "../../../../packages/conversation-domain/src/mcp-library";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";

@@ -1,4 +1,4 @@
-import { lazy, Loading } from "solid-js";
+import { Loading, lazy } from "solid-js";
 import type { RichDocumentSurfaceProps } from "./rich-document-editor";
 
 export type { RichDocumentSurfaceProps } from "./rich-document-editor";

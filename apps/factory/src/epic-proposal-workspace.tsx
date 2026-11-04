@@ -1,7 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import {
-  epicProposalInput,
   type EpicProposal,
+  epicProposalInput,
 } from "../../../packages/conversation-domain/src/epic-proposal";
 import { MarkdownEditor } from "./markdown-editor";
 import { WorkspaceActionBar } from "./ui/workspace-actions";

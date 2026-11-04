@@ -66,6 +66,7 @@ export function ProjectBoard(props: { model: ProjectBoardModel }) {
     <section
       class={model.workspaceVisible() ? "kanban-desktop obscured" : "kanban-desktop"}
       aria-label="Ticket board"
+      tabindex="-1"
       inert={model.workspaceVisible() || model.agentOverlay() || model.registrationOpen()}
     >
       <Show

@@ -1,5 +1,5 @@
-import { Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
+import { Show } from "solid-js";
 import { ProjectModelSettings } from "./project-settings";
 import { SystemModelSettings } from "./system-settings";
 export function ModelSettings(props: {

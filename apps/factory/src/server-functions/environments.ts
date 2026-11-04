@@ -6,6 +6,7 @@ import {
   projectEnvironment,
 } from "../../../../packages/project-domain/src/environment";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getEnvironment = createServerFn({ method: "POST" })
   .validator((args: [projectID: string, environment: ProjectEnvironment]) => args)
@@ -60,3 +61,5 @@ export const discardEnvironmentSave = createServerFn({ method: "POST" })
       return context.environments.discard(project, context.actorID, scope, command);
     });
   });
+
+registerSharedReads(getEnvironment);

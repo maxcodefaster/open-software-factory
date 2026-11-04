@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { probeBuildModel } from "./build-probe";
 import { fakeResponsesOutput } from "../../../../test/support/fake-openai-responses";
+import { probeBuildModel } from "./build-probe";
 
 test.each(["medium", "high", "xhigh", "max"] as const)(
   "native OpenCode uses Responses with %s reasoning and a real structured tool call",

@@ -2,9 +2,9 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import type { ComputeClass } from "../../../../packages/runtime-domain/src/compute";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { ExecutionReserve } from "../runtime/reserve-controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { admitComputeIn, ComputeCapacityError } from "./compute";
 import { codingBudgetIn } from "./policy";
 

@@ -17,6 +17,7 @@ import {
 } from "../../../../packages/conversation-domain/src/skills";
 import { repositorySkillImportInput, skillImportInput, skillShareInput } from "../skills/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getSkillLibrary = createServerFn({ method: "POST", strict: { input: false } })
   .validator((args: [projectID?: string | undefined]) => args)
@@ -198,3 +199,11 @@ export const setSkillPublication = createServerFn({ method: "POST" })
       return context.skills.setPublication(context.actorID, identity, state);
     });
   });
+
+registerSharedReads(
+  getSkillLibrary,
+  getSkillInvocations,
+  getSkillRevision,
+  getInheritedSkills,
+  getSystemSkills,
+);

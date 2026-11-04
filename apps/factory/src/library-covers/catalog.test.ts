@@ -4,8 +4,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { loadImage } from "@napi-rs/canvas";
 import { libraryCoverCatalog } from "../../../../packages/conversation-domain/src/library-covers";
-import { libraryCoverURL } from "./catalog";
 import { skillCover } from "../skills/cover";
+import { libraryCoverURL } from "./catalog";
 
 test("thirty shipped illustrations have distinct optimized portrait and landscape renditions", async () => {
   for (const kind of ["skill", "mcp"] as const) {

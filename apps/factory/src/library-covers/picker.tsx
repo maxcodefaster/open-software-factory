@@ -1,8 +1,8 @@
 import { createSignal, For, Show } from "solid-js";
 import {
-  libraryCoverCatalog,
   type LibraryCover,
   type LibraryCoverKey,
+  libraryCoverCatalog,
 } from "../../../../packages/conversation-domain/src/library-covers";
 import { libraryCoverURL } from "./catalog";
 import "./picker.css";

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { developmentPreviewMessage } from "./ide-messages";
 import { openFactoryPreview } from "../../../deploy/theia-ide/factory-ide-extension/src/browser/factory-runtime-context";
+import { developmentPreviewMessage } from "./ide-messages";
 
 const attemptID = "01994a7d-0000-7000-8000-000000000001";
 const workspaceID = "01994a7d-0000-7000-8000-000000000002";

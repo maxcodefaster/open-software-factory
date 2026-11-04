@@ -6,6 +6,7 @@ import type {
   feedbackUpdateInput,
 } from "../../../../packages/conversation-domain/src/visual-review";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getVisualReview = createServerFn({ method: "POST" })
   .validator((args: [changeID: string]) => args)
@@ -46,3 +47,5 @@ export const sendReviewRevision = createServerFn({ method: "POST" })
       return context.review.send(context.actorID, change, input);
     });
   });
+
+registerSharedReads(getVisualReview);

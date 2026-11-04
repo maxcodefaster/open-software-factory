@@ -1,14 +1,14 @@
 import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
+import { DocumentLinkEditor } from "./document-link-editor";
 import {
-  documentBlocks,
-  supportsDocumentMarkdown,
   type DocumentEditor,
   type DocumentFormat,
+  documentBlocks,
+  supportsDocumentMarkdown,
 } from "./document-model";
-import { RichDocumentSurface } from "./rich-document-surface";
-import { editorCommandHeight, editorPopoverPosition } from "./editor-popover-position";
 import { documentSlash, filterDocumentBlocks } from "./document-slash";
-import { DocumentLinkEditor } from "./document-link-editor";
+import { editorCommandHeight, editorPopoverPosition } from "./editor-popover-position";
+import { RichDocumentSurface } from "./rich-document-surface";
 
 export function MarkdownEditor(props: {
   value: string;

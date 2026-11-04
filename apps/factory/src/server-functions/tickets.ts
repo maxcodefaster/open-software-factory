@@ -8,6 +8,7 @@ import {
 } from "../../../../packages/requirement-domain/src/document";
 import { saveTechnicalDesignInput } from "../../../../packages/requirement-domain/src/technical-design";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const cancelTicketImplementation = createServerFn({ method: "POST" })
   .validator((args: [ticketID: string, commandID: string]) => args)
@@ -131,3 +132,5 @@ export const implementTicket = createServerFn({ method: "POST" })
       return context.tickets.implement(context.actorID, id, value);
     });
   });
+
+registerSharedReads(getTicketDetail);

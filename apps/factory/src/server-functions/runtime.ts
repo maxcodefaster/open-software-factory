@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const startPersonalWorkspace = createServerFn({ method: "POST" })
   .validator((args: [projectID: string]) => args)
@@ -80,3 +81,5 @@ export const ensureStaging = createServerFn({ method: "POST" })
       return context.runtime.ensureStaging(context.actorID, id);
     });
   });
+
+registerSharedReads(getChanges, getRuntimeAttempts, getProjectPreviews);

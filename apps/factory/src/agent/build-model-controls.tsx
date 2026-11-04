@@ -1,13 +1,13 @@
-import { createEffect, createSignal, For, Show, createUniqueId, onCleanup } from "solid-js";
+import { createEffect, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import type { InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
 import {
-  codingReasoningInput,
   type CodingReasoning,
+  codingReasoningInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
+import { reasoningLabels } from "../models/reasoning";
 import { getProjectModels } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
-import { reasoningLabels } from "../models/reasoning";
 
 export function BuildModelControls(props: {
   projectID: string | undefined;

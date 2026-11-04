@@ -1,5 +1,5 @@
-import { children, For } from "solid-js";
 import type { JSX } from "@solidjs/web";
+import { children, For } from "solid-js";
 import { useAttachmentPending } from "./attachments/ui";
 import { WorkspaceActionBar } from "./ui/workspace-actions";
 

@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
   TicketFollowUpInput,
 } from "../../../../packages/requirement-domain/src/document";
 import { canonicalRequirementContent } from "../../../../packages/requirement-domain/src/requirement";
 import { projectAuthorityIn } from "../access/controller";
-import { CommandError } from "../command-error";
-import { z } from "zod";
-import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
 
 const proposedDocument = z.object({
   ticket: z.object({ title: z.string(), description: z.string() }),

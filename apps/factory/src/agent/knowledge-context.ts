@@ -1,5 +1,5 @@
-import type { AgentTurnTransaction } from "./turn-store";
 import { searchExpression } from "../knowledge/search-expression";
+import type { AgentTurnTransaction } from "./turn-store";
 
 export async function buildKnowledgeContext(
   sql: AgentTurnTransaction,

@@ -1,35 +1,37 @@
 import { createHash } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import {
-  skillContentInput,
-  skillRevisionInput,
-  type SkillContent,
-  type SkillRevision,
-} from "../../../../packages/conversation-domain/src/skills";
-import {
+  type LibraryChoice,
   librarySkillIds,
   resolveLibraryChoice,
-  skillLibrarySaveInput,
-  skillChoiceInput,
   type SkillLibraryView,
-  type LibraryChoice,
+  skillChoiceInput,
+  skillLibrarySaveInput,
 } from "../../../../packages/conversation-domain/src/skill-library";
-import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
+import {
+  type SkillContent,
+  type SkillRevision,
+  skillContentInput,
+  skillRevisionInput,
+} from "../../../../packages/conversation-domain/src/skills";
+import type { createDatabase } from "../../../../packages/db/src/client";
+
 type RetainedSettings = Pick<InheritedSkillSettings, "system" | "project" | "personal">;
-import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
-import { CommandError } from "../command-error";
-import { starterSkills } from "./starters";
-import { previewSkillImport, previewRepositorySkill, checkSkillSourceUpdate } from "./import";
+
 import {
   defaultLibraryCover,
   libraryCoverInput,
 } from "../../../../packages/conversation-domain/src/library-covers";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
 import {
   initializeLibraryCoverIn,
   libraryCoversIn,
   saveLibraryCoverIn,
 } from "../library-covers/store";
+import { checkSkillSourceUpdate, previewRepositorySkill, previewSkillImport } from "./import";
+import { starterSkills } from "./starters";
 
 const nil = "00000000-0000-0000-0000-000000000000";
 const hash = (content: SkillContent) =>

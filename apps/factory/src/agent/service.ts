@@ -1,16 +1,16 @@
 import type { z } from "zod";
 import type {
-  changeAgentStartInput,
-  changeAgentResumeInput,
   changeAgentPromptInput,
+  changeAgentResumeInput,
+  changeAgentStartInput,
   changeAgentStopConfirmationInput,
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import type { createAccessController } from "../access/controller";
 import { agentViewSchema } from "../api-contracts";
+import { agentActivityStream } from "./activity-stream";
+import type { newCodingConversationInput } from "./commands";
 import type { createAgentController } from "./controller";
 import { navigationMessages } from "./message-projection";
-import type { newCodingConversationInput } from "./commands";
-import { agentActivityStream } from "./activity-stream";
 
 export function createAgentService(options: {
   access: Pick<

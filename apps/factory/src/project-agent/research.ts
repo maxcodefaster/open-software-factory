@@ -1,8 +1,8 @@
 import { z } from "zod";
+import { attachmentIDs } from "../../../../packages/conversation-domain/src/attachments";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
-import { attachmentIDs } from "../../../../packages/conversation-domain/src/attachments";
 
 export const researchSource = z.enum(["knowledge", "ticket", "epic"]);
 export const projectSearchInput = z.strictObject({

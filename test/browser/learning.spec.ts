@@ -58,11 +58,13 @@ for (const width of [1440, 768, 390]) {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.setViewportSize({ width, height: 1000 });
+    await page.clock.setFixedTime(new Date("2026-10-28T20:00:00Z"));
     await page.goto(`${origin}/learning.html`);
     await expect(page.getByRole("heading", { name: "Work, quality & cost" })).toBeVisible();
     await expect(page.locator("[data-waiting]")).toHaveText(
-      "2 selected cases are waiting for a review. It starts at six selected cases, or 24 hours after the oldest settled (Oct 28, 11:52 AM UTC).",
+      "2 selected cases are waiting for a review. It starts at six selected cases, or at Oct 29, 11:52 AM UTC, 24 hours after the oldest settled (Oct 28, 11:52 AM UTC).",
     );
+    await expect(page.locator("[data-calibration]")).toContainText("Judge calibrated");
     await expect
       .poll(async () =>
         page
@@ -161,6 +163,115 @@ test("empty, read-only and private learning states are truthful", async ({ page 
   await expect(page.getByLabel("Fixture action")).toHaveText(
     "Explicit private proposal released as Ticket",
   );
+});
+test("waiting cases show their 24 hour clock, and an overdue batch explains what can hold it", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-10-30T09:00:00Z"));
+  await page.goto(`${origin}/learning.html`);
+  await expect(page.locator("[data-waiting]")).toContainText(
+    "The 24 hour limit passed at Oct 29, 11:52 AM UTC (oldest settled Oct 28, 11:52 AM UTC).",
+  );
+  await expect(page.locator("[data-waiting]")).toContainText("judge calibration or another review");
+  await page.goto(`${origin}/learning.html?paused`);
+  await expect(page.locator("[data-waiting]")).toContainText(
+    "Nothing is reviewed while learning is paused.",
+  );
+  await expect(page.getByRole("button", { name: "Review now", exact: true })).toHaveCount(0);
+});
+test("Review now states its paid calls and cases, confirms, then shows a pending request", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await page.clock.setFixedTime(new Date("2026-10-28T20:00:00Z"));
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.goto(`${origin}/learning.html?many-waiting`);
+  const review = page.getByRole("button", { name: "Review now", exact: true });
+  await review.click();
+  const confirmation = page.locator("[data-review-now-confirmation]");
+  await expect(confirmation).toContainText("Review 6 selected cases now?");
+  await expect(confirmation).toContainText("paid Planning-model calls: 1 review call");
+  await expect(confirmation).toContainText("never repeats a call whose outcome is lost");
+  await page.screenshot({ path: `${directory}/review-now-390.png`, fullPage: true });
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(page.getByLabel("Fixture action")).toHaveText("");
+  await review.click();
+  await page.getByRole("button", { name: "Start paid review", exact: true }).click();
+  await expect(page.getByLabel("Fixture action")).toHaveText("Review requested for 6 cases");
+  await expect(page.locator("[data-review-state]")).toContainText(
+    "Review requested Oct 28, 12:30 PM UTC. It starts within a minute",
+  );
+  await expect(review).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
+test("Review now counts one case and the calibration calls the judge still needs", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-10-28T20:00:00Z"));
+  await page.goto(`${origin}/learning.html?one-waiting&calibration-state=none`);
+  await expect(page.locator("[data-calibration]")).toContainText("has not been calibrated yet");
+  await page.getByRole("button", { name: "Review now", exact: true }).click();
+  const confirmation = page.locator("[data-review-now-confirmation]");
+  await expect(confirmation).toContainText("Review 1 selected case now?");
+  await expect(confirmation).toContainText("1 calibration call first (up to 3");
+  await expect(confirmation).toContainText("then 1 review call");
+  await expect(confirmation).toContainText("this case");
+  await page.goto(`${origin}/learning.html?calibration-state=running`);
+  await expect(page.locator("[data-calibration]")).toContainText("Calibrating:");
+  await page.getByRole("button", { name: "Review now", exact: true }).click();
+  await expect(page.locator("[data-review-now-confirmation]")).toContainText(
+    "after the running calibration passes",
+  );
+});
+test("calibration retries are visible and a closed judge cannot be bypassed", async ({ page }) => {
+  await page.goto(`${origin}/learning.html?calibration-state=retrying`);
+  await expect(page.locator("[data-calibration]")).toContainText(
+    "Calibration graded a fixed case wrongly (2 of 3 attempts)",
+  );
+  await expect(page.getByRole("button", { name: "Review now", exact: true })).toBeEnabled();
+  for (const state of ["closed", "unconfirmed"]) {
+    await page.goto(`${origin}/learning.html?calibration-state=${state}`);
+    await expect(page.locator("[data-calibration]")).toHaveAttribute("data-calibration", state);
+    await expect(page.getByRole("button", { name: "Review now", exact: true })).toBeDisabled();
+  }
+  await page.goto(`${origin}/learning.html?calibration-state=closed`);
+  await expect(page.locator("[data-calibration]")).toContainText("did not pass after 3 attempts");
+});
+test("Review now is hidden while a review runs and from people who cannot manage learning", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/learning.html?running`);
+  await expect(page.locator("[data-review-state]")).toContainText(
+    "A review of this work is running.",
+  );
+  await expect(page.getByRole("button", { name: "Review now", exact: true })).toHaveCount(0);
+  await page.goto(`${origin}/learning.html?readonly`);
+  await expect(page.locator("[data-waiting]")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review now", exact: true })).toHaveCount(0);
+  await page.goto(`${origin}/learning.html?empty`);
+  await expect(page.getByRole("button", { name: "Review now", exact: true })).toHaveCount(0);
+});
+test("few reviewed cases and empty history are called what they are", async ({ page }) => {
+  await page.goto(`${origin}/learning.html?few-reviewed`);
+  await expect(page.locator("[data-few-cases]")).toHaveText(
+    "Only 3 cases reviewed so far. Rates from so few cases are anecdotes, not a trend.",
+  );
+  await expect(page.locator(".work-summary")).toContainText(
+    "3 / 3 known cases, too few for a rate",
+  );
+  await page.goto(`${origin}/learning.html?empty`);
+  await expect(page.locator("[data-no-work]")).toHaveText(
+    "No work settled in the last 28 days. The charts fill in as work settles.",
+  );
+  await expect(page.locator("[data-few-cases]")).toHaveCount(0);
+  await page.goto(`${origin}/learning.html`);
+  await expect(page.locator("[data-no-work]")).toHaveCount(0);
 });
 test("automatic updates require an explicit scoped permission, separate from default-on review", async ({
   page,

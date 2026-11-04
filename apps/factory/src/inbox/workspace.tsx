@@ -1,8 +1,8 @@
 import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
-import type { InboxItem, InboxView } from "./contracts";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
-import { inboxSectionItems, type InboxPosition, type InboxSection } from "./navigation";
+import type { InboxItem, InboxView } from "./contracts";
+import { type InboxPosition, type InboxSection, inboxSectionItems } from "./navigation";
 import "../ui/workspace-actions.css";
 import "./inbox.css";
 

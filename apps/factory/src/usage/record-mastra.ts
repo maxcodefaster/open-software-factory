@@ -1,7 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { createContractRates } from "./contract-rates";
 import { createUsageJournal, type UsageOperation } from "./journal";
 import type { MastraUsageSink } from "./mastra";
-import { createContractRates } from "./contract-rates";
 
 export function recordedMastraUsage(
   database: ReturnType<typeof createDatabase>,

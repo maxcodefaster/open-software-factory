@@ -1,23 +1,23 @@
+import type { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
-  mentionedPeople,
-  receivesAttention,
   type AttentionCapability,
   type AttentionMember,
+  mentionedPeople,
+  receivesAttention,
 } from "../../../../packages/ticket-domain/src/attention";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import {
-  inboxViewSchema,
-  ticketAttentionSchema,
   type AttentionPerson,
   type InboxItem,
   type InboxView,
   type inboxReceiptInput,
+  inboxViewSchema,
   type responsibilityInput,
+  ticketAttentionSchema,
 } from "./contracts";
-import type { z } from "zod";
 
 type Scope = {
   id: string;

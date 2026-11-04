@@ -2,15 +2,15 @@ import type { z } from "zod";
 import type {
   conversationMessageInput,
   conversationModeCommandInput,
-  newConversationInput,
   interviewAnswerCommandInput,
+  newConversationInput,
 } from "../../../../packages/conversation-domain/src/conversation";
 import type { confirmEpicProposalInput } from "../../../../packages/conversation-domain/src/epic-proposal";
 import type { createAccessController } from "../access/controller";
 import { conversationViewSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
-import type { createProjectAgentController } from "./controller";
 import type { conversationReadInput } from "./commands";
+import type { createProjectAgentController } from "./controller";
 import { projectResponseStream } from "./response-stream";
 
 export function createConversationService(options: {

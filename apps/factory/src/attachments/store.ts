@@ -10,10 +10,10 @@ import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { objectStorageConfigured } from "../storage/objects";
-import type { ConvertedAttachment } from "./conversion-result";
-import { processAttachment } from "./process";
-import { type AttachmentObjects, attachmentDigest, createAttachmentObjects } from "./objects";
 import { retainAttachmentDraftInput } from "./commands";
+import type { ConvertedAttachment } from "./conversion-result";
+import { type AttachmentObjects, attachmentDigest, createAttachmentObjects } from "./objects";
+import { processAttachment } from "./process";
 
 type Database = ReturnType<typeof createDatabase>;
 type StoredObject = { key: string; sha256: string; bytes: number; mediaType: string; name: string };

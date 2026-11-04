@@ -7,6 +7,7 @@ import {
 } from "../../../../packages/conversation-domain/src/usage-view";
 import { contractRateCommand } from "../usage/contract-rates";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getUsage = createServerFn({ method: "POST" })
   .validator((args: [projectID: string | null]) => args)
@@ -63,3 +64,5 @@ export const saveContractPrices = createServerFn({ method: "POST" })
       await context.usage.setRate(context.actorID, command);
     });
   });
+
+registerSharedReads(getUsage, getCurrentCompute, getContractPrices);

@@ -294,6 +294,34 @@ test("real Settings show monitoring, save learning policy and isolate private ev
     await expect.poll(async () => (await application())?.state).toBe("reverted");
     await expect(appliedItem).toBeFocused();
     await expect(appliedItem.getByText("Reverted", { exact: true })).toBeVisible();
+    const fresh = {
+      ...source,
+      id: "owned:fresh-shared",
+      ownerId: null,
+      settledAt: new Date().toISOString(),
+    };
+    await database.client`INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
+      VALUES(${fresh.id},${project},NULL,${admin.id},false,'research','completed',${fresh.settledAt},${JSON.stringify(fresh)}::jsonb,true)`;
+    await page.getByRole("button", { name: "Refresh observations", exact: true }).click();
+    await expect(monitor.locator("[data-waiting]")).toContainText(
+      "1 selected case is waiting for a review. It starts at six selected cases, or at",
+    );
+    await monitor.getByRole("button", { name: "Review now", exact: true }).click();
+    await expect(monitor.locator("[data-review-now-confirmation]")).toContainText(
+      "Review 1 selected case now? This makes paid Planning-model calls",
+    );
+    await monitor.getByRole("button", { name: "Start paid review", exact: true }).click();
+    await expect(monitor.locator("[data-review-state]")).toContainText("Review requested");
+    await expect
+      .poll(async () =>
+        (
+          await fixtureValue(database, "database").client<{ cases: number; actor: string }[]>`
+              SELECT (input->>'cases')::int AS cases,actor_id AS actor FROM factory.learning_command
+              WHERE input->>'kind'='review-now' AND input->>'projectId'=${project}`
+        ).map((row) => [row.cases, row.actor]),
+      )
+      .toEqual([[1, admin.id]]);
+    await expect(monitor.getByRole("button", { name: "Review now", exact: true })).toHaveCount(0);
     await monitor.getByRole("button", { name: "Pause learning", exact: true }).click();
     await expect(monitor.getByText("Learning paused", { exact: true })).toBeVisible();
     await expect

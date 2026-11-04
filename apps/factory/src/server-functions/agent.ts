@@ -8,6 +8,7 @@ import {
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import { newCodingConversationInput } from "../agent/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getAgentView = createServerFn({ method: "POST" })
   .validator((args: [changeID: string, history?: boolean]) => args)
@@ -106,3 +107,5 @@ export const requestCodingChanges = createServerFn({ method: "POST" })
       return context.agent.requestChanges(context.actorID, id, command);
     });
   });
+
+registerSharedReads(getAgentView);

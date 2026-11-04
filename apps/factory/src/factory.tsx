@@ -58,6 +58,7 @@ import { ProjectBoard, type ProjectBoardModel } from "./desktop/project-board";
 import { createProjectCommands } from "./desktop/project-commands";
 import { createDesktopReads } from "./desktop/reads";
 import { createRuntimeNavigation } from "./desktop/runtime-navigation";
+import { SkipToBoard } from "./desktop/skip-to-board";
 import { createTicketCommands } from "./desktop/ticket-commands";
 import { DesktopTopbar, type DesktopTopbarModel } from "./desktop/topbar";
 import type { ActivityNavigationRequest } from "./ide-messages";
@@ -2103,6 +2104,9 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
         data-background={desktopBackgroundKey()}
       >
         <h1 class="sr-only">Delivery floor</h1>
+        <Show when={!workspaceVisible() && !registrationOpen()}>
+          <SkipToBoard />
+        </Show>
         <MentionSupport
           projectID={selectedProjectID()}
           sharedTicket={Boolean(assistantTicketID())}

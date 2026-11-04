@@ -4,7 +4,7 @@ import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { runtimeFactoryURL } from "../runtime/endpoints";
 import { runtimeSourceCapability } from "../runtime/git-http";
-import { RuntimeParentOperationError, type RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 
 const sha = z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/);
 export const personalGitStatus = z.strictObject({

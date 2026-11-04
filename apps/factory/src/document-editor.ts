@@ -1,18 +1,17 @@
 import { Editor } from "@tiptap/core";
-import { StarterKit } from "@tiptap/starter-kit";
-import { Markdown } from "@tiptap/markdown";
-import { TableKit } from "@tiptap/extension-table";
-import { TaskList } from "@tiptap/extension-task-list";
-import { TaskItem } from "@tiptap/extension-task-item";
-import { documentSlash } from "./document-slash";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
-import { codeHighlighter } from "./code-highlighting";
-import { TextSelection } from "@tiptap/pm/state";
-import { preserveDocumentSelection } from "./document-selection";
 import { Image } from "@tiptap/extension-image";
+import { TableKit } from "@tiptap/extension-table";
+import { TaskItem } from "@tiptap/extension-task-item";
+import { TaskList } from "@tiptap/extension-task-list";
+import { Markdown } from "@tiptap/markdown";
 import type { SelectionBookmark } from "@tiptap/pm/state";
-
-import type { DocumentEditor, DocumentFormat, DocumentBlockState } from "./document-model";
+import { TextSelection } from "@tiptap/pm/state";
+import { StarterKit } from "@tiptap/starter-kit";
+import { codeHighlighter } from "./code-highlighting";
+import type { DocumentBlockState, DocumentEditor, DocumentFormat } from "./document-model";
+import { preserveDocumentSelection } from "./document-selection";
+import { documentSlash } from "./document-slash";
 
 export function documentExtensions() {
   return [

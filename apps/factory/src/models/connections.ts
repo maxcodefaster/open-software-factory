@@ -1,30 +1,28 @@
 import { createHmac } from "node:crypto";
+import type { z } from "zod";
 import {
-  modelConnectionWrite,
-  type ModelConnectionWrite,
-  type ModelConnectionView,
-  type ModelProvider,
   type ModelConnectionReference,
+  type ModelConnectionView,
+  type ModelConnectionWrite,
+  type ModelProbeResult,
+  type ModelProvider,
+  modelConnectionWrite,
+  modelProbeResult,
+  modelRoleConnectionInput,
+  modelRoleConnectionView,
 } from "../../../../packages/conversation-domain/src/model-connection";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import { unknownCounters } from "../../../../packages/conversation-domain/src/usage";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { validateModelEndpoint, type ResolvedModelConnection } from "./native";
-import type { ModelSecrets, StoredModelConnection } from "./secrets";
-import { probeModel } from "./probe";
-import { modelRoleConnectionInput } from "../../../../packages/conversation-domain/src/model-connection";
-import type { z } from "zod";
-import {
-  modelProbeResult,
-  modelRoleConnectionView,
-  type ModelProbeResult,
-} from "../../../../packages/conversation-domain/src/model-connection";
-import { codingReasoningIn, createModelSettingsController, modelEnvironment } from "./controller";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import { deploymentModelConnections } from "./deployment";
-import { recordedMastraUsage } from "../usage/record-mastra";
 import { createUsageJournal } from "../usage/journal";
-import { unknownCounters } from "../../../../packages/conversation-domain/src/usage";
+import { recordedMastraUsage } from "../usage/record-mastra";
+import { codingReasoningIn, createModelSettingsController, modelEnvironment } from "./controller";
+import { deploymentModelConnections } from "./deployment";
+import { type ResolvedModelConnection, validateModelEndpoint } from "./native";
+import { probeModel } from "./probe";
+import type { ModelSecrets, StoredModelConnection } from "./secrets";
 
 type Intent = {
   commandID: string;

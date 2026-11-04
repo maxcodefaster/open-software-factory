@@ -1,6 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { lockChangeWriterIn } from "../access/change-writer";
+import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { ensureConversationIn } from "../project-agent/conversation-store";
 

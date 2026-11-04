@@ -3,10 +3,12 @@ import { z } from "zod";
 import {
   learningDecisionCommand,
   learningPolicyCommand,
+  learningReviewNowCommand,
   learningRollbackCommand,
   learningView,
 } from "../../../../packages/conversation-domain/src/learning";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getLearning = createServerFn({ method: "POST" })
   .validator((args: [projectId: string | null, personal?: boolean | undefined]) => args)
@@ -52,3 +54,15 @@ export const rollbackLearning = createServerFn({ method: "POST", strict: { outpu
       return context.learning.rollback(context.actorID, command);
     });
   });
+export const reviewLearningNow = createServerFn({ method: "POST", strict: { output: false } })
+  .validator((args: [input: z.input<typeof learningReviewNowCommand>]) => args)
+  .handler(async ({ data: [input] }) => {
+    return factoryFunction(async () => {
+      const context = factoryFunctionContext();
+      const command = learningReviewNowCommand.parse(input);
+      await context.beforeWrite(true);
+      return context.learning.reviewNow(context.actorID, command);
+    });
+  });
+
+registerSharedReads(getLearning);

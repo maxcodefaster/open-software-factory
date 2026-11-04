@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { inboxReceiptInput, responsibilityInput } from "../inbox/contracts";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getInbox = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
@@ -66,3 +67,5 @@ export const markInboxItem = createServerFn({ method: "POST" })
       return context.inbox.receipt(context.actorID, value);
     });
   });
+
+registerSharedReads(getInbox, getAttentionPeople, getTicketAttention);

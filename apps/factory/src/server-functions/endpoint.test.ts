@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { fixtureValue } from "../../../../test/fixtures/value";
 import { CommandError } from "../command-error";
 import type { FactoryFunctionContext, FactoryServices } from "./context";
 import { createServerFunctionEndpoint } from "./endpoint";
-import { fixtureValue } from "../../../../test/fixtures/value";
 
 const origin = "https://factory.test";
 const usage = {} as FactoryFunctionContext["usage"];

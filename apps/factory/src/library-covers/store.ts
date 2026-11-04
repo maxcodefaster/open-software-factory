@@ -1,7 +1,7 @@
 import {
-  libraryCoverState,
   type LibraryCover,
   type LibraryCoverKey,
+  libraryCoverState,
 } from "../../../../packages/conversation-domain/src/library-covers";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";

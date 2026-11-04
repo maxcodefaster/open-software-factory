@@ -1,4 +1,3 @@
-import { reportFailure } from "../failure-log";
 import type { z } from "zod";
 import {
   feedbackCreateInput,
@@ -8,6 +7,7 @@ import {
 } from "../../../../packages/conversation-domain/src/visual-review";
 import type { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 import type { createVisualReviewController } from "./controller";
 
 function command<T>(raw: unknown, schema: z.ZodType<T>) {

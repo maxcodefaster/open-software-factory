@@ -3,6 +3,7 @@ import { z } from "zod";
 import { attachmentInput } from "../../../../packages/conversation-domain/src/attachments";
 import { retainAttachmentDraftInput } from "../attachments/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getAttachmentUsage = createServerFn({ method: "POST" })
   .validator((args: [projectID: string]) => args)
@@ -51,3 +52,5 @@ export const retainAttachmentDraft = createServerFn({ method: "POST" })
       return context.attachments.retainDraft(context.actorID, project, draft, value);
     });
   });
+
+registerSharedReads(getAttachmentUsage, getAttachmentMetadata);

@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   type AgentTurnCommand,
   agentTurnAuthorityInput,
@@ -7,15 +8,18 @@ import {
   changeAgentStartInput,
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import { buildBrowserInstructions } from "../../../../packages/conversation-domain/src/browser-tools";
-import { buildGoalInstructions } from "./build-completion";
-import { attachmentContextIn } from "../attachments/store";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { claimAgentWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { attachmentContextIn } from "../attachments/store";
 import { requireDeliveredPrerequisites } from "../change/dependencies";
 import { CommandError } from "../command-error";
+import { codingReasoningIn } from "../models/controller";
+import { monitoringChangeAuthorityIn } from "../monitoring/authority";
+import { ensureConversationIn } from "../project-agent/conversation-store";
 import { createSkillController } from "../skills/controller";
 import {
   nativeInputSkills,
@@ -23,15 +27,11 @@ import {
   nativeSkillManifestInput,
   skillAdvertisement,
 } from "../skills/native";
-import { z } from "zod";
 import { createContractRates } from "../usage/contract-rates";
 import { codingBudgetIn } from "../usage/policy";
+import { buildGoalInstructions } from "./build-completion";
 import { buildKnowledgeContext } from "./knowledge-context";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
-import { codingReasoningIn } from "../models/controller";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import { monitoringChangeAuthorityIn } from "../monitoring/authority";
-import { ensureConversationIn } from "../project-agent/conversation-store";
 
 type Database = ReturnType<typeof createDatabase>;
 export type ChangeAgentInput =

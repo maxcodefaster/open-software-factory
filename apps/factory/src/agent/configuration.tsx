@@ -1,11 +1,11 @@
-import { createEffect, createSignal, Show, onCleanup } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
 import type { InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
 import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
 import { getProjectModels } from "../server-functions/models";
-import { getInheritedSkills } from "../server-functions/skills";
 import { serverCall } from "../server-functions/result";
+import { getInheritedSkills } from "../server-functions/skills";
 import { projectFailureNotice } from "./failure-notice";
 
 export function AgentBlockers(props: {

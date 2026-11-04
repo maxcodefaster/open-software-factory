@@ -3,6 +3,7 @@ import { z } from "zod";
 import { identityConfigurationWrite } from "../../../../packages/identity-domain/src/configuration";
 import { managedUserInput, memberInput } from "../access/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getSecurityPolicy = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
@@ -142,3 +143,5 @@ export const activateIdentityConfiguration = createServerFn({ method: "POST" })
       return context.access.activateIdentity(context.actorID, command);
     });
   });
+
+registerSharedReads(getSecurityPolicy, getAccounts, getProjectMembers, getIdentityConfiguration);

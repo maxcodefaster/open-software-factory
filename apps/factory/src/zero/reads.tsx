@@ -11,6 +11,7 @@ import {
 } from "solid-js";
 import { zeroQueries } from "../../../../packages/zero-schema/src";
 import { useZeroConnection, useZeroQuery } from "../../../../packages/zero-solid/src";
+import { invalidateSharedReads } from "../server-functions/shared-reads";
 import { createInvalidatedRead } from "./invalidated-read";
 
 export type ReadScope = {
@@ -91,6 +92,7 @@ export function FactoryReadProvider(props: ParentProps) {
       },
     });
     const retry = () => {
+      invalidateSharedReads();
       versions.retry();
       void refresh.refresh();
     };
@@ -119,15 +121,24 @@ export function FactoryReadProvider(props: ParentProps) {
           a?.connected === b?.connected,
       },
     );
+    let observedRevisions: string | undefined;
     createEffect(observation, (current) => {
-      if (current.source !== "null" && current.complete === "complete" && current.connected)
+      if (current.source !== "null" && current.complete === "complete" && current.connected) {
+        // A changed version means an in-flight shared read may predate it. The first
+        // observation has no earlier answer to distrust, so it keeps sharing.
+        if (observedRevisions !== undefined && observedRevisions !== current.revisions)
+          invalidateSharedReads(`${current.source}|${current.revisions}`);
+        observedRevisions = current.revisions ?? "";
         void refresh.refresh();
+      }
     });
     createEffect(
       () => true,
       () => {
-        const wake = () => {
-          if (!document.hidden) void refresh.refresh();
+        const wake = (event: Event) => {
+          if (document.hidden) return;
+          invalidateSharedReads(event);
+          void refresh.refresh();
         };
         window.addEventListener("focus", wake);
         document.addEventListener("visibilitychange", wake);

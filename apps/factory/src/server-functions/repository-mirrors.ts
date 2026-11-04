@@ -6,6 +6,7 @@ import {
   repositoryMirrorRemove,
 } from "../../../../packages/project-domain/src/repository-mirror";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getRepositoryMirrorProjects = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
@@ -67,3 +68,5 @@ export const acknowledgeRepositoryMirrorOperation = createServerFn({ method: "PO
       return context.repositoryMirrors.acknowledge(context.actorID, project, command.commandID);
     }),
   );
+
+registerSharedReads(getRepositoryMirrorProjects, getRepositoryMirrors);

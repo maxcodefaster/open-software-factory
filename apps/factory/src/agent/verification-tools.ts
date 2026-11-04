@@ -1,9 +1,9 @@
+import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
 import {
   verificationDiagnosisInput,
   verificationToolCallInput,
   verificationToolCatalogue,
 } from "../../../../packages/conversation-domain/src/verification";
-import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { CommandError } from "../command-error";

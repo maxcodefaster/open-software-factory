@@ -6,6 +6,7 @@ import type {
   writerTakeoverCommand,
 } from "../access/writer-command";
 import { factoryFunction, factoryFunctionContext } from "./context";
+import { registerSharedReads } from "./shared-reads";
 
 export const getChangeWriterStatus = createServerFn({ method: "POST" })
   .validator((args: [changeID: string]) => args)
@@ -85,3 +86,5 @@ export const recordChangeEditingActivity = createServerFn({ method: "POST" })
       return context.writer.activity(context.actorID, change, input);
     });
   });
+
+registerSharedReads(getChangeWriterStatus);

@@ -419,7 +419,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                     model.openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
                   }}
                 >
-                  <Icon name="inbox" />
+                  <Icon name="trash" />
                   <span>Trash</span>
                 </button>
               </Show>

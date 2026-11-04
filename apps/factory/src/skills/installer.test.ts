@@ -1,11 +1,11 @@
-import { test, expect } from "bun:test";
-import { mkdtemp, readFile, chmod, rm, writeFile, symlink } from "node:fs/promises";
-import { join } from "node:path";
+import { expect, test } from "bun:test";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { nativeSkillManifest } from "./native";
-import { requirementsInterviewSkill } from "./reviewed";
+import { join } from "node:path";
 import { installSkills } from "../../../../deploy/opencode-server/install-skills.mjs";
 import { fixtureValue } from "../../../../test/fixtures/value";
+import { nativeSkillManifest } from "./native";
+import { requirementsInterviewSkill } from "./reviewed";
 
 test("native installer is idempotent, refuses replacement, corruption, missing metadata and symlinks", async () => {
   const own = await mkdtemp(join(tmpdir(), "factory-skills-proof-"));

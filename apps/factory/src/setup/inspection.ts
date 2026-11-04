@@ -1,11 +1,11 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
+  type SetupInspectionOutput,
   setupFeedbackKey,
   setupInspectionCommand,
   setupInspectionOutput,
   setupInspectionView,
-  type SetupInspectionOutput,
 } from "../../../../packages/project-domain/src/setup";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";

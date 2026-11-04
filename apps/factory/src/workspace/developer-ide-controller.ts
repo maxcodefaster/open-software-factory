@@ -1,9 +1,8 @@
-import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createDeveloperIDEClient,
-  DeveloperIDEIntentConflict,
   type DeveloperIDEClient,
+  DeveloperIDEIntentConflict,
   type DeveloperIDEObservation,
 } from "../../../../packages/runtime-kubernetes/src/developer-ide";
 import type { DeveloperIDEResources } from "../../../../packages/runtime-kubernetes/src/developer-ide-manifest";
@@ -14,6 +13,7 @@ import {
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
 
 type Database = ReturnType<typeof createDatabase>;
 type IDEQuery = Database["client"] | AgentTurnTransaction;
