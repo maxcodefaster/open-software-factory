@@ -9,5 +9,6 @@ test("owned runtime configuration selects the exact fresh worker profile", () =>
   expect(configuredFactoryboxRuntimeProfile(ownedRuntimeConfiguration)).toEqual({
     ...ownedFactoryboxProfile,
     storageAdmission: 1,
+    filesystemLayout: 2,
   });
 });

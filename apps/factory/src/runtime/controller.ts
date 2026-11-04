@@ -21,7 +21,10 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
 import { configuredFactoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { FactoryboxCapacityRefusedError } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
-import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
+import {
+  type RuntimeManifestInput,
+  renderRuntimeResources,
+} from "../../../../packages/runtime-kubernetes/src/manifest";
 import {
   parseSystemContract,
   type SystemContract,
@@ -40,7 +43,7 @@ import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
 import { agentConfiguration } from "./agent-configuration";
 import { runtimeAppOrigins } from "./app-origins";
-import { freezeRuntimeArtifacts } from "./artifacts";
+import { freezeRuntimeArtifacts, type RuntimeArtifactIntent } from "./artifacts";
 import { runtimeFactoryURL, runtimeForgeURL, runtimeReleaseRegistryURL } from "./endpoints";
 import { createFactoryboxExecution } from "./factorybox";
 import {
@@ -75,6 +78,32 @@ type ExecutionIdentity = ReturnType<typeof runtimeIdentity> & {
   podName: string;
 };
 const systemContractPath = ".factory/system.json";
+
+function renderAttemptResources(
+  input: Omit<
+    RuntimeManifestInput,
+    | "runtimeHostImage"
+    | "factoryboxProfile"
+    | "workerID"
+    | "reserveSlotID"
+    | "environmentVersion"
+    | "appOrigins"
+  >,
+  artifacts: RuntimeArtifactIntent,
+) {
+  const appOrigins = input.systemContract
+    ? runtimeAppOrigins(artifacts.publicFactoryOrigin, input.attemptID, input.systemContract)
+    : undefined;
+  return renderRuntimeResources({
+    ...input,
+    runtimeHostImage: artifacts.runtimeHostImage,
+    factoryboxProfile: artifacts.factoryboxProfile,
+    workerID: artifacts.workerID,
+    ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
+    environmentVersion: artifacts.environmentVersion,
+    ...(appOrigins ? { appOrigins } : {}),
+  });
+}
 
 function requirePinnedRuntimeHostImage(value: string | undefined) {
   if (!value?.includes("@sha256:")) {
@@ -731,57 +760,51 @@ export function createRuntimeController(
           ? undefined
           : await resolveSystemContract(input.repositoryURL, input.revision);
       const artifacts = await artifactsFor(input.identity.attemptID, connection);
-      const appOrigins = systemContract
-        ? runtimeAppOrigins(artifacts.publicFactoryOrigin, input.identity.attemptID, systemContract)
-        : undefined;
-      const resources = renderRuntimeResources({
-        ...input.identity,
-        generation: input.generation,
-        projectID: input.projectID,
-        repositoryURL,
-        revision: input.revision,
-        devcontainerPath: input.devcontainerPath,
-        connectorToken: input.parentToken,
-        childConnectorToken: input.childToken,
-        controlURL,
-        runtimeHostImage: artifacts.runtimeHostImage,
-        factoryboxProfile: artifacts.factoryboxProfile,
-        workerID: artifacts.workerID,
-        ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-        environmentVersion: artifacts.environmentVersion,
-        registryCA: await readRegistryCA(),
-        mode: input.kind,
-        ...(systemContract ? { systemContract } : {}),
-        ...(appOrigins ? { appOrigins } : {}),
-        ...(input.verification
-          ? {
-              verification: {
-                forgeURL: runtimeForgeURL(),
-                runnerUUID: input.verification.runnerUUID,
-                runnerToken: input.verification.runnerToken,
-                runnerLabel:
-                  input.kind === "publication" ? "factory-publication" : "factory-verification",
-                ...(input.verification.jobHandle ? { handle: input.verification.jobHandle } : {}),
-                ...(input.verification.publicationID && publicationVersion
-                  ? {
-                      publication: {
-                        id: input.verification.publicationID,
-                        version: publicationVersion,
-                        credentialURL: runtimeFactoryURL(
-                          `/internal/releases/${input.verification.publicationID}/credentials`,
-                        ),
-                        registryURL: runtimeReleaseRegistryURL(),
-                        credentialToken: runtimePublicationToken(
-                          connectorSecret,
-                          input.verification.publicationID,
-                        ),
-                      },
-                    }
-                  : {}),
-              },
-            }
-          : {}),
-      });
+      const resources = renderAttemptResources(
+        {
+          ...input.identity,
+          generation: input.generation,
+          projectID: input.projectID,
+          repositoryURL,
+          revision: input.revision,
+          devcontainerPath: input.devcontainerPath,
+          connectorToken: input.parentToken,
+          childConnectorToken: input.childToken,
+          controlURL,
+          registryCA: await readRegistryCA(),
+          mode: input.kind,
+          ...(systemContract ? { systemContract } : {}),
+          ...(input.verification
+            ? {
+                verification: {
+                  forgeURL: runtimeForgeURL(),
+                  runnerUUID: input.verification.runnerUUID,
+                  runnerToken: input.verification.runnerToken,
+                  runnerLabel:
+                    input.kind === "publication" ? "factory-publication" : "factory-verification",
+                  ...(input.verification.jobHandle ? { handle: input.verification.jobHandle } : {}),
+                  ...(input.verification.publicationID && publicationVersion
+                    ? {
+                        publication: {
+                          id: input.verification.publicationID,
+                          version: publicationVersion,
+                          credentialURL: runtimeFactoryURL(
+                            `/internal/releases/${input.verification.publicationID}/credentials`,
+                          ),
+                          registryURL: runtimeReleaseRegistryURL(),
+                          credentialToken: runtimePublicationToken(
+                            connectorSecret,
+                            input.verification.publicationID,
+                          ),
+                        },
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+        },
+        artifacts,
+      );
       await launchAttempt(
         input.identity.attemptID,
         {
@@ -937,77 +960,71 @@ export function createRuntimeController(
           ? await sources.prepareExecution(attempt.id)
           : undefined;
         const artifacts = await artifactsFor(attempt.id, sql);
-        const appOrigins = systemContract
-          ? runtimeAppOrigins(artifacts.publicFactoryOrigin, attempt.id, systemContract)
-          : undefined;
-        const resources = renderRuntimeResources({
-          ...identity,
-          generation,
-          projectID: row.projectID,
-          runtimeOwnerID,
-          repositoryURL: expectedRepositoryURL,
-          repositoryIdentity: row.projectID,
-          preserveWorkspace: row.workspaceID !== null,
-          ...(canonicalSource ? { storageNode: canonicalSource.storageNode } : {}),
-          revision: row.revision,
-          devcontainerPath: row.devcontainerPath,
-          connectorToken: tokens.parent,
-          childConnectorToken: tokens.child,
-          controlURL,
-          runtimeHostImage: artifacts.runtimeHostImage,
-          factoryboxProfile: artifacts.factoryboxProfile,
-          workerID: artifacts.workerID,
-          ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-          environmentVersion: artifacts.environmentVersion,
-          registryCA: await readRegistryCA(),
-          mode: row.isolatedKind ?? "development",
-          ...(systemContract ? { systemContract } : {}),
-          ...(appOrigins ? { appOrigins } : {}),
-          ...(row.changeID && row.workspaceID
-            ? {
-                agent: await agentConfiguration(
-                  database,
-                  row.changeID,
-                  connectorSecret,
-                  attempt.id,
-                  generation,
-                  artifacts.browserToolsImage,
-                ),
-              }
-            : {}),
-          ...((row.isolatedKind === "verification" || row.isolatedKind === "publication") &&
-          row.runnerUUID &&
-          row.runnerToken
-            ? {
-                verification: {
-                  forgeURL: runtimeForgeURL(),
-                  runnerUUID: row.runnerUUID,
-                  runnerToken: row.runnerToken,
-                  runnerLabel:
-                    row.isolatedKind === "publication"
-                      ? "factory-publication"
-                      : "factory-verification",
-                  ...(row.publicationID && row.publicationHandle && publicationVersion
-                    ? {
-                        handle: row.publicationHandle,
-                        publication: {
-                          id: row.publicationID,
-                          version: publicationVersion,
-                          credentialURL: runtimeFactoryURL(
-                            `/internal/releases/${row.publicationID}/credentials`,
-                          ),
-                          registryURL: runtimeReleaseRegistryURL(),
-                          credentialToken: runtimePublicationToken(
-                            connectorSecret,
-                            row.publicationID,
-                          ),
-                        },
-                      }
-                    : {}),
-                },
-              }
-            : {}),
-        });
+        const resources = renderAttemptResources(
+          {
+            ...identity,
+            generation,
+            projectID: row.projectID,
+            runtimeOwnerID,
+            repositoryURL: expectedRepositoryURL,
+            repositoryIdentity: row.projectID,
+            preserveWorkspace: row.workspaceID !== null,
+            ...(canonicalSource ? { storageNode: canonicalSource.storageNode } : {}),
+            revision: row.revision,
+            devcontainerPath: row.devcontainerPath,
+            connectorToken: tokens.parent,
+            childConnectorToken: tokens.child,
+            controlURL,
+            registryCA: await readRegistryCA(),
+            mode: row.isolatedKind ?? "development",
+            ...(systemContract ? { systemContract } : {}),
+            ...(row.changeID && row.workspaceID
+              ? {
+                  agent: await agentConfiguration(
+                    database,
+                    row.changeID,
+                    connectorSecret,
+                    attempt.id,
+                    generation,
+                    artifacts.browserToolsImage,
+                  ),
+                }
+              : {}),
+            ...((row.isolatedKind === "verification" || row.isolatedKind === "publication") &&
+            row.runnerUUID &&
+            row.runnerToken
+              ? {
+                  verification: {
+                    forgeURL: runtimeForgeURL(),
+                    runnerUUID: row.runnerUUID,
+                    runnerToken: row.runnerToken,
+                    runnerLabel:
+                      row.isolatedKind === "publication"
+                        ? "factory-publication"
+                        : "factory-verification",
+                    ...(row.publicationID && row.publicationHandle && publicationVersion
+                      ? {
+                          handle: row.publicationHandle,
+                          publication: {
+                            id: row.publicationID,
+                            version: publicationVersion,
+                            credentialURL: runtimeFactoryURL(
+                              `/internal/releases/${row.publicationID}/credentials`,
+                            ),
+                            registryURL: runtimeReleaseRegistryURL(),
+                            credentialToken: runtimePublicationToken(
+                              connectorSecret,
+                              row.publicationID,
+                            ),
+                          },
+                        }
+                      : {}),
+                  },
+                }
+              : {}),
+          },
+          artifacts,
+        );
         await freezeStagingConfiguration(sql, attempt.id, resources);
         const activated = await computeWait.launch(
           attempt.id,
@@ -1292,33 +1309,31 @@ export function createRuntimeController(
           0,
           artifacts.runtimeHostImage.indexOf("/"),
         );
-        const resources = renderRuntimeResources({
-          attemptID,
-          generation,
-          namespace: attempt.namespace,
-          podName: attempt.podName,
-          composeProjectName: runtimeIdentity(`project-prebuild:${preparationID}`, generation)
-            .composeProjectName,
-          projectID: job.projectID,
-          repositoryURL: runtimeRepositoryURL(job.repositoryURL, attemptID),
-          revision: job.revision,
-          devcontainerPath: job.devcontainerPath,
-          connectorToken: tokens.parent,
-          childConnectorToken: tokens.child,
-          controlURL,
-          runtimeHostImage: artifacts.runtimeHostImage,
-          factoryboxProfile: artifacts.factoryboxProfile,
-          workerID: artifacts.workerID,
-          ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-          environmentVersion: artifacts.environmentVersion,
-          registryCA: await readRegistryCA(),
-          mode: "prebuild",
-          prebuild: {
-            id: preparationID,
-            platform: "native",
-            imageRepository: `${registry}/open-factory/prebuilds/${job.projectID}`,
+        const resources = renderAttemptResources(
+          {
+            attemptID,
+            generation,
+            namespace: attempt.namespace,
+            podName: attempt.podName,
+            composeProjectName: runtimeIdentity(`project-prebuild:${preparationID}`, generation)
+              .composeProjectName,
+            projectID: job.projectID,
+            repositoryURL: runtimeRepositoryURL(job.repositoryURL, attemptID),
+            revision: job.revision,
+            devcontainerPath: job.devcontainerPath,
+            connectorToken: tokens.parent,
+            childConnectorToken: tokens.child,
+            controlURL,
+            registryCA: await readRegistryCA(),
+            mode: "prebuild",
+            prebuild: {
+              id: preparationID,
+              platform: "native",
+              imageRepository: `${registry}/open-factory/prebuilds/${job.projectID}`,
+            },
           },
-        });
+          artifacts,
+        );
         await launchAttempt(
           attemptID,
           {
@@ -1657,28 +1672,26 @@ export function createRuntimeController(
           }
           const canonicalSource = await sources.prepareExecution(identity.attemptID);
           const artifacts = await artifactsFor(identity.attemptID, lock);
-          const resources = renderRuntimeResources({
-            ...identity,
-            generation,
-            projectID,
-            runtimeOwnerID: workspace.id,
-            repositoryURL,
-            repositoryIdentity: projectID,
-            preserveWorkspace: true,
-            storageNode: canonicalSource.storageNode,
-            revision,
-            devcontainerPath: project.devcontainerPath,
-            connectorToken: token,
-            childConnectorToken: childToken,
-            controlURL,
-            runtimeHostImage: artifacts.runtimeHostImage,
-            factoryboxProfile: artifacts.factoryboxProfile,
-            workerID: artifacts.workerID,
-            ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-            environmentVersion: artifacts.environmentVersion,
-            registryCA: await readRegistryCA(),
-            systemContract,
-          });
+          const resources = renderAttemptResources(
+            {
+              ...identity,
+              generation,
+              projectID,
+              runtimeOwnerID: workspace.id,
+              repositoryURL,
+              repositoryIdentity: projectID,
+              preserveWorkspace: true,
+              storageNode: canonicalSource.storageNode,
+              revision,
+              devcontainerPath: project.devcontainerPath,
+              connectorToken: token,
+              childConnectorToken: childToken,
+              controlURL,
+              registryCA: await readRegistryCA(),
+              systemContract,
+            },
+            artifacts,
+          );
           await launchAttempt(
             identity.attemptID,
             {
@@ -1838,25 +1851,23 @@ export function createRuntimeController(
             );
           }
           const artifacts = await artifactsFor(identity.attemptID, lock);
-          const resources = renderRuntimeResources({
-            ...identity,
-            generation,
-            projectID,
-            repositoryURL,
-            revision: preview.revision,
-            devcontainerPath: project.devcontainerPath,
-            connectorToken: tokens.parent,
-            childConnectorToken: tokens.child,
-            controlURL,
-            runtimeHostImage: artifacts.runtimeHostImage,
-            factoryboxProfile: artifacts.factoryboxProfile,
-            workerID: artifacts.workerID,
-            ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-            environmentVersion: artifacts.environmentVersion,
-            registryCA: await readRegistryCA(),
-            mode: "staging",
-            systemContract,
-          });
+          const resources = renderAttemptResources(
+            {
+              ...identity,
+              generation,
+              projectID,
+              repositoryURL,
+              revision: preview.revision,
+              devcontainerPath: project.devcontainerPath,
+              connectorToken: tokens.parent,
+              childConnectorToken: tokens.child,
+              controlURL,
+              registryCA: await readRegistryCA(),
+              mode: "staging",
+              systemContract,
+            },
+            artifacts,
+          );
           await launchAttempt(
             identity.attemptID,
             {
@@ -2073,36 +2084,34 @@ export function createRuntimeController(
         try {
           const canonicalSource = await sources.prepareExecution(identity.attemptID);
           const artifacts = await artifactsFor(identity.attemptID, lock);
-          const resources = renderRuntimeResources({
-            ...identity,
-            generation,
-            projectID,
-            runtimeOwnerID: workspace.id,
-            repositoryURL,
-            repositoryIdentity: projectID,
-            preserveWorkspace: true,
-            storageNode: canonicalSource.storageNode,
-            revision,
-            devcontainerPath: row.devcontainerPath,
-            connectorToken: parent,
-            childConnectorToken: child,
-            controlURL,
-            runtimeHostImage: artifacts.runtimeHostImage,
-            factoryboxProfile: artifacts.factoryboxProfile,
-            workerID: artifacts.workerID,
-            ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-            environmentVersion: artifacts.environmentVersion,
-            registryCA: await readRegistryCA(),
-            systemContract,
-            agent: await agentConfiguration(
-              database,
-              changeID,
-              connectorSecret,
-              identity.attemptID,
+          const resources = renderAttemptResources(
+            {
+              ...identity,
               generation,
-              artifacts.browserToolsImage,
-            ),
-          });
+              projectID,
+              runtimeOwnerID: workspace.id,
+              repositoryURL,
+              repositoryIdentity: projectID,
+              preserveWorkspace: true,
+              storageNode: canonicalSource.storageNode,
+              revision,
+              devcontainerPath: row.devcontainerPath,
+              connectorToken: parent,
+              childConnectorToken: child,
+              controlURL,
+              registryCA: await readRegistryCA(),
+              systemContract,
+              agent: await agentConfiguration(
+                database,
+                changeID,
+                connectorSecret,
+                identity.attemptID,
+                generation,
+                artifacts.browserToolsImage,
+              ),
+            },
+            artifacts,
+          );
           await launchAttempt(
             identity.attemptID,
             {
