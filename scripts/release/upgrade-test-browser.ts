@@ -78,11 +78,8 @@ export async function seedThroughBrowser(input: SeedUI) {
         .selectOption("system");
       if (!(await navigation.isVisible()))
         await settings.getByRole("button", { name: /choose settings page$/i }).click();
-      await navigation
-        .locator("section")
-        .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-        .getByRole("button", { name: "People & access", exact: true })
-        .click();
+      // The system scope lists only its own pages, so the name is unique, in old builds too.
+      await navigation.getByRole("button", { name: "People & access", exact: true }).click();
       await settings.getByRole("region", { name: "Managed accounts" }).waitFor({ timeout: step });
       await settings.getByText("Add account", { exact: true }).click();
       await settings.getByLabel("Name", { exact: true }).fill(input.user.name);
