@@ -809,3 +809,53 @@ test("Stop during editor create fences its outcome; failed teardown needs an exp
     await owned.dispose();
   }
 }, 30_000);
+
+test("opening the IDE after an upgrade replaces a running editor that has an older image", async () => {
+  const owned = await fixture();
+  const stopped: string[] = [];
+  const observed: DeveloperIDEObservation = {
+    namespaceUID: "namespace",
+    podUID: "pod",
+    ready: true,
+    failed: false,
+  };
+  const editor = createDeveloperIDEController(owned.database, {
+    async prepare() {
+      return observed;
+    },
+    async observe() {
+      return observed;
+    },
+    async endpoint() {
+      return "http://127.0.0.1:4400";
+    },
+    async stop(input) {
+      stopped.push(input.image);
+    },
+    close() {},
+  });
+  try {
+    const first = await editor.ensure(owned.projectID, owned.developerID);
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "ready",
+      "The first editor never became ready",
+      5_000,
+    );
+    // Same image: opening the IDE again keeps the running editor.
+    expect((await editor.ensure(owned.projectID, owned.developerID)).epoch).toBe(first.epoch);
+    expect(stopped).toEqual([]);
+    const upgraded = `registry.invalid/editor@sha256:${"4".repeat(64)}`;
+    process.env["FACTORY_DEVELOPER_IDE_IMAGE"] = upgraded;
+    const next = await editor.ensure(owned.projectID, owned.developerID);
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0]).toContain("3".repeat(64));
+    expect(next.epoch).toBe(first.epoch + 1);
+    const [row] = await owned.database
+      .client`SELECT image FROM factory.developer_ide WHERE user_id=${owned.developerID}`;
+    expect(row?.["image"]).toBe(upgraded);
+  } finally {
+    await editor.close();
+    await owned.dispose();
+  }
+}, 30_000);

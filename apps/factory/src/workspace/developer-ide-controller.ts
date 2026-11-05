@@ -184,6 +184,20 @@ export function createDeveloperIDEController(
       const image = process.env["FACTORY_DEVELOPER_IDE_IMAGE"];
       if (!image || !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(image))
         throw new CommandError("unavailable", "Independent editor artifact is not configured");
+      // An upgrade can ship a new editor image. A running editor keeps its recorded image, so
+      // opening the IDE stops the older one and lets the stopped branch below start the new epoch.
+      const outdated = await row(userID);
+      if (
+        outdated &&
+        outdated.image !== image &&
+        (outdated.state === "ready" || outdated.state === "preparing")
+      ) {
+        await database.client`UPDATE factory.developer_ide SET state='stop-intended',stop_intended_at=COALESCE(stop_intended_at,now()),updated_at=now() WHERE user_id=${userID} AND service_epoch=${outdated.epoch} AND state IN ('ready','preparing')`;
+        schedule(userID);
+        const deadline = now() + 60_000;
+        while (now() < deadline && (await row(userID))?.state === "stop-intended")
+          await Bun.sleep(300);
+      }
       await database.client.begin(async (sql) => {
         await projectDevelopmentAuthorityIn(sql, userID, projectID);
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`developer-ide-intent:${userID}`}))`;
