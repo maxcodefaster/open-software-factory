@@ -938,14 +938,25 @@ export function createForgejoClient(options: {
       const current = await getBranch(repository, defaultBranch);
       if (current?.headSha === expectedHeadSha) return current;
       try {
-        await response(`${repositoryPath(repository)}/pulls/${pullRequestNumber}/merge`, {
-          method: "POST",
-          body: JSON.stringify({
-            Do: "fast-forward-only",
-            head_commit_id: expectedHeadSha,
-            delete_branch_after_merge: false,
-          }),
-        });
+        // Forgejo answers 405 while it still computes whether the pull request can merge. That
+        // check ends within seconds, so ask again before treating the answer as a refusal.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await response(`${repositoryPath(repository)}/pulls/${pullRequestNumber}/merge`, {
+              method: "POST",
+              body: JSON.stringify({
+                Do: "fast-forward-only",
+                head_commit_id: expectedHeadSha,
+                delete_branch_after_merge: false,
+              }),
+            });
+            break;
+          } catch (error) {
+            if (!(error instanceof ForgeHttpError && error.status === 405) || attempt >= 20)
+              throw error;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
       } catch (error) {
         const observed = await getBranch(repository, defaultBranch);
         if (observed?.headSha === expectedHeadSha) return observed;

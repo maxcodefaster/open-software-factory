@@ -202,7 +202,7 @@ describe("confirmed initial workflow merge", () => {
           }
           if (path.endsWith("/pulls/1/merge")) {
             expect(patterns).toBe("secrets/**");
-            if (failMerge) return response({}, 405);
+            if (failMerge) return response({}, 409);
             head = "b".repeat(40);
             return new Response(null, { status: 204 });
           }
@@ -210,11 +210,35 @@ describe("confirmed initial workflow merge", () => {
         },
       });
       const merge = client.mergeInitialSetupWorkflow(repository, 1, "b".repeat(40), "main", sha);
-      if (failMerge) await expect(merge).rejects.toThrow("405");
+      if (failMerge) await expect(merge).rejects.toThrow("409");
       else expect((await merge)?.headSha).toBe("b".repeat(40));
       expect(updates).toEqual(["secrets/**", `secrets/**;${workflow}`]);
     },
   );
+  test("a merge Forgejo still checks is asked again until it can merge", async () => {
+    let head = sha;
+    let asked = 0;
+    const client = createForgejoClient({
+      apiURL: "http://forge/api/v1/",
+      token: "owned-fixture",
+      fetch: async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith("/branches/main")) return response(branch("main", head));
+        if (path.endsWith("/pulls/1/merge")) {
+          asked += 1;
+          if (asked < 3) return response("Please try again later", 405);
+          head = "b".repeat(40);
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`Unexpected owned route ${path}`);
+      },
+    });
+    expect((await client.mergeFastForward(repository, 1, "b".repeat(40), "main"))?.headSha).toBe(
+      "b".repeat(40),
+    );
+    expect(asked).toBe(3);
+  });
+
   test.each(["existing-workflow", "changed-main", "writable-main"])(
     "refuses to relax protection for %s",
     async (boundary) => {
