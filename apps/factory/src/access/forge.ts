@@ -110,13 +110,18 @@ export function createForgeAccessReconciliation(options: {
             enabled: false,
             suspended: person.allowed,
           });
-        const projects = await sql<
+        const everyProject = await sql<
           { id: string; slug: string; repositoryURL: string; branch: string; grant: boolean }[]
         >`
           SELECT project.id,project.slug,project.repository_url AS "repositoryURL",project.default_branch AS branch,
             ${person.allowed} AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID})
               OR EXISTS(SELECT 1 FROM factory.project_membership WHERE project_id=project.id AND user_id=${userID} AND role='developer')) AS grant
           FROM factory.project project ORDER BY project.id`;
+        // A Project hosted elsewhere has no repository here to grant on. It must not stop the
+        // grants of the Projects that are.
+        const projects = everyProject.filter(
+          (project) => !options.origin || new URL(project.repositoryURL).origin === options.origin,
+        );
         await forge.removeAlternativeGrants(
           userID,
           projects

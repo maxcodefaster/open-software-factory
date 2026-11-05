@@ -377,6 +377,24 @@ function standbyEvidence(slot: ExecutionSlot, input: FactoryboxRuntimeInput, val
     snapshotResidentBytes: 0,
   };
 }
+const nativeAbsenceGraceMS = 30 * 60_000;
+
+/** True when the worker reports that the Sandbox record never existed and nothing can still create it. */
+export function nativeRecordAbsent(stderr: string, sandboxID: string, expiresAt: string) {
+  const expired = Date.parse(expiresAt);
+  return (
+    Number.isFinite(expired) &&
+    Date.now() - expired > nativeAbsenceGraceMS &&
+    stderr
+      .split("\n")
+      .some(
+        (line) =>
+          line.startsWith("lstat ") &&
+          line.endsWith(`/objects/${sandboxID}: no such file or directory`),
+      )
+  );
+}
+
 async function reserveState(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
@@ -522,7 +540,13 @@ export function createReserveClient(
         transport,
         factoryboxRuntimeDeclaration(input),
       );
-      if (!observation.confirmed) throw new Error("Execution slot native state is unconfirmed");
+      if (!observation.confirmed) {
+        // A Start that failed before the worker published its record leaves nothing to observe.
+        // Long after the slot expired no native command can still be running, so a missing
+        // record is a confirmed absence and only the Factory resources remain to retire.
+        if (nativeRecordAbsent(observation.stderr, input.sandboxID, slot.expiresAt)) return;
+        throw new Error("Execution slot native state is unconfirmed");
+      }
       let state = z
         .object({ record: z.object({ phase: z.string() }).passthrough() })
         .parse(JSON.parse(observation.stdout));

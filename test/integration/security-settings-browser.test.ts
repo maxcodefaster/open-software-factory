@@ -182,7 +182,7 @@ test("a Product Contributor manages members without receiving code authority", a
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(owned.base);
     await openProjectMenu(page);
-    await page.getByRole("button", { name: /Team workspace/ }).click();
+    await page.locator(".project-choice", { hasText: "Team workspace" }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
     const members = page.getByRole("region", { name: "Project membership", exact: true });

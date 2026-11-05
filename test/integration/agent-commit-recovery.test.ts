@@ -189,7 +189,7 @@ test.each([
       expect(view.commitOperation).toBeUndefined();
       expect(view.state).toBe(recovering ? "failed" : "waiting");
       if (recovering) expect(view.lastError).toContain("Files were left untouched");
-      else expect(view.lastError).toContain("No new commit was submitted");
+      else expect(view.lastError).toContain("nothing new to submit");
       expect(view.turn?.state).toBe("completed");
       const [operation] = await owned.database.client<Array<{ state: string; sha: string | null }>>`
       SELECT state, commit_sha AS sha FROM factory.change_commit_operation WHERE id = ${accepted.turn?.id ?? ""}`;

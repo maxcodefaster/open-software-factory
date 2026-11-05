@@ -579,7 +579,10 @@ test("a Build mode round trip cannot restore uncertain external authority", asyn
     await owned.controller().recover();
     await until(async () => {
       const view = await owned.controller().get(owned.changeID);
-      return view.turn?.state === "completed" || !!view.turn?.summary?.includes("authority");
+      return (
+        view.turn?.state === "completed" ||
+        !!view.turn?.summary?.includes("The work changed while this was running")
+      );
     });
     expect((await owned.turn(commandID))?.state).toBe("uncertain");
     expect(owned.commitCalls).toHaveLength(0);
@@ -1405,7 +1408,8 @@ test("recovery refuses a replaced runtime generation without prompting or commit
     await until(async () => {
       const view = await owned.controller().get(owned.changeID);
       return (
-        view.turn?.state === "uncertain" && !!view.turn.summary?.includes("runtime generation")
+        view.turn?.state === "uncertain" &&
+        !!view.turn.summary?.includes("The work changed while this was running")
       );
     });
     expect(owned.requests()).toBe(1);

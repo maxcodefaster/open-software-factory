@@ -152,7 +152,7 @@ test.each(["restore", "mode revoked", "Session replaced"] as const)(
             SELECT last_error AS error FROM factory.change_commit_operation WHERE change_id = ${owned.changeID}`;
               return rows[0]?.error;
             },
-            (error) => error?.includes("authority changed") === true,
+            (error) => error?.includes("The work changed while this was running") === true,
             "Revoked recovery was not observed",
           );
           expect(frames).toEqual([]);

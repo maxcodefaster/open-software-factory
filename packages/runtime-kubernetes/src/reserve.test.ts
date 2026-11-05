@@ -1,3 +1,4 @@
+import { nativeRecordAbsent } from "./reserve";
 import { expect, test } from "bun:test";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
 import { createKubernetesClient } from "./client";
@@ -580,4 +581,15 @@ test("slot cleanup refuses changed shared ownership or UIDs before deleting cred
     await expect(fixture.adapter.retire({ ...fixture.slot, state: "retiring" })).rejects.toThrow();
     expect(fixture.deleted).toEqual([]);
   }
+});
+
+test("a Sandbox record that never existed is a confirmed absence only after the slot expired long ago", () => {
+  const sandboxID = factoryboxSandboxID(slot.id);
+  const missing = `lstat /var/lib/store/epochs/${"d".repeat(32)}/controller/objects/${sandboxID}: no such file or directory\ncommand terminated with exit code 1\n`;
+  const old = new Date(Date.now() - 31 * 60_000).toISOString();
+  const recent = new Date(Date.now() - 5 * 60_000).toISOString();
+  expect(nativeRecordAbsent(missing, sandboxID, old)).toBe(true);
+  expect(nativeRecordAbsent(missing, sandboxID, recent)).toBe(false);
+  expect(nativeRecordAbsent("resource temporarily unavailable", sandboxID, old)).toBe(false);
+  expect(nativeRecordAbsent(missing, "runtime-other", old)).toBe(false);
 });
