@@ -916,7 +916,7 @@ export function createAgentController(
           "the exact prepared commit was not found; current files were not committed";
       if (emptyCheckout || absentPreparedCommit) {
         const diagnostic = emptyCheckout
-          ? "This turn produced no source changes. No new commit was submitted; the current request still needs review."
+          ? "This turn changed no files, so there is nothing new to submit. The earlier submission is unchanged and still needs review."
           : "Prepared commit was not found. Files were left untouched; review the checkout before starting a new Build turn.";
         await turns.observeCommit(operation.id, async (transaction) => {
           const recorded = await transaction<Array<{ id: string }>>`
