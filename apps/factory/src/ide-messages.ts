@@ -10,7 +10,8 @@ export type ActivityNavigationRequest = {
   id: string;
   workspaceID: string;
   path: string;
-  kind: "file" | "diff";
+  kind: "file" | "diff" | "follow";
+  line?: number;
   diff?: string;
   truncated?: boolean;
 };

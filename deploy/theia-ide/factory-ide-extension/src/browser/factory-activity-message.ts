@@ -3,7 +3,8 @@ export type ActivityNavigationMessage = {
   id: string;
   workspaceID: string;
   path: string;
-  kind: "file" | "diff";
+  kind: "file" | "diff" | "follow";
+  line?: number;
   diff?: string;
   truncated?: boolean;
 };
@@ -36,7 +37,9 @@ export function activityNavigationMessage(value: unknown): ActivityNavigationMes
           part === ".git" ||
           part.startsWith(".factory-save-"),
       ) ||
-    (candidate.kind !== "file" && candidate.kind !== "diff") ||
+    (candidate.kind !== "file" && candidate.kind !== "diff" && candidate.kind !== "follow") ||
+    (candidate.line !== undefined &&
+      (!Number.isInteger(candidate.line) || candidate.line < 1 || candidate.line > 10_000_000)) ||
     (candidate.diff !== undefined &&
       (typeof candidate.diff !== "string" || candidate.diff.length > 64_000)) ||
     (candidate.kind === "diff" && !candidate.diff) ||

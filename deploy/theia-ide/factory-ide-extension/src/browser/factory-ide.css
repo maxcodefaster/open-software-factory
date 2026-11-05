@@ -626,3 +626,23 @@
   opacity: 0.5;
   cursor: wait;
 }
+
+.factory-agent-line {
+  background: color-mix(in srgb, var(--theia-focusBorder, #4d8dff) 18%, transparent);
+  animation: factory-agent-line-fade 4s ease-out forwards;
+}
+
+@keyframes factory-agent-line-fade {
+  from {
+    background-color: color-mix(in srgb, var(--theia-focusBorder, #4d8dff) 32%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .factory-agent-line {
+    animation: none;
+  }
+}

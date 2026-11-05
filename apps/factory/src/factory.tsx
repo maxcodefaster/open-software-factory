@@ -29,6 +29,7 @@ import {
 } from "../../../packages/zero-schema/src";
 import { useZero, useZeroQuery, ZeroProvider } from "../../../packages/zero-solid/src";
 import { takeSettingsReturn } from "./access/settings-return";
+import { createAgentFollower } from "./agent/follow-agent";
 import { createAgentCommandIds } from "./agent-command-ids";
 import { type AgentSnapshot, createAgentReadFence, retainAgentActivity } from "./agent-view-state";
 import type {
@@ -1822,6 +1823,34 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   });
 
   createEffect(assistantKey, () => conversationScroll?.reset());
+
+  // While the IDE of a Ticket's Change is on screen, the editor follows the agent's file edits.
+  // The editor decides when to hold back, for example while the person is typing or scrolling.
+  const agentFollower = createAgentFollower();
+  createEffect(
+    () => ({ changeID: observedAgentChangeID(), messages: agent().messages }),
+    ({ changeID, messages }) => {
+      const target = agentFollower.next(changeID, messages);
+      const tab = untrack(activeWorkspaceTab);
+      if (
+        !target ||
+        !changeID ||
+        !untrack(canDevelopProject) ||
+        tab?.view !== "ide" ||
+        tab.changeID !== changeID ||
+        !tab.workspaceID ||
+        untrack(ideNavigation)
+      )
+        return;
+      setIDENavigation({
+        id: crypto.randomUUID(),
+        workspaceID: tab.workspaceID,
+        path: target.path,
+        kind: "follow",
+        ...(target.line ? { line: target.line } : {}),
+      });
+    },
+  );
 
   let observedProposalContext = "";
   let observedProposalID: string | undefined;
