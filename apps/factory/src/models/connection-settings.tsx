@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import {
   type ModelConnectionView,
   type ModelConnectionWrite,
@@ -448,7 +448,7 @@ function ModelRoleSettings(props: {
   const [reasoning, setReasoning] = createSignal<CodingReasoning>("medium");
   const [dirty, setDirty] = createSignal(false);
   const [result, setResult] = createSignal<ModelProbeResult>();
-  let lastReset = props.resetDrafts;
+  let lastReset = untrack(() => props.resetDrafts);
   const label = () => (props.role === "build" ? "Coding" : "Planning & knowledge");
   const active = () => props.data.roles.find((entry) => entry.role === props.role);
   const deployment = () =>
@@ -485,7 +485,7 @@ function ModelRoleSettings(props: {
       role: props.role,
     }),
     ({ data, settings, reset, role: roleName }) => {
-      if (dirty() && lastReset === reset) return;
+      if (untrack(dirty) && lastReset === reset) return;
       lastReset = reset;
       setDirty(false);
       const role = data.roles.find((entry) => entry.role === roleName)?.active;

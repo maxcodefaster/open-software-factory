@@ -77,12 +77,12 @@ test("Epic folders replace filtering, retain live updates and expose hierarchy a
       .getByRole("button", { name: "Onboarding", exact: true })
       .click();
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-    const openRoot = board.getByRole("button", { name: "Open Epic Release", exact: true });
+    const openRoot = board.getByRole("button", { name: /^Open Epic Release(?: |$)/ });
     await openRoot.focus();
     await openRoot.press("Enter");
     const folder = page.getByRole("dialog", { name: "Release", exact: true });
     await expect(
-      folder.getByRole("button", { name: "Open Epic Onboarding", exact: true }),
+      folder.getByRole("button", { name: /^Open Epic Onboarding(?: |$)/ }),
     ).toBeFocused();
     await expect(folder.locator(".epic-progress")).toHaveText("0/1 done");
     await page.screenshot({ path: `${evidence}/root-desktop.png` });
@@ -94,7 +94,7 @@ test("Epic folders replace filtering, retain live updates and expose hierarchy a
     await page.keyboard.press("Escape");
     await expect(edit).toBeHidden();
     await expect(folder.getByRole("button", { name: "Edit Epic", exact: true })).toBeFocused();
-    await folder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    await folder.getByRole("button", { name: /^Open Epic Onboarding(?: |$)/ }).click();
     const childFolder = page.getByRole("dialog", { name: "Onboarding", exact: true });
     const card = childFolder.getByRole("button", { name: /Welcome new developers/ });
     await expect(card).toBeVisible();
@@ -145,8 +145,7 @@ test("Epic folders replace filtering, retain live updates and expose hierarchy a
         );
       expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
       const opener = board.getByRole("button", {
-        name: "Open Epic Developer onboarding",
-        exact: true,
+        name: /^Open Epic Developer onboarding(?: |$)/,
       });
       await opener.click();
       await page.screenshot({ path: `${evidence}/folder-${width}.png` });
@@ -215,8 +214,7 @@ test("Epic grid centers sparse and incomplete rows and remains usable on small s
     await page.getByRole("button").filter({ hasText: slug }).click();
     const board = page.getByRole("region", { name: "Ticket board", exact: true });
     const opener = board.getByRole("button", {
-      name: "Open Epic Developer onboarding",
-      exact: true,
+      name: /^Open Epic Developer onboarding(?: |$)/,
     });
     await opener.click();
     await page.mouse.move(0, 0);

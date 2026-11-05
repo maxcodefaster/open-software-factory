@@ -156,6 +156,70 @@ test("a draft saved against an older version offers to keep or discard it", asyn
   );
 });
 
+test("typing into a stale draft keeps the recovery in view above the document", async ({
+  page,
+}) => {
+  const id = await insertTicket("Stale and still typing", "Server text", "inbox");
+  await database.client`UPDATE factory.ticket SET version=version+3 WHERE id=${id}`;
+  await retainStaleDraft(page, id, "Stale and still typing");
+  await openTicket(page, "Stale and still typing");
+  const recovery = page.getByRole("alert").filter({ hasText: "changed after you started editing" });
+  await expect(recovery).toBeVisible();
+  const description = page.getByRole("textbox", { name: "Ticket description", exact: true });
+  await description.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type(" and more words");
+  await page.waitForTimeout(1500);
+  await expect(recovery).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Save my version as a new revision" }),
+  ).toBeVisible();
+  const [recoveryBox, descriptionBox] = await Promise.all([
+    recovery.boundingBox(),
+    description.boundingBox(),
+  ]);
+  if (!recoveryBox || !descriptionBox) throw new Error("Recovery or description is not laid out");
+  expect(recoveryBox.y).toBeLessThan(descriptionBox.y);
+});
+
+test("choosing a second file while one uploads says so instead of doing nothing", async ({
+  page,
+}) => {
+  await insertTicket("Busy uploads", "Server text", "inbox");
+  await openTicket(page, "Busy uploads");
+  const description = page.getByRole("textbox", { name: "Ticket description", exact: true });
+  await description.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/file");
+  const first = page.waitForEvent("filechooser");
+  await page.keyboard.press("Enter");
+  const release = Promise.withResolvers<void>();
+  await page.route("**/_server/**", async (route) => {
+    if (route.request().method() === "POST") await release.promise;
+    await route.continue();
+  });
+  try {
+    await (await first).setFiles({
+      name: "first.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("first"),
+    });
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("/file");
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByText("A file is still uploading. Add the next file when it finishes."),
+    ).toBeVisible();
+  } finally {
+    release.resolve();
+  }
+  await expect(
+    page.getByText("A file is still uploading. Add the next file when it finishes."),
+  ).toHaveCount(0, { timeout: 20_000 });
+});
+
 test("keeping a stale draft saves it as a new revision on top of the newer version", async ({
   page,
 }) => {
@@ -172,6 +236,47 @@ test("keeping a stale draft saves it as a new revision on top of the newer versi
     })
     .toBe("My retained wording");
   await expect(page.getByRole("alert").filter({ hasText: "changed after" })).toHaveCount(0);
+});
+
+test("a refused design save names its reason beside the draft", async ({ page }) => {
+  const id = await insertTicket("Design with a reason", "Summary", "ready");
+  const requirement = JSON.stringify({
+    acceptanceCriteria: ["First criterion", "Second criterion"],
+    nonGoals: [],
+    summary: "Summary",
+  });
+  const design = JSON.stringify({
+    context: "Current system.",
+    proposedChanges: "Proposed change.",
+    decisions: [],
+    assumptions: [],
+    risks: [],
+    validation: [{ criterion: 1, check: "Check the first criterion." }],
+    diagrams: [],
+  });
+  const revisionID = crypto.randomUUID();
+  await database.client`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by)
+    VALUES(${revisionID},${id},1,${requirement},encode(digest(convert_to(${requirement}::text,'UTF8'),'sha256'),'hex'),${userID})`;
+  await database.client`INSERT INTO factory.technical_design_revision(id,ticket_id,requirement_revision_id,ordinal,source_commit,canonical_content,content_digest,citations,diagram_renders,renderer_version,created_by,author_kind)
+    VALUES(${crypto.randomUUID()},${id},${revisionID},1,${"a".repeat(40)},${design},encode(digest(convert_to(${design}::text,'UTF8'),'sha256'),'hex'),'[]'::jsonb,'[]'::jsonb,'test',${userID},'ai')`;
+  await mockFactoryFunctions(page, {
+    tickets: {
+      async saveTechnicalDesign() {
+        throw new CommandError(
+          "invalid",
+          "Map every product acceptance criterion to a concrete validation check.",
+        );
+      },
+    },
+  });
+  await openTicket(page, "Design with a reason");
+  await page.getByRole("button", { name: "Edit design", exact: true }).click();
+  await page.getByRole("button", { name: "Save design", exact: true }).click();
+  await expect(
+    page
+      .locator("#ticket-technical")
+      .getByText("Map every product acceptance criterion to a concrete validation check."),
+  ).toBeVisible();
 });
 
 test("a ready Ticket without criteria explains why Implement is unavailable", async ({ page }) => {

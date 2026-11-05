@@ -706,7 +706,8 @@ function TicketDocument(props: TicketWorkspaceProps) {
 
   function beginEditing() {
     setEditing(true);
-    setEditorError("");
+    // A stale draft stays blocked until the person chooses, so its recovery must stay visible.
+    if (!untrack(conflict)) setEditorError("");
     setSavedDocument(false);
   }
 
@@ -1673,6 +1674,46 @@ function TicketDocument(props: TicketWorkspaceProps) {
               </Show>
             </header>
 
+            <Show when={editorError()}>
+              <div class="ticket-save-error" role="alert">
+                <p class="inline-error">{editorError()}</p>
+                <div class="control-actions">
+                  <Show
+                    when={conflict()}
+                    fallback={
+                      <Show when={hasChanges() && !proposal() && draftTitle().trim()}>
+                        <button
+                          type="button"
+                          class="quiet-button"
+                          disabled={saving()}
+                          onClick={() => void saveChanges()}
+                        >
+                          Retry save
+                        </button>
+                      </Show>
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="quiet-button"
+                      disabled={saving()}
+                      onClick={useSavedVersion}
+                    >
+                      Discard my changes
+                    </button>
+                    <button
+                      type="button"
+                      class="primary-button"
+                      disabled={saving()}
+                      onClick={keepMyDraft}
+                    >
+                      Save my version as a new revision
+                    </button>
+                  </Show>
+                </div>
+              </div>
+            </Show>
+
             <div class="ticket-reading-layout">
               <TicketChapterNavigation
                 root={chapterRoot()}
@@ -1863,45 +1904,6 @@ function TicketDocument(props: TicketWorkspaceProps) {
                 </Show>
               </div>
             </div>
-            <Show when={editorError()}>
-              <div class="ticket-save-error" role="alert">
-                <p class="inline-error">{editorError()}</p>
-                <div class="control-actions">
-                  <Show
-                    when={conflict()}
-                    fallback={
-                      <Show when={hasChanges() && !proposal() && draftTitle().trim()}>
-                        <button
-                          type="button"
-                          class="quiet-button"
-                          disabled={saving()}
-                          onClick={() => void saveChanges()}
-                        >
-                          Retry save
-                        </button>
-                      </Show>
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="quiet-button"
-                      disabled={saving()}
-                      onClick={useSavedVersion}
-                    >
-                      Discard my changes
-                    </button>
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={saving()}
-                      onClick={keepMyDraft}
-                    >
-                      Save my version as a new revision
-                    </button>
-                  </Show>
-                </div>
-              </div>
-            </Show>
           </article>
         </div>
 

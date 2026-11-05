@@ -232,10 +232,10 @@ export function ChatSkillPicker(props: {
         }}
       >
         <Show when={error()}>
-          <p role="alert">{error()} Type / again to retry.</p>
+          <p aria-live="assertive">{error()} Type / again to retry.</p>
         </Show>
         <Show when={!view() && !error()}>
-          <p role="status">Loading available Skills…</p>
+          <p aria-live="polite">Loading available Skills…</p>
         </Show>
         <Show when={view()}>
           {(current) => (

@@ -82,6 +82,14 @@
 .usage-settings button {
   justify-self: start;
 }
+.usage-load-error {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+.usage-load-error p {
+  margin: 0;
+}
 .usage-observations {
   list-style: none;
   margin: var(--space-3) 0 0;

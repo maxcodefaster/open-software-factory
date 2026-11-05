@@ -50,7 +50,7 @@ test("Wiki search combines active pages and source documents without repeating e
     ).toEqual(["page"]);
     expect(treeReads).toBe(0);
     const results = await knowledge.search(projectID, "release", userID);
-    expect(results.map((result) => result.kind).sort()).toEqual(["document", "page"]);
+    expect(results.map((result) => result.kind)).toEqual(["page", "document"]);
     expect(results.find((result) => result.kind === "document")?.path).toBe(
       "docs/nested/runbook.md",
     );

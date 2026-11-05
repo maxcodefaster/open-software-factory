@@ -206,7 +206,7 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     ).toBeVisible();
     expect(frames.join("")).not.toContain("Inactive Wiki update stays out of sync");
     await colleague.getByRole("button", { name: "Close Wiki", exact: true }).click();
-    await page.getByRole("button", { name: "Open Epic Older invoice work", exact: true }).click();
+    await page.getByRole("button", { name: /^Open Epic Older invoice work(?: |$)/ }).click();
     const folder = page.getByRole("dialog", { name: "Older invoice work", exact: true });
     await expect(folder).toContainText("No Tickets in the loaded pages");
     await page.setViewportSize({ width: 390, height: 844 });

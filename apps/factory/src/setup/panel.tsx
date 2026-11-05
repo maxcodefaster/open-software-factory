@@ -456,7 +456,7 @@ export function ProjectSetupPanel(props: {
                   </strong>
                 </Show>
                 <Show when={draft().failure}>
-                  <p>{draft().failure}</p>
+                  <p>{plainErrorMessage(draft().failure ?? "")}</p>
                 </Show>
                 <Show when={draft().state === "created" && draft().projectID}>
                   {(id) => (

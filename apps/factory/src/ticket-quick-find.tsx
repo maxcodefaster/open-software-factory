@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "so
 import type { Ticket } from "./api-contracts";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
+import { ticketFindSummary } from "./ticket-find-summary";
 import "./ticket-quick-find.css";
 
 export function TicketQuickFind(props: {
@@ -113,17 +114,12 @@ export function TicketQuickFind(props: {
           />
         </label>
         <p class="ticket-find-summary" role="status">
-          {props.failed
-            ? "Ticket search could not load. Retry shared sync, then search again."
-            : props.loading && !results().length
-              ? "Finding Tickets…"
-              : results().length
-                ? results().length > 50
-                  ? "50 Tickets shown. Refine your search for more."
-                  : `${results().length} ${results().length === 1 ? "Ticket" : "Tickets"} in this Project`
-                : query().trim()
-                  ? "No matching Tickets. Try another title or reference."
-                  : "No Tickets in this Project yet."}
+          {ticketFindSummary({
+            failed: props.failed,
+            loading: props.loading,
+            count: results().length,
+            query: query(),
+          })}
         </p>
         <div class="ticket-find-results">
           <For each={results().slice(0, 50)} keyed={(ticket) => ticket.id}>

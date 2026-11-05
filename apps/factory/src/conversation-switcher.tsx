@@ -194,7 +194,7 @@ export function ConversationSwitcher(props: {
             {props.ticket ? "Ticket chats" : "Your Project chats"}
           </p>
           <Show when={!props.conversation && props.busy}>
-            <p class="conversation-visibility" role="status">
+            <p class="conversation-visibility" aria-live="polite">
               Loading chats…
             </p>
           </Show>

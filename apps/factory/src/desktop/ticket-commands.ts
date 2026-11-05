@@ -201,16 +201,24 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
   async function saveTechnicalDesign(revisionID: string, content: TechnicalDesignContent) {
     const current = dependencies.detail();
     if (!current || !dependencies.canDevelopProject()) return false;
+    let failure: string | undefined;
     const result = await dependencies.mutate(async () => {
       const payload = { expectedRevisionId: revisionID, content };
       const scope = `technical-design:${current.ticket.id}`;
       const commandId = dependencies.agentCommandIds.forInput(scope, JSON.stringify(payload));
-      await serverCall(
-        saveTicketTechnicalDesign({ data: [current.ticket.id, { commandId, ...payload }] }),
-      );
+      try {
+        await serverCall(
+          saveTicketTechnicalDesign({ data: [current.ticket.id, { commandId, ...payload }] }),
+        );
+      } catch (cause) {
+        if (cause instanceof Error) failure = cause.message;
+        throw cause;
+      }
       dependencies.acknowledgeCommand(scope, commandId);
       await dependencies.refreshTicketDetail(current.ticket.id);
     });
+    // The editor shows the reason beside the draft, where the person fixes it.
+    if (!result.ok && failure) throw new Error(failure);
     return result.ok;
   }
 

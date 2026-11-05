@@ -310,6 +310,11 @@ test("real Settings show monitoring, save learning policy and isolate private ev
     await expect(monitor.locator("[data-review-now-confirmation]")).toContainText(
       "Review 1 selected case now? This makes paid Planning-model calls",
     );
+    // Monitoring renders inside the Usage section, whose own fieldset reset must not flatten this.
+    await expect(monitor.getByRole("group", { name: "Confirm review now" })).toHaveCSS(
+      "border-top-width",
+      "1px",
+    );
     await monitor.getByRole("button", { name: "Start paid review", exact: true }).click();
     await expect(monitor.locator("[data-review-state]")).toContainText("Review requested");
     await expect

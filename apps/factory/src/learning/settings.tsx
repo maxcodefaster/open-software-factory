@@ -59,29 +59,32 @@ export function LearningSettings(props: {
       focusAfterRead = undefined;
     };
   });
-  createEffect(read, (result) => {
-    if (result.scope !== target()) return;
-    if ("value" in result) {
-      setView(result.value);
-      setError("");
-      const focus = focusAfterRead;
-      focusAfterRead = undefined;
-      if (focus) {
-        const generation = epoch;
-        requestAnimationFrame(() => {
-          if (generation === epoch) {
-            const element = document.getElementById(focus);
-            element?.scrollIntoView({ block: "nearest", behavior: "instant" });
-            element?.focus({ preventScroll: true });
-          }
-        });
+  createEffect(
+    () => [read(), target()] as const,
+    ([result, current]) => {
+      if (result.scope !== current) return;
+      if ("value" in result) {
+        setView(result.value);
+        setError("");
+        const focus = focusAfterRead;
+        focusAfterRead = undefined;
+        if (focus) {
+          const generation = epoch;
+          requestAnimationFrame(() => {
+            if (generation === epoch) {
+              const element = document.getElementById(focus);
+              element?.scrollIntoView({ block: "nearest", behavior: "instant" });
+              element?.focus({ preventScroll: true });
+            }
+          });
+        }
+      } else setError(result.error);
+      if (waitingRead?.version === result.version) {
+        waitingRead.resolve();
+        waitingRead = undefined;
       }
-    } else setError(result.error);
-    if (waitingRead?.version === result.version) {
-      waitingRead.resolve();
-      waitingRead = undefined;
-    }
-  });
+    },
+  );
   async function command(
     key: string,
     run: (id: string) => Promise<unknown>,

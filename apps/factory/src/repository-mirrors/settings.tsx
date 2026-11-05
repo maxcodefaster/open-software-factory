@@ -25,22 +25,27 @@ export function RepositoryMirrorSettings(props: {
   const [projects, setProjects] = createSignal<RepositoryMirrorProject[]>();
   const [selected, setSelected] = createSignal("");
   const [error, setError] = createSignal("");
+  let disposed = false;
+  function loadProjects() {
+    setError("");
+    void serverCall(getRepositoryMirrorProjects({ data: [] })).then(
+      (value) => {
+        if (disposed) return;
+        setProjects(value);
+        setSelected(value.find((item) => item.id === props.projectID)?.id ?? value[0]?.id ?? "");
+      },
+      () => {
+        if (!disposed)
+          setError("Projects could not be loaded. Check your connection, then try again.");
+      },
+    );
+  }
   createEffect(
     () => props.active,
     (active) => {
       if (!active || untrack(projects)) return;
-      setError("");
-      let disposed = false;
-      void serverCall(getRepositoryMirrorProjects({ data: [] })).then(
-        (value) => {
-          if (disposed) return;
-          setProjects(value);
-          setSelected(value.find((item) => item.id === props.projectID)?.id ?? value[0]?.id ?? "");
-        },
-        () => {
-          if (!disposed) setError("Projects could not be loaded. Reopen this page to try again.");
-        },
-      );
+      disposed = false;
+      loadProjects();
       return () => {
         disposed = true;
       };
@@ -59,8 +64,18 @@ export function RepositoryMirrorSettings(props: {
       <FreshAuthentication active={props.active} />
       <Show when={error()}>
         <p role="alert">{error()}</p>
+        <button type="button" class="quiet-button" onClick={loadProjects}>
+          Reload Projects
+        </button>
       </Show>
-      <Show when={projects()} fallback={<p role="status">Loading Projects…</p>}>
+      <Show
+        when={projects()}
+        fallback={
+          <Show when={!error()}>
+            <p role="status">Loading Projects…</p>
+          </Show>
+        }
+      >
         {(items) => (
           <Show
             when={items().length}

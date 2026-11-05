@@ -262,8 +262,8 @@ export function LearningFlow(props: { view: LearningView; onInspect: (detailId: 
                       width: `${node().label.width}px`,
                     }}
                   >
-                    <span class="learning-flow-date">{day(record().at)}</span>
-                    <span class="learning-flow-name">{label(record().title)}</span>
+                    <span class="learning-flow-date">{day(record().at)}</span>{" "}
+                    <span class="learning-flow-name">{label(record().title)}</span>{" "}
                     <span class="learning-flow-status">{record().status}</span>
                   </span>
                 </button>

@@ -161,7 +161,7 @@ test("upload failures preserve command errors and never retry or claim readiness
     });
     await expect(promise).rejects.toMatchObject({
       status: 409,
-      message: "Upload identity changed",
+      message: "This request no longer matches what was saved. Reload and try again.",
     });
     expect(fixture.requests).toHaveLength(1);
   } finally {

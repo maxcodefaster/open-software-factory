@@ -16,17 +16,34 @@ export function createWorkspaceNavigation(options: {
   let opener: HTMLButtonElement | undefined;
   const close = (restoreFocus = false) => {
     setOpen(false);
-    if (restoreFocus)
-      requestAnimationFrame(() => {
-        const visible = (element: HTMLElement | undefined | null) =>
-          element && element.getClientRects().length > 0;
-        const target = visible(opener)
-          ? opener
-          : Array.from(
-              options.root()?.querySelectorAll<HTMLButtonElement>(`[aria-controls="${id}"]`) ?? [],
-            ).find(visible);
-        target?.focus({ preventScroll: true });
-      });
+    if (!restoreFocus) return;
+    const visible = (element: HTMLElement | undefined | null) =>
+      element && element.getClientRects().length > 0;
+    const restore = () => {
+      const target = visible(opener)
+        ? opener
+        : Array.from(
+            options.root()?.querySelectorAll<HTMLButtonElement>(`[aria-controls="${id}"]`) ?? [],
+          ).find(visible);
+      target?.focus({ preventScroll: true });
+    };
+    requestAnimationFrame(() => {
+      restore();
+      // A page that loads late renders its own header, which replaces the focused opener.
+      // Follow focus to the new opener until the person moves on.
+      const stop = () => {
+        clearInterval(poll);
+        clearTimeout(timer);
+        document.removeEventListener("pointerdown", stop, true);
+        document.removeEventListener("keydown", stop, true);
+      };
+      const poll = setInterval(() => {
+        if (document.activeElement === document.body) restore();
+      }, 100);
+      const timer = setTimeout(stop, 4000);
+      document.addEventListener("pointerdown", stop, true);
+      document.addEventListener("keydown", stop, true);
+    });
   };
   createEffect(
     () => undefined,

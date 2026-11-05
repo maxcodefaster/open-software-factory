@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { plainErrorMessage } from "./command-error";
 
 const errorResponseSchema = z.object({ error: z.string().optional() });
 
@@ -21,7 +22,9 @@ function parseResponse<TSchema extends z.ZodType>(
     const error = errorResponseSchema.safeParse(value);
     throw new APIRequestError(
       status,
-      error.success && error.data.error ? error.data.error : `Request failed with ${status}`,
+      plainErrorMessage(
+        error.success && error.data.error ? error.data.error : `Request failed with ${status}`,
+      ),
     );
   }
   const parsed = schema.safeParse(value);

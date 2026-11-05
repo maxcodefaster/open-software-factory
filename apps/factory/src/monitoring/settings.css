@@ -85,6 +85,9 @@
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
 }
+.input-settings .input-delivery-settings .input-help {
+  font-size: var(--text-sm);
+}
 .input-empty {
   padding-block: var(--space-6);
 }

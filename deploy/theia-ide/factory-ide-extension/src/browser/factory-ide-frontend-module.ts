@@ -42,6 +42,21 @@ import {
 import "./factory-ide.css";
 import { FactoryGitContribution, FactoryGitWidget, factoryGitWidgetID } from "./factory-git-widget";
 
+// After a network loss Theia closes its pending requests with this reason and reconnects by itself.
+// Nobody awaits those requests, so the rejections would only surface as uncaught page errors.
+window.addEventListener("unhandledrejection", (event) => {
+  const reason: unknown = event.reason;
+  const text =
+    typeof reason === "string"
+      ? reason
+      : reason && typeof reason === "object" && "reason" in reason
+        ? String((reason as { reason: unknown }).reason)
+        : reason instanceof Error
+          ? reason.message
+          : "";
+  if (text === "reconnecting channel") event.preventDefault();
+});
+
 export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
   bind(FactoryLanguageGrammars).toSelf().inSingletonScope();
   bind(LanguageGrammarDefinitionContribution).toService(FactoryLanguageGrammars);

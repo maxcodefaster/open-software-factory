@@ -28,6 +28,7 @@ export function AccessSettings(props: {
   const [pendingManagement, setPendingManagement] = createSignal<Record<string, boolean>>({});
   const [users, setUsers] = createSignal<ServerValue<ReturnType<typeof getAccounts>>["users"]>([]);
   const [companySignIn, setCompanySignIn] = createSignal(false);
+  const [loaded, setLoaded] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [notice, setNotice] = createSignal("");
@@ -38,14 +39,17 @@ export function AccessSettings(props: {
   }>();
   let disposed = false;
   let loadVersion = 0;
-  async function load() {
+  const currentScope = () => ({
+    projectID: props.project?.id,
+    systemManager: props.systemManager,
+  });
+  async function load({ projectID, systemManager } = currentScope()) {
     const version = ++loadVersion;
-    const projectID = props.project?.id;
     const [memberResult, userResult, policy] = await Promise.all([
       projectID
         ? serverCall(getProjectMembers({ data: [projectID] }))
         : Promise.resolve({ members: [] }),
-      props.systemManager && !props.project
+      systemManager && !projectID
         ? serverCall(getAccounts({ data: [] }))
         : Promise.resolve({ users: [] }),
       serverCall(getSecurityPolicy({ data: [] })),
@@ -54,6 +58,7 @@ export function AccessSettings(props: {
       setMembers(memberResult.members);
       setUsers(userResult.users);
       setCompanySignIn(policy.companySignIn);
+      setLoaded(true);
     }
   }
   async function act(operation: () => Promise<void>) {
@@ -127,16 +132,17 @@ export function AccessSettings(props: {
   }
   createEffect(
     () => [props.project?.id, props.systemManager] as const,
-    () => {
+    ([projectID, systemManager]) => {
       disposed = false;
       setMembers([]);
       setUsers([]);
+      setLoaded(false);
       setRemoving(undefined);
       setAccountAction(undefined);
       setNotice("");
       setError("");
       setBusy(true);
-      const loading = load();
+      const loading = load({ projectID, systemManager });
       const version = loadVersion;
       void loading
         .catch((cause) => {
@@ -381,7 +387,7 @@ export function AccessSettings(props: {
                   )}
                 </For>
               </ul>
-              <Show when={!busy() && members().length === 0}>
+              <Show when={loaded() && !busy() && members().length === 0}>
                 <p class="model-settings-note">
                   No project members yet. System Managers retain access.
                 </p>

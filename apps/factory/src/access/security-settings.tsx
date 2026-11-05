@@ -16,26 +16,32 @@ import { PasswordChange } from "./password-change";
 export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?: () => void }) {
   const [policy, setPolicy] = createSignal<ServerValue<ReturnType<typeof getSecurityPolicy>>>();
   const [error, setError] = createSignal("");
+  const [loadError, setLoadError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [confirm, setConfirm] = createSignal(false);
   const [fresh, setFresh] = createSignal(true);
   const [canChangePassword, setCanChangePassword] = createSignal(false);
+  function load() {
+    setLoadError("");
+    void Promise.all([
+      serverCall(getSecurityPolicy({ data: [] })),
+      serverCall(getPasswordChangeState({ data: [] })),
+    ])
+      .then(([nextPolicy, passwordState]) => {
+        setPolicy(nextPolicy);
+        setCanChangePassword(passwordState.available);
+      })
+      .catch((cause) =>
+        setLoadError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Could not load security settings",
+        ),
+      );
+  }
   createEffect(
     () => undefined,
-    () => {
-      void serverCall(getSecurityPolicy({ data: [] }))
-        .then(setPolicy)
-        .catch((cause) =>
-          setError(
-            cause instanceof Error
-              ? plainErrorMessage(cause.message)
-              : "Could not load security settings",
-          ),
-        );
-      void serverCall(getPasswordChangeState({ data: [] }))
-        .then((value) => setCanChangePassword(value.available))
-        .catch(() => setCanChangePassword(false));
-    },
+    () => load(),
   );
   async function endAll() {
     setBusy(true);
@@ -139,6 +145,14 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
             </div>
           </Show>
         </section>
+        <Show when={loadError()}>
+          <div class="model-settings-error">
+            <p role="alert">{loadError()}</p>
+            <button type="button" class="quiet-button" onClick={load}>
+              Reload security settings
+            </button>
+          </div>
+        </Show>
         <Show when={error()}>
           <p role="alert" class="error">
             {error()}

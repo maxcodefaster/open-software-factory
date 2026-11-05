@@ -337,7 +337,7 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
           </button>
         </Show>
         <Show when={value()?.failure && pending()?.operation !== "inspect"}>
-          <p class="setup-note">{value()?.failure}</p>
+          <p class="setup-note">{plainErrorMessage(value()?.failure ?? "")}</p>
         </Show>
       </Show>
       <Show when={pending() && !busy()}>

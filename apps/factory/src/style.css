@@ -1015,7 +1015,7 @@ dt {
   height: var(--space-5);
   place-items: center;
   border-radius: var(--radius-pill);
-  color: var(--color-river-deep);
+  color: var(--color-ink);
   background: var(--material-accent-strong);
   font: var(--weight-medium) var(--text-xs) var(--font-technical);
 }
@@ -2131,6 +2131,14 @@ dt {
   box-shadow: var(--shadow-float);
 }
 
+/* Routine loading progress sits at the bottom edge, so it neither moves the Board nor covers the
+   window tab bar. The notice container is a transformed block, so absolute offsets are relative to it. */
+.desktop-notices .sync-notice[data-progress] {
+  position: absolute;
+  inset-inline: 0;
+  top: calc(100dvh - var(--topbar-height) - var(--space-2) - var(--space-12));
+}
+
 .sync-notice[data-automatic-recovery] {
   --notice-text-min-width: 0px;
   flex-wrap: nowrap;
@@ -3105,6 +3113,18 @@ dt {
 .model-policy summary {
   cursor: pointer;
   padding-block: var(--space-2);
+}
+.model-credential-form > details > summary {
+  cursor: pointer;
+  padding-block: var(--space-2);
+}
+@media (pointer: coarse) {
+  .model-role-connection summary,
+  .model-credentials > summary,
+  .model-credential-form > details > summary,
+  .model-policy summary {
+    padding-block: calc((var(--touch-target) - 1lh) / 2);
+  }
 }
 .model-policy fieldset {
   display: grid;
@@ -4409,6 +4429,13 @@ dt {
 .skill-editor .model-checkbox {
   display: flex;
   align-items: center;
+}
+@media (pointer: coarse) {
+  .model-role .model-checkbox,
+  .model-policy .model-checkbox,
+  .skill-editor .model-checkbox {
+    min-height: var(--touch-target);
+  }
 }
 
 @media (max-width: 480px) {

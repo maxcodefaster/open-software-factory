@@ -20,6 +20,20 @@ export function PlanningSyncStatus(props: {
   const [retrying, setRetrying] = createSignal(false);
   const [retryError, setRetryError] = createSignal("");
   const [waited, setWaited] = createSignal(false);
+  const [online, setOnline] = createSignal(typeof navigator === "undefined" || navigator.onLine);
+  // Some screens hold no shared query, so the connection state alone would stay silent offline.
+  createEffect(
+    () => undefined,
+    () => {
+      const update = () => setOnline(navigator.onLine);
+      window.addEventListener("online", update);
+      window.addEventListener("offline", update);
+      return () => {
+        window.removeEventListener("online", update);
+        window.removeEventListener("offline", update);
+      };
+    },
+  );
   const progress = () => {
     const state = connection.state()?.name;
     if (state === "connecting") return "Connecting to shared updates. Showing cached work.";
@@ -51,6 +65,8 @@ export function PlanningSyncStatus(props: {
     if (props.queries.some((query) => query.error()) || reads?.errors().length)
       return "Some shared work could not load. Your drafts are retained.";
     if (props.readError || retryError()) return "Updates paused. Showing the last known state.";
+    if (!online())
+      return "You're offline. Showing cached work. Reconnect before saving shared changes.";
     return waited() ? progress() : "";
   };
   const canRetry = () =>
@@ -90,6 +106,8 @@ export function PlanningSyncStatus(props: {
         role="status"
         aria-label="Shared work sync"
         data-automatic-recovery={connection.automaticRecovery() || undefined}
+        data-transient={message() === progress() || undefined}
+        data-progress={message() === progress() || undefined}
       >
         <span>{message()}</span>
         <Show when={canRetry() || connection.state()?.name === "needs-auth"}>

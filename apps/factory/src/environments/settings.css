@@ -349,7 +349,7 @@
     grid-column: 1 / -1;
   }
   .environment-variable-summary {
-    grid-template-columns: minmax(0, 1fr) var(--space-10);
+    grid-template-columns: minmax(0, 1fr) var(--touch-target);
     gap: var(--space-1) var(--space-2);
     padding-block: var(--space-4);
   }
@@ -364,8 +364,8 @@
   .environment-settings .environment-actions-trigger {
     grid-column: 2;
     grid-row: 1 / 4;
-    width: var(--space-10);
-    height: var(--space-10);
+    width: var(--touch-target);
+    height: var(--touch-target);
   }
   .environment-variable-identity {
     grid-column: 1;
@@ -383,6 +383,8 @@
   .environment-settings input:not([type="checkbox"]),
   .environment-settings .workspace-action,
   .environment-settings summary,
+  .environment-grants label,
+  .environment-settings .environment-check,
   .environment-inline-actions > button,
   .environment-settings .environment-editor-done {
     min-height: 44px;

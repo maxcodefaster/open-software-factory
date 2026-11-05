@@ -777,6 +777,12 @@
   .knowledge-tree button {
     min-height: 44px;
   }
+  .knowledge-tree .tree-toggle,
+  .knowledge-tree .tree-search-button,
+  .wiki-search-dialog .knowledge-search button {
+    min-width: 44px;
+    min-height: 44px;
+  }
   .page-organization summary {
     align-items: center;
     justify-content: center;

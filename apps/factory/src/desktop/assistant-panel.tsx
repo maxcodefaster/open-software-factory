@@ -27,6 +27,7 @@ import type {
 } from "../api-contracts";
 import { composerKeyDown, followConversation, resizeComposer } from "../assistant-interaction";
 import { TextareaAttachments } from "../attachments/ui";
+import { plainFailureMessage } from "../command-error";
 import type { ConversationDisplayItem } from "../conversation-activity";
 import {
   ChangeAgentActivityGroup,
@@ -721,17 +722,19 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
               <div class="agent-empty compact">
                 <Icon name="agent" />
                 <p>
-                  {model.conversationMode() === "build"
-                    ? model.preparingImplementation()
-                      ? "Choose reasoning for this Ticket's first Build."
-                      : !model.agentViewLoaded()
-                        ? "Loading implementation…"
-                        : model.selectedChange()
-                          ? buildAgentEmptyMessage(model.agent())
-                          : "Approve the latest Requirement Revision to start Build."
-                    : model.assistantTicketID()
-                      ? "Ask about this Ticket, or tell me what needs clarifying."
-                      : "Ask about the Project, or describe a change you want to work on."}
+                  {model.assistantContextLoading()
+                    ? "Loading conversation…"
+                    : model.conversationMode() === "build"
+                      ? model.preparingImplementation()
+                        ? "Choose reasoning for this Ticket's first Build."
+                        : !model.agentViewLoaded()
+                          ? "Loading implementation…"
+                          : model.selectedChange()
+                            ? buildAgentEmptyMessage(model.agent())
+                            : "Approve the latest Requirement Revision to start Build."
+                      : model.assistantTicketID()
+                        ? "Ask about this Ticket, or tell me what needs clarifying."
+                        : "Ask about the Project, or describe a change you want to work on."}
                 </p>
               </div>
             </Show>
@@ -874,7 +877,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
                 <Show when={model.preparingImplementation()}>
                   <Show when={model.preparingImplementation()?.failure}>
                     <p class="inline-error" role="alert">
-                      {model.preparingImplementation()?.failure}
+                      {plainFailureMessage(model.preparingImplementation()?.failure ?? "")}
                     </p>
                   </Show>
                   <p class="agent-activity-notice">

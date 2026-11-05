@@ -8,7 +8,7 @@ import {
 } from "../../../../packages/ticket-domain/src/attention";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
-import { CommandError } from "../command-error";
+import { CommandError, plainFailureMessage } from "../command-error";
 import {
   type AttentionPerson,
   type InboxItem,
@@ -48,6 +48,12 @@ type Source = {
   addressedTo?: string | null;
   authorID?: string | null;
 };
+
+// Stored failure text can still carry provider codes or bookkeeping words from before it was reworded.
+const plainPreview = (source: Source): Source => ({
+  ...source,
+  preview: plainFailureMessage(source.preview),
+});
 
 async function peopleIn(sql: AgentTurnTransaction, projectID: string): Promise<AttentionPerson[]> {
   return sql<AttentionPerson[]>`
@@ -315,7 +321,7 @@ async function listIn(sql: AgentTurnTransaction, userID: string): Promise<InboxV
   for (const row of failures) {
     const ticket = row.ticketId && tickets.get(row.ticketId);
     if (ticket && ["done", "cancelled"].includes(ticket.state)) continue;
-    append(row, true);
+    append(plainPreview(row), true);
   }
   const changes = await sql<Source[]>`
     SELECT 'change:'||change.id::text AS id,change.id::text||':'||change.version::text AS "eventId",
@@ -327,7 +333,7 @@ async function listIn(sql: AgentTurnTransaction, userID: string): Promise<InboxV
       AND change.state='failed'
       AND NOT EXISTS(SELECT 1 FROM factory.change newer WHERE newer.ticket_id=change.ticket_id
         AND (newer.created_at,newer.id)>(change.created_at,change.id))`;
-  for (const row of changes) append(row, true);
+  for (const row of changes) append(plainPreview(row), true);
   const pauses = await sql<Source[]>`
     SELECT 'pause:'||pause.turn_id::text AS id,pause.turn_id::text AS "eventId",
       change.project_id AS "projectId",change.ticket_id AS "ticketId",'Coding is paused' AS title,
@@ -339,7 +345,7 @@ async function listIn(sql: AgentTurnTransaction, userID: string): Promise<InboxV
       AND change.state NOT IN ('cancelled','delivered')
       AND NOT EXISTS(SELECT 1 FROM factory.agent_turn newer WHERE newer.change_id=change.id
         AND (newer.created_at,newer.id)>(turn.created_at,turn.id))`;
-  for (const row of pauses) append(row, true);
+  for (const row of pauses) append(plainPreview(row), true);
 
   const feedback = await sql<Source[]>`
     SELECT 'recheck:'||feedback.id::text AS id,feedback.id::text||':'||feedback.version::text AS "eventId",

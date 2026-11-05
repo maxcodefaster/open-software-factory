@@ -38,6 +38,14 @@ back up its database, repositories, configuration and secrets, review the upstre
 changes, and verify the upgrade before normal work resumes. Changing the repository pin or running
 an owned proof never upgrades a retained installation.
 
+An upgrade from the previous build to the new one loses no data. Every row of the Factory and auth
+schemas, every Forgejo repository head and file, every OpenBao secret and every stored object is
+the same afterwards, apart from new migrations and what they add, and the administrator signs in
+with the same password. `release:upgrade-test` proves this on a disposable Namespace before a tag
+(see [the upgrade test](../development/README.md#upgrade-test)). A chart rollback is not part of
+that promise. It does not roll the database back, so after a migration the previous image refuses
+to start. Upgrade forward or restore the last backup set into a new installation.
+
 The chart runs Factory, PostgreSQL, Forgejo, Zero, encrypted OpenBao and one private Garage
 object store in Kubernetes. It creates the file bucket, credentials and persistent volume
 automatically; no separate S3 provisioning is required. Internal

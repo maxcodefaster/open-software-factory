@@ -168,6 +168,12 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     await expect(
       inputs.getByRole("heading", { name: "Automatic Ticket Delivery", level: 2 }),
     ).toBeVisible();
+    // The description says what automatic Delivery does, so it is body text, not 11px help.
+    expect(
+      await inputs
+        .locator(".input-delivery-settings .input-help")
+        .evaluateAll((notes) => notes.map((note) => getComputedStyle(note).fontSize)),
+    ).toEqual(["13px", "13px"]);
     await expect(navigation.locator("h3")).toHaveText(["Project · Invoice workspace"]);
     await expect(
       navigation.getByRole("combobox", { name: "Settings scope" }).locator("option"),

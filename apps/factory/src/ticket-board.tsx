@@ -123,7 +123,7 @@ export function TicketBoardContents(props: {
         type="button"
         class="epic-stack-open"
         data-epic-id={input.epic.id}
-        aria-label={`Open Epic ${input.epic.title}`}
+        aria-label={`Open Epic ${input.epic.title}${input.tickets[0] ? ` ${input.tickets[0].title}` : ""} ${input.tickets.length}${props.ticketsIncomplete ? " loaded" : ""}`}
         aria-haspopup="dialog"
         onClick={(event) => open(input.epic.id, event.currentTarget)}
       >

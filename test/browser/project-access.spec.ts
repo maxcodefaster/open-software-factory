@@ -70,7 +70,7 @@ test("managers create accounts and Project access; developers see only their Pro
           'main', '.devcontainer/devcontainer.json', ${administrator})`;
     }
     await openProjectMenu(page);
-    await page.getByRole("button", { name: new RegExp(name) }).click();
+    await page.locator(".project-choice", { hasText: name }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
     const dialog = page.getByRole("region", { name: "Settings", exact: true });
@@ -113,12 +113,12 @@ test("managers create accounts and Project access; developers see only their Pro
     await developer.getByLabel("Password", { exact: true }).fill(password);
     await developer.getByRole("button", { name: "Sign in", exact: true }).click();
     await openProjectMenu(developer);
-    await expect(developer.getByRole("button", { name: new RegExp(name) })).toBeVisible();
-    await expect(developer.getByRole("button", { name: new RegExp(otherName) })).toHaveCount(0);
+    await expect(developer.locator(".project-choice", { hasText: name })).toBeVisible();
+    await expect(developer.locator(".project-choice", { hasText: otherName })).toHaveCount(0);
     await expect(developer.getByRole("button", { name: "Add project", exact: true })).toHaveCount(
       0,
     );
-    await developer.getByRole("button", { name: new RegExp(name) }).click();
+    await developer.locator(".project-choice", { hasText: name }).click();
     await developer.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(
       developer.getByRole("button", { name: "People & access", exact: true }),
@@ -160,7 +160,7 @@ test("managers create accounts and Project access; developers see only their Pro
       await requestFunction(developer.request, "getConversation", [projectID, {}]),
     ).toMatchObject({ ok: false, status: 404 });
     await openProjectMenu(developer);
-    await expect(developer.getByRole("button", { name: new RegExp(name) })).toHaveCount(0);
+    await expect(developer.locator(".project-choice", { hasText: name })).toHaveCount(0);
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     await expect(dialog).toBeHidden();
     expect(errors).toEqual([]);

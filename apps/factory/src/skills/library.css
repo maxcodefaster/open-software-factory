@@ -570,6 +570,13 @@
   .skill-library :is(button.quiet-button, input, select, .skill-action-menu > summary) {
     min-height: 44px;
   }
+  .skill-library details > summary:not(.workspace-menu-trigger) {
+    padding-block: calc((var(--touch-target) - 1lh) / 2);
+  }
+  .skill-library .mcp-checkbox {
+    min-height: var(--touch-target);
+    align-items: center;
+  }
 }
 @keyframes skill-detail-reveal {
   from {

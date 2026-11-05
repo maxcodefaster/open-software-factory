@@ -247,6 +247,15 @@ test("Review now states its paid calls and cases, confirms, then shows a pending
     "Review requested Oct 28, 12:30 PM UTC. It starts within a minute",
   );
   await expect(review).toHaveCount(0);
+  const gaps = await page
+    .locator("[data-waiting], [data-review-state], [data-calibration]")
+    .evaluateAll((notes) =>
+      notes.slice(1).map((note, index) => {
+        const above = notes[index]?.getBoundingClientRect().bottom ?? 0;
+        return Math.round(note.getBoundingClientRect().top - above);
+      }),
+    );
+  for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(8);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
@@ -426,6 +435,10 @@ for (const width of [1440, 768, 390, 320]) {
     const flow = page.getByRole("region", { name: "Learning history overview" });
     const detail = flow.locator(".learning-flow-detail");
     await expect(flow.getByRole("button", { pressed: true })).toHaveAccessibleName(
+      "Oct 26 Read sources before asking again Adopted v4",
+    );
+    // The visible words must read as one phrase that the accessible name contains.
+    await expect(flow.getByRole("button", { pressed: true })).toHaveText(
       "Oct 26 Read sources before asking again Adopted v4",
     );
     await expect(detail).toContainText("not causal proof");

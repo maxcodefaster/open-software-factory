@@ -62,7 +62,8 @@ test("compiled runtime commands retain trusted System Contract failures without 
   expect(await call()).toEqual({
     ok: false,
     status: 500,
-    message: "Factory command failed. Its outcome is unconfirmed.",
+    message:
+      "Factory could not finish that action. Reload to see whether it was saved, then try again.",
   });
   failure.name = "SystemContractError";
   expect(await call()).toMatchObject({ ok: false, status: 500 });

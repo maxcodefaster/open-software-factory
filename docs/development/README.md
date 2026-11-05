@@ -80,6 +80,8 @@ services in Vite or implement a second RPC encoder.
 | `bun run test:forgejo` | Forgejo integration checks |
 | `bun run runtime:conformance` | Actual Factorybox/Kubernetes/Dev Container/Connector conformance |
 | `bun run beta:gate` | Release gate: secret and forbidden-term scans, every lane, receipt for the exact commit |
+| `bun run release:clean-room` | Install a chart on a fresh Namespace of the current kubectl context, prove it works, remove it |
+| `bun run release:upgrade-test` | Upgrade a previous build to the new one on a fresh Namespace and prove no data is lost |
 | `bun run factorybox:publish` | Push and sign a worker image that passed conformance; refuses unproven bytes |
 | `bun run test:browser` | UI journeys; excludes native, paid and retained-installation restart tests |
 | `bun run test:browser:native` | Explicit real IDE/Terminal/Preview/Delivery journeys |
@@ -318,3 +320,121 @@ separate namespace, worker and claims, never the shared Registry or retained ins
 `runtime:smoke:down` removes only completed labeled conformance namespaces with UID preconditions.
 Failed native stores stay retained for diagnosis while their owned worker Pod is fenced to release RAM.
 
+## Clean-room install test
+
+`release:clean-room` installs a chart package on a Namespace it creates, checks the installation and
+removes exactly what it created. It never reads or reuses a retained installation's values.
+
+```sh
+mise exec -- bun run release:clean-room --factory-image REF@sha256:DIGEST --node NODE
+mise exec -- bun run release:clean-room --chart ./factory-0.1.0-beta.1.tgz --node NODE
+mise exec -- bun run release:clean-room --chart oci://ghcr.io/maxcodefaster/charts/factory:0.1.0-beta.1 --node NODE
+```
+
+`--chart` takes a `.tgz` file or an OCI reference. Without it the run packages this working tree with
+`scripts/release/package-chart.ts`, using `--factory-image` and the worker in
+`deploy/factorybox/release.json`. A locally available tag such as `open-software-factory:release-<sha>`
+is accepted for `--factory-image` on a local run; a published digest reference is the normal case.
+`--node` is optional on a one-node cluster. `--values FILE` adds settings, but only storage class, sizes,
+resource requests and worker sizing are copied. Origins, Secret names, images and the node are dropped,
+and the receipt lists the dropped paths. `--small-requests` lowers scheduling memory requests.
+`--keep` skips cleanup, and `--cleanup factory-cleanroom-<8 hex>` removes an interrupted or kept run.
+
+The run uses the current kubectl context, pinned at the start, and a new Namespace
+`factory-cleanroom-<8 hex>` that carries an owner label. It refuses an existing Namespace. In order, it:
+
+1. checks that the node's unrequested allocatable memory covers the control plane, and names the
+   largest requesters when it does not (it stops nothing itself);
+2. installs with `helm install --wait=legacy --timeout 20m` and runs `helm test`, whose preflight
+   starts a short probe Pod and no worker;
+3. waits for `/health/ready?installation=complete` through the `factory:connect` port forwards;
+4. reads the generated admin password from the installation Secret and signs in with Chromium from
+   `node_modules`, asserting no console errors and no 5xx response;
+5. checks that OpenBao is unsealed and that the Factory settings Models page loads;
+6. runs a manual backup Job from the chart's CronJob, copies the newest set and runs `restore-check`
+   (needs `pg_restore` 16 or Docker; otherwise that check is recorded as skipped);
+7. runs `helm uninstall`, then deletes the PVCs, the Namespace, any released PVs and the chart's
+   ClusterRole and ClusterRoleBinding. Each deletion is by exact name, after the Namespace's name and
+   owner labels and the claims' recorded UIDs match.
+
+Known limits, also written to the receipt. A Starter Project makes Factory prepare images and start
+Main-Preview, which admits a Factorybox worker, so the Project, Ticket and Wiki steps run only with
+`--with-sandbox` and are recorded as skipped otherwise. With it, worker and editor Namespaces count
+as owned only when the installation database recorded their UID; others are listed, never deleted.
+Wiki pages need a model connection, so the Wiki edit is skipped on a clean installation. The settings
+check proves OpenBao is unsealed and the connection list reads, not that a provider key decrypts.
+Memory on a crowded node can be too tight for the control plane; the capacity check fails before
+anything is installed.
+
+The receipt is `.factory/test-results/clean-room/<namespace>.json`, written before the Namespace
+exists and updated after each step. It holds versions, chart and image digests, timings, every check
+and the cleanup result, and never the admin password. Screenshots sit beside it in a folder of the
+same name.
+
+## Upgrade test
+
+`release:upgrade-test` installs a previous build, fills it with data, upgrades the chart to the new
+build and compares everything before and after. It owns one Namespace, `factory-upgrade-<8 hex>`,
+and never reads or changes a retained installation.
+
+```sh
+mise exec -- bun run release:upgrade-test \
+  --from-chart git:7b339b88 --from-image open-software-factory:release-7b339b88 \
+  --to-chart deploy/helm/factory --to-image open-software-factory:release-NEW \
+  --node NODE --values /path/to/private-values.yaml
+```
+
+`--from-chart` takes a chart directory or `git:<commit>`, which extracts `deploy/helm/factory` at that
+commit with `git archive`. Both images must be pullable by the cluster; for a local run an older
+locally built tag is enough. `--values` is the private file both builds need, mainly the Factorybox
+worker image, executable hash and architecture. The script overrides every origin, Secret, backup
+and reserve setting. The release runs with `executionReserveTarget: 0` and backups off, so it starts
+no worker and no Sandbox, and it asks for about 0.8 GiB of scheduling memory. The memory check
+runs first and, when the node is too full, names the Namespaces holding the most requests. It stops
+nothing itself.
+
+The run, in order:
+
+1. creates the labelled Namespace (refusing an existing one) and installs the previous build with
+   `helm install --wait=legacy --timeout 20m`;
+2. seeds data. Chromium signs in as the administrator with the generated password (read from the
+   Secret, never printed), creates a managed account and writes two Tickets as ideas. The Forgejo
+   API creates a repository with the starter scaffold. The factory role writes the rows that need a
+   runtime or a model: the Project, Tickets in four more states, a Wiki page with two revisions, two
+   Inbox assignments and a model connection placeholder whose secret is written to OpenBao. One
+   plain object is written to the object store. An attachment row has no path without the UI, so
+   none is seeded;
+3. takes a fingerprint: for every ordinary table outside `pg_*`, `information_schema` and the Zero
+   cache, a row count and a digest of per-column hashes in primary-key order (volatile columns such
+   as `updated_at`, and sessions, verification tokens, read versions and the maintenance fence, are
+   left out); the applied migrations; every Forgejo repository's branch heads and file listing from
+   the API; every OpenBao secret path the database names, read and decrypted as Factory's own
+   AppRole and compared by digest, plus the seal state; and every object key with its size and ETag;
+4. runs `helm upgrade` to the new chart and image with the same values and takes the fingerprint
+   again. A row, file, secret or object that disappears or changes fails the run. New migrations,
+   tables and columns are allowed. A new row in an existing table is refused unless `--allow
+   row:<schema.table>` names it;
+5. checks that OpenBao is unsealed, the claims and generated Secrets are the same objects, the
+   administrator and the new account still sign in with their original passwords, and the Project,
+   each Ticket and the Wiki page load with zero console errors (`--ignore-console REGEX` for a known
+   benign message);
+6. upgrades again to the same build and requires a fingerprint identical to the one before it, with
+   no allowances and no new migration;
+7. removes the release, then the claims, the Namespace, released volumes and the chart's cluster
+   roles. Each deletion follows a check that the Namespace name and owner label match, and
+   nothing in `factory-box-*`, `factory-editor-*` or another Namespace is touched. `--keep` skips
+   this and `--cleanup factory-upgrade-<8 hex>` removes a kept or interrupted run.
+
+On failure the script prints each refused difference with its table, row key and column (hashes,
+never values). The receipt is `.factory/test-results/upgrade-test/<namespace>.json`. It holds both
+images, the memory check, every step and check, the fingerprint summaries, both diffs and the
+cleanup result, and never a password or token. Screenshots of a failed browser step sit in a folder
+of the same name.
+
+Rollback is documented, not performed. A chart rollback does not roll the database back. Once the
+upgrade has applied a migration the previous image refuses the newer schema at startup, so a
+rollback leaves Factory not ready with all data intact. Recover by upgrading forward or by restoring
+the last backup set into a new installation.
+
+The browser steps use the selectors of the current UI. Run the test with a previous build whose UI
+still matches them, or adjust `scripts/release/upgrade-test-browser.ts` for the build under test.

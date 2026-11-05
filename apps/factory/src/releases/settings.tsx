@@ -5,6 +5,7 @@ import {
 } from "../../../../packages/project-domain/src/release";
 import { FreshAuthentication } from "../access/fresh-authentication";
 import { APIRequestError } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import {
   createReleaseAccess,
   endProjectPublication,
@@ -524,7 +525,9 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                               />
                               <p class="release-notes">{release().notes || "No release notes."}</p>
                               <Show when={release().failure}>
-                                <p class="release-error">{release().failure}</p>
+                                <p class="release-error">
+                                  {plainErrorMessage(release().failure ?? "")}
+                                </p>
                               </Show>
                               <For each={release().artifacts}>
                                 {(artifact) => (

@@ -475,6 +475,9 @@
 .work-review .work-note {
   margin-block: var(--space-3);
 }
+.work-learning > .work-note + .work-note {
+  margin-top: var(--space-3);
+}
 .work-scope button:hover,
 .work-chart-metrics button:hover {
   background: var(--material-chrome-hover);
@@ -513,7 +516,7 @@
   fill: var(--material-accent);
 }
 
-.work-review-now {
+.learning-dashboard .work-review-now {
   display: grid;
   gap: var(--space-3);
   max-width: 72ch;

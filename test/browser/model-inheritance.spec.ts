@@ -53,7 +53,7 @@ test("Project managers set model defaults and locks; developers select and Reset
     await current.getByLabel("Password", { exact: true }).fill(password);
     await current.getByRole("button", { name: "Sign in", exact: true }).click();
     await openProjectMenu(current);
-    await current.getByRole("button", { name: new RegExp(name) }).click();
+    await current.locator(".project-choice", { hasText: name }).click();
   }
   async function open(current: Page, group = "Personal") {
     await current.getByRole("button", { name: "Settings", exact: true }).click();

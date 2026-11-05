@@ -646,3 +646,37 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
   await area.getByRole("button", { name: "Clear filters", exact: true }).click();
   await expect(area.locator(".environment-variable")).toHaveCount(4);
 });
+
+test.describe("touch environments", () => {
+  test.use({ viewport: { width: 390, height: 1000 }, isMobile: true, hasTouch: true });
+  test("variable actions and access choices keep 44px touch targets", async ({ page }) => {
+    await mockFactoryFunctions(page, {
+      environments: {
+        get: async (_project, _actor, environment) => ({
+          ...environmentMetadata(initialBundle()),
+          environment,
+          version: 0,
+          canManage: true,
+          storeConfigured: true,
+          pending: false,
+          pendingCommandID: null,
+          preparation: null,
+        }),
+      },
+    });
+    await page.goto(`${origin}/environment-settings.html`);
+    await chooseSettingsPage(page, "Environments");
+    const area = page.getByRole("region", { name: "Project environment", exact: true });
+    const trigger = area.getByRole("button", { name: "Actions for API_KEY", exact: true });
+    await expect(trigger).toBeVisible();
+    const box = await trigger.boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(43.5);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(43.5);
+    await area.getByRole("button", { name: "Add variable", exact: true }).click();
+    const choices = area.locator(".environment-grants label, .environment-check");
+    await expect(choices.first()).toBeVisible();
+    for (const choice of await choices.all())
+      expect((await choice.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(43.5);
+    await page.screenshot({ path: `${evidence}/touch-targets.png` });
+  });
+});

@@ -1,6 +1,7 @@
 import { Portal } from "@solidjs/web";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Epic } from "./api-contracts";
+import { plainFailureMessage } from "./command-error";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
 import type { TicketHeaderAction } from "./ticket-action-bar";
@@ -393,7 +394,7 @@ export function TicketSecondaryActions(props: {
                 <Show when={view() === "diagnostics"}>
                   <div class="ticket-diagnostics">
                     <Show when={props.failure}>
-                      <p>{props.failure}</p>
+                      <p>{plainFailureMessage(props.failure ?? "")}</p>
                     </Show>
                     <Show when={props.cleanupError}>
                       <p>Resource cleanup: {props.cleanupError}</p>

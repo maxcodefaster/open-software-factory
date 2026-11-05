@@ -74,6 +74,10 @@ test("Project search keeps arrow keys on results and explains an empty search", 
   for (let index = 0; index < 7; index++)
     ids.push(await addProject(`Shell Project ${index + 1}`, `shell-search-${index}`));
   await page.goto(`/projects/${ids[0]}`);
+  // Opening the menu before the link has selected its Project would be closed by that selection.
+  await expect(
+    page.getByRole("button", { name: "Shell Project 1, open project menu" }),
+  ).toBeVisible();
   await openProjectMenu(page);
   const search = page.getByRole("searchbox", { name: "Search projects" });
   await expect(search).toBeFocused();
@@ -241,4 +245,31 @@ test("an empty Board is keyboard reachable because it scrolls sideways on phones
     VALUES(${crypto.randomUUID()},${id},'First scroll ticket','ready',${userID})`;
   await expect(board).toHaveCount(0);
   await expect(page.locator(".board")).not.toHaveAttribute("tabindex", /.*/);
+});
+
+test("a Project link never flashes the choose-a-Project prompt while Projects load", async ({
+  page,
+}) => {
+  const id = await addProject("Deep link project", "shell-deeplink");
+  await page.addInitScript(() => {
+    const prompt = "Choose a Project to open its Ticket board.";
+    const seen = () => {
+      if (document.body?.textContent?.includes(prompt)) {
+        (window as unknown as { promptSeen: boolean }).promptSeen = true;
+      }
+    };
+    new MutationObserver(seen).observe(document, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+  await page.goto(`/projects/${id}`);
+  await expect(page.getByRole("button", { name: /Deep link project/ })).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Ticket board" }).or(page.getByLabel("Ticket board")),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => (window as unknown as { promptSeen?: boolean }).promptSeen),
+  ).toBeFalsy();
 });

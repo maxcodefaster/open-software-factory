@@ -283,6 +283,7 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     await draft.fill("/rev");
     await expect(suggestions).toBeVisible();
     await expect(suggestions).toContainText("Loading available Skills…");
+    await expect(suggestions.locator(":scope > [role]")).toHaveCount(0);
     // Reads are change-driven, not polled. Explicit wake events exercise two
     // unchanged refreshes while the pending Skill choice keeps its focus.
     for (let refresh = 0; refresh < 2; refresh++) {
@@ -321,6 +322,76 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     expect(commissioned).toBe(0);
   } finally {
     skillsReady.resolve();
+    await deleteFactoryProject(projectID, database);
+    await database.client.end();
+  }
+});
+
+test("saved conversation says it is loading instead of offering an empty chat", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await serveChatAssets(page);
+  await signIn(page);
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  const { session } = await browserBootstrap(page);
+  const projectID = crypto.randomUUID();
+  const slug = `chat-loading-${projectID}`;
+  const database = createDatabase(1);
+  const release = Promise.withResolvers<void>();
+  const conversation = conversationViewSchema.parse({
+    id: crypto.randomUUID(),
+    projectId: projectID,
+    mode: "plan",
+    version: 1,
+    entries: [
+      {
+        id: crypto.randomUUID(),
+        conversationId: crypto.randomUUID(),
+        ordinal: 1,
+        kind: "user-message",
+        actor: "user",
+        mode: "plan",
+        body: "Saved question about loading.",
+        payload: {},
+        citations: [],
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    isActiveCoding: false,
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Loading proof starts no runtime");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Loading proof starts no runtime");
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async () => {
+        await release.promise;
+        return conversationViewSchema.nullable().parse(conversation);
+      },
+    },
+  });
+  try {
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${slug},'Chat loading proof','https://example.invalid/chat-loading.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await openProjectMenu(page);
+    await page.getByRole("button").filter({ hasText: slug }).click();
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    const panel = page.locator(".agent-panel");
+    await expect(panel.getByText("Loading conversation…")).toBeVisible();
+    await expect(panel.getByText(/Ask about the Project/)).toHaveCount(0);
+    release.resolve();
+    await expect(panel.getByText("Saved question about loading.")).toBeVisible();
+    await expect(panel.getByText("Loading conversation…")).toHaveCount(0);
+  } finally {
+    release.resolve();
     await deleteFactoryProject(projectID, database);
     await database.client.end();
   }

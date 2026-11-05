@@ -17,6 +17,7 @@ export function Factory() {
   };
   const opening = (message?: () => string, retry?: () => void) => (
     <main class="loading" data-background={defaultDesktopBackgroundKey}>
+      <h1 class="sr-only">Open Software Factory</h1>
       <Show when={message} fallback={<span>Opening Factory</span>}>
         <div class="loading-error">
           <p role="alert">{message?.()}</p>

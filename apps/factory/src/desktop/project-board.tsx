@@ -18,6 +18,7 @@ export interface ProjectBoardModel {
   agentOverlay: () => boolean;
   setupVisible: () => boolean;
   selectedProject: Accessor<DesktopProject | undefined>;
+  projectsLoading: () => boolean;
   setProjectMenuOpen: ReturnType<typeof createProjectPlanning>["setProjectMenuOpen"];
   narrowViewport: SourceAccessor<boolean>;
   historyTickets: () => Ticket[];
@@ -73,7 +74,7 @@ export function ProjectBoard(props: { model: ProjectBoardModel }) {
         fallback={
           model.setupVisible() ? (
             <SetupEmptyBoard />
-          ) : (
+          ) : model.projectsLoading() ? null : (
             <DesktopEmpty onChoose={() => model.setProjectMenuOpen(true)} />
           )
         }

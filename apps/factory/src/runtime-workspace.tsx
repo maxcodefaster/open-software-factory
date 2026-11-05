@@ -21,6 +21,9 @@ import {
 import { createWaitElapsed, waitLabel } from "./wait-elapsed";
 import type { WorkspaceTab } from "./workspace-tabs";
 
+const plainFailure = (failure: string | undefined) =>
+  failure === undefined ? undefined : plainErrorMessage(failure);
+
 export function RuntimeWorkspaceTabs(props: {
   projectID: string;
   tabs: readonly WorkspaceTab[];
@@ -134,7 +137,7 @@ export function RuntimeWorkspaceTabs(props: {
                   ? undefined
                   : attempt()?.state === "resuming" && attempt()?.failure
                     ? boundedCause(attempt()?.failure ?? "")
-                    : (attempt()?.failure ?? tab().preparationFailure)
+                    : plainFailure(attempt()?.failure ?? tab().preparationFailure)
               }
               restoreFailed={attempt()?.restoreFailed}
               onStartFresh={

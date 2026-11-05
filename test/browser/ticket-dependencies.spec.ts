@@ -136,9 +136,12 @@ test("named prerequisites block Build and remain linked after cancellation until
     );
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     const board = page.getByRole("region", { name: "Ticket board", exact: true });
-    await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
+    await board
+      .getByRole("button", { name: /^Open Epic Release(?: |$)/ })
+      .first()
+      .click();
     const rootFolder = page.getByRole("dialog", { name: "Release", exact: true });
-    await rootFolder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    await rootFolder.getByRole("button", { name: /^Open Epic Onboarding(?: |$)/ }).click();
     const childFolder = page.getByRole("dialog", { name: "Onboarding", exact: true });
     await childFolder
       .getByRole("button", { name: /Build onboarding on the sign-in contract/ })
@@ -156,9 +159,12 @@ test("named prerequisites block Build and remain linked after cancellation until
       path: ".factory/test-results/epic-folders/dependencies-ticket-wide.png",
     });
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-    await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
+    await board
+      .getByRole("button", { name: /^Open Epic Release(?: |$)/ })
+      .first()
+      .click();
     await expect(rootFolder.locator(".epic-progress")).toHaveText("0/2 done");
-    await rootFolder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    await rootFolder.getByRole("button", { name: /^Open Epic Onboarding(?: |$)/ }).click();
     await expect(childFolder.getByText("Blocked by", { exact: true })).toBeVisible();
     await expect(childFolder.locator(".ticket-card")).toHaveCount(1);
     const blockedCard = childFolder
@@ -180,12 +186,15 @@ test("named prerequisites block Build and remain linked after cancellation until
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Add dependency", exact: true })).toBeHidden();
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-    await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
+    await board
+      .getByRole("button", { name: /^Open Epic Release(?: |$)/ })
+      .first()
+      .click();
     await page.screenshot({
       path: ".factory/test-results/epic-folders/dependencies-board-wide.png",
     });
     await database.client`UPDATE factory.ticket SET state = 'cancelled' WHERE id = ${first}`;
-    await rootFolder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    await rootFolder.getByRole("button", { name: /^Open Epic Onboarding(?: |$)/ }).click();
     await childFolder
       .getByRole("button", { name: /Build onboarding on the sign-in contract/ })
       .click();

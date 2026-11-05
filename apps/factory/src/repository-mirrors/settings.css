@@ -15,6 +15,9 @@
 .repository-mirrors [role="alert"] {
   color: var(--color-danger);
 }
+.repository-mirrors > button {
+  justify-self: start;
+}
 .repository-mirrors h3 {
   margin: 0;
   font-size: var(--text-md);

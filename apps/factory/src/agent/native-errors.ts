@@ -1,15 +1,11 @@
+import { plainFailureMessage } from "../command-error";
+
 export function bounded(value: string, limit: number) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
-const rateLimited =
-  /rate_limit_exceeded|exceeded (?:the )?token rate limit|too many requests|\b429\b/i;
-
 export function readableError(value: unknown) {
-  const message = rawError(value);
-  return rateLimited.test(message)
-    ? "The model provider is limiting requests right now. Wait a minute, then retry. Retained work is kept."
-    : message;
+  return plainFailureMessage(rawError(value));
 }
 
 function rawError(value: unknown) {
@@ -22,5 +18,7 @@ function rawError(value: unknown) {
       }
     }
   }
-  return typeof value === "string" ? value : "OpenCode run failed";
+  return typeof value === "string"
+    ? value
+    : "The agent stopped unexpectedly. Retained work is kept. Retry to continue.";
 }

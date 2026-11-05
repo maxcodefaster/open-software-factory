@@ -258,6 +258,10 @@ export function AttachmentPicker(props: {
   let submittedIdentity: string | undefined;
   let bound: HTMLElement | undefined;
   const blocked = () => props.disabled || busy();
+  const busyMessage = "A file is still uploading. Add the next file when it finishes.";
+  function declineWhileBusy() {
+    if (!props.disabled && busy()) drafts.update(identity(), { error: busyMessage });
+  }
   createEffect(
     () => project(),
     (id) => {
@@ -278,7 +282,11 @@ export function AttachmentPicker(props: {
     },
   );
   async function upload(files: File[], retry = false) {
-    if (disposed || !files.length || blocked()) return;
+    if (disposed || !files.length) return;
+    if (blocked()) {
+      declineWhileBusy();
+      return;
+    }
     const projectId = project();
     const draftId = props.draftId;
     const key = identity();
@@ -422,11 +430,15 @@ export function AttachmentPicker(props: {
       finish?.();
       insert("");
       drafts.update(key, { busy: false });
+      if (drafts.get(key).error === busyMessage) drafts.update(key, { error: "" });
       if (input) input.value = "";
     }
   }
   function choose(imagesOnly = false) {
-    if (blocked()) return;
+    if (blocked()) {
+      declineWhileBusy();
+      return;
+    }
     pickerIdentity = identity();
     if (input) {
       input.accept = imagesOnly ? ".png,.jpg,.jpeg,.webp" : accepted;

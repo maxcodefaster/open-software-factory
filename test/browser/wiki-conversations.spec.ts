@@ -196,3 +196,27 @@ for (const size of sizes) {
     });
   });
 }
+
+test.describe("touch viewport", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("Wiki tree and search controls are at least 44px wide and tall", async ({ page }) => {
+    await page.goto(`${origin}/wiki-workspace.html?s=populated`);
+    await page.getByRole("button", { name: /browse wiki pages$/i }).click();
+    const controls = [
+      page.locator(".knowledge-tree .tree-search-button"),
+      page.locator(".knowledge-tree .tree-toggle").first(),
+    ];
+    for (const control of controls) {
+      await expect(control).toBeVisible();
+      const box = await control.boundingBox();
+      expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    await page.getByRole("button", { name: "Search Wiki", exact: true }).click();
+    const close = page.getByRole("button", { name: "Close search" });
+    const box = await close.boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  });
+});

@@ -1,5 +1,5 @@
 import { APIRequestError } from "../api-client";
-import { plainErrorMessage } from "../command-error";
+import { plainErrorMessage, sessionExpiredMessage } from "../command-error";
 
 export type ServerResult<T> =
   | { ok: true; value: T }
@@ -23,10 +23,12 @@ export async function serverCall<T>(call: Promise<ServerResult<T>>): Promise<T> 
         409,
         "Factory was updated. Reload before continuing. An unconfirmed command is not repeated.",
       );
+    if (cause && typeof cause === "object" && "status" in cause && cause.status === 401)
+      throw new APIRequestError(401, sessionExpiredMessage);
     if (cause instanceof Error && plainErrorMessage(cause.message) !== cause.message)
       throw new APIRequestError(503, plainErrorMessage(cause.message));
     throw cause;
   }
-  if (!result.ok) throw new APIRequestError(result.status, result.message);
+  if (!result.ok) throw new APIRequestError(result.status, plainErrorMessage(result.message));
   return result.value;
 }

@@ -2100,6 +2100,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     agentOverlay,
     setupVisible,
     selectedProject,
+    projectsLoading: () => projects.completeness() !== "complete",
     setProjectMenuOpen,
     narrowViewport,
     historyTickets,

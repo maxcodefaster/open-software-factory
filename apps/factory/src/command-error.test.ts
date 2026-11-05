@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { plainErrorMessage, unreachableMessage, untilReachable } from "./command-error";
+import {
+  plainErrorMessage,
+  plainFailureMessage,
+  unreachableMessage,
+  untilReachable,
+} from "./command-error";
 
 describe("plainErrorMessage", () => {
   test("replaces transport and runtime errors", () => {
@@ -60,5 +65,85 @@ describe("untilReachable", () => {
         5,
       ),
     ).rejects.toThrow(unreachableMessage);
+  });
+});
+
+describe("plainErrorMessage for server bookkeeping", () => {
+  const reload = "This request no longer matches what was saved. Reload and try again.";
+  const changed =
+    "The work changed while this was running. Check its current status, then try again.";
+  test("names a reused or changed request without the word identity or command", () => {
+    for (const message of [
+      "Release command identity was already used",
+      "The implementation command identity was reused with different input",
+      "This save command belongs to another document",
+      "Policy command changed input",
+      "Checks retry changed target",
+      "This editing request identity has different input.",
+      "Media identity changed its original content",
+      "This action key already created a different Ticket.",
+    ])
+      expect(plainErrorMessage(message)).toBe(reload);
+  });
+  test("names changed ownership as work that changed", () => {
+    for (const message of [
+      "Build authority changed before dispatch",
+      "Agent turn ownership expired before settlement",
+      "Browser no longer owns this Build execution",
+      "Monitoring diagnosis lost execution ownership",
+    ])
+      expect(plainErrorMessage(message)).toBe(changed);
+  });
+  test("keeps unconfirmed outcomes and their guidance as written", () => {
+    for (const message of [
+      "Skill publication outcome is unconfirmed",
+      "Your message was saved. The response outcome is unconfirmed; no request was replayed.",
+      "Browser recovery storage is unavailable. Unconfirmed requests are retained.",
+      "A mirror operation is unconfirmed. Check Forgejo and reload before another change.",
+    ])
+      expect(plainErrorMessage(message)).toBe(message);
+  });
+  test("replaces internal terms and bare status text", () => {
+    expect(plainErrorMessage("Request failed with 502")).toBe(
+      "Factory could not complete that action. Try again.",
+    );
+    expect(plainErrorMessage("MCP tool namespace collision")).toContain("same name");
+    expect(plainErrorMessage("This Runtime Attempt is not connected.")).toBe(
+      "This Sandbox is not connected.",
+    );
+  });
+  test("keeps ordinary guidance", () => {
+    for (const message of [
+      "The Ticket changed. Review the current requirements before implementing.",
+      "Choose a model from the approved catalogue",
+      "Enter a commit message",
+    ])
+      expect(plainErrorMessage(message)).toBe(message);
+  });
+});
+
+describe("plainFailureMessage for stored failures", () => {
+  test("turns provider codes into one sentence with a next step", () => {
+    const raw =
+      "rate_limit_exceeded: Your requests to gpt-5.6-terra in swedencentral have exceeded token rate limit.";
+    expect(plainFailureMessage(raw)).toContain("limiting requests");
+    expect(plainFailureMessage(raw)).not.toContain("rate_limit_exceeded");
+    expect(
+      plainFailureMessage(
+        "Factory Coding allowance paused subsequent inference. Existing code is retained; resume explicitly after reset or an allowance increase.",
+      ),
+    ).toBe(
+      "The Coding allowance is used up. Your code is kept. Resume after the allowance resets or is raised.",
+    );
+  });
+  test("still applies the bookkeeping rules", () => {
+    expect(plainFailureMessage("Build authority changed before dispatch")).toContain(
+      "changed while this was running",
+    );
+  });
+  test("plainErrorMessage never rewrites messages that quote a title", () => {
+    const quoted =
+      "Prerequisites must be delivered before implementation: Fix network error 429 overloaded";
+    expect(plainErrorMessage(quoted)).toBe(quoted);
   });
 });

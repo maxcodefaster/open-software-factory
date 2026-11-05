@@ -163,6 +163,9 @@
   .access-account-menu button {
     min-height: var(--touch-target);
   }
+  .access-settings details > summary {
+    padding-block: calc((var(--touch-target) - 1lh) / 2);
+  }
 }
 .access-settings .access-account-menu small {
   padding: 0 var(--space-3) var(--space-2);

@@ -1,5 +1,6 @@
 import { createEffect, createSignal } from "solid-js";
 import { APIRequestError } from "../api-client";
+import { genericFailure } from "../command-error";
 import { getInbox, markInboxItem } from "../server-functions/inbox";
 import { serverCall } from "../server-functions/result";
 import { observeFactoryRead } from "../zero/reads";
@@ -7,9 +8,8 @@ import type { InboxItem, InboxView } from "./contracts";
 
 // Transport failures carry framework wording. People see a plain sentence instead.
 function failureMessage(cause: unknown, fallback: string) {
-  if (cause instanceof APIRequestError && cause.message) return cause.message;
-  if (cause instanceof Error && /status 401\b/.test(cause.message))
-    return "Your session expired. Reload the page and sign in again; your drafts are retained.";
+  if (cause instanceof APIRequestError && cause.message && cause.message !== genericFailure)
+    return cause.message;
   return fallback;
 }
 

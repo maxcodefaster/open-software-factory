@@ -39,6 +39,7 @@ export function UsageSettings(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [notice, setNotice] = createSignal("");
+  const [attempt, setAttempt] = createSignal(0);
   let epoch = 0;
   let retry:
     | { commandID: string; version: number; policy: ExecutionPolicy; timezone?: string }
@@ -46,6 +47,7 @@ export function UsageSettings(props: {
   const scope = () => props.projectID ?? null;
   const usageRead = createMemo(() => {
     const target = scope();
+    attempt();
     return serverCall(getUsage({ data: [target] })).then(
       (value) => ({ target, ok: true as const, value }),
       (cause: unknown) => ({
@@ -93,11 +95,14 @@ export function UsageSettings(props: {
       clearInterval(refreshTimer);
     };
   });
-  createEffect(usageRead, (result) => {
-    if (result.target !== scope()) return;
-    if (result.ok) publish(result.value);
-    else setError(result.message);
-  });
+  createEffect(
+    () => [usageRead(), scope()] as const,
+    ([result, current]) => {
+      if (result.target !== current) return;
+      if (result.ok) publish(result.value);
+      else setError(result.message);
+    },
+  );
   async function save(event: SubmitEvent) {
     event.preventDefault();
     const current = view();
@@ -135,10 +140,32 @@ export function UsageSettings(props: {
     <section class="usage-settings" aria-label="Usage & limits">
       <LearningSettings projectID={props.projectID} onOpenTicket={props.onOpenTicket} />
       <h3 class="usage-section-title">Usage & limits</h3>
-      <Show when={error()}>
+      <Show when={error() && !view()}>
+        <div class="usage-load-error">
+          <p role="alert">{error()}</p>
+          <button
+            type="button"
+            class="quiet-button"
+            onClick={() => {
+              setError("");
+              setAttempt((count) => count + 1);
+            }}
+          >
+            Reload usage
+          </button>
+        </div>
+      </Show>
+      <Show when={error() && view()}>
         <p role="alert">{error()}</p>
       </Show>
-      <Show when={view()} fallback={<p role="status">Loading usage…</p>}>
+      <Show
+        when={view()}
+        fallback={
+          <Show when={!error()}>
+            <p role="status">Loading usage…</p>
+          </Show>
+        }
+      >
         {(value) => (
           <>
             <p class="usage-note">

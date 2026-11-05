@@ -737,9 +737,12 @@ export function createKnowledgeController(
           rank: terms.every((term) => heading.includes(term)) ? 2 : 0.5,
         });
       }
+      // Wiki pages come first. Their ts_rank scale is far below the document scores,
+      // so a shared rank sort would push every Wiki match behind the repository files.
       return [...results, ...documents]
         .sort(
           (left, right) =>
+            Number(right.kind === "page") - Number(left.kind === "page") ||
             right.rank - left.rank ||
             left.title.localeCompare(right.title) ||
             left.id.localeCompare(right.id),

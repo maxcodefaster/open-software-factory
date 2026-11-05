@@ -91,9 +91,7 @@ test("workspace focus and Ticket quick-find preserve keyboard access and commiss
     const projectChoice = page.getByRole("button").filter({ hasText: `efficiency-${projectID}` });
     await expect(projectChoice).toBeVisible();
     await projectChoice.click();
-    await expect(
-      page.getByRole("button", { name: "Open Epic Billing", exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Open Epic Billing(?: |$)/ })).toBeVisible();
 
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 960 });

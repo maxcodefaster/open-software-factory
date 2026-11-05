@@ -63,7 +63,7 @@ test("human feedback is idempotent, scoped, versioned and admits corrections onl
     expect(await native("createReviewFeedback", [f.changeID, input])).toMatchObject(first);
     await expect(
       native("createReviewFeedback", [f.changeID, { ...input, body: "Changed" }]),
-    ).rejects.toThrow("changed input");
+    ).rejects.toThrow("no longer matches what was saved");
     const view = visualReviewSchema.parse(await native("getVisualReview", [f.changeID]));
     expect(view.feedback).toHaveLength(1);
     expect(view.feedback[0]?.messages[0]?.body).toBe(input.body);

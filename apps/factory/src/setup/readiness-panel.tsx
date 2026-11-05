@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { SetupTask, SetupTaskView } from "../../../../packages/project-domain/src/setup";
+import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { getSetupReadiness, retrySetupTask } from "../server-functions/setup";
 
@@ -87,7 +88,7 @@ export function SetupReadiness(props: { projectID: string; canRetry?: boolean })
                         (row().task === "development" || row().task === "preview-image")))
                   }
                 >
-                  <small>{row().failure}</small>
+                  <small>{plainErrorMessage(row().failure ?? "")}</small>
                 </Show>
               </span>
               <Show when={row().state === "failed" && props.canRetry !== false}>

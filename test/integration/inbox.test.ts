@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { createInboxService } from "../../apps/factory/src/inbox/service";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
 import { mentionText } from "../../packages/ticket-domain/src/attention";
-import { factoryProcess } from "../fixtures/factory-process";
-import { fixture } from "../fixtures/change-agent-turns";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { fixture } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test("Inbox retains responsibility and personal receipts while deriving current authorized requests and grouped activity", async () => {
@@ -317,3 +317,23 @@ test("Delivery, review supersession and blocked Inputs use the actual decision c
     await host.dispose();
   }
 }, 120_000);
+
+test("a stored provider failure reaches the Inbox in plain words", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const service = createInboxService(database);
+    await database.client`UPDATE factory.change SET state='failed',
+      failure='rate_limit_exceeded: Your requests to gpt-5.6-terra in swedencentral have exceeded token rate limit.'
+      WHERE id=${owned.changeID}`;
+    const item = (await service.list(owned.userID)).items.find(
+      (candidate) => candidate.id === `change:${owned.changeID}`,
+    );
+    expect(item?.preview).toContain("limiting requests");
+    expect(item?.preview).not.toContain("rate_limit_exceeded");
+  } finally {
+    await database.client.end();
+    await host.dispose();
+  }
+});
