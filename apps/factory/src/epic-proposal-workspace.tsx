@@ -57,6 +57,7 @@ export function EpicProposalWorkspace(props: {
   return (
     <section class="ticket-workspace epic-proposal-workspace" aria-label="Proposed Epic">
       <div class="ticket-document">
+        <h2 class="sr-only">Proposed work</h2>
         <header class="ticket-status-row workspace-heading">
           <textarea
             class="ticket-draft-title workspace-heading-title"

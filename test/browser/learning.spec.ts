@@ -78,6 +78,13 @@ test("touch monitoring keeps every disclosure at least 44px and the metric choic
         ...new Set(buttons.map((button) => Math.round(button.getBoundingClientRect().top))),
       ]);
     expect(rows).toHaveLength(2);
+    // The period label sits below the metric choices instead of squeezing into their rows.
+    const layout = await page.evaluate(() => {
+      const metrics = document.querySelector(".work-chart-metrics")?.getBoundingClientRect();
+      const period = document.querySelector(".work-period")?.getBoundingClientRect();
+      return { metricsBottom: metrics?.bottom ?? 0, periodTop: period?.top ?? 0 };
+    });
+    expect(layout.periodTop).toBeGreaterThanOrEqual(layout.metricsBottom - 1);
   } finally {
     await context.close();
   }

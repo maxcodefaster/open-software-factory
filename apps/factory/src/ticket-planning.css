@@ -271,6 +271,13 @@
   .ticket-chapter-links button {
     min-height: 44px;
   }
+  .ticket-design-sources > summary,
+  .ticket-diagram-source > summary,
+  .ticket-request-details > summary {
+    box-sizing: border-box;
+    min-height: 44px;
+    padding-block: var(--space-3);
+  }
 }
 
 @media (max-width: 760px) {

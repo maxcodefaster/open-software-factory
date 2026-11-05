@@ -177,16 +177,19 @@ for (const touch of [false, true]) {
       await expect(toast).toBeVisible();
       const strip = page.locator(".workspace-tabbar");
       await expect(strip).toBeVisible();
-      const [toastBox, stripBox] = [await toast.boundingBox(), await strip.boundingBox()];
-      expect((toastBox?.y ?? 0) + (toastBox?.height ?? 0)).toBeLessThanOrEqual(
-        (stripBox?.y ?? 0) + 1,
-      );
-      for (const name of ["Minimize workspace"]) {
-        const control = await page.getByRole("button", { name }).boundingBox();
-        expect(control?.y ?? 0).toBeGreaterThanOrEqual(
-          (toastBox?.y ?? 0) + (toastBox?.height ?? 0),
-        );
-      }
+      const minimize = page.getByRole("button", { name: "Minimize workspace" });
+      // The window moves once the notice has been measured, so wait for the settled layout.
+      await expect
+        .poll(async () => {
+          const [toastBox, stripBox, minimizeBox] = [
+            await toast.boundingBox(),
+            await strip.boundingBox(),
+            await minimize.boundingBox(),
+          ];
+          const bottom = (toastBox?.y ?? 0) + (toastBox?.height ?? 0);
+          return bottom <= (stripBox?.y ?? 0) + 1 && bottom <= (minimizeBox?.y ?? 0);
+        })
+        .toBe(true);
     });
   });
 }
@@ -224,4 +227,18 @@ test.describe("touch dock", () => {
     for (let index = 1; index < boxes.length; index++)
       expect(boxes[index]?.left ?? 0).toBeGreaterThanOrEqual((boxes[index - 1]?.right ?? 0) - 0.5);
   });
+});
+
+test("an empty Board is keyboard reachable because it scrolls sideways on phones", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const id = await addProject("Empty scroll project", "shell-scroll");
+  await page.goto(`/projects/${id}`);
+  const board = page.getByRole("group", { name: "Ticket stages" });
+  await expect(board).toHaveAttribute("tabindex", "0");
+  await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
+    VALUES(${crypto.randomUUID()},${id},'First scroll ticket','ready',${userID})`;
+  await expect(board).toHaveCount(0);
+  await expect(page.locator(".board")).not.toHaveAttribute("tabindex", /.*/);
 });

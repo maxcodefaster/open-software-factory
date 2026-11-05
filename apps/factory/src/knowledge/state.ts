@@ -267,11 +267,9 @@ export function createKnowledgeState(options: {
         if (request !== searchRequest || options.projectID() !== projectId) return "superseded";
         setResults(body.results);
         return "found";
-      } catch (cause) {
+      } catch {
+        // The search dialog names the failure and offers a retry; a second toast would repeat it.
         if (request !== searchRequest || options.projectID() !== projectId) return "superseded";
-        options.onError(
-          cause instanceof Error ? cause.message : "Knowledge search could not be loaded.",
-        );
         return "failed";
       }
     },

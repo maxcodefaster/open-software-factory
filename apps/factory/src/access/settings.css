@@ -191,3 +191,6 @@
   color: var(--color-danger);
   font-size: var(--text-sm);
 }
+.access-settings .access-password-form ~ p {
+  margin-top: var(--space-3);
+}

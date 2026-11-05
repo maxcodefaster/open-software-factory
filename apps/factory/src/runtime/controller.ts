@@ -1434,6 +1434,12 @@ export function createRuntimeController(
         SELECT id FROM factory.runtime_attempt WHERE state='failed' AND stop_intended_at IS NOT NULL`;
       for (const attempt of failedStops)
         await this.stop(attempt.id).catch(reportFailure("Retained runtime Stop needs retry"));
+      // A Stop that reached 'stopped' without its native Delete being confirmed leaves an
+      // unresolved Sandbox record that blocks backing retirement for every later Stop.
+      for (const id of await factorybox.stoppedWithUnconfirmedDelete().catch(() => []))
+        await factorybox
+          .deleteSandbox(id)
+          .catch(reportFailure("Stopped runtime's native Delete needs observation"));
       await database.client`
         UPDATE factory.change change SET
           state = CASE WHEN attempt.state = 'stopped' AND change.cancel_requested_at IS NOT NULL
@@ -2557,7 +2563,7 @@ export function createRuntimeController(
           attempt.kubernetes_pod_name AS "kubernetesPodName", attempt.failure,
           attempt.created_at AS "createdAt", attempt.updated_at AS "updatedAt",
           attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt",
-          (attempt.state='resuming' AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
+          (attempt.state IN ('resuming','cleanup-failed') AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
         FROM factory.runtime_attempt attempt
         LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
@@ -2637,7 +2643,7 @@ export function createRuntimeController(
           COALESCE(staging.runtime_attempt_id = attempt.id, false) AS "currentStaging",
           attempt.updated_at AS "updatedAt",
           attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt",
-          (attempt.state='resuming' AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
+          (attempt.state IN ('resuming','cleanup-failed') AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
         FROM factory.runtime_attempt attempt
         LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id

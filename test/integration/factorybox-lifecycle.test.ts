@@ -50,6 +50,7 @@ test.each([
   ["arm64", false, false, "resume-already-attempted"],
   ["arm64", false, false, "resume-failed-stop"],
   ["amd64", false, false, "resume-failed-stop"],
+  ["arm64", false, false, "resume-failed-stopped"],
   ["arm64", false, false, "resume-delete-diagnostic"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
@@ -448,9 +449,14 @@ test.each([
                 attempted: [
                   "resume-already-attempted",
                   "resume-failed-stop",
+                  "resume-failed-stopped",
                   "resume-delete-diagnostic",
                 ].includes(deleteContinuation),
-                ...(["resume-failed-stop", "resume-delete-diagnostic"].includes(deleteContinuation)
+                ...([
+                  "resume-failed-stop",
+                  "resume-failed-stopped",
+                  "resume-delete-diagnostic",
+                ].includes(deleteContinuation)
                   ? { error: "original native restore failed before activation" }
                   : {}),
               };
@@ -911,7 +917,10 @@ test.each([
           expect(mutations.filter((action) => action === "delete")).toHaveLength(2);
           return;
         }
-        if (deleteContinuation === "resume-failed-stop") {
+        if (
+          deleteContinuation === "resume-failed-stop" ||
+          deleteContinuation === "resume-failed-stopped"
+        ) {
           await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
           // Unknown until the native record is read: the attempt keeps the first cause.
           const [unknown] = await restoreState();
@@ -931,14 +940,26 @@ test.each([
           expect(await recovered.observeFailedResume(owned.attemptID)).toBe(true);
           expect(mutations).toHaveLength(commandsBefore);
           const nativeResume = structuredClone(record.pause?.resume);
+          // A Stop that was recorded as 'stopped' before its native Delete was confirmed
+          // continues the same Delete; the sweep finds it and nothing else.
+          const stoppedEarly = deleteContinuation === "resume-failed-stopped";
           await database.client`UPDATE factory.runtime_attempt
-            SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
+            SET state=${stoppedEarly ? "stopped" : "stopping"},stop_intended_at=now()
+            WHERE id=${owned.attemptID}`;
+          if (stoppedEarly) {
+            // Not yet attempted: never selected. After the first refused Delete it is.
+            expect(await recovered.stoppedWithUnconfirmedDelete()).toEqual([]);
+          }
           // Original failed Delete, lost successful Delete reply, lost capture
           // retirement reply and lost private-backing retirement reply.
-          for (let observation = 0; observation < 4; observation++)
+          for (let observation = 0; observation < 4; observation++) {
             await expect(recovered.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
+            if (stoppedEarly && observation === 0)
+              expect(await recovered.stoppedWithUnconfirmedDelete()).toEqual([owned.attemptID]);
+          }
           await recovered.deleteSandbox(owned.attemptID);
           await recovered.deleteSandbox(owned.attemptID);
+          expect(await recovered.stoppedWithUnconfirmedDelete()).toEqual([]);
           const [original] = await database.client<
             Array<{ id: string; attemptedAt: string; completed: boolean }>
           >`SELECT id,attempted_at::text AS "attemptedAt",completed_at IS NOT NULL AS completed

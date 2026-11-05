@@ -95,6 +95,11 @@ export function SkillGalleryDetail(props: {
             </WorkspaceActionBar>
           </div>
           <p>{state().revision?.content.description}</p>
+          <Show when={canEdit() && props.hasDraft}>
+            <p class="skill-detail-origin" role="status">
+              Resume or discard your existing draft before editing this skill.
+            </p>
+          </Show>
           <p class="skill-detail-origin">
             {props.entry.scope === "personal"
               ? "Personal library"

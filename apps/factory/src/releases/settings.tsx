@@ -189,6 +189,15 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
       : view()?.releases.some((item) => item.version === version())
         ? "This version is already reserved. Choose a new version."
         : "";
+  // Only the empty version is explained here; every other blocker has its own message.
+  const versionHint = () =>
+    !version() &&
+    view()?.canPublish &&
+    view()?.candidateSHA &&
+    !loadError() &&
+    !view()?.configurationError &&
+    (!view()?.contract || view()?.configured) &&
+    !activePublication();
   const canReview = () =>
     view()?.canPublish &&
     view()?.candidateSHA &&
@@ -410,7 +419,7 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                           </p>
                         </Show>
                       </fieldset>
-                      <Show when={!version() && data().candidateSHA && !activePublication()}>
+                      <Show when={versionHint()}>
                         <p id="release-version-hint" class="release-note">
                           Enter or choose a version to review the publication.
                         </p>
@@ -419,11 +428,7 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                         type="submit"
                         class="primary-button"
                         disabled={busy() || !canReview()}
-                        aria-describedby={
-                          !version() && data().candidateSHA && !activePublication()
-                            ? "release-version-hint"
-                            : undefined
-                        }
+                        aria-describedby={versionHint() ? "release-version-hint" : undefined}
                       >
                         Review publication
                       </button>

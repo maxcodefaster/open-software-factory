@@ -90,7 +90,7 @@ export function createDocumentEditor(input: {
     selectingWithPointer = false;
     queueMicrotask(() => !disposed && input.onSelection(editor.view.dom));
   };
-  const editor = new Editor({
+  const editor: Editor = new Editor({
     element: input.host,
     content: input.value,
     contentType: "markdown",
@@ -107,6 +107,21 @@ export function createDocumentEditor(input: {
         "aria-readonly": input.editable ? "false" : "true",
         "data-field": input.field,
         "data-placeholder": input.placeholder ?? "",
+      },
+      // "- " at the start of a later list item nests a list. Without this the marker stays literal
+      // text, which Markdown reads as a nested list after saving, unlike what the editor showed.
+      handleTextInput: (view, from, to, text): boolean => {
+        if (text !== " " || from !== to) return false;
+        const { $from } = view.state.selection;
+        if ($from.parentOffset !== 1 || $from.parent.type.name !== "paragraph") return false;
+        if ($from.parent.textContent !== "-" && $from.parent.textContent !== "*") return false;
+        if ($from.node($from.depth - 1).type.name !== "listItem") return false;
+        const nested: boolean = editor
+          .chain()
+          .deleteRange({ from: from - 1, to: from })
+          .sinkListItem("listItem")
+          .run();
+        return nested;
       },
       handleDOMEvents: {
         mousedown: () => {

@@ -422,6 +422,11 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await visible(
       panel().getByRole("button", { name: "Choose a point on the paused QA frame" }),
     ).toHaveCount(0);
+    // A cancelled selection must not seed the next composer with a revoked frame.
+    await page.getByRole("button", { name: "Add feedback", exact: true }).first().click();
+    await visible(panel().getByRole("textbox", { name: "Review comment" })).toBeFocused();
+    await visible(panel().getByRole("img", { name: "Captured QA frame" })).toHaveCount(0);
+    await panel().getByRole("button", { name: "Cancel feedback", exact: true }).click();
     await panel().getByRole("button", { name: "Comment", exact: true }).click();
     await panel()
       .getByRole("button", { name: "Choose a point on the paused QA frame" })

@@ -234,3 +234,57 @@ test("the Ticket document keeps a continuous heading hierarchy", async ({ page }
   for (let index = 1; index < levels.length; index++)
     expect(levels[index] ?? 0).toBeLessThanOrEqual((levels[index - 1] ?? 0) + 1);
 });
+
+test("the mention picker drops its active option when no member matches", async ({ page }) => {
+  await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+    VALUES(${projectID},${userID},'developer',true,${userID}) ON CONFLICT DO NOTHING`;
+  await insertTicket("Mentions", "Summary", "inbox");
+  await openTicket(page, "Mentions");
+  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "Message conversation", exact: true });
+  await composer.fill("Hallo @");
+  await expect(page.getByRole("listbox", { name: "Mention a Project member" })).toBeVisible();
+  await expect(page.getByRole("option")).not.toHaveCount(0);
+  await expect(composer).toHaveAttribute("aria-activedescendant", /mention-options-.+-0/);
+  await composer.pressSequentially("zzzz");
+  await expect(page.getByRole("option")).toHaveCount(0);
+  await expect(composer).not.toHaveAttribute("aria-activedescendant", /.+/);
+});
+
+test("typing a list marker in a later list item nests a list instead of keeping literal text", async ({
+  page,
+}) => {
+  await insertTicket("Nested list", "", "inbox");
+  await openTicket(page, "Nested list");
+  const description = page.getByRole("textbox", { name: "Ticket description", exact: true });
+  await description.click();
+  await page.keyboard.type("- eins\n- zwei");
+  await expect(description.locator("ul ul li")).toHaveText("zwei");
+  await expect(description).not.toContainText("- zwei");
+  await expect
+    .poll(async () => {
+      const [row] = await database.client<{ description: string }[]>`
+        SELECT description FROM factory.ticket WHERE title='Nested list' AND project_id=${projectID}`;
+      return row?.description;
+    })
+    .not.toContain("- - ");
+});
+
+test("the empty New ticket title is one line tall", async ({ page }) => {
+  await openProjectMenu(page);
+  await page.getByRole("button").filter({ hasText: slug }).click();
+  await page.getByRole("button", { name: "New Ticket", exact: true }).click();
+  const box = await page.getByRole("textbox", { name: "Ticket title", exact: true }).boundingBox();
+  expect(box?.height ?? 0).toBeLessThan(60);
+});
+
+test("the Ticket actions menu lives inside a landmark", async ({ page }) => {
+  await insertTicket("Menu landmark", "Summary", "inbox");
+  await openTicket(page, "Menu landmark");
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).first().click();
+  const menu = page.getByRole("menu", { name: "Ticket actions" });
+  await expect(menu).toBeVisible();
+  expect(await menu.evaluate((element) => Boolean(element.closest("section[aria-label]")))).toBe(
+    true,
+  );
+});

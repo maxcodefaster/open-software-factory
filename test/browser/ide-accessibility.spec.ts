@@ -87,7 +87,8 @@ test("status entries with a command work from the keyboard and popups get landma
        <ul><li class="single-pref" tabindex="0"><div class="pref-name">Editor: Font Size</div><input type="number"></li></ul>
        <div id="settings"><ul class="settings-section"><li>Title</li></ul><li class="single-pref"><div class="pref-name">Editor: Tab Size</div><input type="number"></li></div>
        <div role="listbox"><div id="row" role="option" aria-level="1"></div></div>
-       <textarea id="search" title="Search"></textarea>`,
+       <textarea id="search" title="Search"></textarea>
+       <input class="iPadShowKeyboard" type="button" id="keyboard">`,
     );
   });
   await expect(page.locator(".lm-Menu")).toHaveAttribute("aria-label", "Menu");
@@ -100,6 +101,7 @@ test("status entries with a command work from the keyboard and popups get landma
   await expect(page.locator(".settings-section")).toHaveAttribute("role", "presentation");
   await expect(page.locator("#search")).toHaveAttribute("aria-label", "Search");
   await expect(page.locator("#row")).not.toHaveAttribute("aria-level", /.*/);
+  await expect(page.locator("#keyboard")).toHaveAttribute("aria-label", "Show on-screen keyboard");
   // Monaco re-sets the level when it recycles a row.
   await page.evaluate(() => document.querySelector("#row")?.setAttribute("aria-level", "2"));
   await expect(page.locator("#row")).not.toHaveAttribute("aria-level", /.*/);

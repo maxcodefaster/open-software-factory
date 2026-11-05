@@ -424,9 +424,11 @@ export function createFactoryboxExecution(
       // Failed startup also records compensating cleanup before Native Delete.
       // Continue that exact intent without inventing a human Stop or clearing
       // its failure. Native owner/input and process-exit checks still apply.
+      // A stopped attempt qualifies through its recorded Stop: its native Delete was
+      // attempted and never confirmed, which leaves the Sandbox record unresolved.
       const [closing] = await connection`SELECT id FROM factory.runtime_attempt
         WHERE id=${attemptID} AND (stop_intended_at IS NOT NULL OR failure IS NOT NULL)
-          AND state IN ('stopping','cleanup-failed')`;
+          AND state IN ('stopping','cleanup-failed','stopped')`;
       if (!closing)
         throw new Error("Native Delete continuation requires the original recorded cleanup");
       const [started] = await connection<{ observation: unknown }[]>`
@@ -770,6 +772,23 @@ export function createFactoryboxExecution(
               (current.runtime.status === "stopped" && current.runtime.pid === 0)))
         );
       });
+    },
+    // Stopped attempts whose native Delete was attempted but never confirmed. Their
+    // unresolved Sandbox record blocks private-backing retirement for the whole worker.
+    // Deleting them again continues the same recorded Delete intent.
+    async stoppedWithUnconfirmedDelete() {
+      const rows = await database.client<Array<{ id: string }>>`
+        SELECT attempt.id FROM factory.runtime_attempt attempt
+        JOIN factory.factorybox_runtime saved ON saved.runtime_attempt_id=attempt.id
+        WHERE attempt.state='stopped' AND attempt.stop_intended_at IS NOT NULL
+          AND saved.inputs_released_at IS NULL
+          AND EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation op
+            WHERE op.runtime_attempt_id=attempt.id AND op.action='start' AND op.completed_at IS NOT NULL)
+          AND EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation op
+            WHERE op.runtime_attempt_id=attempt.id AND op.action='delete'
+              AND op.attempted_at IS NOT NULL AND op.completed_at IS NULL)
+        ORDER BY attempt.created_at`;
+      return rows.map((row) => row.id);
     },
     // Reads the original native record of a Resume that did not complete. Only a
     // positively recorded failure (see confirmedFailedFactoryboxResume) is stamped,

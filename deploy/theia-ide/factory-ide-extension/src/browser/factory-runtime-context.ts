@@ -84,7 +84,10 @@ export const restoreFailedCopy =
 
 export function runtimePreparationCopy(value: FactoryRuntimeState | undefined) {
   if (!value) return "Select a Workspace to use its compute.";
-  if (value.restoreFailed) return restoreFailedCopy;
+  if (value.restoreFailed)
+    return value.state === "cleanup-failed"
+      ? `${restoreFailedCopy} The previous attempt to discard it could not be confirmed; Start fresh tries again.`
+      : restoreFailedCopy;
   if (value.state === "resuming" && value.failure)
     return "Restoring the paused Sandbox could not be confirmed. Factory keeps it untouched until its state is known. Your files are unchanged.";
   if (value.failure) return boundedFailure(value.failure);

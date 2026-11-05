@@ -93,12 +93,13 @@ export function MentionSupport(props: {
       }
     }
     if (read !== generation) return;
-    setOptions(
-      people.filter((person) =>
-        person.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
-      ),
+    // Solid applies the write later, so decide from the matches themselves, not options().
+    const matches = people.filter((person) =>
+      person.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
     );
-    if (options().length) target.setAttribute("aria-activedescendant", `${listID}-0`);
+    setOptions(matches);
+    if (matches.length) target.setAttribute("aria-activedescendant", `${listID}-0`);
+    else target.removeAttribute("aria-activedescendant");
   }
   createEffect(
     () => props.projectID,

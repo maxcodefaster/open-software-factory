@@ -302,6 +302,9 @@
   border-bottom: 1px solid var(--line-subtle);
   padding: var(--space-2);
 }
+.work-data-scroll tbody th {
+  white-space: nowrap;
+}
 .work-section-heading > div {
   flex: 1 1 22rem;
 }
@@ -425,6 +428,10 @@
   }
 }
 @media (max-width: 760px) {
+  .work-chart-toolbar {
+    display: grid;
+    justify-content: stretch;
+  }
   .work-chart-metrics {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -512,8 +519,9 @@
   max-width: 72ch;
   min-width: 0;
   margin: var(--space-3) 0;
-  padding: 0;
-  border: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
 }
 .work-review-now-actions {
   justify-content: flex-start;

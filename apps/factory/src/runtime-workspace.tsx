@@ -135,6 +135,7 @@ export function RuntimeWorkspaceTabs(props: {
                     ? boundedCause(attempt()?.failure ?? "")
                     : (attempt()?.failure ?? tab().preparationFailure)
               }
+              restoreFailed={attempt()?.restoreFailed}
               onStartFresh={
                 props.onStartFresh && attempt()?.restoreFailed
                   ? () => props.onStartFresh?.(tab()) ?? Promise.resolve()
@@ -167,6 +168,7 @@ export function RuntimeWorkspace(props: {
   failure?: string | null | undefined;
   onRetry?: (() => Promise<void>) | undefined;
   onStartFresh?: (() => Promise<void>) | undefined;
+  restoreFailed?: boolean | undefined;
   reconnecting?: boolean;
   active?: boolean | undefined;
   review?:
@@ -219,7 +221,21 @@ export function RuntimeWorkspace(props: {
           <div class="empty-workspace runtime-start-state" role="status">
             <p>{props.loadingLabel}</p>
             <Show when={props.loadingDetail}>{(detail) => <p aria-live="off">{detail()}</p>}</Show>
-            <Show when={props.failure}>{(failure) => <p role="note">{failure()}</p>}</Show>
+            <Show when={props.failure}>
+              {(failure) => (
+                <Show
+                  when={props.onStartFresh || props.restoreFailed}
+                  fallback={<p role="note">{failure()}</p>}
+                >
+                  <details class="runtime-cause">
+                    <summary>Technical cause</summary>
+                    <p role="note">
+                      {failure().replace(/^The paused Sandbox could not be restored:\s*/, "")}
+                    </p>
+                  </details>
+                </Show>
+              )}
+            </Show>
             <Show when={props.onStartFresh || freshening()}>
               <button
                 type="button"

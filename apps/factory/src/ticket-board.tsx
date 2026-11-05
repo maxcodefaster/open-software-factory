@@ -179,6 +179,10 @@ export function TicketBoardContents(props: {
         <div
           ref={board}
           class="board board-enter"
+          // An empty board still scrolls sideways on a phone, so keyboard users must reach it.
+          {...(props.tickets.length || props.epics.length
+            ? {}
+            : { tabindex: 0, role: "group" as const, "aria-label": "Ticket stages" })}
           style={{ "--board-stage-count": boardStages.length }}
         >
           <For each={boardStages}>

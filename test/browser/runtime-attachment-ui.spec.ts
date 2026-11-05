@@ -707,6 +707,10 @@ test("a confirmed failed restore explains itself and offers one idempotent Start
     ),
   ).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
+  // The native cause stays one click away instead of repeating the headline in a log.
+  await expect(page.getByText("restore backend exited before its pre-resume hold")).toBeHidden();
+  await page.getByText("Technical cause", { exact: true }).click();
+  await expect(page.getByText("restore backend exited before its pre-resume hold")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry Main Preview" })).toHaveCount(0);
   const fresh = page.getByRole("button", { name: "Start fresh", exact: true });
   await fresh.click();

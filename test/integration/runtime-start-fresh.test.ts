@@ -98,6 +98,8 @@ test("Start fresh needs a confirmed failed Resume, waits for the Stop and repeat
       "could not be confirmed",
     );
     expect(calls.at(-1)).toBe("stop-retry");
+    // A discard that could not be confirmed is offered again, not left as a dead end.
+    expect((await controller.get(owned.attemptID))?.restoreFailed).toBe(true);
     // A running Sandbox is not waiting to be restored.
     await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
     await expect(controller.startFresh(owned.attemptID, owned.userID)).rejects.toThrow(

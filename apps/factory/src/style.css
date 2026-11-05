@@ -1635,6 +1635,7 @@ dt {
 .ticket-draft-title {
   display: block;
   field-sizing: content;
+  min-height: var(--control-height);
   resize: none;
   overflow: hidden;
   overflow-wrap: anywhere;
@@ -2069,11 +2070,6 @@ dt {
   color: var(--red);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
-}
-
-.ticket-document .markdown-body a {
-  color: var(--color-river-deep);
-  text-underline-offset: var(--space-1);
 }
 
 .ticket-save-error {
@@ -3493,6 +3489,11 @@ dt {
 .ticket-check-details a {
   color: var(--color-river-deep);
 }
+
+.ticket-document .markdown-body a {
+  color: var(--color-river-deep);
+  text-underline-offset: var(--space-1);
+}
 @media (pointer: coarse) {
   .ticket-check-details a {
     display: inline-flex;
@@ -3587,6 +3588,11 @@ dt {
   resize: none;
   border: 0;
   background: transparent;
+}
+@media (pointer: coarse) {
+  .epic-proposal-workspace textarea {
+    min-height: var(--touch-target);
+  }
 }
 .epic-proposal-member summary {
   color: var(--muted-ink);

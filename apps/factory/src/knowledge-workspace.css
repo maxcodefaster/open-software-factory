@@ -312,11 +312,6 @@
   margin-top: var(--space-8);
 }
 
-.rich-editor-host .tiptap pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 .rich-editor-host .tiptap table {
   display: table;
   max-width: none;
@@ -612,10 +607,6 @@
   max-inline-size: 72ch;
 }
 
-.knowledge-generation .knowledge-update-error > p {
-  color: var(--red);
-}
-
 .knowledge-update-error details {
   margin-top: var(--space-2);
   color: var(--muted-ink);
@@ -696,6 +687,15 @@
   border-radius: var(--radius-md);
   background: var(--material-code);
   font-size: var(--text-sm);
+}
+
+.rich-editor-host .tiptap pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-generation .knowledge-update-error > p {
+  color: var(--red);
 }
 
 .document-block-controls button,

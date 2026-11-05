@@ -277,3 +277,6 @@
     gap: var(--space-1);
   }
 }
+.release-settings input::placeholder {
+  font-style: italic;
+}

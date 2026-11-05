@@ -411,11 +411,16 @@ export function ReviewPanel(props: {
     setSelectedScenario("");
     syncPlayhead();
   };
+  // A cancelled selection keeps no captured frame; a stale one would otherwise seed the next composer.
+  const cancelMarking = () => {
+    setMarkingVideo(false);
+    if (!composing()) setCapture(undefined);
+  };
   const cancelMarkingOnEscape = (event: KeyboardEvent) => {
     if (event.key !== "Escape" || !markingVideo()) return;
     event.preventDefault();
     event.stopPropagation();
-    setMarkingVideo(false);
+    cancelMarking();
     // The selection overlay disappears with the mode, so keep keyboard focus on the Comment button.
     surface?.querySelector<HTMLElement>(".review-comment-fab")?.focus();
   };
@@ -735,7 +740,7 @@ export function ReviewPanel(props: {
       busy={busy()}
       locked={Boolean(retry) || !view()}
       source={composerSource()}
-      image={frameURL() || undefined}
+      image={capture()?.frame ? frameURL() || undefined : undefined}
       reconstructed={capture()?.context.source === "preview"}
       onBody={setBody}
       onKind={setKind}
@@ -1017,7 +1022,7 @@ export function ReviewPanel(props: {
                       aria-pressed={markingVideo() ? "true" : "false"}
                       onKeyDown={cancelMarkingOnEscape}
                       onClick={() => {
-                        if (markingVideo()) setMarkingVideo(false);
+                        if (markingVideo()) cancelMarking();
                         else void annotateFrame();
                       }}
                     >

@@ -11,7 +11,6 @@
   gap: var(--space-3);
   margin-bottom: var(--space-6);
   padding-bottom: var(--space-6);
-  border-bottom: 1px solid var(--line-subtle);
 }
 .input-delivery-settings h2 {
   margin: 0;

@@ -63,7 +63,7 @@ export function createDeveloperIDERuntime(
       Array<{ attemptID: string; state: string; failure: string | null; restoreFailed: boolean }>
     >`
       SELECT id AS "attemptID",state,failure,
-        (state='resuming' AND resume_failed_at IS NOT NULL) AS "restoreFailed"
+        (state IN ('resuming','cleanup-failed') AND resume_failed_at IS NOT NULL) AS "restoreFailed"
       FROM factory.runtime_attempt
       WHERE workspace_id=${workspaceID} AND project_id=${source.projectID}
         AND ((${source.changeID}::uuid IS NULL AND change_id IS NULL)

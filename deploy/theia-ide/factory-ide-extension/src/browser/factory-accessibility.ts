@@ -23,6 +23,8 @@ const titledInputs =
 const separators = ".lm-Menu-item[data-type='separator']";
 const preferences = ".single-pref";
 const options = "[role='option'][aria-level]";
+// Monaco's touch-only keyboard toggle is an unlabelled control.
+const keyboardToggle = ".iPadShowKeyboard:not([aria-label])";
 const tabs = "ul[role='tablist'] > li";
 const statusEntries = "#theia-statusBar .element";
 const statusButtons = "#theia-statusBar [role='button']";
@@ -100,6 +102,9 @@ function hardenWithin(root: Element) {
   if (root.matches(titledInputs)) root.setAttribute("aria-label", root.getAttribute("title") ?? "");
   for (const input of root.querySelectorAll(titledInputs))
     input.setAttribute("aria-label", input.getAttribute("title") ?? "");
+  if (root.matches(keyboardToggle)) root.setAttribute("aria-label", "Show on-screen keyboard");
+  for (const toggle of root.querySelectorAll(keyboardToggle))
+    toggle.setAttribute("aria-label", "Show on-screen keyboard");
   if (root.matches(options)) root.removeAttribute("aria-level");
   for (const option of root.querySelectorAll(options)) option.removeAttribute("aria-level");
   for (const tab of root.querySelectorAll(tabs)) hardenTab(tab);

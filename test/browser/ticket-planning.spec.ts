@@ -648,6 +648,15 @@ test.describe("touch chapter controls", () => {
     expect((await nav.boundingBox())?.width).toBeLessThanOrEqual(28);
     const target = nav.getByRole("button", { name: "Technical design", exact: true });
     expect((await target.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    const summaries = await page
+      .locator(".ticket-design-sources > summary, .ticket-diagram-source > summary")
+      .evaluateAll((nodes) =>
+        nodes
+          .filter((node) => node.getBoundingClientRect().height > 0)
+          .map((node) => Math.round(node.getBoundingClientRect().height)),
+      );
+    expect(summaries.length).toBeGreaterThan(0);
+    expect(Math.min(...summaries)).toBeGreaterThanOrEqual(44);
     await page.screenshot({ path: `${directory}/chapter-touch-1440.png`, fullPage: true });
   });
 });
