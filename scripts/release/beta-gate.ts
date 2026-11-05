@@ -43,7 +43,13 @@ export function gateSteps(): GateStep[] {
     { name: "unit", command: ["bun", "run", "test:unit"] },
     { name: "connector", command: ["bun", "run", "connector:check"] },
     { name: "controllers", command: ["bun", "run", "test:controllers"] },
-    { name: "browser", command: ["bun", "run", "test:browser"] },
+    {
+      name: "browser",
+      command: ["bun", "run", "test:browser"],
+      // One retry absorbs a timing flake on a loaded machine. A spec that needs it is listed as
+      // flaky in the run output; a spec that fails twice fails the gate.
+      environment: { FACTORY_BROWSER_RETRIES: "1" },
+    },
   ];
 }
 

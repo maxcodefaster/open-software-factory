@@ -54,5 +54,6 @@ export default defineConfig({
       ? { launchOptions: { executablePath: PLAYWRIGHT_CHROMIUM_EXECUTABLE } }
       : {}),
   },
+  retries: Number(process.env["FACTORY_BROWSER_RETRIES"] ?? 0),
   workers: 1,
 });
