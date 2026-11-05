@@ -735,10 +735,11 @@ export function seedSQL(input: SeedInput) {
     `INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,citations,created_by)
       VALUES(${id(secondRevision)},${id(input.wiki.pageID)},2,'human',${text(input.wiki.title)},${text(input.wiki.second)},${text(input.wiki.first)},${text(input.commitSha)},'[]'::jsonb,${id(input.adminID)});`,
     `UPDATE factory.knowledge_page SET current_body=${text(input.wiki.second)},current_revision_id=${id(secondRevision)},version=version+1,updated_at=now() WHERE id=${id(input.wiki.pageID)};`,
-    `INSERT INTO factory.model_connection_write(command_id,connection_id,base_version,provider,endpoint,fingerprint,secret_key,state,created_by,committed_at)
-      VALUES(${id(input.model.commandID)},${id(input.model.connectionID)},0,'openai','https://api.openai.com/v1',${text(input.model.fingerprint)},${text(input.model.secretKey)},'committed',${id(input.adminID)},now());`,
+    `INSERT INTO factory.model_connection_write(command_id,connection_id,base_version,provider,endpoint,fingerprint,secret_key,state,created_by)
+      VALUES(${id(input.model.commandID)},${id(input.model.connectionID)},0,'openai','https://api.openai.com/v1',${text(input.model.fingerprint)},${text(input.model.secretKey)},'write-intended',${id(input.adminID)});`,
     `INSERT INTO factory.model_connection_version(connection_id,version,provider,endpoint,secret_key,created_by)
       VALUES(${id(input.model.connectionID)},1,'openai','https://api.openai.com/v1',${text(input.model.secretKey)},${id(input.adminID)});`,
+    `UPDATE factory.model_connection_write SET state='committed',committed_at=now() WHERE command_id=${id(input.model.commandID)};`,
     "COMMIT;",
   ].join("\n");
 }
