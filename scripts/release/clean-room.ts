@@ -622,36 +622,23 @@ async function main(options: Options) {
 
     await step("helm-test", async () => {
       log("Running helm test (the chart's preflight; it starts a short probe Pod, not a worker)");
-      const result = await run(
-        helm("test", releaseName, "-n", namespace, "--timeout", "25m", "--logs"),
+      // Helm deletes a passing hook Job, so only a failure leaves logs to read.
+      const result = await run(helm("test", releaseName, "-n", namespace, "--timeout", "25m"), {
+        cwd: root,
+        allowFailure: true,
+      });
+      if (result.code === 0) return "helm test passed (the preflight Job succeeded)";
+      const logs = await run(
+        ["kubectl", "--context", context, "-n", namespace, "logs", `job/${releaseName}-preflight`],
         { cwd: root, allowFailure: true },
       );
-      const lines = `${result.stdout}\n${result.stderr}`
+      const lines = logs.stdout
         .split("\n")
-        .filter((line) => /^(PASS|WARN|FAIL)\b/.test(line.trim()))
-        .map((line) => line.trim());
-      const summary = [
-        `${lines.filter((line) => line.startsWith("PASS")).length} pass`,
-        `${lines.filter((line) => line.startsWith("WARN")).length} warn`,
-        `${lines.filter((line) => line.startsWith("FAIL")).length} fail`,
-      ].join(", ");
-      if (result.code !== 0)
-        throw new Error(
-          `helm test failed (${summary}): ${
-            lines
-              .filter((line) => !line.startsWith("PASS"))
-              .slice(0, 4)
-              .join(" | ") || result.stderr.trim().split("\n").at(-1)
-          }`,
-        );
-      return `helm test passed (${summary})${
-        lines.some((line) => line.startsWith("WARN"))
-          ? `; ${lines
-              .filter((line) => line.startsWith("WARN"))
-              .slice(0, 2)
-              .join(" | ")}`
-          : ""
-      }`;
+        .map((line) => line.trim())
+        .filter((line) => /^(WARN|FAIL)\b/.test(line));
+      throw new Error(
+        `helm test failed: ${lines.slice(0, 4).join(" | ") || result.stderr.trim().split("\n").at(-1)}`,
+      );
     });
 
     await step("readiness", async () => {

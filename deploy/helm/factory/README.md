@@ -170,8 +170,9 @@ Omitting `storage` retains the exact original store. Retry a request only with t
 storage selection. See [ADR 0003](../../../docs/adr/0003-worker-recovery-and-storage-retirement.md#admit-fresh-execution-storage-only-after-confirmed-drain).
 A new node, storage backend or architecture still needs its own native admission.
 `factorybox.kernel` is optional. Leave it empty (or `"*"`) to let the worker decide, or list
-releases with `*` wildcards to restrict which nodes Factory admits. Run `helm test` to see the
-node's kernel capability report.
+releases with `*` wildcards to restrict which nodes Factory admits. Run `helm test RELEASE` to
+check the node, storage class and Pod admission. A passing test leaves nothing behind. After a
+failure, `kubectl logs job/RELEASE-preflight` names each failed check and its fix.
 
 Fresh worker resource admission checks the configured node's readiness and allocatable resources
 and its assigned Pods before selecting a finite aggregate budget. The worker reserves the remaining

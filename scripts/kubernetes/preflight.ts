@@ -107,7 +107,8 @@ function probePod(profile: FactoryboxRuntimeProfile, namespace: string) {
           volumeMounts: [{ name: "boot", mountPath: "/host/boot", readOnly: true }],
         },
       ],
-      volumes: [{ name: "boot", hostPath: { path: "/boot", type: "Directory" } }],
+      // No type check: a node without /boot still runs the probe, which reads its kernel config only if present.
+      volumes: [{ name: "boot", hostPath: { path: "/boot", type: "" } }],
     },
   };
 }

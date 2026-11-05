@@ -105,6 +105,10 @@ spec:
           env:
             - name: HOME
               value: /tmp
+            # Factory's own container writes a kubeconfig for its ServiceAccount at start. This
+            # Job has none, so kubectl falls back to the ServiceAccount of this Pod.
+            - {name: FACTORY_KUBERNETES_CONTEXT, value: ""}
+            - {name: KUBECONFIG, value: ""}
             - name: FACTORY_PREFLIGHT_NAMESPACE
               valueFrom:
                 fieldRef: {fieldPath: metadata.namespace}
