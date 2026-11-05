@@ -24,7 +24,9 @@ export class FactoryActivityNavigation
   readonly #snapshots = new Map<string, string>();
   readonly #gate = new AgentFollowGate<ActivityNavigationMessage>(() => performance.now(), 4_000);
   #followTimer: ReturnType<typeof setInterval> | undefined;
-  #highlight: { editor: TextEditor; ids: string[]; timer: ReturnType<typeof setTimeout> } | undefined;
+  #highlight:
+    | { editor: TextEditor; ids: string[]; timer: ReturnType<typeof setTimeout> }
+    | undefined;
   constructor(
     @inject(EditorManager) private readonly editors: EditorManager,
     @inject(WorkspaceService) private readonly workspaces: FactoryWorkspaceSelection,
@@ -100,7 +102,9 @@ export class FactoryActivityNavigation
       this.#clearHighlight();
       const ids = editor.deltaDecorations({
         oldDecorations: [],
-        newDecorations: [{ range, options: { className: "factory-agent-line", isWholeLine: true } }],
+        newDecorations: [
+          { range, options: { className: "factory-agent-line", isWholeLine: true } },
+        ],
       });
       this.#highlight = {
         editor,
@@ -134,7 +138,8 @@ export class FactoryActivityNavigation
     if (!target) return;
     if (target.kind === "follow") {
       if (
-        this.workspaces.workspace?.resource.toString() === `${workspaceScheme}://${target.workspaceID}/`
+        this.workspaces.workspace?.resource.toString() ===
+        `${workspaceScheme}://${target.workspaceID}/`
       )
         this.#gate.offer(target);
       // Factory only needs to know the target arrived. It never waits on the editor to follow.
