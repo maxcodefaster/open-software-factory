@@ -33,7 +33,7 @@ async function screenshotOnFailure<T>(
     await mkdir(evidence, { recursive: true });
     await page.screenshot({ path: resolve(evidence, `${name}.png`) }).catch(() => undefined);
     throw new Error(
-      `${name} failed in the browser: ${cause instanceof Error ? cause.message.split("\n")[0] : String(cause)}`,
+      `${name} failed in the browser: ${cause instanceof Error ? cause.message.split("\n").slice(0, 4).join(" | ") : String(cause)}`,
     );
   }
 }
@@ -71,13 +71,22 @@ export async function seedThroughBrowser(input: SeedUI) {
         .getByRole("region", { name: "Settings", exact: true })
         .and(page.locator(".settings-workspace"));
       const navigation = settings.getByRole("navigation", { name: "Settings navigation" });
-      if (!(await navigation.isVisible()))
+      // The navigation can render again right after a scope change, so give it a moment to settle.
+      const openNavigation = async () => {
+        if (
+          await navigation.waitFor({ state: "visible", timeout: 5_000 }).then(
+            () => true,
+            () => false,
+          )
+        )
+          return;
         await settings.getByRole("button", { name: /choose settings page$/i }).click();
+      };
+      await openNavigation();
       await navigation
         .getByRole("combobox", { name: "Settings scope", exact: true })
         .selectOption("system");
-      if (!(await navigation.isVisible()))
-        await settings.getByRole("button", { name: /choose settings page$/i }).click();
+      await openNavigation();
       // The system scope lists only its own pages, so the name is unique, in old builds too.
       await navigation.getByRole("button", { name: "People & access", exact: true }).click();
       await settings.getByRole("region", { name: "Managed accounts" }).waitFor({ timeout: step });
