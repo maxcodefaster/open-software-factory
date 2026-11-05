@@ -109,6 +109,10 @@ export async function seedThroughBrowser(input: SeedUI) {
         await page.getByLabel("Ticket title", { exact: true }).fill(title);
         await page.getByRole("button", { name: "Create as idea", exact: true }).click();
         await page.getByText(title).first().waitFor({ state: "visible", timeout: step });
+        // The board shows the Ticket before its mutation reaches the server. Closing the browser
+        // now would drop it, so give the sync a moment to settle.
+        await page.waitForLoadState("networkidle");
+        await page.waitForTimeout(3_000);
       });
   } finally {
     await browser.close();
