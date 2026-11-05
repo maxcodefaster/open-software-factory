@@ -1204,11 +1204,14 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
       },
     },
   });
-  await openProjectMenu(page);
-  await page
-    .locator(".project-menu")
-    .getByRole("button", { name: /Create project|Continue project setup/ })
-    .click();
+  // Loading Projects can close the menu once. Open it again until the action is there.
+  await expect(async () => {
+    await openProjectMenu(page);
+    await page
+      .locator(".project-menu")
+      .getByRole("button", { name: /Create project|Continue project setup/ })
+      .click({ timeout: 3_000 });
+  }).toPass({ timeout: 30_000 });
   const panel = page.getByRole("region", { name: "Project setup", exact: true });
   await expect(panel.getByRole("textbox", { name: "Project name", exact: true })).toHaveValue(
     "A focused product",
