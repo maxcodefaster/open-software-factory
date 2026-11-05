@@ -117,6 +117,43 @@ async function removeRun(cl: Cluster, release: string, namespace: string) {
     throw new Error(
       `${namespace} holds claims labelled for another owner (${ownership.foreign.join(", ")}); nothing was deleted`,
     );
+  // The installation asked Kubernetes for the Developer IDE Namespace. Its UID in the database is
+  // the one thing that ties it to this run, so it goes before the database does.
+  const recorded = await kubectl(
+    [
+      "exec",
+      "-n",
+      namespace,
+      `${release}-postgres-0`,
+      "--",
+      "psql",
+      "-U",
+      "factory",
+      "-d",
+      "factory",
+      "-X",
+      "-At",
+      "-c",
+      "SELECT namespace_uid FROM factory.developer_ide WHERE namespace_uid IS NOT NULL",
+    ],
+    { allowFailure: true },
+  );
+  const uids = new Set(recorded.stdout.split("\n").filter(Boolean));
+  if (uids.size) {
+    const editors = (await json(["get", "namespaces"])).items as Array<{
+      metadata: { name: string; uid: string; labels?: Record<string, string> };
+    }>;
+    for (const item of editors.filter(
+      (entry) =>
+        uids.has(entry.metadata.uid) &&
+        entry.metadata.labels?.["app.kubernetes.io/managed-by"] === "open-software-factory",
+    )) {
+      await kubectl(["delete", "namespace", item.metadata.name, "--wait=false"], {
+        allowFailure: true,
+      });
+      removed.push(`namespace/${item.metadata.name}`);
+    }
+  }
   await run(helm("uninstall", release, "--namespace", namespace, "--wait", "--timeout", "10m"), {
     allowFailure: true,
   });

@@ -126,7 +126,7 @@ async function gatherOwnership(cl: Cluster, namespace: string): Promise<Ownershi
       "-X",
       "-At",
       "-c",
-      "SELECT namespace_uid FROM factory.factorybox_worker WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.workspace_source WHERE namespace_uid IS NOT NULL",
+      "SELECT namespace_uid FROM factory.factorybox_worker WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.workspace_source WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.developer_ide WHERE namespace_uid IS NOT NULL",
     ],
     { allowFailure: true },
   );
