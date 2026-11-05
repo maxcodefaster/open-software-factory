@@ -1,11 +1,12 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import {
-  defaultExecutionPolicy,
   codingDecision,
+  defaultExecutionPolicy,
   effectiveExecutionPolicy,
-  tighterExecutionPolicy,
   executionPolicyCommand,
+  tighterExecutionPolicy,
 } from "./execution-policy";
+
 test("unlimited defaults tolerate unknown costs; enabled budgets distinguish starts and finish reserve", () => {
   const policy = defaultExecutionPolicy();
   const decision = (spent: bigint, continuation = false, unknown = false) =>

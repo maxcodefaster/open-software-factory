@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eventually } from "./factory-process";
 
 // TLS/authenticated Registry API backed by the existing immutable test images.

@@ -1,9 +1,9 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { test } from "../fixtures/browser-test";
 import { luminance, rgb } from "../support/visual-contrast";
 
 const evidence = ".factory/test-results/ui-controls";
@@ -109,7 +109,7 @@ for (const { width, desktop } of [
     const invalid = page.getByRole("textbox", { name: "Required name", exact: true });
     await expect(invalid).toHaveAttribute("aria-describedby", "control-name-error");
     expect(await invalid.evaluate((element) => getComputedStyle(element).borderTopColor)).toBe(
-      "rgb(148, 85, 77)",
+      "rgb(132, 69, 61)",
     );
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       width,

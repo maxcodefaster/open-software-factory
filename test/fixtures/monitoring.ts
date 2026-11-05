@@ -1,12 +1,12 @@
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
+import { mcpDigest } from "../../apps/factory/src/mcp/controller";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
+import { monitoringDigest } from "../../apps/factory/src/monitoring/payload";
 import { createMonitoringRoutes } from "../../apps/factory/src/monitoring/routes";
 import { factoryProcess } from "./factory-process";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
-import { monitoringDigest } from "../../apps/factory/src/monitoring/payload";
-import { mcpDigest } from "../../apps/factory/src/mcp/controller";
 
 // Exact synthetic authorization state for the existing native Build/reviewer
 // fixture. Transport/authentication itself uses monitoringFixture below.

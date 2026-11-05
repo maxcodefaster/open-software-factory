@@ -1,6 +1,7 @@
 import type { ErroredQuery, ResultType } from "@rocicorp/zero";
-import { createSignal, Show } from "solid-js";
+import { createEffect, createSignal, Show } from "solid-js";
 import { useZeroConnection } from "../../../../packages/zero-solid/src";
+import { plainErrorMessage } from "../command-error";
 import { useFactoryReadStatus } from "./reads";
 
 type QueryStatus = {
@@ -18,6 +19,26 @@ export function PlanningSyncStatus(props: {
   const reads = useFactoryReadStatus();
   const [retrying, setRetrying] = createSignal(false);
   const [retryError, setRetryError] = createSignal("");
+  const [waited, setWaited] = createSignal(false);
+  const progress = () => {
+    const state = connection.state()?.name;
+    if (state === "connecting") return "Connecting to shared updates. Showing cached work.";
+    if (props.queries.some((query) => query.completeness() === "unknown"))
+      return "Loading shared work…";
+    return "";
+  };
+  // Routine startup progress appears only when it lasts, so a fast load never shifts the layout.
+  createEffect(
+    () => progress() !== "",
+    (active) => {
+      if (!active) {
+        setWaited(false);
+        return;
+      }
+      const timer = setTimeout(() => setWaited(true), 1200);
+      return () => clearTimeout(timer);
+    },
+  );
   const message = () => {
     const state = connection.state()?.name;
     if (state === "needs-auth")
@@ -30,10 +51,7 @@ export function PlanningSyncStatus(props: {
     if (props.queries.some((query) => query.error()) || reads?.errors().length)
       return "Some shared work could not load. Your drafts are retained.";
     if (props.readError || retryError()) return "Updates paused. Showing the last known state.";
-    if (state === "connecting") return "Connecting to shared updates. Showing cached work.";
-    if (props.queries.some((query) => query.completeness() === "unknown"))
-      return "Loading shared work…";
-    return "";
+    return waited() ? progress() : "";
   };
   const canRetry = () =>
     ["error", "closed", "disconnected", "needs-auth"].includes(connection.state()?.name ?? "") ||
@@ -56,7 +74,11 @@ export function PlanningSyncStatus(props: {
       reads?.retry();
       await props.onRetry();
     } catch (cause) {
-      setRetryError(cause instanceof Error ? cause.message : "Shared updates could not reconnect.");
+      setRetryError(
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Shared updates could not reconnect.",
+      );
     } finally {
       setRetrying(false);
     }

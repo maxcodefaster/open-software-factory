@@ -1,6 +1,4 @@
 import { expect, test } from "bun:test";
-import { callFactoryFunction, authenticatedBootstrap } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium, type Page, type Request } from "@playwright/test";
@@ -9,6 +7,7 @@ import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { proveDesktopRuntime } from "../fixtures/developer-ide-desktop-runtime";
@@ -20,9 +19,10 @@ import {
 } from "../fixtures/editor-source-resources";
 import { eventually } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 import { deleteFactoryProject } from "./factory-fixture";
 import { slice20StartupTargetFailures } from "./runtime-startup";
-import { fixtureValue } from "../fixtures/value";
 
 const enabled = process.env["FACTORY_RUN_DEVELOPER_IDE_DESKTOP_PROOF"] === "1";
 const runtimeEnabled = process.env["FACTORY_RUN_DEVELOPER_IDE_RUNTIME_PROOF"] === "1";

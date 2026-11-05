@@ -9,6 +9,7 @@ import {
   type monitoringView,
 } from "../../../../packages/conversation-domain/src/monitoring";
 import { APIRequestError } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
 import {
@@ -332,7 +333,9 @@ export function MonitoringSettings(props: {
       if (cause instanceof APIRequestError && cause.status < 500) setPending(undefined);
       if (operation.projectId === props.project?.id) {
         setError(
-          cause instanceof Error ? cause.message : "The Input command could not be confirmed.",
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "The Input command could not be confirmed.",
         );
         await load();
       }

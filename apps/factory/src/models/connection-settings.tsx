@@ -12,6 +12,7 @@ import {
   type ModelSettingsView,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import { APIRequestError } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import {
   adoptDeploymentModelConnection,
   getModelConnection,
@@ -87,7 +88,11 @@ export function ModelConnectionSettings(props: {
     () => {
       void load().catch((cause: unknown) => {
         if (!disposed)
-          setError(cause instanceof Error ? cause.message : "Could not load connections");
+          setError(
+            cause instanceof Error
+              ? plainErrorMessage(cause.message)
+              : "Could not load connections",
+          );
       });
     },
   );
@@ -147,7 +152,9 @@ export function ModelConnectionSettings(props: {
         }
         if (cause instanceof APIRequestError && [400, 403].includes(cause.status))
           pendingSave = undefined;
-        setError(cause instanceof Error ? cause.message : "Could not save connection");
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not save connection",
+        );
       }
     } finally {
       if (!disposed) working(undefined);
@@ -228,7 +235,7 @@ export function ModelConnectionSettings(props: {
           abort.signal.aborted
             ? "Check stopped. Refresh access status before starting another check."
             : cause instanceof Error
-              ? cause.message
+              ? plainErrorMessage(cause.message)
               : "Could not check model",
         );
     } finally {

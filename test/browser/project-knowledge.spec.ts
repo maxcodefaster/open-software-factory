@@ -1,10 +1,10 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, browserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const origin = "http://127.0.0.1:3000";
@@ -49,7 +49,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     await expect(current.getByRole("region", { name: "Ticket board" })).toBeVisible();
     await openProjectMenu(current);
     await current.getByRole("button").filter({ hasText: name }).click();
-    await current.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await current.getByRole("button", { name: "Wiki", exact: true }).click();
   }
   try {
     await mkdir(".factory/screenshots/wiki-slice19", { recursive: true });
@@ -102,7 +102,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     await contributor.getByRole("button", { name: "Sign in" }).click();
     await selectProject(contributor);
     await contributor.getByRole("button", { name: "Search Wiki", exact: true }).click();
-    const search = contributor.getByRole("searchbox", { name: "Search Knowledge" });
+    const search = contributor.getByRole("searchbox", { name: "Search Wiki" });
     await search.fill("escalation");
     await expect(
       contributor.getByRole("button", { name: "docs/product/support.md", exact: true }),
@@ -132,7 +132,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     await expect(
       contributor.getByRole("button", { name: "Open Project IDE", exact: true }),
     ).toHaveCount(0);
-    await expect(contributor.getByRole("textbox", { name: "Knowledge body" })).toHaveCount(0);
+    await expect(contributor.getByRole("textbox", { name: "Wiki body" })).toHaveCount(0);
     expect(
       (
         await contributor.request.put(`/api/projects/${project}/knowledge/documents`, {
@@ -142,8 +142,8 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
       ).status(),
     ).toBe(404);
     await contributor.getByRole("button", { name: "Support guide", exact: true }).click();
-    await contributor.getByLabel("Edit Knowledge body", { exact: true }).click();
-    const editor = contributor.getByRole("textbox", { name: "Knowledge body", exact: true });
+    await contributor.getByLabel("Edit Wiki body", { exact: true }).click();
+    const editor = contributor.getByRole("textbox", { name: "Wiki body", exact: true });
     await editor.press("ControlOrMeta+End");
     await editor.press("Enter");
     await editor.pressSequentially("Human escalation owner.");
@@ -159,7 +159,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
       .toContain("Human escalation owner.");
     await contributor.getByRole("button", { name: "Page options", exact: true }).click();
     await contributor.getByRole("menuitem", { name: "History", exact: true }).click();
-    const history = contributor.getByRole("complementary", { name: "Knowledge history" });
+    const history = contributor.getByRole("complementary", { name: "Wiki history" });
     await history.getByRole("button").nth(1).click();
     await expect(contributor.getByLabel("Historical page")).toContainText("Human escalation owner");
     await history.getByRole("button").last().click();

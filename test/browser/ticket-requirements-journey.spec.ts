@@ -54,9 +54,9 @@ async function selectProject(page: Page) {
   if (new URL(page.url()).pathname.startsWith(`/projects/${projectID}`)) {
     // Reload restores its authorized resource URL. Do not race that restore
     // with another imperative selection and discard the retained context.
-    await expect(
-      page.getByRole("button", { name: "Open project menu", exact: true }),
-    ).toContainText("Requirements journey");
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toContainText(
+      "Requirements journey",
+    );
     return;
   }
   await openProjectMenu(page);

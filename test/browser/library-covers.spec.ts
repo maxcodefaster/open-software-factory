@@ -2,9 +2,9 @@ import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
 test("owned Factory saves thirty-choice covers across reloads without changing content or MCP access", async ({
@@ -175,7 +175,7 @@ test("owned Factory saves thirty-choice covers across reloads without changing c
       await page.reload();
       await openLibrary(libraryName);
       if (!(await detail.getByRole("heading", { name, exact: true }).isVisible()))
-        await page.getByRole("button", { name: `Inspect ${name}`, exact: true }).click();
+        await page.getByRole("button", { name: new RegExp(`^${name}`) }).click();
       await expect(artwork).toHaveAttribute("src", `/art/library/${target}-${kind}.webp`);
       if (kind === "skill") {
         const [row] = await database.client`SELECT cover.version::float8 AS version,

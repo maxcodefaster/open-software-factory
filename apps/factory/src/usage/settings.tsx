@@ -7,6 +7,7 @@ import type {
   currentComputeView,
   UsageSettingsView,
 } from "../../../../packages/conversation-domain/src/usage-view";
+import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { getCurrentCompute, getUsage, saveUsage } from "../server-functions/usage";
 import "./settings.css";
@@ -50,7 +51,7 @@ export function UsageSettings(props: {
       (cause: unknown) => ({
         target,
         ok: false as const,
-        message: cause instanceof Error ? cause.message : "Usage is unavailable",
+        message: cause instanceof Error ? plainErrorMessage(cause.message) : "Usage is unavailable",
       }),
     );
   });
@@ -120,7 +121,11 @@ export function UsageSettings(props: {
       setNotice("Saved. Existing work is retained.");
     } catch (cause) {
       if (generation === epoch)
-        setError(cause instanceof Error ? cause.message : "Could not save Usage & limits");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Could not save Usage & limits",
+        );
     } finally {
       if (generation === epoch) setBusy(false);
     }

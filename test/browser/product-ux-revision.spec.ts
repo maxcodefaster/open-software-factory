@@ -142,7 +142,7 @@ test("Enter sends, Shift+Enter preserves a line and navigation selects context a
   await input.press("Enter");
   await expect.poll(() => captured.body?.text).toBe("First line\nSecond line");
   expect(captured.body).toHaveProperty("ticketId", ticketID);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   delete captured.body;
   await input.fill("Project question");
   await input.press("Enter");

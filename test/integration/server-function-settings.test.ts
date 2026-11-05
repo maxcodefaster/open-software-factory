@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
-import type { EnvironmentSettingsView } from "../../packages/project-domain/src/environment";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
+import { CommandError } from "../../apps/factory/src/command-error";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import type { EnvironmentSettingsView } from "../../packages/project-domain/src/environment";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled settings functions validate inputs, retain host permissions and pass cancellation without replay", async () => {
   const origin = "https://factory.test";

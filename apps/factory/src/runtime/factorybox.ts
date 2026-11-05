@@ -110,6 +110,8 @@ async function retiredBackingPending(sql: SQL) {
 export type FactoryboxReclaimPolicy = {
   backoff: RetryBackoff;
   importedExportsEveryMS: number;
+  /** A Sandbox paused or resumed this recently keeps its retired checkpoints for now. */
+  pausedSettleMS: number;
 };
 
 export function createFactoryboxExecution(
@@ -905,9 +907,16 @@ export function createFactoryboxExecution(
         }
         const attempts = await database.client<
           Array<{ id: string }>
-        >`SELECT DISTINCT runtime_attempt_id AS id FROM factory.factorybox_lifecycle_operation
-          WHERE action IN ('retire-checkpoint','retire-resume') AND completed_at IS NULL
-            AND (${reclaimAfter}::uuid IS NULL OR runtime_attempt_id>${reclaimAfter}::uuid)
+        >`SELECT DISTINCT operation.runtime_attempt_id AS id FROM factory.factorybox_lifecycle_operation operation
+          WHERE operation.action IN ('retire-checkpoint','retire-resume') AND operation.completed_at IS NULL
+            AND (${reclaimAfter}::uuid IS NULL OR operation.runtime_attempt_id>${reclaimAfter}::uuid)
+            -- A retirement is one native call of 13-30 seconds. A Sandbox paused moments ago
+            -- is the one most likely to be opened next, and that Resume would wait behind
+            -- the call. Retire after it runs again, or once it has stayed paused a while.
+            AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt waiting
+              WHERE waiting.id=operation.runtime_attempt_id
+                AND waiting.state IN ('pausing','paused','resuming')
+                AND waiting.updated_at > now() - make_interval(secs => ${(reclaim?.pausedSettleMS ?? 0) / 1000}))
           ORDER BY id LIMIT 16`;
         reclaimAfter = attempts.length === 16 ? (attempts.at(-1)?.id ?? null) : null;
         for (const attempt of attempts) {

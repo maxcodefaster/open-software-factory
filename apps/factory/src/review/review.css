@@ -5,6 +5,9 @@
   font: var(--weight-regular) var(--text-sm) / 1.5 var(--font-interface);
   margin-block: 0 var(--space-4);
 }
+.visual-review.is-loading {
+  min-height: 24rem;
+}
 .review-heading,
 .review-composer-heading,
 .review-composer-actions,

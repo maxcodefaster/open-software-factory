@@ -5,6 +5,7 @@ import {
   setupFeedbackKey,
 } from "../../../../packages/project-domain/src/setup";
 import { APIRequestError } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import {
   confirmSetupInspection,
@@ -176,7 +177,9 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
           clearPending();
           await load();
         }
-        setError(cause instanceof Error ? cause.message : "Setup is unavailable.");
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Setup is unavailable.",
+        );
       }
     } finally {
       if (!disposed) setBusy(false);

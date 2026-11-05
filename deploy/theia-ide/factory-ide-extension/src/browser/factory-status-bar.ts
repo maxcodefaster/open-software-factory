@@ -1,4 +1,4 @@
-import { StatusBarImpl, type StatusBarEntry } from "@theia/core/lib/browser/status-bar/status-bar";
+import { type StatusBarEntry, StatusBarImpl } from "@theia/core/lib/browser/status-bar/status-bar";
 import { MarkdownString } from "@theia/core/lib/common/markdown-rendering/markdown-string";
 import { injectable } from "@theia/core/shared/inversify";
 import { renderAsPlaintext } from "@theia/monaco-editor-core/esm/vs/base/browser/markdownRenderer";

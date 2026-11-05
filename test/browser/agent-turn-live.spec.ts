@@ -1,18 +1,18 @@
-import { requestFunction } from "../fixtures/server-functions";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { loadEnvFile } from "node:process";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { requestFunction } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 
 const execute = promisify(execFile);

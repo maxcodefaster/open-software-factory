@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Inbox commands bind the authenticated actor, validate identities and honor write maintenance", async () => {
   const actor = crypto.randomUUID(),

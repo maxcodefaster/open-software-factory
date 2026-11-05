@@ -232,7 +232,7 @@ export function LearningFlow(props: { view: LearningView; onInspect: (detailId: 
                   type="button"
                   class="learning-flow-node"
                   aria-pressed={current()?.id === recordId ? "true" : "false"}
-                  aria-label={`${day(record().at)}: ${record().title}. ${record().status}`}
+                  aria-label={`${day(record().at)} ${record().title} ${record().status}`}
                   aria-describedby={preview()?.id === recordId ? previewId : undefined}
                   data-tone={record().tone}
                   data-mark={record().mark}

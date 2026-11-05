@@ -128,6 +128,7 @@ export function createRuntimeController(
   factorybox = createFactoryboxExecution(database, hub, undefined, {
     backoff: createRetryBackoff(15_000, 5 * 60_000),
     importedExportsEveryMS: 2 * 60_000,
+    pausedSettleMS: 10 * 60_000,
   }),
 ) {
   const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(

@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { APIRequestError } from "./api-client";
 import type { WriterView } from "./api-contracts";
+import { plainErrorMessage } from "./command-error";
 import { serverCall } from "./server-functions/result";
 import {
   approveChangeEditing,
@@ -147,7 +148,7 @@ export function ChangeWriterStatus(props: {
           pendingRequest = undefined;
         setError(
           cause instanceof Error
-            ? cause.message
+            ? plainErrorMessage(cause.message)
             : "Editing could not be transferred. Check its status.",
         );
       }

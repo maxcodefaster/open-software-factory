@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect, type FrameLocator, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
@@ -12,6 +11,7 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { test } from "../fixtures/browser-test";
 import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
 import {
   factoryboxFixtureCommand,

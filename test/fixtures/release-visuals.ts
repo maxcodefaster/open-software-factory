@@ -120,7 +120,7 @@ export async function releaseProductVisuals(fixture: Fixture) {
   await capture("agent-configuration");
   await capture("agent-configuration", 900);
   await page.setViewportSize({ width: 1440, height: 960 });
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await visible(page.locator(".knowledge-article")).toBeVisible();
   await capture("knowledge");
   await capture("knowledge", 900);

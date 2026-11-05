@@ -4,6 +4,7 @@ import {
   passwordChangeMessage,
   passwordPolicy,
 } from "../../../../packages/auth/src/password-policy";
+import { plainErrorMessage } from "../command-error";
 import { changeOwnPassword } from "../server-functions/access";
 import { serverCall } from "../server-functions/result";
 import "./settings.css";
@@ -34,7 +35,11 @@ export function PasswordChange(props: { fresh: boolean }) {
       setDone(true);
     } catch (cause) {
       form.querySelector<HTMLInputElement>('input[name="currentPassword"]')?.select();
-      setError(cause instanceof Error ? cause.message : "The password could not be changed.");
+      setError(
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "The password could not be changed.",
+      );
     } finally {
       setBusy(false);
     }

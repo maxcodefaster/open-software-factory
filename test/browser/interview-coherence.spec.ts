@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import {
   type ConversationStreamEvent,
   type ConversationView,
@@ -16,6 +15,7 @@ import {
   interviewAnswerCommandInput,
 } from "../../packages/conversation-domain/src/conversation";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
@@ -213,7 +213,7 @@ for (const outcome of ["complete", "error"] as const) {
     await expect(panel).toBeHidden();
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
     await expect(live).toBeVisible();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await expect(panel.getByLabel("Assistant streaming response")).toHaveCount(0);
     await page.getByRole("tab", { name: ticketTitle, exact: true }).click();
     await expect(live).toBeVisible();
@@ -457,7 +457,7 @@ for (const buildState of ["stopped", "failed"] as const)
       .poll(() => buildPrompt)
       .toMatchObject({ text: "Continue this exact Change", commandId: expect.any(String) });
     await expect(message).toHaveValue("Continue this exact Change");
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await expect(panel).not.toContainText("Retained Ticket research");
     await ide.click();
     await expect(panel).toContainText("Retained Ticket research");
@@ -776,7 +776,7 @@ test("minimize and pause preserve the exact answer; Wiki chat never retargets th
   expect(submitted()).toBeUndefined();
   await answer.press("Enter");
   await expect.poll(submitted).toMatchObject({ ticketId: ticketID, questionEntryId: questionID });
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await expect(panel.locator(".conversation-question")).toHaveCount(0);
   await expect(panel.getByLabel("Message conversation")).toHaveAttribute(
     "placeholder",

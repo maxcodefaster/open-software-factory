@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
 import { learningFixture } from "../fixtures/learning";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled work-review commands validate exact input, session and fresh-write maintenance without inferring on reads", async () => {
   const actor = crypto.randomUUID();

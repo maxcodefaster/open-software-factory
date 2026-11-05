@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
+import { plainErrorMessage } from "../command-error";
 import {
   createAccount,
   endAccountSessions,
@@ -63,7 +64,10 @@ export function AccessSettings(props: {
     try {
       await operation();
     } catch (cause) {
-      if (!disposed) setError(cause instanceof Error ? cause.message : "Could not update access");
+      if (!disposed)
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not update access",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }
@@ -137,7 +141,9 @@ export function AccessSettings(props: {
       void loading
         .catch((cause) => {
           if (!disposed && version === loadVersion)
-            setError(cause instanceof Error ? cause.message : "Could not load access");
+            setError(
+              cause instanceof Error ? plainErrorMessage(cause.message) : "Could not load access",
+            );
         })
         .finally(() => {
           if (!disposed && version === loadVersion) setBusy(false);

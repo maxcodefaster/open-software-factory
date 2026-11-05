@@ -126,7 +126,7 @@ for (const touch of [false, true]) {
         await chooseSettingsPage(page, "Inputs");
         const settings = page.getByRole("region", { name: "Settings", exact: true });
         const navigation = settings.getByRole("navigation", { name: "Settings navigation" });
-        const chooser = settings.getByRole("button", { name: "Choose settings page", exact: true });
+        const chooser = settings.getByRole("button", { name: /choose settings page$/i });
         await expect(navigation).toBeVisible();
         await expect(chooser).toBeHidden();
         await expect(
@@ -318,7 +318,7 @@ for (const touch of [false, true]) {
             .toBeLessThanOrEqual(1);
         }
         await page.screenshot({ path: `${evidence}/settings-390-${suffix}.png` });
-        await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+        await page.getByRole("button", { name: "Wiki", exact: true }).click();
         const wikiNavigation = page.getByRole("complementary", { name: "Wiki navigation" });
         const pages = page.getByRole("button", { name: "Browse Wiki pages" });
         await expect(pages).toBeVisible();

@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createKnowledgeService } from "../../apps/factory/src/knowledge/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Knowledge functions keep authority, exact versions, ISO history and admitted generation independent of browser cancellation", async () => {
   const origin = "https://owned-knowledge.test",

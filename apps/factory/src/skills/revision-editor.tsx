@@ -8,6 +8,7 @@ import {
   type SkillContent,
   skillContentInput,
 } from "../../../../packages/conversation-domain/src/skills";
+import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { saveSkill } from "../server-functions/skills";
 
@@ -73,7 +74,9 @@ export function SkillRevisionEditor(props: {
       update({ files });
       setError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not attach files");
+      setError(
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Could not attach files",
+      );
     }
   }
   async function save(event: SubmitEvent) {
@@ -108,7 +111,7 @@ export function SkillRevisionEditor(props: {
       const saved = await serverCall(saveSkill({ data: [pending] }));
       props.onSaved({ ...saved, scope: scope() });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save skill");
+      setError(cause instanceof Error ? plainErrorMessage(cause.message) : "Could not save skill");
     } finally {
       setBusy(false);
     }

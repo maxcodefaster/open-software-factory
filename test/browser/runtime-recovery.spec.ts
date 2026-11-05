@@ -1,14 +1,13 @@
-import { requestFunction } from "../fixtures/server-functions";
 import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
-import { createDatabase } from "../../packages/db/src/client";
-import { openProjectMenu } from "../fixtures/project-menu";
-import { teardownFactoryProject } from "../support/factory-fixture";
-import { browserFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { browserFunction, requestFunction } from "../fixtures/server-functions";
+import { teardownFactoryProject } from "../support/factory-fixture";
 
 const { FACTORY_ADMIN_EMAIL, FACTORY_ADMIN_PASSWORD, FACTORY_TEST_REPOSITORY_URL } = process.env;
 const email = FACTORY_ADMIN_EMAIL ?? "admin@factory.local";

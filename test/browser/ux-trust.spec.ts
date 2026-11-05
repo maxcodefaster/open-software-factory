@@ -145,7 +145,7 @@ test("first opening from a Ticket link preserves the already loaded hidden edito
   await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
   await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
   await draft.fill("Keep the opened editor and this unsaved draft");
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   await expect(draft).toHaveValue("Keep the opened editor and this unsaved draft");
   expect(fixture.documentRequests).toBe(1);
@@ -396,6 +396,45 @@ test("source admission failure stays visible inside the IDE and an explicit retr
   expect(fixture.stopRequests).toEqual([]);
 });
 
+test("an offline IDE open shows plain wording with a retry instead of the browser's fetch error", async ({
+  page,
+}) => {
+  const fixture = await mockDeveloperIDE(page);
+  let offline = true;
+  await mockFactoryFunctions(
+    page,
+    {
+      workspaces: {
+        ensurePersonalSource: async () => ({
+          workspaceID: fixture.workspaceID,
+          label: "Owned source",
+          serviceID: `fixture-source-${fixture.workspaceID}`,
+          epoch: 1,
+          state: "ready",
+          failure: null,
+        }),
+      },
+    },
+    (name) => offline && name === "ensurePersonalSource",
+  );
+  await signIn(page);
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  const panel = page.getByRole("tabpanel", { name: "IDE · My workspace", exact: true });
+  await expect(
+    panel.getByRole("status").filter({ hasText: "Factory could not reach the server." }),
+  ).toBeVisible();
+  await expect(page.getByText(/failed to fetch/i)).toHaveCount(0);
+  const retry = panel.getByRole("button", { name: "Retry file access", exact: true });
+  await expect(retry).toBeVisible();
+  offline = false;
+  await retry.click();
+  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
+    "data-workspace-id",
+    fixture.workspaceID,
+  );
+});
+
 test("a slow Wiki status read never locks the Ticket board", async ({ page }) => {
   if (!database) throw new Error("Missing owned Wiki fixture database");
   const ticketID = crypto.randomUUID();
@@ -418,7 +457,7 @@ test("a slow Wiki status read never locks the Ticket board", async ({ page }) =>
     await selectProject(page);
     const ticket = page.getByRole("button").filter({ hasText: "Wiki must not lock this Ticket" });
     await expect(ticket).toBeEnabled();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await requested.promise;
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     await expect(ticket).toBeEnabled({ timeout: 2_000 });
@@ -464,7 +503,7 @@ for (const device of [
       });
       await signIn(page);
       await selectProject(page);
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await page.getByRole("button", { name: "Wiki", exact: true }).click();
       await expect(
         page.getByText("Keep this saved guide and human context.", { exact: true }),
       ).toBeVisible();
@@ -514,7 +553,7 @@ test("a running Wiki update shows its phase, guide position and published pages"
   await mockFactoryFunctions(page, { knowledge: { generation: async () => generation } });
   await signIn(page);
   await selectProject(page);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await expect(page.getByText("Updating Wiki…", { exact: true })).toBeVisible();
   const detail = page.locator(".generation-detail");
   await expect(detail).toContainText("Writing guide 3 of 5: Billing.");
@@ -550,7 +589,7 @@ test("Wiki opening leaves collapsed Code docs unloaded and slow source inventory
   try {
     await signIn(page);
     await selectProject(page);
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await expect(page.getByText("Saved Wiki text stays readable.", { exact: true })).toBeVisible();
     expect(reads).toBe(0);
     await page.getByRole("button", { name: "Code docs", exact: true }).click();
@@ -753,7 +792,7 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   expect(mutations).toEqual(["startCoding"]);
   expect(computeCreates).toEqual([]);
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await expect(panel.locator(".agent-message.assistant")).toHaveCount(0);
   await expect(panel.getByRole("button", { name: "Stop OpenCode" })).toBeVisible();
   await expect(
@@ -768,7 +807,7 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
   await expect(panel.locator(".agent-state")).toHaveText("Working");
   await expect(panel.getByLabel("Message conversation")).toHaveValue("Retain next instructions");
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await panel.getByRole("button", { name: "Stop OpenCode" }).click();
   await expect.poll(() => mutations).toEqual(["startCoding", "stopCoding"]);
   await page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }).click();
@@ -2216,12 +2255,12 @@ test("keeps a delayed Workspace response in its original Project", async ({ page
     await page.getByRole("button", { name: "IDE", exact: true }).click();
     await intercepted;
     await selectProject(page, other.slug);
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     release();
     const tabs = page.getByRole("tablist", { name: "Open workspace views" });
     await expect(tabs.getByRole("tab", { name: /^IDE ·/ })).toHaveCount(0);
     await selectProject(page);
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await expect(tabs.getByRole("tab", { name: "IDE · My workspace", exact: true })).toHaveCount(1);
     await tabs.getByRole("tab", { name: "IDE · My workspace", exact: true }).click();
     const frame = page.locator('iframe[title="Factory IDE"]');
@@ -2364,7 +2403,7 @@ test("dismisses Project and Settings popovers with keyboard focus returned to th
 }) => {
   await signIn(page);
   await selectProject(page);
-  const projectOpener = page.getByRole("button", { name: "Open project menu", exact: true });
+  const projectOpener = page.getByRole("button", { name: /open project menu$/i });
   await openProjectMenu(page);
   const projects = page.getByRole("region", { name: "Projects", exact: true });
   await expect(projects).toBeVisible();
@@ -2393,7 +2432,7 @@ test("dismisses Project and Settings popovers with keyboard focus returned to th
   await settingsOpener.click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });
   await expect(settings).toBeVisible();
-  await expect(settings.locator('[aria-pressed="true"]')).toBeFocused();
+  await expect(settings.getByRole("button", { name: "Open settings", exact: true })).toBeFocused();
   await page.keyboard.press("End");
   await expect(settings.locator("button").last()).toBeFocused();
   await expect(page.locator(".factory-desktop")).toHaveAttribute(
@@ -2529,7 +2568,7 @@ test("Project setup keeps rejected input and permits non-modal navigation", asyn
   await panel.getByRole("button", { name: "Import project", exact: true }).click();
   await expect(panel.getByRole("alert")).toHaveText("Repository cannot be imported");
   await expect(name).toHaveValue("A rejected project draft");
-  const globalNavigation = page.getByRole("button", { name: "Open project menu", exact: true });
+  const globalNavigation = page.getByRole("button", { name: /open project menu$/i });
   await globalNavigation.focus();
   await expect(globalNavigation).toBeFocused();
   await page.screenshot({ path: `${evidenceDirectory}/project-setup-retained.png` });
@@ -2607,7 +2646,7 @@ test("uses readable workspace tabs with keyboard navigation and an accessible ov
   }
   const dock = page.getByRole("navigation", { name: "Workspace dock" });
   await dock.getByRole("button", { name: "Inbox", exact: true }).click();
-  await dock.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await dock.getByRole("button", { name: "Wiki", exact: true }).click();
   const tabs = page.getByRole("tablist", { name: "Open workspace views" });
   await expect(tabs).toBeVisible({ timeout: 5_000 });
   await expect(tabs.getByRole("tab")).toHaveCount(9);
@@ -2616,7 +2655,7 @@ test("uses readable workspace tabs with keyboard navigation and an accessible ov
   expect(
     await first.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
   ).toBeGreaterThanOrEqual(12);
-  const knowledge = tabs.getByRole("tab", { name: "Knowledge", exact: true });
+  const knowledge = tabs.getByRole("tab", { name: "Wiki", exact: true });
   await knowledge.focus();
   await knowledge.press("Home");
   await expect(first).toBeFocused();
@@ -2681,7 +2720,7 @@ test("keeps outer workspace geometry when switching Ticket, Inbox, and Knowledge
       );
       const baseline = await window.boundingBox();
       expect(baseline).not.toBeNull();
-      for (const name of ["Inbox", "Knowledge"]) {
+      for (const name of ["Inbox", "Wiki"]) {
         await dock.getByRole("button", { name, exact: true }).click();
         await expect.poll(() => window.boundingBox()).toEqual(baseline);
       }
@@ -3008,28 +3047,28 @@ test("keeps Knowledge drafts with their page across navigation and minimize", as
   });
   await signIn(page);
   await selectProject(page);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await page.getByRole("button", { name: "First knowledge", exact: true }).click();
-  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
+  await page.getByLabel("Edit Wiki body", { exact: true }).click();
   await page
-    .getByRole("textbox", { name: "Knowledge body", exact: true })
+    .getByRole("textbox", { name: "Wiki body", exact: true })
     .fill("Unsaved first-page draft");
   await expect(page.getByRole("alert")).toContainText("Owned Wiki save interrupted");
   await page.getByRole("button", { name: "Second knowledge", exact: true }).click();
   await expect(page.locator(".knowledge-article")).toContainText("Second original body");
   await expect(page.locator(".knowledge-article")).not.toContainText("Unsaved first-page draft");
   await page.getByRole("button", { name: "First knowledge", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
+  await expect(page.getByRole("textbox", { name: "Wiki body" })).toContainText(
     "Unsaved first-page draft",
   );
   await page.reload();
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${firstID}(?:[/?#]|$)`));
-  await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
+  await expect(page.getByRole("textbox", { name: "Wiki body" })).toContainText(
     "Unsaved first-page draft",
   );
   await page.getByRole("button", { name: "Minimize workspace" }).click();
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Wiki body" })).toContainText(
     "Unsaved first-page draft",
   );
   const [before] = await database.client<
@@ -3096,11 +3135,11 @@ test("Knowledge History preserves exact bodies and new saves advance immutable o
   });
   await signIn(page);
   await selectProject(page);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await page.getByRole("button", { name: "Cleanup knowledge", exact: true }).click();
   await page.getByRole("button", { name: "Page options", exact: true }).click();
   await page.getByRole("menuitem", { name: "History", exact: true }).click();
-  const history = page.getByRole("complementary", { name: "Knowledge history" });
+  const history = page.getByRole("complementary", { name: "Wiki history" });
   await history.getByRole("button", { name: /Proposed/ }).click();
   // Retained proposed baselines are not the saved Markdown snapshot. History
   // must neither adopt that baseline nor rewrite the immutable historical body.
@@ -3111,17 +3150,15 @@ test("Knowledge History preserves exact bodies and new saves advance immutable o
     fullPage: true,
   });
   await page.keyboard.press("Escape");
-  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-  const visual = page.getByRole("textbox", { name: "Knowledge body" });
+  await page.getByLabel("Edit Wiki body", { exact: true }).click();
+  const visual = page.getByRole("textbox", { name: "Wiki body" });
   await expect(visual).toContainText("Human content stays visible.");
   await visual.click();
   const mac = await visual.evaluate(() => navigator.platform.startsWith("Mac"));
   await visual.press(mac ? "Meta+ArrowDown" : "Control+End");
   await page.keyboard.press("Enter");
   await page.keyboard.type("Manual addition.");
-  await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
-    "Manual addition.",
-  );
+  await expect(page.getByRole("textbox", { name: "Wiki body" })).toContainText("Manual addition.");
   await expect
     .poll(async () => {
       if (!database) throw new Error("Database is not ready");

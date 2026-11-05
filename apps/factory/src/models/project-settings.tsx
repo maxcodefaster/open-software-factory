@@ -6,6 +6,7 @@ import {
   type PersonalModelSettings,
   type ProjectModelSettings as ProjectSettings,
 } from "../../../../packages/conversation-domain/src/model-inheritance";
+import { plainErrorMessage } from "../command-error";
 import {
   getProjectModels,
   savePersonalModels,
@@ -41,7 +42,10 @@ export function ProjectModelSettings(props: {
       const value = await serverCall(getProjectModels({ data: [projectID] }));
       if (!disposed && projectID === props.projectID) publish(value);
     } catch (cause) {
-      if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
+      if (!disposed)
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not load models",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }
@@ -66,7 +70,10 @@ export function ProjectModelSettings(props: {
         setSaved(true);
       }
     } catch (cause) {
-      if (!disposed) setError(cause instanceof Error ? cause.message : "Could not save models");
+      if (!disposed)
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not save models",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }

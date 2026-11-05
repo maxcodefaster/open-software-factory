@@ -12,7 +12,7 @@
 
   --color-ink: #1d211d;
   --color-ink-muted: #343c34;
-  --color-ink-faint: #858c85;
+  --color-ink-faint: #656d65;
   --color-ink-inverse: #f8f7f2;
   --color-paper: #f7f5ef;
   --color-paper-cool: #eef1ed;
@@ -21,11 +21,11 @@
   --color-river-soft: color-mix(in srgb, var(--color-river-deep) 13%, transparent);
   --color-moss: #65705d;
   --color-wheat: #a58c59;
-  --color-danger: #94554d;
+  --color-danger: #84453d;
   --color-danger-soft: rgb(148 85 77 / 11%);
   --color-success: #47735d;
   --color-success-soft: rgb(71 115 93 / 12%);
-  --color-warning: #927137;
+  --color-warning: #7f6128;
   --color-warning-soft: rgb(146 113 55 / 12%);
   --color-focus: var(--color-river-deep);
   --terminal-background: #f5f6f2;
@@ -182,7 +182,7 @@
   --workspace-tab-height: 38px;
   --workspace-tab-min-width: 104px;
   --workspace-tab-max-width: 192px;
-  --workspace-tab-close-size: 22px;
+  --workspace-tab-close-size: 24px;
   --workspace-tab-close-opacity: 0.48;
   --workspace-tab-active-line-size: 1px;
   --agent-composer-textarea-height: 28px;

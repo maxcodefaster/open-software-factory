@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { recoverWorkspaceSource } from "../../apps/factory/src/source-recovery";
 import { createWorkspaceService } from "../../apps/factory/src/workspace/service";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Workspace lifecycle uses the existing controllers, confirms Stop before another epoch and does not cancel admitted work", async () => {
   const origin = "https://owned-workspaces.test",

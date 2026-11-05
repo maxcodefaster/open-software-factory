@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Agent } from "@mastra/core/agent";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createWikiSourceUpdates } from "../../apps/factory/src/knowledge/source-updates";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test

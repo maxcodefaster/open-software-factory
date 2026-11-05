@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createFactoryboxExecution } from "../../apps/factory/src/runtime/factorybox";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import { createRetryBackoff } from "../../apps/factory/src/runtime/retry-backoff";
 import {
   type FactoryboxRuntimeInput,
   factoryboxRuntimeDeclaration,
@@ -1077,6 +1078,17 @@ test.each([
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
       await execution.pause(owned.attemptID);
       const secondSnapshot = activeSnapshot();
+      // A Sandbox paused moments ago keeps its retirements pending, so opening it
+      // does not wait behind a 13 to 30 second native deletion.
+      const settling = createFactoryboxExecution(database, hub, run, {
+        backoff: createRetryBackoff(15_000, 5 * 60_000),
+        importedExportsEveryMS: 0,
+        pausedSettleMS: 600_000,
+      });
+      const resumeRetirementsBefore = resumeReclaimed.size;
+      await settling.reclaimStorage();
+      expect(resumeReclaimed.size).toBe(resumeRetirementsBefore);
+      expect(reclaimed.size).toBe(1);
       await execution.reclaimStorage();
       expect(reclaimed.has(secondSnapshot)).toBe(false);
       expect(resumeReclaimed.size).toBe(1);

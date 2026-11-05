@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createAccessController } from "../../apps/factory/src/access/controller";
-import { createTicketService } from "../../apps/factory/src/change/service";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { createTicketService } from "../../apps/factory/src/change/service";
 import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { factoryProcess } from "../fixtures/factory-process";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("native Ticket document writes preserve CAS, exact retries, retained history, Trash and current Project authority", async () => {
   const host = await factoryProcess(),

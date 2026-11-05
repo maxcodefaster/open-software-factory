@@ -13,11 +13,11 @@ import { createVisualReviewController } from "../../apps/factory/src/review/cont
 import { createReviewService } from "../../apps/factory/src/review/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { attachmentIDs } from "../../packages/conversation-domain/src/attachments";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { fixture } from "../fixtures/change-agent-turns";
 import { callFactoryFunction, compiledFactoryEndpoint } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
-import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 // Bun does not load playwright.config.ts. Match the ordinary browser lane's
 // observation window, including real conversion and storage acknowledgement.
@@ -250,7 +250,7 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
       buffer: Buffer.from("Confirmation code 7319"),
     };
     const wiki = page.getByRole("region", { name: "Wiki attachment editor" });
-    const editor = wiki.getByRole("textbox", { name: "Knowledge body" });
+    const editor = wiki.getByRole("textbox", { name: "Wiki body" });
     await visible(editor).toBeVisible();
     await visible(wiki.getByRole("button", { name: "Add image or file", exact: true })).toHaveCount(
       0,

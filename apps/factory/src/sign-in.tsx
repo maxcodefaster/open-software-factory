@@ -1,6 +1,7 @@
 import { createEffect, createSignal, Show } from "solid-js";
 import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import { factoryIdentityClient } from "./auth-client";
+import { plainErrorMessage } from "./command-error";
 
 export function SignIn(props: {
   error: string;
@@ -26,10 +27,13 @@ export function SignIn(props: {
         providerId: "company",
         callbackURL: location.href,
       });
-      if (response.error) throw new Error(response.error.message ?? "Company sign-in failed");
+      if (response.error)
+        throw new Error(plainErrorMessage(response.error.message ?? "Company sign-in failed"));
       if (response.data?.url) location.assign(response.data.url);
     } catch (cause) {
-      props.setError(cause instanceof Error ? cause.message : "Company sign-in failed");
+      props.setError(
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Company sign-in failed",
+      );
       setPending(false);
     }
   }
@@ -44,14 +48,15 @@ export function SignIn(props: {
         email: String(form.get("email")),
         password: String(form.get("password")),
       });
-      if (response.error) throw new Error(response.error.message ?? "Sign in failed");
+      if (response.error)
+        throw new Error(plainErrorMessage(response.error.message ?? "Sign in failed"));
       if (response.data?.url) {
         location.assign(response.data.url);
         return;
       }
       location.reload();
     } catch (cause) {
-      props.setError(cause instanceof Error ? cause.message : "Sign in failed");
+      props.setError(cause instanceof Error ? plainErrorMessage(cause.message) : "Sign in failed");
       setPending(false);
     }
   }

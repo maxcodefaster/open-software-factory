@@ -46,6 +46,7 @@ import type {
 import { orderedDesktopBackgrounds } from "./artworks";
 import type { followConversation } from "./assistant-interaction";
 import { AttachmentProvider } from "./attachments/ui";
+import { plainErrorMessage } from "./command-error";
 import { AssistantPanel, type AssistantPanelModel } from "./desktop/assistant-panel";
 import { createAssistantPresentation } from "./desktop/assistant-presentation";
 import { createBoardProjection } from "./desktop/board-projection";
@@ -388,7 +389,11 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
         }
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
+      setError(
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Browser recovery is unavailable.",
+      );
     }
     lastAgentSnapshot = retainAgentActivity(lastAgentSnapshot, changeID, view, historyRequested);
     setAgent(lastAgentSnapshot.view);
@@ -954,6 +959,17 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     boardHistoryOpen,
   });
 
+  createEffect(
+    () =>
+      [
+        workspaceVisible() ? activeWorkspaceTab()?.label : undefined,
+        selectedProject()?.name,
+      ] as const,
+    ([tab, project]) => {
+      document.title = [tab, project, "Open Software Factory"].filter(Boolean).join(" · ");
+    },
+  );
+
   const {
     selectedChange,
     latestRevision,
@@ -1062,7 +1078,9 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       return { ok: true as const, value: await operation() };
     } catch (cause) {
       if (isCurrent()) {
-        setError(cause instanceof Error ? cause.message : "Factory command failed");
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Factory command failed",
+        );
       }
       return { ok: false as const };
     } finally {
@@ -1091,7 +1109,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     } catch (cause) {
       setError(
         `Background for ${project.name} could not be saved. ${
-          cause instanceof Error ? cause.message : "Try again."
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Try again."
         }`,
       );
     } finally {
@@ -1307,10 +1325,16 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     onSettled(() => {
       if (selectedProjectID() !== projectID || selectedTicketID() !== ticketID) return;
       void refreshTicketDetail(ticketID).catch((cause) =>
-        setSyncError(cause instanceof Error ? cause.message : "The Ticket could not load"),
+        setSyncError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "The Ticket could not load",
+        ),
       );
       void refreshConversation(projectID, ticketID).catch((cause) =>
-        setSyncError(cause instanceof Error ? cause.message : "The conversation could not load"),
+        setSyncError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "The conversation could not load",
+        ),
       );
     });
   }
@@ -1352,7 +1376,11 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     onSettled(() => {
       if (selectedProjectID() !== projectID) return;
       void refreshConversation(projectID, undefined).catch((cause) =>
-        setSyncError(cause instanceof Error ? cause.message : "The conversation could not load"),
+        setSyncError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "The conversation could not load",
+        ),
       );
     });
     setProjectMenuOpen(false);
@@ -1471,7 +1499,11 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       if (item.unread) await inbox.mark(item, "read");
     } catch (cause) {
       if (!navigation.signal.aborted)
-        setError(cause instanceof Error ? cause.message : "The Inbox source could not be opened.");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "The Inbox source could not be opened.",
+        );
     }
   }
 
@@ -2204,7 +2236,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
           </Show>
           <Show when={error()}>
             <p class="error-toast" role="alert">
-              {error()}
+              {plainErrorMessage(error())}
             </p>
           </Show>
           <PlanningSyncStatus

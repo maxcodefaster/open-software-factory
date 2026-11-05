@@ -1,13 +1,12 @@
 import { expect, test } from "bun:test";
-import { factoryProcess } from "../fixtures/factory-process";
-import { fixture } from "../fixtures/change-agent-turns";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { createUsageJournal } from "../../apps/factory/src/usage/journal";
 import { createModelRelay } from "../../apps/factory/src/models/relay";
+import { createUsageJournal } from "../../apps/factory/src/usage/journal";
+import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
-import { eventually } from "../fixtures/factory-process";
+import { fixture } from "../fixtures/change-agent-turns";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("commissioned Coding finishes its in-flight call, blocks subsequent inference and explicitly resumes exact pending input", async () => {
   const isolated = await factoryProcess(),

@@ -9,6 +9,7 @@ import type {
   SkillContent,
   SkillRevision,
 } from "../../../../packages/conversation-domain/src/skills";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { serverCall } from "../server-functions/result";
 import {
@@ -88,7 +89,11 @@ export function SkillLibrary(props: {
     });
   }
   const report = (cause: unknown) =>
-    setError(cause instanceof Error ? cause.message : "Could not load library. Try reloading.");
+    setError(
+      cause instanceof Error
+        ? plainErrorMessage(cause.message)
+        : "Could not load library. Try reloading.",
+    );
   async function load(projectId: string | undefined) {
     const request = ++sequence;
     setLoading(true);
@@ -406,7 +411,6 @@ export function SkillLibrary(props: {
                 }}
                 type="button"
                 class="workspace-action skill-filter-toggle"
-                aria-label="Filters"
                 aria-expanded={filtersOpen() ? "true" : "false"}
                 aria-controls={filterID}
                 onClick={() => {
@@ -649,7 +653,6 @@ export function SkillLibrary(props: {
                         id={`skill-open-${entry.id}`}
                         type="button"
                         class="skill-tile"
-                        aria-label={`Inspect ${revision()?.content.name}`}
                         aria-pressed={selected() === entry.id ? "true" : "false"}
                         onClick={() => openSkill(entry.id)}
                       >

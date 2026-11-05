@@ -132,7 +132,7 @@ export function WorkspaceNavigationToggle(props: {
     <button
       type="button"
       class="workspace-navigation-trigger"
-      aria-label={props.label}
+      aria-label={`${props.title}, ${props.label.charAt(0).toLowerCase()}${props.label.slice(1)}`}
       aria-controls={props.navigation.id}
       aria-expanded={props.navigation.open() ? "true" : "false"}
       onClick={(event) => props.navigation.toggle(event.currentTarget)}

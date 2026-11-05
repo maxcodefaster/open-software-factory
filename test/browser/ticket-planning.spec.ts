@@ -74,7 +74,7 @@ for (const width of [1440, 390]) {
       page.getByRole("button", { name: "Plan technical design", exact: true }),
     ).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Follow", exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Add person", exact: true }).click();
+    await page.getByRole("button", { name: /add person$/i }).click();
     const people = page.getByRole("dialog", { name: "Assign responsibility" });
     await people.getByRole("button", { name: "Follow", exact: true }).click();
     await expect(people.getByRole("button", { name: "Following", exact: true })).toHaveAttribute(
@@ -246,7 +246,7 @@ for (const width of [1440, 768, 390]) {
     ).toBeVisible();
     await expect(ticketDocument.getByRole("tab")).toHaveCount(0);
     await page.screenshot({ path: `${directory}/ticket-${width}.png`, fullPage: true });
-    await ticketDocument.getByRole("button", { name: "Add person", exact: true }).click();
+    await ticketDocument.getByRole("button", { name: /add person$/i }).click();
     const picker = page.getByRole("dialog", { name: "Assign responsibility" });
     await picker.getByRole("searchbox").fill("Lisa");
     await expect(picker.locator("[data-popover-option]")).toHaveCount(1);
@@ -591,6 +591,64 @@ for (const { width, count } of [
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`a Ticket with an implementation review block keeps its content still while the review loads at ${width}px`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const shifts = { total: 0 };
+      Object.assign(window, { __shifts: shifts });
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries() as unknown as {
+          value: number;
+          hadRecentInput: boolean;
+        }[])
+          if (!entry.hadRecentInput) shifts.total += entry.value;
+      }).observe({ type: "layout-shift", buffered: true });
+    });
+    await mockFactoryFunctions(page, {
+      review: {
+        get: async () => {
+          await new Promise((done) => setTimeout(done, 700));
+          return visualReviewSchema.parse({
+            feedback: [],
+            recording: {
+              id: crypto.randomUUID(),
+              state: "complete",
+              commitSha: "a".repeat(40),
+              durationMs: 12_000,
+              reason: null,
+            },
+            scenarios: [
+              {
+                id: "scenario-1",
+                title: "Open the page and add an item",
+                category: "normal",
+                startedMs: 0,
+                endedMs: 4000,
+                status: "passed",
+                expected: "The item appears.",
+                observed: "The item appeared.",
+              },
+            ],
+            canSendCorrections: true,
+          });
+        },
+      },
+    });
+    await page.setViewportSize({ width, height: 960 });
+    await page.goto(`${origin}/ticket-planning.html?review`);
+    await expect(page.getByLabel("Ticket requirements")).toBeVisible();
+    await expect(page.getByText("Loading review…")).toBeVisible();
+    await expect(page.getByText("Loading review…")).toHaveCount(0);
+    await page.waitForTimeout(500);
+    const shift = await page.evaluate(
+      () => (window as unknown as { __shifts: { total: number } }).__shifts.total,
+    );
+    expect(shift).toBeLessThan(0.1);
+  });
+}
+
 test("chapter marks expose labels on hover and focus and track manual scrolling", async ({
   page,
 }) => {
@@ -733,9 +791,7 @@ test("chapter controls work from the keyboard and unsafe diagram edits stay in t
 test("capture the existing Wiki as the visual reference", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
   await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
-  await expect(
-    page.getByRole("button", { name: "Edit Knowledge title", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /edit wiki title$/i })).toBeVisible();
   await page.screenshot({ path: `${directory}/existing-wiki-reference.png`, fullPage: true });
 });
 

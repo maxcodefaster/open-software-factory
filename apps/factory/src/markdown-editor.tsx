@@ -172,7 +172,7 @@ export function MarkdownEditor(props: {
           value={props.value}
           editable={true}
           field="knowledge"
-          label={props.label ?? "Knowledge body"}
+          label={props.label ?? "Wiki body"}
           class="visual-editor markdown-body"
           onEditor={(_element, handle) => {
             editor = handle;
@@ -194,7 +194,7 @@ export function MarkdownEditor(props: {
               <div
                 class={`selection-toolbar document-floating-control${linkEditing() ? " is-link-editing" : ""}`}
                 role="toolbar"
-                aria-label="Knowledge selection formatting"
+                aria-label="Wiki selection formatting"
                 ref={setControl}
                 onMouseDown={(event) => {
                   if (!linkEditing()) event.preventDefault();
@@ -245,7 +245,7 @@ export function MarkdownEditor(props: {
             <div
               class="specification-command-menu caret-command-menu document-floating-control"
               role="menu"
-              aria-label="Knowledge blocks"
+              aria-label="Wiki blocks"
               ref={setControl}
               onMouseDown={(event) => event.preventDefault()}
             >

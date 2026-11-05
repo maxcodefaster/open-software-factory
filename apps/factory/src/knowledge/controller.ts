@@ -255,7 +255,7 @@ export function createKnowledgeController(
     executions.add(execution);
     void execution
       .finally(() => executions.delete(execution))
-      .catch(reportFailure("Knowledge generation"));
+      .catch(reportFailure("Wiki generation"));
     return execution;
   }
 

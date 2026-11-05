@@ -1,5 +1,6 @@
 import { createSignal, For, onSettled, Show } from "solid-js";
 import { type UsageRate, usageRate } from "../../../../packages/conversation-domain/src/usage";
+import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { getContractPrices, saveContractPrices } from "../server-functions/usage";
 
@@ -89,7 +90,11 @@ export function ContractPrices() {
       setNotice("Saved for future work. Historical estimates stay unchanged.");
     } catch (cause) {
       if (!disposed)
-        setError(cause instanceof Error ? cause.message : "Could not save contract prices");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Could not save contract prices",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }

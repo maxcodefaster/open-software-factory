@@ -1,13 +1,13 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
-import { openProjectMenu } from "../fixtures/project-menu";
-import { signIn } from "../support/factory-fixture";
+import { test } from "../fixtures/browser-test";
 import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { requestFunction } from "../fixtures/server-functions";
+import { signIn } from "../support/factory-fixture";
 
 // Read-only local walkthrough. Never starts compute, calls a model or approves Delivery.
 test("captures the Starter document and assistant at desktop and phone widths", async ({
@@ -38,7 +38,7 @@ test("captures the Starter document and assistant at desktop and phone widths", 
     animations: "disabled",
   });
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await page.getByRole("button", { name: "Factory starter", exact: true }).click();
   await expect(page.locator(".knowledge-article table").first()).toBeVisible();
   await page.getByRole("button", { name: "Remove Ticket context" }).click();
@@ -69,7 +69,7 @@ test("captures the Starter document and assistant at desktop and phone widths", 
     animations: "disabled",
   });
   await page.getByRole("button", { name: "Minimize Agent panel" }).click();
-  await page.getByRole("tab", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("tab", { name: "Wiki", exact: true }).click();
   await expect(page.locator(".knowledge-article")).toBeVisible();
   await page.screenshot({
     path: ".factory/screenshots/ux-followup/knowledge-narrow.png",

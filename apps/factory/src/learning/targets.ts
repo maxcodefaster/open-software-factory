@@ -137,7 +137,7 @@ export function createLearningTargets(database: Database) {
       if (!page || page.revisionId !== target.revisionId || page.version !== target.version)
         throw new CommandError(
           "conflict",
-          "This Knowledge page changed. No newer writing was overwritten.",
+          "This Wiki page changed. No newer writing was overwritten.",
         );
       return {
         scope,
@@ -230,7 +230,7 @@ export function createLearningTargets(database: Database) {
     }
     if (target.kind === "knowledge") {
       if (loaded.title === null)
-        throw new CommandError("conflict", "The observed Knowledge title is no longer available");
+        throw new CommandError("conflict", "The observed Wiki title is no longer available");
       const saved = await editKnowledgeIn(
         sql,
         target.id,
@@ -322,7 +322,7 @@ export function createLearningTargets(database: Database) {
           { body: string }[]
         >`SELECT body FROM factory.knowledge_revision WHERE id=${input.target.revisionId} AND page_id=${target.id}`;
         if (!before)
-          throw new CommandError("not-found", "The original Knowledge revision is unavailable");
+          throw new CommandError("not-found", "The original Wiki revision is unavailable");
         text = before.body;
       } else {
         const [before] = await sql<{ instructions: string | null }[]>`

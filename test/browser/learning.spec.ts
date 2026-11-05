@@ -426,7 +426,7 @@ for (const width of [1440, 768, 390, 320]) {
     const flow = page.getByRole("region", { name: "Learning history overview" });
     const detail = flow.locator(".learning-flow-detail");
     await expect(flow.getByRole("button", { pressed: true })).toHaveAccessibleName(
-      "Oct 26: Read sources before asking again. Adopted v4",
+      "Oct 26 Read sources before asking again Adopted v4",
     );
     await expect(detail).toContainText("not causal proof");
     await expect(flow.locator(".learning-flow-node")).toHaveCount(4);

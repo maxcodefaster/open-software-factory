@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { seedMonitoringDelegation } from "../fixtures/monitoring";
 import { fixtureValue } from "../fixtures/value";

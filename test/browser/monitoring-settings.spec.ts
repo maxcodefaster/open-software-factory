@@ -94,7 +94,7 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
       .catch(() => false);
     if (reopened) return chooseSettingsPage(current, "Inputs");
     await openProjectMenu(current);
-    await current.getByRole("button", { name: new RegExp(projectName) }).click();
+    await current.locator(".project-choice").filter({ hasText: projectName }).click();
     await current.getByRole("button", { name: "Settings", exact: true }).click();
     await current.getByRole("button", { name: "Open settings", exact: true }).click();
     await chooseSettingsPage(current, "Inputs");
@@ -164,7 +164,7 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await setup.getByRole("button", { name: "Back to inputs", exact: true }).click();
     await expect(editor).toBeVisible();
     await editor.getByRole("button", { name: "Connect a service", exact: true }).click();
-    await page.getByRole("button", { name: "Set up Sentry", exact: true }).click();
+    await page.getByRole("button", { name: /^Sentry mcp\.sentry\.dev/ }).click();
     await expect(mcpUI.getByLabel("Name", { exact: true })).toHaveValue("Sentry");
     await expect(page.getByRole("combobox", { name: "Save in", exact: true })).toBeHidden();
     await expect(page.getByLabel("MCP endpoint", { exact: true })).toBeHidden();
@@ -373,9 +373,7 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await consent.check();
     await expect(save).toBeEnabled();
     await editor.getByRole("button", { name: "Connect a service", exact: true }).click();
-    await page
-      .getByRole("button", { name: "Inspect Reviewed Project source", exact: true })
-      .click();
+    await page.getByRole("button", { name: /^Reviewed Project source/ }).click();
     await page.getByRole("button", { name: "Use for Input", exact: true }).click();
     await expect(editor.getByRole("textbox", { name: "Name", exact: true })).toHaveValue(
       "Invoice errors",

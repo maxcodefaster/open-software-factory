@@ -238,31 +238,34 @@ export function SettingsWorkspace(props: {
           </label>
           <Show when={currentGroup()?.id !== "libraries"}>
             <p class="settings-scope-hint">
-              Skills and MCP connections are in Libraries. Choose it in Settings for.
+              Skills and MCP connections are in Libraries. Choose Libraries in the menu above.
             </p>
           </Show>
           <div class="settings-navigation-groups">
-            <For each={groups().filter((group) => group.id === currentGroup()?.id)}>
+            <For
+              each={groups().filter((group) => group.id === currentGroup()?.id)}
+              keyed={(group) => group.id}
+            >
               {(group) => (
-                <section class={group.scope === "system" ? "settings-admin-group" : undefined}>
-                  <h3 class="sr-only">{group.label}</h3>
-                  <For each={group.categories}>
+                <section class={group().scope === "system" ? "settings-admin-group" : undefined}>
+                  <h3 class="sr-only">{group().label}</h3>
+                  <For each={group().categories}>
                     {(value) => (
                       <button
                         type="button"
                         aria-current={
-                          navigationSelection().scope === group.scope &&
+                          navigationSelection().scope === group().scope &&
                           navigationSelection().category === value
                             ? "page"
                             : undefined
                         }
                         onClick={() => {
                           if (value === "mcp") setMonitoringSetup(undefined);
-                          setSelection({ scope: group.scope, category: value });
+                          setSelection({ scope: group().scope, category: value });
                           navigation.close(true);
                         }}
                       >
-                        {label(value, group.scope)}
+                        {label(value, group().scope)}
                       </button>
                     )}
                   </For>

@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
-import { factoryProcess } from "../fixtures/factory-process";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { knowledgeHistorySchema, knowledgeSaveSchema } from "../../apps/factory/src/api-contracts";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createKnowledgeService } from "../../apps/factory/src/knowledge/service";
-import { createAccessController } from "../../apps/factory/src/access/controller";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { knowledgeHistorySchema, knowledgeSaveSchema } from "../../apps/factory/src/api-contracts";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
+import { factoryProcess } from "../fixtures/factory-process";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("Wiki saves deduplicate retry, reject stale writes and restore immutably with current authority", async () => {

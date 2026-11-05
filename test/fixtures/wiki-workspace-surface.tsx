@@ -220,7 +220,7 @@ function Surface() {
       <h1 class="sr-only">Delivery floor</h1>
       <section class="workspace-window workspace-window-knowledge" aria-label="knowledge workspace">
         <WorkspaceTabbar
-          tabs={[{ id: "knowledge", view: "knowledge", label: "Knowledge" }]}
+          tabs={[{ id: "knowledge", view: "knowledge", label: "Wiki" }]}
           activeTabID="knowledge"
           onActivate={() => {}}
           onClose={() => {}}

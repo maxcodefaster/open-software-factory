@@ -1,9 +1,9 @@
-import { test, expect } from "bun:test";
-import { pinnedOpenCode, observe } from "../fixtures/pinned-opencode";
-import { nativeSkillManifest, nativeSkillId } from "../../apps/factory/src/skills/native";
-import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
+import { expect, test } from "bun:test";
 import { promptRecordedOpenCodeInput } from "../../apps/factory/src/agent/opencode-client";
+import { nativeSkillId, nativeSkillManifest } from "../../apps/factory/src/skills/native";
+import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import upstream from "../../upstream.json";
+import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 test("pinned native OpenCode discovers only admitted packages and retains explicit skill input without inference", async () => {
   const previous = process.env["FACTORY_OPENCODE_PACKAGED_SERVER"];

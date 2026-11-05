@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import {
   WikiSourceEvidenceError,
@@ -7,6 +6,7 @@ import {
   WikiTopicQualityError,
 } from "../../apps/factory/src/knowledge/generation-failure";
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test.each([false, true])(

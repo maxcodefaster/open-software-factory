@@ -5,6 +5,7 @@ import type {
   RepositoryMirrorView,
 } from "../../../../packages/project-domain/src/repository-mirror";
 import { FreshAuthentication } from "../access/fresh-authentication";
+import { plainErrorMessage } from "../command-error";
 import {
   acknowledgeRepositoryMirrorOperation,
   createRepositoryMirror,
@@ -119,7 +120,11 @@ function ProjectMirrors(props: { projectID: string; active: boolean }) {
       }
     } catch (cause) {
       if (!disposed)
-        setError(cause instanceof Error ? cause.message : "Mirror status is unavailable.");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Mirror status is unavailable.",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }
@@ -152,7 +157,11 @@ function ProjectMirrors(props: { projectID: string; active: boolean }) {
       }
     } catch (cause) {
       if (!disposed)
-        setError(cause instanceof Error ? cause.message : "Mirror operation is unconfirmed.");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Mirror operation is unconfirmed.",
+        );
     } finally {
       // Do not retain a credential in a hidden or failed form.
       setToken("");

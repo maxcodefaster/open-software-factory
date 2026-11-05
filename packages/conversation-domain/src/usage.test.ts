@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { estimateUsage, usageRate, unknownCounters } from "./usage";
 import { fixtureValue } from "../../../test/fixtures/value";
+import { estimateUsage, unknownCounters, usageRate } from "./usage";
 
 const base = usageRate.parse({
   provider: "provider",

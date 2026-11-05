@@ -39,12 +39,12 @@ test("workspace tabs keep their actions outside the tablist and unavailable link
   await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
     VALUES(${crypto.randomUUID()},${id},'First shell ticket','ready',${userID})`;
   await page.goto(`/projects/${id}`);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   const tabs = page.getByRole("tablist", { name: "Open workspace views" });
-  await expect(tabs.getByRole("tab", { name: "Knowledge", exact: true })).toBeVisible();
+  await expect(tabs.getByRole("tab", { name: "Wiki", exact: true })).toBeVisible();
   await expect(tabs.locator("button:not([role='tab']), a")).toHaveCount(0);
-  const close = page.getByRole("button", { name: "Close Knowledge", exact: true });
-  const tab = tabs.getByRole("tab", { name: "Knowledge", exact: true });
+  const close = page.getByRole("button", { name: "Close Wiki", exact: true });
+  const tab = tabs.getByRole("tab", { name: "Wiki", exact: true });
   await expect
     .poll(async () => {
       const [tabBox, closeBox] = [await tab.boundingBox(), await close.boundingBox()];
@@ -212,7 +212,7 @@ test.describe("touch dock", () => {
   }) => {
     const id = await addProject("Dock project", "shell-dock");
     await page.goto(`/projects/${id}`);
-    await expect(page.getByRole("button", { name: "Knowledge", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Wiki", exact: true })).toBeVisible();
     const boxes = await page
       .locator(".workspace-dock button")
       .evaluateAll((buttons) =>

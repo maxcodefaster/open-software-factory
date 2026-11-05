@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { planningDesign } from "../fixtures/technical-planning";
 
 test("compiled Ticket and Project commands validate exact input, bind the actor and detach cancellation without replay", async () => {

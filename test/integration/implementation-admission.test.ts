@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { createChangeController } from "../../apps/factory/src/change/controller";
+import { createHash } from "node:crypto";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test("Implement atomically freezes requirements and Build before branch create; duplicates and lost outcome never re-admit", async () => {

@@ -5,6 +5,7 @@ import {
   pageSiblings,
 } from "../../../../packages/knowledge-domain/src/page-tree";
 import type { KnowledgePage, KnowledgePageOutline } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import type { PageMove } from "./page-tree";
 
@@ -40,7 +41,9 @@ export function PageOrganization(props: {
     try {
       await action();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Page could not be updated.");
+      setError(
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Page could not be updated.",
+      );
     } finally {
       setPending(false);
     }

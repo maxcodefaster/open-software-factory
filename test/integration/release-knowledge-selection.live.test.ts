@@ -11,11 +11,11 @@ test.skipIf(!installation)(
     try {
       const page = await f.page("developer");
       await f.selectProject(page);
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await page.getByRole("button", { name: "Wiki", exact: true }).click();
       await page.getByRole("button", { name: "Container Topology", exact: true }).click();
       await visible(page.locator(".knowledge-article")).toBeVisible();
       await f.selectProject(page);
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await page.getByRole("button", { name: "Wiki", exact: true }).click();
       await visible(page.locator(".knowledge-article")).toBeVisible();
       await visible(
         page.getByRole("button", { name: "Container Topology", exact: true }),

@@ -2,15 +2,15 @@ import { AbstractViewContribution } from "@theia/core/lib/browser/shell/view-con
 import { BaseWidget, type Message } from "@theia/core/lib/browser/widgets/widget";
 import { inject, injectable } from "@theia/core/shared/inversify";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
+import { FactoryGitClient, type FactoryGitStatus, factoryGitStatus } from "./factory-git-client";
 import {
+  type FactoryRuntimeState,
   factoryRuntimeContext,
   readyRuntime,
   runtimePreparationCopy,
-  type FactoryRuntimeState,
 } from "./factory-runtime-context";
-import { factoryWriteContext } from "./factory-write-context";
 import { workspaceScheme } from "./factory-workspace-files";
-import { FactoryGitClient, factoryGitStatus, type FactoryGitStatus } from "./factory-git-client";
+import { factoryWriteContext } from "./factory-write-context";
 
 export const factoryGitWidgetID = "factory-git";
 

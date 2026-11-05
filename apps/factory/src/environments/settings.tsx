@@ -6,6 +6,7 @@ import {
   type ProjectEnvironment,
   parseEnvironmentPaste,
 } from "../../../../packages/project-domain/src/environment";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
 import {
@@ -257,7 +258,9 @@ function EnvironmentDocument(
       }
     } catch (cause) {
       if (epoch === generation)
-        setError(cause instanceof Error ? cause.message : "Could not load environment");
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not load environment",
+        );
     } finally {
       if (epoch === generation) setBusy(false);
     }
@@ -332,7 +335,9 @@ function EnvironmentDocument(
           setView(latest);
           if (!latest.pending || latest.pendingCommandID !== input.commandID) retry = undefined;
         }
-        setError(cause instanceof Error ? cause.message : "Could not save environment");
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not save environment",
+        );
       }
     } finally {
       if (epoch === generation) setBusy(false);
@@ -521,7 +526,6 @@ function EnvironmentDocument(
               <button
                 type="button"
                 class="workspace-action"
-                aria-label="Filter and sort variables"
                 aria-controls={filtersID}
                 aria-expanded={filtersOpen() ? "true" : "false"}
                 onClick={() => setFiltersOpen((open) => !open)}

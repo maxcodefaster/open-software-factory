@@ -91,7 +91,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
   }
   async function selectProject(current: Page) {
     await openProjectMenu(current);
-    await current.getByRole("button", { name: new RegExp(projectName) }).click();
+    await current.locator(".project-choice").filter({ hasText: projectName }).click();
   }
   async function open(current: Page) {
     await current.getByRole("button", { name: "Settings", exact: true }).click();
@@ -129,8 +129,8 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await actions.getByRole("button", { name, exact: true }).click();
   }
   async function filtersClosed(current: Page) {
-    await expect(current.getByRole("button", { name: "Filters", exact: true })).toBeVisible();
-    await expect(current.getByRole("button", { name: "Filters", exact: true })).toHaveAttribute(
+    await expect(current.getByRole("button", { name: /^Filter( ·|$)/ })).toBeVisible();
+    await expect(current.getByRole("button", { name: /^Filter( ·|$)/ })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
@@ -142,7 +142,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     name: "Work type" | "Ownership" | "Availability",
     value: string,
   ) {
-    const toggle = current.getByRole("button", { name: "Filters", exact: true });
+    const toggle = current.getByRole("button", { name: /^Filter( ·|$)/ });
     if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await current.getByRole("combobox", { name, exact: true }).selectOption(value);
@@ -209,7 +209,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await mkdir(evidence, { recursive: true });
     await login(page, `owned-${fixture.id}@factory.local`, "owned-process-password-not-a-secret");
     const unbound = await open(page);
-    await unbound.getByRole("button", { name: "Inspect Frontend design", exact: true }).click();
+    await unbound.getByRole("button", { name: /^Frontend design/ }).click();
     await expect(
       detail(page).getByRole("combobox", { name: "Frontend design Build choice" }),
     ).toBeDisabled();
@@ -272,9 +272,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     for (const card of await starterCards.all()) {
       const name = await card.getAttribute("aria-label");
       if (!name) throw new Error("Starter cover missing its skill name");
-      await expect(
-        card.getByRole("button", { name: `Inspect ${name}`, exact: true }),
-      ).toBeVisible();
+      await expect(card.getByRole("button", { name: new RegExp(`^${name}`) })).toBeVisible();
       await coverLoaded(card.locator("img.skill-cover"));
       await expect(card.locator(".skill-tile-title")).toHaveText(name);
       await expect(card.locator(".skill-tile-description")).not.toHaveText("");
@@ -300,7 +298,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
       });
     }
     await author.setViewportSize(options.viewport);
-    await library.getByRole("button", { name: "Inspect Code review", exact: true }).click();
+    await library.getByRole("button", { name: /^Code review/ }).click();
     await fullWidthReader(author);
     await author.screenshot({ path: `${evidence}/code-review-desktop.png`, fullPage: true });
     for (const width of [390, 320]) {
@@ -314,7 +312,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await detail(author).getByRole("button", { name: "Back to library", exact: true }).click();
     await author.setViewportSize({ width: 390, height: 844 });
     const lastSkill = library.getByRole("button", {
-      name: "Inspect Verify completion",
+      name: /^Verify completion/,
       exact: true,
     });
     await lastSkill.scrollIntoViewIfNeeded();
@@ -342,7 +340,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await setFilter(author, "Availability", "enabled");
     await library.getByRole("searchbox", { name: "Search skills" }).fill("interview");
     const inspect = library.getByRole("button", {
-      name: "Inspect Requirements interview",
+      name: /^Requirements interview/,
       exact: true,
     });
     await inspect.focus();
@@ -372,11 +370,11 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await expect(library.getByRole("searchbox", { name: "Search skills" })).toHaveValue(
       "interview",
     );
-    await expect(library.getByRole("button", { name: "Filters", exact: true })).toHaveAttribute(
+    await expect(library.getByRole("button", { name: /^Filter( ·|$)/ })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
-    await library.getByRole("button", { name: "Filters", exact: true }).click();
+    await library.getByRole("button", { name: /^Filter( ·|$)/ }).click();
     await expect(library.getByRole("combobox", { name: "Work type", exact: true })).toHaveValue(
       "planning",
     );
@@ -433,7 +431,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await detail(author).getByRole("button", { name: "Back to library", exact: true }).click();
     const customCard = library.getByRole("article", { name: "Corporate design", exact: true });
     await coverLoaded(customCard.locator("img.skill-cover"));
-    await customCard.getByRole("button", { name: "Inspect Corporate design", exact: true }).click();
+    await customCard.getByRole("button", { name: /^Corporate design/ }).click();
     const privateEntry = (await readView(author)).entries.find(
       (entry) => entry.revisions[0]?.content.name === "Corporate design",
     );
@@ -514,14 +512,14 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await open(author);
     await filtersClosed(author);
     await setFilter(author, "Ownership", "project");
-    await library.getByRole("button", { name: "Inspect Corporate design", exact: true }).click();
+    await library.getByRole("button", { name: /^Corporate design/ }).click();
     await expect(detail(author)).toContainText("Required by Project");
     await expect(
       detail(author).getByRole("combobox", { name: "Corporate design Investigate & Plan choice" }),
     ).toBeDisabled();
     await detail(author).getByRole("button", { name: "Back to library", exact: true }).click();
     await setFilter(author, "Ownership", "personal");
-    await library.getByRole("button", { name: "Inspect Corporate design", exact: true }).click();
+    await library.getByRole("button", { name: /^Corporate design/ }).click();
     await detail(author).getByRole("button", { name: "Edit skill", exact: true }).click();
     await editor.getByLabel("Instructions", { exact: true }).fill("Use our revised blue #1646b0.");
     await editor.getByRole("button", { name: "Save skill", exact: true }).click();
@@ -575,7 +573,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await expect(library.getByRole("region", { name: "Skill gallery" })).toBeHidden();
     await detail(author).getByRole("button", { name: "Back to library", exact: true }).click();
     await setFilter(author, "Ownership", "all");
-    await library.getByRole("button", { name: "Filters", exact: true }).click();
+    await library.getByRole("button", { name: /^Filter( ·|$)/ }).click();
     await filtersClosed(author);
     await noOverflow(author);
     const mobileCovers = library.locator(".skill-gallery-card img.skill-cover");
@@ -604,7 +602,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     const mobileInspect = library
       .locator(".skill-gallery-card")
       .last()
-      .getByRole("button", { name: /^Inspect / });
+      .locator("button.skill-tile");
     await mobileInspect.scrollIntoViewIfNeeded();
     await mobileInspect.focus();
     const galleryScroll = library.locator(".skill-gallery-scroll");

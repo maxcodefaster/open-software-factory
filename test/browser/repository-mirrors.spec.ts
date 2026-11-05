@@ -211,7 +211,7 @@ test("a refused mirror target is explained in the danger colour and keeps no tok
   await region.getByRole("button", { name: "Add mirror", exact: true }).click();
   const alert = region.getByRole("alert");
   await expect(alert).toHaveText("Use an approved HTTPS Git URL without credentials.");
-  await expect(alert).toHaveCSS("color", "rgb(148, 85, 77)");
+  await expect(alert).toHaveCSS("color", "rgb(132, 69, 61)");
   await expect(region.getByLabel("Access token", { exact: true })).toHaveValue("");
   await expect(page.locator("body")).not.toContainText("fixture-only-secret");
 });

@@ -1,9 +1,8 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { attachmentIDs } from "../../packages/conversation-domain/src/attachments";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { attachmentDOCX, attachmentPDF } from "../fixtures/attachment-files";
@@ -11,6 +10,7 @@ import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 const visible = browserExpect.configure({ timeout: 30_000 });
@@ -148,15 +148,15 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
         Math.abs(dock.y + dock.height / 2 - gearBox.y - gearBox.height / 2),
       ).toBeLessThanOrEqual(1);
       await gear.click();
-      await visible(
-        page.getByRole("button", { name: "Open project menu", exact: true }),
-      ).toContainText("Attachment UX");
+      await visible(page.getByRole("button", { name: /open project menu$/i })).toContainText(
+        "Attachment UX",
+      );
       await visible(page.getByRole("region", { name: "Settings", exact: true })).toBeInViewport();
       await page.screenshot({
         path: resolve(directory, `settings-${width}.png`),
         animations: "disabled",
       });
-      await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+      await page.getByRole("button", { name: /open project menu$/i }).click();
       await visible(page.getByRole("region", { name: "Projects", exact: true })).toBeInViewport();
       await page.screenshot({
         path: resolve(directory, `project-switcher-${width}.png`),
@@ -261,10 +261,10 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
         buffer: Buffer.from("## Review notes\n\nDo not copy the temporary error state."),
       },
     ];
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await page.getByRole("button", { name: "Reference material", exact: true }).click();
-    await page.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
-    const wiki = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+    await page.getByRole("button", { name: /edit wiki title$/i }).click();
+    const wiki = page.getByRole("textbox", { name: "Wiki body", exact: true });
     await visible(wiki).toBeVisible();
     const wikiHost = page.locator(".rich-editor-host").filter({ has: wiki });
     await wikiHost.getByLabel("Choose attachments").setInputFiles([reference, documentFile]);
@@ -453,7 +453,7 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
         hasText: `build-turn-${f.projectID.replaceAll("-", "").slice(0, 12)}`,
       })
       .click();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await visible(message).toHaveValue(
       "Please compare these references. Keep the document's caveats.",
@@ -499,7 +499,7 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     await visible(savedImage).toHaveAttribute("target", "_blank");
     await visible(ticket.locator(".review-message-body")).not.toContainText("/api/attachments/");
     await capture("feedback-saved");
-    await page.getByRole("tab", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("tab", { name: "Wiki", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await visible(message).toHaveValue(
       "Please compare these references. Keep the document's caveats.",

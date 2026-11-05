@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createMCPService } from "../../apps/factory/src/mcp/service";
-import { createInputService } from "../../apps/factory/src/monitoring/service";
-import type { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
+import { createMCPService } from "../../apps/factory/src/mcp/service";
+import type { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
+import { createInputService } from "../../apps/factory/src/monitoring/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("native MCP and Inputs retain host validation, immutable commands, actor binding and browser-independent admission", async () => {
   const origin = "https://factory.test",

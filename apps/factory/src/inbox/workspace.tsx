@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
 import type { InboxItem, InboxView } from "./contracts";
@@ -203,7 +204,7 @@ export function InboxWorkspace(props: {
     } catch (cause) {
       setWriteError(
         cause instanceof Error
-          ? cause.message
+          ? plainErrorMessage(cause.message)
           : "Your change was not saved. Refresh the Inbox, then repeat the action.",
       );
     } finally {

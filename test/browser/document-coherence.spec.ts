@@ -63,7 +63,7 @@ async function openTicket(page: Page) {
 }
 
 async function openKnowledge(page: Page) {
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await page.getByRole("button", { name: title, exact: true }).click();
   await expect(page.locator(".knowledge-article")).toContainText("Saved human explanation");
 }
@@ -238,7 +238,7 @@ test("filters Knowledge while typing and retains the query through Enter", async
   await openFixture(page);
   await openKnowledge(page);
   await page.getByRole("button", { name: "Search Wiki", exact: true }).click();
-  const search = page.getByRole("searchbox", { name: "Search Knowledge" });
+  const search = page.getByRole("searchbox", { name: "Search Wiki" });
   await search.fill("missing");
   await expect(page.locator(".wiki-search-results")).toContainText("No matching pages");
   await expect(
@@ -297,7 +297,7 @@ test("searches nested repository documents with a snippet and ignores a late ear
   await openFixture(page);
   await openKnowledge(page);
   await page.getByRole("button", { name: "Search Wiki", exact: true }).click();
-  const search = page.getByRole("searchbox", { name: "Search Knowledge" });
+  const search = page.getByRole("searchbox", { name: "Search Wiki" });
   await search.fill("older");
   await requested.promise;
   await search.fill("runbook");
@@ -317,9 +317,9 @@ test("filters Wiki slash blocks at the caret and removes the whole query on inse
   await openFixture(page);
   await openKnowledge(page);
   await page.locator(".knowledge-article").click();
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await editor.fill("/ta");
-  const menu = page.getByRole("menu", { name: "Knowledge blocks" });
+  const menu = page.getByRole("menu", { name: "Wiki blocks" });
   await expect(menu.getByRole("menuitem")).toHaveCount(1);
   await expect(menu.getByRole("menuitem", { name: "Table", exact: true })).toBeVisible();
   const geometry = await menu.evaluate((element) => {
@@ -372,7 +372,7 @@ test("repository documents stay read-only and their write route creates no plann
   await page.getByRole("button", { name: path, exact: true }).click();
   await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
   await page.getByLabel("Repository document", { exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "Knowledge body", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Wiki body", exact: true })).toHaveCount(0);
   const response = await page.request.put(`/api/projects/${projectID}/knowledge/documents`, {
     headers: { origin: new URL(page.url()).origin },
     data: { path, expectedBlobSha: commit, body: "Overwrite" },
@@ -459,7 +459,7 @@ test("Knowledge click-edit shares rich blocks, selection formatting and lossless
   ).toHaveCount(1);
   await expect(page.locator(".knowledge-article table")).toContainText("Developer");
   await page.locator(".knowledge-article p").first().click();
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await expect(editor.locator("table")).toContainText("Developer");
   await expectInlineChecklist(editor);
   await expect(page.getByRole("toolbar", { name: "Markdown formatting" })).toHaveCount(0);
@@ -468,7 +468,7 @@ test("Knowledge click-edit shares rich blocks, selection formatting and lossless
   await editor.press("Enter");
   await editor.press("Enter");
   await editor.pressSequentially("/");
-  const menu = page.getByRole("menu", { name: "Knowledge blocks" });
+  const menu = page.getByRole("menu", { name: "Wiki blocks" });
   await expect(menu.getByRole("menuitem")).toHaveCount(documentBlocks.length);
   for (const block of documentBlocks)
     await expect(menu.getByRole("menuitem", { name: block.label, exact: true })).toBeVisible();
@@ -476,7 +476,7 @@ test("Knowledge click-edit shares rich blocks, selection formatting and lossless
   await editor.pressSequentially("Human note");
   for (let index = 0; index < 4; index++) await editor.press("Shift+ArrowLeft");
   await page
-    .getByRole("toolbar", { name: "Knowledge selection formatting" })
+    .getByRole("toolbar", { name: "Wiki selection formatting" })
     .getByRole("button", { name: "Bold", exact: true })
     .click();
   await expect
@@ -508,8 +508,8 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   if (!database) throw new Error("Fixture database unavailable");
   await openFixture(page);
   await openKnowledge(page);
-  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  await page.getByLabel("Edit Wiki body", { exact: true }).click();
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await editor.press("ControlOrMeta+End");
   await editor.press("Enter");
   await editor.pressSequentially("Local product framing.");
@@ -536,7 +536,7 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await expect(page.getByRole("alert")).toContainText("Saving temporarily unavailable");
   await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
   await expect(editor).toBeHidden();
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await expect(editor).toContainText("Recovered draft.");
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
@@ -575,8 +575,8 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
   if (!database) throw new Error("Fixture database unavailable");
   await openFixture(page);
   await openKnowledge(page);
-  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  await page.getByLabel("Edit Wiki body", { exact: true }).click();
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   let saved = false;
   const release = Promise.withResolvers<void>();
   let first = true;
@@ -631,7 +631,7 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
     await page.reload();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
-    await expect(page.getByLabel("Edit Knowledge body", { exact: true })).toHaveText(
+    await expect(page.getByLabel("Edit Wiki body", { exact: true })).toHaveText(
       "Replacement Wiki intent.",
     );
   } finally {
@@ -700,8 +700,8 @@ test("Wiki table controls and highlighted code retain Markdown through Tab, undo
   await database.client`UPDATE factory.knowledge_page SET current_body=${body},generated_body=${body} WHERE id=${pageID}`;
   await openFixture(page);
   await openKnowledge(page);
-  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  await page.getByLabel("Edit Wiki body", { exact: true }).click();
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await editor.locator("td").first().click();
   await page.getByRole("button", { name: "Table actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Column after", exact: true }).click();
@@ -776,7 +776,9 @@ test("Wiki drag movement rejects source writes and History restores a new human 
     })
     .toBe(pageID);
   await page.getByRole("button", { name: "Code docs", exact: true }).click();
-  await child.dragTo(page.getByRole("button", { name: "Wiki", exact: true }));
+  await child.dragTo(
+    page.getByRole("tabpanel", { name: "Wiki" }).getByRole("button", { name: "Wiki", exact: true }),
+  );
   await expect
     .poll(async () => {
       if (!database) throw new Error("Fixture database unavailable");
@@ -800,7 +802,7 @@ test("Wiki drag movement rejects source writes and History restores a new human 
   expect(saved.ok).toBe(true);
   await expect(page.locator(".knowledge-article")).toContainText("Changed human explanation.");
   await openPageHistory(page);
-  const history = page.getByRole("complementary", { name: "Knowledge history" });
+  const history = page.getByRole("complementary", { name: "Wiki history" });
   await expect(history.locator(".version-history-item")).toHaveCount(3);
   await history.getByRole("button").last().click();
   await expect(page.getByLabel("Historical page")).toContainText("Saved human explanation");
@@ -868,7 +870,7 @@ test("Wiki insertion targets do not reorder on hover and navigation resize is re
   if (!icon || !heading) throw new Error("Inline title unavailable");
   expect(icon.x + icon.width).toBeLessThan(heading.x);
   expect(Math.abs(icon.y - heading.y)).toBeLessThan(12);
-  const titleButton = page.getByRole("button", { name: "Edit Knowledge title", exact: true });
+  const titleButton = page.getByRole("button", { name: /edit wiki title$/i });
   expect(await titleButton.innerText()).toBe(title);
   expect(
     await titleButton.evaluate((element) => ({
@@ -895,7 +897,7 @@ test("Wiki internal links select checked pages without navigating out, and long 
   await database.client`UPDATE factory.knowledge_page SET current_body='Saved human explanation. [Read guide](#wiki/linked-guide)' WHERE id=${pageID}`;
   await openFixture(page);
   await openKnowledge(page);
-  const heading = page.getByRole("button", { name: "Edit Knowledge title", exact: true });
+  const heading = page.getByRole("button", { name: /edit wiki title$/i });
   expect(await heading.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(
     true,
   );
@@ -1471,7 +1473,7 @@ test("keeps saved Knowledge readable when History fails and allows an explicit r
     },
   });
   await openPageHistory(page);
-  const history = page.getByRole("complementary", { name: "Knowledge history" });
+  const history = page.getByRole("complementary", { name: "Wiki history" });
   await expect(page.locator(".knowledge-version-panel").getByRole("alert")).toContainText(
     "History could not be loaded",
   );
@@ -1547,15 +1549,19 @@ test("keeps Knowledge reading and editing width stable and history dismissible w
     const readingTitle = await page.locator(".knowledge-heading h2").boundingBox();
     await page.mouse.move(0, 0);
     await page.screenshot({ path: `${evidenceDirectory}/knowledge-read-${width}.png` });
-    await page.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
-    const editing = await page.getByRole("textbox", { name: "Knowledge body" }).boundingBox();
-    const titleField = page.getByRole("textbox", { name: "Knowledge page title" });
+    await page.getByRole("button", { name: /edit wiki title$/i }).click();
+    const editing = await page.getByRole("textbox", { name: "Wiki body" }).boundingBox();
+    const titleField = page.getByRole("textbox", { name: "Wiki page title" });
     const editingTitle = await titleField.boundingBox();
     if (!reading || !editing) throw new Error("Missing document geometry");
     if (!readingTitle || !editingTitle) throw new Error("Missing title geometry");
     expect(Math.abs(readingTitle.height - editingTitle.height)).toBeLessThanOrEqual(1);
-    expect(Math.abs(reading.x - editing.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(reading.width - editing.width)).toBeLessThanOrEqual(1);
+    // The editing surface is outset by its own padding so the text stays where the reading text was.
+    const inset = await page
+      .getByRole("textbox", { name: "Wiki body" })
+      .evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingLeft));
+    expect(Math.abs(reading.x - (editing.x + inset))).toBeLessThanOrEqual(1);
+    expect(Math.abs(reading.width - (editing.width - 2 * inset))).toBeLessThanOrEqual(1);
     await page.mouse.move(0, 0);
     await page.screenshot({ path: `${evidenceDirectory}/knowledge-edit-${width}.png` });
     await titleField.fill(`${title} ${title}`);
@@ -1571,7 +1577,7 @@ test("keeps Knowledge reading and editing width stable and history dismissible w
   await page.setViewportSize({ width: 1440, height: 900 });
   const opener = page.getByRole("button", { name: "Page options", exact: true });
   await openPageHistory(page);
-  const history = page.getByRole("complementary", { name: "Knowledge history" });
+  const history = page.getByRole("complementary", { name: "Wiki history" });
   await expect(history).toContainText("Current");
   await history.getByRole("button").nth(1).click();
   await expect(page.locator(".historical-document").getByLabel("Historical page")).toBeVisible();
@@ -1596,9 +1602,9 @@ test("saves a wrapping Knowledge title as a new immutable revision", async ({ pa
   `;
   await openFixture(page);
   await openKnowledge(page);
-  await page.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
+  await page.getByRole("button", { name: /edit wiki title$/i }).click();
   const newTitle = `${title} with a reviewed release note`;
-  await page.getByRole("textbox", { name: "Knowledge page title" }).fill(newTitle);
+  await page.getByRole("textbox", { name: "Wiki page title" }).fill(newTitle);
   await expect
     .poll(async () => {
       if (!database) throw new Error("No database");

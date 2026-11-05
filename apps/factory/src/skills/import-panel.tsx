@@ -1,5 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
+import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { previewRepositorySkill, previewSkillImport } from "../server-functions/skills";
 
@@ -20,7 +21,11 @@ export function SkillImportPanel(props: {
     try {
       props.onPreview(await action());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not preview this package");
+      setError(
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Could not preview this package",
+      );
     } finally {
       setBusy(false);
     }

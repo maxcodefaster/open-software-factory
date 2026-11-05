@@ -18,7 +18,9 @@ export const Route = createRootRoute({
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1.0, viewport-fit=cover" },
       { title: "Open Software Factory" },
+      { name: "theme-color", content: "#f7f5ef" },
     ],
+    links: [{ rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
   }),
   component: () => (
     <>

@@ -90,17 +90,17 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await open();
     await expect(page.locator(".mcp-library").getByRole("heading")).toHaveText(["MCP connections"]);
-    await expect(page.getByRole("button", { name: "Set up Sentry" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Set up Datadog" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Sentry mcp\.sentry\.dev/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Datadog/ })).toBeVisible();
     await expectConnectionCovers();
-    await expect(page.getByRole("button", { name: "Set up Sentry" })).toContainText(
+    await expect(page.getByRole("button", { name: /^Sentry mcp\.sentry\.dev/ })).toContainText(
       "mcp.sentry.dev",
     );
     await page.screenshot({ path: `${evidence}/gallery-desktop.png`, fullPage: true });
     await page
       .getByRole("region", { name: "Recommended MCP connections", exact: true })
       .screenshot({ path: `${evidence}/connection-cards-desktop.png` });
-    await page.getByRole("button", { name: "Set up Sentry" }).click();
+    await page.getByRole("button", { name: /^Sentry mcp\.sentry\.dev/ }).click();
     await page.getByLabel("Name", { exact: true }).fill("Owned MCP source");
     await page.getByLabel("MCP endpoint", { exact: true }).fill("http://unsafe.example/mcp");
     await page.getByRole("button", { name: "Save definition", exact: true }).click();
@@ -159,18 +159,18 @@ test("MCP library uses landscape connection covers, retains private drafts and k
       .fill("no matching source");
     await expect(page.getByRole("heading", { name: "No matching connections" })).toBeVisible();
     await page.getByRole("button", { name: "Clear filters", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Owned MCP source/ })).toBeVisible();
     await expectConnectionCovers();
-    await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toContainText(
+    await expect(page.getByRole("button", { name: /^Owned MCP source/ })).toContainText(
       "source.example",
     );
-    await page.getByRole("button", { name: "Inspect Owned MCP source" }).focus();
+    await page.getByRole("button", { name: /^Owned MCP source/ }).focus();
     await page.keyboard.press("Enter");
     await expect(
       detail.getByRole("heading", { name: "Owned MCP source", exact: true }),
     ).toBeFocused();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toBeFocused();
+    await expect(page.getByRole("button", { name: /^Owned MCP source/ })).toBeFocused();
     await page.screenshot({ path: `${evidence}/gallery-mobile.png`, fullPage: true });
     const view = await serverCall(browserFunction(page, "getMCPLibrary", []));
     expect(view.entries).toHaveLength(1);
@@ -178,7 +178,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     expect(fixtureValue(view.entries[0], "view.entries[0]").connection).toBeNull();
     await page.reload();
     await open();
-    await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Owned MCP source/ })).toBeVisible();
     await page.setViewportSize({ width: 1440, height: 960 });
     const project = crypto.randomUUID();
     const projectName = `MCP proof ${project.slice(0, 8)}`;
@@ -267,7 +267,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
       .getByRole("navigation", { name: "Settings navigation" })
       .getByRole("button", { name: "MCP connections", exact: true })
       .click();
-    await page.getByRole("button", { name: "Inspect Owned shared source", exact: true }).click();
+    await page.getByRole("button", { name: /^Owned shared source/ }).click();
     const review = page.getByRole("region", { name: "Read-only tool review", exact: true });
     await expect(review).toBeVisible();
     const buildChoice = page.getByRole("combobox", { name: "Owned shared source Build choice" });
@@ -318,13 +318,13 @@ test("MCP library uses landscape connection covers, retains private drafts and k
         .filter({ has: page.locator('summary[aria-label="MCP library actions"]') }),
     ).not.toHaveAttribute("open", "");
     await expect(page.getByLabel("Manage defaults for")).toHaveValue("project");
-    await page.getByRole("button", { name: "Inspect Owned shared source", exact: true }).click();
+    await page.getByRole("button", { name: /^Owned shared source/ }).click();
     await detail
       .getByRole("combobox", { name: "Owned shared source Build choice", exact: true })
       .selectOption("required");
     await detail.getByRole("button", { name: "Back to library", exact: true }).click();
     await page.getByRole("button", { name: "Browse connections", exact: true }).click();
-    await page.getByRole("button", { name: "Inspect Owned shared source", exact: true }).click();
+    await page.getByRole("button", { name: /^Owned shared source/ }).click();
     await expect(
       detail.getByRole("combobox", { name: "Owned shared source Build choice", exact: true }),
     ).toBeDisabled();
@@ -373,7 +373,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     await page.reload();
     await page.setViewportSize({ width: 1440, height: 960 });
     await open();
-    await page.getByRole("button", { name: "Inspect Owned shared source", exact: true }).click();
+    await page.getByRole("button", { name: /^Owned shared source/ }).click();
     const adopt = page.getByRole("button", { name: "Use connected v2 for new work", exact: true });
     await expect(adopt).toBeDisabled();
     await adopt.scrollIntoViewIfNeeded();

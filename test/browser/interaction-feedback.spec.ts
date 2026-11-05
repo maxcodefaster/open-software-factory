@@ -183,7 +183,7 @@ test("Wiki loading never offers generation before an authoritative empty outline
   await page.setViewportSize({ width: 390, height: 844 });
   await capture(page, "wiki-body-loading-narrow");
   await page.getByRole("button", { name: "Receive Wiki body", exact: true }).click();
-  await expect(page.getByLabel("Edit Knowledge body")).toContainText("A retained reference.");
+  await expect(page.getByLabel("Edit Wiki body")).toContainText("A retained reference.");
   await expect(page.getByRole("status").filter({ hasText: "Loading Wiki…" })).toHaveCount(0);
   await expect(create).toHaveCount(0);
   await page.getByRole("button", { name: "Clear Wiki selection", exact: true }).click();
@@ -213,7 +213,7 @@ for (const { label, width, touch } of [
         page.getByText("No Wiki pages have been published yet.", { exact: true }),
       ).toBeVisible();
       if (width <= 760) {
-        const navigation = page.getByRole("button", { name: "Browse Wiki pages", exact: true });
+        const navigation = page.getByRole("button", { name: /browse wiki pages$/i });
         const button = fixtureValue(await navigation.boundingBox(), "Wiki navigation geometry");
         const notice = fixtureValue(
           await page.locator(".knowledge-generation").boundingBox(),
@@ -506,11 +506,10 @@ for (const surface of ["wiki", "ticket"] as const) {
     const status = page.locator(".save-feedback");
     const title =
       surface === "wiki"
-        ? page.getByRole("textbox", { name: "Knowledge page title", exact: true })
+        ? page.getByRole("textbox", { name: "Wiki page title", exact: true })
         : page.getByRole("textbox", { name: "Ticket title", exact: true });
     try {
-      if (surface === "wiki")
-        await page.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
+      if (surface === "wiki") await page.getByRole("button", { name: /edit wiki title$/i }).click();
       await title.fill("Retain my updated reference");
       await expect(status).toHaveText("Changes will save automatically");
       await received.promise;
@@ -540,7 +539,7 @@ for (const surface of ["wiki", "ticket"] as const) {
       }
       await received.promise;
       if (surface === "wiki") {
-        await page.getByRole("button", { name: "Browse Wiki pages", exact: true }).click();
+        await page.getByRole("button", { name: /browse wiki pages$/i }).click();
         await page.getByRole("button", { name: "Second reference", exact: true }).click();
       } else await page.getByRole("button", { name: "Switch Ticket", exact: true }).click();
       release.resolve();

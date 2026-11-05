@@ -8,6 +8,7 @@ import {
 import type { TechnicalDesignContent } from "../../../../packages/requirement-domain/src/technical-design";
 import type { createAgentCommandIds } from "../agent-command-ids";
 import type { Change, DeliveryView, Ticket } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import type { createProjectPlanning } from "../projects/planning";
 import { confirmEpicProposal } from "../server-functions/conversations";
 import {
@@ -308,7 +309,9 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
       }
     } catch (cause) {
       dependencies.setError(
-        cause instanceof Error ? cause.message : "Browser recovery is unavailable.",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Browser recovery is unavailable.",
       );
       return;
     }
@@ -353,7 +356,9 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
             ? {
                 ...current,
                 failure:
-                  cause instanceof Error ? cause.message : "Implementation response unavailable.",
+                  cause instanceof Error
+                    ? plainErrorMessage(cause.message)
+                    : "Implementation response unavailable.",
               }
             : current,
         );

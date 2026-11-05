@@ -1,7 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import type { z } from "zod";
@@ -10,10 +9,11 @@ import {
   mcpLibraryView,
   type mcpSaveInput,
 } from "../../packages/conversation-domain/src/mcp-library";
+import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { observeBrowserErrors } from "../fixtures/browser-errors";
+import { test } from "../fixtures/browser-test";
 import { invalidateFixtureRead } from "../fixtures/read-invalidation";
-import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { factoryFunctionMatches, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -165,7 +165,7 @@ test("MCP filters count active choices, reset with matching results and dismiss 
   await mockFactoryFunctions(page, { mcp: { get: async () => view } });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${origin}/mcp-library.html`);
-  const toggle = page.getByRole("button", { name: "Filters", exact: true });
+  const toggle = page.getByRole("button", { name: /^Filter( ·|$)/ });
   const ownership = page.getByRole("combobox", { name: "Ownership", exact: true });
   const workType = page.getByRole("combobox", { name: "Work type", exact: true });
   const search = page.getByRole("searchbox", { name: "Search MCP connections" });
@@ -181,7 +181,7 @@ test("MCP filters count active choices, reset with matching results and dismiss 
   await ownership.selectOption("personal");
   await workType.selectOption("planning");
   await expect(toggle).toHaveText("Filter · 2");
-  await expect(page.getByRole("button", { name: "Inspect Product context" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Product context/ })).toBeVisible();
   await page.screenshot({ path: `${directory}/active-filters-390.png` });
   await workType.focus();
   await workType.press("Escape");
@@ -406,7 +406,7 @@ for (const viewport of [
       path: `${directory}/gallery-${viewport.width}.png`,
       fullPage: true,
     });
-    await recommendations.getByRole("button", { name: "Set up Sentry", exact: true }).focus();
+    await recommendations.getByRole("button", { name: /^Sentry mcp\.sentry\.dev/ }).focus();
     await page.keyboard.press("Enter");
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("Sentry");
     await page.getByRole("button", { name: "Discard draft", exact: true }).click();
@@ -440,7 +440,7 @@ for (const viewport of [
     });
     await page.reload();
     await chooseSettingsPage(page, "MCP connections");
-    await expect(library.getByRole("button", { name: "Inspect Product context" })).toBeVisible();
+    await expect(library.getByRole("button", { name: /^Product context/ })).toBeVisible();
     await expect(recommendations.getByRole("heading")).toHaveText("Recommended starting points");
     await expect(recommendations.locator(":scope > p")).toHaveCount(0);
     await page.screenshot({

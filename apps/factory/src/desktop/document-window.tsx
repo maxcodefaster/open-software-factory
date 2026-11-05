@@ -31,6 +31,7 @@ import type {
   RuntimeDockTarget,
   Ticket,
 } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import { EpicProposalWorkspace } from "../epic-proposal-workspace";
 import type { ActivityNavigationRequest } from "../ide-messages";
 import type { InboxItem } from "../inbox/contracts";
@@ -762,7 +763,9 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                 })
                 .catch((cause: unknown) =>
                   model.setError(
-                    cause instanceof Error ? cause.message : "Preview is unavailable.",
+                    cause instanceof Error
+                      ? plainErrorMessage(cause.message)
+                      : "Preview is unavailable.",
                   ),
                 );
             }}

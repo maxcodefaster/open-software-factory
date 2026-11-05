@@ -73,7 +73,7 @@ export function WikiSearch(props: {
           <Icon name="search" />
           <input
             type="search"
-            aria-label="Search Knowledge"
+            aria-label="Search Wiki"
             placeholder={props.canDevelop ? "Search Wiki and code docs" : "Search Wiki"}
             value={text()}
             onInput={(event) => {

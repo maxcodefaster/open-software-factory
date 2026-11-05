@@ -45,7 +45,7 @@ export async function editKnowledgeIn(
       revisionId: page.revisionId,
     };
   if (page.version !== value.expectedVersion)
-    throw new CommandError("conflict", "Knowledge Page changed. Reload it before saving.");
+    throw new CommandError("conflict", "Wiki Page changed. Reload it before saving.");
   const [next] = await sql<{ ordinal: number }[]>`
     SELECT coalesce(max(ordinal),0)+1 AS ordinal FROM factory.knowledge_revision WHERE page_id=${pageID}`;
   await sql`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,citations,created_by)

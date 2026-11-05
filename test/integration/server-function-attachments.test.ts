@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Attachment functions bind private intent, draft sequence and metadata to the authenticated actor without replay", async () => {
   const origin = "https://factory.test",

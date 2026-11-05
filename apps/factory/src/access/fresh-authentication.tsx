@@ -1,5 +1,6 @@
 import { createEffect, createSignal, Show } from "solid-js";
 import { factoryIdentityClient } from "../auth-client";
+import { plainErrorMessage } from "../command-error";
 import { getAuthenticationState } from "../server-functions/access";
 import { type ServerValue, serverCall } from "../server-functions/result";
 import "./settings.css";
@@ -73,7 +74,8 @@ export function FreshAuthentication(props: {
             email: current.email,
             password: password ?? "",
           });
-      if (result.error) throw new Error(result.error.message ?? "Sign-in failed");
+      if (result.error)
+        throw new Error(plainErrorMessage(result.error.message ?? "Sign-in failed"));
       if (current.companySignIn && result.data?.url) location.assign(result.data.url);
       else {
         const current = await serverCall(getAuthenticationState({ data: [] }));
@@ -81,7 +83,7 @@ export function FreshAuthentication(props: {
         props.onFresh?.(current.fresh);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Sign-in failed");
+      setError(cause instanceof Error ? plainErrorMessage(cause.message) : "Sign-in failed");
     } finally {
       setBusy(false);
     }

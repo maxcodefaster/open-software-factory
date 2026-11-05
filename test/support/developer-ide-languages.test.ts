@@ -1,11 +1,11 @@
 import { expect, mock, test } from "bun:test";
 import { TextmateRegistry } from "../../deploy/theia-ide/node_modules/@theia/monaco/lib/browser/textmate/textmate-registry";
-import { Registry, parseRawGrammar } from "../../deploy/theia-ide/node_modules/vscode-textmate";
 import {
   loadWASM,
   OnigScanner,
   OnigString,
 } from "../../deploy/theia-ide/node_modules/vscode-oniguruma";
+import { parseRawGrammar, Registry } from "../../deploy/theia-ide/node_modules/vscode-textmate";
 
 const registered: Array<{ id: string; extensions: string[] }> = [];
 const configurations = new Map<string, unknown>();

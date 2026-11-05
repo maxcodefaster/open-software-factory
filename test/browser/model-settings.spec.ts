@@ -29,9 +29,9 @@ async function openFactoryModels(page: Page) {
   // opening a Factory-scope workspace while the planning projection connects.
   const projects = await serverCall(browserFunction(page, "getProjects", []));
   if (projects.projects.length)
-    await expect(
-      page.getByRole("button", { name: "Open project menu", exact: true }),
-    ).not.toContainText("Choose project");
+    await expect(page.getByRole("button", { name: /open project menu$/i })).not.toContainText(
+      "Choose project",
+    );
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });

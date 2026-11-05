@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { epicProposalInput, type EpicProposal } from "./epic-proposal";
+import { type EpicProposal, epicProposalInput } from "./epic-proposal";
 
 const proposal: EpicProposal = {
   epic: { title: "Invoice workflow", description: "Manage invoices" },

@@ -4,6 +4,7 @@ import {
   modelRoles,
 } from "../../../../packages/conversation-domain/src/model-inheritance";
 import type { ModelSettingsView } from "../../../../packages/conversation-domain/src/model-settings";
+import { plainErrorMessage } from "../command-error";
 import { getModelSettings, saveModelSettings } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
 import { ModelConnectionSettings } from "./connection-settings";
@@ -39,7 +40,10 @@ export function SystemModelSettings(props: {
       const value = await serverCall(getModelSettings({ data: [] }));
       if (!disposed) publish(value);
     } catch (cause) {
-      if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
+      if (!disposed)
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not load models",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }
@@ -69,7 +73,10 @@ export function SystemModelSettings(props: {
         setSaved(true);
       }
     } catch (cause) {
-      if (!disposed) setError(cause instanceof Error ? cause.message : "Could not save models");
+      if (!disposed)
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not save models",
+        );
     } finally {
       if (!disposed) setBusy(false);
     }

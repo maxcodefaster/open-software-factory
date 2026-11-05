@@ -44,7 +44,7 @@ async function noSidewaysScroll(page: Page) {
   ).toBeLessThanOrEqual(1);
 }
 async function openNavigation(page: Page, narrow: boolean) {
-  if (narrow) await page.getByRole("button", { name: "Browse Wiki pages", exact: true }).click();
+  if (narrow) await page.getByRole("button", { name: /browse wiki pages$/i }).click();
 }
 
 for (const size of sizes) {
@@ -129,7 +129,7 @@ for (const size of sizes) {
       await openNavigation(page, narrow);
       const opener = page.getByRole("button", { name: "Search Wiki", exact: true });
       await opener.click();
-      const box = page.getByRole("searchbox", { name: "Search Knowledge" });
+      const box = page.getByRole("searchbox", { name: "Search Wiki" });
       await box.fill("Betrieb");
       await expect(page.getByRole("status").filter({ hasText: "Searching" })).toBeVisible();
       await expect(page.getByText("No matching pages.")).toHaveCount(0);
@@ -139,15 +139,15 @@ for (const size of sizes) {
       await expect(page.getByRole("dialog", { name: "Search Wiki" })).toHaveCount(0);
       await expect(
         page.getByRole("button", {
-          name: narrow ? "Browse Wiki pages" : "Search Wiki",
-          exact: true,
+          name: narrow ? /browse wiki pages$/i : "Search Wiki",
+          ...(narrow ? {} : { exact: true }),
         }),
       ).toBeFocused();
 
       await page.goto(`${origin}/wiki-workspace.html?s=populated&search=fail`);
       await openNavigation(page, narrow);
       await page.getByRole("button", { name: "Search Wiki", exact: true }).click();
-      await page.getByRole("searchbox", { name: "Search Knowledge" }).fill("Betrieb");
+      await page.getByRole("searchbox", { name: "Search Wiki" }).fill("Betrieb");
       await expect(page.getByRole("alert")).toContainText("Search failed");
       await expect(page.locator(".wiki-search-result")).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
@@ -156,7 +156,7 @@ for (const size of sizes) {
       await page.goto(`${origin}/wiki-workspace.html?s=populated&search=none`);
       await openNavigation(page, narrow);
       await page.getByRole("button", { name: "Search Wiki", exact: true }).click();
-      await page.getByRole("searchbox", { name: "Search Knowledge" }).fill("Zzzz");
+      await page.getByRole("searchbox", { name: "Search Wiki" }).fill("Zzzz");
       await expect(page.getByText("No matching pages.")).toBeVisible();
     });
 
@@ -166,11 +166,11 @@ for (const size of sizes) {
       await page.goto(`${origin}/wiki-workspace.html?s=populated&save=fail`);
       await page.getByRole("button", { name: "Page options", exact: true }).click();
       await page.getByRole("menuitem", { name: "Edit page" }).click();
-      await page.getByRole("textbox", { name: "Knowledge page title" }).fill("Neuer Titel");
+      await page.getByRole("textbox", { name: "Wiki page title" }).fill("Neuer Titel");
       const alert = page.getByRole("alert").filter({ hasText: "could not be saved" });
       await expect(alert).toContainText("The Wiki could not be saved.");
       await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-      await expect(page.getByRole("textbox", { name: "Knowledge page title" })).toHaveValue(
+      await expect(page.getByRole("textbox", { name: "Wiki page title" })).toHaveValue(
         "Neuer Titel",
       );
       await noSidewaysScroll(page);

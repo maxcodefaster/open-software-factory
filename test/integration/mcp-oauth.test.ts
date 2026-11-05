@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import type { MCPSecret } from "../../apps/factory/src/mcp/secrets";

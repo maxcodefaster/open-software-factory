@@ -1,6 +1,7 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
 import { confirmAccessStopped } from "./access-stop";
+import { plainErrorMessage } from "./command-error";
 import { developerIDEOrigin } from "./developer-ide-origin";
 import type { ActivityNavigationRequest } from "./ide-messages";
 import { type DevelopmentPreviewMessage, developmentPreviewMessage } from "./ide-messages";
@@ -40,7 +41,7 @@ export function DeveloperIDEWorkspace(props: {
   const [editorSlow, setEditorSlow] = createSignal(false);
   const [sourceError, setSourceError] = createSignal("");
   const fileError = () =>
-    availableSource() ? "" : sourceError() || props.preparationFailure || "";
+    availableSource() ? "" : plainErrorMessage(sourceError() || props.preparationFailure || "");
   const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
   const [editorRecovering, setEditorRecovering] = createSignal(false);
@@ -113,7 +114,7 @@ export function DeveloperIDEWorkspace(props: {
           signal.aborted
             ? "File access recovery is taking longer than expected. Your files are retained; retry to check its recorded state."
             : cause instanceof Error
-              ? cause.message
+              ? plainErrorMessage(cause.message)
               : "File access could not recover.",
         );
       }
@@ -153,7 +154,9 @@ export function DeveloperIDEWorkspace(props: {
     } catch (cause) {
       if (!cancel.signal.aborted)
         setEditorError(
-          cause instanceof Error ? cause.message : "Editor restart could not be confirmed.",
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Editor restart could not be confirmed.",
         );
     } finally {
       if (editorRecovery === cancel) {
@@ -207,7 +210,9 @@ export function DeveloperIDEWorkspace(props: {
         }
       })().catch((cause: unknown) => {
         if (!cancel.signal.aborted)
-          setEditorError(cause instanceof Error ? cause.message : "Editor is unavailable.");
+          setEditorError(
+            cause instanceof Error ? plainErrorMessage(cause.message) : "Editor is unavailable.",
+          );
       });
       return () => cancel.abort();
     },
@@ -240,7 +245,9 @@ export function DeveloperIDEWorkspace(props: {
       })().catch((cause: unknown) => {
         if (!cancel.signal.aborted)
           setSourceError(
-            cause instanceof Error ? cause.message : "Workspace files are unavailable.",
+            cause instanceof Error
+              ? plainErrorMessage(cause.message)
+              : "Workspace files are unavailable.",
           );
       });
       return () => cancel.abort();

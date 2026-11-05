@@ -1,16 +1,15 @@
 import { expect, test } from "bun:test";
-import { fixture } from "../fixtures/change-agent-turns";
-import { ownedBrowserJPEG } from "../fixtures/browser-image";
-import { pinnedOpenCode, observe } from "../fixtures/pinned-opencode";
-import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
-import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
-import { createAttachmentTools } from "../../apps/factory/src/attachments/tools";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
+import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
+import { createAttachmentTools } from "../../apps/factory/src/attachments/tools";
 import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
-import { buildModelID } from "../fixtures/change-agent-turns";
+import { ownedBrowserJPEG } from "../fixtures/browser-image";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { fixtureValue } from "../fixtures/value";
 
 test("pinned OpenCode reads an admitted human attachment as a native model image, without shell or file detours", async () => {

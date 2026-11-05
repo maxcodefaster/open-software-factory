@@ -1,17 +1,17 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import { mkdir } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
-import { learningFixture } from "../fixtures/learning";
-import { openProjectMenu } from "../fixtures/project-menu";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { retainedEditProposal } from "../fixtures/learning-edit";
 import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
-import { fixtureValue } from "../fixtures/value";
+import { createDatabase } from "../../packages/db/src/client";
 import { prepareBrowserBuild } from "../fixtures/browser-build";
+import { test } from "../fixtures/browser-test";
+import { learningFixture } from "../fixtures/learning";
+import { retainedEditProposal } from "../fixtures/learning-edit";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { fixtureValue } from "../fixtures/value";
 
 test("real Settings show monitoring, save learning policy and isolate private evidence without commissioning work", async ({
   page,
@@ -190,7 +190,7 @@ test("real Settings show monitoring, save learning policy and isolate private ev
     const projectChoice = page.getByRole("button").filter({ hasText: `monitoring-${project}` });
     await expect(projectChoice).toBeVisible();
     await projectChoice.click();
-    await expect(page.getByRole("button", { name: "Open project menu", exact: true })).toHaveText(
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toHaveText(
       "Monitoring proof",
     );
     await page.getByRole("button", { name: "Settings", exact: true }).click();

@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { z } from "zod";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -15,7 +14,11 @@ import {
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("human feedback is idempotent, scoped, versioned and admits corrections only explicitly", async () => {

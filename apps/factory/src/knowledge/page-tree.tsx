@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { pageSiblings } from "../../../../packages/knowledge-domain/src/page-tree";
 import type { KnowledgePageOutline, RepositoryDocument } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 
 export type PageMove = { pageId: string; parentId: string | null; beforeId: string | null };
@@ -61,7 +62,9 @@ export function KnowledgeTree(props: {
         .catch((cause: unknown) => {
           if (!disposed)
             setDocumentsError(
-              cause instanceof Error ? cause.message : "Code documents could not be loaded.",
+              cause instanceof Error
+                ? plainErrorMessage(cause.message)
+                : "Code documents could not be loaded.",
             );
         })
         .finally(() => {
@@ -125,7 +128,9 @@ export function KnowledgeTree(props: {
     } catch (cause) {
       reject(
         input.pageId,
-        cause instanceof Error ? cause.message : "Page could not be moved. Try again.",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Page could not be moved. Try again.",
       );
     }
   }

@@ -6,6 +6,7 @@ import type {
   RuntimeAttempt,
   RuntimeDockTarget,
 } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import type { ActivityNavigationRequest } from "../ide-messages";
 import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
@@ -75,7 +76,9 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
           {
             ...opening,
             preparationFailure:
-              cause instanceof Error ? cause.message : "Workspace files could not be prepared.",
+              cause instanceof Error
+                ? plainErrorMessage(cause.message)
+                : "Workspace files could not be prepared.",
           },
           projectID,
         );

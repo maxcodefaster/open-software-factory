@@ -8,6 +8,7 @@ import { normalizeInterviewAnswer } from "../../../../packages/conversation-doma
 import type { createAgentCommandIds } from "../agent-command-ids";
 import type { Change, ConversationView, Ticket } from "../api-contracts";
 import { readAttachmentContent } from "../attachments/composer";
+import { plainErrorMessage } from "../command-error";
 import { streamConversation } from "../conversation-stream";
 import {
   answerConversationQuestion,
@@ -260,7 +261,9 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
       dependencies.setError(savedResponseNotice(refreshed.turn, commandId));
     } catch (cause) {
       dependencies.setError(
-        cause instanceof Error ? cause.message : "Browser recovery is unavailable.",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Browser recovery is unavailable.",
       );
     }
   }

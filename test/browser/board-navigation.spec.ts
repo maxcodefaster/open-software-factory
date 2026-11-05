@@ -1,12 +1,11 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { serveChatAssets } from "../support/chat-assets";
 import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
@@ -103,7 +102,7 @@ test("desktop keeps compact actions, aligned stage headings and one retained dra
   ).toHaveAccessibleDescription("1 ticket");
   for (const lane of await board.locator(".lane").all())
     await expect(lane).toHaveCSS("border-top-width", "0px");
-  const project = topbar.getByRole("button", { name: "Open project menu", exact: true });
+  const project = topbar.getByRole("button", { name: /open project menu$/i });
   const create = topbar.getByRole("button", { name: "New Ticket", exact: true });
   for (const width of [1440, 1024, 901]) {
     await page.setViewportSize({ width, height: 900 });
@@ -489,7 +488,7 @@ test.describe("touch navigation", () => {
     await settings.tap();
     const menu = page.getByRole("region", { name: "Settings", exact: true });
     await expect(menu).toBeVisible();
-    await menu.getByRole("button", { name: "Open project menu", exact: true }).tap();
+    await menu.getByRole("button", { name: /open project menu$/i }).tap();
     await expect(page.getByRole("region", { name: "Projects", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(settings).toBeFocused();
@@ -510,7 +509,7 @@ test.describe("touch navigation", () => {
     await page.screenshot({ path: `${evidence}/board-320.png` });
     await toggle.tap();
     await expect(draft).toHaveValue("Keep this unsent Project question.");
-    await dock.getByRole("button", { name: "Knowledge", exact: true }).tap();
+    await dock.getByRole("button", { name: "Wiki", exact: true }).tap();
     await expect(panel).toHaveCount(0);
     await expect(
       page.getByRole("region", { name: "knowledge workspace", exact: true }),

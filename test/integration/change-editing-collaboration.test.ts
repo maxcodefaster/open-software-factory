@@ -1,20 +1,22 @@
 import { expect, test } from "bun:test";
-import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
+import { workspaceWriteAuthorityIn } from "../../apps/factory/src/access/change-writer";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import {
   WriterActivity,
   writerIdleMilliseconds,
 } from "../../apps/factory/src/access/writer-activity";
-import { workspaceWriteAuthorityIn } from "../../apps/factory/src/access/change-writer";
-import { fixture } from "../fixtures/change-agent-turns";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { buildModelID } from "../fixtures/change-agent-turns";
+import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createWriterService } from "../../apps/factory/src/access/writer-service";
-import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { writerViewSchema } from "../../apps/factory/src/api-contracts";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("shared editing requires a decision, fences the old writer, and never transfers unsaved buffers", async () => {
   const owned = await fixture();

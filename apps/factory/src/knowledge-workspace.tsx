@@ -11,6 +11,7 @@ import type {
   OpenRepositoryDocument,
   RepositoryDocument,
 } from "./api-contracts";
+import { plainErrorMessage } from "./command-error";
 import { Icon } from "./icon";
 import {
   draftDirty,
@@ -155,7 +156,11 @@ export function KnowledgeWorkspace(props: {
       );
       closeHistory();
     } catch (cause) {
-      setRestoreError(cause instanceof Error ? cause.message : "Revision could not be restored.");
+      setRestoreError(
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Revision could not be restored.",
+      );
     } finally {
       setRestoring(false);
     }
@@ -393,7 +398,11 @@ export function KnowledgeWorkspace(props: {
       failed = true;
       if (draftKey === key) {
         setSaveState("failed");
-        setSaveError(cause instanceof Error ? cause.message : "Your changes could not be saved.");
+        setSaveError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Your changes could not be saved.",
+        );
         const page = props.selectedPage;
         const current = draft();
         if (page && current) setDraft(reconcileDraft(current, pageSnapshot(page)));
@@ -531,10 +540,10 @@ export function KnowledgeWorkspace(props: {
                   <Show when={!hasPublishedPages()} fallback={<p>Choose a Wiki page to read.</p>}>
                     <p>
                       {["pending", "running"].includes(props.generation?.state ?? "")
-                        ? "Project Knowledge is being generated."
+                        ? "Project Wiki is being generated."
                         : props.generation?.state === "failed"
                           ? "No Wiki pages have been published yet."
-                          : "Generate Project Knowledge from the current commit."}
+                          : "Generate Project Wiki from the current commit."}
                     </p>
                     <Show
                       when={
@@ -654,8 +663,8 @@ export function KnowledgeWorkspace(props: {
                           <button
                             type="button"
                             class="knowledge-title-button"
-                            aria-label="Edit Knowledge title"
-                            title="Edit Knowledge title"
+                            aria-label={`${draftTitle()}, edit Wiki title`}
+                            title="Edit Wiki title"
                             onClick={beginEdit}
                           >
                             {draftTitle()}
@@ -665,7 +674,7 @@ export function KnowledgeWorkspace(props: {
                     }
                   >
                     <textarea
-                      aria-label="Knowledge page title"
+                      aria-label="Wiki page title"
                       rows={1}
                       value={draftTitle()}
                       onInput={(event) => changeDraft("title", event.currentTarget.value)}
@@ -701,7 +710,7 @@ export function KnowledgeWorkspace(props: {
                                 requestAnimationFrame(() =>
                                   workspace
                                     ?.querySelector<HTMLTextAreaElement>(
-                                      'textarea[aria-label="Knowledge page title"]',
+                                      'textarea[aria-label="Wiki page title"]',
                                     )
                                     ?.focus({ preventScroll: true }),
                                 );
@@ -952,7 +961,7 @@ export function KnowledgeWorkspace(props: {
                 fallback={
                   <MarkdownReader
                     class="knowledge-article markdown-body"
-                    label={props.openDocument ? "Repository document" : "Edit Knowledge body"}
+                    label={props.openDocument ? "Repository document" : "Edit Wiki body"}
                     scopeKey={`${props.projectID}:${props.openDocument?.path ?? props.selectedPage?.id}`}
                     onNavigate={props.openDocument ? undefined : navigateWiki}
                     wikiPages={
@@ -984,7 +993,7 @@ export function KnowledgeWorkspace(props: {
               <p role="alert">{historyError()}</p>
             </Show>
             <VersionHistory
-              label="Knowledge history"
+              label="Wiki history"
               selectedID={historyRevisionID()}
               loading={historyLoading()}
               versions={props.revisions.map((revision) => ({

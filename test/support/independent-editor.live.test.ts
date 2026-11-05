@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { chromium, expect as browserExpect, type Page } from "@playwright/test";
+import { expect as browserExpect, chromium, type Page } from "@playwright/test";
 import { languageToolsFixture } from "../fixtures/language-tools";
 import { fixtureValue } from "../fixtures/value";
 

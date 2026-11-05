@@ -1,13 +1,12 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { test } from "../fixtures/browser-test";
+import { browserBootstrap, requestFunction } from "../fixtures/server-functions";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const { FACTORY_ADMIN_EMAIL, FACTORY_ADMIN_PASSWORD } = process.env;

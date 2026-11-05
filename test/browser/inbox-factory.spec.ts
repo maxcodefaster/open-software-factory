@@ -92,7 +92,7 @@ test("the real Factory dock aggregates Projects and opens the exact shared quest
       .getByRole("button")
       .filter({ hasText: `inbox-${projects[0]}` })
       .click();
-    await expect(page.getByRole("button", { name: "Open project menu", exact: true })).toHaveText(
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toHaveText(
       "Inbox proof 1",
     );
     await page.getByRole("button", { name: "Inbox, 2 items need your attention" }).click();
@@ -129,7 +129,7 @@ test("the real Factory dock aggregates Projects and opens the exact shared quest
     await inbox.getByLabel("Filter Inbox by Project").selectOption("");
     await inbox.getByRole("button", { name: /Inbox proof 2.*Answer the Agent/ }).click();
     await expect(question).toBeFocused();
-    await page.getByRole("button", { name: "Add person", exact: true }).click();
+    await page.getByRole("button", { name: /add person$/i }).click();
     const people = page.getByRole("dialog", { name: "Assign responsibility" });
     await expect(people.getByRole("searchbox")).toBeFocused();
     await people.getByRole("button", { name: "Local administrator", exact: true }).click();

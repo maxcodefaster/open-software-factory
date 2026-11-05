@@ -8,6 +8,7 @@ import type {
   OpenRepositoryDocument,
   RepositoryDocument,
 } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import type { KnowledgeDraft } from "../knowledge-workspace";
 import {
   archiveKnowledgePage,
@@ -148,16 +149,15 @@ export function createKnowledgeState(options: {
     searchRequest++;
     setQuery("");
     setResults([]);
-    options.openTab(
-      { id: `knowledge:${projectId}`, view: "knowledge", label: "Knowledge" },
-      publish,
-    );
+    options.openTab({ id: `knowledge:${projectId}`, view: "knowledge", label: "Wiki" }, publish);
     try {
       await refresh();
     } catch (cause) {
       if (options.projectID() === projectId)
         options.onError(
-          cause instanceof Error ? cause.message : "Wiki status could not be loaded.",
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Wiki status could not be loaded.",
         );
     }
   }
@@ -249,7 +249,9 @@ export function createKnowledgeState(options: {
       } catch (cause) {
         if (options.projectID() === projectId && request === documentRequest)
           options.onError(
-            cause instanceof Error ? cause.message : "The repository document could not load.",
+            cause instanceof Error
+              ? plainErrorMessage(cause.message)
+              : "The repository document could not load.",
           );
         return false;
       }

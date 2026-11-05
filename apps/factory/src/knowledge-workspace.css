@@ -184,7 +184,7 @@
   padding: 0 var(--space-2) var(--space-3);
 }
 .tree-toggle-placeholder {
-  width: var(--space-5);
+  width: var(--space-6);
   height: var(--space-7);
   flex: none;
   padding: 0;
@@ -889,7 +889,7 @@
   border-radius: var(--radius-sm);
 }
 .knowledge-tree .tree-toggle {
-  width: var(--space-5);
+  width: var(--space-6);
   height: var(--space-7);
   flex: none;
   padding: 0;

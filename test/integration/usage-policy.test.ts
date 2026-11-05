@@ -1,12 +1,12 @@
-import { test, expect } from "bun:test";
-import { factoryProcess } from "../fixtures/factory-process";
-import { createUsagePolicy, codingBudgetIn } from "../../apps/factory/src/usage/policy";
-import { createUsageJournal } from "../../apps/factory/src/usage/journal";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { createUsageService } from "../../apps/factory/src/usage/service";
-import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
-import { fixture } from "../fixtures/change-agent-turns";
+import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
+import { createUsageJournal } from "../../apps/factory/src/usage/journal";
+import { codingBudgetIn, createUsagePolicy } from "../../apps/factory/src/usage/policy";
+import { createUsageService } from "../../apps/factory/src/usage/service";
+import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
+import { fixture } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test("calendar reset excludes expired unknowns and concurrent threshold requests admit no new Coding", async () => {

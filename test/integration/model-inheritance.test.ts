@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
-import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
-import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
+import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
+import {
+  callFactoryFunction,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 const systemModel = "system-model";

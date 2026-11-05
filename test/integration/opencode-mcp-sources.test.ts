@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { connectOpenCodeSources } from "../../apps/factory/src/agent/opencode-browser";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import { mcpSourceAlias } from "../../apps/factory/src/mcp/sources";
+import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { fixtureValue } from "../fixtures/value";

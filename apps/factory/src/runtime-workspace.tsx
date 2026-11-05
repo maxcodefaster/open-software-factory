@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { workspacePresence } from "../../../packages/interface-domain/src/workspace-presence";
 import type { AppPreview, RuntimeAttempt } from "./api-contracts";
+import { plainErrorMessage } from "./command-error";
 import {
   appResponseNotice,
   boundedCause,
@@ -193,7 +194,9 @@ export function RuntimeWorkspace(props: {
       await props.onStartFresh();
     } catch (cause) {
       setFreshError(
-        cause instanceof Error ? cause.message : "Start fresh could not be confirmed. Try again.",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Start fresh could not be confirmed. Try again.",
       );
     } finally {
       setFreshening(false);
@@ -207,7 +210,9 @@ export function RuntimeWorkspace(props: {
       await props.onRetry();
     } catch (cause) {
       setRetryError(
-        cause instanceof Error ? cause.message : "The Main Preview start could not be confirmed.",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "The Main Preview start could not be confirmed.",
       );
     } finally {
       setRetrying(false);

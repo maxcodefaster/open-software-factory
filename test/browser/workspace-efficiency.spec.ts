@@ -2,12 +2,12 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
+import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { createPlanningEpic } from "../support/factory-fixture";
-import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 
 const evidence = ".factory/test-results/workspace-efficiency";
 

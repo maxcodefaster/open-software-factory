@@ -72,7 +72,7 @@ textarea {
   resize: vertical;
 }
 :where(input, textarea)::placeholder {
-  color: var(--color-ink-muted);
+  color: var(--color-ink-faint);
   opacity: 1;
 }
 input:where([type="checkbox"], [type="radio"]) {
@@ -185,5 +185,17 @@ input:where([type="checkbox"], [type="radio"]) {
   select {
     min-height: var(--touch-target);
     font-size: var(--text-lg);
+  }
+}
+
+/* Forced colors drop box-shadow, so every focus indicator needs a real outline. */
+@media (forced-colors: active) {
+  :focus-visible {
+    /* biome-ignore lint/complexity/noImportantStyles: component outline resets must not hide focus here */
+    outline: 2px solid Highlight !important;
+    outline-offset: 2px;
+  }
+  button:where([aria-current="page"], [aria-pressed="true"]) {
+    border: 2px solid Highlight;
   }
 }

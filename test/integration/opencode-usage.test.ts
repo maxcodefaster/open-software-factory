@@ -1,15 +1,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { pinnedOpenCode, observe } from "../fixtures/pinned-opencode";
 import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
-import { buildModelID, fixture as changeFixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
+import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createUsageJournal, type UsageEntry } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage, openCodeUsageEntry } from "../../apps/factory/src/usage/opencode";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
+import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import upstream from "../../upstream.json";
+import { buildModelID, fixture as changeFixture } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
+import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 // Kubernetes is injected in the cleanup case; these artifacts are never
 // launched, and no fixture may inherit the retained installation's forge token.

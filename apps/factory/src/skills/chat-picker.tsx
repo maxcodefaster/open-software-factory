@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+import { plainErrorMessage } from "../command-error";
 import { type ServerValue, serverCall } from "../server-functions/result";
 import { getSkillInvocations } from "../server-functions/skills";
 import { insertSkillInvocation, skillInvocationQuery } from "./chat-invocation";
@@ -175,7 +176,9 @@ export function ChatSkillPicker(props: {
       if (!current.signal.aborted) setView(result);
     } catch (cause) {
       if (!current.signal.aborted)
-        setError(cause instanceof Error ? cause.message : "Skills could not be loaded.");
+        setError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Skills could not be loaded.",
+        );
     }
   }
   function choose(key: string) {

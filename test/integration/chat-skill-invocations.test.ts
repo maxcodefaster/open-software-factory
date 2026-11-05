@@ -1,16 +1,18 @@
 import { expect, test } from "bun:test";
-import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { createSkillService } from "../../apps/factory/src/skills/service";
-import { createAccessController } from "../../apps/factory/src/access/controller";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import { createSkillController } from "../../apps/factory/src/skills/controller";
+import { createSkillService } from "../../apps/factory/src/skills/service";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("chat Skill discovery follows eligible guidance and freezes an existing Change's exact revisions", async () => {
   const owned = await fixture();

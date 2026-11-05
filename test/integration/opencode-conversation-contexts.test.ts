@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { fixture, buildModelID } from "../fixtures/change-agent-turns";
-import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { fixtureValue } from "../fixtures/value";
 
 test("a fresh native Coding context keeps its original Session and canonical source without creating another runtime", async () => {

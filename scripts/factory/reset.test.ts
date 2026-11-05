@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { resetDisposable, requireRuntimeNamespacesAbsent } from "./reset";
-import { parseInstallation, requireOwnedResource, composeProject } from "./installation";
+import { composeProject, parseInstallation, requireOwnedResource } from "./installation";
+import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
 
 test("existing or unobservable runtime namespaces prevent reset", async () => {
   await expect(

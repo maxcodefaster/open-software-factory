@@ -13,6 +13,7 @@ import {
   technicalDesignContentInput,
 } from "../../../packages/requirement-domain/src/technical-design";
 import type { TechnicalDesignRevision } from "./api-contracts";
+import { plainErrorMessage } from "./command-error";
 import { MarkdownReader } from "./markdown-reader";
 import { technicalDesignProblem } from "./proposal-problems";
 import "./ticket-planning.css";
@@ -276,7 +277,7 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
       if (props.storageKey !== scopeKey) return;
       setError(
         cause instanceof Error
-          ? cause.message
+          ? plainErrorMessage(cause.message)
           : "Could not save the design. Your draft is retained.",
       );
     } finally {

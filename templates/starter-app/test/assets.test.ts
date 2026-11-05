@@ -1,6 +1,6 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { test } from "node:test";
 import { startApplication } from "./application.ts";
 
 test("Start streams scoped HTML and Nitro serves only public production assets", async () => {

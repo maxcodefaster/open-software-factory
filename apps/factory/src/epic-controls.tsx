@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
 import type { Epic } from "./api-contracts";
+import { plainErrorMessage } from "./command-error";
 import { WindowHeading } from "./workspace-chrome";
 
 export type EpicEdit = { title: string; description: string; parentId: string | null };
@@ -52,7 +53,11 @@ export function EpicEditor(props: {
               parentId: String(data.get("parentId") ?? "") || null,
             })
             .catch((cause: unknown) =>
-              setError(cause instanceof Error ? cause.message : "Epic could not be saved"),
+              setError(
+                cause instanceof Error
+                  ? plainErrorMessage(cause.message)
+                  : "Epic could not be saved",
+              ),
             );
         }}
       >

@@ -9,6 +9,7 @@ import type {
   DeliveryView,
   RuntimeAttempt,
 } from "../api-contracts";
+import { plainErrorMessage } from "../command-error";
 import type { createKnowledgeState } from "../knowledge/state";
 import { unavailableLink } from "../navigation/desktop";
 import { getAgentView } from "../server-functions/agent";
@@ -125,7 +126,9 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
     visible: () => !document.hidden,
     onError: (cause) =>
       dependencies.setSyncError(
-        cause instanceof Error ? cause.message : "Factory updates are unavailable",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Factory updates are unavailable",
       ),
   });
 
@@ -152,7 +155,9 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
     },
     (cause) =>
       dependencies.setSyncError(
-        cause instanceof Error ? cause.message : "Ticket updates are unavailable",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Ticket updates are unavailable",
       ),
   );
 
@@ -170,7 +175,9 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
     () => refreshConversation(),
     (cause) =>
       dependencies.setSyncError(
-        cause instanceof Error ? cause.message : "Conversation updates are unavailable",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Conversation updates are unavailable",
       ),
   );
 
@@ -184,7 +191,7 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
     (signal) => dependencies.refreshKnowledge(signal),
     (cause) =>
       dependencies.setSyncError(
-        cause instanceof Error ? cause.message : "Wiki updates are unavailable",
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Wiki updates are unavailable",
       ),
   );
 
@@ -285,7 +292,9 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
       if (value) dependencies.acknowledgeConversation(value);
     } catch (cause) {
       dependencies.setError(
-        cause instanceof Error ? cause.message : "Browser recovery is unavailable.",
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "Browser recovery is unavailable.",
       );
     }
     dependencies.publishConversation(value ?? undefined);
@@ -308,7 +317,7 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
     // observedContext defines the subscription; refresh is a scoped read action.
     void untrack(refreshServerState).catch((cause) =>
       dependencies.setSyncError(
-        cause instanceof Error ? cause.message : "Shared updates could not load",
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Shared updates could not load",
       ),
     );
   });

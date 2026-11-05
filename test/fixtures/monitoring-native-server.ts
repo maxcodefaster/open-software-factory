@@ -1,7 +1,7 @@
 import { mock } from "bun:test";
 import { appendFile, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { monitoringNativeSource } from "./monitoring-native";
 

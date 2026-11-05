@@ -1,14 +1,17 @@
-import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import {
+  browserBootstrap,
+  browserFunction,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test("a newer background read cannot discard the exact autosave acknowledgement", async ({
   page,

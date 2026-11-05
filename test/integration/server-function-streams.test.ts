@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { createConversationService } from "../../apps/factory/src/project-agent/service";
 import { createAgentService } from "../../apps/factory/src/agent/service";
-import { CommandError } from "../../apps/factory/src/command-error";
 import type { ConversationView } from "../../apps/factory/src/api-contracts";
 import { agentViewSchema } from "../../apps/factory/src/api-contracts";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
+import { createConversationService } from "../../apps/factory/src/project-agent/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import {
   callFactoryFunction,
   compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
   factoryFunctionRequest,
 } from "../fixtures/server-functions";
 

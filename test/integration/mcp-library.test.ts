@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import type { MCPSecret } from "../../apps/factory/src/mcp/secrets";
-import { factoryProcess } from "../fixtures/factory-process";
 import type { MCPAssignment } from "../../packages/conversation-domain/src/mcp-library";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test("MCP library keeps private definitions private, grants exact read tools and fences changed or revoked access", async () => {

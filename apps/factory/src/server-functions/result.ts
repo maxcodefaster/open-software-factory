@@ -1,4 +1,5 @@
 import { APIRequestError } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 
 export type ServerResult<T> =
   | { ok: true; value: T }
@@ -22,6 +23,8 @@ export async function serverCall<T>(call: Promise<ServerResult<T>>): Promise<T> 
         409,
         "Factory was updated. Reload before continuing. An unconfirmed command is not repeated.",
       );
+    if (cause instanceof Error && plainErrorMessage(cause.message) !== cause.message)
+      throw new APIRequestError(503, plainErrorMessage(cause.message));
     throw cause;
   }
   if (!result.ok) throw new APIRequestError(result.status, result.message);

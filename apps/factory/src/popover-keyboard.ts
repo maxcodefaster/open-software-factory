@@ -65,7 +65,7 @@ export function bindPopoverKeyboard(
     (
       element.querySelector<HTMLElement>("input:not(:disabled)") ??
       element.querySelector<HTMLElement>(
-        '[aria-current="true"], [aria-current="page"], [aria-pressed="true"]',
+        '[aria-current="true"], [aria-current="page"], [aria-pressed="true"]:not(.background-option)',
       ) ??
       buttons()[0]
     )?.focus({ preventScroll: true });

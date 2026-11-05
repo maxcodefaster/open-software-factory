@@ -1,9 +1,9 @@
-import { test, expect } from "bun:test";
-import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { factoryProcess } from "../fixtures/factory-process";
-import type { SkillContent } from "../../packages/conversation-domain/src/skills";
+import { expect, test } from "bun:test";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { createSkillController } from "../../apps/factory/src/skills/controller";
+import type { SkillContent } from "../../packages/conversation-domain/src/skills";
+import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test("product authors keep a private cross-Project library; managers share exact copies and choices inherit", async () => {

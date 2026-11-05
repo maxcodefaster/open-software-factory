@@ -1,10 +1,10 @@
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
-import { createDatabase } from "../../packages/db/src/client";
-import { openProjectMenu } from "../fixtures/project-menu";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
+import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test("an uncertain background Interview stays visible without resending inference", async ({
   page,

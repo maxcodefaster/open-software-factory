@@ -400,9 +400,9 @@ test("personal conversation history keeps drafts scoped through selection and re
     // the picker during that restoration races its legitimate navigation close
     // and would hide a failure to retain the selected Project.
     await expect(page).toHaveURL(new RegExp(`/projects/${projectID}(?:[/?#]|$)`));
-    await expect(
-      page.getByRole("button", { name: "Open project menu", exact: true }),
-    ).toContainText("Conversation draft proof");
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toContainText(
+      "Conversation draft proof",
+    );
     if (!(await selector.isVisible()))
       await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await expect(selector).toHaveAttribute("data-context-id", fresh);

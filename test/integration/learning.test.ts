@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
-import { createLearningService } from "../../apps/factory/src/learning/service";
-import { createLearningWorker } from "../../apps/factory/src/learning/worker";
-import { collectLearningCases } from "../../apps/factory/src/learning/sources";
-import { calibratedResult } from "../fixtures/learning";
+import { retainLearningArtifactsIn } from "../../apps/factory/src/learning/artifacts";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
+import { createLearningService } from "../../apps/factory/src/learning/service";
+import { collectLearningCases } from "../../apps/factory/src/learning/sources";
+import { createLearningWorker } from "../../apps/factory/src/learning/worker";
 import type { LearningCase, LearningResult } from "../../packages/conversation-domain/src/learning";
-import { sampleLearningCase, learningCase } from "../../packages/conversation-domain/src/learning";
+import { learningCase, sampleLearningCase } from "../../packages/conversation-domain/src/learning";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import { retainLearningArtifactsIn } from "../../apps/factory/src/learning/artifacts";
+import { calibratedResult } from "../fixtures/learning";
 import { fixtureValue } from "../fixtures/value";
 import { verificationReceipt } from "../fixtures/verification";
 

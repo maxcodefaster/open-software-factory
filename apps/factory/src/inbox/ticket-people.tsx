@@ -1,5 +1,6 @@
 import { Portal } from "@solidjs/web";
 import { createEffect, createSignal, For, Show } from "solid-js";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
 import {
@@ -77,7 +78,7 @@ export function TicketPeople(props: {
         type="button"
         class="quiet-button ticket-person-trigger"
         ref={opener}
-        aria-label={props.value.responsibleId ? `Responsible: ${name()}` : "Add person"}
+        aria-label={props.value.responsibleId ? `Responsible: ${name()}` : "People, add person"}
         aria-haspopup="dialog"
         aria-expanded={open() ? "true" : "false"}
         aria-controls={panelID}
@@ -192,7 +193,11 @@ export function TicketAttentionControls(props: { ticketID: string; projectID?: s
       }
     } catch (cause) {
       if (read === generation)
-        setError(cause instanceof Error ? cause.message : "Ticket people could not be loaded.");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Ticket people could not be loaded.",
+        );
     }
   }
   createEffect(
@@ -225,7 +230,11 @@ export function TicketAttentionControls(props: { ticketID: string; projectID?: s
       }
     } catch (cause) {
       if (props.ticketID === ticketID)
-        setError(cause instanceof Error ? cause.message : "Your change was not saved. Try again.");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Your change was not saved. Try again.",
+        );
     } finally {
       setBusy(false);
     }

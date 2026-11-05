@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
@@ -13,6 +12,7 @@ import {
   runtimeIdentity,
 } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
+import { test } from "../fixtures/browser-test";
 import { requestFunction } from "../fixtures/server-functions";
 import { teardownFactoryProject } from "../support/factory-fixture";
 

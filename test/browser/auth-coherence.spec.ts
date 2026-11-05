@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 import { test } from "../fixtures/browser-test";
 import { luminance, rgb } from "../support/visual-contrast";
-import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 
 for (const width of [1440, 900, 390]) {
   test(`signed-out supporting text has a contrast floor at ${width}px`, async ({ page }) => {

@@ -1,21 +1,23 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { createAccessController } from "../../apps/factory/src/access/controller";
+import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { createMCPService } from "../../apps/factory/src/mcp/service";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
 import { createInputService } from "../../apps/factory/src/monitoring/service";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
 import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { factoryProcess } from "../fixtures/factory-process";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("compiled MCP and Input commands enforce current SQL authority, exact revisions, CAS and no inference on settings changes", async () => {

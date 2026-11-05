@@ -142,14 +142,14 @@ test("Settings scope chooser exposes one compact group instead of every scope at
   await scope.selectOption("project");
   await page.screenshot({ path: `${evidence}/compact-settings-1440.png` });
   await resize(page, { width: 390, height: 844 });
-  await page.getByRole("button", { name: "Choose settings page", exact: true }).click();
+  await page.getByRole("button", { name: /choose settings page$/i }).click();
   await expect(scope).toBeVisible();
   await expect(navigation.getByRole("button")).toHaveCount(6);
   await page.screenshot({ path: `${evidence}/compact-settings-390.png` });
   await scope.focus();
   await scope.selectOption("system");
   await expect(navigation).toBeHidden();
-  await page.getByRole("button", { name: "Choose settings page", exact: true }).click();
+  await page.getByRole("button", { name: /choose settings page$/i }).click();
   await expect(scope).toHaveValue("system");
   await navigation.getByRole("button", { name: "Company sign-in", exact: true }).click();
   await expect(page.getByRole("region", { name: "Company sign-in", exact: true })).toBeVisible();

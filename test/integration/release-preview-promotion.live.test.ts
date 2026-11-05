@@ -1,10 +1,9 @@
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { test } from "bun:test";
 import { expect as visible } from "@playwright/test";
 import { attemptsResponseSchema } from "../../apps/factory/src/api-contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { releaseInstallation } from "../fixtures/release-installation";
+import { callFactoryFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
 test.skipIf(!installation)(

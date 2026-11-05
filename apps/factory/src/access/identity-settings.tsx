@@ -2,6 +2,7 @@ import { createEffect, createSignal, For, Show } from "solid-js";
 import { z } from "zod";
 import { identityConfiguration } from "../../../../packages/identity-domain/src/configuration";
 import { protocolRequest } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import {
   activateIdentityConfiguration,
   getIdentityConfiguration,
@@ -34,7 +35,9 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
     try {
       await operation();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not update sign-in");
+      setError(
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Could not update sign-in",
+      );
     } finally {
       setBusy(false);
     }

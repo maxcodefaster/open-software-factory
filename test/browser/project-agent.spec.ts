@@ -1,12 +1,12 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { teardownFactoryProject } from "../support/factory-fixture";
+import { requestFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
+import { teardownFactoryProject } from "../support/factory-fixture";
 
 const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
 const password = process.env["FACTORY_ADMIN_PASSWORD"] ?? "factory-local-password";

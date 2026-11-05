@@ -1,6 +1,7 @@
 import { createEffect, createSignal, Show } from "solid-js";
 import type { z } from "zod";
 import type { deliverySettingsView } from "../../../../packages/change-domain/src/delivery";
+import { plainErrorMessage } from "../command-error";
 import { configureDelivery, getDeliverySettings } from "../server-functions/delivery";
 import { serverCall } from "../server-functions/result";
 
@@ -34,7 +35,11 @@ export function DeliverySettings(props: { projectID: string; active: boolean }) 
       }
     } catch (cause) {
       if (epoch === generation)
-        setError(cause instanceof Error ? cause.message : "Could not load Delivery settings.");
+        setError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Could not load Delivery settings.",
+        );
     }
   }
   createEffect(
@@ -83,7 +88,7 @@ export function DeliverySettings(props: { projectID: string; active: boolean }) 
       if (epoch === generation)
         setError(
           cause instanceof Error
-            ? cause.message
+            ? plainErrorMessage(cause.message)
             : "Delivery setting is unconfirmed. Retry the same decision.",
         );
     } finally {

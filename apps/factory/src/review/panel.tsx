@@ -22,6 +22,7 @@ import {
 import { APIRequestError } from "../api-client";
 import { attachmentText, readAttachmentContent } from "../attachments/composer";
 import { TextareaAttachments } from "../attachments/ui";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { markdownHTML } from "../markdown";
 import { bindPopoverKeyboard } from "../popover-keyboard";
@@ -519,7 +520,9 @@ export function ReviewPanel(props: {
           void refresh(true).catch(() => {});
         }
         setError(
-          cause instanceof Error ? cause.message : "Review could not save. Retry the same command.",
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Review could not save. Retry the same command.",
         );
       }
       return false;
@@ -573,7 +576,7 @@ export function ReviewPanel(props: {
         if (epoch === generation)
           setError(
             cause instanceof Error
-              ? cause.message
+              ? plainErrorMessage(cause.message)
               : "Original frame could not save. Your comment is retained.",
           );
         return;
@@ -821,7 +824,7 @@ export function ReviewPanel(props: {
   return (
     <section
       ref={surface}
-      class={`visual-review ${props.compact ? "compact" : ""}`}
+      class={`visual-review ${props.compact ? "compact" : ""}${!props.compact && !view() && !loadFailed() ? " is-loading" : ""}`}
       aria-label="Visual review"
     >
       <header class={`review-heading ${props.onActions ? "sr-only" : ""}`}>

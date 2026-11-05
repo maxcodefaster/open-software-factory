@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { pinnedOpenCode, observe } from "../fixtures/pinned-opencode";
-import { buildModelID } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
 import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
+import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage } from "../../apps/factory/src/usage/opencode";
-import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
+import { buildModelID } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
+import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 test.skipIf(process.env["FACTORY_RUN_USAGE_MODEL_PROOF"] !== "1")(
   "actual configured Coding model reports native consumption through the exact runtime artifact",

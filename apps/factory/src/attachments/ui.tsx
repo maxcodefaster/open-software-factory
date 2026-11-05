@@ -18,6 +18,7 @@ import {
   attachmentURL,
 } from "../../../../packages/conversation-domain/src/attachments";
 import { apiUpload } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import {
   beginAttachment,
@@ -411,7 +412,9 @@ export function AttachmentPicker(props: {
       drafts.update(key, {
         status: "",
         error: `${files[currentFile]?.name ?? "File"} was not attached. ${endSentence(
-          cause instanceof Error ? cause.message : "Upload failed. Choose the file again to retry.",
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Upload failed. Choose the file again to retry.",
         )} Your text and earlier attachments are unchanged.`,
         retryFiles: attempts.size ? files.slice(currentFile) : [],
       });

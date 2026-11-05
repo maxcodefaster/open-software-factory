@@ -1,6 +1,7 @@
 import { createMemo, createSignal, Errored, Loading, lazy, Match, Show, Switch } from "solid-js";
 import { defaultDesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import { loadBootstrap } from "./bootstrap/client";
+import { plainErrorMessage } from "./command-error";
 import { SignIn } from "./sign-in";
 
 const AuthenticatedFactory = lazy(async () => ({
@@ -17,10 +18,12 @@ export function Factory() {
   const opening = (message?: () => string, retry?: () => void) => (
     <main class="loading" data-background={defaultDesktopBackgroundKey}>
       <Show when={message} fallback={<span>Opening Factory</span>}>
-        <p role="alert">{message?.()}</p>
-        <button type="button" class="quiet-button" onClick={retry}>
-          Retry opening Factory
-        </button>
+        <div class="loading-error">
+          <p role="alert">{message?.()}</p>
+          <button type="button" class="quiet-button" onClick={retry}>
+            Retry opening Factory
+          </button>
+        </div>
       </Show>
     </main>
   );
@@ -29,7 +32,9 @@ export function Factory() {
       fallback={(cause, retry) =>
         opening(() => {
           const error = cause();
-          return error instanceof Error ? error.message : "Factory failed to load";
+          return plainErrorMessage(
+            error instanceof Error && error.message ? error.message : "Factory could not open.",
+          );
         }, retry)
       }
     >

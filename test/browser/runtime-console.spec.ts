@@ -1,8 +1,6 @@
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { requestFunction } from "../fixtures/server-functions";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
@@ -10,7 +8,9 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { requestFunction } from "../fixtures/server-functions";
 import { signIn, teardownFactoryProject } from "../support/factory-fixture";
 
 const repositoryURL = "http://127.0.0.1:33030/factory-mutation/runtime-fixture.git";

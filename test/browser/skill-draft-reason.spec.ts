@@ -15,7 +15,7 @@ test("a retained skill draft explains why Edit skill is unavailable", async ({ p
     .getByLabel("Name", { exact: true })
     .fill("Draft only");
   await library.getByRole("button", { name: "Back to library", exact: true }).click();
-  const tiles = library.getByRole("button", { name: /^Inspect / });
+  const tiles = library.locator("button.skill-tile");
   await expect(tiles.first()).toBeVisible();
   let checked = 0;
   for (const tile of await tiles.all()) {

@@ -53,12 +53,12 @@ for (const width of [1440, 768, 390]) {
     await page.setViewportSize({ width, height: 960 });
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
-    const title = page.getByRole("button", { name: "Edit Knowledge title", exact: true });
+    const title = page.getByRole("button", { name: /edit wiki title$/i });
     await expect(title).toHaveText("Invoice exports");
     const navigation = page.getByRole("complementary", { name: "Wiki navigation" });
     await expectGlass(page.locator(".workspace-window"));
     if (width <= 760) {
-      await page.getByRole("button", { name: "Browse Wiki pages", exact: true }).click();
+      await page.getByRole("button", { name: /browse wiki pages$/i }).click();
       await expect(navigation).toBeVisible();
       await expect(navigation).toHaveCSS("background-color", "rgb(252, 252, 248)");
       await capture(page, `wiki-menu-${width}`);
@@ -80,11 +80,11 @@ for (const width of [1440, 768, 390]) {
     await expect(edit).toBeFocused();
     await capture(page, `wiki-edit-menu-${width}`);
     await edit.press("Enter");
-    const pageTitle = page.getByRole("textbox", { name: "Knowledge page title", exact: true });
+    const pageTitle = page.getByRole("textbox", { name: "Wiki page title", exact: true });
     await expect(menu).toBeHidden();
     await expect(pageTitle).toBeFocused();
     await expect(pageTitle).toHaveValue("Billing rules");
-    await expect(page.getByRole("textbox", { name: "Knowledge body", exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Wiki body", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Page options", exact: true }).click();
     await expect(menu.getByRole("menuitem", { name: "Edit page", exact: true })).toHaveCount(0);
     await menu.getByRole("menuitem", { name: "Read page", exact: true }).click();
@@ -118,15 +118,15 @@ test("Wiki keeps body and title editing while repository documents stay read-onl
   page,
 }) => {
   await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
-  const body = page.getByRole("article", { name: "Edit Knowledge body", exact: true });
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  const body = page.getByRole("article", { name: "Edit Wiki body", exact: true });
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await body.focus();
   await body.press("Enter");
   await expect(editor).toBeVisible();
   await page.getByRole("button", { name: "Page options", exact: true }).click();
   await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
-  await page.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "Knowledge page title" })).toBeVisible();
+  await page.getByRole("button", { name: /edit wiki title$/i }).click();
+  await expect(page.getByRole("textbox", { name: "Wiki page title" })).toBeVisible();
   await page.getByRole("button", { name: "Page options", exact: true }).click();
   await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
   await body.click();
@@ -136,7 +136,7 @@ test("Wiki keeps body and title editing while repository documents stay read-onl
     page.getByRole("article", { name: "Repository document", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Page options", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Edit Knowledge title" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit Wiki title" })).toHaveCount(0);
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Open Project IDE", exact: true })).toHaveCount(0);
 });
@@ -147,10 +147,10 @@ test("a failed Wiki autosave retains the draft and retries only after an explici
   await page.clock.install();
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
-  const body = page.getByRole("article", { name: "Edit Knowledge body", exact: true });
+  const body = page.getByRole("article", { name: "Edit Wiki body", exact: true });
   await body.focus();
   await body.press("Enter");
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await editor.fill("A deliberately retained Wiki draft.");
   await page.clock.runFor(800);
   const attempts = () =>
@@ -389,11 +389,11 @@ test("Wiki uses the same link editor and restores its selection on Escape", asyn
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
-  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  await page.getByLabel("Edit Wiki body", { exact: true }).click();
+  const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await expect(editor).toBeVisible();
   const selected = await selectFirstWord(page, editor, 6, "Choose");
-  const toolbar = page.getByRole("toolbar", { name: "Knowledge selection formatting" });
+  const toolbar = page.getByRole("toolbar", { name: "Wiki selection formatting" });
   await toolbar.getByRole("button", { name: "Link", exact: true }).click();
   const link = toolbar.getByRole("textbox", { name: "Link address", exact: true });
   await expect(link).toBeFocused();

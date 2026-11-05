@@ -10,7 +10,7 @@ export async function chooseSettingsScope(page: Page, scope: SettingsScope) {
   const navigation = workspace.getByRole("navigation", { name: "Settings navigation" });
   await expect(workspace).toBeVisible();
   if (!(await navigation.isVisible()))
-    await workspace.getByRole("button", { name: "Choose settings page", exact: true }).click();
+    await workspace.getByRole("button", { name: /choose settings page$/i }).click();
   const picker = navigation.getByRole("combobox", { name: "Settings scope", exact: true });
   await expect(picker).toBeVisible();
   if ((await picker.inputValue()) === scope) return;
@@ -23,9 +23,7 @@ export async function chooseSettingsScope(page: Page, scope: SettingsScope) {
   await expect(
     workspace.getByRole("status").filter({ hasText: /^Opening settings…$/ }),
   ).toHaveCount(0);
-  if (
-    await workspace.getByRole("button", { name: "Choose settings page", exact: true }).isVisible()
-  )
+  if (await workspace.getByRole("button", { name: /choose settings page$/i }).isVisible())
     await expect(workspace.locator('nav[aria-label="Settings navigation"]')).toHaveAttribute(
       "data-navigation-open",
       "false",
@@ -59,7 +57,7 @@ export async function chooseSettingsPage(page: Page, label: string, group?: stri
   const navigation = workspace.getByRole("navigation", { name: "Settings navigation" });
   await expect(workspace).toBeVisible();
   if (!(await navigation.isVisible()))
-    await workspace.getByRole("button", { name: "Choose settings page", exact: true }).click();
+    await workspace.getByRole("button", { name: /choose settings page$/i }).click();
   await expect(navigation).toBeVisible();
   const section = group
     ? navigation

@@ -1,6 +1,5 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import {
@@ -9,6 +8,7 @@ import {
   environmentMetadata,
   replaceEnvironment,
 } from "../../packages/project-domain/src/environment";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";

@@ -332,7 +332,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
 
   await search.fill("hugo");
   await expect(names).toHaveText(["HUGO_VERSION"]);
-  await area.getByRole("button", { name: "Filter and sort variables", exact: true }).click();
+  await area.getByRole("button", { name: /^Filter & sort/ }).click();
   await area.getByRole("combobox", { name: "Filter by usage" }).selectOption("runtime");
   await expect(area.getByText("No variables match these filters.")).toBeVisible();
   await area.getByRole("button", { name: "Clear filters", exact: true }).click();
@@ -510,10 +510,10 @@ test("variable rows support search, filters, sorting, focused editing, imports a
     await area.evaluate((element) => element.scrollWidth - element.clientWidth),
   ).toBeLessThanOrEqual(1);
   await page.screenshot({ path: `${evidence}/long-name-phone.png` });
-  await area.getByRole("button", { name: "Filter and sort variables", exact: true }).click();
+  await area.getByRole("button", { name: /^Filter & sort/ }).click();
   await expect(area.getByRole("combobox", { name: "Filter by usage" })).toBeVisible();
   await page.screenshot({ path: `${evidence}/filters-phone.png` });
-  await area.getByRole("button", { name: "Filter and sort variables", exact: true }).click();
+  await area.getByRole("button", { name: /^Filter & sort/ }).click();
   await editImage.click();
   await expect(registry).toBeVisible();
   await registry.scrollIntoViewIfNeeded();

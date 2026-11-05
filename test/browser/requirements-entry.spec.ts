@@ -1,13 +1,12 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const observer = process.env["FACTORY_REQUIREMENTS_MODEL_OBSERVER"];
 const captures = ".factory/test-results/explicit-requirements";

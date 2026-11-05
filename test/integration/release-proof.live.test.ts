@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import {
@@ -19,7 +20,6 @@ import { releasePlanning } from "../fixtures/release-planning";
 import { releaseProductVisuals, releaseVisuals } from "../fixtures/release-visuals";
 import { releaseWorkspace } from "../fixtures/release-workspace";
 import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const installationName = process.env["FACTORY_RELEASE_INSTALLATION"];
 const phase = process.env["FACTORY_RELEASE_PHASE"] ?? "setup";
@@ -381,12 +381,12 @@ test.skipIf(!installationName)(
           return generation;
         },
         (value) => value?.state === "succeeded" || value?.state === "failed",
-        "Initial real Knowledge generation did not finish",
+        "Initial real Wiki generation did not finish",
         180_000,
       );
       expect(knowledge?.state).toBe("succeeded");
       expect(knowledge?.count ?? 0).toBeGreaterThan(0);
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await page.getByRole("button", { name: "Wiki", exact: true }).click();
       await visible(page.locator(".knowledge-workspace")).toBeVisible();
       await page.screenshot({ path: resolve(fixture.evidence, "knowledge-wide.png") });
       await fixture.save("setup", performance.now() - started);

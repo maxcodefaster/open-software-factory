@@ -2,6 +2,7 @@ import { type Accessor, createEffect, createSignal, onCleanup } from "solid-js";
 import type { createAgentCommandIds } from "../agent-command-ids";
 import { resizeComposer } from "../assistant-interaction";
 import { readAttachmentContent, restoreAttachmentContent } from "../attachments/composer";
+import { plainErrorMessage } from "../command-error";
 export function createComposerState(input: {
   userID: string;
   commands: ReturnType<typeof createAgentCommandIds>;
@@ -77,7 +78,9 @@ export function createComposerState(input: {
           setRestoredMessageScope(restoredCommand?.draft ? key : undefined);
         } catch (cause) {
           input.onError(
-            cause instanceof Error ? cause.message : "Browser recovery is unavailable.",
+            cause instanceof Error
+              ? plainErrorMessage(cause.message)
+              : "Browser recovery is unavailable.",
           );
         }
       },

@@ -4,6 +4,7 @@ import {
   type ProjectSetupView,
   projectSetupFields,
 } from "../../../../packages/project-domain/src/setup";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { serverCall } from "../server-functions/result";
 import {
@@ -45,7 +46,9 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
       if (value && navigation === admittedNavigation) setDraft(value);
     } catch (error) {
       setError(
-        error instanceof Error ? error.message : "Setup is unavailable. Your draft is retained.",
+        error instanceof Error
+          ? plainErrorMessage(error.message)
+          : "Setup is unavailable. Your draft is retained.",
       );
     } finally {
       setPending(false);
@@ -249,7 +252,9 @@ export function ProjectSetupPanel(props: {
         } else remember();
       })
       .catch((error: unknown) => {
-        setup.setError(error instanceof Error ? error.message : "Draft could not be saved.");
+        setup.setError(
+          error instanceof Error ? plainErrorMessage(error.message) : "Draft could not be saved.",
+        );
       })
       .finally(() => {
         setSaving(false);

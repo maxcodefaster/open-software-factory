@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { kubernetesCommand } from "./config";
 import { createKubernetesClient, type KubernetesClient } from "./client";
-import { renderDeveloperIDEResources, type DeveloperIDEResources } from "./developer-ide-manifest";
+import { kubernetesCommand } from "./config";
+import { type DeveloperIDEResources, renderDeveloperIDEResources } from "./developer-ide-manifest";
 import { startServiceForward } from "./service-forward";
 
 const metadata = z.object({
@@ -204,4 +204,5 @@ export function createDeveloperIDEClient(
     },
   };
 }
+
 import { runCommand } from "./command";

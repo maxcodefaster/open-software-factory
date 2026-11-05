@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { skillContentInput } from "./skills";
-import { resolveLibraryChoice, librarySkillIds, type LibraryChoice } from "./skill-library";
-import { requirementsInterviewSkill } from "../../../apps/factory/src/skills/reviewed";
-import { starterSkills } from "../../../apps/factory/src/skills/starters";
 import { previewSkillImport } from "../../../apps/factory/src/skills/import";
 import {
-  nativeSkillManifest,
   invokedSkills,
+  nativeSkillManifest,
   observedNativeSkillIds,
 } from "../../../apps/factory/src/skills/native";
+import { requirementsInterviewSkill } from "../../../apps/factory/src/skills/reviewed";
+import { starterSkills } from "../../../apps/factory/src/skills/starters";
 import { fixtureValue } from "../../../test/fixtures/value";
+import { type LibraryChoice, librarySkillIds, resolveLibraryChoice } from "./skill-library";
+import { skillContentInput } from "./skills";
 
 test("per-skill choices inherit later defaults, lock required versions, and reset one override", () => {
   const id = crypto.randomUUID();

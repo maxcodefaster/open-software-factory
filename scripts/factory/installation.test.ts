@@ -1,20 +1,20 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, symlink, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
+  composeEnvironment,
   createInstallation,
-  loadInstallation,
   installationDirectory,
   installationName,
+  loadInstallation,
   parseInstallation,
-  composeEnvironment,
 } from "./installation";
 import {
+  inspectCurrentContainers,
+  requireComposePins,
   requireModelConfiguration,
   requirePinnedImage,
-  requireComposePins,
-  inspectCurrentContainers,
 } from "./preflight";
 
 test("ownership inspection reconciles vanished containers, but never ignores inspection failure", async () => {

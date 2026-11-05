@@ -1,13 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import {
-  repositoryDocumentsSchema,
   openRepositoryDocumentSchema,
+  repositoryDocumentsSchema,
 } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
@@ -161,7 +161,7 @@ test("Wiki page and revision actions share text controls and keep history keyboa
     });
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await page.getByRole("button", { name: "Review process", exact: true }).click();
     await expect(page.locator(".knowledge-article")).toContainText("Inspect the normal flow");
     for (const width of widths) {
@@ -186,7 +186,7 @@ test("Wiki page and revision actions share text controls and keep history keyboa
     await expect(page.locator(".knowledge-article:visible")).toContainText(
       "Earlier saved guidance",
     );
-    await expect(page.getByRole("complementary", { name: "Knowledge history" })).toBeHidden();
+    await expect(page.getByRole("complementary", { name: "Wiki history" })).toBeHidden();
     await page.getByRole("button", { name: "Code docs", exact: true }).click();
     await page.getByRole("button", { name: "README.md", exact: true }).click();
     for (const width of widths) {
@@ -214,9 +214,7 @@ test("Settings libraries share overflow-first actions, preserve drafts and keep 
   const navigation = await openSettings(page);
   await chooseSettings(navigation, "Skills");
   const skills = page.locator(".skill-library:not(.mcp-library)");
-  await expect(
-    skills.getByRole("button", { name: "Inspect Frontend design", exact: true }),
-  ).toBeVisible();
+  await expect(skills.getByRole("button", { name: /^Frontend design/ })).toBeVisible();
   for (const width of widths) {
     await page.setViewportSize({ width, height: 960 });
     const bar = await actionBar(page, "Skills library actions", "Add skill");
@@ -242,7 +240,7 @@ test("Settings libraries share overflow-first actions, preserve drafts and keep 
   await editor.getByLabel("Name", { exact: true }).fill("Retained action draft");
   await editor.getByRole("button", { name: "Back to library", exact: true }).click();
   await actionBar(page, "Skills library actions", "Resume draft");
-  await skills.getByRole("button", { name: "Inspect Frontend design", exact: true }).click();
+  await skills.getByRole("button", { name: /^Frontend design/ }).click();
   const existingSkillActions = await actionBar(page, "Skill actions", "Edit skill");
   await expect(existingSkillActions.getByRole("button", { name: "Edit skill" })).toBeDisabled();
   await capture(page, "skill-detail");
@@ -374,9 +372,7 @@ test.describe("touch page actions", () => {
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
     const navigation = await openSettings(page);
     await chooseSettings(navigation, "Skills");
-    await expect(
-      page.getByRole("button", { name: "Inspect Frontend design", exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Frontend design/ })).toBeVisible();
     const bar = await actionBar(page, "Skills library actions", "Add skill");
     for (const control of await bar.locator(".workspace-action").all()) {
       expect((await bounds(control)).height).toBeGreaterThanOrEqual(44);

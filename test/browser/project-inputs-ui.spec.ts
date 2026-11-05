@@ -201,7 +201,7 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
       "aria-current",
       "page",
     );
-    await page.getByRole("button", { name: "Inspect Sentry", exact: true }).click();
+    await page.getByRole("button", { name: /^Sentry source\.example/ }).click();
     await page.getByRole("button", { name: "Use for Input", exact: true }).click();
     await expect(editor.getByRole("button", { name: "Remove Sentry", exact: true })).toBeVisible();
     await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Product feedback");
@@ -223,9 +223,7 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     expect(commands[0]).toEqual(commands[1]);
     expect(view.hooks).toHaveLength(1);
     const secret = inputs.getByRole("region", { name: "New webhook URL" });
-    await expect(
-      page.getByRole("button", { name: "Choose settings page", exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /choose settings page$/i })).toBeVisible();
     await expect(secret.getByLabel("Webhook URL")).toHaveAttribute("type", "password");
     await expect(secret.getByRole("heading")).toBeFocused();
     await secret.getByRole("button", { name: "Reveal URL", exact: true }).click();
@@ -449,9 +447,7 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         await expect(inputs.getByRole("alert")).toHaveText(/temporarily unavailable/);
         await page.screenshot({ path: `${evidence}/error-${device.name}.png` });
         if (device.width <= 760)
-          await expect(
-            page.getByRole("button", { name: "Choose settings page", exact: true }),
-          ).toBeVisible();
+          await expect(page.getByRole("button", { name: /choose settings page$/i })).toBeVisible();
         await chooseSettingsPage(page, "MCP connections");
         await expect(page.getByRole("searchbox", { name: "Search MCP connections" })).toBeVisible();
         await chooseSettingsPage(page, "Inputs");

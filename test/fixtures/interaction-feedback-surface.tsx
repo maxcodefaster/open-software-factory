@@ -173,6 +173,9 @@ function Ticket() {
       version: 1,
     })),
   );
+  const [documents, setDocuments] = createSignal<Record<string, { id: string; ordinal: number }>>(
+    {},
+  );
   const drafts = new Map<string, TicketDraft>();
   const save: TicketWorkspaceProps["onSaveDocument"] = async (input) => {
     const ticketID = fixtureValue(tickets()[selected()], "tickets()[selected()]").id;
@@ -184,7 +187,11 @@ function Ticket() {
         response.ok ? ticketDocumentSaveSchema.parse(await response.json()) : undefined,
       )
       .catch(() => undefined);
-    if (saved)
+    if (saved) {
+      setDocuments((previous) => ({
+        ...previous,
+        [ticketID]: { id: saved.id, ordinal: (previous[ticketID]?.ordinal ?? 0) + 1 },
+      }));
       setTickets((previous) =>
         previous.map((ticket) =>
           ticket.id === ticketID
@@ -197,6 +204,7 @@ function Ticket() {
             : ticket,
         ),
       );
+    }
     return saved;
   };
   return (
@@ -208,7 +216,23 @@ function Ticket() {
         current={{
           ticket: fixtureValue(tickets()[selected()], "tickets()[selected()]"),
           revisions: [],
-          documentRevisions: [],
+          documentRevisions: (() => {
+            const ticket = fixtureValue(tickets()[selected()], "tickets()[selected()]");
+            const document = documents()[ticket.id];
+            return document
+              ? [
+                  {
+                    id: document.id,
+                    ordinal: document.ordinal,
+                    canonicalContent: "",
+                    contentDigest: document.id,
+                    title: ticket.title,
+                    description: ticket.description,
+                    requirementRevisionId: null,
+                  },
+                ]
+              : [];
+          })(),
           origin: null,
           followUps: [],
         }}

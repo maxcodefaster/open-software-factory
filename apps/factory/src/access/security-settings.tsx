@@ -1,5 +1,6 @@
 import { createEffect, createSignal, Show } from "solid-js";
 import { emptyResponseSchema, protocolRequest } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import {
   endOwnSessions,
   getPasswordChangeState,
@@ -25,7 +26,11 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
       void serverCall(getSecurityPolicy({ data: [] }))
         .then(setPolicy)
         .catch((cause) =>
-          setError(cause instanceof Error ? cause.message : "Could not load security settings"),
+          setError(
+            cause instanceof Error
+              ? plainErrorMessage(cause.message)
+              : "Could not load security settings",
+          ),
         );
       void serverCall(getPasswordChangeState({ data: [] }))
         .then((value) => setCanChangePassword(value.available))
@@ -39,7 +44,9 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
       await serverCall(endOwnSessions({ data: [] }));
       location.reload();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not end sessions");
+      setError(
+        cause instanceof Error ? plainErrorMessage(cause.message) : "Could not end sessions",
+      );
       setBusy(false);
     }
   }
@@ -52,7 +59,7 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
       if (destination.forgeLogoutURL) location.assign(destination.forgeLogoutURL);
       else location.reload();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not sign out");
+      setError(cause instanceof Error ? plainErrorMessage(cause.message) : "Could not sign out");
       setBusy(false);
     }
   }

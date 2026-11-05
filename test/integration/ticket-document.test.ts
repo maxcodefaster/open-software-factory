@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { createHash } from "node:crypto";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { fixture, buildModelID } from "../fixtures/change-agent-turns";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test("partial manual drafts acknowledge the next write base without making incomplete requirements implementable", async () => {

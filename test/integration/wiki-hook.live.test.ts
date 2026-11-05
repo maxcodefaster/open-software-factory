@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { createWikiSourceUpdates } from "../../apps/factory/src/knowledge/source-updates";
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
+import { createForgejoClient } from "../../packages/forge/src/forge";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test.skipIf(process.env["FACTORY_WIKI_HOOK_LIVE"] !== "1")(
   "real Forgejo push reaches signed durable Wiki admission without Click-Ops",

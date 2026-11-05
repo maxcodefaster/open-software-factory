@@ -472,7 +472,7 @@ test("responsibility is optional and mentions work in the real feedback composer
   await expect(
     page.getByRole("button", { name: "Inbox, 5 items need your attention" }),
   ).toBeVisible();
-  await source.getByRole("button", { name: "Add person", exact: true }).click();
+  await source.getByRole("button", { name: /add person$/i }).click();
   const picker = page.getByRole("dialog", { name: "Assign responsibility" });
   const search = picker.getByRole("searchbox", { name: "Search Project members" });
   await expect(search).toBeFocused();
@@ -531,7 +531,7 @@ test("the people picker supports changing, clearing, empty search and dismissal 
   await page.goto(`${origin}/inbox.html`);
   await page.getByRole("button", { name: /Billing.*Answer the Agent/ }).click();
   const source = page.getByRole("region", { name: "Exact Ticket source" });
-  const add = source.getByRole("button", { name: "Add person", exact: true });
+  const add = source.getByRole("button", { name: /add person$/i });
   const picker = page.getByRole("dialog", { name: "Assign responsibility" });
   await add.click();
   await picker.getByRole("searchbox").fill("Nobody matches");
@@ -601,12 +601,12 @@ for (const state of [
       if (state === "unavailable-person") {
         await expect(trigger).toHaveAccessibleName("Responsible: Unavailable member");
         await picker.getByRole("button", { name: "Not assigned", exact: true }).click();
-        await expect(trigger).toHaveAccessibleName("Add person");
+        await expect(trigger).toHaveAccessibleName("People, add person");
       }
       if (state === "people-error") {
         await picker.getByRole("button", { name: "Lisa Product", exact: true }).click();
         await expect(source.getByRole("alert")).toContainText("Your change was not saved");
-        await expect(trigger).toHaveAccessibleName("Add person");
+        await expect(trigger).toHaveAccessibleName("People, add person");
         await expect(trigger).toBeFocused();
         await trigger.click();
         await expect(
@@ -635,7 +635,7 @@ test("assignment works by touch with a typed name and a viewport-contained picke
     await page.goto(`${origin}/inbox.html`);
     await page.getByRole("button", { name: /Billing.*Answer the Agent/ }).tap();
     const source = page.getByRole("region", { name: "Exact Ticket source" });
-    await source.getByRole("button", { name: "Add person", exact: true }).tap();
+    await source.getByRole("button", { name: /add person$/i }).tap();
     const picker = page.getByRole("dialog", { name: "Assign responsibility" });
     await picker.getByRole("searchbox").fill("Tom");
     const person = picker.getByRole("button", { name: "Tom Development", exact: true });

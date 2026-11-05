@@ -282,10 +282,10 @@ for (const requirementsPath of ["manual", "interview"] as const)
         SELECT id,title FROM factory.knowledge_page WHERE project_id=${projectID} ORDER BY created_at LIMIT 1`;
         const note = `Human release note ${runID}: contact the release owner before production.`;
         if (wiki) {
-          await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+          await page.getByRole("button", { name: "Wiki", exact: true }).click();
           await page.getByRole("button", { name: wiki.title, exact: true }).click();
-          await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-          const wikiEditor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+          await page.getByLabel("Edit Wiki body", { exact: true }).click();
+          const wikiEditor = page.getByRole("textbox", { name: "Wiki body", exact: true });
           await wikiEditor.press("ControlOrMeta+End");
           await wikiEditor.press("Enter");
           await wikiEditor.pressSequentially(note);
@@ -637,9 +637,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
         >`SELECT current_body AS body,title FROM factory.knowledge_page WHERE id=${wiki.id}`;
         expect(retainedNote?.body).toContain(note);
         if (!retainedNote) throw new Error("The original Wiki page is missing after delivery");
-        await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+        await page.getByRole("button", { name: "Wiki", exact: true }).click();
         await page.getByRole("button", { name: retainedNote.title, exact: true }).click();
-        await visible(page.getByLabel("Edit Knowledge body", { exact: true })).toContainText(note);
+        await visible(page.getByLabel("Edit Wiki body", { exact: true })).toContainText(note);
         await captureFactory("07-wiki-note-preserved");
         expect(pageErrors).toEqual([]);
         result["status"] = "passed";

@@ -95,7 +95,7 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     await database.client`INSERT INTO factory.epic(id,project_id,title,description,created_by)
       VALUES(${epic},${project},'Older invoice work','Retained history',${fixtureValue(administrator, "administrator").id})`;
     await database.client`UPDATE factory.ticket SET epic_id=${epic},version=version+1 WHERE id=${oldTicket}`;
-    await expect(page.getByRole("button", { name: "Open project menu", exact: true })).toHaveText(
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toHaveText(
       "Shared Zero proof",
     );
     await expect(
@@ -179,7 +179,7 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     await expect(
       page.locator(".ticket-card-body").filter({ hasText: "Invoice flow updated elsewhere" }),
     ).toBeVisible();
-    await colleague.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await colleague.getByRole("button", { name: "Wiki", exact: true }).click();
     await expect(
       colleague.getByRole("button", { name: "Create Project Wiki", exact: true }),
     ).toBeEnabled();
@@ -205,7 +205,7 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
       colleague.getByRole("button", { name: "A invoice overview revised", exact: true }),
     ).toBeVisible();
     expect(frames.join("")).not.toContain("Inactive Wiki update stays out of sync");
-    await colleague.getByRole("button", { name: "Close Knowledge", exact: true }).click();
+    await colleague.getByRole("button", { name: "Close Wiki", exact: true }).click();
     await page.getByRole("button", { name: "Open Epic Older invoice work", exact: true }).click();
     const folder = page.getByRole("dialog", { name: "Older invoice work", exact: true });
     await expect(folder).toContainText("No Tickets in the loaded pages");
@@ -337,8 +337,10 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     await page.screenshot({ path: `${evidence}/sync-error-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: `${evidence}/sync-error-390.png`, fullPage: true });
+    const staleSocket = socket;
     await sync.getByRole("button", { name: "Retry sync", exact: true }).click();
     await expect(sync).toHaveCount(0);
+    await expect.poll(() => socket !== staleSocket).toBe(true);
     await expect(page.getByLabel("Ticket title", { exact: true })).toHaveValue(
       "Retain my uncreated draft",
     );

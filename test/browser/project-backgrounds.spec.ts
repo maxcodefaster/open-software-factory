@@ -2,16 +2,16 @@ import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { desktopBackgrounds } from "../../apps/factory/src/artworks";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
-import { luminance } from "../support/visual-contrast";
 import { fixtureValue } from "../fixtures/value";
+import { luminance } from "../support/visual-contrast";
 
 test("Project backgrounds stay shared and persistent with a compact, expandable artwork picker", async ({
   page,
@@ -86,7 +86,7 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
     await expect(desktop(target)).toBeVisible();
   };
   const selectProject = async (target: Page, slug: string) => {
-    if (!(await target.getByRole("button", { name: "Open project menu", exact: true }).isVisible()))
+    if (!(await target.getByRole("button", { name: /open project menu$/i }).isVisible()))
       await target.getByRole("button", { name: "Settings", exact: true }).click();
     await openProjectMenu(target);
     await target
@@ -171,6 +171,9 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(choices(page)).toHaveCount(2);
+    await expect(page.getByRole("button", { name: "Open settings", exact: true })).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
     await expect(choices(page).first()).toBeFocused();
     await expect(picker(page).locator(".background-peek")).toHaveAttribute("aria-hidden", "true");
     await expect(expand(page)).toHaveAttribute("aria-controls", "background-options");

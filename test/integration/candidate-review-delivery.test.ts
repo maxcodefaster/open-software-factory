@@ -1,10 +1,16 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
-import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
+import { createDeliveryService } from "../../apps/factory/src/delivery/service";
+import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
+import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import {
   type CandidateReviewResult,
   candidateReviewResultInput,
@@ -13,14 +19,11 @@ import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
-import { createVisualReviewController } from "../../apps/factory/src/review/controller";
-import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
-import { createAccessController } from "../../apps/factory/src/access/controller";
-import { createDeliveryService } from "../../apps/factory/src/delivery/service";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 async function setup(autofix = false) {

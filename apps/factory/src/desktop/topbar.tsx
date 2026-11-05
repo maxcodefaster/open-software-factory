@@ -140,7 +140,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
             <button
               type="button"
               class="context-button project-selector"
-              aria-label="Open project menu"
+              aria-label={`${model.selectedProject()?.name ?? "Choose project"}, open project menu`}
               aria-expanded={model.projectMenuOpen() ? "true" : "false"}
               aria-controls="project-popover"
               title={model.selectedProject()?.name ?? "Choose project"}
@@ -257,7 +257,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
         />
         <Show when={!model.setupVisible() && model.selectedProject()}>
           <DockButton
-            label="Knowledge"
+            label="Wiki"
             icon="knowledge"
             active={model.workspaceVisible() && model.workspaceView() === "knowledge"}
             open={model.workspaceTabs().some((tab) => tab.view === "knowledge")}

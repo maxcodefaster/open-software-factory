@@ -1003,7 +1003,10 @@ dt {
   align-items: center;
   gap: var(--space-2);
   padding-inline: var(--space-3);
-  color: var(--color-ink-muted);
+  border-radius: var(--radius-control);
+  color: var(--color-ink);
+  background: var(--material-chrome);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
 }
 
 .history-count {
@@ -1303,6 +1306,15 @@ dt {
   height: 100%;
   color: var(--muted-ink);
   text-align: center;
+}
+
+.desktop-empty > p {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-control);
+  color: var(--color-ink);
+  background: var(--material-chrome);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
 }
 
 .modal-backdrop {
@@ -2769,6 +2781,27 @@ dt {
 .agent-editing-confirmation {
   margin-top: var(--space-2);
 }
+.loading-error {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  max-width: min(28rem, calc(100vw - var(--space-8)));
+  padding: var(--space-5);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-lg);
+  color: var(--color-ink);
+  background: var(--material-chrome);
+  box-shadow: var(--shadow-control);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
+  font: var(--weight-regular) var(--text-md) / var(--leading-body) var(--font-interface);
+  letter-spacing: normal;
+  text-align: center;
+  text-transform: none;
+}
+.loading-error > p {
+  margin: 0;
+}
+
 .loading::before,
 .signin::before {
   position: absolute;
@@ -4174,7 +4207,7 @@ dt {
 }
 
 .document-link-fields input::placeholder {
-  color: var(--color-ink-muted);
+  color: var(--color-ink-faint);
   opacity: 1;
 }
 

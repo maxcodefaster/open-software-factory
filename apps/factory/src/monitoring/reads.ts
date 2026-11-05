@@ -2,6 +2,7 @@ import { type Accessor, createEffect, createMemo, createSignal, untrack } from "
 import type { z } from "zod";
 import type { MCPLibraryView } from "../../../../packages/conversation-domain/src/mcp-library";
 import type { monitoringView } from "../../../../packages/conversation-domain/src/monitoring";
+import { plainErrorMessage } from "../command-error";
 import { getProjectInputs } from "../server-functions/inputs";
 import { getMCPLibrary } from "../server-functions/mcp";
 import { serverCall } from "../server-functions/result";
@@ -43,7 +44,9 @@ export function createInputReads(
       }
     } catch (cause) {
       if (current())
-        setInputError(cause instanceof Error ? cause.message : "Inputs could not load.");
+        setInputError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Inputs could not load.",
+        );
     } finally {
       if (current()) setInputBusy(false);
     }
@@ -65,7 +68,9 @@ export function createInputReads(
       }
     } catch (cause) {
       if (current())
-        setSourceError(cause instanceof Error ? cause.message : "Sources could not load.");
+        setSourceError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Sources could not load.",
+        );
     } finally {
       if (current()) setSourceBusy(false);
     }

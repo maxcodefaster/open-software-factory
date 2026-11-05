@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import type { LearningView } from "../../../../packages/conversation-domain/src/learning";
 import { APIRequestError } from "../api-client";
+import { plainErrorMessage } from "../command-error";
 import {
   decideLearning,
   getLearning,
@@ -36,7 +37,7 @@ export function LearningSettings(props: {
         version,
         error:
           cause instanceof APIRequestError
-            ? cause.message
+            ? plainErrorMessage(cause.message)
             : "Monitoring could not be loaded. Check your connection and refresh.",
       }),
     );
@@ -109,7 +110,7 @@ export function LearningSettings(props: {
       if (generation === epoch)
         setError(
           cause instanceof Error
-            ? cause.message
+            ? plainErrorMessage(cause.message)
             : "The command is unconfirmed. Retry the same action or refresh.",
         );
     } finally {

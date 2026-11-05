@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Access commands bind actors, retain Fresh Auth and maintenance, and reject forged account/membership inputs", async () => {
   const origin = "https://factory.test";

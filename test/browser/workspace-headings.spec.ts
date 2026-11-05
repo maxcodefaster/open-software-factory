@@ -1,12 +1,11 @@
-import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, type Locator } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const evidence = ".factory/test-results/workspace-headings";
@@ -119,7 +118,7 @@ test("document titles share their action row and remain editable, wrapping and k
       );
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
     await page.getByRole("button", { name: "Onboarding guide", exact: true }).click();
     const wiki = page.locator(".knowledge-document:visible");
     for (const width of [1440, 1024, 760, 390, 320]) {
@@ -134,8 +133,8 @@ test("document titles share their action row and remain editable, wrapping and k
     const longTitle =
       "Onboarding guide with a long but readable title for project contributors reviewing the exact implementation and delivery";
     await page.setViewportSize({ width: 1440, height: 900 });
-    await wiki.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
-    const titleField = wiki.getByRole("textbox", { name: "Knowledge page title", exact: true });
+    await wiki.getByRole("button", { name: /edit wiki title$/i }).click();
+    const titleField = wiki.getByRole("textbox", { name: "Wiki page title", exact: true });
     await titleField.fill(longTitle);
     await expect
       .poll(async () => {
@@ -153,11 +152,11 @@ test("document titles share their action row and remain editable, wrapping and k
     await page.screenshot({ path: `${evidence}/wiki-edit-long-390.png` });
     await wiki.getByRole("button", { name: "Page options", exact: true }).click();
     await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
-    await expect(wiki.getByRole("button", { name: "Edit Knowledge title" })).toHaveText(longTitle);
+    await expect(wiki.getByRole("button", { name: "Edit Wiki title" })).toHaveText(longTitle);
     await page.setViewportSize({ width: 1440, height: 900 });
     await wiki.getByRole("button", { name: "Page options", exact: true }).click();
     await page.getByRole("menuitem", { name: "History", exact: true }).click();
-    const history = page.getByRole("complementary", { name: "Knowledge history", exact: true });
+    const history = page.getByRole("complementary", { name: "Wiki history", exact: true });
     await history.locator(".version-history-item").last().click();
     await expect(
       page.getByRole("button", { name: "Restore this version", exact: true }),

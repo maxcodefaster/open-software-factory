@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
+import type { LearningCase, LearningEdit } from "../../packages/conversation-domain/src/learning";
 import type { createDatabase } from "../../packages/db/src/client";
-import type { LearningEdit, LearningCase } from "../../packages/conversation-domain/src/learning";
 
 export async function retainedEditProposal(
   database: ReturnType<typeof createDatabase>,

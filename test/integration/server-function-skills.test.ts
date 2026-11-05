@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
 import type { SkillContent, SkillRevision } from "../../packages/conversation-domain/src/skills";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Skill functions bind the actor, validate exact revisions and fence writes without browser-owned work", async () => {
   const origin = "https://factory.test",

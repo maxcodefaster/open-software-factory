@@ -11,6 +11,7 @@ import {
   recommendedMCPs,
   resolveMCPChoice,
 } from "../../../../packages/conversation-domain/src/mcp-library";
+import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { monitoringSourceAvailable } from "../monitoring/sources";
 import {
@@ -176,7 +177,9 @@ export function MCPLibrary(props: {
       return result;
     } catch (cause) {
       if (current === sequence)
-        setReadError(cause instanceof Error ? cause.message : "Could not load connections.");
+        setReadError(
+          cause instanceof Error ? plainErrorMessage(cause.message) : "Could not load connections.",
+        );
     } finally {
       if (current === sequence && !quiet) setLoading(false);
     }
@@ -192,7 +195,11 @@ export function MCPLibrary(props: {
       await load(props.projectId);
       return true;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The MCP action failed. Try again.");
+      setError(
+        cause instanceof Error
+          ? plainErrorMessage(cause.message)
+          : "The MCP action failed. Try again.",
+      );
       return false;
     } finally {
       setBusy(false);
@@ -551,7 +558,6 @@ export function MCPLibrary(props: {
               }}
               type="button"
               class="workspace-action skill-filter-toggle"
-              aria-label="Filters"
               aria-expanded={filters() ? "true" : "false"}
               aria-controls={filterID}
               onKeyDown={dismissFilters}
@@ -885,7 +891,6 @@ export function MCPLibrary(props: {
                       id={`mcp-open-${item.id}`}
                       type="button"
                       class="skill-tile"
-                      aria-label={`Inspect ${item.revisions[0]?.content.name}`}
                       onClick={() => open(item)}
                     >
                       <img
@@ -954,7 +959,6 @@ export function MCPLibrary(props: {
                         type="button"
                         class="skill-tile"
                         disabled={Boolean(draft()) || setupBlocked()}
-                        aria-label={`Set up ${suggestion.name}`}
                         onClick={() => edit(suggestion)}
                       >
                         <img
