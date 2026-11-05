@@ -90,7 +90,9 @@ test("a failed memory capture discards the Sandbox instead of leaving it half pa
     await expect(controller.pause(owned.attemptID)).rejects.toThrow("retained source capture");
     const [retained] = await database.client<{ state: string }[]>`
       SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
-    expect(["stop-intended", "stopping", "stopped", "cleanup-failed"]).toContain(retained?.state);
+    expect(["stop-intended", "stopping", "stopped", "cleanup-failed"]).toContain(
+      retained?.state ?? "",
+    );
     // Let the Stop that Pause started settle before the owned database closes.
     await Bun.sleep(2_000);
   } finally {
