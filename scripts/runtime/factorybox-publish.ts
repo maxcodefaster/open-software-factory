@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
 
@@ -11,12 +12,13 @@ export const cosignImage =
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const imageReference = z.string().regex(/^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/);
+// The result.json that `bun run factorybox:build` writes.
 export const workerBuild = z.object({
   passed: z.literal(true),
-  platform: z.enum(["linux/arm64", "linux/amd64"]),
-  worker_build: z.string(),
+  architecture: z.enum(["arm64", "amd64"]),
+  workerBuild: z.string(),
   image: imageReference,
-  executable_sha256: digest,
+  executableSHA256: digest,
 });
 export const conformanceReceipt = z.object({
   passed: z.literal(true),
@@ -34,10 +36,10 @@ export const conformanceReceipt = z.object({
 export function verifyPublishInputs(build: unknown, receipt: unknown) {
   const worker = workerBuild.parse(build);
   const proof = conformanceReceipt.parse(receipt);
-  const architecture = worker.platform.split("/")[1];
+  const architecture = worker.architecture;
   if (proof.worker.image !== worker.image)
     throw new Error("The conformance ran a different image than this build");
-  if (proof.worker.executableSHA256 !== worker.executable_sha256)
+  if (proof.worker.executableSHA256 !== worker.executableSHA256)
     throw new Error("The conformance ran a different executable than this build");
   if (proof.worker.architecture !== architecture)
     throw new Error("The conformance ran on another architecture than this build");
@@ -82,7 +84,7 @@ if (import.meta.main) {
     await readJSON(conformanceFile),
   );
   console.log(
-    `Conformance passed ${proof.passedAt} on ${proof.worker.node} for ${worker.image}; executable ${worker.executable_sha256}`,
+    `Conformance passed ${proof.passedAt} on ${proof.worker.node} for ${worker.image}; executable ${worker.executableSHA256}`,
   );
   if (dryRun) {
     console.log("Dry run: nothing was pushed or signed.");
@@ -95,32 +97,55 @@ if (import.meta.main) {
   const pushedDigest = /digest: (sha256:[a-f0-9]{64})/.exec(pushed)?.[1];
   if (!pushedDigest) throw new Error("The registry did not report a digest");
   const reference = `${repository}@${pushedDigest}`;
-  await run([
-    "docker",
-    "run",
-    "--rm",
-    "--network",
-    "host",
-    "-v",
-    `${resolve(keyFile as string)}:/cosign.key:ro`,
-    "-v",
-    `${process.env["HOME"]}/.docker:/root/.docker:ro`,
-    "-e",
-    "COSIGN_PASSWORD",
-    cosignImage,
-    "sign",
-    "--yes",
-    "--key",
-    "/cosign.key",
-    "--annotations",
-    `executable-sha256=${worker.executable_sha256}`,
-    reference,
-  ]);
+  // The container cannot reach a host credential helper, so it gets a one-off Docker config that
+  // holds only the registry login named by REGISTRY_USERNAME and REGISTRY_TOKEN. It lives under the
+  // home directory because Docker on macOS shares that tree with its containers.
+  const username = process.env["REGISTRY_USERNAME"];
+  const token = process.env["REGISTRY_TOKEN"];
+  if (!username || !token) throw new Error("Set REGISTRY_USERNAME and REGISTRY_TOKEN to sign");
+  const dockerConfig = await mkdtemp(resolve(homedir(), ".factorybox-sign-"));
+  try {
+    await writeFile(
+      resolve(dockerConfig, "config.json"),
+      JSON.stringify({
+        auths: {
+          [repository.split("/")[0] as string]: {
+            auth: Buffer.from(`${username}:${token}`).toString("base64"),
+          },
+        },
+      }),
+    );
+    await run([
+      "docker",
+      "run",
+      "--rm",
+      "--network",
+      "host",
+      "-v",
+      `${resolve(keyFile as string)}:/cosign.key:ro`,
+      "-v",
+      `${dockerConfig}:/dockerconfig:ro`,
+      "-e",
+      "DOCKER_CONFIG=/dockerconfig",
+      "-e",
+      "COSIGN_PASSWORD",
+      cosignImage,
+      "sign",
+      "--yes",
+      "--key",
+      "/cosign.key",
+      "--annotations",
+      `executable-sha256=${worker.executableSHA256}`,
+      reference,
+    ]);
+  } finally {
+    await rm(dockerConfig, { recursive: true, force: true });
+  }
   const release = {
     schema: 1,
     image: reference,
-    executableSHA256: worker.executable_sha256,
-    architecture: worker.platform.split("/")[1],
+    executableSHA256: worker.executableSHA256,
+    architecture: worker.architecture,
     tag,
     conformancePassedAt: proof.passedAt,
     conformedOn: proof.worker.node,

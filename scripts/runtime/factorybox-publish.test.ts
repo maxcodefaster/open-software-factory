@@ -4,10 +4,10 @@ import { verifyPublishInputs } from "./factorybox-publish";
 const image = `factorybox-worker-${"a".repeat(32)}@sha256:${"b".repeat(64)}`;
 const build = {
   passed: true,
-  platform: "linux/arm64",
-  worker_build: "factorybox-build-worker-x",
+  architecture: "arm64",
+  workerBuild: "factorybox-build-worker-x",
   image,
-  executable_sha256: "c".repeat(64),
+  executableSHA256: "c".repeat(64),
 };
 const receipt = {
   passed: true,
