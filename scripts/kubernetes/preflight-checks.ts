@@ -399,7 +399,11 @@ export interface NodeFacts {
   readonly pageSize: number;
   readonly cgroupFilesystem: string | null;
   readonly cgroupControllers: string | null;
-  readonly config: { readonly source: string | null; readonly values: Record<string, string> };
+  readonly config: {
+    readonly source: string | null;
+    readonly values: Record<string, string>;
+    readonly listed?: number;
+  };
   readonly filesystems: readonly string[];
   readonly btf: boolean;
   readonly userfaultfd: { readonly available: boolean; readonly errno: number } | null;
@@ -514,6 +518,15 @@ export function evaluateNodeFacts(facts: NodeFacts) {
       const present = value === "y" || value === "m";
       const id = `kernel.${item.option.replace(/^CONFIG_/, "").toLowerCase()}`;
       if (present) checks.push(pass(id, `${item.option}=${value} (${item.why})`));
+      else if (value === undefined && (facts.config.listed ?? Infinity) < 1000)
+        // A stripped configuration (some development nodes) omits options the kernel has built in.
+        checks.push(
+          warn(
+            id,
+            `${item.option} is not listed in the kernel configuration; needed for ${item.why}`,
+            "Confirm with `factorybox doctor`, which the worker.doctor check runs",
+          ),
+        );
       else if (item.required)
         checks.push(
           fail(
@@ -563,13 +576,19 @@ export function evaluateNodeFacts(facts: NodeFacts) {
         ),
   );
   checks.push(
-    (facts.maxUserNamespaces ?? 0) > 0
-      ? pass("kernel.user-namespaces", `user.max_user_namespaces=${facts.maxUserNamespaces}`)
-      : fail(
+    facts.maxUserNamespaces === null
+      ? warn(
           "kernel.user-namespaces",
-          "user.max_user_namespaces is 0 or unreadable",
-          "sysctl user.max_user_namespaces=63359 on the node pool",
-        ),
+          "user.max_user_namespaces is unreadable from the probe Pod",
+          "Confirm with `factorybox doctor`, which the worker.doctor check runs",
+        )
+      : facts.maxUserNamespaces > 0
+        ? pass("kernel.user-namespaces", `user.max_user_namespaces=${facts.maxUserNamespaces}`)
+        : fail(
+            "kernel.user-namespaces",
+            "user.max_user_namespaces is 0",
+            "sysctl user.max_user_namespaces=63359 on the node pool",
+          ),
   );
   for (const [device, present] of Object.entries(facts.devices))
     if (!present)
@@ -617,7 +636,10 @@ if text is None:
             source = path
             break
 values = {}
+listed = 0
 for line in (text or "").splitlines():
+    if line.startswith("CONFIG_") or (line.startswith("# CONFIG_") and line.endswith(" is not set")):
+        listed += 1
     if line.startswith("CONFIG_"):
         key, _, value = line.partition("=")
         if key in OPTIONS:
@@ -626,7 +648,7 @@ for line in (text or "").splitlines():
         key = line[2:].split()[0]
         if key in OPTIONS:
             values[key] = "n"
-facts["config"] = {"source": source, "values": values}
+facts["config"] = {"source": source, "values": values, "listed": listed}
 facts["filesystems"] = [l.split()[-1] for l in (read("/proc/filesystems") or "").splitlines() if l.strip()]
 facts["btf"] = os.path.exists("/sys/kernel/btf/vmlinux")
 number = {"x86_64": 323, "aarch64": 282}.get(platform.machine())

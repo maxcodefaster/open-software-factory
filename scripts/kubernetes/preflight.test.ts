@@ -266,6 +266,23 @@ test("missing kernel facilities fail or warn with exact remediation", () => {
   expect(doctor?.fix).toContain("5.15.0-1068-azure");
 });
 
+test("a partial kernel configuration and an unreadable namespace limit warn instead of failing", () => {
+  const values = { ...facts().config.values };
+  delete (values as Record<string, string>)["CONFIG_EPOLL"];
+  const checks = evaluateNodeFacts(
+    facts({
+      config: { source: "/proc/config.gz", values, listed: 446 },
+      maxUserNamespaces: null,
+    }),
+  );
+  expect(status(checks, "kernel.epoll")).toBe("WARN");
+  expect(status(checks, "kernel.user-namespaces")).toBe("WARN");
+  const full = evaluateNodeFacts(
+    facts({ config: { source: "/proc/config.gz", values, listed: 4200 } }),
+  );
+  expect(status(full, "kernel.epoll")).toBe("FAIL");
+});
+
 test("a node the worker accepts on an unverified kernel is a warning, not a failure", () => {
   for (const stdout of [
     '{"platform":{"kernel":"5.15.0-1068-azure"},"qualification":"unverified"}',
