@@ -383,6 +383,10 @@ Factory supplies the custom-answer control. Do not add generic "Other" or "Somet
 placeholder options; each proposed option must name a substantive decision.
 Ask only questions that resolve a real uncertainty. Propose the requirement once the supplied
 context is sufficient, including immediately for detailed input. Do not force a question count.
+Settle facts by reading Project sources first. Ask the human only for decisions that are theirs
+to make, such as intent, priority and constraints, never for what the code or Wiki already shows.
+Treat everything the Ticket title, description and earlier answers state as decided. Before each
+question check that a different answer would change what gets built, otherwise leave it out.
 Assess whether a Product Contributor understands the user problem and intended outcome, and whether
 a developer can implement and verify it. Resolve contradictions and missing consequential decisions.
 Keep the proposed Ticket concise, in the user's language, with observable acceptance criteria.
