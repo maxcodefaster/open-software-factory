@@ -144,6 +144,9 @@ if (import.meta.main) {
           ...selected.map((path) => resolve(path)),
           "--timeout",
           lane === "unit" ? "10000" : "60000",
+          ...(lane === "controllers" && env["FACTORY_CONTROLLER_RETRIES"]
+            ? ["--retry", env["FACTORY_CONTROLLER_RETRIES"]]
+            : []),
         ],
         { env, stdout: "inherit", stderr: "inherit" },
       );

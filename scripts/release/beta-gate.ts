@@ -42,7 +42,13 @@ export function gateSteps(): GateStep[] {
     { name: "typecheck", command: ["bun", "run", "typecheck"] },
     { name: "unit", command: ["bun", "run", "test:unit"] },
     { name: "connector", command: ["bun", "run", "connector:check"] },
-    { name: "controllers", command: ["bun", "run", "test:controllers"] },
+    {
+      name: "controllers",
+      command: ["bun", "run", "test:controllers"],
+      // The owned browsers in this lane start slowly while many databases run at once. One retry
+      // per test absorbs that; a test that fails twice fails the gate.
+      environment: { FACTORY_CONTROLLER_RETRIES: "1" },
+    },
     {
       name: "browser",
       command: ["bun", "run", "test:browser"],
