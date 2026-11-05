@@ -928,14 +928,20 @@ async function main(options: Options) {
         await psql(`SELECT id FROM auth."user" WHERE email = '${userEmail}';`)
       ).trim();
       if (!userID) throw new Error("The account created in the UI has no user row");
-      const created = (
-        await psql(
-          `SELECT id || '|' || title FROM factory.ticket WHERE project_id = '${projectID}' ORDER BY created_at;`,
+      // The UI shows a new Ticket before its mutation reaches PostgreSQL, so wait for the rows.
+      let created: Array<{ id: string; title: string }> = [];
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        created = (
+          await psql(
+            `SELECT id || '|' || title FROM factory.ticket WHERE project_id = '${projectID}' ORDER BY created_at;`,
+          )
         )
-      )
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => ({ id: line.slice(0, 36), title: line.slice(37) }));
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => ({ id: line.slice(0, 36), title: line.slice(37) }));
+        if (ticketTitles.every((title) => created.some((ticket) => ticket.title === title))) break;
+        await Bun.sleep(1_000);
+      }
       for (const title of ticketTitles)
         if (!created.some((ticket) => ticket.title === title))
           throw new Error(`The Ticket ${title} was not created`);
