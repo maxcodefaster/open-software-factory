@@ -37,6 +37,7 @@
     "factory:image": "bun scripts/factory/image.ts",
     "factory:connect": "bun scripts/kubernetes/connect.ts",
     "restore:rehearsal": "bun scripts/kubernetes/restore-rehearsal.ts",
+    "release:soak": "bun scripts/release/soak.ts",
     "release:upgrade-test": "bun scripts/release/upgrade-test.ts",
     "factory:up": "bun scripts/factory/index.ts up",
     "factory:restart": "bun scripts/factory/index.ts restart",

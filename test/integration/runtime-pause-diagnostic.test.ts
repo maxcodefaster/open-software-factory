@@ -55,3 +55,46 @@ test("native Pause controls cannot prevent PostgreSQL from retaining the origina
     await process.dispose();
   }
 }, 30_000);
+
+test("a failed memory capture discards the Sandbox instead of leaving it half paused", async () => {
+  const process = await factoryProcess();
+  const database = process.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const execution = createFactoryboxExecution(database, owned.hub, async () => {
+      throw new Error("This diagnostic fixture must not call a native worker");
+    });
+    const controller = createRuntimeController(
+      database,
+      owned.hub,
+      "owned-pause-capture-failure",
+      {
+        async prepareExecution() {
+          throw new Error("Pause diagnostics must not prepare or replace Source");
+        },
+      },
+      createKubernetesClient(),
+      async () => "",
+      undefined,
+      {
+        ...execution,
+        async pause(id) {
+          await database.client`UPDATE factory.runtime_attempt SET state='pausing' WHERE id=${id}`;
+          throw factoryboxOperationFailure(
+            "pause",
+            "retained source capture: exit status 1: Error (criu/fsnotify.c:303): Can't dump that handle",
+          );
+        },
+      },
+    );
+    await expect(controller.pause(owned.attemptID)).rejects.toThrow("retained source capture");
+    const [retained] = await database.client<{ state: string }[]>`
+      SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    expect(["stop-intended", "stopping", "stopped", "cleanup-failed"]).toContain(retained?.state);
+    // Let the Stop that Pause started settle before the owned database closes.
+    await Bun.sleep(2_000);
+  } finally {
+    await database.client.end({ timeout: 1 });
+    await process.dispose();
+  }
+}, 30_000);

@@ -1210,8 +1210,18 @@ export function createRuntimeController(
       try {
         await factorybox.pause(attemptID);
       } catch (cause) {
-        await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox Pause is unconfirmed"},updated_at=now()
+        const message = cause instanceof Error ? cause.message : "Factorybox Pause is unconfirmed";
+        await database.client`UPDATE factory.runtime_attempt SET failure=${message},updated_at=now()
           WHERE id=${attemptID} AND state='pausing'`;
+        // A failed memory capture, for example an inotify watch on a deleted file, leaves nothing
+        // to resume, and the half-paused Sandbox would block the private backing of every other
+        // Sandbox. Files live in the canonical Source, so discard it. The next open starts fresh.
+        if (/retained source capture:/.test(message)) {
+          console.error(
+            `Factorybox Pause failed to capture ${attemptID}; discarding the Sandbox. ${message.slice(0, 200)}`,
+          );
+          await this.stop(attemptID).catch(() => undefined);
+        }
         throw cause;
       }
       return this.get(attemptID);

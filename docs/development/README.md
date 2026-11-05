@@ -81,6 +81,7 @@ services in Vite or implement a second RPC encoder.
 | `bun run runtime:conformance` | Actual Factorybox/Kubernetes/Dev Container/Connector conformance |
 | `bun run beta:gate` | Release gate: secret and forbidden-term scans, every lane, receipt for the exact commit |
 | `bun run release:clean-room` | Install a chart on a fresh Namespace of the current kubectl context, prove it works, remove it |
+| `bun run release:soak` | Long run on one installation: Preview open, idle pause, resume, Wiki update and backup every cycle, one Ticket journey every six hours; stops at the first error nobody allowed |
 | `bun run release:upgrade-test` | Upgrade a previous build to the new one on a fresh Namespace and prove no data is lost |
 | `bun run factorybox:publish` | Push and sign a worker image that passed conformance; refuses unproven bytes |
 | `bun run test:browser` | UI journeys; excludes native, paid and retained-installation restart tests |
@@ -438,3 +439,25 @@ the last backup set into a new installation.
 
 The browser steps use the selectors of the current UI. Run the test with a previous build whose UI
 still matches them, or adjust `scripts/release/upgrade-test-browser.ts` for the build under test.
+
+## Release soak
+
+`bun run release:soak` runs on a retained installation for 24 hours before a release. Each cycle (every
+20 minutes) checks Factory restarts, the worker Pod, failed runtime attempts and free disk, then runs
+`scripts/release/soak-ui-cycle.ts`, which opens the Development Preview. Idle pause turns the Sandbox
+off between cycles, so the next open is also a Resume. Every third cycle runs a Wiki update
+(`soak-wiki.ts`) and a backup Job. Every eighteenth cycle runs one complete Ticket journey with the real
+model (`soak-journey.ts`). A log line the allowlist does not name ends the run with a receipt that
+says why.
+
+```sh
+FACTORY_SOAK_PROJECT=PROJECT_ID FACTORY_SOAK_STATE=session-state.json \
+FACTORY_SOAK_NAMESPACE=NAMESPACE FACTORY_SOAK_RELEASE=RELEASE \
+mise exec -- bun run release:soak --namespace NAMESPACE --release RELEASE \
+  --worker-namespace WORKER_NAMESPACE --ui-cycle scripts/release/soak-ui-cycle.ts \
+  --wiki "bun scripts/release/soak-wiki.ts" --journey "bun scripts/release/soak-journey.ts" \
+  --allow allow.txt --hours 24 --interval 20
+```
+
+`session-state.json` is a Playwright storage state of a signed-in administrator. `allow.txt` lists one
+regular expression per line for log lines that are known and harmless on that installation.
