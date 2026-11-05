@@ -32,7 +32,7 @@ test("application build tools match the upstream artifact pins", async () => {
   expect(dockerfile).toContain('"scripts/kubernetes/start.ts"');
 });
 
-test("only published releases build and publish both architectures natively", async () => {
+test("only published releases build and publish arm64 natively", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
@@ -48,7 +48,6 @@ test("only published releases build and publish both architectures natively", as
   expect(workflow.jobs.distribution.needs).toEqual(["release", "factory"]);
   for (const job of ["roles", "factory"])
     expect(workflow.jobs[job].strategy.matrix.include).toEqual([
-      { arch: "amd64", runner: "ubuntu-24.04" },
       { arch: "arm64", runner: "ubuntu-24.04-arm" },
     ]);
   for (const job of ["roles", "factory"]) {
@@ -68,7 +67,7 @@ test("only published releases build and publish both architectures natively", as
   expect(workflow.jobs.manifests.needs).toContain("roles");
 });
 
-test("release images wait for the same non-live checks on both native architectures", async () => {
+test("release images wait for the same non-live checks on native arm64", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
@@ -84,10 +83,7 @@ test("release images wait for the same non-live checks on both native architectu
   expect(checks.permissions).toEqual({ contents: "read" });
   const verify = checks.jobs.verify;
   expect(verify.strategy["fail-fast"]).toBe(false);
-  expect(verify.strategy.matrix.include).toEqual([
-    { arch: "amd64", runner: "ubuntu-24.04" },
-    { arch: "arm64", runner: "ubuntu-24.04-arm" },
-  ]);
+  expect(verify.strategy.matrix.include).toEqual([{ arch: "arm64", runner: "ubuntu-24.04-arm" }]);
   expect(verify["runs-on"]).toBe(`\${{ matrix.runner }}`);
   expect(verify["continue-on-error"]).not.toBe(true);
   const steps = verify.steps as {
