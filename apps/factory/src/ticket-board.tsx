@@ -129,11 +129,11 @@ export function TicketBoardContents(props: {
       >
         <Icon name="folder" />
         <span class="epic-stack-label">
-          <strong>{input.epic.title}</strong>
+          <strong>{input.epic.title}</strong>{" "}
           <Show when={input.tickets[0]}>
             <span class="epic-stack-preview">{input.tickets[0]?.title}</span>
           </Show>
-        </span>
+        </span>{" "}
         <small>
           {input.tickets.length}
           {props.ticketsIncomplete ? " loaded" : ""}
