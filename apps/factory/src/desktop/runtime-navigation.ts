@@ -6,7 +6,7 @@ import type {
   RuntimeAttempt,
   RuntimeDockTarget,
 } from "../api-contracts";
-import { plainErrorMessage } from "../command-error";
+import { plainErrorMessage, untilReachable } from "../command-error";
 import type { ActivityNavigationRequest } from "../ide-messages";
 import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
@@ -67,10 +67,12 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     };
     dependencies.openWorkspaceTab(opening);
     await dependencies.mutate(async () => {
-      const source = await serverCall(
-        target.changeId
-          ? ensureChangeSource({ data: [target.changeId] })
-          : ensurePersonalSource({ data: [projectID] }),
+      const source = await untilReachable(() =>
+        serverCall(
+          target.changeId
+            ? ensureChangeSource({ data: [target.changeId] })
+            : ensurePersonalSource({ data: [projectID] }),
+        ),
       ).catch((cause: unknown) => {
         dependencies.updateWorkspaceTab(
           {

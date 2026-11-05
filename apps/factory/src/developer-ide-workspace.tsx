@@ -1,7 +1,7 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
 import { confirmAccessStopped } from "./access-stop";
-import { plainErrorMessage } from "./command-error";
+import { isUnreachable, plainErrorMessage } from "./command-error";
 import { developerIDEOrigin } from "./developer-ide-origin";
 import type { ActivityNavigationRequest } from "./ide-messages";
 import { type DevelopmentPreviewMessage, developmentPreviewMessage } from "./ide-messages";
@@ -51,6 +51,7 @@ export function DeveloperIDEWorkspace(props: {
   const filesWaited = createWaitElapsed(() =>
     preparingFiles() ? `${props.workspaceID ?? "selection"}:${sourceState() ?? ""}` : undefined,
   );
+  const [reconnecting, setReconnecting] = createSignal(false);
   const [editorRetry, setEditorRetry] = createSignal(0);
   const [sourceRetry, setSourceRetry] = createSignal(0);
   let sourceRecovery: AbortController | undefined;
@@ -165,6 +166,25 @@ export function DeveloperIDEWorkspace(props: {
       }
     }
   }
+  // A brief network loss or server restart heals itself. The user sees a quiet "Reconnecting"
+  // note, and the error with its buttons appears only when the outage outlasts a minute.
+  async function tolerant<T>(signal: AbortSignal, call: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    for (;;) {
+      try {
+        const value = await call();
+        setReconnecting(false);
+        return value;
+      } catch (cause) {
+        if (!isUnreachable(cause) || signal.aborted || performance.now() - started > 60_000) {
+          setReconnecting(false);
+          throw cause;
+        }
+        setReconnecting(true);
+        await outagePause(signal);
+      }
+    }
+  }
   let frame: HTMLIFrameElement | undefined;
   const editorOrigin = () => {
     const current = attachment();
@@ -187,8 +207,8 @@ export function DeveloperIDEWorkspace(props: {
       const cancel = new AbortController();
       setEditorError("");
       void (async () => {
-        let current = await serverCall(
-          ensureDeveloperIDE({ ...{ signal: cancel.signal }, data: [projectID] }),
+        let current = await tolerant(cancel.signal, () =>
+          serverCall(ensureDeveloperIDE({ ...{ signal: cancel.signal }, data: [projectID] })),
         );
         while (!cancel.signal.aborted) {
           setEditorState(current.state);
@@ -206,7 +226,9 @@ export function DeveloperIDEWorkspace(props: {
           if (["failed", "stopped", "stop-intended"].includes(current.state))
             throw new Error(current.failure ?? "Editor is stopped. Retry to prepare it.");
           await pause(cancel.signal);
-          current = await serverCall(getDeveloperIDE({ ...{ signal: cancel.signal }, data: [] }));
+          current = await tolerant(cancel.signal, () =>
+            serverCall(getDeveloperIDE({ ...{ signal: cancel.signal }, data: [] })),
+          );
         }
       })().catch((cause: unknown) => {
         if (!cancel.signal.aborted)
@@ -227,8 +249,8 @@ export function DeveloperIDEWorkspace(props: {
       setSourceError("");
       void (async () => {
         while (!cancel.signal.aborted) {
-          const source = await serverCall(
-            getWorkspaceSource({ ...{ signal: cancel.signal }, data: [workspaceID] }),
+          const source = await tolerant(cancel.signal, () =>
+            serverCall(getWorkspaceSource({ ...{ signal: cancel.signal }, data: [workspaceID] })),
           );
           if (!cancel.signal.aborted) setSourceState(source.state);
           if (source.state === "ready") {
@@ -360,7 +382,7 @@ export function DeveloperIDEWorkspace(props: {
               <p>
                 {editorRecovering()
                   ? "Restarting your editor…"
-                  : editorError() || "Preparing your editor…"}
+                  : editorError() || (reconnecting() ? "Reconnecting…" : "Preparing your editor…")}
               </p>
             </div>
           }
@@ -382,7 +404,15 @@ export function DeveloperIDEWorkspace(props: {
                   if (document?.contentType === "application/json")
                     setEditorError("Editor access was rejected. Retry opening it.");
                 }}
-                onError={() => setEditorError("Could not connect to the editor. Retry opening it.")}
+                onError={() => {
+                  // The frame reloads itself once the connection is back.
+                  setReconnecting(true);
+                  void outagePause(new AbortController().signal).then(() => {
+                    setReconnecting(false);
+                    if (!ready() && frame && attachment())
+                      frame.src = attachment()?.url ?? frame.src;
+                  });
+                }}
               />
               <Show when={!ready() || editorError() || editorRecovering()}>
                 <div class="runtime-frame-state empty-workspace" role="status">
@@ -390,9 +420,11 @@ export function DeveloperIDEWorkspace(props: {
                     {editorRecovering()
                       ? "Restarting your editor…"
                       : editorError() ||
-                        (editorSlow()
-                          ? "Your editor is still opening. You can wait or retry the connection."
-                          : "Opening your editor…")}
+                        (reconnecting()
+                          ? "Reconnecting…"
+                          : editorSlow()
+                            ? "Your editor is still opening. You can wait or retry the connection."
+                            : "Opening your editor…")}
                   </p>
                 </div>
               </Show>
@@ -486,6 +518,27 @@ function pause(signal: AbortSignal) {
       signal.removeEventListener("abort", abort);
       resolve();
     }, 200);
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+// Waits for the browser to report a connection again, or two seconds, whichever comes first.
+function outagePause(signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timer);
+      window.removeEventListener("online", finish);
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    const abort = () => {
+      clearTimeout(timer);
+      window.removeEventListener("online", finish);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(finish, 2000);
+    window.addEventListener("online", finish, { once: true });
     if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
   });

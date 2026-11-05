@@ -396,11 +396,12 @@ test("source admission failure stays visible inside the IDE and an explicit retr
   expect(fixture.stopRequests).toEqual([]);
 });
 
-test("an offline IDE open shows plain wording with a retry instead of the browser's fetch error", async ({
+test("a brief network loss while opening the IDE heals itself without an error or a button", async ({
   page,
 }) => {
   const fixture = await mockDeveloperIDE(page);
   let offline = true;
+  let attempts = 0;
   await mockFactoryFunctions(
     page,
     {
@@ -415,24 +416,28 @@ test("an offline IDE open shows plain wording with a retry instead of the browse
         }),
       },
     },
-    (name) => offline && name === "ensurePersonalSource",
+    (name) => {
+      if (name !== "ensurePersonalSource") return false;
+      attempts += 1;
+      return offline;
+    },
   );
   await signIn(page);
   await selectProject(page);
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   const panel = page.getByRole("tabpanel", { name: "IDE · My workspace", exact: true });
-  await expect(
-    panel.getByRole("status").filter({ hasText: "Factory could not reach the server." }),
-  ).toBeVisible();
-  await expect(page.getByText(/failed to fetch/i)).toHaveCount(0);
-  const retry = panel.getByRole("button", { name: "Retry file access", exact: true });
-  await expect(retry).toBeVisible();
+  await expect.poll(() => attempts).toBeGreaterThan(1);
+  await expect(page.getByText(/could not reach the server|failed to fetch/i)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Retry/ })).toHaveCount(0);
+  await page.screenshot({ path: `${evidenceDirectory}/ide-offline-quiet.png`, fullPage: true });
   offline = false;
-  await retry.click();
   await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
     "data-workspace-id",
     fixture.workspaceID,
+    { timeout: 15_000 },
   );
+  await expect(panel.getByRole("button", { name: /^Retry/ })).toHaveCount(0);
+  await expect(page.getByText(/could not reach the server|failed to fetch/i)).toHaveCount(0);
 });
 
 test("a slow Wiki status read never locks the Ticket board", async ({ page }) => {
