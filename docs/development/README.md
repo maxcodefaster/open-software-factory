@@ -461,3 +461,14 @@ mise exec -- bun run release:soak --namespace NAMESPACE --release RELEASE \
 
 `session-state.json` is a Playwright storage state of a signed-in administrator. `allow.txt` lists one
 regular expression per line for log lines that are known and harmless on that installation.
+
+## Release gate
+
+`bun run beta:gate` runs clean-tree, forbidden-term and secret scans, docs, format, lint, typecheck, unit,
+Connector, controller and browser lanes in that order and stops at the first failing lane. It writes a
+receipt for the exact commit under `.factory/test-results/beta-gate/`. The browser lane allows one
+retry per spec (`FACTORY_BROWSER_RETRIES=1`); a spec that passes only on retry is listed as flaky.
+
+The forbidden-term scan reads one term per line from `.factory/forbidden-terms.txt`, or from the file
+named by `FACTORY_FORBIDDEN_TERMS_FILE`. The list stays outside Git so the terms never enter the
+history. Without a list the step fails. The Docker lanes need a working default bridge network.
