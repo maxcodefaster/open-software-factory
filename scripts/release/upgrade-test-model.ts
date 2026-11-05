@@ -338,6 +338,14 @@ export const defaultIgnoredTables = [
   "auth.verification",
   "factory.read_version",
   "factory.installation_maintenance",
+  // Per-person version counters that every sign-in bumps, including the test's own.
+  "factory.access_revocation",
+];
+
+/** Rows a new build's own background work adds to an existing installation after it starts. */
+export const backgroundAdditions = [
+  "row:factory.project_image_preparation",
+  "row:factory.wiki_source_update",
 ];
 
 // Timestamps and leases that a running Factory refreshes without any user action.

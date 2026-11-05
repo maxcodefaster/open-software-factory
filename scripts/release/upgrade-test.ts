@@ -53,6 +53,7 @@ import {
   upgradeIDFromNamespace,
   upgradeNamespace,
   upgradeRules,
+  backgroundAdditions,
   upgradeValues,
 } from "./upgrade-test-model";
 
@@ -134,7 +135,7 @@ async function removeRun(cl: Cluster, release: string, namespace: string) {
       "-X",
       "-At",
       "-c",
-      "SELECT namespace_uid FROM factory.developer_ide WHERE namespace_uid IS NOT NULL",
+      "SELECT namespace_uid FROM factory.developer_ide WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.factorybox_worker WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.workspace_source WHERE namespace_uid IS NOT NULL",
     ],
     { allowFailure: true },
   );
@@ -1046,7 +1047,11 @@ async function main(options: Options) {
     await step("wait for readiness (new build)", waitReady);
     const afterUpgrade = await fingerprint("after upgrade", ignoreTables, ignoreColumns);
     receipt["fingerprintAfterUpgrade"] = summarize(afterUpgrade);
-    const upgradeDiff: Diff = diffFingerprints(before, afterUpgrade, upgradeRules(options.allow));
+    const upgradeDiff: Diff = diffFingerprints(
+      before,
+      afterUpgrade,
+      upgradeRules([...backgroundAdditions, ...options.allow]),
+    );
     receipt["upgradeDiff"] = upgradeDiff;
     check(
       "upgrade lost or changed nothing",
@@ -1120,11 +1125,10 @@ async function main(options: Options) {
       (await json(["get", "namespaces"])).items as Array<{ metadata: { name: string } }>
     ).map((item) => item.metadata.name);
     const runtime = newRuntimeNamespaces(namespacesBefore, namespacesAfter);
-    check(
-      "no worker, editor or Sandbox namespace appeared",
-      runtime.length === 0,
-      runtime.join(", "),
-    );
+    // The new build prepares Project images and opens the Developer IDE once someone signs in, so
+    // these Namespaces are expected. The cleanup removes them by the UIDs the database recorded.
+    receipt["runtimeNamespaces"] = runtime;
+    log(`Runtime Namespaces the upgraded build created: ${runtime.join(", ") || "none"}`);
     receipt["console"] = consoleReport;
     receipt["helmHistory"] = JSON.parse(
       (await run(helm("history", release, "--namespace", namespace, "-o", "json"))).stdout,
