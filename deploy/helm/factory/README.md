@@ -1,8 +1,12 @@
 # Factory on existing Kubernetes
 
-This is a development chart maintained in the Factory repository, not a published chart release.
-Install it from the checkout. The operator supplies Kubernetes; this chart does not install
-OrbStack, Docker, a VM, an Ingress controller or a cluster.
+Releases publish this chart as a signed OCI artifact at `oci://ghcr.io/maxcodefaster/charts/factory`
+and as an asset of the GitHub release. The released chart pins the released Factory image and the
+signed Factorybox worker that passed its native conformance. The operator supplies Kubernetes;
+this chart does not install OrbStack, Docker, a VM, an Ingress controller or a cluster.
+
+Platform support for `v0.1.0-beta.1`: Linux on arm64 is the only verified platform. amd64 and
+Azure AKS are not supported yet; the chart refuses neither, but nothing has been proven there.
 
 ## Prerequisites
 
@@ -87,14 +91,11 @@ The OpenBao certificate must cover the OpenBao Service names and `127.0.0.1`, wh
 
 ## Install
 
-Set a small private values file:
+Install a release. Its chart already pins the Factory image and the verified worker, so a small
+private values file is enough:
 
 ```yaml
-image: your-registry/factory@sha256:YOUR_BUILT_APPLICATION_DIGEST
 factorybox:
-  image: your-registry/factorybox@sha256:YOUR_VERIFIED_WORKER_DIGEST
-  executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
-  architecture: amd64 # or arm64, matching the independently qualified worker package
   nodeName: YOUR_ADMITTED_NODE
   # kernel: "5.15.0-*-azure,6.8.0-*-azure" # optional; omit to admit any kernel
 publicURL: https://factory.example.com
@@ -105,7 +106,31 @@ ingress:
   tlsSecret: your-existing-certificate-secret
 ```
 
-Then install from the repository:
+```sh
+helm install factory oci://ghcr.io/maxcodefaster/charts/factory --version 0.1.0-beta.1 \
+  --namespace factory --create-namespace --values /path/to/private-values.yaml \
+  --wait=legacy --timeout 20m
+```
+
+Check the signatures first with `cosign verify --certificate-identity-regexp
+'^https://github.com/maxcodefaster/open-software-factory/' --certificate-oidc-issuer
+https://token.actions.githubusercontent.com ghcr.io/maxcodefaster/charts/factory:0.1.0-beta.1`.
+The worker image is signed with the project key; its public half is `deploy/factorybox/cosign.pub`.
+
+To run a build from a checkout instead, supply the image and worker yourself:
+
+```yaml
+image: your-registry/factory@sha256:YOUR_BUILT_APPLICATION_DIGEST
+factorybox:
+  image: your-registry/factorybox@sha256:YOUR_VERIFIED_WORKER_DIGEST
+  executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
+  architecture: arm64 # amd64 is not supported yet
+  nodeName: YOUR_ADMITTED_NODE
+publicURL: https://factory.example.com
+forgejoPublicURL: https://git.example.com
+```
+
+Then install from the checkout:
 
 ```sh
 helm install factory ./deploy/helm/factory --namespace factory --create-namespace \

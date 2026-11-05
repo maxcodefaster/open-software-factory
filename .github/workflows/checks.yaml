@@ -12,8 +12,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
@@ -52,7 +50,7 @@ jobs:
             --set "factorybox.image=registry.invalid/worker@sha256:$zeros"
             --set "factorybox.executableSHA256=$zeros"
             --set factorybox.nodeName=ci-node
-            --set factorybox.architecture=amd64)
+            --set factorybox.architecture=arm64)
           mise exec -- helm lint "${chart[@]}"
           mise exec -- helm template factory "${chart[@]}" \
             | mise exec -- kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.35.0

@@ -15,8 +15,9 @@ Project Registry certificates. Empty Project settings do not discard the install
 trust or disable TLS verification.
 
 The development Helm chart lives in [deploy/helm/factory](../../deploy/helm/factory/README.md).
-Install it directly from this repository; a public chart repository and release publication are
-not required during development. Kubernetes is provided by the operator. Factory does not
+Releases publish it as a signed OCI chart that pins the released Factory image and the verified
+worker; `v0.1.0-beta.1` is verified on arm64 Linux only, and amd64 and Azure AKS are not
+supported yet. A checkout can still install it directly. Kubernetes is provided by the operator. Factory does not
 install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
 Local tools and the Factory image pin `kubectl` 1.35.6. Use a Kubernetes API server
 within one minor version, 1.34 through 1.36, as required by the upstream version-skew policy.
@@ -150,13 +151,14 @@ application does not build its own tools or require a source checkout on the ope
 The image workflow publishes only when a GitHub release is published, never on branch pushes or
 pull requests. A release tag such as `v0.1.0` must point to a commit contained in `main`.
 The shared verification workflow runs the standard checks, PostgreSQL/controller tests and
-owned UI journeys natively on AMD64 and ARM64. It does not run on pushes or pull requests;
+owned UI journeys natively on ARM64. It does not run on pushes or pull requests;
 release publication calls it, and it can be started by hand. Release publication must pass those
 same checks on its exact tagged source before any image build or push. Before tagging, the
 maintainer runs `bun run beta:gate` on a clean checkout: it scans the history for secrets and for
 terms that must not ship, runs every lane and writes a receipt that names the exact commit.
-Native AMD64 and ARM64 jobs build the runtime roles and Factory, then publish their combined
-manifests. Existing versioned architecture images are not overwritten. Publishing Factory does
+A native ARM64 job builds the runtime roles and Factory, then publishes their manifests; a last job
+packages the chart with those digests and the signed worker, pushes it to GitHub's container
+registry, signs it and attaches it to the release. Existing versioned architecture images are not overwritten. Publishing Factory does
 not admit a Factorybox worker or activate an installation.
 Before pushing each native runtime-host image, an offline Compose proof builds a configured
 Dockerfile outside its context and checks that raw Bake still refuses the same ungranted file.
@@ -196,6 +198,8 @@ App's origin; Factory credentials are not forwarded, and App cookies cannot esca
 
 
 ## Managed clusters such as Azure AKS
+
+Azure AKS is not supported yet. The notes below describe the intended setup and are not verified.
 
 Factory runs on a standard managed cluster when one dedicated node can host the privileged
 Factorybox worker. Nothing here is verified on AKS yet. Run the preflight first, and treat its

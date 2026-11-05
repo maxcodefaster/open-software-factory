@@ -57,7 +57,8 @@ mise exec -- bun run test:browser       # owned UI journeys
 ```
 
 Native, live and paid lanes are listed in [docs/development](docs/development/README.md).
-CI runs the first three on AMD64 and ARM64 for `main` and pull requests.
+GitHub runs the checks only for release tags and by hand. Before a release, `mise exec -- bun run beta:gate`
+runs every lane locally and writes a receipt for the exact commit.
 
 ## Repository layout
 

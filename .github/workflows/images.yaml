@@ -46,8 +46,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
@@ -149,7 +147,7 @@ jobs:
           artifacts='{}'
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE"
-            digest="$(release_combine "$image" "$image-amd64" "$image-arm64")"
+            digest="$(release_combine "$image" "$image-arm64")"
             release_sign "$IMAGE_ROOT/$role@$digest"
             artifacts="$(jq -c --arg role "$role" --arg ref "$IMAGE_ROOT/$role@$digest" '. + {($role): $ref}' <<< "$artifacts")"
           done
@@ -164,8 +162,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
@@ -243,6 +239,8 @@ jobs:
       packages: write
       id-token: write
     runs-on: ubuntu-24.04
+    outputs:
+      factory: ${{ steps.publish.outputs.factory }}
     env:
       RELEASE: ${{ needs.release.outputs.version }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
@@ -251,7 +249,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
-      - name: Publish multi-architecture Factory manifest
+      - name: Publish the Factory manifest
+        id: publish
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -260,7 +259,7 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           image="$IMAGE_ROOT/factory:$RELEASE"
-          digest="$(release_combine "$image" "$image-amd64" "$image-arm64")"
+          digest="$(release_combine "$image" "$image-arm64")"
           release_sign "$IMAGE_ROOT/factory@$digest"
           {
             echo "### Factory $RELEASE"
@@ -271,3 +270,45 @@ jobs:
             echo "$IMAGE_ROOT/factory@$digest"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+  chart:
+    needs: [release, distribution]
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE: ${{ needs.release.outputs.version }}
+      FACTORY_IMAGE: ${{ needs.distribution.outputs.factory }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
+        with:
+          version: 2026.10.3
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - name: Package the chart with the released images
+        run: |
+          set -euo pipefail
+          mise exec -- bun install --frozen-lockfile
+          mkdir dist
+          mise exec -- bun scripts/release/package-chart.ts --version "$RELEASE" \
+            --factory-image "$FACTORY_IMAGE" --output dist
+          mise exec -- helm lint "dist/factory-$RELEASE.tgz" --set "factorybox.nodeName=lint-node" \
+            --set publicURL=http://127.0.0.1:3000 --set forgejoPublicURL=http://127.0.0.1:3001 --set development=true
+      - name: Publish and sign the chart
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          printf '%s' "$GHCR_TOKEN" | mise exec -- helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          pushed="$(mise exec -- helm push "dist/factory-$RELEASE.tgz" "oci://ghcr.io/$owner/charts" 2>&1)"
+          echo "$pushed"
+          digest="$(sed -n 's/^Digest: //p' <<< "$pushed" | head -n1)"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          cosign sign --yes "ghcr.io/$owner/charts/factory@$digest"
+          gh release upload "$TAG" "dist/factory-$RELEASE.tgz" --clobber --repo "$GITHUB_REPOSITORY"

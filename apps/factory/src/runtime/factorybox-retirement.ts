@@ -244,7 +244,11 @@ export async function reclaimRetiredFactoryboxBacking(
     } catch (cause) {
       if (cause instanceof NativeSlotBusyError) throw cause;
       failed += 1;
-      console.error("Factorybox retained slot backing needs observation", source.id);
+      console.error(
+        "Factorybox retained slot backing needs observation",
+        source.id,
+        cause instanceof Error ? cause.message.slice(0, 400) : String(cause).slice(0, 400),
+      );
     }
   }
   return {
