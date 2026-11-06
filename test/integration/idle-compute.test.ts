@@ -5,6 +5,7 @@ import {
   executionIdleMS,
   executionQuietMS,
   executionReviewMS,
+  maximumPausesPerSandbox,
 } from "../../apps/factory/src/runtime/idle";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -215,3 +216,44 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
     await processFixture.dispose();
   }
 }, 30_000);
+
+test("a Sandbox with the maximum number of Pauses stops instead of pausing again", async () => {
+  const processFixture = await factoryProcess();
+  const database = processFixture.connect();
+  let idle: ReturnType<typeof createIdleCompute> | undefined;
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${owned.attemptID}`;
+    await database.client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request)
+      VALUES(${owned.attemptID},${JSON.stringify({ sandboxID: "runtime-test" })}::text::jsonb)`;
+    await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
+    for (let index = 0; index < maximumPausesPerSandbox; index += 1)
+      await database.client`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,snapshot_id,attempted_at,completed_at)
+        VALUES(${owned.attemptID},'pause',${crypto.randomUUID().replaceAll("-", "")},now(),now())`;
+    const stopped: string[] = [];
+    idle = createIdleCompute(
+      database,
+      { claimIdle: () => true, releaseIdle: () => {} },
+      {
+        async pause() {
+          throw new Error("A Sandbox at its Pause limit must stop");
+        },
+        async stop(attemptID) {
+          const [intent] = await database.client<Array<{ state: string }>>`
+            SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+          expect(intent?.state).toBe("stop-intended");
+          stopped.push(attemptID);
+        },
+      },
+      1,
+      1,
+      0,
+    );
+    await idle.sweep();
+    expect(stopped).toEqual([owned.attemptID]);
+  } finally {
+    await idle?.close();
+    await database.client.end({ timeout: 2 });
+    await processFixture.dispose();
+  }
+}, 60_000);

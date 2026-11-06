@@ -34,6 +34,12 @@ export function executionReviewMS(environment: Readonly<Record<string, string | 
   return minutes(environment, "FACTORY_EXECUTION_REVIEW_MINUTES", "30");
 }
 
+// Factorybox keeps every Pause of a Sandbox in one bounded lifecycle record, and refuses to resume
+// a Sandbox whose record could no longer hold its next Pause. Measured, that happens after 19
+// Pauses. A Sandbox with this many Pauses stops instead, so the next open starts fresh from its
+// Source before the limit can trap it.
+export const maximumPausesPerSandbox = 12;
+
 // Activity stays in memory. Restart starts a new grace; it never stores user heartbeats.
 export function createIdleCompute(
   database: Database,
@@ -118,7 +124,13 @@ export function createIdleCompute(
           // Submitted work needs no checkpoint; a definite failure already
           // requires fresh, fenced execution on explicit retry. Preserve their
           // Source and native Sessions while releasing the private backing.
-          const mode = work?.releasable ? "stop" : "pause";
+          const [history] = await sql<Array<{ pauses: number }>>`
+            SELECT count(*)::int AS pauses FROM factory.factorybox_lifecycle_operation
+            WHERE runtime_attempt_id=${attempt.id} AND action='pause' AND completed_at IS NOT NULL`;
+          const mode =
+            work?.releasable || (history?.pauses ?? 0) >= maximumPausesPerSandbox
+              ? "stop"
+              : "pause";
           await sql`UPDATE factory.runtime_attempt SET
             state=${mode === "stop" ? "stop-intended" : "pausing"}::factory.runtime_attempt_state,
             stop_intended_at=CASE WHEN ${mode === "stop"} THEN now() ELSE stop_intended_at END,
