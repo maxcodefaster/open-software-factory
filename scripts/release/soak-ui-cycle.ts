@@ -35,17 +35,19 @@ try {
   const chooser = page.locator('button[aria-label="Choose Preview instance"]').first();
   const development = page.getByRole("menuitem").filter({ hasText: "Development" }).first();
   // A Project offers its Development Preview only while a Development environment exists. The
-  // first cycle on a fresh Project opens the IDE, which creates it.
-  await chooser.click();
-  if (!(await development.isVisible().catch(() => false))) {
+  // first cycle after it was stopped opens the IDE, which creates it again.
+  const offered = async () => {
+    if (!(await chooser.isVisible({ timeout: 5_000 }).catch(() => false))) return false;
+    await chooser.click();
+    if (await development.isVisible().catch(() => false)) return true;
     await page.keyboard.press("Escape");
+    return false;
+  };
+  if (!(await offered())) {
     await page.getByRole("button", { name: "IDE", exact: true }).click();
     const deadline = Date.now() + 300_000;
-    for (;;) {
+    while (!(await offered())) {
       await page.waitForTimeout(10_000);
-      await chooser.click();
-      if (await development.isVisible().catch(() => false)) break;
-      await page.keyboard.press("Escape");
       if (Date.now() > deadline) throw new Error("No Development Preview after opening the IDE");
     }
   }
