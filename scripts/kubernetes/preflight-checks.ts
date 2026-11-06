@@ -609,9 +609,16 @@ export function nodeProbeProgram() {
   return `import ctypes, gzip, json, os, platform, subprocess
 OPTIONS = set(json.loads(${JSON.stringify(JSON.stringify(nodeProbeOptions))}))
 def read(path, limit=1 << 22):
+    # Newer kernels answer a large read of a /proc/sys file with ENOMEM, so read in small blocks.
     try:
         with open(path, "rb") as f:
-            return f.read(limit).decode("utf-8", "replace")
+            data = b""
+            while len(data) < limit:
+                block = f.read(min(1 << 16, limit - len(data)))
+                if not block:
+                    break
+                data += block
+            return data.decode("utf-8", "replace")
     except OSError:
         return None
 release = platform.release()
