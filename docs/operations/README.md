@@ -17,7 +17,9 @@ trust or disable TLS verification.
 The development Helm chart lives in [deploy/helm/factory](../../deploy/helm/factory/README.md).
 Releases publish it as a signed OCI chart that pins the released Factory image and the verified
 worker; `v0.1.0-beta.1` is verified on arm64 Linux only, and amd64 and Azure AKS are not
-supported yet. A checkout can still install it directly. Kubernetes is provided by the operator. Factory does not
+supported yet. The worker needs a private cgroup namespace, which the Docker runtime of the
+verified node gives privileged Pods and a default containerd setup may not; the other platforms
+have not passed the native conformance. A checkout can still install it directly. Kubernetes is provided by the operator. Factory does not
 install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
 Local tools and the Factory image pin `kubectl` 1.35.6. Use a Kubernetes API server
 within one minor version, 1.34 through 1.36, as required by the upstream version-skew policy.

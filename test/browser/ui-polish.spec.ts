@@ -756,7 +756,15 @@ for (const touch of [false, true])
       if (touch) {
         // The dock keeps one row: touch targets are at least 44px where the layout allows and never
         // below 24px. The chevron keeps its 24px look and its full 44px height.
-        const box = await chooser.boundingBox();
+        // The topbar settles after the resize and the first data. Measure once two reads agree.
+        let box = await chooser.boundingBox();
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          await page.waitForTimeout(100);
+          const next = await chooser.boundingBox();
+          const settled = JSON.stringify(next) === JSON.stringify(box);
+          box = next;
+          if (settled) break;
+        }
         if (!box) throw new Error("The Preview chooser has no box");
         expect(box.width).toBe(24);
         expect(box.height).toBeGreaterThanOrEqual(44);
