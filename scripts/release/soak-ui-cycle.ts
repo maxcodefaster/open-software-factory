@@ -25,9 +25,18 @@ try {
     problems.push(`pageerror ${error.message.slice(0, 200)}`);
   });
   page.on("console", (message) => {
-    if (message.type() === "error") problems.push(`console ${message.text().slice(0, 200)}`);
+    if (message.type() !== "error") return;
+    if (
+      /status of 503/.test(message.text()) &&
+      /\.runtime\.localhost[:/]/.test(message.location().url)
+    )
+      return;
+    problems.push(`console ${message.text().slice(0, 200)}`);
   });
   page.on("response", (response) => {
+    // The Project's own App answers 503 until its dev server is up after a fresh start. The
+    // Preview waits for it, and the cycle still requires the frame to render.
+    if (response.status() === 503 && /\.runtime\.localhost[:/]/.test(response.url())) return;
     if (response.status() >= 500) problems.push(`${response.status()} ${response.url()}`);
   });
   await page.goto(`${base}/projects/${project}`);
