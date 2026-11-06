@@ -32,8 +32,24 @@ try {
   });
   await page.goto(`${base}/projects/${project}`);
   await page.getByRole("region", { name: "Ticket board" }).waitFor({ timeout: 60_000 });
-  await page.locator('button[aria-label="Choose Preview instance"]').first().click();
-  await page.getByRole("menuitem").filter({ hasText: "Development" }).first().click();
+  const chooser = page.locator('button[aria-label="Choose Preview instance"]').first();
+  const development = page.getByRole("menuitem").filter({ hasText: "Development" }).first();
+  // A Project offers its Development Preview only while a Development environment exists. The
+  // first cycle on a fresh Project opens the IDE, which creates it.
+  await chooser.click();
+  if (!(await development.isVisible().catch(() => false))) {
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "IDE", exact: true }).click();
+    const deadline = Date.now() + 300_000;
+    for (;;) {
+      await page.waitForTimeout(10_000);
+      await chooser.click();
+      if (await development.isVisible().catch(() => false)) break;
+      await page.keyboard.press("Escape");
+      if (Date.now() > deadline) throw new Error("No Development Preview after opening the IDE");
+    }
+  }
+  await development.click();
   const frame = page.locator('iframe[title="Factory Preview"]');
   await frame.waitFor({ timeout: 180_000 });
   const opened = Date.now() - started;

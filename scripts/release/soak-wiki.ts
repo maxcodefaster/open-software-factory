@@ -49,8 +49,13 @@ try {
   const page = await context.newPage();
   await page.goto(`${base}/projects/${project}`);
   await page.getByRole("button", { name: "Wiki", exact: true }).click();
-  await page.locator("[aria-label*=ctions i], [aria-label*=ore i]").first().click();
-  await page.getByRole("menuitem", { name: "Update Project Wiki" }).click();
+  // A Wiki that failed to build offers Retry update. Otherwise the actions menu updates it.
+  const retry = page.getByRole("button", { name: "Retry update", exact: true });
+  if (await retry.isVisible({ timeout: 5_000 }).catch(() => false)) await retry.click();
+  else {
+    await page.locator("[aria-label*=ctions i], [aria-label*=ore i]").first().click();
+    await page.getByRole("menuitem", { name: "Update Project Wiki" }).click();
+  }
   const deadline = Date.now() + 25 * 60_000;
   for (;;) {
     await page.waitForTimeout(5_000);
