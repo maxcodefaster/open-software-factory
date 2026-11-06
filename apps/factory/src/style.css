@@ -395,6 +395,14 @@ dt {
   max-width: min(18rem, 21vw);
 }
 
+/* The script removes the selector at this width after hydration; hiding it from the first paint
+   keeps a phone from showing it for a moment. */
+@media (max-width: 900px) {
+  .project-selector {
+    display: none;
+  }
+}
+
 .topbar-new-ticket {
   padding-inline: var(--space-4);
   white-space: nowrap;
