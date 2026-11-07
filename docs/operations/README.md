@@ -207,6 +207,54 @@ Preview grants bind the exact Runtime Attempt and App channel. Their host-only c
 App's origin; Factory credentials are not forwarded, and App cookies cannot escape to another App.
 
 
+## Trust boundary and node hardening
+
+Sandboxes run on the node's kernel, next to the privileged worker. Sysbox user namespaces, a
+seccomp policy and the Connector's Dev Container checks limit what Project code reaches. None of
+them is a virtual machine boundary, and a kernel bug can cross it. Plan the node accordingly.
+
+- **One worker per Factory.** Factory keeps a single worker. Every Project and user of that
+  installation runs in it. Use a separate installation, with its own node, for a customer or trust
+  domain you do not want to share a kernel with.
+- **A node for the worker.** Run it on a node pool that hosts nothing else you need to protect.
+  Do not give that pool cloud credentials beyond what its kubelet needs.
+- **Egress is open.** A Sandbox reaches the network through NAT in the worker Pod, with the Pod's
+  address. The worker accepts every forwarded destination, and Factory creates no NetworkPolicy in
+  the `factory-box-*` Namespaces. The release's own policies cover only the release's Pods.
+  Whether a Sandbox reaches the cluster DNS, other Pods, the node, the Kubernetes API server or a
+  cloud metadata endpoint depends on your CNI and cloud. Test it from inside a Sandbox. On a cloud
+  cluster, refuse 169.254.169.254 and the node's kubelet port for those Namespaces. A policy needs a
+  CNI that enforces NetworkPolicy, and the addresses to except depend on that CNI. Verify the
+  result before you rely on it:
+
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: sandbox-egress
+    namespace: factory-box-UUID
+  spec:
+    podSelector: {}
+    policyTypes: [Egress]
+    egress:
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except: [169.254.0.0/16, NODE_SUBNET_CIDR]
+  ```
+
+- **Node sysctls.** The preflight warns when `kernel.unprivileged_bpf_disabled`,
+  `kernel.perf_event_paranoid`, `kernel.kptr_restrict`, `kernel.dmesg_restrict` or
+  `vm.unprivileged_userfaultfd` leave unprivileged entry points open. It also reports
+  `kernel.yama.ptrace_scope` and `kernel.io_uring_disabled`. Sandboxes have their own PID
+  namespace and a seccomp rule that returns EPERM for io_uring, so those two never warn. The
+  worker itself is privileged and does not depend on any of them.
+- **Kernel updates.** A kernel fix matters more on this node than on an ordinary one. The
+  recommended node image settings below stop automatic image upgrades, so schedule kernel updates
+  yourself: stop execution, upgrade the pool, then recover the worker as described under
+  Upgrades and reboots.
+
+
 ## Managed clusters such as Azure AKS
 
 Azure AKS is not supported yet. The notes below describe the intended setup and are not verified.

@@ -10,10 +10,12 @@ import {
 } from "./preflight";
 import {
   evaluateAdmission,
+  evaluateHardening,
   evaluateNode,
   evaluateNodeFacts,
   evaluateReleaseNamespace,
   evaluateStorage,
+  hardeningSysctls,
   kernelConfigRequirements,
   type NodeFacts,
   nodeProbeProgram,
@@ -227,6 +229,15 @@ function facts(overrides: Partial<NodeFacts> = {}): NodeFacts {
     btf: true,
     userfaultfd: { available: true, errno: 0 },
     unprivilegedUserfaultfd: "0",
+    hardening: {
+      "kernel.unprivileged_bpf_disabled": "2",
+      "kernel.perf_event_paranoid": "4",
+      "kernel.kptr_restrict": "1",
+      "kernel.dmesg_restrict": "1",
+      "vm.unprivileged_userfaultfd": "0",
+      "kernel.yama.ptrace_scope": "1",
+      "kernel.io_uring_disabled": "2",
+    },
     nsLastPidWritable: true,
     maxUserNamespaces: 63359,
     devices: { "loop-control": true, fuse: true },
@@ -238,6 +249,36 @@ function facts(overrides: Partial<NodeFacts> = {}): NodeFacts {
 test("complete node facts pass every kernel check", () => {
   const checks = evaluateNodeFacts(facts());
   expect(checks.filter((check) => check.status !== "PASS")).toEqual([]);
+});
+
+test("open unprivileged kernel entry points warn with the exact sysctl", () => {
+  const checks = evaluateNodeFacts(
+    facts({
+      hardening: {
+        ...facts().hardening,
+        "kernel.unprivileged_bpf_disabled": "0",
+        "kernel.perf_event_paranoid": "1",
+        "kernel.dmesg_restrict": "0",
+        "vm.unprivileged_userfaultfd": "1",
+        "kernel.yama.ptrace_scope": "0",
+        "kernel.io_uring_disabled": null,
+      },
+    }),
+  );
+  const bpf = checks.find(
+    (check) => check.id === "kernel.hardening.kernel-unprivileged_bpf_disabled",
+  );
+  expect(bpf?.status).toBe("WARN");
+  expect(bpf?.fix).toContain("sysctl -w kernel.unprivileged_bpf_disabled=1");
+  expect(status(checks, "kernel.hardening.kernel-perf_event_paranoid")).toBe("WARN");
+  expect(status(checks, "kernel.hardening.kernel-dmesg_restrict")).toBe("WARN");
+  expect(status(checks, "kernel.hardening.vm-unprivileged_userfaultfd")).toBe("WARN");
+  expect(status(checks, "kernel.hardening.kernel-kptr_restrict")).toBe("PASS");
+  // Another layer covers these two, so they never warn.
+  expect(status(checks, "kernel.hardening.kernel-yama-ptrace_scope")).toBe("PASS");
+  expect(status(checks, "kernel.hardening.kernel-io_uring_disabled")).toBe("SKIP");
+  expect(checks.some((check) => check.status === "FAIL")).toBe(false);
+  expect(evaluateHardening(undefined)).toEqual([]);
 });
 
 test("missing kernel facilities fail or warn with exact remediation", () => {
@@ -311,6 +352,7 @@ test("an unreadable kernel configuration falls back to loaded filesystems with w
 test("the node probe program is valid Python carrying every checked option", async () => {
   const program = nodeProbeProgram();
   for (const item of kernelConfigRequirements) expect(program).toContain(item.option);
+  for (const name of hardeningSysctls) expect(program).toContain(name);
   const child = Bun.spawn(
     ["python3", "-c", "import sys; compile(sys.stdin.read(), 'probe', 'exec')"],
     { stdin: new TextEncoder().encode(program), stdout: "pipe", stderr: "pipe" },

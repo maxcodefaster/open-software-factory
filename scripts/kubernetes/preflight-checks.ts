@@ -408,6 +408,8 @@ export interface NodeFacts {
   readonly btf: boolean;
   readonly userfaultfd: { readonly available: boolean; readonly errno: number } | null;
   readonly unprivilegedUserfaultfd: string | null;
+  // Host-wide sysctl values by name; null when the kernel does not expose the file.
+  readonly hardening?: Readonly<Record<string, string | null>>;
   readonly nsLastPidWritable: boolean;
   readonly maxUserNamespaces: number | null;
   readonly devices: Record<string, boolean>;
@@ -469,6 +471,87 @@ export const kernelConfigRequirements: readonly ConfigRequirement[] = [
 ];
 
 export const nodeProbeOptions = kernelConfigRequirements.map((item) => item.option);
+
+interface HardeningRule {
+  readonly sysctl: string;
+  readonly accepts: (value: number) => boolean;
+  readonly want: string;
+  readonly why: string;
+  // Reported, never warned: another layer already covers it.
+  readonly informational?: string;
+}
+
+// Sandbox code shares the node kernel. These sysctls shrink what unprivileged
+// code, including a Sandbox's root in its user namespace, can reach. They only
+// warn. The worker is privileged and does not depend on them.
+export const hardeningRules: readonly HardeningRule[] = [
+  {
+    sysctl: "kernel.unprivileged_bpf_disabled",
+    accepts: (value) => value === 1 || value === 2,
+    want: "1 or 2",
+    why: "unprivileged bpf() is a common kernel exploit entry",
+  },
+  {
+    sysctl: "kernel.perf_event_paranoid",
+    accepts: (value) => value >= 2,
+    want: "2 or higher",
+    why: "perf_event_open() exposes kernel state to unprivileged code",
+  },
+  {
+    sysctl: "kernel.kptr_restrict",
+    accepts: (value) => value >= 1,
+    want: "1 or 2",
+    why: "kernel addresses help exploit development",
+  },
+  {
+    sysctl: "kernel.dmesg_restrict",
+    accepts: (value) => value === 1,
+    want: "1",
+    why: "the kernel log leaks addresses and module state",
+  },
+  {
+    sysctl: "vm.unprivileged_userfaultfd",
+    accepts: (value) => value === 0,
+    want: "0",
+    why: "kernel-mode userfaultfd lets unprivileged code stall the kernel inside a race window",
+  },
+  {
+    sysctl: "kernel.yama.ptrace_scope",
+    accepts: (value) => value >= 1,
+    want: "1 or higher",
+    why: "ptrace between same-user processes",
+    informational:
+      "Sandboxes have their own PID namespace and cannot name the worker's processes, so this only limits ptrace inside a Sandbox",
+  },
+  {
+    sysctl: "kernel.io_uring_disabled",
+    accepts: (value) => value >= 1,
+    want: "1 or 2 (kernel 6.6 and newer)",
+    why: "io_uring has a long record of kernel bugs",
+    informational:
+      "The Sandbox seccomp policy already returns EPERM for io_uring_setup, io_uring_enter and io_uring_register",
+  },
+];
+
+export const hardeningSysctls = hardeningRules.map((rule) => rule.sysctl);
+
+export function evaluateHardening(values: Readonly<Record<string, string | null>> | undefined) {
+  if (!values) return [];
+  return hardeningRules.map((rule) => {
+    const id = `kernel.hardening.${rule.sysctl.replaceAll(".", "-")}`;
+    const raw = values[rule.sysctl];
+    const value = raw === null || raw === undefined ? Number.NaN : Number(raw.trim());
+    if (Number.isNaN(value))
+      return skip(id, `${rule.sysctl} is not readable on this kernel; wanted ${rule.want}`);
+    if (rule.accepts(value)) return pass(id, `${rule.sysctl}=${value}`);
+    if (rule.informational) return pass(id, `${rule.sysctl}=${value}. ${rule.informational}`);
+    return warn(
+      id,
+      `${rule.sysctl}=${value}; wanted ${rule.want}. ${rule.why}.`,
+      `sysctl -w ${rule.sysctl}=${rule.want.split(" ")[0]} on the node pool and persist it in /etc/sysctl.d`,
+    );
+  });
+}
 
 export function evaluateNodeFacts(facts: NodeFacts) {
   const checks: PreflightCheck[] = [];
@@ -599,6 +682,7 @@ export function evaluateNodeFacts(facts: NodeFacts) {
           `modprobe ${device === "fuse" ? "fuse" : "loop"} on the node if the worker cannot start`,
         ),
       );
+  checks.push(...evaluateHardening(facts.hardening));
   checks.push(workerDoctorCheck(facts));
   return checks;
 }
@@ -608,6 +692,7 @@ export function evaluateNodeFacts(facts: NodeFacts) {
 export function nodeProbeProgram() {
   return `import ctypes, gzip, json, os, platform, subprocess
 OPTIONS = set(json.loads(${JSON.stringify(JSON.stringify(nodeProbeOptions))}))
+HARDENING = json.loads(${JSON.stringify(JSON.stringify(hardeningSysctls))})
 def read(path, limit=1 << 22):
     # Newer kernels answer a large read of a /proc/sys file with ENOMEM, so read in small blocks.
     try:
@@ -668,6 +753,10 @@ if number:
         os.close(fd)
 unprivileged = read("/proc/sys/vm/unprivileged_userfaultfd")
 facts["unprivilegedUserfaultfd"] = unprivileged.strip() if unprivileged else None
+facts["hardening"] = {}
+for name in HARDENING:
+    value = read("/proc/sys/" + name.replace(".", "/"), 64)
+    facts["hardening"][name] = value.strip() if value is not None else None
 facts["nsLastPidWritable"] = os.access("/proc/sys/kernel/ns_last_pid", os.W_OK)
 namespaces = read("/proc/sys/user/max_user_namespaces")
 facts["maxUserNamespaces"] = int(namespaces) if namespaces and namespaces.strip().isdigit() else None
