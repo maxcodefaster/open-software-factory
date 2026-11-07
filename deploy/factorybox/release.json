@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "image": "ghcr.io/maxcodefaster/factorybox-worker@sha256:6f9fb997c9390e50d7696fc1bcae18b6476b1d11f5acef88024910dfe775e286",
-  "executableSHA256": "c38a564f47d227c38f7ee4627f87f9655dc7811945fde32306cbf1b55b262179",
+  "image": "ghcr.io/maxcodefaster/factorybox-worker@sha256:e83867b1ef3cb636122e450a73597a3e397df9dec6de08e8f2a87a6738c6e6da",
+  "executableSHA256": "f731ac852393335add481887b420f410a7c6e844ab5e19bfec1737543657d7e1",
   "architecture": "arm64",
   "tag": "v0.1.0-beta.1",
-  "conformancePassedAt": "2026-11-06T06:50:36.728Z",
+  "conformancePassedAt": "2026-11-07T17:09:43.628Z",
   "conformedOn": "orbstack",
-  "signedAt": "2026-11-06T06:52:17.803Z"
+  "signedAt": "2026-11-07T17:11:45.380Z"
 }
