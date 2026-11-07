@@ -1,6 +1,8 @@
 set -eu
 umask 077
 unset CODER_AGENT_TOKEN CODER_AGENT_SUBSYSTEM CODER_AGENT_URL
+# CRIU cannot checkpoint MPTCP sockets, and Go listens with MPTCP on kernels that enable it.
+export GODEBUG=multipathtcp=0
 cp /factory/assignment/parent-token /run/factory-parent-token
 cp /factory/assignment/child-token /run/factory-child-token
 chmod 0400 /run/factory-parent-token /run/factory-child-token
