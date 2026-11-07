@@ -30,6 +30,27 @@
 - Persist product state, external intent/outcome, human decisions, Verification/merge results and
   compact Evidence. Logs, heartbeats and resource samples stay ephemeral.
 
+## Product and design brief
+
+- Users. Product Contributors define requirements, research Projects and give feedback. Developers also
+  work with source, development Workspaces and Coding. Project managers control access and shared
+  defaults. Factory administrators manage the installation. Management permission and Developer status
+  are separate. Design for people who understand their product but need not understand agent engines,
+  package formats or runtime infrastructure, and keep technical detail available but never required.
+- Purpose. Factory turns approved product intent into reviewed source changes. A Project combines a
+  source repository, Tickets, revisioned Knowledge, shared development and a promoted Preview. People
+  approve the requirements and the exact verified commit, or explicitly delegate eligible monitoring
+  fixes and Delivery. Factory records which decision authorized the work.
+- Requirements are manual by default. An AI Interview and technical planning start only on an explicit
+  request, and reading or saving never starts inference. Implement approves the saved requirements.
+  Verification and an independent review of the exact commit precede a deliberate human Delivery approval.
+- Background work does not inherit personal configuration. Edits after approval save as a new revision
+  and leave the approved requirements pinned.
+- Settings show one scope at a time: Project, Libraries, Personal or Factory administration. Small
+  screens use a grouped title menu instead of a sidebar.
+- Show progress from saved state, state what Factory recorded rather than guessing, and keep unknown
+  or uncertain outcomes distinct from success.
+
 ## Interface
 
 - Before UI changes, read the existing control owners. Preserve the visual system rather than
