@@ -179,9 +179,11 @@ export function createSetupInspection(input: {
           (cause instanceof Error && cause.name === "TimeoutError");
         const failure = timedOut
           ? "Inspection timed out. Previous answers and source are unchanged. Retry explicitly when ready."
-          : cause instanceof SetupConfigurationError
-            ? cause.recovery
-            : "Inspection could not finish. Previous answers and source are unchanged; retry when ready.";
+          : cause instanceof Error && cause.message === "Inspection model was not admitted"
+            ? "No planning model is connected. Ask a Factory administrator to connect one in Settings, then retry."
+            : cause instanceof SetupConfigurationError
+              ? cause.recovery
+              : "Inspection could not finish. Previous answers and source are unchanged; retry when ready.";
         await sql`UPDATE factory.project_setup_inspection SET state='failed',failure=${failure},updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
       } finally {
         aborts.delete(value.id);

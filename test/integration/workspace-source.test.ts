@@ -1042,3 +1042,27 @@ test("Stop fences an in-flight source create and failed teardown needs an explic
     await fixture.dispose();
   }
 }, 30_000);
+
+test("an imported Project gets no personal Workspace before its configuration is ready", async () => {
+  const fixture = await ownedSourceFixture();
+  try {
+    await fixture.database
+      .client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
+      SELECT ${crypto.randomUUID()},${crypto.randomUUID()},${fixture.developerID},id,name,slug,'import','https://example.invalid/owned/import',${"b".repeat(64)},'committed'
+      FROM factory.project WHERE id=${fixture.projectID}`;
+    const sources = createWorkspaceSourceController(
+      fixture.database,
+      "no-early-workspace",
+      {} as never,
+    );
+    await expect(sources.ensurePersonal(fixture.projectID, fixture.developerID)).rejects.toThrow(
+      "Confirm this Project's configuration",
+    );
+    expect(
+      await fixture.database
+        .client`SELECT id FROM factory.development_workspace WHERE project_id=${fixture.projectID}`,
+    ).toHaveLength(0);
+  } finally {
+    await fixture.dispose();
+  }
+}, 30_000);

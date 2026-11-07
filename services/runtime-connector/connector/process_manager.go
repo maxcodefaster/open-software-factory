@@ -23,6 +23,7 @@ type managedProcess struct {
 	done            chan struct{}
 	generation      uint64
 	restarts        int
+	startError      string
 }
 
 type processManager struct {
@@ -105,7 +106,10 @@ func (manager *processManager) startupFailure(assignment Assignment) error {
 			continue
 		}
 		summary := fmt.Sprintf("channel %q process %q failed before readiness", channel.Name, process.spec.Name)
-		if process.exitCode != nil {
+		if process.startError != "" {
+			summary = fmt.Sprintf("channel %q process %q could not start (%s) before readiness",
+				channel.Name, process.spec.Name, process.startError)
+		} else if process.exitCode != nil {
 			summary = fmt.Sprintf("channel %q process %q exited with code %d before readiness",
 				channel.Name, process.spec.Name, *process.exitCode)
 		}
@@ -180,6 +184,7 @@ func (manager *processManager) start(name string) error {
 	process.state = "starting"
 	process.startedAt = time.Time{}
 	process.exitCode = nil
+	process.startError = ""
 	process.intentionalStop = false
 	process.done = make(chan struct{})
 	spec := process.spec
@@ -204,6 +209,10 @@ func (manager *processManager) start(name string) error {
 			process.state = "failed"
 			code := -1
 			process.exitCode = &code
+			process.startError = err.Error()
+			if len(process.startError) > 200 {
+				process.startError = process.startError[:200]
+			}
 			close(process.done)
 		}
 		manager.mutex.Unlock()

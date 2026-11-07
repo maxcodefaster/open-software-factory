@@ -23,6 +23,7 @@ import { CommandError } from "../command-error";
 import { runtimeFactoryURL, runtimeRepositoryCloneURL } from "../runtime/endpoints";
 import { resolveRepositoryRevision, serveRuntimeRepository } from "../runtime/git-http";
 import { factoryboxAllocation, rememberFactoryboxSource } from "../runtime/worker";
+import { requireSetupReady } from "../setup/execution-gate";
 
 type Database = ReturnType<typeof createDatabase>;
 type SourceSQL = Database["client"] | AgentTurnTransaction;
@@ -482,6 +483,9 @@ export function createWorkspaceSourceController(
         const [existing] =
           await sql`SELECT id FROM factory.development_workspace WHERE id=${identity.workspaceID}`;
         if (existing) return;
+        // The Workspace keeps the revision it is created at. An imported Project must have its
+        // configuration committed first, or the Workspace would stay on a commit without it.
+        await requireSetupReady(sql, projectID);
         const [project] = await sql<
           Array<{ repositoryURL: string; defaultBranch: string }>
         >`SELECT repository_url AS "repositoryURL",default_branch AS "defaultBranch" FROM factory.project WHERE id=${projectID}`;

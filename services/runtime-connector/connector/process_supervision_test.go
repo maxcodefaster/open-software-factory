@@ -64,3 +64,16 @@ func TestAppIsNotRestartedBeforeReadinessOrOutsideSharedRuntimes(t *testing.T) {
 		}
 	}
 }
+
+func TestMissingCommandIsNamedInTheStartupFailure(t *testing.T) {
+	assignment := validAssignment()
+	assignment.Channels = []Channel{{Name: "app", Kind: "app"}}
+	assignment.Processes = []Process{{Name: "app", Command: []string{"factory-missing-command", "run"}}}
+	manager := newProcessManager(context.Background(), assignment, io.Discard)
+	_ = manager.start("app")
+	err := manager.startupFailure(assignment)
+	if err == nil || !strings.Contains(err.Error(), "could not start") ||
+		!strings.Contains(err.Error(), "factory-missing-command") || strings.Contains(err.Error(), "code -1") {
+		t.Fatalf("a missing command lost its cause: %v", err)
+	}
+}
