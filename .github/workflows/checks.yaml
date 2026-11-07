@@ -54,9 +54,14 @@ jobs:
           mise exec -- helm lint "${chart[@]}"
           mise exec -- helm template factory "${chart[@]}" \
             | mise exec -- kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.35.0
+      # Same policy as the local gate: one retry for a timing flake, none for a repeated failure.
       - name: Check source, Connector and owned controllers
+        env:
+          FACTORY_CONTROLLER_RETRIES: "1"
         run: mise exec -- bun run check:integration
       - name: Check owned UI journeys
+        env:
+          FACTORY_BROWSER_RETRIES: "1"
         run: mise exec -- bun run test:browser
   factory-image:
     runs-on: ubuntu-24.04
