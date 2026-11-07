@@ -184,7 +184,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     head = "c".repeat(40);
     await expect(
       controller.start(projectID, userID, crypto.randomUUID(), { parentID: failedID }),
-    ).rejects.toThrow("Source changed");
+    ).rejects.toThrow("Continue the retained setup inspection");
     expect(calls).toBe(3);
 
     head = "a".repeat(40);
