@@ -68,7 +68,7 @@ test.each([
     phase: "failed",
   });
   expect(status.cause).toContain(cause);
-  expect(status.detail).toContain("Restart the App");
+  expect(status.detail).toContain("restarts a crashed App");
 });
 
 test("a recorded runtime failure wins over a generic transport cause", () => {

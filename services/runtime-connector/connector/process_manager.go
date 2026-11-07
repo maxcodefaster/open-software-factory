@@ -22,6 +22,7 @@ type managedProcess struct {
 	intentionalStop bool
 	done            chan struct{}
 	generation      uint64
+	restarts        int
 }
 
 type processManager struct {
@@ -35,6 +36,10 @@ type processManager struct {
 	recent      map[string][]byte
 	fatal       chan error
 	development bool
+	// A shared Staging or Preview runtime has App channels only. Once it is ready, a crashed App
+	// restarts with a bounded backoff, because nobody opens a Run bar there.
+	supervised  bool
+	supervising bool
 	environment map[string]string
 }
 
@@ -54,9 +59,13 @@ func newProcessManager(ctx context.Context, assignment Assignment, output io.Wri
 		fatal:       make(chan error, len(assignment.Processes)),
 		environment: assignment.RuntimeEnvironment,
 	}
+	manager.supervised = len(assignment.Channels) > 0
 	for _, channel := range assignment.Channels {
 		if channel.Kind == "ide" {
 			manager.development = true
+		}
+		if channel.Kind != "app" {
+			manager.supervised = false
 		}
 	}
 	for _, spec := range assignment.Processes {
@@ -227,6 +236,7 @@ func (manager *processManager) wait(name string, generation uint64, command *exe
 		return
 	}
 	intentional := process.intentionalStop
+	ranFor := time.Since(process.startedAt)
 	process.command = nil
 	process.exitCode = &exitCode
 	if intentional || manager.ctx.Err() != nil {
@@ -237,6 +247,9 @@ func (manager *processManager) wait(name string, generation uint64, command *exe
 	close(process.done)
 	manager.mutex.Unlock()
 	manager.emitState(name)
+	if !intentional && manager.ctx.Err() == nil && manager.shouldRestart(name) {
+		go manager.restartAfterFailure(name, generation, ranFor)
+	}
 	if !intentional && manager.ctx.Err() == nil && manager.failureIsFatal(name) {
 		if err == nil {
 			err = fmt.Errorf("process %q exited with code %d", name, exitCode)
@@ -247,6 +260,54 @@ func (manager *processManager) wait(name string, generation uint64, command *exe
 		case manager.fatal <- err:
 		default:
 		}
+	}
+}
+
+// supervise turns restarts on after the runtime reported its Apps ready, so a failing start is
+// still reported as a start failure instead of being retried behind the caller's back.
+func (manager *processManager) supervise() {
+	manager.mutex.Lock()
+	manager.supervising = manager.supervised
+	manager.mutex.Unlock()
+}
+
+func (manager *processManager) shouldRestart(name string) bool {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	return manager.supervising && isAppProcess(name)
+}
+
+const maximumAppRestarts = 5
+
+func (manager *processManager) restartAfterFailure(name string, generation uint64, ranFor time.Duration) {
+	manager.mutex.Lock()
+	process := manager.processes[name]
+	if process == nil || process.generation != generation || process.state != "failed" {
+		manager.mutex.Unlock()
+		return
+	}
+	if ranFor >= time.Minute {
+		process.restarts = 0
+	}
+	process.restarts++
+	attempt := process.restarts
+	manager.mutex.Unlock()
+	if attempt > maximumAppRestarts {
+		_ = manager.write(name, []byte("Factory stopped restarting this App after repeated failures. Restart it from the IDE.\n"))
+		return
+	}
+	delay := min(time.Duration(1<<attempt)*time.Second, 30*time.Second)
+	_ = manager.write(name, []byte(fmt.Sprintf("The App exited. Factory restarts it in %d seconds (attempt %d of %d).\n", int(delay/time.Second), attempt, maximumAppRestarts)))
+	select {
+	case <-manager.ctx.Done():
+		return
+	case <-time.After(delay):
+	}
+	manager.mutex.Lock()
+	stale := process.generation != generation || process.state != "failed"
+	manager.mutex.Unlock()
+	if !stale {
+		_ = manager.start(name)
 	}
 }
 

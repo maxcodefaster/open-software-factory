@@ -98,6 +98,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 	if readinessErr != nil {
 		return fail(readinessErr)
 	}
+	processes.supervise()
 	runtime := &childRuntime{
 		assignment: assignment,
 		httpClient: &http.Client{

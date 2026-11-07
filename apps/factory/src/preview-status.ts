@@ -73,7 +73,7 @@ export function previewStatus(input: PreviewStatusInput): PreviewStatus {
       headline: "Could not open Preview.",
       cause,
       detail: processCause
-        ? "Restart the App from the Run bar in the IDE, then reload this view."
+        ? "Reload this view in a moment. Staging restarts a crashed App by itself. In your own Workspace, restart it from the Run bar in the IDE."
         : "Retry with Reload view.",
     };
   }
