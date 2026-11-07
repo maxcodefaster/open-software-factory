@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "measuredAt": "2026-11-07",
+  "platform": "linux/amd64",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 4800U",
+    "cores": 8,
+    "threads": 16,
+    "memoryGiB": 15
+  },
+  "kernel": "7.2.15-1-omarchy",
+  "workerLimit": {
+    "cpu": 3,
+    "memoryGiB": 3
+  },
+  "workload": "test/fixtures/runtime-project",
+  "randomApplicationMemoryMiB": 256,
+  "cache": "Ten warm restores on one freshly admitted worker; no host image cache purge",
+  "timing": "Host monotonic time including Kubernetes exec transport; resume ends on healthy App state probe",
+  "quantiles": "nearest-rank",
+  "sourceReceiptSHA256": "4738b3df8e534afa40d4ff4cce2ed92e294cdc2520792bd6420241a56ce0507b",
+  "passed": true,
+  "samples": 10,
+  "successfulRestores": 10,
+  "pause": {
+    "medianMS": 4071.1265149999963,
+    "p95MS": 5777.593617000006,
+    "minMS": 2686.784833999991,
+    "maxMS": 5777.593617000006
+  },
+  "resumeToHealthy": {
+    "medianMS": 2992.046570999999,
+    "p95MS": 3649.2176420000033,
+    "minMS": 2780.8132089999854,
+    "maxMS": 3649.2176420000033
+  },
+  "anonymousRAMReleased": true,
+  "runs": [
+    {
+      "pauseMS": 4491.945170999999,
+      "resumeToHealthyMS": 2992.046570999999,
+      "beforeAnonBytes": 361697280,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 4071.1265149999963,
+      "resumeToHealthyMS": 2945.7702379999973,
+      "beforeAnonBytes": 361963520,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 3205.54375099999,
+      "resumeToHealthyMS": 2780.8132089999854,
+      "beforeAnonBytes": 379604992,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 2686.784833999991,
+      "resumeToHealthyMS": 2870.779545999976,
+      "beforeAnonBytes": 366936064,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 3348.713340999995,
+      "resumeToHealthyMS": 2937.690444000007,
+      "beforeAnonBytes": 361734144,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 3072.9856319999963,
+      "resumeToHealthyMS": 3306.372076999978,
+      "beforeAnonBytes": 361861120,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 4890.861525999993,
+      "resumeToHealthyMS": 3357.360904000001,
+      "beforeAnonBytes": 362037248,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 4573.978616000008,
+      "resumeToHealthyMS": 3478.320007000002,
+      "beforeAnonBytes": 361480192,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 4326.422106000013,
+      "resumeToHealthyMS": 3649.2176420000033,
+      "beforeAnonBytes": 362627072,
+      "afterAnonBytes": 0,
+      "preserved": true
+    },
+    {
+      "pauseMS": 5777.593617000006,
+      "resumeToHealthyMS": 3408.6432870000135,
+      "beforeAnonBytes": 363094016,
+      "afterAnonBytes": 0,
+      "preserved": true
+    }
+  ]
+}

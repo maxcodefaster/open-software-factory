@@ -15,6 +15,11 @@ export const workerRelease = z.object({
   architecture: z.enum(["arm64", "amd64"]),
 });
 
+export function workerValuesFile(input: z.infer<typeof workerRelease>) {
+  const worker = workerRelease.parse(input);
+  return `factorybox:\n  architecture: "${worker.architecture}"\n  image: "${worker.image}"\n  executableSHA256: "${worker.executableSHA256}"\n`;
+}
+
 function replaceOnce(text: string, pattern: RegExp, replacement: string, label: string) {
   if (!pattern.test(text)) throw new Error(`The chart has no ${label} line to set`);
   return text.replace(pattern, replacement);
@@ -86,6 +91,20 @@ if (import.meta.main) {
   );
   await writeFile(join(chartDirectory, "Chart.yaml"), released.chart);
   await writeFile(join(chartDirectory, "values.yaml"), released.values);
+  for (const architecture of ["arm64", "amd64"] as const) {
+    const releasePath = join(
+      root,
+      architecture === "arm64"
+        ? "deploy/factorybox/release.json"
+        : "deploy/factorybox/release-amd64.json",
+    );
+    const pin = workerRelease.parse(JSON.parse(await readFile(releasePath, "utf8")));
+    if (pin.architecture !== architecture)
+      throw new Error(`The ${architecture} worker release has a different architecture`);
+    const name = `factory-${architecture}-${version}.yaml`;
+    await writeFile(join(resolve(output), name), workerValuesFile(pin));
+    await writeFile(join(chartDirectory, `values.${architecture}.yaml`), workerValuesFile(pin));
+  }
   const packaged = Bun.spawn(
     ["helm", "package", chartDirectory, "--destination", resolve(output)],
     {

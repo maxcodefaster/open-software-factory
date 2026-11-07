@@ -1,0 +1,42 @@
+{
+  "purpose": "Presentation of existing public demo screenshots, not new live proof",
+  "presentation": "Framed public demo screenshots; source and output hashes below",
+  "images": [
+    {
+      "output": "hero.png",
+      "source": "../screens/board.jpg",
+      "sourceSHA256": "d150120d71b171f5072b5e3fe09aa09e35830fe2261a013d09248fa1ee87214a",
+      "outputSHA256": "692e36ef705edeb4c5050210bea933f961faf42a1dc4b323cb2bdf4f26bbf254",
+      "presentationOnly": true,
+      "imageSize": [1600, 820],
+      "bytes": 716699
+    },
+    {
+      "output": "intent.png",
+      "source": "../screens/spec.jpg",
+      "sourceSHA256": "d7de5933562e7c5a53cedac79dbcb7937bee67df99ad8b2f22df670a24ccd585",
+      "outputSHA256": "309d39704f3510b044fce9b2ed174e9b7e84a5f849381032190ce591c04553a0",
+      "presentationOnly": true,
+      "imageSize": [1600, 1300],
+      "bytes": 999639
+    },
+    {
+      "output": "build.png",
+      "source": "../screens/ide.jpg",
+      "sourceSHA256": "9d4ff2eade66d610f999a01c0edfb78c82f9d2f3d4e0deb0589e2cdedb9bda23",
+      "outputSHA256": "536f99349e0020aac21d3213ccb2ad3ae396d778a620bb181deb369d683a0ccf",
+      "presentationOnly": true,
+      "imageSize": [1600, 1300],
+      "bytes": 1191273
+    },
+    {
+      "output": "deliver.png",
+      "source": "../screens/review.jpg",
+      "sourceSHA256": "2691eb85704d2efa506c9af24b03f9433bab3de084987b41c213fe66058edfe7",
+      "outputSHA256": "6fdd266cf54d841cc89b5ff2d7be7a6be11ea5577d8e4f335aeb2e3bbaa5eee5",
+      "presentationOnly": true,
+      "imageSize": [1600, 1300],
+      "bytes": 897404
+    }
+  ]
+}

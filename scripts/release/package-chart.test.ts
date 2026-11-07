@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { releaseChartFiles } from "./package-chart";
+import { releaseChartFiles, workerValuesFile } from "./package-chart";
 
 const chart = readFileSync("deploy/helm/factory/Chart.yaml", "utf8");
 const values = readFileSync("deploy/helm/factory/values.yaml", "utf8");
@@ -43,4 +43,16 @@ test("a malformed release input is refused", () => {
     ),
   ).toThrow();
   expect(() => releaseChartFiles({ chart: "name: x\n", values }, release)).toThrow();
+});
+
+test("architecture values keep the worker image and executable together", () => {
+  const amd64 = { ...release.worker, architecture: "amd64" as const };
+  expect(Bun.YAML.parse(workerValuesFile(amd64))).toEqual({
+    factorybox: {
+      architecture: "amd64",
+      image: amd64.image,
+      executableSHA256: amd64.executableSHA256,
+    },
+  });
+  expect(() => workerValuesFile({ ...amd64, executableSHA256: "" })).toThrow();
 });

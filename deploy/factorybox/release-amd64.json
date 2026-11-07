@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "image": "ghcr.io/maxcodefaster/factorybox-worker@sha256:e3e8c0e763ed3522cdb490954648cccb2855e03a9afd1e0de999ce9d0f905e72",
+  "executableSHA256": "3328eff7c972616c37c8b12ed55f49077de53f1caba5da60c4e1aea4ea702e6b",
+  "architecture": "amd64",
+  "tag": "v0.1.0-beta.1-amd64",
+  "conformancePassedAt": "2026-11-07T21:04:59.045Z",
+  "conformedOn": "archy",
+  "signedAt": "2026-11-07T21:14:08.095Z"
+}

@@ -265,6 +265,7 @@ jobs:
           image="$IMAGE_ROOT/factory:$RELEASE"
           digest="$(release_combine "$image" "$image-arm64" "$image-amd64")"
           release_sign "$IMAGE_ROOT/factory@$digest"
+          printf 'factory=%s@%s\n' "$IMAGE_ROOT/factory" "$digest" >> "$GITHUB_OUTPUT"
           {
             echo "### Factory $RELEASE"
             echo
@@ -300,7 +301,12 @@ jobs:
           mise exec -- bun scripts/release/package-chart.ts --version "$RELEASE" \
             --factory-image "$FACTORY_IMAGE" --output dist
           mise exec -- helm lint "dist/factory-$RELEASE.tgz" --set "factorybox.nodeName=lint-node" \
-            --set publicURL=http://127.0.0.1:3000 --set forgejoPublicURL=http://127.0.0.1:3001 --set development=true
+            --set publicURL=http://127.0.0.1:3000 --set forgejoPublicURL=http://127.0.0.1:3001 \
+            --set development=true --set developmentZeroURL=http://127.0.0.1:3002
+          mise exec -- helm lint "dist/factory-$RELEASE.tgz" --values "dist/factory-amd64-$RELEASE.yaml" \
+            --set factorybox.nodeName=lint-node --set publicURL=http://127.0.0.1:3000 \
+            --set forgejoPublicURL=http://127.0.0.1:3001 --set development=true \
+            --set developmentZeroURL=http://127.0.0.1:3002
       - name: Publish and sign the chart
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -315,4 +321,6 @@ jobs:
           digest="$(sed -n 's/^Digest: //p' <<< "$pushed" | head -n1)"
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           cosign sign --yes "ghcr.io/$owner/charts/factory@$digest"
-          gh release upload "$TAG" "dist/factory-$RELEASE.tgz" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" "dist/factory-$RELEASE.tgz" \
+            "dist/factory-arm64-$RELEASE.yaml" "dist/factory-amd64-$RELEASE.yaml" \
+            --clobber --repo "$GITHUB_REPOSITORY"

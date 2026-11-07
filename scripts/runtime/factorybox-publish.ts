@@ -74,10 +74,11 @@ if (import.meta.main) {
   const repository = option("--repository");
   const tag = option("--tag");
   const keyFile = option("--cosign-key");
+  const releaseFile = option("--release-file") ?? "deploy/factorybox/release.json";
   const dryRun = process.argv.includes("--dry-run");
   if (!buildFile || !conformanceFile || !repository || !tag || (!keyFile && !dryRun))
     throw new Error(
-      "Usage: factorybox-publish --build result.json --conformance result.json --repository ghcr.io/OWNER/factorybox-worker --tag v0.1.0-beta.1 --cosign-key cosign.key [--dry-run]",
+      "Usage: factorybox-publish --build result.json --conformance result.json --repository ghcr.io/OWNER/factorybox-worker --tag v0.1.0-beta.1 --cosign-key cosign.key [--release-file PATH] [--dry-run]",
     );
   const { worker, proof } = verifyPublishInputs(
     await readJSON(buildFile),
@@ -153,6 +154,6 @@ if (import.meta.main) {
   };
   const directory = resolve(import.meta.dir, "../../deploy/factorybox");
   await mkdir(directory, { recursive: true });
-  await writeFile(resolve(directory, "release.json"), `${JSON.stringify(release, null, 2)}\n`);
-  console.log(`Published and signed ${reference}\nRecorded deploy/factorybox/release.json`);
+  await writeFile(resolve(releaseFile), `${JSON.stringify(release, null, 2)}\n`);
+  console.log(`Published and signed ${reference}\nRecorded ${releaseFile}`);
 }

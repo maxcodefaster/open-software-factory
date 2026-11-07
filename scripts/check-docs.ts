@@ -50,6 +50,13 @@ for (const path of paths) {
   );
   const document = readFileSync(path, "utf8");
   requireValid((document.match(/^```/gm) ?? []).length % 2 === 0, `${name}: unbalanced fences`);
+  for (const [, asset] of document.matchAll(/\b(?:src|srcset)="([^"]+)"/g)) {
+    if (!asset || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(asset)) continue;
+    requireValid(
+      existsSync(resolve(dirname(path), decodeURIComponent(asset))),
+      `${name}: missing image ${asset}`,
+    );
+  }
   for (const [, raw] of document.matchAll(/\]\(([^)\n]+)\)/g)) {
     const target = (raw ?? "").replace(/^<|>$/g, "");
     if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue;

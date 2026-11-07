@@ -168,6 +168,10 @@ test("release publication is attested, signed and scoped to the jobs that need c
     factory.findIndex((step) => step.run?.includes("docker buildx build")),
   );
   expect(workflow.jobs.distribution.steps.at(-1).run).toContain("GITHUB_STEP_SUMMARY");
+  expect(workflow.jobs.distribution.outputs.factory).toBe("${{ steps.publish.outputs.factory }}");
+  expect(workflow.jobs.distribution.steps.at(-1).run).toContain("printf 'factory=%s@%s\\n'");
+  expect(workflow.jobs.distribution.steps.at(-1).run).toContain('>> "$GITHUB_OUTPUT"');
+  expect(workflow.jobs.chart.env.FACTORY_IMAGE).toBe("${{ needs.distribution.outputs.factory }}");
   const library = await readFile(new URL("./release-lib.sh", import.meta.url), "utf8");
   expect(library).toContain("Choose a new release version.");
   expect(library).toContain("cosign sign --yes");
