@@ -167,7 +167,7 @@ original worker while retaining its Pod object for terminal observation. Fresh r
 unresolved backing from any admission sharing the old claim. It records a new store intent,
 keeps the old claim and history, and retains canonical Source on its original claim and node.
 Omitting `storage` retains the exact original store. Retry a request only with the same UUID and
-storage selection. See [ADR 0003](../../../docs/adr/0003-worker-recovery-and-storage-retirement.md#admit-fresh-execution-storage-only-after-confirmed-drain).
+storage selection. See ADR 0003.
 A new node, storage backend or architecture still needs its own native admission.
 `factorybox.kernel` is optional. Leave it empty (or `"*"`) to let the worker decide, or list
 releases with `*` wildcards to restrict which nodes Factory admits. Run `helm test RELEASE` to
@@ -640,3 +640,769 @@ are rejected rather than silently switching existing attachments to an empty buc
 Startup also refuses retained QA files in the former state-volume `review-media` directory.
 Transfer retained bytes and verify their exact identities before changing an existing installation;
 the chart does not migrate or erase them automatically.
+
+## Operating Factory
+
+Installing, sizing and recovering a Factory installation and its Factorybox worker.
+The chart's own instructions are in [deploy/helm/factory](README.md).
+
+### Installation and worker admission
+
+Select `registryCASecret` before admitting the installation's first Factorybox worker and keep
+that CA bundle unchanged for the retained worker. This configures its private Sandbox registry
+trust; it does not configure Kubernetes node image pulls. Node image-pull trust is an operator
+prerequisite. Publishing new digest-pinned runtime tools does not itself require changing this
+setting, and Factory refuses to overwrite a retained worker's shared trust declaration.
+The Dev Containers CLI receives that admitted Factory Registry CA alongside any
+Project Registry certificates. Empty Project settings do not discard the installation
+trust or disable TLS verification.
+
+The development Helm chart lives in [deploy/helm/factory](README.md).
+Releases publish it as a signed OCI chart that pins the released Factory image and the verified
+worker; `v0.1.0-beta.1` is verified on arm64 Linux only, and amd64 and Azure AKS are not
+supported yet. The worker needs a private cgroup namespace, which the Docker runtime of the
+verified node gives privileged Pods and a default containerd setup may not; the other platforms
+have not passed the native conformance. A checkout can still install it directly. Kubernetes is provided by the operator. Factory does not
+install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
+Local tools and the Factory image pin `kubectl` 1.35.6. Use a Kubernetes API server
+within one minor version, 1.34 through 1.36, as required by the upstream version-skew policy.
+Use the repository-pinned Helm 4.2.2 for installation and upgrades. Helm 4.2.0 and 4.2.1
+can wait indefinitely for deletion of a missing pre-upgrade hook, including Factory's
+maintenance Job. The [upstream fix](https://github.com/helm/helm/issues/32231) is included in
+4.2.2; skipping hooks would bypass Factory's work-settlement guard rather than fix the wait.
+
+A Factory restart waits up to 100 seconds for running Start, Pause, Resume and Delete commands
+before it exits (the Pod's grace period is 120 seconds). A kill between a native Resume's intent
+and its outcome leaves that Sandbox unconfirmed. Factory retains it as `cleanup-failed` and never
+guesses, so roll Factory when no Pause or Resume is in flight and prefer `helm upgrade --wait`
+over deleting the Pod.
+
+The chart and owned Forgejo fixtures pin 17.0.0 by image digest. Its native job/step/log API
+supplies Verification diagnostics. Upgrading an existing Forgejo is an explicit operator action:
+back up its database, repositories, configuration and secrets, review the upstream 16/17 breaking
+changes, and verify the upgrade before normal work resumes. Changing the repository pin or running
+an owned proof never upgrades a retained installation.
+
+An upgrade from the previous build to the new one loses no data. Every row of the Factory and auth
+schemas, every Forgejo repository head and file, every OpenBao secret and every stored object is
+the same afterwards, apart from new migrations and what they add, and the administrator signs in
+with the same password. `release:upgrade-test` proves this on a disposable Namespace before a tag
+(see the upgrade test (`bun run release:upgrade-test`)). A chart rollback is not part of
+that promise. It does not roll the database back, so after a migration the previous image refuses
+to start. Upgrade forward or restore the last backup set into a new installation.
+
+The chart runs Factory, PostgreSQL, Forgejo, Zero, encrypted OpenBao and one private Garage
+object store in Kubernetes. It creates the file bucket, credentials and persistent volume
+automatically; no separate S3 provisioning is required. Internal
+callbacks use Services and the application uses its ServiceAccount, without a personal kubeconfig
+or a mounted host Docker socket. Factorybox execution requires a Linux node whose kernel passes the worker's capability gate,
+permission for privileged outer Pods and usable persistent storage. Supply the exact
+private worker image and executable hash in the chart's `factorybox` values.
+
+PostgreSQL checks idle TCP connections after 30 seconds, with three ten-second probes and a
+60-second unacknowledged-data bound. This detects lost control-plane Pods so their session
+advisory locks do not wait for node TCP defaults that can retain them for hours. Healthy idle
+connections have no session expiry; a long Sandbox operation is not cancelled merely because it issues no SQL.
+Active queries check for a kernel-reported disconnect every second. Database connection loss
+does not authorize replaying external work; retained intents and native operation locks still
+govern reconciliation.
+
+Fresh chart installations select the aggregate worker budget from the configured node before
+first admission. Factory checks its platform and readiness, uses its allocatable CPU ceiling
+and subtracts other Pods' memory reservations plus `factorybox.memoryHeadroomMiB`, 2048 MiB
+by default. The worker reserves that selected memory and uses it as its finite ceiling.
+Init peaks, sidecars, Pod overhead and terminating or resizing allocations remain charged.
+This is scheduling capacity, not a sample of free memory.
+`factorybox.cpuRequestMilli` selects the smaller CPU scheduling reserve, 100 millicores by default.
+The pinned Factorybox binary must admit finite aggregate budgets; the native qualification
+fixtures still retain their 3 CPU / 3 GiB ceiling. Existing workers retain their exact admitted
+profile, including the original 3 GiB aggregate limit. Changing defaults never resizes or replaces
+them. See worker resource admission.
+Operator values can independently size `postgres.resources`, `forgejo.resources`,
+`openbao.resources`, `zero.resources` and `objectStorage.resources`; their defaults are unchanged.
+CPU requests are reservations, not instantaneous usage. Keep headroom for startup, storage checks,
+runtime helpers and future Source/IDE allocation without bypassing admission.
+
+There is one active worker admission per Factory. A fresh commissioned Start can recover a failed
+initial setup only after the exact original terminal Pod is observed, no native worker identity
+was recorded and all previous execution is settled. The new admission has its own Pod and private
+store; canonical Source, old Pods, stores and Runtime Attempts retain their original identities.
+Opening a Project or reconnecting does not replace a worker. Recovery of an already admitted
+worker requires an explicit System Manager command after its exact original Pod has terminated
+and prior execution has settled. By default the successor reuses the original private store and Source claim;
+it has a new Pod and native epoch, without replaying Agent work. See
+admitted worker recovery
+and bootstrap admission recovery.
+An explicit `storage: "fresh"` recovery can admit a distinct store with the configured capacity
+only after private backing cleanup is confirmed across every admission sharing the old claim.
+The old store and execution history remain unchanged, and canonical Source keeps its exact claim,
+Namespace and node. This does not resize or migrate a retained store. See
+fresh execution storage.
+The successor can finish an exact private-backing retirement whose native Delete
+and preceding checkpoint retirements were already confirmed. Factory retains each
+reserve retirement receipt as it arrives, instead of losing completed steps when
+the final cleanup fails. Its storage sweep uses the successor's pinned executable
+against the original controller in the same store. It preserves old execution
+identities and never starts old processes. Missing checkpoint receipts remain
+pending; stopped compute is not a claim that all retained storage was reclaimed.
+Before preparing a successor's Sandbox, Factory retires completed image-export transports
+owned by positively terminated predecessor admissions. It keeps their receipts and checks
+exact archive identity; active, partial and changed payloads are not deletion authority.
+This does not prune native bases, snapshots, Source or the bounded store.
+The current worker also retires a completed consumer transport after reverifying its independent
+native import. Later preparations reuse that verified base without the tar file. The storage
+sweep performs this automatically; Source, snapshots and native backing remain retained.
+See consumer transport retirement.
+Fresh admissions check actual backing-filesystem availability before native allocation. The chart
+defaults to an 8 GiB minimum, 64 GiB maximum and 128 GiB claim. Larger safe whole-GiB budgets
+are accepted when the claim covers the maximum plus 17 GiB. The pinned worker selects a fixed
+size in that range on the actual volume while preserving its native host floor and operating
+write reserve. Factory records the
+selected size in its immutable native identity. The worker must support `bounded-min-bytes` and pass
+its native qualification. Insufficient space fails explicitly rather than waiting indefinitely.
+This does not resize a retained worker or reclaim unrelated node data.
+
+Before dispatching a fresh Sandbox Start or Fork, Factory observes the original worker's native
+write-admission decision. A known disk refusal leaves the mutation unattempted, so Stop can release
+its prepared inputs without inventing a native Delete receipt. The native runtime still checks
+again at dispatch; an uncertain result after dispatch remains retained and is never replayed.
+Preparation checks that same decision before exporting a consumer image and again before dispatching
+extraction or private mounts. A refused check keeps preparation unattempted and can continue when
+capacity returns. If dispatched preparation has no completion receipt, reconciliation preserves its
+original failure diagnostic rather than replacing it with a generic pending message.
+Verified pre-dispatch capacity waiting does not consume the Sandbox's native startup window.
+When capacity returns, the same admitted request receives its full bounded lifecycle window.
+Unknown outcomes retain their existing deadline and cannot use this admission-wait path.
+A confirmed native Start with its Parent connected remains preparing while Project setup hooks
+finish. Expiry of the native startup observation window does not report those hooks as failed.
+Connector readiness, actual setup errors and exact-identity transport recovery still own the outcome.
+Cold Project pool templates use their original preparation lease, fifteen minutes by default,
+for image import, dependency hooks and checkpoint quiescence. Native Fork preparation retains its
+420-second window. A newly commissioned healthy Staging permits one fresh preparation after a
+failed template; unchanged observation never cold-retries it. Already-ready templates remain reusable.
+Clean preparation retains the primary's installed user-home tools in a private, exact-image
+cache before Apps or Runtime grants are activated. A same-source Fork that needs fresh Runtime
+values can create a new compliant Dev Container from those files instead of downloading its
+tools again. Required hooks still run once, and changed build or registry grants cannot reuse
+that cache. It stays in the Sandbox's private daemon and is never published.
+Idle Pause checks that same capacity decision before revoking live transports or dispatching capture.
+A known pre-dispatch refusal keeps the Sandbox usable and the same snapshot intent unattempted;
+the existing idle grace permits another admission check. A dispatched or unknown Pause remains fenced.
+Development compute keeps its Sandbox for `FACTORY_EXECUTION_IDLE_MINUTES` (default 15) and pauses after
+`FACTORY_EXECUTION_QUIET_MINUTES` (default 2, capped at the idle value) when no IDE, Terminal, App or
+browser request is open; every Pause fence is unchanged. A submitted Change stays warm for
+`FACTORY_EXECUTION_REVIEW_MINUTES` (default 30, 0 disables) after its last commit or Verification verdict
+and while Verification runs. Native commands hold the cross-process lock `factorybox-worker-lifecycle` one call at a time;
+image export, Kubernetes reads and sweeps do not, and background retirement yields to waiting Start, Resume and Pause.
+
+Choose an available development application image containing the exact runtime artifact bundle,
+then supply the browser-facing Factory and Forgejo origins. See the chart's
+[installation and maintenance instructions](README.md) for local access,
+Ingress, credentials and retained data. Development images may be built locally; the installed
+application does not build its own tools or require a source checkout on the operator's machine.
+
+The image workflow publishes only when a GitHub release is published, never on branch pushes or
+pull requests. A release tag such as `v0.1.0` must point to a commit contained in `main`.
+The shared verification workflow runs the standard checks, PostgreSQL/controller tests and
+owned UI journeys natively on ARM64. It does not run on pushes or pull requests;
+release publication calls it, and it can be started by hand. Release publication must pass those
+same checks on its exact tagged source before any image build or push. Before tagging, the
+maintainer runs `bun run beta:gate` on a clean checkout: it scans the history for secrets and for
+terms that must not ship, runs every lane and writes a receipt that names the exact commit.
+A native ARM64 job builds the runtime roles and Factory, then publishes their manifests; a last job
+packages the chart with those digests and the signed worker, pushes it to GitHub's container
+registry, signs it and attaches it to the release. Existing versioned architecture images are not overwritten. Publishing Factory does
+not admit a Factorybox worker or activate an installation.
+Before pushing each native runtime-host image, an offline Compose proof builds a configured
+Dockerfile outside its context and checks that raw Bake still refuses the same ungranted file.
+It uses no Project source, credentials or host Docker socket.
+`mise exec -- bash scripts/runtime/project-compose-prebuild-proof.sh RUNTIME_IMAGE NODE_IMAGE REGISTRY_IMAGE`
+separately checks native Compose image preparation, exact replay and a writable consumer with
+required Project/Feature hooks. Pass immutable native image references. It runs offline against a private Docker daemon.
+
+For local browser access, install with `deploy/helm/factory/values.local.yaml` and your
+cluster-reachable application image. Then run:
+
+```sh
+mise exec -- bun run factory:connect
+```
+
+This one foreground command reads the installed addresses and manages all three native Kubernetes
+connections. It reconnects after a forwarding process exits, including Pod replacement, without
+restarting Factory or replaying work. Use `--namespace`, `--release` and `--context` for a different
+installation. Ctrl+C closes only its own local connections. No hosts-file edits, external wildcard
+DNS or browser resolver flags are needed in Chromium-based browsers for the isolated
+`*.runtime.localhost` IDE and App addresses. This is local development access, not a public Ingress
+or an installer for Kubernetes.
+
+Each declared App has its own isolated origin. Root-relative pages, framework APIs, assets and
+WebSockets stay with that App instead of entering Factory's document or command handlers.
+Declared App processes receive `FACTORY_APP_ORIGINS`, a JSON object from their declared ports
+to the published origins of that exact Runtime Attempt. Projects can use those addresses for
+browser-facing configuration while keeping backend and health connections local. The addresses
+contain no credentials and grant no cross-App access or relaxed authentication. New artifact
+intent freezes the public Factory origin; existing Attempts and clean prepared templates are
+not rewritten. See published App addresses.
+The Connector preserves the browser-visible App Host for HTTP and WebSocket requests while
+dialing only the admitted internal target. Factory reconstructs proxy authority after discarding
+client-supplied forwarding headers; same-origin authentication does not need a relaxed origin check.
+Preview grants bind the exact Runtime Attempt and App channel. Their host-only cookies cover that
+App's origin; Factory credentials are not forwarded, and App cookies cannot escape to another App.
+
+
+### Trust boundary and node hardening
+
+Sandboxes run on the node's kernel, next to the privileged worker. Sysbox user namespaces, a
+seccomp policy and the Connector's Dev Container checks limit what Project code reaches. None of
+them is a virtual machine boundary, and a kernel bug can cross it. Plan the node accordingly.
+
+- **One worker per Factory.** Factory keeps a single worker. Every Project and user of that
+  installation runs in it. Use a separate installation, with its own node, for a customer or trust
+  domain you do not want to share a kernel with.
+- **A node for the worker.** Run it on a node pool that hosts nothing else you need to protect.
+  Do not give that pool cloud credentials beyond what its kubelet needs.
+- **Egress is open.** A Sandbox reaches the network through NAT in the worker Pod, with the Pod's
+  address. The worker accepts every forwarded destination, and Factory creates no NetworkPolicy in
+  the `factory-box-*` Namespaces. The release's own policies cover only the release's Pods.
+  Whether a Sandbox reaches the cluster DNS, other Pods, the node, the Kubernetes API server or a
+  cloud metadata endpoint depends on your CNI and cloud. Test it from inside a Sandbox. On a cloud
+  cluster, refuse 169.254.169.254 and the node's kubelet port for those Namespaces. A policy needs a
+  CNI that enforces NetworkPolicy, and the addresses to except depend on that CNI. Verify the
+  result before you rely on it:
+
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: sandbox-egress
+    namespace: factory-box-UUID
+  spec:
+    podSelector: {}
+    policyTypes: [Egress]
+    egress:
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except: [169.254.0.0/16, NODE_SUBNET_CIDR]
+  ```
+
+- **Node sysctls.** The preflight warns when `kernel.unprivileged_bpf_disabled`,
+  `kernel.perf_event_paranoid`, `kernel.kptr_restrict`, `kernel.dmesg_restrict` or
+  `vm.unprivileged_userfaultfd` leave unprivileged entry points open. It also reports
+  `kernel.yama.ptrace_scope` and `kernel.io_uring_disabled`. Sandboxes have their own PID
+  namespace and a seccomp rule that returns EPERM for io_uring, so those two never warn. The
+  worker itself is privileged and does not depend on any of them.
+- **Kernel updates.** A kernel fix matters more on this node than on an ordinary one. The
+  recommended node image settings below stop automatic image upgrades, so schedule kernel updates
+  yourself: stop execution, upgrade the pool, then recover the worker as described under
+  Upgrades and reboots.
+
+
+### Managed clusters such as Azure AKS
+
+Azure AKS is not supported yet. The notes below describe the intended setup and are not verified.
+
+Factory runs on a standard managed cluster when one dedicated node can host the privileged
+Factorybox worker. Nothing here is verified on AKS yet. Run the preflight first, and treat its
+FAIL lines as blockers.
+
+**Node pool.** Use one Ubuntu 22.04 amd64 node (`--os-sku Ubuntu`), kernel 5.15 or newer, cgroup v2,
+containerd, a 128 GiB OS disk, and a VM size with at least 4 data-disk slots and 8 GiB of memory
+after system reservations. Do not taint the pool; the worker and Source Pods declare no
+tolerations. Set `factorybox.nodeName` to the node's `kubernetes.io/hostname` label and
+`factorybox.architecture: amd64`. Source, the worker store and every Developer IDE claim use
+ReadWriteOnce disks, so they all stay on that one node.
+
+**Kernel.** Factory does not pin a kernel release. Leave `factorybox.kernel` empty (or `"*"`) and the
+worker's own capability gate decides: it checks the kernel facilities, cgroup v2 and page size, and
+`factorybox doctor` reports any refusal. The worker reports the node's exact kernel and boot ID and
+marks it `qualification: verified` or `unverified`. That mark is informational, and Factory still
+admits an unverified kernel the gate accepts. Node image upgrades change the release string, so an
+empty value keeps working across them. To restrict nodes anyway, list releases with `*` wildcards,
+for example `factorybox.kernel: "5.15.0-*-azure,6.8.0-*-azure"`. A node outside the list is
+refused, and the restriction never relaxes the worker's gate. With `--set` on the command line,
+escape the comma as `\,`. The node boot ID still pins each retained worker whatever you choose.
+
+**Namespaces.** The release Namespace may enforce `baseline` but not `restricted` (the volume-ownership
+init containers run as root with `CHOWN`, `DAC_OVERRIDE` and `FOWNER`). Factory creates `factory-box-<uuid>` Namespaces for the privileged worker and labels them
+`pod-security.kubernetes.io/enforce`, `audit` and `warn` at `privileged`, so a cluster default of
+`baseline` or `restricted` does not reject the worker. Namespaces that existed before this label
+keep their labels. If you run Azure Policy or Gatekeeper rules against privileged Pods, exempt
+Namespaces labelled `app.kubernetes.io/managed-by=open-software-factory`, because labels cannot
+override a policy engine. The preflight shows which layer denies the Pod.
+
+**Storage.** Use Azure Disk CSI: `storageClass: managed-csi` (or `managed-csi-premium`) with
+`volumeBindingMode: WaitForFirstConsumer`. Azure Files and Blob are refused, because the store is a
+loop-mounted ext4 image with direct I/O. A disk is zonal, so keep the pool in one zone.
+
+**Upgrades and reboots.** A reboot or image upgrade ends the worker's processes and RAM. A
+reboot in place leaves the Pod `Failed` and the retained store intact. Stop remaining
+execution and POST `/api/admin/worker/recover`, as in the Factorybox README. A replaced node
+gets a new name, and its original Pod is garbage-collected, so Factory refuses recovery and
+keeps the data. Prevent that. Set `az aks nodepool update --node-os-upgrade-channel None` (or the
+`Unmanaged` channel) and `az aks update --auto-upgrade-channel none`, so node images and
+Kubernetes versions change only when you run them. Upgrade the worker pool by itself, after
+stopping all execution and recording the retained Pod UID.
+
+**Preflight.** After `helm install`, run `helm test RELEASE --namespace NAMESPACE --logs`. Or run
+it from a checkout with your kubectl context:
+
+```sh
+bun scripts/kubernetes/preflight.ts --node NODE --architecture amd64 \
+  --image REGISTRY/factorybox@sha256:DIGEST \
+  --storage-class managed-csi --namespace factory
+```
+
+Add `--kernel '5.15.0-*-azure,6.8.0-*-azure'` only to test a restriction. The preflight checks the
+node platform, taints, memory and CPU budget, the storage class and attach limit, and the release
+Namespace. It reports the node's kernel and checks it against the 5.15 minimum and any
+`factorybox.kernel` restriction. It FAILs on a missing kernel capability or a `factorybox doctor`
+refusal and only WARNs when the worker accepts a kernel its build has not verified. Unless you pass `--read-only`, it also creates one throwaway
+`factory-preflight-*` Namespace, dry-runs the real worker Pod and claim against admission, runs one
+privileged Pod to read the kernel configuration, cgroup, BTF and userfaultfd facts and run
+`factorybox doctor`, then deletes the Namespace. Each FAIL names its fix.
+
+### Runtime host
+
+The runtime host builds Docker Compose from the verified upstream source archive pinned in
+`upstream.json`. It includes the configured-input grants needed for Dev Containers' temporary
+Dockerfiles while keeping Bake's filesystem checks enabled. This is an upstream development
+
+### Local source installation
+
+The local listener defaults to `0.0.0.0` so OrbStack-hosted runtimes can call Factory.
+Set `FACTORY_HOST` explicitly to narrow that listener, noting that loopback-only access may prevent
+runtime callbacks. `FACTORY_ADMIN_EMAIL` and `FACTORY_ADMIN_PASSWORD` are honored for bootstrap and
+Forge setup. Set a private password before first startup if the listener is reachable by others.
+Bootstrap never resets an existing account's password; later starts must use that account's
+current credentials for Forge setup.
+Disposable installations keep their own generated administrator identity and private password
+instead of inheriting the normal installation's administrator overrides.
+
+Startup provisions the local database, Forgejo, planning cache and encrypted OpenBao, reuses a
+complete set of pinned runtime artifacts after checking their remote manifests or publishes them
+once, applies migrations and builds Factory. Missing artifacts fail before replacing a running
+Factory server; a valid digest file alone is not readiness. Cold artifact builds
+and Sandbox preparation can take several minutes. Installation data and exact artifact references
+live under the ignored `.factory/` directory.
+
+Before replacing the running server or announcing readiness, startup checks the default Kubernetes
+storage class with a fresh 8 GiB RWO claim. The pinned source image must write and read a marker as
+the source-service UID, then its Pod, claim, backing volume and Namespace must be removed.
+This checks usable storage, not just a reachable cluster or an existing volume. A failed check
+keeps its own recorded identity for the next startup; it never resets Project storage.
+`storage-readiness-diagnostic.json` in the installation state records compact claim, Pod and
+provisioning-helper states, including observed exit codes when available. The last failed check
+also remains in `storage-readiness-failure.json`, even after a successful retry. Neither file
+contains raw logs, environment values or credentials. The explicit native proof is
+`FACTORY_RUN_STORAGE_READINESS_PROOF=1 mise exec -- bun run test:live storage-readiness.live`.
+
+```sh
+mise exec -- bun run factory:status
+mise exec -- bun run factory:restart
+```
+
+Restart adopts published pins for new runtime attempts and preserves existing intent and data.
+Published defaults also supersede disposable-installation bootstrap pins, never an existing
+Runtime Attempt's recorded image.
+It starts stopped PostgreSQL and Forgejo services and waits for their health checks before running
+migrations or replacing the server. A dependency failure leaves the existing server untouched.
+It reuses the existing frontend bundle. After changing UI source, run `factory:up` again to rebuild
+that bundle and restart the same installation without resetting its data.
+Use the runtime artifact instructions below when changing runtime images.
+
+#### Run the existing installation's server on Linux
+
+On macOS 27 with OrbStack 2.2.3, long-lived Pod connections through the Mac host alias can lose
+responses. Keep Factory's server on the Linux side and use the Linux node's reachable IPv4 address
+for runtime callbacks. This changes only the server process, not the installation, database,
+Workspace storage, model settings or registered Forge identity.
+Source initialization and runtime assignments share the same repository-transport check. Local
+HTTP endpoints may use private or loopback IP literals as well as the local host aliases. Public
+HTTP endpoints, credentials in URLs and executable clone protocols remain rejected.
+
+After the initial artifact publication, build the application image and inspect the node address:
+
+```sh
+FACTORY_IMAGE=open-software-factory:local mise exec -- bun run factory:image
+mise exec -- kubectl --context orbstack get node orbstack -o wide
+```
+
+Use the actual `INTERNAL-IP` from that output, rather than copying this example address:
+
+```sh
+FACTORY_SERVER_IMAGE=open-software-factory:local FACTORY_RUNTIME_HOST=192.168.139.2 mise exec -- bun run factory:restart
+```
+
+The native launcher still owns startup and Stop. It records the exact image/container identity
+before creation, keeps credentials out of command arguments and reuses the selected image and
+runtime host on later restarts. It mounts the configured OpenBao token and CA files read-only,
+including a local CA stored outside installation state. Neither a static neighbour entry nor a
+network repair loop is needed. For the Linux server, the launcher also binds the existing local
+Forgejo port on that exact private node address so Sandbox Git operations can reach it. The
+loopback binding and browser-facing Forgejo identity stay unchanged; PostgreSQL and Zero remain
+loopback-only. Rebuild the image and explicitly select it to adopt source or UI changes. Setting
+`FACTORY_SERVER_IMAGE=native` explicitly returns to a host process.
+
+Compose supplies only the source-development data services. It is not another Factory installation
+method. The application image starts the Kubernetes bootstrap and contains neither a Docker CLI
+nor a workstation certificate generator. Install that image with the
+[repository Helm chart](README.md).
+
+
+## Factorybox worker admission
+
+Factorybox is a separate Linux system-container runtime. This operator command admits one
+dedicated worker for a customer or trust domain and controls administrator-prepared private OCI
+bundles through its own CLI. Factory Workspace Start and the execution reserve use this same worker
+contract with Factory-owned consumer preparation. See Workspace execution.
+
+The Helm chart requires `factorybox.image`, `factorybox.executableSHA256`,
+`factorybox.architecture` and `factorybox.nodeName`. `factorybox.kernel` is optional. The local launcher uses
+`FACTORY_FACTORYBOX_WORKER_IMAGE`, `FACTORY_FACTORYBOX_EXECUTABLE_SHA256`,
+`FACTORY_FACTORYBOX_ARCHITECTURE` and `FACTORY_FACTORYBOX_NODE`, plus an optional
+`FACTORY_FACTORYBOX_KERNEL`.
+They must identify a verified package and the actual admitted node. Architecture is explicitly
+`arm64` or `amd64`; Factory never infers it from the control-plane host.
+The worker image must be available in the operator's private registry or loaded on that node.
+An image built in the developer's Docker daemon is not automatically available to Kubernetes.
+
+Stop existing Envbox executions before changing the installation profile. Existing unused reserve
+slots retire when their frozen profile differs. Never adopt a used Envbox execution as Factorybox
+or overwrite its immutable runtime artifacts. The default `executionReserveTarget` is two unused
+paused Forks, not a limit of two running Sandboxes. Qualify the target node, CNI and StorageClass
+before admitting its worker.
+
+Pause/Resume retains RAM on the same live worker. A worker restart or node loss retains canonical
+source but requires an explicit fresh execution; automatic cross-node RAM recovery is unsupported.
+
+The command renders ordinary Kubernetes objects and uses the installation's existing kubectl
+context or ServiceAccount. It has no cloud-specific implementation, CRD, new database or pool
+controller. The worker receives no Kubernetes token or host Docker socket. Keep distinct stores
+and workers for distinct trust domains.
+
+### Local worker build
+
+`bun run factorybox:build REQUEST_JSON` invokes the standalone repository's pinned
+worker pipeline. It records intent and output under `.factory/test-results/`, checks
+the final image architecture and the actual executable bytes inside that image, and
+writes `profile.candidate.json` in the existing Factory runtime-profile format.
+It neither publishes an image nor changes an installed profile or retained Sandbox.
+
+The request names exact completed inputs, not a floating tag or latest artifact:
+
+```json
+{
+  "repository": "/absolute/path/to/factorybox",
+  "commit": "REPLACE_WITH_40_HEX_CHARACTER_HEAD_COMMIT",
+  "upstreamVersion": "REPLACE_WITH_FACTORYBOX_VERSION",
+  "platform": "linux/arm64",
+  "nativeBaseBuild": "factorybox-build-native-base-REPLACE_WITH_32_HEX_CHARACTERS",
+  "builder": "REPLACE_WITH_RUNNING_BOUNDED_BUILDER",
+  "boundedBuild": true,
+  "network": "host",
+  "dockerContext": "orbstack",
+  "nodeName": "orbstack"
+}
+```
+
+The build refuses a repository whose `HEAD` differs from `commit` or whose working tree has any
+change, and records the commit, tool versions and timestamps in `provenance.json` beside the
+candidate. The build tool receives an allowlisted environment, not Factory's.
+
+The standalone README describes native-base and bounded builder preparation.
+Optional `sysboxBuild` and `retainedCandidate` reuse exact verified completed component
+builds. All components must match `platform`. An AMD64 build on ARM64 remains a
+cross-build; Factory runs the native `doctor` probe only on a matching Linux Docker
+host.
+
+The ARM64 candidate implements timer continuation and passes native Start, shared-source
+Pause/Resume and Connector checks. Select a candidate profile only after the standalone
+repository's native checks pass on the target node with its exact bytes. The existing
+installation stays unchanged when a build or runtime probe fails.
+
+### Request and deployment
+
+Save the immutable request under `.factory/test-results/`. Supply an exact worker image digest
+available to the selected node and the SHA-256 of that image's Factorybox executable. Both must
+come from the same verified build. The new image must support `--health-listen`, `--worker-store-id`
+and `--worker-epoch`. The previous first-release image does not expose these options.
+
+```json
+{
+  "version": 1,
+  "namespace": "factorybox-owned-example",
+  "podName": "worker",
+  "storeID": "0123456789abcdef0123456789abcdef",
+  "trustDomainID": "abcdef0123456789abcdef0123456789",
+  "image": "registry.example/private/factorybox@sha256:REPLACE_WITH_VERIFIED_IMAGE_DIGEST",
+  "executableSHA256": "REPLACE_WITH_EXECUTABLE_SHA256",
+  "architecture": "amd64",
+  "nodeName": "REPLACE_WITH_NODE_NAME",
+  "boundedBytes": 8589934592,
+  "claimGiB": 32
+}
+```
+
+Replace the example store and trust-domain IDs with random 32-character hexadecimal identities.
+Factory renders and validates either Linux ARM64 or AMD64 using the same worker protocol.
+The standalone worker gates on kernel capabilities and 4096-byte pages, not one kernel release.
+It reports the node's exact kernel and boot ID, and an informational `qualification` of
+`verified` or `unverified`. Inspection checks the node's OS and architecture against the live
+worker. `kernel` is optional. Unset, empty or `*` admits any kernel. To restrict nodes, set one
+release or a comma-separated list using `*` wildcards (`5.15.0-*-azure,6.8.0-*-azure`); a node
+outside the list is refused. The restriction never relaxes the worker's own capability gate, and
+the node boot ID still pins each retained worker. Node-reported and kernel-reported boot IDs
+are pinned separately; a later change to either refuses the original admission. Worker startup checks its actual
+cgroups, component identities, store lease and filesystem. Another node profile needs the
+standalone native checks before use.
+
+The Pod has a 3 CPU / 3 GiB limit and reservation, a private PID namespace and privileged access.
+Required kernel facilities must already be present on the admitted node. Factory does not mount
+host `/lib/modules`: Sysbox can pass that external tree into a guest, which violates private
+filesystem capture admission. Its complete `/var/lib/sysbox` state uses a dedicated RWO PVC.
+The bounded filesystem size is explicit; the PVC must also cover 16 GiB of host admission
+headroom and metadata. `storageClass` is optional. Empty volumes must have root-owned parents
+without group/world write permissions; existing stores are never reformatted or migrated.
+
+The product Pod initializes only a new empty root-owned store volume before exporting the
+consumer image. It records the original Pod/store identity and sets private directory modes.
+Nonempty, aliased or differently owned volumes are refused without changing their permissions.
+This handles StorageClasses that provision an initially world-writable root, without repairing
+or adopting a retained worker store.
+
+`bun run runtime:conformance` uses these actual product manifests and adapters against the
+configured Kubernetes API. Supply the `FACTORY_FACTORYBOX_*` profile above and explicit
+Registry trust through `FACTORY_REGISTRY_CA_FILE`, or `FACTORY_REGISTRY_CA_NAMESPACE` and
+`FACTORY_REGISTRY_CA_SECRET`. It creates a unique namespace, worker and store, exercises the
+maintained Dev Container and Connector assertions, and adds native Pause/Resume and
+per-Sandbox resource observations. It never uses an Envbox container or fixture Kubernetes
+responses. A failed runtime proof retains its private store and fences only its own Pod to
+release fixture RAM. `runtime:smoke:down` refuses that retained evidence.
+
+```sh
+bun run factorybox:worker render .factory/test-results/worker-request.json > .factory/test-results/worker-resources.json
+kubectl create -f .factory/test-results/worker-resources.json
+bun run factorybox:worker inspect .factory/test-results/worker-request.json .factory/test-results/worker-identity.json
+```
+
+Use a fresh namespace and `create`, not adoption of existing resources. If creation has an
+uncertain outcome, inspect the exact named objects and original request before any new create.
+Inspection requires matching namespace/Pod/PVC ownership, bound storage, node placement, complete
+worker configuration and HTTP readiness before its first exec. The identity file is created
+exclusively and records Kubernetes UIDs, store, worker epoch, boot and executable. The probe starts
+inside PID 1 after cgroup delegation. An early Kubernetes exec probe would interfere with that
+delegation, so the manifest uses HTTP probes.
+
+The Pod has `restartPolicy: Never`. There is no Deployment, automatic replacement or recovery
+after node loss. A node reboot leaves the Pod `Failed` and changes the node boot ID. Inspection
+then reports a node-loss error naming the recovery command. If the node is deleted and the Pod
+object is garbage-collected, Factory cannot observe termination and refuses recovery, so keep
+the node (see the managed-cluster section of the operations guide). Keep a failed worker's complete PVC and original identity for explicit recovery.
+The health port serves only `GET /readyz` with an empty 204/503 response; it is not an admin API.
+
+### Recover an admitted product worker
+
+Settle or explicitly Stop existing execution before stopping the original worker. Keep its Pod
+with `restartPolicy: Never` so Factory can observe its exact UID and terminal phase.
+Do not delete its Namespace, Source claim or store, mutate the admitted Pod, edit database rows
+or repeat an uncertain Sandbox Start.
+
+An authenticated System Manager can POST `{"requestID":"<new UUID>"}` to
+`/api/admin/worker/recover` with the normal Factory session and same-origin command header.
+The configured worker image and executable select the independently qualified successor.
+Reuse that request UUID to observe the same completed recovery after a lost response.
+The command refuses running, missing or replaced original Pods, unresolved execution and
+foreign stores. Refusal leaves the admission unchanged.
+
+Recovery retains the new declaration without starting a Sandbox. The next explicitly commissioned
+execution creates the successor Pod on the original node, reusing the exact store and Source claim.
+A read-only inspector verifies the original initialization receipt, bounded image inode and
+capacity and requires its old lease to be released. Old imports, exports and runtime histories
+remain retained; new exports have separate admission-scoped inputs. A failed successor bootstrap
+using that store needs another explicit operator recovery, never a new-store bootstrap retry.
+See ADR 0003.
+
+### Lifecycle commands
+
+Prepare the complete OCI bundle inside the bounded store, for example
+`/var/lib/sysbox/fixed-store/data/store/input/project/bundle`, using Factorybox's admitted overlay
+layout. This command does not pull/unpack images, prepare a Project checkout or replace the
+Factory Connector. Factory's product preparer separately declares and validates the canonical
+Source bind; this administrator command does not prepare it.
+
+Save one operation JSON before calling `run`:
+
+```json
+{"action":"start","sandboxID":"owned-example","bundle":"/var/lib/sysbox/fixed-store/data/store/input/project/bundle"}
+```
+
+```sh
+bun run factorybox:worker run .factory/test-results/worker-request.json .factory/test-results/worker-identity.json .factory/test-results/start.json
+```
+
+Supported operation shapes:
+
+| Action | Additional fields |
+| --- | --- |
+| `capacity` | none |
+| `state`, `delete` | `sandboxID` |
+| `start` | `sandboxID`, `bundle` |
+| `pause`, `resume` | `sandboxID`, `snapshotID`, an immutable 32-character hexadecimal ID |
+
+`run` exclusively creates and fsyncs `OPERATION.intent.json` before external work, then writes
+`OPERATION.result.json`. It never overwrites either file. A nonzero exit, timeout or partial response
+remains unconfirmed. Inspect the original operation and worker state. An explicit exact replay
+uses a new journal filename with the same Sandbox/snapshot identities, not a replacement Sandbox.
+Every lifecycle exec pins the expected store and epoch inside Factorybox itself. This closes the
+race between the Kubernetes read and an exec reaching a replacement worker. The 420-second
+lifecycle deadline includes inspection; no automatic command retry is enabled.
+
+Changed UIDs, epochs or boots refuse execution. An explicit new inspection is not permission to
+resume an old Sandbox in a new epoch. Retained recovery requires Factorybox's separate exact
+recovery protocol and remains outside this command.
+
+### Verification and limits
+
+```sh
+bun test packages/runtime-kubernetes/src
+bun run typecheck
+bun run check:docs
+```
+
+The explicit native transport proof in `scripts/runtime/factorybox-worker-native.ts` is invoked by
+Factorybox's owned `tools/kubernetes_worker_probe.py`. It uses fixture Kubernetes observations
+and executes the real delivered worker CLI. It proves Start, useful work, RAM mutation, zero
+anonymous/snapshot residency after Pause, exact RAM/file retention after Resume, completed replay
+without a second process and Delete.
+
+Factory's product path binds the canonical Source directory under the admitted shared-source
+contract. Native acceptance must preserve atomic editor saves made while paused, the same app RAM
+and the original Dev Container after Resume. The actual Factory Connector and reserve activation
+are exercised by Factorybox's `tools/factory_consumer_native.py`. Independent Theia remains outside worker resource accounting.
+
+## Runtime artifacts
+
+`runtime-host` is the common Factorybox consumer image for Development, Coding, Staging,
+Verification and publication. It contains Docker
+Engine 29.9.0, the integrity-checked Dev Containers CLI 0.89.0 and the static Factory Runtime Connector.
+It also contains the pinned OpenCode server, admitted Skill installer and Forgejo runner.
+Factory starts only the processes and grants only the capabilities of the assigned role.
+Its development language preset
+contains pinned TypeScript Language Server and Pyright packages with the exact Node 24.21.0
+runtime for glibc and musl. Only interactive Development assignments inject those tools; source
+opening starts none of them. They use the Dev Container's Project toolchain and dependencies.
+The Connector injects the tools required by the assigned role into its primary
+Dev Container. A Runtime Attempt records its exact artifact and role before creating compute;
+recovery cannot replace that artifact through changed installation settings.
+
+`developer-ide` contains the independent pinned Theia 1.76.0 composition. One developer backend
+serves authorized Workspace-qualified source through Factory. Theia does not run in each execution
+Sandbox. Its package composition and npm integrity lock remain in `deploy/theia-ide/`.
+
+Publish the artifacts with:
+
+```sh
+mise exec -- bun scripts/factory/index.ts publish-runtime
+```
+
+Publication updates the local digest files without restarting Factory or replacing existing runtime
+identities. `factory:restart` loads those pins for new Attempts; existing artifact intents remain fixed.
+Runtime manifests use registry digest references, never publication tags.
+
+The local Registry keeps artifacts on its retained `registry-data` claim, not in a Pod's temporary
+filesystem. Publication refuses to replace an existing temporary store with an empty claim.
+Preserve that Registry's contents on the claim before adopting the persistent layout; do not reset
+Workspaces or replace frozen Runtime Attempt image references to repair missing images.
+
+Startup, restart and local Factory image builds check every role's remote manifest without pulling
+or warming an image cache. The local Registry check uses its approved CA and verifies the exact
+manifest digest. Missing images fail with the artifact name before replacing the running Factory
+server; local Registry failures also identify the HTTP status. Restore the exact artifacts, or publish
+a complete generation and restart to select it for new Attempts. Publication adopts its complete
+generation atomically only after the common runtime, editor, source and browser manifests and
+the Starter images are confirmed.
+
+Normal `factory:up` reuses an available published set instead of rebuilding all roles. The manual
+[distribution workflow](../../../.github/workflows/images.yaml) builds amd64/arm64 roles and embeds
+their exact multi-architecture digests in the Factory image. A release bundle replaces defaults
+atomically during container startup; it cannot change a persisted Runtime Attempt. See
+local deployment for Compose and Linux setup.
+
+The clean execution reserve prepares fresh Staging and Verification only. It contains pinned tools
+and base images, no checkout, user/model/forge capabilities or used containers/volumes. Default target
+is one slot per role, with one concurrent creation, two spare slots and sixteen total admitted or
+spare/creating/retiring slots. Unassigned slots expire after fifteen minutes; preparation is bounded
+at three minutes and failure replacement waits thirty seconds. `FACTORY_EXECUTION_RESERVE_TARGET`
+accepts 0–4 per role; `FACTORY_EXECUTION_MAX_SLOTS` accepts 2–256 and must cover the configured reserve.
+Every Factorybox worker currently has a shared 3-CPU/3-GiB ceiling, including reserve workers.
+Assignment preserves its exact Pod/PVC, issues new Attempt capabilities and immediately requests
+refill. Used slots are destroyed, never returned. Development Workspaces retain their canonical
+source and normal retained-storage preparation; no running Pod/PVC hot swap is performed.
+
+Opening an editable Workspace automatically starts or resumes its compute. This commissions no
+Agent Turn. Read-only observation does not claim writing authority. A failed Start remains visible
+with an explicit Retry, rather than repeating on every observation.
+
+Development compute idles after fifteen minutes without use (two when nothing is attached). `FACTORY_EXECUTION_IDLE_MINUTES`
+accepts 0–1440; zero disables it. Admitted/uncertain Build, working Sessions, pending commits,
+open terminal sessions and pending runtime operations prevent automatic Pause. Native PTY Resume
+currently fails to reopen `/dev/tty`, so even detached idle prompts block Pause. A Run view,
+language connection or background App polling does not count as human use.
+The Connector samples terminal work every five seconds; missing or stale observations block Pause.
+Pause intent is committed under the Build admission locks before the native operation.
+Real editor activity resumes the same Attempt. Restart grants a fresh inactivity period.
+Source/approved data and the independent editor are retained. Staging and Verification do not idle.
+
+After successful prebuild and compute cleanup, private Docker trims unused build cache toward
+1 GB within fifteen seconds. It never prunes images, containers, volumes, installed dependencies or
+checkout. This is a best-effort cache target, not a filesystem quota. The local RWO provisioner's
+8 GiB claim request does not establish a hard disk quota; deployments need storage-enforced quotas
+for that guarantee. CPU bursts and RAM use the worker's declared total limits;
+local measured RAM remains unavailable when Kubernetes Metrics is not installed.
+
+The parent resolves the approved Dev Container configuration before startup and prepares only the
+selected registry images and their required Compose dependencies. Images must be digest-pinned;
+Docker's canonical repository/digest identity, rather than a tag's text, confirms a cache hit. At most
+two acquisitions run concurrently, with an overall 180-second deadline and Stop cancellation. Required
+Dev Container hooks and resolved-container boundary checks still run. Each Workspace retains its own
+private Docker graph. Registry artifacts can be reused; mutable dependency trees and prior
+Verification results cannot.
+
+The host also includes `factory-project-prebuild`. Run it inside the assigned Sysbox host, where it
+uses that Workspace's private daemon, with an exact commit, target architecture and Project-owned
+registry repository:
+
+```sh
+factory-project-prebuild --commit <full-commit> --platform linux/arm64 \
+  --config .devcontainer/prebuild/devcontainer.json \
+  --image-repository <approved-registry>/open-factory/prebuilds/<project-id>
+```
+
+The optional configuration is a normal committed Dev Container image/Dockerfile recipe, not a new
+Factory configuration format. The producer resolves it with the pinned CLI, builds local Features
+from the exact committed tree, requires digest-pinned external image/Feature inputs and uses the
+CLI's committed frozen Feature lock. Local Features must remain inside `.devcontainer`, as required
+by that pinned CLI. Put locked dependency installation in the Dockerfile. Its image can
+carry immutable dependency seeds; required normal lifecycle hooks populate each owner's writable
+checkout without sharing a mutable dependency tree. Compose consumers reference the resulting
+ordinary registry digest. This producer does not prebuild a multi-image Compose stack or run a
+background build service.
+
+The producer snapshots committed inputs separately from human/Agent files. Its identity includes
+Project, commit/tree, configuration, platform, exact CLI integrity and immutable image inputs.
+It persists intent before build/publication, verifies image ownership/platform, recovers a produced
+image after lost acknowledgement and never treats a publication tag as the consumer identity.
+Publication names retain the first creating Runtime Attempt, so independent private daemons cannot
+race on a shared tag; Stop/restart retains that persisted name. Dockerfile snapshots receive ordinary
+Factory ownership labels at each selectable stage because the pinned CLI forwards its label option
+only in the image/Feature path. Neither the canonical Dockerfile nor upstream CLI is modified.
+One producer runs per Workspace, with a ten-minute bound, bounded snapshot size and owned interrupted
+snapshot cleanup. It passes no reusable Factory, model or forge capabilities into the build. Git,
+CLI and registry output does not become product Evidence. This freezes the recipe and identifies
+the resulting artifact; arbitrary network-dependent Dockerfile commands are not a reproducibility
+guarantee. Private cache eviction does not delete canonical source or approved data.
+
+Snapshot creation uses a temporary root-private Git configuration trusting only that canonical
+checkout and its Git directory. This passes the exact trust boundary to local upload-pack on Git
+versions that discard command-line overrides, without changing user or installation configuration.

@@ -7,7 +7,7 @@
 //
 // It owns one namespace, `factory-upgrade-<8 hex>`, labelled with this run's id. Cleanup deletes
 // that namespace and its claims after checking the label, and touches nothing else. It starts no
-// Factorybox worker and no Sandbox. See docs/development/README.md for what it promises.
+// Factorybox worker and no Sandbox. See the README for the command.
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

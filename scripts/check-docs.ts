@@ -45,12 +45,8 @@ let links = 0;
 for (const path of paths) {
   const name = relative(root, path);
   requireValid(
-    basename(path) === "README.md" ||
-      basename(path) === "AGENTS.md" ||
-      name === "SECURITY.md" ||
-      name === "apps/factory/PRODUCT.md" ||
-      /^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(name),
-    `${name}: use a README, AGENTS.md, SECURITY.md, numbered ADR or apps/factory/PRODUCT.md`,
+    basename(path) === "README.md" || basename(path) === "AGENTS.md" || name === "SECURITY.md",
+    `${name}: Markdown is limited to README.md, AGENTS.md and SECURITY.md`,
   );
   const document = readFileSync(path, "utf8");
   requireValid((document.match(/^```/gm) ?? []).length % 2 === 0, `${name}: unbalanced fences`);
@@ -70,6 +66,6 @@ for (const path of paths) {
     links += 1;
   }
 }
-for (const expected of ["README.md", "AGENTS.md", "docs/README.md"])
+for (const expected of ["README.md", "AGENTS.md", "SECURITY.md"])
   requireValid(paths.includes(resolve(root, expected)), `Missing ${expected}`);
 console.log({ documents: paths.length, links, result: "passed" });

@@ -4,15 +4,12 @@
 
 - Implement the requested task. Keep temporary plans/status in the task or issue; do not activate
   later work, prepare speculative APIs or reopen completed programmes.
-- Use the root README for orientation, `docs/development/README.md` for commands and test lanes,
-  `docs/operations/README.md` for installation, `docs/product/README.md` for current behavior,
-  `docs/README.md` for domain and service boundaries,
-  and the relevant `docs/adr` decision when changing that boundary. Read what the task needs.
-- Maintained Markdown is limited to READMEs, `AGENTS.md`, `SECURITY.md`, numbered ADRs in `docs/adr`
-  and the UI product brief at `apps/factory/PRODUCT.md`. The product brief summarizes durable
-  product facts and links to the existing documentation; task plans and design specifications
-  still belong in the task or issue.
-  Put generated evidence under `.factory/test-results/`; do not add checkpoint or audit reports.
+- Use the root README for orientation, commands and test lanes, and `deploy/helm/factory/README.md`
+  for installation, operation, worker admission and recovery. Read the code and its tests for domain
+  and service boundaries.
+- Maintained Markdown is limited to READMEs, `AGENTS.md` and `SECURITY.md`. Task plans, design
+  specifications and audit or checkpoint reports belong in the task or issue. Put generated evidence
+  under `.factory/test-results/`.
 - Preserve changes made by others and use `apply_patch` for manual edits.
 - Keep `/Users/max/Code/software-factory` read-only. Port isolated behavior only within the requested
   scope and bring its tests with it.
@@ -35,8 +32,14 @@
 
 ## Interface
 
-- Before UI changes, read `apps/factory/PRODUCT.md` and the existing control owners. Preserve
-  the visual system in ADR 0010 rather than inventing a new skin for each feature.
+- Before UI changes, read the existing control owners. Preserve the visual system rather than
+  inventing a new skin for each feature: one global semantic token system, three bundled
+  public-domain paintings with fixed contrast-tested accents, Sansita for display and Inter for
+  interface and documents. Document windows are one subtly translucent blurred base, nested editors
+  stay transparent, menus are opaque enough to read, and IDE, Terminal and Preview bodies stay
+  opaque. Reduced transparency and unsupported backdrop filters use solid surfaces, and motion
+  follows the operating-system preference. Frequent actions sit adjacent, overflow goes to a
+  compact menu at the far right, and focus returns to the opener.
 - `apps/factory/src/style.css` loads `ui/controls.css` once. Use native buttons, selects,
   inputs and textareas with those shared defaults. `workspace-action` and `data-primary`
   own quiet document actions; `quiet-button`, `primary-button` and `danger-button` cover
