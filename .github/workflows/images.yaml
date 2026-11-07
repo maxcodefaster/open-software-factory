@@ -48,6 +48,8 @@ jobs:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     env:
       RELEASE: ${{ needs.release.outputs.version }}
@@ -147,7 +149,7 @@ jobs:
           artifacts='{}'
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE"
-            digest="$(release_combine "$image" "$image-arm64")"
+            digest="$(release_combine "$image" "$image-arm64" "$image-amd64")"
             release_sign "$IMAGE_ROOT/$role@$digest"
             artifacts="$(jq -c --arg role "$role" --arg ref "$IMAGE_ROOT/$role@$digest" '. + {($role): $ref}' <<< "$artifacts")"
           done
@@ -164,6 +166,8 @@ jobs:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     env:
       RELEASE: ${{ needs.release.outputs.version }}
@@ -259,7 +263,7 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           image="$IMAGE_ROOT/factory:$RELEASE"
-          digest="$(release_combine "$image" "$image-arm64")"
+          digest="$(release_combine "$image" "$image-arm64" "$image-amd64")"
           release_sign "$IMAGE_ROOT/factory@$digest"
           {
             echo "### Factory $RELEASE"
