@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
-import { wallpaperBudget } from "../../../scripts/factory/optimize-art";
 import { desktopBackgrounds, orderedDesktopBackgrounds } from "./artworks";
+
+const wallpaperBudget = 350_000;
 
 test("the selected background comes first without changing the catalog or remaining order", () => {
   for (const key of desktopBackgroundKeys) {

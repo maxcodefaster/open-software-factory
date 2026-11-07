@@ -6,7 +6,7 @@ test("direct UI checks own their host but discovery, explicit targets and live l
   expect(needsOwnedBrowserHost(["test/browser/usage-settings.spec.ts"], {})).toBe(true);
   for (const arg of ["--list", "--help", "-h"])
     expect(needsOwnedBrowserHost([arg], {})).toBe(false);
-  for (const lane of ["native", "paid", "manual"])
+  for (const lane of ["native", "paid"])
     expect(needsOwnedBrowserHost([], { FACTORY_BROWSER_LANE: lane })).toBe(false);
   expect(needsOwnedBrowserHost([], { FACTORY_BROWSER_BASE_URL: "http://127.0.0.1:12345" })).toBe(
     false,

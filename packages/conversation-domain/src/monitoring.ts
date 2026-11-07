@@ -73,9 +73,3 @@ export const monitoringView = z.object({
     }),
   ),
 });
-
-export const monitoringReceipt = z.object({
-  accepted: z.number().int().nonnegative(),
-  duplicates: z.number().int().nonnegative(),
-  ignored: z.number().int().nonnegative(),
-});

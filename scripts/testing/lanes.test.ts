@@ -6,8 +6,6 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(integrationLane("test/integration/project-environment.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/native-skill-loading.test.ts")).toBe("native");
   expect(integrationLane("test/integration/team-delivery.live.test.ts")).toBe("live");
-  for (const name of ["change-agent", "change-recovery", "runtime-recovery", "ux-starter-capture"])
-    expect(browserLane(`${name}.spec.ts`)).toBe("manual");
   expect(browserLane("agent-turn-live.spec.ts")).toBe("paid");
   expect(browserLane("project-agent.spec.ts")).toBe("paid");
   expect(browserLane("runtime-console.spec.ts")).toBe("native");

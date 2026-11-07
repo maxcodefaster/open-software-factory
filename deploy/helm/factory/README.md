@@ -167,7 +167,7 @@ original worker while retaining its Pod object for terminal observation. Fresh r
 unresolved backing from any admission sharing the old claim. It records a new store intent,
 keeps the old claim and history, and retains canonical Source on its original claim and node.
 Omitting `storage` retains the exact original store. Retry a request only with the same UUID and
-storage selection. See ADR 0003.
+storage selection. See the worker recovery design.
 A new node, storage backend or architecture still needs its own native admission.
 `factorybox.kernel` is optional. Leave it empty (or `"*"`) to let the worker decide, or list
 releases with `*` wildcards to restrict which nodes Factory admits. Run `helm test RELEASE` to
@@ -1221,7 +1221,7 @@ A read-only inspector verifies the original initialization receipt, bounded imag
 capacity and requires its old lease to be released. Old imports, exports and runtime histories
 remain retained; new exports have separate admission-scoped inputs. A failed successor bootstrap
 using that store needs another explicit operator recovery, never a new-store bootstrap retry.
-See ADR 0003.
+See the worker recovery design.
 
 ### Lifecycle commands
 

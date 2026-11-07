@@ -79,7 +79,6 @@ test("admitted configuration is readable, private to Project members, and distin
       .click();
     await current.getByRole("button", { name: "Toggle Agent panel" }).click();
     const panel = current.getByRole("complementary", { name: "Agent panel" });
-    await expect(panel.locator(".agent-turn-details")).toHaveCount(0);
     return panel;
   }
   try {

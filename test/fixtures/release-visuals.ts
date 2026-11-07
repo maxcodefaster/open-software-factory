@@ -113,12 +113,6 @@ export async function releaseProductVisuals(fixture: Fixture) {
   await page.getByRole("button", { name: "Minimize Agent panel" }).click();
   await capture("spec", 900);
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
-  await page
-    .locator(".agent-turn-details > summary")
-    .filter({ hasText: "Agent configuration" })
-    .click();
-  await capture("agent-configuration");
-  await capture("agent-configuration", 900);
   await page.setViewportSize({ width: 1440, height: 960 });
   await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await visible(page.locator(".knowledge-article")).toBeVisible();

@@ -1,3 +1,4 @@
+// @ts-nocheck: this test exercises a plain JavaScript module that ships in the OpenCode server image.
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";

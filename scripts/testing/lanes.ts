@@ -54,12 +54,6 @@ export function integrationLane(path: string) {
 
 export const browserFiles = {
   paid: ["agent-turn-live.spec.ts", "project-agent.spec.ts"],
-  manual: [
-    "change-agent.spec.ts",
-    "change-recovery.spec.ts",
-    "runtime-recovery.spec.ts",
-    "ux-starter-capture.spec.ts",
-  ],
   native: [
     "runtime-console.spec.ts",
     "delivery.spec.ts",

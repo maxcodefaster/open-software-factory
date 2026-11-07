@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { finishedPrebuildNamespace } from "./editor-source-resources";
+import { finishedPrebuildNamespace } from "../fixtures/editor-source-resources";
 
 test("background cleanup exemption requires exact terminal producer identity, never Workspace or UID replacement", () => {
   const namespace = { name: "factory-runtime-4a8e2f0c85f5", uid: "owned-namespace-uid" };

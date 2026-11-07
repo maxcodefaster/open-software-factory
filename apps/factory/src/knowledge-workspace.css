@@ -157,10 +157,6 @@
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
 }
-.knowledge-text-diff {
-  margin-bottom: var(--space-4);
-  font: var(--text-md) / var(--leading-body) var(--font-interface);
-}
 
 .knowledge-nav-heading {
   min-height: var(--space-12);
@@ -513,15 +509,6 @@
   white-space: pre-wrap;
   font: inherit;
 }
-.knowledge-text-diff pre {
-  display: flex;
-  gap: var(--space-2);
-  margin: 0;
-  padding: var(--space-1) var(--space-2);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: inherit;
-}
 @container workspace (max-width: 600px) {
   .knowledge-compare > div {
     grid-template-columns: minmax(0, 1fr);
@@ -803,9 +790,6 @@
   height: var(--space-4);
   flex: none;
 }
-.knowledge-text-diff pre > span {
-  flex: none;
-}
 
 .knowledge-tree button svg {
   width: var(--space-4);
@@ -873,17 +857,6 @@
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
   }
-}
-.knowledge-text-diff .diff-added {
-  background: var(--material-accent);
-  color: var(--color-success);
-}
-.knowledge-text-diff .diff-removed {
-  color: var(--red);
-  text-decoration: line-through;
-}
-.knowledge-text-diff .diff-unchanged {
-  color: var(--muted-ink);
 }
 
 .knowledge-tree .wiki-tree-row {

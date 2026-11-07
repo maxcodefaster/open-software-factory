@@ -2223,17 +2223,6 @@ dt {
   font-weight: var(--weight-medium);
 }
 
-.agent-turn-details {
-  flex: 0 0 auto;
-  max-height: 40%;
-  overflow: auto;
-  padding: var(--space-2) 0;
-  color: var(--muted-ink);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
-  border-bottom: 1px solid var(--line-subtle);
-}
-
 .assistant-context-row {
   display: flex;
   align-items: center;
@@ -3805,39 +3794,6 @@ dt {
   caret-color: var(--color-focus);
 }
 
-.agent-turn-details summary {
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-
-.agent-turn-details dl {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--space-1) var(--space-3);
-  margin: var(--space-3) 0;
-}
-
-.agent-turn-details dd {
-  margin: 0;
-  color: var(--color-ink);
-  overflow-wrap: anywhere;
-}
-
-.agent-turn-details ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.agent-turn-details code {
-  display: block;
-  font-size: var(--text-xs);
-}
-
-.agent-turn-details p {
-  margin: var(--space-2) 0 0;
-}
-
 .runtime-presence i {
   width: 0.42rem;
   height: 0.42rem;
@@ -4244,10 +4200,6 @@ dt {
   opacity: 1;
 }
 
-.agent-turn-details li + li {
-  margin-top: var(--space-2);
-}
-
 .chat-skill-picker li button {
   display: flex;
   flex-direction: column;
@@ -4271,11 +4223,6 @@ dt {
 .ticket-action-menu > button > span + svg {
   rotate: -90deg;
   color: var(--color-ink-muted);
-}
-
-.agent-turn-details summary span + span {
-  margin-left: var(--space-2);
-  color: var(--color-ink);
 }
 
 .chat-skill-picker li button > span {
@@ -4830,12 +4777,6 @@ dt {
 .factory-desktop .agent-status {
   padding: var(--space-2) 0;
   font-size: var(--text-xs);
-}
-.assistant-context-row > .agent-turn-details {
-  flex: none;
-  max-height: var(--document-history-max-height);
-  padding: 0 var(--space-2);
-  border-bottom: 0;
 }
 .assistant-context-row > .agent-configuration-note {
   flex-basis: 100%;
@@ -5412,16 +5353,8 @@ dt {
 .specification-document.locked .specification-rich-text {
   min-height: auto;
 }
-.assistant-context-row:has(.agent-turn-details[open], .agent-configuration-note) {
+.assistant-context-row:has(.agent-configuration-note) {
   flex-wrap: wrap;
-}
-.assistant-context-row > .agent-turn-details:not([open]) {
-  order: 2;
-  margin-left: auto;
-}
-.assistant-context-row > .agent-turn-details[open] {
-  flex-basis: 100%;
-  order: 3;
 }
 
 .agent-activity.completed .activity-indicator {
