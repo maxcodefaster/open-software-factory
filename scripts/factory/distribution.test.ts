@@ -32,7 +32,7 @@ test("application build tools match the upstream artifact pins", async () => {
   expect(dockerfile).toContain('"scripts/kubernetes/start.ts"');
 });
 
-test("only published releases build and publish arm64 natively", async () => {
+test("only published releases build and publish arm64 and amd64 natively", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
@@ -49,6 +49,7 @@ test("only published releases build and publish arm64 natively", async () => {
   for (const job of ["roles", "factory"])
     expect(workflow.jobs[job].strategy.matrix.include).toEqual([
       { arch: "arm64", runner: "ubuntu-24.04-arm" },
+      { arch: "amd64", runner: "ubuntu-24.04" },
     ]);
   for (const job of ["roles", "factory"]) {
     const build = workflow.jobs[job].steps.find((step: { run?: string }) =>
