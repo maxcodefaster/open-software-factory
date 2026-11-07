@@ -3,6 +3,7 @@ import { workspacePresence } from "../../../packages/interface-domain/src/worksp
 import type { AppPreview, RuntimeAttempt } from "./api-contracts";
 import { plainErrorMessage } from "./command-error";
 import {
+  appProcessCause,
   appResponseNotice,
   boundedCause,
   previewStatus,
@@ -538,7 +539,7 @@ function AttachedRuntimeFrame(props: {
             }
           >
             <p>
-              {phase() === "failed" && retryable()
+              {phase() === "failed" && retryable() && !appProcessCause(props.app?.process)
                 ? "Preview could not be reached. Reconnecting…"
                 : status().headline}
             </p>

@@ -8,5 +8,5 @@ chmod 0400 /run/factory-parent-token /run/factory-child-token
 # make those mounts shared again, which cannot be checkpointed in the child.
 # Keep the storage layout qualified by standalone Factorybox, not Docker's
 # version-dependent default.
-dockerd --storage-driver=overlay2 --host=unix:///var/run/docker.sock >/var/log/factory-dockerd.log 2>&1 &
+dockerd --init --storage-driver=overlay2 --host=unix:///var/run/docker.sock >/var/log/factory-dockerd.log 2>&1 &
 exec factory-runtime-connector parent --assignment /factory/assignment/assignment.json --token-file /run/factory-parent-token --child-token-file /run/factory-child-token

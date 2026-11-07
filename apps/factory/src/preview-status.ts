@@ -69,7 +69,13 @@ export function previewStatus(input: PreviewStatusInput): PreviewStatus {
         detail:
           "Factory has not confirmed whether the paused Sandbox restored, so it keeps it untouched. Your files are unchanged.",
       };
-    return { headline: "Could not open Preview.", cause, detail: "Retry with Reload view." };
+    return {
+      headline: "Could not open Preview.",
+      cause,
+      detail: processCause
+        ? "Restart the App from the Run bar in the IDE, then reload this view."
+        : "Retry with Reload view.",
+    };
   }
   if (attempt?.computeWait)
     return {

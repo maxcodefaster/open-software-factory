@@ -84,7 +84,7 @@ describe("runtime Kubernetes resources", () => {
     expect(bootstrap).toContain("--token-file /run/factory-parent-token");
     expect(bootstrap).not.toContain("/tmp/factory-parent-token");
     expect(bootstrap).toContain(
-      "dockerd --storage-driver=overlay2 --host=unix:///var/run/docker.sock",
+      "dockerd --init --storage-driver=overlay2 --host=unix:///var/run/docker.sock",
     );
     expect(bootstrap).not.toContain("dockerd-entrypoint.sh");
     const assignment = String(

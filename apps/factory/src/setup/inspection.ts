@@ -284,7 +284,9 @@ export function createSetupInspection(input: {
           !["proposal", "failed"].includes(parent.state)
         )
           throw new CommandError("conflict", "The setup question changed");
-        if (parent.sourceCommit !== head.headSha)
+        // A failed inspection retained no proposal. A changed default branch is the usual
+        // reason to retry, so only a proposal or open questions are bound to their commit.
+        if (parent.sourceCommit !== head.headSha && parent.state !== "failed")
           throw new CommandError(
             "conflict",
             "Source changed. Inspect the current configuration again.",
