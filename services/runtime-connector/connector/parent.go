@@ -609,6 +609,9 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 		RunArguments []string `json:"runArgs"`
 		CapAdd       []string `json:"capAdd"`
 		SecurityOpt  []string `json:"securityOpt"`
+		// initializeCommand runs before the container exists, as the Sandbox's own root
+		// with the Docker daemon and Runtime credentials in reach.
+		InitializeCommand json.RawMessage `json:"initializeCommand"`
 	}
 	var result struct {
 		Configuration struct {
@@ -639,6 +642,9 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 	// This runs before `devcontainer up`, so a forbidden setting from the
 	// Project or its Features is refused before any lifecycle hook executes.
 	for _, configured := range []settings{result.Configuration.settings, result.Merged} {
+		if hasInitializeCommand(configured.InitializeCommand) {
+			return nil, errors.New("Dev Container initializeCommand runs outside the container and is not allowed. Move it to postCreateCommand")
+		}
 		if err := validateDevcontainerSettings(assignment.WorkspaceFolder, configured.Privileged, configured.Mounts, configured.RunArguments, configured.CapAdd, configured.SecurityOpt); err != nil {
 			return nil, err
 		}
@@ -658,6 +664,17 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 		images = append(images, result.Configuration.Image)
 	}
 	return images, nil
+}
+
+// hasInitializeCommand reports whether the configuration sets a command, in any of the string,
+// array or object forms the Dev Container specification allows.
+func hasInitializeCommand(raw json.RawMessage) bool {
+	text := strings.TrimSpace(string(raw))
+	switch text {
+	case "", "null", `""`, "[]", "{}":
+		return false
+	}
+	return true
 }
 
 // validateDevcontainerSettings refuses Dev Container settings that cross the
@@ -785,6 +802,10 @@ func validateContainerBoundary(container inspectedContainer, assignment Assignme
 	return nil
 }
 
+type composeFileResource struct {
+	File string `json:"file"`
+}
+
 func validateCompose(
 	ctx context.Context,
 	assignment Assignment,
@@ -828,6 +849,12 @@ func validateCompose(
 			Privileged  bool                       `json:"privileged"`
 			Pid         string                     `json:"pid"`
 			NetworkMode string                     `json:"network_mode"`
+			Ipc         string                     `json:"ipc"`
+			Uts         string                     `json:"uts"`
+			Cgroup      string                     `json:"cgroup"`
+			UsernsMode  string                     `json:"userns_mode"`
+			Devices     []json.RawMessage          `json:"devices"`
+			VolumesFrom []string                   `json:"volumes_from"`
 			CapDrop     []string                   `json:"cap_drop"`
 			Volumes     []struct {
 				Type   string `json:"type"`
@@ -835,13 +862,32 @@ func validateCompose(
 				Target string `json:"target"`
 			} `json:"volumes"`
 		} `json:"services"`
+		Secrets map[string]composeFileResource `json:"secrets"`
+		Configs map[string]composeFileResource `json:"configs"`
 	}
 	if err := json.Unmarshal(output, &compose); err != nil {
 		return nil, fmt.Errorf("decode Compose configuration: %w", err)
 	}
+	// A Compose secret or config file is mounted into a service. It must not
+	// reach the Runtime credentials under /factory/assignment.
+	for _, resources := range []map[string]composeFileResource{compose.Secrets, compose.Configs} {
+		for name, resource := range resources {
+			if resource.File != "" && !pathWithin(assignment.WorkspaceFolder, resource.File) {
+				return nil, fmt.Errorf("Compose secret or config %q reads a file outside the assigned checkout", name)
+			}
+		}
+	}
 	for name, service := range compose.Services {
 		if service.Privileged || service.Pid == "host" || service.NetworkMode == "host" {
 			return nil, fmt.Errorf("Compose service %q requests a forbidden host boundary", name)
+		}
+		if service.Ipc == "host" || service.Uts == "host" || service.Cgroup == "host" || service.UsernsMode == "host" || len(service.Devices) > 0 {
+			return nil, fmt.Errorf("Compose service %q requests a forbidden host boundary", name)
+		}
+		for _, source := range service.VolumesFrom {
+			if strings.HasPrefix(source, "container:") {
+				return nil, fmt.Errorf("Compose service %q shares volumes with a container outside the Compose project", name)
+			}
 		}
 		if name == primaryService {
 			dropped := make(map[string]bool, len(service.CapDrop))

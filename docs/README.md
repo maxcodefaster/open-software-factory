@@ -367,6 +367,11 @@ Docker socket. The privileged outer Factorybox worker is trusted infrastructure;
 host kernel and does not establish VM-grade isolation. Factory has one concrete runtime topology
 and no Coder control plane or generic runtime provider layer.
 
+The Runtime Connector refuses Dev Container and Compose settings that cross the Sandbox boundary before any
+lifecycle hook runs. That covers privileged mode, added capabilities, the Docker socket, host namespaces,
+devices, Compose secrets and configs outside the checkout, and `initializeCommand`. The last one runs before
+the container exists, as the Sandbox's own root, so Projects use `postCreateCommand` instead.
+
 One exact consumer image contains ordinary execution, OpenCode and Forgejo Verification tools.
 Assignments select role processes and credentials; the Developer IDE, source service and browser
 tools remain separate artifacts. A persisted Runtime Attempt keeps its image through
