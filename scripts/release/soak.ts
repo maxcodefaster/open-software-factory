@@ -151,9 +151,11 @@ async function main(options: Options) {
   };
   const baselineWorker = await worker();
   const baseline: Baseline = { restarts: await factoryRestarts(), workerPod: baselineWorker.name };
+  // A failed image prebuild falls back to normal startup by design. The starter app's Compose
+  // file needs Environment values, so its prebuild can never succeed. Failed cleanup still counts.
   const badBaseline = Number(
     await psql(
-      "select count(*) from factory.runtime_attempt where state in ('failed','cleanup-failed')",
+      "select count(*) from factory.runtime_attempt where state='cleanup-failed' or (state='failed' and isolated_kind is distinct from 'prebuild')",
     ),
   );
   record({
@@ -183,7 +185,7 @@ async function main(options: Options) {
     const now = await worker();
     const bad = Number(
       await psql(
-        "select count(*) from factory.runtime_attempt where state in ('failed','cleanup-failed')",
+        "select count(*) from factory.runtime_attempt where state='cleanup-failed' or (state='failed' and isolated_kind is distinct from 'prebuild')",
       ),
     );
     const violations = healthViolations({
