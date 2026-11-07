@@ -726,7 +726,7 @@ class PreparationTests(unittest.TestCase):
                 patch("subprocess.run", side_effect=unmount), \
                 self.environment(), \
                 patch.dict(globals_, {
-                    "prepared_input": lambda value, status: {
+                    "prepared_input": lambda value, status, release=False: {
                         "bundle": str(bundle), "storeID": request["storeID"], "epoch": request["epoch"]},
                     "input_mounts": lambda value: dict(mounts),
                 }):
@@ -734,6 +734,26 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(reads.call_count, 1)  # Worker status only, no sibling state.
             self.assertEqual(commands, [["umount", "--", str(bundle / name)] for name in ["rootfs", "lower"]])
             self.assertTrue(running.is_dir())
+
+    def test_release_finds_input_prepared_by_an_earlier_bootstrap(self):
+        request = self.request
+        root = self.root / "input" / request["sandboxID"]
+        (root / "bundle").mkdir(parents=True)
+        (root / "bundle" / "config.json").write_text("{}")
+        digest = self.module["digest"](root / "bundle" / "config.json")
+        earlier = {**request, "bootstrap": "an earlier bootstrap", "version": request["version"] + 1}
+        (root / "intent.json").write_text(json.dumps({"request": earlier, "rootfsSHA256": "r" * 64}))
+        (root / "prepared.json").write_text(json.dumps({
+            "version": earlier["version"], "sandboxID": request["sandboxID"], "bundle": str(root / "bundle"),
+            "storeID": request["storeID"], "epoch": request["epoch"], "podUID": request["podUID"],
+            "rootfsSHA256": "r" * 64, "configSHA256": digest}))
+        status = {"store": str(self.root)}
+        with self.assertRaisesRegex(ValueError, "another preparation"):
+            self.module["prepared_input"](request, status)
+        self.assertEqual(self.module["prepared_input"](request, status, release=True)["storeID"], request["storeID"])
+        other = {**request, "runtimeHostImage": "registry.invalid/other@sha256:" + "a" * 64}
+        with self.assertRaisesRegex(ValueError, "another preparation"):
+            self.module["prepared_input"](other, status, release=True)
 
     def test_another_sandbox_deleted_record_cannot_authorize_release(self):
         request = self.request
@@ -748,7 +768,7 @@ class PreparationTests(unittest.TestCase):
         with patch("subprocess.check_output", side_effect=replies), \
                 patch("subprocess.run") as mutation, \
                 self.environment(), \
-                patch.dict(globals_, {"prepared_input": lambda value, status: {
+                patch.dict(globals_, {"prepared_input": lambda value, status, release=False: {
                     "bundle": str(root / "bundle"), "storeID": request["storeID"], "epoch": request["epoch"]}}):
             with self.assertRaisesRegex(ValueError, "confirmed native Delete"):
                 self.module["release"](request, False)

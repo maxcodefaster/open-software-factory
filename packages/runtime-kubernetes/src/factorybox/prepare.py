@@ -171,13 +171,20 @@ def canonical_source(request):
             os.close(descriptor)
 
 
-def prepared_input(request, status):
+# A Factory upgrade can change the bootstrap text and the preparation version. Cleanup of a
+# Sandbox prepared by an earlier release still has to find its own private input.
+RELEASE_IGNORED_FIELDS = {'bootstrap', 'version'}
+
+
+def prepared_input(request, status, release=False):
     root = Path(status['store'])/'input'/request['sandboxID']
     plan = json.loads((root/'intent.json').read_text())
-    if {key: plan['request'].get(key) for key in IDENTITY_FIELDS} != {key: request[key] for key in IDENTITY_FIELDS}:
+    compared = IDENTITY_FIELDS - (RELEASE_IGNORED_FIELDS if release else set())
+    if {key: plan['request'].get(key) for key in compared} != {key: request[key] for key in compared}:
         raise ValueError('Private input already belongs to another preparation')
     completed = json.loads((root/'prepared.json').read_text())
-    if (completed.get('version') != request['version'] or completed.get('sandboxID') != request['sandboxID'] or
+    if (completed.get('sandboxID') != request['sandboxID'] or
+            (not release and completed.get('version') != request['version']) or
             completed.get('bundle') != str(root/'bundle') or completed.get('storeID') != request['storeID'] or
             completed.get('epoch') != request['epoch'] or completed.get('podUID') != request['podUID'] or
             completed.get('rootfsSHA256') != plan['rootfsSHA256'] or
@@ -627,7 +634,7 @@ def release(request, never_started):
     root = Path(status['store'])/'input'/request['sandboxID']
     if not (root/'prepared.json').is_file():
         raise ValueError('Incomplete preparation must remain retained for inspection')
-    prepared = prepared_input(request, status)
+    prepared = prepared_input(request, status, release=True)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
            '--worker-store-id', prepared['storeID'], '--worker-epoch', prepared['epoch']]
     if never_started:
