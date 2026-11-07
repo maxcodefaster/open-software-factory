@@ -3,8 +3,7 @@ import { browserFiles, mixedPaidBrowserFiles } from "./scripts/testing/lanes";
 
 const { PLAYWRIGHT_CHROMIUM_EXECUTABLE } = process.env;
 const lane = process.env["FACTORY_BROWSER_LANE"] ?? "ui";
-if (!["ui", "native", "paid"].includes(lane))
-  throw new Error("Unknown browser test lane");
+if (!["ui", "native", "paid"].includes(lane)) throw new Error("Unknown browser test lane");
 const files = Object.values(browserFiles).flat();
 const ownedFactoryFiles = [
   "start-navigation.spec.ts",
