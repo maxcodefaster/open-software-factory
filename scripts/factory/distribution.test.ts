@@ -77,14 +77,18 @@ test("only published releases build and publish arm64 and amd64 natively", async
   expect(workflow.jobs.manifests.needs).toContain("roles");
 });
 
-test("release images wait for the same non-live checks on native arm64", async () => {
+test("release images require full source checks or a validated exact-commit local gate", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
   expect(workflow.jobs.verify.needs).toBe("release");
+  expect(workflow.jobs.verify.if).toBe(`\${{ needs.release.outputs.local_gate_passed != 'true' }}`);
   expect(workflow.jobs.verify.uses).toBe("./.github/workflows/checks.yaml");
   expect(workflow.jobs.verify["continue-on-error"]).not.toBe(true);
   expect(workflow.jobs.roles.needs).toContain("verify");
+  expect(workflow.jobs.roles.if).toBe(
+    `\${{ !cancelled() && needs.release.result == 'success' && (needs.verify.result == 'success' || needs.release.outputs.local_gate_passed == 'true') }}`,
+  );
   const checks = parse(
     await readFile(new URL("../../.github/workflows/checks.yaml", import.meta.url), "utf8"),
   );
@@ -132,6 +136,94 @@ test("release images wait for the same non-live checks on native arm64", async (
     "cache-dependency-path": "services/runtime-connector/go.sum",
   });
   expect(JSON.stringify(checks)).not.toMatch(/secrets\.|test:(?:live|native|browser:paid)/);
+});
+
+test("local gate reuse rejects another commit, incomplete checks and failed receipts", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  expect(workflow.on.workflow_dispatch.inputs.use_local_gate).toMatchObject({
+    type: "boolean",
+    default: false,
+  });
+  expect(workflow.jobs.release.outputs.local_gate_passed).toBe(
+    `\${{ steps.local-gate.outputs.passed }}`,
+  );
+  const gate = workflow.jobs.release.steps.find(
+    (step: { id?: string }) => step.id === "local-gate",
+  );
+  const revision = "a".repeat(40);
+  const complete = {
+    schema: 1,
+    commit: revision,
+    passed: true,
+    steps: [
+      "clean-tree",
+      "forbidden-terms",
+      "secrets",
+      "docs",
+      "format",
+      "lint",
+      "typecheck",
+      "unit",
+      "connector",
+      "controllers",
+      "browser",
+    ].map((name) => ({ name, passed: true })),
+  };
+  const incomplete = structuredClone(complete);
+  incomplete.steps.pop();
+  const failed = structuredClone(complete);
+  failed.steps[0]!.passed = false;
+  const duplicate = structuredClone(complete);
+  duplicate.steps[0]!.name = "browser";
+  const directory = await mkdtemp(join(tmpdir(), "factory-local-release-gate-"));
+  try {
+    for (const [receipt, enabled, expected] of [
+      [complete, "true", 0],
+      [{ ...complete, commit: "b".repeat(40) }, "true", 1],
+      [{ ...complete, passed: false }, "true", 1],
+      [{ ...complete, schema: 2 }, "true", 1],
+      [incomplete, "true", 1],
+      [failed, "true", 1],
+      [duplicate, "true", 1],
+      [complete, "false", 0],
+    ] as const) {
+      const fixture = join(directory, "fixture.json");
+      const output = join(directory, "output.txt");
+      await writeFile(fixture, JSON.stringify(receipt));
+      await writeFile(output, "");
+      const child = Bun.spawn(
+        [
+          "bash",
+          "-c",
+          `
+        git() { printf '%s\\n' "$EXPECTED_REVISION"; }
+        curl() { test "$USE_LOCAL_GATE" = true; cp "$RECEIPT_FIXTURE" "\${!#}"; }
+        ${gate.run}
+      `,
+        ],
+        {
+          env: {
+            ...process.env,
+            USE_LOCAL_GATE: enabled,
+            EXPECTED_REVISION: revision,
+            RECEIPT_FIXTURE: fixture,
+            GITHUB_OUTPUT: output,
+            RUNNER_TEMP: directory,
+            GITHUB_REPOSITORY: "maxcodefaster/open-software-factory",
+            RELEASE_TAG: "v0.1.0-beta.1",
+          },
+          stdout: "ignore",
+          stderr: "pipe",
+        },
+      );
+      expect(await child.exited).toBe(expected);
+      expect(await readFile(output, "utf8")).toBe(expected === 0 ? `passed=${enabled}\n` : "");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("runtime publication compares config digests, not Docker's manifest ID", async () => {

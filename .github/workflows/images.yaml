@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      use_local_gate:
+        description: Use the release's passed exact-commit beta gate receipt instead of repeating source checks
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -28,6 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      local_gate_passed: ${{ steps.local-gate.outputs.passed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -48,8 +54,32 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           git merge-base --is-ancestor HEAD origin/main
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Validate the published exact-commit local gate receipt
+        id: local-gate
+        env:
+          USE_LOCAL_GATE: ${{ inputs.use_local_gate || 'false' }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$USE_LOCAL_GATE" != true ]]; then
+            printf 'passed=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          revision="$(git rev-parse HEAD)"
+          curl --fail --location --silent --show-error \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/beta-gate-${revision:0:12}.json" \
+            --output "$RUNNER_TEMP/local-gate.json"
+          jq -e --arg revision "$revision" '
+            .schema == 1 and .commit == $revision and .passed == true and
+            (.steps | length) == 11 and
+            ([.steps[] | select(.passed == true) | .name] | sort) ==
+            (["clean-tree", "forbidden-terms", "secrets", "docs", "format", "lint",
+              "typecheck", "unit", "connector", "controllers", "browser"] | sort)
+          ' "$RUNNER_TEMP/local-gate.json"
+          printf 'passed=true\n' >> "$GITHUB_OUTPUT"
   verify:
     needs: release
+    if: ${{ needs.release.outputs.local_gate_passed != 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/checks.yaml
@@ -57,6 +87,7 @@ jobs:
       source_ref: ${{ github.event.release.tag_name || inputs.release_tag }}
   roles:
     needs: [release, verify]
+    if: ${{ !cancelled() && needs.release.result == 'success' && (needs.verify.result == 'success' || needs.release.outputs.local_gate_passed == 'true') }}
     permissions:
       contents: read
       packages: write
