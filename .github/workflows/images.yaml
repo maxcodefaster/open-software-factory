@@ -170,7 +170,13 @@ jobs:
                 "${build[@]}" --provenance=false --sbom=false --load \
                   --metadata-file "$RUNNER_TEMP/runtime-host-proven.json" .
                 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
-                proven_config="$(jq -er '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host-proven.json")"
+                # Export metadata can omit the config digest. Hash the actual config
+                # of the loaded image that the native proofs will execute instead.
+                proof_archive="$RUNNER_TEMP/runtime-host-proven.tar"
+                docker image save --output "$proof_archive" "$image_id"
+                config_file="$(tar -xOf "$proof_archive" manifest.json | jq -er 'if length == 1 then .[0].Config else error("unexpected proof image count") end')"
+                proven_config="sha256:$(tar -xOf "$proof_archive" -- "$config_file" | sha256sum | awk '{print $1}')"
+                rm -- "$proof_archive"
                 [[ "$proven_config" =~ ^sha256:[a-f0-9]{64}$ ]]
                 bash scripts/runtime/compose-inputs-proof.sh "$image_id"
                 registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
@@ -179,7 +185,12 @@ jobs:
                 # The proven layers come from the build cache. Publish them with attestations
                 # and refuse any result whose image configuration is not the proven one.
                 "${build[@]}" "${attest[@]}" --push --metadata-file "$RUNNER_TEMP/runtime-host.json" .
-                test "$(jq -r '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host.json")" = "$proven_config"
+                # Attestations wrap the native image in an index. Resolve its native
+                # child and compare the real OCI config descriptor, not optional metadata.
+                native_child="$(docker buildx imagetools inspect "$image" --raw | jq -er --arg arch "$ARCH" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)] | if length == 1 then .[0].digest else error("unexpected published platform count") end')"
+                published_config="$(docker buildx imagetools inspect "$image@$native_child" --raw | jq -er '.config.digest')"
+                printf 'proven-config=%s published-config=%s\n' "$proven_config" "$published_config"
+                test "$published_config" = "$proven_config"
               else
                 "${build[@]}" "${attest[@]}" --push .
               fi

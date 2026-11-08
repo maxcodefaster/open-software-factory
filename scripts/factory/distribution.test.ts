@@ -234,38 +234,71 @@ test("runtime publication compares config digests, not Docker's manifest ID", as
     step.run?.includes("docker buildx build"),
   ).run;
   expect(command).toContain('--metadata-file "$RUNNER_TEMP/runtime-host-proven.json"');
-  expect(command).toContain('proven_config="$(jq -er');
+  expect(command).toContain('docker image save --output "$proof_archive" "$image_id"');
+  expect(command).toContain('tar -xOf "$proof_archive" -- "$config_file" | sha256sum');
+  expect(command).not.toContain("containerimage.config.digest");
+  expect(command).toContain('docker buildx imagetools inspect "$image@$native_child" --raw');
   expect(command).toContain(
     'test "$(docker image inspect --format \'{{.Id}}\' "$image")" = "$image_id"',
   );
-  const comparison = command.split("\n").find((line) => line.includes('test "$(jq -r'));
+  const comparison = command.split("\n").find((line) => line.includes('test "$published_config"'));
   if (!comparison) throw new Error("Missing published config comparison");
-  const directory = await mkdtemp(join(tmpdir(), "factory-release-identity-"));
-  try {
-    const configDigest = `sha256:${"a".repeat(64)}`;
-    const manifestDigest = `sha256:${"b".repeat(64)}`;
-    for (const [pushed, expected] of [
-      [configDigest, 0],
-      [manifestDigest, 1],
-    ] as const) {
-      await writeFile(
-        join(directory, "runtime-host.json"),
-        JSON.stringify({ "containerimage.config.digest": pushed }),
-      );
-      const child = Bun.spawn(["bash", "-c", comparison], {
-        env: {
-          ...process.env,
-          RUNNER_TEMP: directory,
-          proven_config: configDigest,
-          image_id: manifestDigest,
-        },
-        stdout: "ignore",
-        stderr: "pipe",
-      });
-      expect(await child.exited).toBe(expected);
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+  const configDigest = `sha256:${"a".repeat(64)}`;
+  const manifestDigest = `sha256:${"b".repeat(64)}`;
+  for (const [pushed, expected] of [
+    [configDigest, 0],
+    [manifestDigest, 1],
+  ] as const) {
+    const child = Bun.spawn(["bash", "-c", comparison], {
+      env: {
+        ...process.env,
+        proven_config: configDigest,
+        published_config: pushed,
+        image_id: manifestDigest,
+      },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(expected);
+  }
+});
+
+test("published config lookup selects one native child and ignores attestations", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  ).run;
+  const filter = /native_child=.*jq -er --arg arch "\$ARCH" '([^']+)'/.exec(command)?.[1];
+  expect(filter).toBeDefined();
+  const arm = {
+    digest: `sha256:${"a".repeat(64)}`,
+    platform: { os: "linux", architecture: "arm64" },
+  };
+  const amd = {
+    digest: `sha256:${"b".repeat(64)}`,
+    platform: { os: "linux", architecture: "amd64" },
+  };
+  const attestation = {
+    digest: `sha256:${"c".repeat(64)}`,
+    platform: { os: "unknown", architecture: "unknown" },
+  };
+  for (const [manifests, architecture, expected, digest] of [
+    [[arm, amd, attestation], "arm64", 0, arm.digest],
+    [[arm, amd, attestation], "amd64", 0, amd.digest],
+    [[arm, attestation], "amd64", 5, ""],
+    [[arm, arm, attestation], "arm64", 5, ""],
+  ] as const) {
+    const child = Bun.spawn(["jq", "-er", "--arg", "arch", architecture, filter ?? ""], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    child.stdin.write(JSON.stringify({ manifests }));
+    child.stdin.end();
+    expect(await child.exited).toBe(expected);
+    expect((await new Response(child.stdout).text()).trim()).toBe(digest);
   }
 });
 
