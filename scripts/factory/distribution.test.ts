@@ -230,6 +230,29 @@ test("release publication is attested, signed and scoped to the jobs that need c
   expect(library).toContain("cosign sign --yes");
 });
 
+test("every publication job installs the same digest-pinned Cosign binary", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  expect(workflow.env.COSIGN_IMAGE).toMatch(/:v2\.5\.3@sha256:[a-f0-9]{64}$/);
+  const scripts = ["roles", "manifests", "factory", "distribution", "chart"].map(
+    (job) =>
+      workflow.jobs[job].steps.find(
+        (step: { name?: string }) => step.name === "Install pinned Cosign",
+      ).run,
+  );
+  expect(new Set(scripts).size).toBe(1);
+  expect(scripts[0]).toContain('docker pull "$COSIGN_IMAGE"');
+  expect(scripts[0]).toContain('docker create --network=none "$COSIGN_IMAGE"');
+  expect(scripts[0]).toContain(".Config.Entrypoint");
+  expect(scripts[0]).toContain('.gitVersion == "v2.5.3"');
+  expect(scripts[0]).toContain("GITHUB_PATH");
+  const syntax = Bun.spawn(["bash", "-n"], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
+  syntax.stdin.write(scripts[0]);
+  syntax.stdin.end();
+  expect(await syntax.exited).toBe(0);
+});
+
 test("the native lane is a separate manual workflow that never runs for pull requests", async () => {
   const native = parse(
     await readFile(new URL("../../.github/workflows/native.yaml", import.meta.url), "utf8"),

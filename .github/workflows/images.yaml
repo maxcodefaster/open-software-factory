@@ -16,6 +16,7 @@ concurrency:
 env:
   BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
   SBOM_GENERATOR: docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
+  COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v2.5.3@sha256:f1946d0f30fc8e3777b02f2201e02efdba9fe38f4918162f937052fac98e083f
 jobs:
   release:
     runs-on: ubuntu-24.04
@@ -69,7 +70,20 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - &install-cosign
+        name: Install pinned Cosign
+        run: |
+          set -euo pipefail
+          docker pull "$COSIGN_IMAGE"
+          container="$(docker create --network=none "$COSIGN_IMAGE")"
+          trap 'docker rm "$container" > /dev/null' EXIT
+          executable="$(docker image inspect "$COSIGN_IMAGE" --format '{{json .Config.Entrypoint}}' | jq -er 'if length == 1 then .[0] | select(startswith("/")) else error("unexpected Cosign entrypoint") end')"
+          directory="$RUNNER_TEMP/factory-release-bin"
+          install -d "$directory"
+          docker cp "$container:$executable" "$directory/cosign"
+          chmod 0555 "$directory/cosign"
+          "$directory/cosign" version --json | jq -e '.gitVersion == "v2.5.3"'
+          printf '%s\n' "$directory" >> "$GITHUB_PATH"
       - name: Read native proof tool pins
         id: proof-tools
         run: |
@@ -150,7 +164,7 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Publish multi-architecture role manifests
         id: publish
         env:
@@ -192,7 +206,7 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Build native Factory with exact runtime references
         id: build
         env:
@@ -268,7 +282,7 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Publish the Factory manifest
         id: publish
         env:
@@ -309,7 +323,7 @@ jobs:
       - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
         with:
           version: 2026.10.3
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Package the chart with the released images
         run: |
           set -euo pipefail
