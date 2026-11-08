@@ -450,7 +450,85 @@ test("only explicit owner-authorized beta.1 correction can overwrite published t
     expect(command).toContain(
       'release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite',
     );
-    expect(command).toContain('release_exists "$image" && ! release_overwrite');
+    if (job === "factory")
+      expect(command).toContain('release_exists "$image" && ! release_overwrite');
+    else {
+      expect(command).toContain('if [[ "$reuse" == true ]]');
+      expect(command).toContain("cosign verify --certificate-identity-regexp");
+    }
+  }
+});
+
+test("published image jobs survive a locally satisfied verification dependency but not failures", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  for (const [job, dependency] of [
+    ["manifests", "roles"],
+    ["factory", "manifests"],
+    ["distribution", "factory"],
+    ["chart", "distribution"],
+  ] as const) {
+    expect(workflow.jobs[job].needs).toEqual(["release", dependency]);
+    expect(workflow.jobs[job].if).toBe(
+      `\${{ !cancelled() && needs.release.result == 'success' && needs.${dependency}.result == 'success' }}`,
+    );
+  }
+});
+
+test("an overwrite reuses only signed runtime images from the exact release commit", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  ).run as string;
+  const start = command.indexOf("reuse=false");
+  const end = command.indexOf('if [[ "$reuse" == true ]]', start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const block = command.slice(start, end);
+  for (const [found, signed, overwrite, expectedCode, expectedReuse] of [
+    ["release-commit", "true", "true", 0, "true"],
+    ["release-commit", "false", "true", 0, "false"],
+    ["other-commit", "true", "true", 0, "false"],
+    ["release-commit", "false", "false", 0, "true"],
+    ["other-commit", "true", "false", 1, ""],
+  ] as const) {
+    const child = Bun.spawn(
+      [
+        "bash",
+        "-c",
+        `
+      set -euo pipefail
+      release_exists() { return 0; }
+      release_overwrite() { test "$OVERWRITE" = true; }
+      release_revision() { printf '%s' "$FOUND"; }
+      release_require_revision() { test "$FOUND" = "$REVISION"; }
+      release_digest() { printf 'sha256:%064d' 0; }
+      cosign() { test "$SIGNED" = true; }
+      ${block}
+      printf '%s' "$reuse"
+    `,
+      ],
+      {
+        env: {
+          ...process.env,
+          FOUND: found,
+          SIGNED: signed,
+          OVERWRITE: overwrite,
+          REVISION: "release-commit",
+          GITHUB_REPOSITORY: "maxcodefaster/open-software-factory",
+          IMAGE_ROOT: "ghcr.io/maxcodefaster/open-software-factory",
+          role: "runtime-host",
+          image: "fixture:release",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    expect(await child.exited).toBe(expectedCode);
+    expect(await new Response(child.stdout).text()).toBe(expectedReuse);
   }
 });
 

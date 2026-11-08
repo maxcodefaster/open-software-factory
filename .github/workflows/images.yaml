@@ -150,7 +150,19 @@ jobs:
           docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
-            if release_exists "$image" && ! release_overwrite; then
+            reuse=false
+            if release_exists "$image"; then
+              if ! release_overwrite; then
+                release_require_revision "$image" "$REVISION"
+                reuse=true
+              elif [[ "$(release_revision "$image")" == "$REVISION" ]] &&
+                cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+                  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                  "$IMAGE_ROOT/$role@$(release_digest "$image")" > /dev/null 2>&1; then
+                reuse=true
+              fi
+            fi
+            if [[ "$reuse" == true ]]; then
               release_require_revision "$image" "$REVISION"
               echo "Reusing the architecture image from an earlier attempt: $image"
             else
@@ -200,6 +212,7 @@ jobs:
           done
   manifests:
     needs: [release, roles]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.roles.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -235,6 +248,7 @@ jobs:
           printf 'artifacts=%s\n' "$artifacts" >> "$GITHUB_OUTPUT"
   factory:
     needs: [release, manifests]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.manifests.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -348,6 +362,7 @@ jobs:
             --predicate "$RUNNER_TEMP/framework-security.vex.json" "$IMAGE_REF"
   distribution:
     needs: [release, factory]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.factory.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -388,6 +403,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
   chart:
     needs: [release, distribution]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.distribution.result == 'success' }}
     permissions:
       contents: write
       packages: write
