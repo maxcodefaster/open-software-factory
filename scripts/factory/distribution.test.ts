@@ -450,12 +450,50 @@ test("only explicit owner-authorized beta.1 correction can overwrite published t
     expect(command).toContain(
       'release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite',
     );
-    if (job === "factory")
-      expect(command).toContain('release_exists "$image" && ! release_overwrite');
-    else {
-      expect(command).toContain('if [[ "$reuse" == true ]]');
-      expect(command).toContain("cosign verify --certificate-identity-regexp");
+    expect(command).toContain('if [[ "$reuse" == true ]]');
+    expect(command).toContain("cosign verify --certificate-identity-regexp");
+  }
+});
+
+test("chart signing authenticates Cosign as well as Helm", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command = workflow.jobs.chart.steps.at(-1).run as string;
+  expect(command).toContain(
+    'helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin',
+  );
+  expect(command).toContain('docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin');
+  expect(command.indexOf("docker login")).toBeLessThan(command.indexOf("cosign sign"));
+});
+
+test("cached Factory images must carry the exact released runtime references", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command = workflow.jobs.factory.steps.find((step: { id?: string }) => step.id === "build")
+    .run as string;
+  const script = /'(const ordered=.*?)'; then/.exec(command)?.[1];
+  expect(script).toBeDefined();
+  const directory = await mkdtemp(join(tmpdir(), "factory-runtime-references-"));
+  const artifacts = { "runtime-host": "host-image", "developer-ide": "ide-image" };
+  try {
+    await writeFile(join(directory, "runtime-artifacts.json"), JSON.stringify(artifacts));
+    for (const [expected, exitCode] of [
+      [{ "developer-ide": "ide-image", "runtime-host": "host-image" }, 0],
+      [{ ...artifacts, "runtime-host": "changed-image" }, 1],
+      [{ "runtime-host": "host-image" }, 1],
+    ] as const) {
+      const child = Bun.spawn([process.execPath, "--no-env-file", "-e", script ?? ""], {
+        cwd: directory,
+        env: { ...process.env, EXPECTED_RUNTIME_ARTIFACTS: JSON.stringify(expected) },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await child.exited).toBe(exitCode);
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

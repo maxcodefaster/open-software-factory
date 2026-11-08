@@ -288,7 +288,24 @@ jobs:
             echo 'This distribution version is already published. Choose a new release version.'
             exit 1
           fi
-          if release_exists "$image" && ! release_overwrite; then
+          reuse=false
+          if release_exists "$image"; then
+            if ! release_overwrite; then
+              release_require_revision "$image" "$REVISION"
+              reuse=true
+            elif [[ "$(release_revision "$image")" == "$REVISION" ]] &&
+              cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                "$IMAGE_ROOT/factory@$(release_digest "$image")" > /dev/null 2>&1; then
+              if docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
+                --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
+                --env "EXPECTED_RUNTIME_ARTIFACTS=$FACTORY_RUNTIME_ARTIFACTS" "$image" -e \
+                'const ordered=(v)=>JSON.stringify(Object.entries(v).sort(([a],[b])=>a.localeCompare(b)));if(ordered(await Bun.file("runtime-artifacts.json").json())!==ordered(JSON.parse(process.env.EXPECTED_RUNTIME_ARTIFACTS)))throw new Error("Runtime references changed");'; then
+                reuse=true
+              fi
+            fi
+          fi
+          if [[ "$reuse" == true ]]; then
             release_require_revision "$image" "$REVISION"
             echo "Reusing the Factory architecture image from an earlier attempt: $image"
           else
@@ -444,6 +461,7 @@ jobs:
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           printf '%s' "$GHCR_TOKEN" | mise exec -- helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           pushed="$(mise exec -- helm push "dist/factory-$RELEASE.tgz" "oci://ghcr.io/$owner/charts" 2>&1)"
           echo "$pushed"
           digest="$(sed -n 's/^Digest: //p' <<< "$pushed" | head -n1)"
