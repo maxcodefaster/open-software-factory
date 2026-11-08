@@ -1696,6 +1696,32 @@ export function createRuntimeController(
               existing.childTokenHash,
             );
           }
+          if (
+            current?.state === "starting" &&
+            current.kubernetesNamespace &&
+            current.kubernetesPodName &&
+            !startupObservations.has(existing.id)
+          ) {
+            // A worker can become Ready after the initial observation window.
+            // Renew only an intent that never reached native preparation/dispatch.
+            const [unprepared] = await lock`SELECT id FROM factory.runtime_attempt attempt
+              WHERE attempt.id=${existing.id} AND attempt.state='starting'
+                AND attempt.stop_intended_at IS NULL AND attempt.kubernetes_uid IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id)
+                AND NOT EXISTS(SELECT 1 FROM factory.factorybox_runtime WHERE runtime_attempt_id=attempt.id)
+                AND NOT EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=attempt.id)`;
+            if (unprepared) {
+              const resources = await factorybox.startupResources(existing.id);
+              if (resources)
+                void observeStartup(
+                  existing.id,
+                  workspace.id,
+                  current.kubernetesNamespace,
+                  current.kubernetesPodName,
+                  resources,
+                ).catch(reportFailure("Retained personal startup observation failed"));
+            }
+          }
           return current;
         }
         const generations = await lock<Array<{ generation: string }>>`
