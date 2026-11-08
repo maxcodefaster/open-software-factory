@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parse } from "yaml";
 import upstream from "../../upstream.json";
 
@@ -36,12 +38,19 @@ test("only published releases build and publish arm64 and amd64 natively", async
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
-  expect(workflow.on).toEqual({ release: { types: ["published"] } });
+  expect(Object.keys(workflow.on).sort()).toEqual(["release", "workflow_dispatch"]);
+  expect(workflow.on.release).toEqual({ types: ["published"] });
+  expect(workflow.on.workflow_dispatch.inputs.release_tag.required).toBe(true);
   expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
   const validate = workflow.jobs.release.steps.find(
     (step: { id?: string }) => step.id === "version",
   );
-  expect(validate.env.RELEASE_TAG).toBe(`\${{ github.event.release.tag_name }}`);
+  expect(validate.env.RELEASE_TAG).toBe(
+    "${{ github.event.release.tag_name || inputs.release_tag }}",
+  );
+  expect(workflow.jobs.verify.with.source_ref).toBe(validate.env.RELEASE_TAG);
+  for (const job of ["release", "roles", "manifests", "factory", "distribution", "chart"])
+    expect(workflow.jobs[job].steps[0].with.ref).toBe(validate.env.RELEASE_TAG);
   expect(validate.run).toContain(`version="\${RELEASE_TAG#v}"`);
   expect(validate.run).toContain("git merge-base --is-ancestor HEAD origin/main");
   expect(workflow.jobs.roles.needs).toEqual(["release", "verify"]);
@@ -104,6 +113,7 @@ test("release images wait for the same non-live checks on native arm64", async (
   });
   expect(steps.find((step) => step.uses?.startsWith("actions/checkout@"))?.with).toEqual({
     "persist-credentials": false,
+    ref: "${{ inputs.source_ref || github.ref }}",
   });
   const commands = steps.flatMap((step) => (step.run ? [step.run] : []));
   expect(commands).toContain("mise exec -- bun install --frozen-lockfile");
@@ -122,6 +132,49 @@ test("release images wait for the same non-live checks on native arm64", async (
     "cache-dependency-path": "services/runtime-connector/go.sum",
   });
   expect(JSON.stringify(checks)).not.toMatch(/secrets\.|test:(?:live|native|browser:paid)/);
+});
+
+test("runtime publication compares config digests, not Docker's manifest ID", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command: string = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  ).run;
+  expect(command).toContain('--metadata-file "$RUNNER_TEMP/runtime-host-proven.json"');
+  expect(command).toContain('proven_config="$(jq -er');
+  expect(command).toContain(
+    'test "$(docker image inspect --format \'{{.Id}}\' "$image")" = "$image_id"',
+  );
+  const comparison = command.split("\n").find((line) => line.includes('test "$(jq -r'));
+  if (!comparison) throw new Error("Missing published config comparison");
+  const directory = await mkdtemp(join(tmpdir(), "factory-release-identity-"));
+  try {
+    const configDigest = `sha256:${"a".repeat(64)}`;
+    const manifestDigest = `sha256:${"b".repeat(64)}`;
+    for (const [pushed, expected] of [
+      [configDigest, 0],
+      [manifestDigest, 1],
+    ] as const) {
+      await writeFile(
+        join(directory, "runtime-host.json"),
+        JSON.stringify({ "containerimage.config.digest": pushed }),
+      );
+      const child = Bun.spawn(["bash", "-c", comparison], {
+        env: {
+          ...process.env,
+          RUNNER_TEMP: directory,
+          proven_config: configDigest,
+          image_id: manifestDigest,
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await child.exited).toBe(expected);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("release publication is attested, signed and scoped to the jobs that need credentials", async () => {

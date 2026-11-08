@@ -2,10 +2,16 @@ name: Publish distribution images
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to publish or resume
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: distribution-${{ github.event.release.tag_name }}
+  group: distribution-${{ github.event.release.tag_name || inputs.release_tag }}
   cancel-in-progress: false
 env:
   BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
@@ -19,11 +25,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - name: Validate release tag and consolidated source
         id: version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
@@ -36,6 +43,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/checks.yaml
+    with:
+      source_ref: ${{ github.event.release.tag_name || inputs.release_tag }}
   roles:
     needs: [release, verify]
     permissions:
@@ -58,6 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Read native proof tool pins
@@ -103,8 +113,11 @@ jobs:
                 --file "$dockerfile" "${target[@]}" --tag "$image")
               attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")
               if [[ "$role" == runtime-host ]]; then
-                "${build[@]}" --provenance=false --sbom=false --load .
+                "${build[@]}" --provenance=false --sbom=false --load \
+                  --metadata-file "$RUNNER_TEMP/runtime-host-proven.json" .
                 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+                proven_config="$(jq -er '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host-proven.json")"
+                [[ "$proven_config" =~ ^sha256:[a-f0-9]{64}$ ]]
                 bash scripts/runtime/compose-inputs-proof.sh "$image_id"
                 registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
                 bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
@@ -112,7 +125,7 @@ jobs:
                 # The proven layers come from the build cache. Publish them with attestations
                 # and refuse any result whose image configuration is not the proven one.
                 "${build[@]}" "${attest[@]}" --push --metadata-file "$RUNNER_TEMP/runtime-host.json" .
-                test "$(jq -r '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host.json")" = "$image_id"
+                test "$(jq -r '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host.json")" = "$proven_config"
               else
                 "${build[@]}" "${attest[@]}" --push .
               fi
@@ -135,6 +148,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Publish multi-architecture role manifests
@@ -176,6 +190,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Build native Factory with exact runtime references
@@ -251,6 +266,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Publish the Factory manifest
@@ -288,6 +304,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
         with:
@@ -311,7 +328,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"

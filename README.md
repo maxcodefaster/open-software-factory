@@ -1,163 +1,72 @@
-<div align="center">
-
-<img alt="Your cloud. Your workflow. Your software factory. The Factory board shows work from idea to review." src="assets/story/hero.png" width="100%">
-
 # Open Software Factory
 
-**Your cloud. Your workflow. Your software factory.**
+Self-hosted software development with coding agents. Import your repository and Dev Container,
+write requirements, and let an agent implement them. Tests and an independent review check the exact
+commit before you approve delivery.
 
-A self-hosted software factory for enterprise teams. Turn business intent into verified software:
-business teams, developers and coding agents in one delivery workflow, on Kubernetes you control.
+Runs on Kubernetes. Linux arm64 and amd64. Apache-2.0. No telemetry.
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-2c5a7a)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.1.0--beta.1-2c5a7a)](https://github.com/maxcodefaster/open-software-factory/releases)
-[![Platforms](https://img.shields.io/badge/platforms-Linux%20arm64%20%7C%20amd64-2c5a7a)](#where-it-runs)
-[![Telemetry](https://img.shields.io/badge/telemetry-none-2c5a7a)](SECURITY.md)
+[Install](#install) · [Factorybox](#isolation) · [Develop](#developing)
 
-[Why](#why-factory) · [The cycle](#the-cycle) · [Features](#features) · [Performance](#performance-with-context) · [Factory Box](#factory-box) · [Where it runs](#where-it-runs) · [Install](#install) · [Develop](#developing)
-
-</div>
-
----
-
-## Why Factory
-
-Your team already has a product, a repository and a way to decide what changes. Factory connects
-those decisions to agent execution: business teams define the outcome, developers work with real
-source and tools, and people approve the verified commit before delivery.
-
-Bring your existing Git history and Dev Container, rather than rewriting your application for an
-agent platform. Project requirements, environment settings, model choices and approved instructions
-make the workflow fit the work. An AI Interview is optional; writing requirements needs no model.
-
-- **Fits your workflow.** From a business request to testable requirements, implementation,
-  independent review and a deliberate delivery decision. The source, approvals and history stay connected.
-- **Runs real projects.** Agents use your project's Dev Container, private Docker daemon and running
-  services. People can open the IDE and Preview, inspect the work or continue it themselves.
-- **Keeps you in control.** Task-scoped execution, scoped secrets, checks on the exact commit and
-  recorded human approval. Idle development Sandboxes pause with their memory; progress is retained,
-  not rebuilt from scratch on every visit.
-
-Factory is open source, self-hosted and sends no telemetry. Git is held in your Forgejo, secrets in
-your OpenBao, and you choose the model connections. Model calls send their authorized context to
-the provider you select. Self-hosting is not a claim that inference stays on your node.
-
-## The cycle
+## The workflow
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/lifecycle-dark.svg">
-  <img alt="Idea, Interview, Requirements, Design, Build, Review, Deliver and Learn form a loop. People approve requirements and delivery." src="assets/lifecycle-light.svg" width="100%">
+  <img alt="Idea, Interview, Requirements, Design, Build, Review, Deliver and Learn. People approve requirements and delivery." src="assets/lifecycle-light.svg" width="100%">
 </picture>
 
-## Features
+### Write requirements
 
-### Business intent. One shared delivery workflow.
+Tickets hold the request, acceptance criteria and discussion. Write them yourself or ask the AI
+Interview to read the repository and clarify missing decisions. Approve the product spec before
+technical planning and implementation.
 
-<img alt="A product specification with acceptance criteria in Factory. Business intent becomes reviewable requirements." src="assets/story/intent.png" width="100%">
+<img alt="Product specification and acceptance criteria awaiting approval" src="assets/screens/spec.jpg" width="100%">
 
-Tickets move from Ideas through Requirements and Implementation to Review. Every Project has its own
-board, History and Trash. Share a Ticket with the people who define the outcome and the people who
-build it. Write requirements directly, with a summary and independently testable acceptance criteria.
+### Work with the agent
 
-Ask AI to clarify when you want an Interview: it reads the repository first and asks what the source
-cannot settle. A technical design can follow from the real code. Reading and saving do not start
-inference. Implement approves the exact saved requirements and commissions Coding.
+Each Sandbox has your Dev Container, a private Docker daemon and running services. Open the IDE
+to inspect or edit the source. Open the Preview to use the App. Idle development Sandboxes pause
+with their memory and resume the same processes.
 
-### Real code. Real tools. Isolated execution.
+<img alt="Project source and running application in the Factory IDE" src="assets/screens/ide.jpg" width="100%">
 
-<img alt="The Factory IDE with a real project, installed dependencies and running services." src="assets/story/build.png" width="100%">
+### Review and deliver
 
-Implementation runs in a Sandbox with your Project's Dev Container. Keep your package manager,
-build commands, databases and service stack. Open the IDE while an agent works and follow its edits;
-open the Preview to see the running App, not a description of it. The editor is an independent service,
-so source access does not require keeping execution compute awake.
+Verification and independent review use the same commit. Review includes a recording of the App.
+Your approval promotes the change to Staging. Production deployment remains your responsibility.
 
-### A verified change. A deliberate decision.
+<img alt="Passed checks and an App QA recording before delivery" src="assets/screens/review.jpg" width="100%">
 
-<img alt="Factory shows successful checks and independent review alongside a recorded App QA session." src="assets/story/deliver.png" width="100%">
+Project Wikis keep revisions and human edits. Roles separate product work, development and
+administration. OpenBao encrypts secrets. Backups include Git, database, objects and secrets.
+Learning proposals need approval before adoption.
 
-Verification runs on the exact commit. An independent reviewer reads that same commit and records a
-QA session of the running App. Factory retains the checks, review and decision that authorized the
-change. Delivery promotes the approved change to the project's Staging Preview; operating a production
-application is a separate deployment responsibility.
+## Pause and resume
 
-### Knowledge, access and continuity
+<img alt="Median pause 4.07 seconds, median resume to a healthy App 2.99 seconds, ten of ten state checks passed" src="assets/story/lifecycle.svg" width="100%">
 
-- **Knowledge that follows the source.** Generate Wiki guides with a configured model. Pages keep
-  revisions and human edits. Repeated corrections can become proposed instructions; people decide
-  what is adopted.
-- **Roles and scoped secrets.** Separate product work, development and administration. Environment
-  values are scoped, encrypted in OpenBao and hidden in the interface.
-- **Backups and recovery.** Back up database, Git, objects and secrets together. Restore rehearsals
-  check recovery rather than assuming a successful backup is enough.
-- **Pause compute, not progress.** Idle development Sandboxes release their anonymous RAM and resume
-  the same processes. Retained snapshots and disk still occupy storage, and Staging stays running
-  for reviewers. Pausing a Sandbox does not automatically stop or reduce the bill for a cloud node.
+Ten warm cycles on one Ryzen 7 4800U node with k3s, a 3-CPU / 3-GiB worker, two Node containers
+and 256 MiB of random App memory. Times include Kubernetes transport. All ten restores preserved
+the process, memory and counters. These are warm restore times, not cold starts.
+[Samples](assets/story/lifecycle.json) · [Measurement command](scripts/runtime/README.md).
 
-The illustrations above frame the repository's existing public demo screenshots. They are not new
-live recordings, and the same images remain available in [assets/screens](assets/screens).
+## Isolation
 
-## Performance with context
+[Factorybox](https://github.com/maxcodefaster/factorybox) runs user-namespaced system containers
+with Sysbox and checkpoints their RAM and filesystem with CRIU. It supports private Docker
+without KVM or a custom kernel.
 
-<img alt="Measured warm restores: 4.07-second median pause, 2.99-second median resume to a healthy App, ten of ten state checks passed" src="assets/story/lifecycle.svg" width="100%">
-
-Two running Node containers, a persistent volume and 256 MiB of random application memory. Across
-ten warm restores, the process ID, memory hash, request counter and container identities survived.
-The Sandbox's anonymous RAM dropped to zero after every pause.
-
-| Operation | Median | p95 |
-| --- | ---: | ---: |
-| Pause until capture is confirmed | 4.07 s | 5.78 s |
-| Resume until the App answers its state probe | 2.99 s | 3.65 s |
-
-Measured on 7 November 2026, on a Ryzen 7 4800U Linux node with k3s, a 3-CPU / 3-GiB worker limit
-and ten cycles on one warm environment. Times include Kubernetes transport. These are lifecycle
-measurements, not cold-start times or a provider speed ranking.
-[Samples and hardware](assets/story/lifecycle.json) · [Reproduce the measurement](scripts/runtime/README.md).
-
-For provider pricing and workload comparisons, see [Battleships](https://battleships.dev/).
-
-## Factory Box
-
-Every Sandbox runs in **Factory Box**, a separate runtime that Factory uses as its execution layer
-([maxcodefaster/factorybox](https://github.com/maxcodefaster/factorybox)). It runs each Sandbox as a
-Linux system container on [Sysbox](https://github.com/nestybox/sysbox), so the Sandbox can run its own
-Docker daemon without a privileged container. It uses [CRIU](https://criu.org) to checkpoint a running
-Sandbox, RAM included, and restore it later.
-
-The philosophy is practical. A microVM supplies a separate guest kernel but needs hardware
-virtualization, which is not available on every managed node type. Factory Box instead uses Linux
-system containers: a full development environment with private Docker, without KVM or a special
-kernel build. That is a different trust boundary, not a claim of VM-equivalent security.
-
-| | Plain container | gVisor | MicroVM (Firecracker, Kata) | **Factory Box** |
+| | Containers | gVisor | MicroVMs | Factorybox |
 | --- | --- | --- | --- | --- |
-| Kernel | Shared with the node | Userspace kernel | Own guest kernel | Shared with the node |
-| Docker daemon inside | Requires suitable privileges or a rootless setup | Depends on runtime support | Yes, with suitable guest privileges | Yes, private per Sandbox |
-| Pause with memory | Requires checkpoint tooling | Checkpoint support | Snapshot support depends on runtime | Yes, in seconds |
-| Needs hardware virtualization | No | No | Yes | No |
-| Node requirement | Container runtime | Configured sandbox runtime | Hardware virtualization and runtime | Admitted Linux capabilities and privileged worker Pod |
-| Trust boundary | Shared host kernel | Userspace kernel intercepts system calls | Separate guest kernel | User-namespaced system containers; shared host kernel |
+| Kernel | Shared | Userspace kernel | Separate guest kernel | Shared, user namespaces |
+| Hardware virtualization | No | No | Required | No |
+| Memory checkpoint | Additional tooling | Supported | Runtime-dependent | Built in |
+| Node setup | Container runtime | Sandbox runtime | VMM and virtualization | Privileged worker Pod |
 
-The outer worker is privileged and shares the node kernel; its project
-containers do not receive the node Docker socket or Kubernetes ServiceAccount. User namespaces and
-scoped capabilities are not an independent guest kernel. Keep each worker in one trust domain and
-give mutually untrusted tenants their own installations and nodes. The capability check admits
-compatible nodes. Keep node kernels patched and isolate worker network access as described in the chart README.
-
-## Where it runs
-
-Factory is deployed through one Helm chart, with no cloud-specific resources or custom operator.
-Choose Kubernetes infrastructure, storage, DNS and model connections you control. Laptop clusters,
-on-premises servers and managed clusters use the same deployment contract.
-
-The worker needs an admitted Linux node and permission for a privileged worker Pod. It checks kernel
-capabilities before admitting a Sandbox. The current control plane is a single-instance deployment;
-adding nodes alone does not provide high availability or automatic execution scale-out. Read the
-[chart README](deploy/helm/factory/README.md) for its precise storage and trust requirements.
-
-Factory and its runtime images are published for Linux arm64 and amd64. Workers are pinned separately
-for each architecture because their executable hashes differ.
+The outer worker is privileged and shares the node kernel. Use separate installations and nodes
+for mutually untrusted tenants. The [chart guide](deploy/helm/factory/README.md) covers node,
+storage and network requirements. For provider pricing comparisons, see [Battleships](https://battleships.dev/).
 
 ## Install
 
@@ -167,17 +76,14 @@ helm install factory oci://ghcr.io/maxcodefaster/charts/factory --version 0.1.0-
   --wait=legacy --timeout 20m
 ```
 
-`private-values.yaml` names your node and your public addresses. The chart pins the released Factory
-image and the signed worker, and generates every credential. The
-[chart README](deploy/helm/factory/README.md) covers prerequisites, storage, backups, node hardening,
-managed clusters and recovery. On an amd64 node, also pass the released
-[amd64 worker values](https://github.com/maxcodefaster/open-software-factory/releases/download/v0.1.0-beta.1/factory-amd64-0.1.0-beta.1.yaml).
-From v0.1.0 on, chart upgrades are tested with retained data.
+Set the node, public addresses and Ingress in `private-values.yaml`. The chart supplies the services
+and credentials and pins signed images. On amd64, also pass the released
+[worker values](https://github.com/maxcodefaster/open-software-factory/releases/download/v0.1.0-beta.1/factory-amd64-0.1.0-beta.1.yaml).
+[Installation, backups and recovery](deploy/helm/factory/README.md).
 
 ## Developing
 
-Source development needs macOS with OrbStack (Linux Docker daemon, Kubernetes context `orbstack`)
-and [mise](https://mise.jdx.dev).
+On macOS with OrbStack and [mise](https://mise.jdx.dev):
 
 ```sh
 mise install
@@ -185,42 +91,14 @@ mise exec -- bun install --frozen-lockfile
 mise exec -- bun run factory:up
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The launcher generates the administrator password
-for `admin@factory.local`, writes it to `.factory/` and prints the path. Provider connections are
-configured in Settings, and [.env.example](.env.example) lists optional bootstrap values.
+Open http://127.0.0.1:3000. The launcher prints the generated administrator-password file.
+Configure model connections in Settings. Calls send context to the model provider you select.
 
-| Command | Purpose |
-| --- | --- |
-| `bun run check` | Docs, format, lint, types, unit tests and Connector checks |
-| `bun run check:integration` | Adds PostgreSQL invariants and the owned controller lane |
-| `bun run test:browser` | UI journeys against an owned Factory |
-| `bun run test:native` | Real OpenCode, source, Forgejo and OpenBao adapters |
-| `bun run runtime:conformance` | Factory Box, Kubernetes, Dev Containers and Connector together |
-| `bun run beta:gate` | Every lane plus secret and forbidden-term scans, with a receipt for the exact commit |
-| `bun run release:clean-room` | Install a chart on a fresh Namespace, prove it works, remove it |
-| `bun run release:upgrade-test` | Upgrade a previous build on a fresh Namespace and prove no data is lost |
-| `bun run release:soak` | Long run with Preview, pause, resume, Wiki and backup cycles |
+`bun run check` checks source and the Connector. `bun run check:integration` adds database and
+controller tests. `bun run test:browser` runs UI journeys. `bun run beta:gate` writes a release
+receipt. Native runtime and clean-install commands are in [scripts/runtime](scripts/runtime/README.md)
+and the [chart guide](deploy/helm/factory/README.md). GitHub checks run only for releases or by request.
 
-GitHub runs the checks only for release tags and by hand. [AGENTS.md](AGENTS.md) holds the rules for
-coding agents in this repository.
-
-```text
-apps/factory/               Web interface, HTTP server and Factory controllers
-packages/                   Domain rules and concrete integration adapters
-services/runtime-connector/ Go connector inside the approved runtime
-deploy/                     Helm chart, upstream compositions and runtime images
-scripts/                    Local operation, integration, release and runtime tools
-templates/starter-app/      Maintained application scaffold for new Projects
-test/                       Browser, integration and live proofs with owned fixtures
-```
-
-## Built on
-
-TanStack Start with Solid 2, Bun and PostgreSQL. Zero syncs the interface. Mastra runs research and
-interviews. OpenCode implements approved Changes. Forgejo owns Git and Verification. Sysbox and CRIU run
-the Sandboxes inside Factory Box. OpenBao holds the secrets.
-
-## Contributing and security
-
-Report bugs as GitHub issues. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
-Factory is licensed under [Apache-2.0](LICENSE). Bundled third-party assets keep their own notices.
+Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode and Forgejo.
+[AGENTS.md](AGENTS.md) holds contributor rules. Report bugs in GitHub Issues and vulnerabilities
+through [SECURITY.md](SECURITY.md). [Apache-2.0](LICENSE); bundled assets keep their own notices.
