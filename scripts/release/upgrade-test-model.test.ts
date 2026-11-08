@@ -420,6 +420,12 @@ test("seed SQL escapes text and refuses malformed identities", () => {
   const sql = seedSQL(input);
   expect(sql).toStartWith("BEGIN;");
   expect(sql).toEndWith("COMMIT;");
+  expect(sql).toContain("INSERT INTO factory.execution_policy");
+  expect(sql).toContain(`'{"sandboxes":0}'::jsonb`);
+  expect(sql.indexOf("INSERT INTO factory.execution_policy")).toBeLessThan(
+    sql.indexOf("INSERT INTO factory.project("),
+  );
+  expect(sql).toContain("policy=factory.execution_policy.policy ||");
   expect(sql).toContain("'It''s a project'");
   expect(sql).toContain("'Backlog ''; DROP TABLE x; --'");
   expect(sql.match(/INSERT INTO factory\.knowledge_revision/g)).toHaveLength(2);
