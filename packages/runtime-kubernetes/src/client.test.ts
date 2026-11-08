@@ -261,6 +261,82 @@ const privateAssignment = {
   stringData: { "assignment.json": "owned" },
 };
 
+test.each(["matching", "foreign-owner", "changed-spec", "replaced-namespace"] as const)(
+  "a shared claim created between observation and create is validated: %s",
+  async (scenario) => {
+    let claimReads = 0;
+    let namespaceReads = 0;
+    const writes: string[][] = [];
+    const client = createKubernetesClient(async (args) => {
+      if (args[0] !== "get") writes.push(args);
+      if (args[0] === "get" && args[1] === "namespace") {
+        namespaceReads++;
+        return {
+          stdout: JSON.stringify({
+            metadata: {
+              uid:
+                scenario === "replaced-namespace" && namespaceReads > 1
+                  ? "replacement"
+                  : "namespace-uid",
+              labels: namespace.metadata.labels,
+            },
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      if (args[0] === "get") {
+        claimReads++;
+        if (claimReads === 1)
+          return { stdout: "", stderr: "Error from server (NotFound): claim missing", exitCode: 1 };
+        return {
+          stdout: JSON.stringify({
+            ...common,
+            metadata: {
+              ...common.metadata,
+              uid: "concurrently-created",
+              labels: {
+                ...common.metadata.labels,
+                ...(scenario === "foreign-owner" ? { "factory.dev/runtime-owner": "foreign" } : {}),
+              },
+            },
+            spec:
+              scenario === "changed-spec"
+                ? { ...common.spec, accessModes: ["ReadWriteMany"] }
+                : common.spec,
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      if (args[0] === "create")
+        return {
+          stdout: "",
+          stderr: "Error from server (AlreadyExists): claim already exists",
+          exitCode: 1,
+        };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const applied = client.apply([namespace, common, privateAssignment], {
+      ownerID: "workspace",
+      uid: "namespace-uid",
+      createShared: true,
+    });
+    if (scenario === "matching") {
+      expect(await applied).toEqual({
+        namespaceUID: "namespace-uid",
+        sharedUIDs: { "PersistentVolumeClaim/runtime-data": "concurrently-created" },
+      });
+      expect(writes.map((args) => args[0])).toEqual(["create", "apply"]);
+    } else {
+      await expect(applied).rejects.toThrow(
+        scenario === "replaced-namespace" ? "Namespace" : "immutable owner",
+      );
+      expect(writes.map((args) => args[0])).toEqual(["create"]);
+    }
+  },
+);
+
 test("existing shared storage is observed and UID-checked, never reapplied with a Sandbox", async () => {
   const calls: Array<{ args: string[]; input?: string }> = [];
   const client = createKubernetesClient(async (args, input) => {

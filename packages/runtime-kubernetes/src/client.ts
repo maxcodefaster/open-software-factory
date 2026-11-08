@@ -175,6 +175,45 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
       const privateItems: unknown[] = [];
       const missing: Array<z.infer<typeof sharedResource>> = [];
       const sharedUIDs: Record<string, string> = {};
+      const recordShared = (resource: z.infer<typeof sharedResource>, observed: unknown) => {
+        const key = `${resource.kind}/${resource.metadata.name}`;
+        const actual = sharedResource.parse(observed);
+        const containers = actual.spec?.["containers"];
+        const ephemeral = actual.spec?.["ephemeralContainers"];
+        const changedData =
+          resource.stringData &&
+          Object.entries(resource.stringData).some(
+            ([name, data]) => Buffer.from(actual.data?.[name] ?? "", "base64").toString() !== data,
+          );
+        if (
+          !actual.metadata.uid ||
+          actual.kind !== resource.kind ||
+          actual.metadata.name !== resource.metadata.name ||
+          actual.metadata.namespace !== namespaceName ||
+          !declaredFields(actual.metadata.labels, resource.metadata.labels) ||
+          (resource.spec && !declaredFields(actual.spec, resource.spec)) ||
+          (expectedNamespace?.sharedUIDs?.[key] &&
+            actual.metadata.uid !== expectedNamespace.sharedUIDs[key]) ||
+          changedData ||
+          (resource.kind === "Pod" &&
+            ((Array.isArray(ephemeral) && ephemeral.length > 0) ||
+              (Array.isArray(containers) &&
+                containers.some(
+                  (container) =>
+                    typeof container === "object" &&
+                    container !== null &&
+                    Reflect.get(container, "envFrom") !== undefined,
+                ))))
+        )
+          throw new Error(
+            `Shared Factory resource ${key} differs from its immutable owner or declaration.${
+              resource.kind === "Secret" && resource.metadata.name === "registry-ca" && changedData
+                ? " Registry CA configuration must match the existing worker. Node image-pull trust is configured separately; the worker and its retained source were not changed."
+                : ""
+            }`,
+          );
+        sharedUIDs[key] = actual.metadata.uid;
+      };
       for (const value of items) {
         const metadata =
           typeof value === "object" && value !== null ? Reflect.get(value, "metadata") : undefined;
@@ -211,45 +250,40 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
           missing.push(resource);
           continue;
         }
-        const actual = sharedResource.parse(JSON.parse(current.stdout));
-        const containers = actual.spec?.["containers"];
-        const ephemeral = actual.spec?.["ephemeralContainers"];
-        const changedData =
-          resource.stringData &&
-          Object.entries(resource.stringData).some(
-            ([name, data]) => Buffer.from(actual.data?.[name] ?? "", "base64").toString() !== data,
-          );
-        if (
-          !actual.metadata.uid ||
-          actual.kind !== resource.kind ||
-          actual.metadata.name !== resource.metadata.name ||
-          actual.metadata.namespace !== namespaceName ||
-          !declaredFields(actual.metadata.labels, resource.metadata.labels) ||
-          (resource.spec && !declaredFields(actual.spec, resource.spec)) ||
-          (expectedNamespace?.sharedUIDs?.[key] &&
-            actual.metadata.uid !== expectedNamespace.sharedUIDs[key]) ||
-          changedData ||
-          (resource.kind === "Pod" &&
-            ((Array.isArray(ephemeral) && ephemeral.length > 0) ||
-              (Array.isArray(containers) &&
-                containers.some(
-                  (container) =>
-                    typeof container === "object" &&
-                    container !== null &&
-                    Reflect.get(container, "envFrom") !== undefined,
-                ))))
-        )
-          throw new Error(
-            `Shared Factory resource ${key} differs from its immutable owner or declaration.${
-              resource.kind === "Secret" && resource.metadata.name === "registry-ca" && changedData
-                ? " Registry CA configuration must match the existing worker. Node image-pull trust is configured separately; the worker and its retained source were not changed."
-                : ""
-            }`,
-          );
-        sharedUIDs[key] = actual.metadata.uid;
+        recordShared(resource, JSON.parse(current.stdout));
       }
       for (const resource of missing) {
         const created = await run(["create", "-f", "-", "-o", "json"], JSON.stringify(resource));
+        if (created.exitCode !== 0 && created.stderr.includes("(AlreadyExists)")) {
+          // A concurrent Source create can win after the missing-object observation.
+          // This definite rejection permits a read, never a replacement or another create.
+          const currentNamespace = await run(["get", "namespace", namespaceName, "-o", "json"]);
+          if (currentNamespace.exitCode !== 0)
+            throw new Error("Factory Namespace observation failed after shared create conflict");
+          const identity = JSON.parse(currentNamespace.stdout) as {
+            metadata?: { uid?: string; labels?: Record<string, string> };
+          };
+          if (
+            identity.metadata?.uid !== namespaceUID ||
+            !declaredFields(identity.metadata.labels, namespace.metadata?.labels ?? {})
+          )
+            throw new Error("Factory Namespace identity changed after shared create conflict");
+          const concurrent = await run([
+            "get",
+            resource.kind,
+            resource.metadata.name,
+            "-n",
+            namespaceName,
+            "-o",
+            "json",
+          ]);
+          if (concurrent.exitCode !== 0)
+            throw new Error(
+              `Observe shared Factory resource after create conflict: ${concurrent.stderr}`,
+            );
+          recordShared(resource, JSON.parse(concurrent.stdout));
+          continue;
+        }
         if (created.exitCode !== 0)
           throw new Error(`Create shared Factory resource: ${created.stderr}`);
         const actual = JSON.parse(created.stdout) as { metadata?: { uid?: string } };
