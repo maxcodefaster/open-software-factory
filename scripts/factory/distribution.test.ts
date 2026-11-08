@@ -253,6 +253,82 @@ test("every publication job installs the same digest-pinned Cosign binary", asyn
   expect(await syntax.exited).toBe(0);
 });
 
+test("security exceptions follow exact-image backport proof and precede signing", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const steps = workflow.jobs.factory.steps;
+  const proof = steps.findIndex((step: { run?: string }) =>
+    step.run?.includes("/proof/framework-image-proof.ts"),
+  );
+  const scan = steps.findIndex((step: { uses?: string }) =>
+    step.uses?.startsWith("aquasecurity/trivy-action@"),
+  );
+  const sign = steps.findIndex((step: { run?: string }) =>
+    step.run?.includes('release_sign "$IMAGE_REF"'),
+  );
+  expect(proof).toBeGreaterThan(0);
+  expect(scan).toBeGreaterThan(proof);
+  expect(sign).toBeGreaterThan(scan);
+  expect(steps[proof].env.IMAGE_REF).toBe(`\${{ steps.build.outputs.ref }}`);
+  expect(steps[proof].run).toContain("--network=none --read-only --cap-drop=ALL --user 1000:1000");
+  expect(steps[proof].run).toContain('> "$RUNNER_TEMP/framework-security-proof.json"');
+  expect(steps[scan].env.TRIVY_VEX).toBe(`\${{ runner.temp }}/framework-security.vex.json`);
+  expect(steps[scan].env.TRIVY_PLATFORM).toBe(`linux/\${{ matrix.arch }}`);
+  expect(steps[scan].with["exit-code"]).toBe(1);
+  expect(steps[scan]["continue-on-error"]).not.toBe(true);
+  expect(steps[sign].run).toContain("cosign attest --yes --type https://openvex.dev/ns/v0.2.0");
+  const dockerfile = await readFile(
+    new URL("../../deploy/factory/Dockerfile", import.meta.url),
+    "utf8",
+  );
+  for (const stage of ["build", "dependencies"]) {
+    const commands = dockerfile.split(`FROM tools AS ${stage}\n`)[1]?.split("\nFROM ")[0];
+    expect(commands).toBeDefined();
+    expect(commands?.indexOf("COPY patches ./patches")).toBeLessThan(
+      commands?.indexOf("RUN bun install") ?? -1,
+    );
+  }
+});
+
+test("only explicit owner-authorized beta.1 correction can overwrite published tags", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  expect(workflow.on.workflow_dispatch.inputs.overwrite_existing).toMatchObject({
+    type: "boolean",
+    default: false,
+  });
+  expect(workflow.env.RELEASE_OVERWRITE).toBe(`\${{ inputs.overwrite_existing || 'false' }}`);
+  expect(
+    workflow.jobs.release.steps.find((step: { id?: string }) => step.id === "version").run,
+  ).toContain('test "$RELEASE_TAG" = v0.1.0-beta.1');
+  const library = new URL("./release-lib.sh", import.meta.url).pathname;
+  for (const [version, flag, expected] of [
+    ["0.1.0-beta.1", "false", 1],
+    ["0.1.0-beta.1", "true", 0],
+    ["0.1.0-beta.2", "true", 1],
+    ["0.1.0", "true", 1],
+    ["0.1.0-beta.1", "1", 1],
+  ] as const) {
+    const child = Bun.spawn(["bash", "-c", 'source "$1"; release_overwrite', "proof", library], {
+      env: { ...process.env, RELEASE: version, RELEASE_OVERWRITE: flag },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(expected);
+  }
+  for (const job of ["roles", "factory"]) {
+    const command = workflow.jobs[job].steps.find((step: { run?: string }) =>
+      step.run?.includes("docker buildx build"),
+    ).run;
+    expect(command).toContain(
+      'release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite',
+    );
+    expect(command).toContain('release_exists "$image" && ! release_overwrite');
+  }
+});
+
 test("the native lane is a separate manual workflow that never runs for pull requests", async () => {
   const native = parse(
     await readFile(new URL("../../.github/workflows/native.yaml", import.meta.url), "utf8"),

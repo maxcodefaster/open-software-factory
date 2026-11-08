@@ -1,6 +1,10 @@
 # Shared by .github/workflows/images.yaml. Source it; it defines functions only.
-# A published combined version tag is never overwritten. A per-architecture tag left by an
-# earlier attempt is reused only when it was built from this exact commit.
+# Tags are immutable by default. The owner-authorized beta.1 correction can
+# replace tags through explicit manual dispatch; earlier digest references remain intact.
+
+release_overwrite() {
+  [[ "${RELEASE_OVERWRITE:-false}" == true && "${RELEASE:-}" == 0.1.0-beta.1 ]]
+}
 
 release_exists() {
   docker buildx imagetools inspect "$1" > /dev/null 2>&1
@@ -44,7 +48,7 @@ release_sign() {
 release_combine() {
   local combined="$1" missing
   shift
-  if release_exists "$combined"; then
+  if release_exists "$combined" && ! release_overwrite; then
     missing="$(comm -23 \
       <(for source in "$@"; do release_children "$source"; done | sort -u) \
       <(release_children "$combined" | sort -u))"

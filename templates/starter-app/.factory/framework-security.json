@@ -1,0 +1,230 @@
+{
+  "version": "1.169.26",
+  "advisory": "GHSA-qx66-fv34-fjm8",
+  "cve": "CVE-2026-102989",
+  "upstreamFixVersion": "1.169.39",
+  "upstreamAdvisory": "https://github.com/advisories/GHSA-qx66-fv34-fjm8",
+  "patchSHA256": "be3b4af1c0cfb8742ab99cd5d9b042ddfb7bd0b06ba8c312c131b37a062a1684",
+  "files": [
+    {
+      "path": "dist/esm/server-functions-handler.js",
+      "beforeSHA256": "f0f0746e7e36601d69e4c9f79fbadd31db88b9756ff8fc053a1cca283c05a108",
+      "afterSHA256": "21b3b0741dd6efe4b59c6acc88e15e140d79eef74cc564486b1017e0c6dc15da",
+      "edits": [
+        {
+          "start": 52,
+          "end": 55,
+          "lines": [
+            "\t\t\t\t\treturn await action({ data: payload?.data, context: safeObjectMerge(payload?.context, context), method: methodUpper });"
+          ]
+        },
+        {
+          "start": 59,
+          "end": 62,
+          "lines": [
+            "\t\t\t\treturn await action({ data: payload?.data, context: safeObjectMerge(payload?.context, context), method: methodUpper });"
+          ]
+        },
+        {
+          "start": 63,
+          "end": 64,
+          "lines": [
+            "\t\t\tconst unwrapped = res.error !== void 0 ? res.error : res.result;"
+          ]
+        },
+        {
+          "start": 65,
+          "end": 66,
+          "lines": [
+            "\t\t\tif (!isServerFn && (unwrapped instanceof Response || unwrapped === null || typeof unwrapped !== \"object\")) return unwrapped;"
+          ]
+        },
+        {
+          "start": 216,
+          "end": 216,
+          "lines": [
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "path": "dist/esm/request-response.js",
+      "beforeSHA256": "f4cf5ab3b1f5a857661beb9afe4311b61fe557c540aa0f00ca6c32adaab6f14f",
+      "afterSHA256": "1f01f16d81b56b54d712cf4c287be3a2158309c253331c7e26de22611b6c8698",
+      "edits": [
+        {
+          "start": 8,
+          "end": 9,
+          "lines": [
+            "\treturn (typeof value === \"object\" || typeof value === \"function\") && value !== null && typeof value.then === \"function\";"
+          ]
+        },
+        {
+          "start": 26,
+          "end": 32,
+          "lines": [
+            "\tif (isPromiseLike(value)) return Promise.resolve(value).then((resolved) => {",
+            "\t\tconst response = ensureResponse(resolved);",
+            "\t\tmergeEventResponseHeaders(response, event);",
+            "\t\treturn response;",
+            "\t}, (error) => attachResponseHeaders(handleResponseError(error), event));",
+            "\tconst response = ensureResponse(value);",
+            "\tmergeEventResponseHeaders(response, event);",
+            "\treturn response;",
+            "}",
+            "function ensureResponse(value) {",
+            "\tif (value instanceof Response) return value;",
+            "\treturn new Response(\"Internal Server Error\", { status: 500 });",
+            "}",
+            "function handleResponseError(error) {",
+            "\tif (error instanceof Response) return error;",
+            "\tif (error instanceof Error) throw error;",
+            "\treturn new Response(\"Internal Server Error\", { status: 500 });"
+          ]
+        },
+        {
+          "start": 45,
+          "end": 46,
+          "lines": [
+            "\t\tlet response;",
+            "\t\ttry {",
+            "\t\t\tresponse = eventStorage.run({ h3Event }, () => handler(request, requestOpts));",
+            "\t\t} catch (error) {",
+            "\t\t\tresponse = handleResponseError(error);",
+            "\t\t}",
+            "\t\treturn toResponse(attachResponseHeaders(response, h3Event), h3Event);"
+          ]
+        },
+        {
+          "start": 230,
+          "end": 230,
+          "lines": [
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/server-functions-handler.ts",
+      "beforeSHA256": "2111de3a56ac57483f1979c3e70026b020e2fa84329e99d3eba3e2afa4ac3b60",
+      "afterSHA256": "1340cc3e0b4c9dc1cca56a280127e0b2509c12e2e488cd04aaee0832694ecbf5",
+      "edits": [
+        {
+          "start": 144,
+          "end": 148,
+          "lines": [
+            "          return await action({",
+            "            data: payload?.data,",
+            "            context: safeObjectMerge(payload?.context, context),",
+            "            method: methodUpper,",
+            "          })"
+          ]
+        },
+        {
+          "start": 156,
+          "end": 159,
+          "lines": [
+            "        return await action({",
+            "          data: payload?.data,",
+            "          context: safeObjectMerge(payload?.context, context),",
+            "          method: methodUpper,",
+            "        })"
+          ]
+        },
+        {
+          "start": 161,
+          "end": 162,
+          "lines": [
+            "      const unwrapped = res.error !== undefined ? res.error : res.result"
+          ]
+        },
+        {
+          "start": 167,
+          "end": 168,
+          "lines": [
+            "      if (!isServerFn && (unwrapped instanceof Response || unwrapped === null || typeof unwrapped !== 'object')) {"
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/request-response.ts",
+      "beforeSHA256": "574f231bf01714715d5fc81130dd2e9542292ff7f510005effe521704345284d",
+      "afterSHA256": "bcf2acdbb526635c1be4454b3927ff1f02c24534c2c2a25af33dd824f91f5fa0",
+      "edits": [
+        {
+          "start": 67,
+          "end": 69,
+          "lines": [
+            "function isPromiseLike(value: unknown): value is PromiseLike<unknown> {",
+            "  return (typeof value === 'object' || typeof value === 'function') && value !== null && typeof (value as PromiseLike<unknown>).then === 'function'"
+          ]
+        },
+        {
+          "start": 100,
+          "end": 102,
+          "lines": [
+            "function attachResponseHeaders(",
+            "  value: unknown,"
+          ]
+        },
+        {
+          "start": 103,
+          "end": 104,
+          "lines": [
+            "): MaybePromise<Response> {"
+          ]
+        },
+        {
+          "start": 105,
+          "end": 111,
+          "lines": [
+            "    return Promise.resolve(value).then((resolved) => {",
+            "      const response = ensureResponse(resolved)",
+            "      mergeEventResponseHeaders(response, event)",
+            "      return response",
+            "    }, (error) => attachResponseHeaders(handleResponseError(error), event))"
+          ]
+        },
+        {
+          "start": 113,
+          "end": 116,
+          "lines": [
+            "  const response = ensureResponse(value)",
+            "  mergeEventResponseHeaders(response, event)",
+            "  return response",
+            "}"
+          ]
+        },
+        {
+          "start": 117,
+          "end": 118,
+          "lines": [
+            "function ensureResponse(value: unknown): Response {",
+            "  if (value instanceof Response) return value",
+            "  return new Response('Internal Server Error', { status: 500 })",
+            "}",
+            "",
+            "function handleResponseError(error: unknown): Response {",
+            "  if (error instanceof Response) return error",
+            "  if (error instanceof Error) throw error",
+            "  return new Response('Internal Server Error', { status: 500 })"
+          ]
+        },
+        {
+          "start": 137,
+          "end": 140,
+          "lines": [
+            "    let response: unknown",
+            "    try {",
+            "      response = eventStorage.run({ h3Event }, () => handler(request, requestOpts))",
+            "    } catch (error) {",
+            "      response = handleResponseError(error)",
+            "    }"
+          ]
+        }
+      ]
+    }
+  ]
+}

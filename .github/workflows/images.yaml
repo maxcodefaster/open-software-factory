@@ -8,12 +8,18 @@ on:
         description: Existing release tag to publish or resume
         required: true
         type: string
+      overwrite_existing:
+        description: Replace existing beta.1 image tags after the owner approves the correction
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
   group: distribution-${{ github.event.release.tag_name || inputs.release_tag }}
   cancel-in-progress: false
 env:
+  RELEASE_OVERWRITE: ${{ inputs.overwrite_existing || 'false' }}
   BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
   SBOM_GENERATOR: docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
   COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v2.5.3@sha256:f1946d0f30fc8e3777b02f2201e02efdba9fe38f4918162f937052fac98e083f
@@ -36,6 +42,9 @@ jobs:
           set -euo pipefail
           version="${RELEASE_TAG#v}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          if [[ "$RELEASE_OVERWRITE" == true ]]; then
+            test "$RELEASE_TAG" = v0.1.0-beta.1
+          fi
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           git merge-base --is-ancestor HEAD origin/main
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
@@ -103,14 +112,14 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           REVISION="$(git rev-parse HEAD)"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if release_exists "$IMAGE_ROOT/factory:$RELEASE"; then
+          if release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite; then
             echo 'This distribution version is already published. Choose a new version.'
             exit 1
           fi
           docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
-            if release_exists "$image"; then
+            if release_exists "$image" && ! release_overwrite; then
               release_require_revision "$image" "$REVISION"
               echo "Reusing the architecture image from an earlier attempt: $image"
             else
@@ -219,11 +228,11 @@ jobs:
           REVISION="$(git rev-parse HEAD)"
           image="$IMAGE_ROOT/factory:$RELEASE-$ARCH"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if release_exists "$IMAGE_ROOT/factory:$RELEASE"; then
+          if release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite; then
             echo 'This distribution version is already published. Choose a new release version.'
             exit 1
           fi
-          if release_exists "$image"; then
+          if release_exists "$image" && ! release_overwrite; then
             release_require_revision "$image" "$REVISION"
             echo "Reusing the Factory architecture image from an earlier attempt: $image"
           else
@@ -247,17 +256,45 @@ jobs:
             --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
             --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \
             "$IMAGE_REF" /smoke/image-smoke.ts
+      - name: Verify the image security backport before generating its scoped VEX
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
+            --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
+            --volume "$PWD/scripts/factory/framework-image-proof.ts:/proof/framework-image-proof.ts:ro" \
+            --volume "$PWD/test/fixtures/framework-transport-security.ts:/proof/framework-transport-security.ts:ro" \
+            --volume "$PWD/templates/starter-app/.factory/framework-security.json:/proof/framework-security.json:ro" \
+            "$IMAGE_REF" /proof/framework-image-proof.ts "$IMAGE_REF" \
+            /proof/framework-security.json /proof/framework-transport-security.ts \
+            > "$RUNNER_TEMP/framework-security-proof.json"
+          jq -e '.vex' "$RUNNER_TEMP/framework-security-proof.json" > "$RUNNER_TEMP/framework-security.vex.json"
       - name: Scan the Factory image for fixable critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TRIVY_VEX: ${{ runner.temp }}/framework-security.vex.json
+          TRIVY_PLATFORM: linux/${{ matrix.arch }}
+          TRIVY_SHOW_SUPPRESSED: "true"
         with:
           image-ref: ${{ steps.build.outputs.ref }}
           scanners: vuln
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: 1
+          format: json
+          output: ${{ runner.temp }}/factory-security-scan.json
+      - name: Retain image security proof and scan evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: factory-security-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/framework-security-proof.json
+            ${{ runner.temp }}/framework-security.vex.json
+            ${{ runner.temp }}/factory-security-scan.json
+          if-no-files-found: error
       - name: Sign the Factory architecture image
         env:
           IMAGE_REF: ${{ steps.build.outputs.ref }}
@@ -265,6 +302,8 @@ jobs:
           set -euo pipefail
           source scripts/factory/release-lib.sh
           release_sign "$IMAGE_REF"
+          cosign attest --yes --type https://openvex.dev/ns/v0.2.0 \
+            --predicate "$RUNNER_TEMP/framework-security.vex.json" "$IMAGE_REF"
   distribution:
     needs: [release, factory]
     permissions:

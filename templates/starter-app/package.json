@@ -6,6 +6,7 @@
     "node": "24.21.0"
   },
   "scripts": {
+    "postinstall": "node .factory/apply-framework-security.mjs",
     "dev": "node --watch src/dev.ts",
     "build": "vite build",
     "start": "node .output/server/index.mjs",
