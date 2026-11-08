@@ -1010,6 +1010,56 @@ describe("Runtime Connector recovery", () => {
     hub.message(child, JSON.stringify({ type: "operation-response", operationId: "operation-1" }));
     await expect(operation).resolves.toBeUndefined();
   });
+
+  test("a failed child send settles its owned operation before revocation", async () => {
+    for (const failure of ["throw", "refuse"] as const) {
+      const child = {
+        data: { kind: "connector", role: "child", attemptID: "attempt", generation: 1 },
+        close() {},
+        send() {
+          if (failure === "throw") throw new Error("socket closed during send");
+          return 0;
+        },
+      } as unknown as ServerWebSocket<RuntimeSocketData>;
+      const hub = new RuntimeHub(async () => {});
+      hub.open(child);
+      await expect(
+        hub.childOperation("attempt", { operationId: failure, action: "process-start" }),
+      ).rejects.toThrow(
+        failure === "throw"
+          ? "socket closed during send"
+          : "Runtime child operation could not be sent",
+      );
+      // Revocation must not reject a forgotten promise left behind by send.
+      hub.revoke("attempt");
+      await Promise.resolve();
+    }
+  });
+
+  test("a pending child operation cannot be replaced by the same identity", async () => {
+    let sends = 0;
+    const child = {
+      data: { kind: "connector", role: "child", attemptID: "attempt", generation: 1 },
+      close() {},
+      send() {
+        sends++;
+        return 1;
+      },
+    } as unknown as ServerWebSocket<RuntimeSocketData>;
+    const hub = new RuntimeHub(async () => {});
+    hub.open(child);
+    const input = { operationId: "owned-operation", action: "process-start" };
+    const first = hub.childOperation("attempt", input);
+    await expect(hub.childOperation("attempt", input)).rejects.toThrow(
+      "Runtime child operation is already pending",
+    );
+    expect(sends).toBe(1);
+    hub.message(
+      child,
+      JSON.stringify({ type: "operation-response", operationId: input.operationId }),
+    );
+    await expect(first).resolves.toBeUndefined();
+  });
 });
 
 describe("Runtime terminal attachment readiness", () => {

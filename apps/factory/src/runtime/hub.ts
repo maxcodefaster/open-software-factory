@@ -755,23 +755,26 @@ export class RuntimeHub {
     if (!child) throw new Error("Runtime child is not ready");
     const operationID = operation["operationId"];
     if (!operationID) throw new Error("Operation identity is required");
-    const promise = new Promise<void>((resolve, reject) => {
+    if (this.#pendingChildOperations.has(operationID))
+      throw new Error("Runtime child operation is already pending");
+    this.#touch(attemptID);
+    return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pendingChildOperations.delete(operationID);
         reject(new Error("Runtime child operation timed out"));
       }, 20_000);
-      this.#pendingChildOperations.set(operationID, { attemptID, resolve, reject, timer });
-    });
-    this.#touch(attemptID);
-    if (child.send(JSON.stringify({ type: "operation-request", ...operation })) <= 0) {
-      const pending = this.#pendingChildOperations.get(operationID);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.#pendingChildOperations.delete(operationID);
+      const pending = { attemptID, resolve, reject, timer };
+      this.#pendingChildOperations.set(operationID, pending);
+      try {
+        if (child.send(JSON.stringify({ type: "operation-request", ...operation })) <= 0)
+          throw new Error("Runtime child operation could not be sent");
+      } catch (cause) {
+        clearTimeout(timer);
+        if (this.#pendingChildOperations.get(operationID) === pending)
+          this.#pendingChildOperations.delete(operationID);
+        reject(cause);
       }
-      throw new Error("Runtime child operation could not be sent");
-    }
-    return promise;
+    });
   }
 
   stop(attemptID: string) {

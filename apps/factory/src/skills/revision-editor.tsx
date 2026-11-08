@@ -8,6 +8,7 @@ import {
   type SkillContent,
   skillContentInput,
 } from "../../../../packages/conversation-domain/src/skills";
+import { APIRequestError } from "../api-client";
 import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { saveSkill } from "../server-functions/skills";
@@ -29,10 +30,21 @@ export function SkillRevisionEditor(props: {
     content: structuredClone(props.content),
     scope: props.entry?.scope ?? props.scope,
     reviewed: !props.warnings?.length,
+    libraryId: props.entry?.id ?? crypto.randomUUID(),
+    expectedRevision: props.entry?.revisions[0]?.revision ?? 0,
   }));
   const [draft, setDraft] = createSignal(initial.content);
+  let currentDraft = initial.content;
+  let draftVersion = 0;
+  let expectedRevision = initial.expectedRevision;
   const [scope, setScope] = createSignal<SkillScope>(initial.scope);
-  const [busy, setBusy] = createSignal(false);
+  let currentScope = initial.scope;
+  const [saveState, setSaveState] = createSignal<"idle" | "saving" | "saved" | "failed">("idle");
+  const busy = () => saveState() === "saving";
+  let saving = false;
+  let attachmentReads = 0;
+  const [attaching, setAttaching] = createSignal(false);
+  const [saveNotice, setSaveNotice] = createSignal("");
   const [error, setError] = createSignal("");
   const [reviewed, setReviewed] = createSignal(initial.reviewed);
   let pending:
@@ -43,16 +55,26 @@ export function SkillRevisionEditor(props: {
         scope: SkillScope;
         projectId?: string;
         content: SkillContent;
+        draftVersion: number;
       }
     | undefined;
   const update = (patch: Partial<SkillContent>) => {
-    setDraft((previous) => ({ ...previous, ...patch }));
-    pending = undefined;
+    currentDraft = { ...currentDraft, ...patch };
+    draftVersion += 1;
+    setDraft(currentDraft);
+  };
+  const changeScope = (value: SkillScope) => {
+    if (pending || expectedRevision > 0 || props.entry) return;
+    currentScope = value;
+    setScope(value);
+    draftVersion += 1;
   };
   async function attach(list: FileList | null) {
     if (!list?.length) return;
+    attachmentReads += 1;
+    setAttaching(true);
     try {
-      const files = [...(draft().files ?? [])];
+      const files: NonNullable<SkillContent["files"]> = [];
       for (const file of list) {
         if (file.size > 700000) throw new Error("Each attachment must be smaller than 700 KB");
         const bytes = new Uint8Array(await file.arrayBuffer());
@@ -71,49 +93,77 @@ export function SkillRevisionEditor(props: {
           throw new Error(`An attachment named ${file.name} already exists`);
         files.push({ path, body, encoding });
       }
-      update({ files });
+      // Commit the batch against the latest owned draft, not the pre-read file list.
+      const existing = currentDraft.files ?? [];
+      for (const file of files) {
+        if (existing.some((value) => value.path === file.path))
+          throw new Error(`An attachment named ${file.path.slice(7)} already exists`);
+      }
+      update({ files: [...existing, ...files] });
       setError("");
     } catch (cause) {
       setError(
         cause instanceof Error ? plainErrorMessage(cause.message) : "Could not attach files",
       );
+    } finally {
+      attachmentReads -= 1;
+      setAttaching(attachmentReads > 0);
     }
   }
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (busy() || !reviewed()) return;
-    const latest = props.entry?.revisions[0];
-    const content = skillContentInput.safeParse({
-      ...draft(),
-      key: props.entry
-        ? draft().key
-        : draft()
-            .name.toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-|-$/g, "")
-            .slice(0, 64) || "custom-skill",
-    });
-    if (!content.success) {
-      setError(content.error.issues[0]?.message ?? "Check the skill");
-      return;
+    if (saving || !reviewed()) return;
+    if (!pending) {
+      const content = skillContentInput.safeParse({
+        ...currentDraft,
+        key: props.entry
+          ? currentDraft.key
+          : currentDraft.name
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-|-$/g, "")
+              .slice(0, 64) || "custom-skill",
+      });
+      if (!content.success) {
+        setError(content.error.issues[0]?.message ?? "Check the skill");
+        return;
+      }
+      pending = {
+        libraryId: initial.libraryId,
+        revisionId: crypto.randomUUID(),
+        expectedRevision,
+        scope: currentScope,
+        ...(props.projectId ? { projectId: props.projectId } : {}),
+        content: content.data,
+        draftVersion,
+      };
     }
-    pending ??= {
-      libraryId: props.entry?.id ?? crypto.randomUUID(),
-      revisionId: crypto.randomUUID(),
-      expectedRevision: latest?.revision ?? 0,
-      scope: scope(),
-      ...(props.projectId ? { projectId: props.projectId } : {}),
-      content: content.data,
-    };
-    setBusy(true);
+    const submission = pending;
+    const { draftVersion: submittedVersion, ...input } = submission;
+    saving = true;
+    setSaveState("saving");
     setError("");
+    setSaveNotice("");
     try {
-      const saved = await serverCall(saveSkill({ data: [pending] }));
-      props.onSaved({ ...saved, scope: scope() });
+      const saved = await serverCall(saveSkill({ data: [input] }));
+      expectedRevision = submission.expectedRevision + 1;
+      pending = undefined;
+      setSaveState("saved");
+      if (draftVersion === submittedVersion && attachmentReads === 0)
+        props.onSaved({ ...saved, scope: submission.scope });
+      else
+        setSaveNotice(
+          "Submitted version saved. Save again to include your later changes and attachments.",
+        );
     } catch (cause) {
+      // Confirmed validation/access denials did not write. Let the person correct
+      // them; transport failures and unknown outcomes retain the exact request.
+      if (cause instanceof APIRequestError && [400, 401, 403, 404, 422].includes(cause.status))
+        pending = undefined;
+      setSaveState("failed");
       setError(cause instanceof Error ? plainErrorMessage(cause.message) : "Could not save skill");
     } finally {
-      setBusy(false);
+      saving = false;
     }
   }
   return (
@@ -165,11 +215,8 @@ export function SkillRevisionEditor(props: {
         <select
           aria-label="Available to"
           value={scope()}
-          disabled={busy() || Boolean(props.entry)}
-          onChange={(event) => {
-            setScope(event.currentTarget.value as SkillScope);
-            pending = undefined;
-          }}
+          disabled={busy() || Boolean(props.entry) || Boolean(pending) || expectedRevision > 0}
+          onChange={(event) => changeScope(event.currentTarget.value as SkillScope)}
         >
           <option value="personal">Only me</option>
           <Show when={props.canManageProject && props.projectId}>
@@ -341,6 +388,12 @@ export function SkillRevisionEditor(props: {
         </div>
       </Show>
       <p role="alert">{error()}</p>
+      <Show when={attaching()}>
+        <p role="status">Reading attachments…</p>
+      </Show>
+      <Show when={saveNotice()}>
+        <p role="status">{saveNotice()}</p>
+      </Show>
       <footer class="model-settings-actions">
         <button type="button" class="quiet-button" disabled={busy()} onClick={props.onCancel}>
           Back to library

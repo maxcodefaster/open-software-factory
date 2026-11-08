@@ -168,12 +168,30 @@ func (manager *processManager) action(name string, action string) error {
 	}
 }
 
+type processStartKind uint8
+
+const (
+	explicitProcessStart processStartKind = iota
+	scheduledProcessRestart
+)
+
 func (manager *processManager) start(name string) error {
+	return manager.startProcess(name, explicitProcessStart, 0)
+}
+
+func (manager *processManager) startProcess(name string, kind processStartKind, failedGeneration uint64) error {
 	manager.mutex.Lock()
 	process := manager.processes[name]
 	if process == nil {
 		manager.mutex.Unlock()
 		return errors.New("declared process does not exist")
+	}
+	// A scheduled restart owns only the failed generation that requested it. Check
+	// and claim that generation together, so Stop cannot be overtaken by a timer.
+	if kind == scheduledProcessRestart && (manager.ctx.Err() != nil ||
+		process.generation != failedGeneration || process.state != "failed") {
+		manager.mutex.Unlock()
+		return nil
 	}
 	if process.command != nil || process.state == "starting" || process.state == "running" {
 		manager.mutex.Unlock()
@@ -312,12 +330,7 @@ func (manager *processManager) restartAfterFailure(name string, generation uint6
 		return
 	case <-time.After(delay):
 	}
-	manager.mutex.Lock()
-	stale := process.generation != generation || process.state != "failed"
-	manager.mutex.Unlock()
-	if !stale {
-		_ = manager.start(name)
-	}
+	_ = manager.startProcess(name, scheduledProcessRestart, generation)
 }
 
 func (manager *processManager) stop(name string) error {
@@ -327,17 +340,22 @@ func (manager *processManager) stop(name string) error {
 		manager.mutex.Unlock()
 		return errors.New("declared process does not exist")
 	}
-	if process.command == nil {
+	command, done := process.command, process.done
+	state, generation := process.state, process.generation
+	if command == nil {
+		// No waiter owns a failed generation now. Retire only its pending restart,
+		// without erasing the crash or invalidating an active or starting waiter.
+		if state == "failed" && manager.supervising && isAppProcess(name) {
+			process.generation = generation + 1
+		}
 		manager.mutex.Unlock()
-		if process.state == "stopped" || process.state == "failed" {
+		if state == "stopped" || state == "failed" {
 			return nil
 		}
 		return errors.New("process is not running")
 	}
 	process.intentionalStop = true
 	process.state = "stopping"
-	command := process.command
-	done := process.done
 	manager.mutex.Unlock()
 	manager.emitState(name)
 	TerminateAssignedProcess(command)
