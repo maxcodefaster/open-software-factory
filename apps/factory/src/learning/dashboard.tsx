@@ -469,7 +469,10 @@ export function LearningDashboard(props: {
   return (
     <section class="learning-dashboard" aria-label="Factory monitoring" ref={dashboard}>
       <Show when={props.view.projectId}>
-        <LearningFlow view={props.view} onInspect={inspectRecord} />
+        <details class="work-history">
+          <summary>Learning history</summary>
+          <LearningFlow view={props.view} onInspect={inspectRecord} />
+        </details>
       </Show>
       <div class="work-overview-heading">
         <div>
@@ -477,7 +480,7 @@ export function LearningDashboard(props: {
           <p>
             {props.view.scope === "personal"
               ? "Private learning from your work. Nothing is promoted to the Project without your decision."
-              : "See where work settles, where evidence is missing, and what is worth improving."}
+              : "Last 28 days of settled work and retained review evidence."}
           </p>
         </div>
       </div>
@@ -533,16 +536,14 @@ export function LearningDashboard(props: {
           work.
         </p>
       </Show>
-      <WorkChart days={props.view.days} />
+      <Show when={total("operations") || total("observed") || total("reviewed")}>
+        <WorkChart days={props.view.days} />
+      </Show>
       <Show when={props.view.projectId}>
         <section class="work-learning" aria-labelledby="work-learning-title">
           <div class="work-section-heading">
             <div>
               <h3 id="work-learning-title">Learning from work</h3>
-              <p>
-                One batched review after six selected cases or 24 hours. Failed work with retained
-                evidence and a stable one-in-five sample of completed work.
-              </p>
             </div>
             <Show when={props.view.canManage}>
               <button
@@ -584,10 +585,26 @@ export function LearningDashboard(props: {
               A review of this work is running.
             </p>
           </Show>
-          <p class="work-note" data-calibration={props.view.calibration.state}>
-            {calibrationNote(props.view.calibration)} Analysis grants no write authority. Existing
-            approvals and Verification stay in force.
-          </p>
+          <details class="work-method">
+            <summary>Review workflow & calibration</summary>
+            <p class="work-note">
+              One batched review after six selected cases or 24 hours. Failed work with retained
+              evidence and a stable one-in-five sample of completed work.
+            </p>
+            <Show when={["passed", "none"].includes(props.view.calibration.state)}>
+              <p class="work-note" data-calibration={props.view.calibration.state}>
+                {calibrationNote(props.view.calibration)}
+              </p>
+            </Show>
+            <p class="work-note">
+              Analysis grants no write authority. Existing approvals and Verification stay in force.
+            </p>
+          </details>
+          <Show when={!["passed", "none"].includes(props.view.calibration.state)}>
+            <p class="work-note" data-calibration={props.view.calibration.state}>
+              {calibrationNote(props.view.calibration)}
+            </p>
+          </Show>
           <details class="work-automatic">
             <summary>
               Automatic Skill updates · {props.view.automaticSkills ? "Allowed" : "Off"}

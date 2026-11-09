@@ -166,7 +166,6 @@ function Editor() {
       }}
       onAssignEpic={noAction}
       onInterview={noAction}
-      onWriteRequirements={noAction}
       onSaveDocument={async () => undefined}
       onConfirmRequirements={async () => undefined}
       clarificationAction={{ label: "Ask AI to clarify", status: false }}

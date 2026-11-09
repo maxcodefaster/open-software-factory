@@ -430,51 +430,13 @@ form:has(.attachment-insert-drop),
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.attachment-help {
-  flex: none;
-}
-.attachment-help > summary {
-  list-style: none;
-  color: var(--color-ink-muted);
-}
-.attachment-help > summary::-webkit-details-marker {
-  display: none;
-}
-.attachment-help > summary:hover,
-.attachment-help[open] > summary {
-  color: var(--color-ink);
-  background: var(--material-accent);
-}
-.attachment-help-content {
-  position: absolute;
-  z-index: 2;
-  inset-block-end: calc(100% + var(--space-2));
-  inset-inline-start: 0;
-  width: min(22rem, 100%);
-  padding: var(--space-4);
-  border-radius: var(--radius-control);
-  background: var(--material-popover);
-  box-shadow: var(--shadow-float);
-  color: var(--color-ink);
-}
-.attachment-help-content p {
-  margin-block: var(--space-2) 0;
-  color: var(--color-ink-muted);
-  font-size: var(--text-sm);
-  line-height: var(--leading-body);
-}
-.attachment-strip .attachment-pending-list:focus-visible,
-.attachment-help > summary:focus-visible {
+.attachment-strip .attachment-pending-list:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: var(--space-0-5);
 }
 @media (max-width: 480px) {
   .attachment-insert.attachment-insert-strip .attachment-scroll {
     display: none;
-  }
-  .attachment-help > summary {
-    width: 44px;
-    height: 44px;
   }
   .attachment-insert-strip .attachment-add {
     min-width: 44px;

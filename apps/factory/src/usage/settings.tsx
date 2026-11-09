@@ -11,7 +11,6 @@ import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { getCurrentCompute, getUsage, saveUsage } from "../server-functions/usage";
 import "./settings.css";
-import { LearningSettings } from "../learning/settings";
 import { ContractPrices } from "./contract-prices";
 
 const fields = [
@@ -28,10 +27,7 @@ const usd = (nano: string) =>
   }).format(Number(nano) / 1_000_000_000);
 const tokens = (count: string) => new Intl.NumberFormat("en-US").format(Number(count));
 
-export function UsageSettings(props: {
-  projectID?: string | undefined;
-  onOpenTicket?: ((id: string, projectId: string) => void) | undefined;
-}) {
+export function UsageSettings(props: { projectID?: string | undefined }) {
   const [view, setView] = createSignal<UsageSettingsView>();
   const [compute, setCompute] = createSignal<ReturnType<typeof currentComputeView.parse>>();
   const [policy, setPolicy] = createSignal<ExecutionPolicy>(executionPolicy.parse({}));
@@ -138,8 +134,6 @@ export function UsageSettings(props: {
   const coding = () => view()?.scopes.find((scope) => scope.scope === (props.projectID ?? null));
   return (
     <section class="usage-settings" aria-label="Usage & limits">
-      <LearningSettings projectID={props.projectID} onOpenTicket={props.onOpenTicket} />
-      <h3 class="usage-section-title">Usage & limits</h3>
       <Show when={error() && !view()}>
         <div class="usage-load-error">
           <p role="alert">{error()}</p>

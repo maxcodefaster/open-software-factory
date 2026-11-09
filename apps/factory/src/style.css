@@ -1278,6 +1278,10 @@ dt {
   overflow-wrap: anywhere;
 }
 
+.ticket-card-body:hover:not(:disabled) {
+  background: transparent;
+}
+
 .ticket-card-blockers {
   display: grid;
   gap: var(--space-1);
@@ -3592,14 +3596,6 @@ dt {
   overflow-wrap: anywhere;
 }
 
-.ticket-request-details > summary {
-  width: fit-content;
-  padding-block: var(--space-2);
-  color: var(--color-ink-muted);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
 .tiptap table {
   border-collapse: collapse;
   width: 100%;
@@ -4691,8 +4687,8 @@ dt {
 }
 
 .inline-editor-surface:focus {
-  background: var(--material-card);
-  box-shadow: var(--shadow-inset-line);
+  background: transparent;
+  box-shadow: none;
 }
 .epic-proposal-workspace > .ticket-document {
   display: block;
@@ -5539,7 +5535,7 @@ dt {
 }
 @media (max-width: 600px) {
   .ticket-header-actions[data-has-primary="true"][data-collapsible="true"]
-    > .ticket-header-action:not([data-primary="true"]) {
+    > .ticket-header-action:not([data-primary="true"], [data-persistent="true"]) {
     display: none;
   }
 }

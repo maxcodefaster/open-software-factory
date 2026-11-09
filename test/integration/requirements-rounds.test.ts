@@ -9,10 +9,14 @@ import { eventually, factoryProcess } from "../fixtures/factory-process";
 test("Requirements entry is planning only; explicit Interview and round advancement do not replay inference", async () => {
   const process = await factoryProcess();
   const db = process.connect();
-  const question = (prompt: string) => ({
-    type: "free-text" as const,
+  const question = (
+    prompt: string,
+    options: { id: string; label: string; description: string }[],
+  ) => ({
+    type: "single-select" as const,
     prompt,
-    placeholder: "Your answer",
+    options,
+    allowCustom: true,
   });
   let requests = 0;
   const model = Bun.serve({
@@ -24,7 +28,32 @@ test("Requirements entry is planning only; explicit Interview and round advancem
       const output = {
         kind: "round",
         message: "Two open decisions",
-        questions: [question("Who uses this?"), question("What outcome matters?")],
+        questions: [
+          question("Who uses this?", [
+            {
+              id: "contributors",
+              label: "Product contributors",
+              description: "People defining requirements.",
+            },
+            {
+              id: "developers",
+              label: "Developers",
+              description: "People implementing requirements.",
+            },
+          ]),
+          question("What outcome matters?", [
+            {
+              id: "clarity",
+              label: "Clear requirements",
+              description: "Make the intended result explicit.",
+            },
+            {
+              id: "speed",
+              label: "Faster implementation",
+              description: "Reduce time spent on the next task.",
+            },
+          ]),
+        ],
         citations: [],
       };
       const content = JSON.stringify({ output });
@@ -107,7 +136,7 @@ test("Requirements entry is planning only; explicit Interview and round advancem
     expect(first?.entries.filter((entry) => entry.kind === "question")).toHaveLength(1);
     expect(requests).toBe(1);
     const answerID = crypto.randomUUID();
-    const answer = { selectedOptionIds: [], customText: "Product contributors" };
+    const answer = { selectedOptionIds: ["contributors"], customText: "" };
     const second = await controller.answer(
       owned.projectID,
       ticketID,
@@ -161,7 +190,7 @@ test("Requirements entry is planning only; explicit Interview and round advancem
         owned.projectID,
         ticketID,
         currentQuestion.id,
-        answer,
+        { selectedOptionIds: [], customText: "Product contributors" },
         owned.userID,
         crypto.randomUUID(),
       ),

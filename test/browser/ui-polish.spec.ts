@@ -31,13 +31,35 @@ const auditViewports = [desktopViewport, { width: 390, height: 844 }];
 const settingsGroups = [
   {
     scope: "project",
-    labels: ["Models", "Environments", "Inputs", "Releases", "Monitoring", "People & access"],
+    labels: [
+      "Models",
+      "Environments",
+      "Inputs",
+      "Releases",
+      "Monitoring",
+      "Usage & limits",
+      "People & access",
+      "Skills",
+      "MCP connections",
+    ],
   },
   { scope: "libraries", labels: ["Skills", "MCP connections"] },
-  { scope: "personal", labels: ["Model overrides", "Login & security"] },
+  {
+    scope: "personal",
+    labels: ["Model overrides", "Login & security", "Skills", "MCP connections"],
+  },
   {
     scope: "system",
-    labels: ["Models", "Monitoring", "Repository mirrors", "People & access", "Company sign-in"],
+    labels: [
+      "Models",
+      "Monitoring",
+      "Usage & limits",
+      "Repository mirrors",
+      "People & access",
+      "Company sign-in",
+      "Skills",
+      "MCP connections",
+    ],
   },
 ];
 let projectID = "";
@@ -122,7 +144,7 @@ async function openSettings(page: import("@playwright/test").Page) {
   return page.getByRole("navigation", { name: "Settings navigation" });
 }
 
-test("Settings scope chooser exposes one compact group instead of every scope at once", async ({
+test("Settings scope chooser keeps one context and direct library destinations", async ({
   page,
 }) => {
   const navigation = await openSettings(page);
@@ -132,19 +154,19 @@ test("Settings scope chooser exposes one compact group instead of every scope at
     await expect(navigation.getByRole("button")).toHaveText(group.labels);
   }
   await scope.selectOption("project");
-  const hint = navigation.getByText("Skills and MCP connections are in Libraries.");
-  await expect(hint).toBeVisible();
-  await expect(scope.locator("option", { hasText: "Libraries" })).toHaveText(
-    "Libraries · Skills, MCP connections",
-  );
+  await expect(navigation.locator(".settings-scope-hint")).toHaveCount(0);
+  await expect(navigation.getByRole("button", { name: "Skills", exact: true })).toBeVisible();
+  await expect(
+    navigation.getByRole("button", { name: "MCP connections", exact: true }),
+  ).toBeVisible();
+  await expect(scope.locator("option", { hasText: "Libraries" })).toHaveText("Libraries");
   await scope.selectOption("libraries");
-  await expect(hint).toHaveCount(0);
   await scope.selectOption("project");
   await page.screenshot({ path: `${evidence}/compact-settings-1440.png` });
   await resize(page, { width: 390, height: 844 });
   await page.getByRole("button", { name: /choose settings page$/i }).click();
   await expect(scope).toBeVisible();
-  await expect(navigation.getByRole("button")).toHaveCount(6);
+  await expect(navigation.getByRole("button")).toHaveCount(9);
   await page.screenshot({ path: `${evidence}/compact-settings-390.png` });
   await scope.focus();
   await scope.selectOption("system");
@@ -278,7 +300,7 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
   expect.soft(color.actual).toBe(color.expected);
   for (const { scope, category } of [
     { scope: "project", category: "Environments" },
-    { scope: "project", category: "Monitoring" },
+    { scope: "project", category: "Usage & limits" },
     { scope: "system", category: "Company sign-in" },
   ]) {
     await resize(page, desktopViewport);
@@ -507,7 +529,7 @@ test("frost, integrated controls and action hierarchy stay coherent", async ({ p
   const order = await page.locator(".ticket-header-actions").evaluate((element) => {
     const primary = element.querySelector('[data-primary="true"]')?.getBoundingClientRect();
     const menu = element.querySelector(".ticket-secondary-actions")?.getBoundingClientRect();
-    return Boolean(primary && menu && menu.right <= primary.left);
+    return Boolean(primary && menu && primary.right <= menu.left);
   });
   expect.soft(order).toBe(true);
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();

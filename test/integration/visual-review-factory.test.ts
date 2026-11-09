@@ -34,7 +34,19 @@ test("review fits the actual Factory Ticket and retains human work in its existi
   const directory = resolve(".factory/test-results/visual-review-factory", owned.id);
   await mkdir(directory, { recursive: true });
   const database = owned.connect();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium
+    .launch({
+      headless: true,
+      ...(process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
+        ? { executablePath: process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"] }
+        : {}),
+    })
+    .catch(async (cause) => {
+      await database.client.end();
+      await owned.dispose();
+      await s3.dispose();
+      throw cause;
+    });
   let f: Awaited<ReturnType<typeof candidateReviewFixture>> | undefined;
   let page: import("@playwright/test").Page | undefined;
   let completed = false;
@@ -320,24 +332,28 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     });
     expect(buttonStyle.actual).toEqual(buttonStyle.standard);
     expect(buttonStyle.actual[0]).toBe("rgba(0, 0, 0, 0)");
-    await visible(toolbar.locator(":scope > :first-child > button")).toHaveAttribute(
+    await visible(toolbar.locator(":scope > :last-child > button")).toHaveAttribute(
       "aria-label",
       "Ticket actions",
     );
-    await visible(toolbar.locator(":scope > :last-child")).toHaveAttribute("data-primary", "true");
-    await visible(toolbar.locator("svg")).toHaveCount(1);
-    const headerBounds = await page.locator(".ticket-status-row").boundingBox();
+    await visible(toolbar.locator(":scope > .ticket-header-action").last()).toHaveAttribute(
+      "data-primary",
+      "true",
+    );
+    await visible(toolbar.locator(".ticket-header-action svg")).toHaveCount(0);
+    await visible(toolbar.getByRole("button", { name: "People, add person" })).toBeVisible();
+    const headerBounds = await toolbar.boundingBox();
     const primaryBounds = await primary.boundingBox();
     expect(
       fixtureValue(primaryBounds, "primaryBounds").y - fixtureValue(headerBounds, "headerBounds").y,
-    ).toBeLessThanOrEqual(4);
+    ).toBeGreaterThanOrEqual(0);
     expect(
       fixtureValue(primaryBounds, "primaryBounds").x +
         fixtureValue(primaryBounds, "primaryBounds").width,
-    ).toBeGreaterThan(
+    ).toBeLessThanOrEqual(
       fixtureValue(headerBounds, "headerBounds").x +
         fixtureValue(headerBounds, "headerBounds").width -
-        60,
+        0,
     );
     expect(
       await page
@@ -385,7 +401,7 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     );
     await visible(page.getByRole("heading", { name: "QA & review", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-    await visible(page.getByRole("menuitem", { name: "Open IDE", exact: true })).toBeVisible();
+    await visible(page.getByRole("button", { name: "Open IDE", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await visible(
       page

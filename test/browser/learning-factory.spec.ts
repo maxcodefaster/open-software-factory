@@ -204,11 +204,15 @@ test("real Settings show monitoring, save learning policy and isolate private ev
       .click();
     const monitor = page.getByRole("region", { name: "Factory monitoring" });
     await expect(monitor.getByRole("heading", { name: "Work, quality & cost" })).toBeVisible();
-    await expect(monitor.locator(".work-chart svg")).toHaveCSS("stroke", "none");
+    // This fixture has retained reviews but no settled operation observations.
+    // Keep its proposals visible without drawing an empty chart.
+    await expect(monitor.locator(".work-chart")).toHaveCount(0);
+    await expect(monitor.locator("[data-no-work]")).toBeVisible();
     await expect(
       monitor.locator(".work-proposal-heading").getByText(proposal.title, { exact: true }),
     ).toBeVisible();
     const stream = monitor.getByRole("region", { name: "Learning history overview" });
+    await monitor.locator(".work-history > summary").click();
     await expect(stream.locator(".learning-flow-node")).toHaveCount(2);
     await expect(stream).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await expect
@@ -310,7 +314,7 @@ test("real Settings show monitoring, save learning policy and isolate private ev
     await expect(monitor.locator("[data-review-now-confirmation]")).toContainText(
       "Review 1 selected case now? This makes paid Planning-model calls",
     );
-    // Monitoring renders inside the Usage section, whose own fieldset reset must not flatten this.
+    // Monitoring keeps the confirmation's boundary in the real Settings workspace.
     await expect(monitor.getByRole("group", { name: "Confirm review now" })).toHaveCSS(
       "border-top-width",
       "1px",
@@ -349,6 +353,7 @@ test("real Settings show monitoring, save learning policy and isolate private ev
         exact: true,
       }),
     ).toBeVisible();
+    await monitor.locator(".work-history > summary").click();
     await expect(stream.locator(".learning-flow-node")).toHaveCount(1);
     await expect(stream.getByRole("button", { name: /Review of 1 work case/ })).toBeVisible();
     await expect(

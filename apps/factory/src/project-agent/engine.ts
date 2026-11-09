@@ -375,9 +375,10 @@ questions need a cited answer, not a requirements interview. Interview or propos
 user is defining or clarifying intended work. Return kind round with 1 to 4 independent questions
 whose answers do not depend on another question in that round. Factory shows them one at a time.
 Do not repeat settled decisions. On a changed direction reconsider all remaining questions.
-Use single-select when
-one choice is needed, multi-select when several choices may apply, and free-text when options would
-distort the answer. Keep option sets short, give every option a distinct ID within its question,
+Use single-select when one choice is needed and multi-select when several choices may apply.
+Product Interviews always offer concrete, researched alternatives for each independent decision,
+never collect several product decisions in one free-text question. Free-text is available only
+outside the explicit Product Interview. Keep option sets short, give every option a distinct ID within its question,
 and always allow a custom answer for choice questions.
 Factory supplies the custom-answer control. Do not add generic "Other" or "Something else"
 placeholder options; each proposed option must name a substantive decision.

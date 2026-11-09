@@ -95,8 +95,37 @@ export function WorkspaceTabbar(props: {
       };
       const observer = new ResizeObserver(measure);
       observer.observe(scroller);
+      const wheel = (event: WheelEvent) => {
+        if (
+          !scroller ||
+          event.ctrlKey ||
+          event.metaKey ||
+          Math.abs(event.deltaX) >= Math.abs(event.deltaY)
+        )
+          return;
+        const unit =
+          event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? scroller.clientWidth
+            : event.deltaMode === WheelEvent.DOM_DELTA_LINE
+              ? Number.parseFloat(getComputedStyle(scroller).lineHeight) || 16
+              : 1;
+        const next = Math.max(
+          0,
+          Math.min(
+            scroller.scrollWidth - scroller.clientWidth,
+            scroller.scrollLeft + event.deltaY * unit,
+          ),
+        );
+        if (next === scroller.scrollLeft) return;
+        event.preventDefault();
+        scroller.scrollLeft = next;
+      };
+      scroller.addEventListener("wheel", wheel, { passive: false });
       measure();
-      return () => observer.disconnect();
+      return () => {
+        observer.disconnect();
+        scroller?.removeEventListener("wheel", wheel);
+      };
     },
   );
   createEffect(

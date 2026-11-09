@@ -94,6 +94,19 @@ export function createRuntimeAccess(
       const accessToken = crypto.randomUUID();
       grants.set(accessToken, grant);
       url.searchParams.delete("factory-grant");
+      if (channel === "app" && cookiePath === "/") {
+        // Transport normalizes isolated-host requests to internal runtime routes.
+        // Redemption must not send that internal prefix back to the App router.
+        const prefixes = [
+          `/runtime/${attemptID}/preview/${appChannel}`,
+          ...(appChannel === "app" ? [`/runtime/${attemptID}/app`] : []),
+        ];
+        for (const prefix of prefixes)
+          if (url.pathname === prefix || url.pathname.startsWith(`${prefix}/`)) {
+            url.pathname = url.pathname.slice(prefix.length) || "/";
+            break;
+          }
+      }
       const attributes =
         grant.mode === "embedded"
           ? "HttpOnly; SameSite=None; Secure; Partitioned"

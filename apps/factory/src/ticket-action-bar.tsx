@@ -10,13 +10,15 @@ export type TicketHeaderAction = {
   title?: string | undefined;
   describedBy?: string | undefined;
   primary?: boolean;
+  persistent?: boolean;
   run(): void;
 };
 
-/** Overflow first, context actions next, one next-step action at the right edge. */
+/** Frequent actions remain visible; secondary actions stay in the trailing menu. */
 export function TicketActionBar(props: {
   actions: readonly TicketHeaderAction[];
   menu?: JSX.Element;
+  people?: JSX.Element;
 }) {
   const menu = children(() => props.menu);
   const uploading = useAttachmentPending();
@@ -32,13 +34,13 @@ export function TicketActionBar(props: {
       hasPrimary={Boolean(primary())}
       collapsible={Boolean(menu())}
     >
-      {menu()}
       <For each={ordered()} keyed={(action) => action.id}>
         {(action) => (
           <button
             type="button"
             class="workspace-action ticket-header-action"
             data-primary={action().id === primary() ? "true" : undefined}
+            data-persistent={action().persistent ? "true" : undefined}
             disabled={action().disabled || uploading()}
             title={uploading() ? "Wait for file preparation to finish." : action().title}
             aria-describedby={action().describedBy}
@@ -48,6 +50,8 @@ export function TicketActionBar(props: {
           </button>
         )}
       </For>
+      {props.people}
+      {menu()}
     </WorkspaceActionBar>
   );
 }

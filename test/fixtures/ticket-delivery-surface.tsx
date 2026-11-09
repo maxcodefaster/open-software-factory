@@ -96,7 +96,6 @@ function Surface() {
             }}
             onAssignEpic={noop}
             onInterview={noop}
-            onWriteRequirements={noop}
             onSaveDocument={async () => undefined}
             onConfirmRequirements={async () => undefined}
             clarificationAction={{ label: "Ask AI to clarify", status: false }}

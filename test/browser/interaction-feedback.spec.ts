@@ -769,12 +769,11 @@ test("narrow feedback keeps the complete size limit and hides desktop attachment
   expect(await count.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expect(page.getByRole("button", { name: "Scroll attachments right" })).not.toBeVisible();
   await expect(page.locator(".attachment-privacy")).toHaveCount(0);
-  const help = page.getByLabel("Attachment formats and limits", { exact: true });
-  await help.click();
-  await expect(page.locator(".attachment-help-content")).toContainText(
-    "New files stay private until this feedback is saved.",
+  const attach = page.getByRole("button", { name: "Add image or file", exact: true });
+  await expect(attach).toHaveAccessibleDescription(
+    /New files stay private until this feedback is saved\./,
   );
-  await help.press("Escape");
+  await expect(page.getByLabel("Attachment formats and limits", { exact: true })).toHaveCount(0);
   await page.locator("form").screenshot({ path: `${directory}/five-feedback-files-narrow.png` });
 });
 
@@ -888,20 +887,18 @@ test("five attachments stay in one row above the input and remain accessible whe
   await remove.press("Enter");
   await expect(list.locator("li")).toHaveCount(4);
   await expect(input).toHaveValue("Keep the draft while browsing attachments.");
-  const help = page.getByLabel("Attachment formats and limits", { exact: true });
-  await help.focus();
-  await help.press("Enter");
-  await expect(page.locator(".attachment-restrictions")).toBeVisible();
-  await expect(page.locator(".attachment-restrictions")).toContainText("DOCX");
-  const panel = page.locator(".attachment-help-content");
+  await attach.focus();
+  await expect(attach).toHaveAccessibleDescription(/DOCX/);
+  await expect(attach).toBeFocused();
+  const panel = attach;
   await expect(panel).toBeInViewport();
   const bounds = fixtureValue(await panel.boundingBox(), "(await panel.boundingBox())");
   expect(bounds.x).toBeGreaterThanOrEqual(0);
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   expect(bounds.y).toBeGreaterThanOrEqual(0);
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
-  await capture(page, "five-files-help-narrow");
-  await help.press("Escape");
-  await expect(help).toBeFocused();
+  await capture(page, "five-files-attachment-control-narrow");
+  await attach.press("Escape");
+  await expect(attach).toBeFocused();
   await expect(page.locator(".attachment-restrictions")).not.toBeVisible();
 });
