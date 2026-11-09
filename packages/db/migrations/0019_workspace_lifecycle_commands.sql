@@ -12,5 +12,5 @@ CREATE TABLE factory.workspace_lifecycle_command (
   completed_at timestamptz
 );
 
-INSERT INTO factory.schema_migration(version) VALUES(18);
+INSERT INTO factory.schema_migration(version) VALUES(19);
 COMMIT;

@@ -18,5 +18,5 @@ CREATE TABLE factory.workspace_command (
 );
 CREATE INDEX workspace_command_runtime_idx ON factory.workspace_command(runtime_attempt_id,state);
 
-INSERT INTO factory.schema_migration(version) VALUES(17);
+INSERT INTO factory.schema_migration(version) VALUES(18);
 COMMIT;

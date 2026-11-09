@@ -17,5 +17,5 @@ CREATE TABLE factory.workspace_collaboration_decision (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-INSERT INTO factory.schema_migration(version) VALUES(21);
+INSERT INTO factory.schema_migration(version) VALUES(22);
 COMMIT;

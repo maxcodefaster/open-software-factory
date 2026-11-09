@@ -11,5 +11,5 @@ CREATE TABLE factory.workspace_terminal_operation (
   completed_at timestamptz
 );
 
-INSERT INTO factory.schema_migration(version) VALUES(19);
+INSERT INTO factory.schema_migration(version) VALUES(20);
 COMMIT;

@@ -10,5 +10,5 @@ CREATE TABLE factory.shared_document_resolution (
   result jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO factory.schema_migration(version) VALUES(23);
+INSERT INTO factory.schema_migration(version) VALUES(24);
 COMMIT;

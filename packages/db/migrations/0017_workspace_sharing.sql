@@ -26,5 +26,5 @@ CREATE TABLE factory.workspace_share_decision (
   access_reconciled_at timestamptz
 );
 
-INSERT INTO factory.schema_migration(version) VALUES(16);
+INSERT INTO factory.schema_migration(version) VALUES(17);
 COMMIT;

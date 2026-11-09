@@ -18,5 +18,5 @@ CREATE TABLE factory.workspace_submission (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-INSERT INTO factory.schema_migration(version) VALUES(22);
+INSERT INTO factory.schema_migration(version) VALUES(23);
 COMMIT;

@@ -30,5 +30,5 @@ CREATE TABLE factory.workspace_file_operation (
   completed_at timestamptz
 );
 
-INSERT INTO factory.schema_migration(version) VALUES(20);
+INSERT INTO factory.schema_migration(version) VALUES(21);
 COMMIT;
