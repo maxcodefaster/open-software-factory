@@ -6,6 +6,60 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
+test("complete manual requirements move an Idea without approval or inference", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const ticketID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
+      VALUES(${ticketID},${owned.projectID},'Inline requirements','Existing product intent.','inbox',${owned.userID})`;
+    const documents = createTicketDocumentController(database);
+    const input = {
+      commandId: crypto.randomUUID(),
+      expectedVersion: 1,
+      expectedDocumentId: null,
+      requirementRevisionId: null,
+      title: "Inline requirements",
+      description: "Existing product intent.",
+      requirement: { summary: "Existing product intent.", acceptanceCriteria: [], nonGoals: [] },
+    };
+    const partial = await documents.save(ticketID, owned.userID, input);
+    const [idea] = await database.client<
+      { state: string }[]
+    >`SELECT state FROM factory.ticket WHERE id=${ticketID}`;
+    expect(idea?.state).toBe("inbox");
+    const complete = await documents.save(ticketID, owned.userID, {
+      ...input,
+      commandId: crypto.randomUUID(),
+      expectedVersion: partial.ticketVersion,
+      expectedDocumentId: partial.id,
+      requirementRevisionId: partial.requirementRevisionId,
+      requirement: {
+        ...input.requirement,
+        acceptanceCriteria: ["The user can edit requirements in place."],
+      },
+    });
+    expect(complete.requirementRevisionId).toBe(complete.id);
+    const [ready] = await database.client<
+      { state: string }[]
+    >`SELECT state FROM factory.ticket WHERE id=${ticketID}`;
+    expect(ready?.state).toBe("ready");
+    expect(
+      await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${ticketID}`,
+    ).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${ticketID}`,
+    ).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.change WHERE ticket_id=${ticketID}`,
+    ).toHaveLength(0);
+  } finally {
+    await database.client.end();
+    await host.dispose();
+  }
+}, 60_000);
+
 test("partial manual drafts acknowledge the next write base without making incomplete requirements implementable", async () => {
   const host = await factoryProcess();
   const database = host.connect();

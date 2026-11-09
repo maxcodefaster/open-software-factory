@@ -385,7 +385,7 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     );
     await visible(page.getByRole("heading", { name: "QA & review", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-    await visible(page.getByRole("menuitem", { name: "Open IDE", exact: true })).toBeVisible();
+    await visible(page.getByRole("button", { name: "Open IDE", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await visible(
       page

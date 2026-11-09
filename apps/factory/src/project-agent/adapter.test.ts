@@ -159,9 +159,21 @@ test.each([
             message: "One decision remains.",
             questions: [
               {
-                type: "free-text",
+                type: "single-select",
                 prompt: "Where should the account appear?",
-                placeholder: "Location",
+                options: [
+                  {
+                    id: "header",
+                    label: "Workspace header",
+                    description: "Visible throughout the session.",
+                  },
+                  {
+                    id: "menu",
+                    label: "Account menu",
+                    description: "Available when opening account actions.",
+                  },
+                ],
+                allowCustom: true,
               },
             ],
             citations: [

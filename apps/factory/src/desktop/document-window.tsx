@@ -490,7 +490,6 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                     planningBusy={
                       model.assistantPending() && model.assistantTicketID() === current().ticket.id
                     }
-                    onWriteRequirements={() => void model.moveTicket(current().ticket, "ready")}
                     onSaveDocument={model.saveTicketDocument}
                     onFollowUp={() => void model.createFollowUp()}
                     onOpenTicket={model.selectTicket}

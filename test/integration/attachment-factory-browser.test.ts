@@ -283,13 +283,14 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     await visible(composer).toBeVisible();
     const message = composer.getByRole("textbox", { name: "Message conversation", exact: true });
     await message.fill("Please compare these references. Keep the document's caveats.");
-    const help = composer.getByLabel("Attachment formats and limits", { exact: true });
-    await help.click();
-    await visible(composer.locator(".attachment-restrictions")).toBeVisible();
-    await visible(composer.locator(".attachment-restrictions")).toContainText("10 MiB per file");
-    await visible(composer.locator(".attachment-restrictions")).toContainText("20 MiB total");
-    await help.press("Escape");
-    await visible(help).toBeFocused();
+    const attach = composer.getByRole("button", { name: "Add image or file", exact: true });
+    await visible(attach).toHaveAccessibleDescription(/10 MiB per file/);
+    await visible(attach).toHaveAccessibleDescription(/20 MiB total/);
+    await attach.focus();
+    await visible(attach).toBeFocused();
+    await visible(
+      composer.getByLabel("Attachment formats and limits", { exact: true }),
+    ).toHaveCount(0);
     await composer.getByLabel("Choose attachments").setInputFiles(reference);
     await visible(
       composer.getByRole("list", { name: "Prepared attachments" }).locator("li"),
@@ -382,16 +383,17 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
       await files.press("End");
       await visible.poll(() => files.evaluate((list) => list.scrollLeft)).toBeGreaterThan(0);
       await files.press("Home");
-      await help.click();
-      const panel = composer.locator(".attachment-help-content");
+      await attach.focus();
+      await visible(attach).toHaveAccessibleDescription(/DOCX/);
+      const panel = attach;
       await visible(panel).toBeInViewport();
       const bounds = fixtureValue(await panel.boundingBox(), "(await panel.boundingBox())");
       expect(bounds.x).toBeGreaterThanOrEqual(0);
       expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
       expect(bounds.y).toBeGreaterThanOrEqual(0);
       expect(bounds.y + bounds.height).toBeLessThanOrEqual(width === 390 ? 844 : 1000);
-      await page.screenshot({ path: resolve(directory, `chat-help-${width}.png`) });
-      await help.press("Escape");
+      await page.screenshot({ path: resolve(directory, `chat-attachment-control-${width}.png`) });
+      await attach.press("Escape");
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
     await visible(

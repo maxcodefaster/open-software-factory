@@ -252,7 +252,6 @@ function Ticket() {
         }}
         onAssignEpic={noAction}
         onInterview={noAction}
-        onWriteRequirements={noAction}
         onSaveDocument={save}
         onConfirmRequirements={save}
         clarificationAction={{ label: "Ask AI to clarify", status: false }}

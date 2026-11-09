@@ -76,7 +76,12 @@ for (const idea of [false, true])
     const capture = `${captures}/manual-${idea ? "idea" : "new"}`;
     if (idea) {
       await page.screenshot({ path: `${capture}-captured-desktop.png` });
-      await page.getByRole("button", { name: "Write requirements", exact: true }).click();
+      await expect(
+        page.getByRole("button", { name: "Write requirements", exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("textbox", { name: "Acceptance criterion 1", exact: true }),
+      ).toBeEditable();
     }
     await expect(page.getByRole("complementary", { name: "Agent panel" })).toHaveCount(0);
     await expect(

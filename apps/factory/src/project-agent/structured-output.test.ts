@@ -14,6 +14,33 @@ const answer = (citation: unknown) => ({
   output: { kind: "answer", message: "An observed fact.[^1]", citations: [citation] },
 });
 
+test("new product interviews offer concrete choices rather than only free text", () => {
+  const schema = projectAgentProviderOutputFor("plan", true);
+  const free = { type: "free-text", prompt: "Which product decision is intended?" };
+  expect(schema.safeParse({ output: { kind: "question", question: free } }).success).toBe(false);
+  expect(schema.safeParse({ output: { kind: "round", questions: [free] } }).success).toBe(false);
+  for (const type of ["single-select", "multi-select"] as const) {
+    const question = {
+      type,
+      prompt: "Where should customer context appear?",
+      options: [
+        {
+          id: "header",
+          label: "Workspace header",
+          description: "Visible throughout the consultation.",
+        },
+        {
+          id: "sidebar",
+          label: "Customer sidebar",
+          description: "Next to the consultation details.",
+        },
+      ],
+      allowCustom: true,
+    };
+    expect(schema.safeParse({ output: { kind: "question", question } }).success).toBe(true);
+  }
+});
+
 test("an explicitly commissioned Ticket interview cannot finish with only a promise", () => {
   const noProposal = {
     output: {
@@ -33,7 +60,15 @@ test("an explicitly commissioned Ticket interview cannot finish with only a prom
       output: {
         kind: "question",
         message: "One consequential decision is missing.",
-        question: { type: "free-text", prompt: "Which supported architecture is required?" },
+        question: {
+          type: "single-select",
+          prompt: "Which supported architecture is required?",
+          options: [
+            { id: "arm64", label: "ARM64", description: "Support the ARM64 deployment." },
+            { id: "amd64", label: "AMD64", description: "Support the AMD64 deployment." },
+          ],
+          allowCustom: true,
+        },
         citations: [],
       },
     }).success,

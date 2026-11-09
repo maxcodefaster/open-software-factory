@@ -390,7 +390,7 @@ for (const width of [1440, 390]) {
     await navigate("technical");
     await discard.click();
     await expect(implement).toBeEnabled();
-    await expect(page.getByText("Ready to implement", { exact: true })).toBeVisible();
+    await expect(page.getByText("Ready to implement", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Editing technical design", { exact: true })).toHaveCount(0);
     await expect(save).toHaveCount(0);
     expect(
@@ -444,7 +444,7 @@ test("chapter save preserves form submission and locks actions until the save se
   await page.getByRole("button", { name: "Finish fixture save", exact: true }).click();
   await expect(saving).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeEnabled();
-  await expect(page.getByText("Ready to implement", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ready to implement", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Fixture design approved")).toHaveText("false");
 });
 
