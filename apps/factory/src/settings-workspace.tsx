@@ -31,6 +31,9 @@ const ReleaseSettings = lazy(async () => ({
 const UsageSettings = lazy(async () => ({
   default: (await import("./usage/settings")).UsageSettings,
 }));
+const LearningSettings = lazy(async () => ({
+  default: (await import("./learning/settings")).LearningSettings,
+}));
 const RepositoryMirrorSettings = lazy(async () => ({
   default: (await import("./repository-mirrors/settings")).RepositoryMirrorSettings,
 }));
@@ -47,6 +50,7 @@ type Category =
   | "setup"
   | "security"
   | "usage"
+  | "limits"
   | "repositories";
 
 export function SettingsWorkspace(props: {
@@ -135,6 +139,7 @@ export function SettingsWorkspace(props: {
               "monitoring",
               "releases",
               "usage",
+              "limits",
               ...(canManage() ? ["people" as const] : []),
             ] as Category[],
           },
@@ -161,7 +166,14 @@ export function SettingsWorkspace(props: {
             id: "system",
             scope: "system" as const,
             label: "Factory administration",
-            categories: ["models", "usage", "repositories", "people", "security"] as Category[],
+            categories: [
+              "models",
+              "usage",
+              "limits",
+              "repositories",
+              "people",
+              "security",
+            ] as Category[],
           },
         ]
       : []),
@@ -172,10 +184,6 @@ export function SettingsWorkspace(props: {
       (group) => group.scope === current.scope && group.categories.includes(current.category),
     );
   };
-  const scopeLabel = (group: ReturnType<typeof groups>[number]) =>
-    group.id === "project" || group.id === "system"
-      ? group.label
-      : `${group.label} · ${group.categories.map((value) => label(value, group.scope)).join(", ")}`;
   const label = (value: Category, scope: Scope = selection().scope) =>
     ({
       models: scope === "personal" ? "Model overrides" : "Models",
@@ -187,6 +195,7 @@ export function SettingsWorkspace(props: {
       environment: "Environments",
       setup: "Project setup",
       usage: "Monitoring",
+      limits: "Usage & limits",
       repositories: "Repository mirrors",
       security: scope === "system" ? "Company sign-in" : "Login & security",
     })[value];
@@ -232,22 +241,25 @@ export function SettingsWorkspace(props: {
               }}
             >
               <For each={groups()}>
-                {(group) => <option value={group.id}>{scopeLabel(group)}</option>}
+                {(group) => <option value={group.id}>{group.label}</option>}
               </For>
             </select>
           </label>
-          <Show when={currentGroup()?.id !== "libraries"}>
-            <p class="settings-scope-hint">
-              Skills and MCP connections are in Libraries. Choose Libraries in the menu above.
-            </p>
-          </Show>
           <div class="settings-navigation-groups">
             <For
-              each={groups().filter((group) => group.id === currentGroup()?.id)}
+              each={[
+                ...groups().filter(
+                  (group) => group.id === currentGroup()?.id && group.id !== "libraries",
+                ),
+                ...groups().filter((group) => group.id === "libraries"),
+              ]}
               keyed={(group) => group.id}
             >
               {(group) => (
-                <section class={group().scope === "system" ? "settings-admin-group" : undefined}>
+                <section
+                  class={group().scope === "system" ? "settings-admin-group" : undefined}
+                  data-settings-scope={group().id}
+                >
                   <h3 class="sr-only">{group().label}</h3>
                   <For each={group().categories}>
                     {(value) => (
@@ -286,13 +298,15 @@ export function SettingsWorkspace(props: {
             >
               <h2 class="settings-wide-title">{label(category())}</h2>
               {navigationTitle()}
-              <small>
-                {selection().scope === "system"
-                  ? "Factory"
-                  : selection().scope === "personal"
-                    ? "Personal choices"
-                    : props.project?.name}
-              </small>
+              <Show when={category() !== "skills" && category() !== "mcp"}>
+                <small>
+                  {selection().scope === "system"
+                    ? "Factory"
+                    : selection().scope === "personal"
+                      ? "Personal choices"
+                      : props.project?.name}
+                </small>
+              </Show>
             </header>
           </Show>
           <Loading on={category()} fallback={<p role="status">Opening settings…</p>}>
@@ -406,9 +420,16 @@ export function SettingsWorkspace(props: {
             </Show>
             <Show when={category() === "usage"}>
               <div hidden={category() !== "usage"}>
-                <UsageSettings
+                <LearningSettings
                   projectID={selection().scope === "project" ? props.project?.id : undefined}
                   onOpenTicket={props.onOpenTicket}
+                />
+              </div>
+            </Show>
+            <Show when={category() === "limits"}>
+              <div hidden={category() !== "limits"}>
+                <UsageSettings
+                  projectID={selection().scope === "project" ? props.project?.id : undefined}
                 />
               </div>
             </Show>

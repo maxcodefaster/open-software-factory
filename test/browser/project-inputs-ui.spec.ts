@@ -174,13 +174,13 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
         .locator(".input-delivery-settings .input-help")
         .evaluateAll((notes) => notes.map((note) => getComputedStyle(note).fontSize)),
     ).toEqual(["13px", "13px"]);
-    await expect(navigation.locator("h3")).toHaveText(["Project · Invoice workspace"]);
+    await expect(navigation.locator("h3")).toHaveText(["Project · Invoice workspace", "Libraries"]);
     await expect(
       navigation.getByRole("combobox", { name: "Settings scope" }).locator("option"),
     ).toHaveText([
       "Project · Invoice workspace",
-      "Libraries · Skills, MCP connections",
-      "Personal · Model overrides, Login & security",
+      "Libraries",
+      "Personal",
       "Factory administration",
     ]);
     const sizes = await navigation

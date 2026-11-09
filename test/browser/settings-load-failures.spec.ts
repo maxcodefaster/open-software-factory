@@ -117,7 +117,7 @@ test("a failed security load explains itself and reloads the sign-in and passwor
   await expect(region.getByRole("alert")).toHaveCount(0);
 });
 
-test("a failed Usage read on Factory Monitoring offers a reload instead of a loading line", async ({
+test("a failed Usage read offers a reload on its own settings page instead of a loading line", async ({
   page,
 }) => {
   let reads = 0;
@@ -131,7 +131,7 @@ test("a failed Usage read on Factory Monitoring offers a reload instead of a loa
     },
   });
   await page.goto(`${origin}/repository-mirrors.html`);
-  await chooseSettingsPage(page, "Monitoring", "Factory administration");
+  await chooseSettingsPage(page, "Usage & limits", "Factory administration");
   const usage = page.getByRole("region", { name: "Usage & limits", exact: true });
   await expect(usage.locator(".usage-load-error").getByRole("alert")).toBeVisible();
   await expect(usage.getByText("Loading usage…")).toHaveCount(0);

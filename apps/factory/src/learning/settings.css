@@ -3,6 +3,15 @@
   display: grid;
   gap: var(--space-4);
 }
+
+.work-history,
+.work-method {
+  margin-block: var(--space-3);
+}
+.work-method[open] {
+  display: grid;
+  gap: var(--space-2);
+}
 .learning-dashboard {
   min-width: 0;
   color: var(--color-ink);

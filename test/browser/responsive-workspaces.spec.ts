@@ -298,6 +298,7 @@ for (const touch of [false, true]) {
         for (const [label, group] of [
           ["Models", "Factory administration"],
           ["Monitoring", "Factory administration"],
+          ["Usage & limits", "Factory administration"],
           ["People & access", "Factory administration"],
           ["Login & security", "Personal"],
           ["Skills", "Libraries"],
