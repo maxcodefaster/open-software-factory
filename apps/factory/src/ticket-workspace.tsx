@@ -1533,6 +1533,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                       props.current.implementationOrder ||
                       props.current.technicalPlanningPending ||
                       technicalDirty() ||
+                      requirementsIncomplete() ||
                       (!draftDescription().trim() && !draftSummary().trim()))
                   }
                 >

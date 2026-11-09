@@ -279,7 +279,9 @@ test("a refused design save names its reason beside the draft", async ({ page })
   ).toBeVisible();
 });
 
-test("a ready Ticket without criteria explains why Implement is unavailable", async ({ page }) => {
+test("a ready Ticket without criteria explains why Implement is unavailable", async ({
+  page,
+}, testInfo) => {
   await insertTicket("Needs criteria", "Summary only", "ready");
   await openTicket(page, "Needs criteria");
   const implement = page.getByRole("button", { name: "Implement", exact: true });
@@ -290,21 +292,33 @@ test("a ready Ticket without criteria explains why Implement is unavailable", as
   await expect(page.getByRole("status", { name: "Ticket progress" })).toHaveText(
     "Add a summary and at least one acceptance criterion to enable Implement.",
   );
+  await page.screenshot({ path: testInfo.outputPath("implement-reason.png") });
   await page
     .getByRole("textbox", { name: "Acceptance criterion 1", exact: true })
     .fill("The total is exact.");
   await expect(implement).toBeEnabled();
 });
 
-test("Ideas offer only blocks that exist", async ({ page }) => {
+test("Ideas insert requirement blocks into the directly editable specification", async ({
+  page,
+}) => {
   await insertTicket("Plain idea", "", "inbox");
   await openTicket(page, "Plain idea");
   await page.getByRole("textbox", { name: "Ticket description", exact: true }).click();
   await page.keyboard.type("/");
   const menu = page.getByRole("menu", { name: "Specification blocks" });
   await expect(menu.getByRole("menuitem", { name: "Table" })).toBeVisible();
-  await expect(menu.getByRole("menuitem", { name: "Acceptance criterion" })).toHaveCount(0);
-  await expect(menu.getByRole("menuitem", { name: "Non-goal" })).toHaveCount(0);
+  await expect(menu.getByRole("menuitem", { name: "Non-goal" })).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Acceptance criterion" }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Acceptance criterion 2", exact: true }),
+  ).toBeFocused();
+  await expect(menu).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Ticket description", exact: true }).click();
+  await page.keyboard.type("/");
+  await menu.getByRole("menuitem", { name: "Non-goal" }).click();
+  await expect(page.getByRole("textbox", { name: "Non-goal 2", exact: true })).toBeFocused();
+  await expect(menu).toHaveCount(0);
 });
 
 test("a cancelled Ticket offers no clarification", async ({ page }) => {

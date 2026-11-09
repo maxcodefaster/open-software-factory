@@ -58,8 +58,19 @@ for (const destination of ["Skills", "MCP connections"])
     );
     await expect(button).toHaveAttribute("aria-current", "page");
     await expect(navigation.locator('[aria-current="page"]')).toHaveCount(1);
+    // The lazy library replaces the temporary Settings heading with its own.
+    // Wait for that header before resizing so the click targets the final control.
+    await expect(
+      page.getByRole("group", {
+        name: destination === "Skills" ? "Skills library actions" : "MCP library actions",
+        exact: true,
+      }),
+    ).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("button", { name: /choose settings page$/i }).click();
+    await page
+      .getByRole("button", { name: /choose settings page$/i })
+      .filter({ visible: true })
+      .click();
     await expect(button).toBeVisible();
     await mkdir(".factory/test-results/settings-discovery", { recursive: true });
     await page.screenshot({
@@ -98,7 +109,10 @@ test("Monitoring does not load or show allowance editors until Usage & limits is
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: ".factory/test-results/settings-discovery/monitoring-phone.png" });
-  await page.getByRole("button", { name: /choose settings page$/i }).click();
+  await page
+    .getByRole("button", { name: /choose settings page$/i })
+    .filter({ visible: true })
+    .click();
   await navigation.getByRole("button", { name: "Usage & limits", exact: true }).click();
   await expect(page.getByRole("group", { name: "Optional limits", exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Factory monitoring", exact: true })).toHaveCount(
