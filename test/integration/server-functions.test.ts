@@ -15,7 +15,18 @@ import { fixtureValue } from "../fixtures/value";
 test("production Server Functions use real sessions, durable exact saves and no HTTP usage routes", async () => {
   const owned = await factoryProcess();
   const database = owned.connect();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium
+    .launch({
+      headless: true,
+      ...(process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
+        ? { executablePath: process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"] }
+        : {}),
+    })
+    .catch(async (cause) => {
+      await database.client.end();
+      await owned.dispose();
+      throw cause;
+    });
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const page = await context.newPage();
   const errors: string[] = [];
@@ -40,7 +51,7 @@ test("production Server Functions use real sessions, durable exact saves and no 
     expect(assets.some((path) => path.includes("/document-engine-"))).toBe(false);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
-    await chooseSettingsPage(page, "Monitoring", "Factory administration");
+    await chooseSettingsPage(page, "Usage & limits", "Factory administration");
     const usage = page.getByRole("region", { name: "Usage & limits", exact: true });
     await browserExpect(usage.getByLabel("Monthly Coding allowance")).toHaveValue("");
     await usage.getByLabel("Monthly Coding allowance").fill("7");
