@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { createAccessController } from "../access/controller";
+import { workspaceAuthorityIn } from "../access/workspace";
 import type { createRuntimeAccess } from "../access/runtime";
 import { executeEditingCommand } from "../access/writer-command";
 import type { createChangeWriterController } from "../access/writer-controller";
@@ -13,7 +13,13 @@ import type { DeveloperIDEGrant } from "./developer-ide-access";
 import { createPersonalGit } from "./personal-git";
 
 type EditorAuthorization = { token: string; grant: DeveloperIDEGrant };
-type Workspace = { projectID: string; changeID: string | null; kind: string; available: boolean };
+type Workspace = {
+  projectID: string;
+  changeID: string | null;
+  kind: string;
+  available: boolean;
+  permission: "observe" | "collaborate";
+};
 
 export function createDeveloperIDERuntime(
   database: ReturnType<typeof createDatabase>,
@@ -28,14 +34,15 @@ export function createDeveloperIDERuntime(
     "view" | "takeOver" | "activity" | "request" | "approve" | "release" | "takeIdle"
   >,
 ) {
-  const authority = createAccessController(database);
   const git = createPersonalGit(database, hub);
   const terminalGrants = new Map<
     string,
     { editorToken: string; attemptID: string; token: string }
   >();
   async function workspace(workspaceID: string, userID: string): Promise<Workspace> {
-    const [row] = await database.client<Array<Workspace & { ownerID: string | null }>>`
+    const [row] = await database.client<
+      Array<Omit<Workspace, "permission"> & { ownerID: string | null }>
+    >`
       SELECT workspace.project_id AS "projectID", workspace.change_id AS "changeID",
         workspace.kind, workspace.owner_user_id AS "ownerID",
         workspace.kind = 'personal' OR (change.state IN ('starting','active','failed')
@@ -44,10 +51,11 @@ export function createDeveloperIDERuntime(
       LEFT JOIN factory.change change ON change.id=workspace.change_id
       LEFT JOIN factory.ticket ticket ON ticket.id=change.ticket_id
       WHERE workspace.id=${workspaceID}`;
-    if (!row || (row.kind === "personal" && row.ownerID !== userID))
-      throw new CommandError("not-found", "Workspace not found");
-    await authority.requireDevelopment(userID, row.projectID);
-    return row;
+    if (!row) throw new CommandError("not-found", "Workspace not found");
+    const access = await database.client.begin((sql) =>
+      workspaceAuthorityIn(sql, workspaceID, userID),
+    );
+    return { ...row, permission: access.permission };
   }
   async function context(workspaceID: string, userID: string) {
     const source = await workspace(workspaceID, userID);
@@ -140,7 +148,12 @@ export function createDeveloperIDERuntime(
       if (writer?.[1]) {
         const source = await workspace(writer[1], authorized.grant.userID);
         if (!source.changeID)
-          return json({ state: "human", canWrite: true, yours: true, epoch: 1 });
+          return json({
+            state: "human",
+            canWrite: source.permission === "collaborate",
+            yours: true,
+            epoch: 1,
+          });
         if (!writers) throw new CommandError("unavailable", "Editing authority is unavailable");
         if (writer[2] && writer[2] !== "activity") {
           if (request.method !== "POST") return new Response(null, { status: 405 });
@@ -225,7 +238,7 @@ export function createDeveloperIDERuntime(
         }
         if (source.changeID)
           await runtimes.startPersisted(source.changeID, authorized.grant.userID);
-        else await runtimes.start(source.projectID, authorized.grant.userID);
+        else await runtimes.start(source.projectID, authorized.grant.userID, workspaceID);
         return json(await context(workspaceID, authorized.grant.userID), 202);
       }
       const operation = suffix.match(

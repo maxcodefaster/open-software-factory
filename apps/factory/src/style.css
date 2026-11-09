@@ -1548,6 +1548,10 @@ dt {
 .workspace-view-body:focus {
   outline: none;
 }
+.workspace-window-ide .workspace-view-body {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: max-content minmax(0, 1fr);
+}
 
 .workspace-view-body:focus-visible {
   outline: 2px solid var(--color-focus);

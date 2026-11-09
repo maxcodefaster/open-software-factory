@@ -131,6 +131,15 @@ test("the separately granted embedded IDE has only explicitly classified native 
   const context = await readFile(resolve(root, prefix, "factory-runtime-context.ts"), "utf8");
   expect(context).toContain("__factory/workspaces/${workspaceID}/runtime");
   expect(context).not.toContain("/api/");
+  const collaboration = await readFile(resolve(root, prefix, "factory-collaboration.ts"), "utf8");
+  expect(collaboration).toContain(
+    "__factory/workspaces/${identity.workspaceID}/collaboration/${action}",
+  );
+  for (const call of browserNetworkCalls(
+    `${prefix}/factory-collaboration.ts`,
+    'fetch("/api/projects")',
+  ))
+    expect(editorProtocolDecision(call)).toBeUndefined();
   expect(
     calls.some((call) => call.arguments.some((argument) => argument.includes("/_server/"))),
   ).toBe(false);

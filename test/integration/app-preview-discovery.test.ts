@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { factoryProcess } from "../fixtures/factory-process";
+import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 
 test.each(["ready", "paused", "unavailable"] as const)(
   "Development App names come from their admitted revision without compute: %s",
@@ -99,6 +100,14 @@ test.each(["ready", "paused", "unavailable"] as const)(
             VALUES(${otherAttempt},${project},${otherWorkspace},1,${revision},'ready',
               ${"c".repeat(64)},${"d".repeat(64)},now(),${other},'["app","app-editor"]'::jsonb)`;
           attempts.push(otherAttempt);
+          // Personal Previews are private. This batch deliberately includes only invited readers.
+          await createWorkspaceSharing(database, () => {}).decide(other, {
+            commandID: crypto.randomUUID(),
+            workspaceID: otherWorkspace,
+            userID: owner,
+            permission: "observe",
+            expectedVersion: 0,
+          });
         }
       }
       const previews = createProjectAppPreviews(database, () => {

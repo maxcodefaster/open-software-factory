@@ -9,6 +9,7 @@ const notShared = new Set([
   "getSignOutDestination",
   "getAuthenticationState",
   "getPasswordChangeState",
+  "getMCPAuthorization",
   "checkSkillSourceUpdate",
   "getBootstrap",
 ]);

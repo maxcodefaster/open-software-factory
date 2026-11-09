@@ -92,6 +92,11 @@ export function createProjectAppPreviews(
       LEFT JOIN factory.ticket ticket ON ticket.id=change.ticket_id
       WHERE attempt.project_id=${projectID} AND attempt.state IN ('create-intended','ready','pausing','paused','resuming','starting')
         AND (workspace.kind='personal' OR change.runtime_attempt_id=attempt.id AND ticket.trashed_at IS NULL)
+        AND (workspace.kind<>'personal' OR (
+          (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID}) OR EXISTS(
+            SELECT 1 FROM factory.project_membership WHERE project_id=${projectID} AND user_id=${userID} AND role='developer'))
+          AND (workspace.owner_user_id=${userID} OR EXISTS(SELECT 1 FROM factory.workspace_share
+            WHERE workspace_id=workspace.id AND user_id=${userID} AND revoked_at IS NULL))))
       ORDER BY attempt.created_at DESC LIMIT 100`;
     const development: {
       attemptID: string;

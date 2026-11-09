@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { workspaceAuthorityIn } from "../access/workspace";
+import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
 import { runtimeFactoryURL } from "../runtime/endpoints";
 import { runtimeSourceCapability } from "../runtime/git-http";
@@ -54,12 +56,14 @@ export async function personalGitRepository(database: Database, commandID: strin
     JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
     WHERE operation.id=${commandID} AND operation.state='attempted'
       AND operation.action IN ('fetch','pull') AND workspace.kind='personal'
-      AND workspace.owner_user_id=operation.user_id AND attempt.workspace_id=workspace.id
+      AND attempt.workspace_id=workspace.id
       AND attempt.state='ready' AND attempt.stop_intended_at IS NULL`;
   if (!operation) return null;
-  await database.client.begin((sql) =>
-    projectDevelopmentAuthorityIn(sql, operation.userID, operation.projectID),
-  );
+  const [scope] = await database.client<
+    { id: string }[]
+  >`SELECT workspace_id AS id FROM factory.personal_git_operation WHERE id=${commandID}`;
+  if (!scope) return null;
+  await database.client.begin((sql) => workspaceAuthorityIn(sql, scope.id, operation.userID, true));
   return operation.repository;
 }
 
@@ -67,16 +71,17 @@ export function createPersonalGit(
   database: Database,
   hub: Pick<RuntimeHub, "connected" | "parentOperation">,
 ) {
-  async function source(workspaceID: string, userID: string): Promise<Source> {
+  async function source(workspaceID: string, userID: string, write = false): Promise<Source> {
+    await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, userID, write));
     const [row] = await database.client<Source[]>`
       SELECT workspace.project_id AS "projectID",project.default_branch AS branch,
         attempt.id AS "attemptID",person.name AS "authorName",person.email AS "authorEmail"
       FROM factory.development_workspace workspace
       JOIN factory.project project ON project.id=workspace.project_id
-      JOIN auth."user" person ON person.id=workspace.owner_user_id
+      JOIN auth."user" person ON person.id=${userID}
       JOIN LATERAL (SELECT id FROM factory.runtime_attempt WHERE workspace_id=workspace.id
         AND state='ready' AND stop_intended_at IS NULL ORDER BY generation DESC LIMIT 1) attempt ON true
-      WHERE workspace.id=${workspaceID} AND workspace.kind='personal' AND workspace.owner_user_id=${userID}`;
+      WHERE workspace.id=${workspaceID} AND workspace.kind='personal'`;
     if (!row) throw new CommandError("conflict", "Open your personal Workspace before using Git");
     await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, row.projectID));
     if (!hub.connected(row.attemptID))
@@ -100,11 +105,14 @@ export function createPersonalGit(
       (send) =>
         database.client.begin(async (sql) => {
           await projectDevelopmentAuthorityIn(sql, userID, saved.projectID);
+          if (["status", "diff"].includes(input["action"] ?? ""))
+            await workspaceAuthorityIn(sql, workspaceID, userID);
+          else await workspaceWriteAuthorityIn(sql, workspaceID, userID);
           const [current] = await sql`
             SELECT attempt.id FROM factory.runtime_attempt attempt
             JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
             WHERE attempt.id=${saved.attemptID} AND attempt.workspace_id=${workspaceID}
-              AND workspace.kind='personal' AND workspace.owner_user_id=${userID}
+              AND workspace.kind='personal'
               AND attempt.state='ready' AND attempt.stop_intended_at IS NULL
             FOR SHARE OF attempt,workspace`;
           if (!current) throw new CommandError("conflict", "Personal Workspace execution changed");
@@ -146,7 +154,7 @@ export function createPersonalGit(
       const input = mutation.parse(raw);
       if (action === "commit" && !input.message.trim())
         throw new CommandError("invalid", "Enter a commit message");
-      const saved = await source(workspaceID, userID);
+      const saved = await source(workspaceID, userID, true);
       const connection = database.coordination();
       try {
         await connection`SELECT pg_advisory_lock(hashtext(${`personal-git:${workspaceID}`}))`;
@@ -174,7 +182,7 @@ export function createPersonalGit(
             operation.failure ?? "The previous Git outcome is unconfirmed. Inspect Git status",
           );
         // Recheck authority and execution after waiting for the Workspace lock.
-        const current = await source(workspaceID, userID);
+        const current = await source(workspaceID, userID, true);
         if (current.attemptID !== operation.attemptID || current.branch !== operation.branch)
           throw new CommandError("conflict", "Workspace execution or default branch changed");
         await connection`UPDATE factory.personal_git_operation SET state='attempted',attempted_at=now()

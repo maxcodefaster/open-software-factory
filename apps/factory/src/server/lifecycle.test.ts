@@ -78,6 +78,15 @@ test("the process owns Delivery and Monitoring observations and drains them befo
         closed.push("wiki");
       },
     },
+    workspaceCommands: {
+      async close() {
+        closed.push("commands");
+        await finish.promise;
+      },
+    },
+    workspaceFiles: { close: idle },
+    workspaceCollaboration: { close: idle },
+    workspaceSubmission: { close: idle, recover: idle },
   } as unknown as Parameters<typeof startFactoryLifecycle>[0];
   const close = startFactoryLifecycle(application);
   try {
@@ -93,10 +102,11 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     await Bun.sleep(10);
     expect(closed).toContain("monitoring");
     expect(closed).toContain("wiki");
+    expect(closed).toContain("commands");
     expect(drained).toBe(false);
     finish.resolve();
     await pending;
-    expect(closed.sort()).toEqual(["delivery", "monitoring", "wiki"]);
+    expect(closed.sort()).toEqual(["commands", "delivery", "monitoring", "wiki"]);
     expect(deliveries).toBe(1);
     expect(browserCleanups).toBe(1);
   } finally {

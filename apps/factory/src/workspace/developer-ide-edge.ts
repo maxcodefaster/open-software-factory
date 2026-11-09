@@ -11,6 +11,7 @@ import { createDeveloperIDEAccess, developerIDEPath } from "./developer-ide-acce
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import type { createDeveloperIDERuntime } from "./developer-ide-runtime";
 import type { createWorkspaceSourceController } from "./source-controller";
+import type { createWorkspaceCollaboration } from "./collaboration";
 
 export interface DeveloperEditorSocketData {
   readonly kind: "developer-editor";
@@ -60,6 +61,7 @@ export function createDeveloperIDEEdge(
   sources: ReturnType<typeof createWorkspaceSourceController>,
   factoryOrigin: string,
   runtime: ReturnType<typeof createDeveloperIDERuntime>,
+  collaboration?: ReturnType<typeof createWorkspaceCollaboration>,
 ) {
   const sockets = new Map<EditorSocket, Connection>();
   const requests = new Map<AbortController, string>();
@@ -184,6 +186,35 @@ export function createDeveloperIDEEdge(
         return json({ error: "Editor origin is invalid" }, 403);
       if (suffix === "/__factory/context" && request.method === "GET")
         return json({ factoryOrigin, userID, epoch });
+      const shared = suffix.match(
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/collaboration\/(sync|save|participants|read|resolve)$/,
+      );
+      if (shared?.[1] && shared[2]) {
+        if (!collaboration) throw new CommandError("unavailable", "Shared editing is unavailable");
+        const workspaceID = shared[1];
+        if (shared[2] === "participants" && request.method === "GET")
+          return json(await collaboration.participants(workspaceID, userID));
+        if (request.method !== "POST") return new Response(null, { status: 405 });
+        const bytes = await boundedSourceBody(request, request.signal);
+        const input: unknown = JSON.parse(new TextDecoder().decode(bytes));
+        return json(
+          shared[2] === "read"
+            ? await collaboration.read(
+                userID,
+                workspaceID,
+                String((input as { path?: string }).path ?? ""),
+              )
+            : shared[2] === "resolve"
+              ? await collaboration.resolve(userID, workspaceID, input)
+              : shared[2] === "save"
+                ? await collaboration.save(userID, workspaceID, input)
+                : await collaboration.sync(
+                    { userID, sessionID: authorized.grant.sessionID, kind: "person" },
+                    workspaceID,
+                    input,
+                  ),
+        );
+      }
       const presentation = suffix.match(
         /^\/__factory\/workspaces\/([0-9a-f-]{36})\/source\/context$/,
       );

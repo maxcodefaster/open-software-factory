@@ -196,7 +196,11 @@ export function createAgentController(
       ? (target) => settleRetainedStop(target, observationController.signal)
       : undefined,
   );
-  const admitReview = createReviewAdmission(database);
+  const admitReview = createReviewAdmission(database, async (sql, context) => {
+    const modelId = await modelSettings.resolve("build", sql, { ...context, personal: false });
+    const modelConnection = await modelConnections.reference("build", sql);
+    return { modelId, ...(modelConnection ? { modelConnection } : {}) };
+  });
   const commitTransport = createAgentCommitTransport(database, hub);
   const background = new Set<Promise<void>>();
   let closed = false;

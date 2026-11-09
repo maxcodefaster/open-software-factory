@@ -55,6 +55,19 @@ export function startFactoryTransport(application: FactoryTransportServices) {
       const connectionRequest = request;
       request = runtimeAppRequest(request, factoryOrigin);
       const url = factoryRequestURL(request, factoryOrigin);
+      if (
+        request.method === "GET" &&
+        [
+          "/.well-known/oauth-protected-resource",
+          "/.well-known/oauth-protected-resource/api/mcp",
+        ].includes(url.pathname)
+      )
+        return json(await application.factoryAuth.mcpResourceMetadata());
+      if (
+        request.method === "GET" &&
+        url.pathname === "/.well-known/oauth-authorization-server/api/auth"
+      )
+        return json(await application.factoryAuth.mcpDiscovery());
       if (/^\/internal\/build-browser\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/.test(url.pathname))
         // Cold image preparation has its own 180-second bound, followed by the
         // bounded container and cold Chrome setup. Do not time out transport first.

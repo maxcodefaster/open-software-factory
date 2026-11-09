@@ -2,6 +2,7 @@ import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./controller";
 import { writerActivity } from "./writer-activity";
+import { workspaceAuthorityIn } from "./workspace";
 
 export async function lockChangeWriterIn(sql: AgentTurnTransaction, changeID: string) {
   // Admission already orders Change before membership. Source and handoff use
@@ -39,6 +40,15 @@ export async function claimAgentWriterIn(
   commissionerID: string,
 ) {
   const writer = await lockChangeWriterIn(sql, changeID);
+  const [sharedDraft] =
+    await sql`SELECT document.path FROM factory.workspace_shared_document document
+    JOIN factory.development_workspace workspace ON workspace.id=document.workspace_id
+    WHERE workspace.change_id=${changeID} AND (document.dirty OR document.conflict) LIMIT 1`;
+  if (sharedDraft)
+    throw new CommandError(
+      "conflict",
+      "Save or resolve shared editor buffers before commissioning background Coding.",
+    );
   const [integration] =
     await sql`SELECT id FROM factory.change_commit_operation WHERE change_id=${changeID}
     AND source='integration' AND state NOT IN ('succeeded','failed') LIMIT 1`;
@@ -125,18 +135,22 @@ export async function workspaceWriteAuthorityIn(
     }[]
   >`SELECT project_id AS "projectID",kind,owner_user_id AS "ownerID",change_id AS "changeID"
     FROM factory.development_workspace WHERE id=${workspaceID}`;
-  if (!workspace || (workspace.kind === "personal" && workspace.ownerID !== userID))
-    throw new CommandError("not-found", "Workspace not found");
+  if (!workspace) throw new CommandError("not-found", "Workspace not found");
   const writer = workspace.changeID ? await lockChangeWriterIn(sql, workspace.changeID) : null;
-  await projectDevelopmentAuthorityIn(sql, userID, workspace.projectID);
-  if (writer && (!writer.available || writer.state !== "human" || writer.userID !== userID))
+  const access = await workspaceAuthorityIn(sql, workspaceID, userID, true);
+  if (
+    writer &&
+    (!writer.available ||
+      writer.state !== "human" ||
+      (!access.collaborative && writer.userID !== userID))
+  )
     throw new CommandError(
       "conflict",
       "This Workspace is observation-only. Take over editing before changing files or running commands.",
     );
   if (writer && workspace.changeID)
     writerActivity.observe(workspace.changeID, userID, writer.epoch, "edit");
-  return { ...workspace, writerEpoch: writer?.epoch };
+  return { ...workspace, writerEpoch: writer?.epoch, accessVersion: access.accessVersion };
 }
 
 export async function runtimeWriteAuthorityIn(

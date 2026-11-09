@@ -5,6 +5,7 @@ import {
 } from "../../../../packages/project-domain/src/access";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import { workspaceAuthorityIn } from "./workspace";
 
 type Database = ReturnType<typeof createDatabase>;
 
@@ -82,16 +83,28 @@ export function createAccessController(database: Database) {
   }
   async function requireRuntime(userID: string, attemptID: string, channel?: "app" | "ide") {
     const rows = await sql<
-      Array<{ projectID: string; kind: string | null; ownerID: string | null }>
+      Array<{
+        projectID: string;
+        kind: string | null;
+        ownerID: string | null;
+        workspaceID: string | null;
+      }>
     >`
-      SELECT attempt.project_id AS "projectID", workspace.kind, workspace.owner_user_id AS "ownerID"
+      SELECT attempt.project_id AS "projectID", workspace.kind, workspace.owner_user_id AS "ownerID",workspace.id AS "workspaceID"
       FROM factory.runtime_attempt attempt
       LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
       WHERE attempt.id = ${attemptID}
     `;
     const row = rows[0];
-    if (!row || (channel !== "app" && row.kind === "personal" && row.ownerID !== userID)) {
+    if (!row) {
       throw new CommandError("not-found", "Runtime not found");
+    }
+    if (row.kind === "personal" && row.workspaceID) {
+      const workspaceID = row.workspaceID;
+      await database.client.begin((transaction) =>
+        workspaceAuthorityIn(transaction, workspaceID, userID),
+      );
+      return;
     }
     await requireProject(userID, row.projectID);
     if (channel === "ide") await requireDevelopment(userID, row.projectID);

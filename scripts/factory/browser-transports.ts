@@ -140,6 +140,12 @@ export function editorProtocolDecision(call: BrowserNetworkCall): string | undef
   if (file === "factory-git-client.ts" && call.operation === "fetch" && args[0] === "...args")
     return "Grant-bound personal Workspace Git operations with exact head and command identity.";
   if (
+    file === "factory-collaboration.ts" &&
+    call.operation === "fetch" &&
+    args[0] === "url(action)"
+  )
+    return "Grant-bound Yjs shared document and presence protocol in the original Workspace, with explicit versioned Save and conflict decisions. No central-session API or inference.";
+  if (
     file === "factory-source-client.ts" &&
     call.operation === "EventSource" &&
     (args[0] === 'this.url(workspaceID, "events")' ||

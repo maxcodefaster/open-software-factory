@@ -93,6 +93,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY deploy/theia-ide/package.json deploy/theia-ide/package-lock.json ./
 COPY deploy/theia-ide/browser-app/package.json ./browser-app/package.json
+COPY deploy/theia-ide/browser-app/esbuild.mjs ./browser-app/esbuild.mjs
 COPY deploy/theia-ide/factory-ide-extension/package.json ./factory-ide-extension/package.json
 RUN npm ci --no-audit --no-fund
 COPY deploy/theia-ide/factory-ide-extension ./factory-ide-extension

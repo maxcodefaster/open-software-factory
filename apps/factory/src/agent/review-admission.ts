@@ -12,8 +12,16 @@ import { projectAuthorityIn } from "../access/controller";
 import { freezeFeedbackAttachmentsIn } from "../attachments/store";
 import { CommandError } from "../command-error";
 import { createAgentTurnStore } from "./turn-store";
+import type { AgentTurnTransaction } from "./turn-store";
+import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 
-export function createReviewAdmission(database: ReturnType<typeof createDatabase>) {
+export function createReviewAdmission(
+  database: ReturnType<typeof createDatabase>,
+  workspaceReview?: (
+    sql: AgentTurnTransaction,
+    context: { projectID: string; userID: string },
+  ) => Promise<{ modelId: string; modelConnection?: ModelConnectionReference }>,
+) {
   const turns = createAgentTurnStore(database);
   return async (changeID: string, reviewID: string, userID: string) =>
     database.client.begin(async (sql) => {
@@ -110,8 +118,18 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
       const [first] = await sql<{ authority: unknown }[]>`
         SELECT authority FROM factory.agent_turn WHERE change_id=${changeID}
           AND input->>'kind' <> 'change-review' ORDER BY created_at,id LIMIT 1`;
-      if (!first) throw new CommandError("conflict", "Review needs the admitted Coding model");
-      const authority = agentTurnAuthorityInput.parse(first.authority);
+      const [submittedWorkspace] =
+        await sql`SELECT id FROM factory.change_commit_operation WHERE change_id=${changeID} AND source::text='workspace'
+        AND state='succeeded' AND commit_sha=${change.commitSHA}`;
+      if (!first && (!submittedWorkspace || !workspaceReview))
+        throw new CommandError("conflict", "Review needs the admitted Coding model");
+      const authority = first
+        ? agentTurnAuthorityInput.parse(first.authority)
+        : agentTurnAuthorityInput.parse({
+            mode: "build",
+            requirementRevisionId: change.revisionID,
+            ...(await workspaceReview?.(sql, { projectID: change.projectID, userID })),
+          });
       if (authority.mode !== "build") throw new Error("Missing Coding configuration");
       // Only an explicit fresh review of the still-verified candidate recovers
       // failed bootstrap. It does not resume or commission implementation.

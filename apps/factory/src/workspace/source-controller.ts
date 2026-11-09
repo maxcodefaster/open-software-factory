@@ -18,6 +18,7 @@ import {
 } from "../../../../packages/workspace-domain/src/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { workspaceAuthorityIn } from "../access/workspace";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { runtimeFactoryURL, runtimeRepositoryCloneURL } from "../runtime/endpoints";
@@ -172,14 +173,7 @@ export function createWorkspaceSourceController(
     };
   }
   async function authority(workspaceID: string, userID: string, sql: AgentTurnTransaction) {
-    const [workspace] = await sql<
-      Array<{ projectID: string; kind: string; ownerID: string | null }>
-    >`SELECT project_id AS "projectID",kind,owner_user_id AS "ownerID" FROM factory.development_workspace WHERE id=${workspaceID}`;
-    if (!workspace || (workspace.kind === "personal" && workspace.ownerID !== userID))
-      throw new CommandError("not-found", "Workspace not found");
-    // Transactional membership locks order admitted writes before normal membership revocation.
-    await projectDevelopmentAuthorityIn(sql, userID, workspace.projectID);
-    return workspace;
+    return workspaceAuthorityIn(sql, workspaceID, userID);
   }
   async function record(
     source: SourceRow,
@@ -526,7 +520,13 @@ export function createWorkspaceSourceController(
       if (!current) throw new CommandError("not-found", "Source access not prepared");
       return view(current);
     },
-    async forward(workspaceID: string, userID: string, operation: string, request: Request) {
+    async forward(
+      workspaceID: string,
+      userID: string,
+      operation: string,
+      request: Request,
+      sharedSave = false,
+    ) {
       if (operation === "events" ? request.method !== "GET" : request.method !== "POST")
         return new Response(null, { status: 405 });
       if (!/^(stat|list|read|write|mkdir|rename|delete|search|events)$/.test(operation))
@@ -548,6 +548,28 @@ export function createWorkspaceSourceController(
                 body: content,
                 signal: controller.signal,
               });
+        const checkShared = async (sql: AgentTurnTransaction) => {
+          if (!sharedSave && ["write", "rename", "delete"].includes(operation) && content) {
+            const input = JSON.parse(new TextDecoder().decode(content)) as {
+              path?: string;
+              destination?: string;
+            };
+            if (typeof input.path === "string") {
+              const paths = [
+                input.path,
+                ...(typeof input.destination === "string" ? [input.destination] : []),
+              ];
+              const [dirty] = await sql`SELECT path FROM factory.workspace_shared_document
+              WHERE workspace_id=${workspaceID} AND (dirty OR conflict) AND EXISTS(
+                SELECT 1 FROM unnest(${paths}::text[]) target WHERE path=target OR starts_with(path,target||'/')) LIMIT 1`;
+              if (dirty)
+                throw new CommandError(
+                  "conflict",
+                  "Shared unsaved edits are retained for this path. Save or resolve the shared document instead of overwriting it.",
+                );
+            }
+          }
+        };
         const result = await database.client.begin(async (sql) => {
           if (["write", "mkdir", "rename", "delete"].includes(operation)) {
             const writer = await workspaceWriteAuthorityIn(sql, workspaceID, userID);
@@ -557,6 +579,7 @@ export function createWorkspaceSourceController(
             }
           }
           const workspace = await authority(workspaceID, userID, sql);
+          await checkShared(sql);
           const source = await row(workspaceID, sql);
           if (source?.state !== "ready")
             throw new CommandError("unavailable", "Workspace source is preparing or stopped");
@@ -610,7 +633,7 @@ export function createWorkspaceSourceController(
     },
     async stop(workspaceID: string, userID: string) {
       await database.client.begin(async (sql) => {
-        await authority(workspaceID, userID, sql);
+        await workspaceAuthorityIn(sql, workspaceID, userID, true);
         await sql`UPDATE factory.workspace_source SET state='stop-intended',stop_intended_at=COALESCE(stop_intended_at,now()),updated_at=now() WHERE workspace_id=${workspaceID} AND state<>'stopped'`;
       });
       revokeWorkspace(workspaceID);
@@ -619,6 +642,10 @@ export function createWorkspaceSourceController(
     async revokeMember(projectID: string, userID: string) {
       for (const [controller, stream] of streams)
         if (stream.userID === userID && stream.projectID === projectID) controller.abort();
+    },
+    revokeSharedMember(workspaceID: string, userID: string) {
+      for (const [controller, stream] of streams)
+        if (stream.userID === userID && stream.workspaceID === workspaceID) controller.abort();
     },
     revokeUser(userID: string) {
       for (const [controller, stream] of streams) if (stream.userID === userID) controller.abort();

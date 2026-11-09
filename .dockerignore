@@ -12,4 +12,4 @@ playwright-report
 test-results
 deploy/theia-ide/*/lib
 deploy/theia-ide/browser-app/src-gen
-deploy/theia-ide/browser-app/*esbuild*.mjs
+deploy/theia-ide/browser-app/gen-esbuild*.mjs

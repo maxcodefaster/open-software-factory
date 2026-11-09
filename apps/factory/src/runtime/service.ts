@@ -1,5 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
+import { workspaceAuthorityIn } from "../access/workspace";
 import type { createAccessController } from "../access/controller";
 import type { createProjectAppPreviews } from "../access/previews";
 import {
@@ -65,6 +66,14 @@ export function createRuntimeService(options: {
     },
     async stop(userID: string, attemptID: string) {
       await options.access.requireRuntime(userID, attemptID, "ide");
+      const [workspace] = await options.database.client<{ id: string | null }[]>`
+        SELECT workspace_id AS id FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (workspace?.id) {
+        const workspaceID = workspace.id;
+        await options.database.client.begin((sql) =>
+          workspaceAuthorityIn(sql, workspaceID, userID, true),
+        );
+      }
       try {
         return attempt(await options.runtime.stop(attemptID));
       } finally {

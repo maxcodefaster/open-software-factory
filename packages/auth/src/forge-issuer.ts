@@ -6,6 +6,7 @@ import { jwt } from "better-auth/plugins";
 import { z } from "zod";
 import type { createDatabase } from "../../db/src/client";
 import { emergencyAdministratorID, type IdentityPolicy } from "./policy";
+import { factoryMCPRegistration, factoryMCPResource, factoryMCPScopes } from "./mcp-registration";
 
 export const forgeClientID = "factory-forgejo";
 const issuerSession = z.object({
@@ -40,6 +41,7 @@ export function factoryForgeIssuer(
           matcher: (context) =>
             Boolean(context.path?.startsWith("/oauth2/")) ||
             Boolean(context.path?.startsWith("/admin/oauth2/")) ||
+            context.path === "/mcp/register" ||
             context.path === "/token",
           handler: createAuthMiddleware(async (context) => {
             if (policy.setupCommandID || policy.emergencyOnly) throw new APIError("NOT_FOUND");
@@ -84,8 +86,16 @@ export function factoryForgeIssuer(
   const native = oauthProvider({
     loginPage: "/",
     consentPage: "/",
-    scopes: ["openid", "profile", "email"],
-    grantTypes: ["authorization_code"],
+    scopes: ["openid", "profile", "email", ...factoryMCPScopes],
+    advertisedMetadata: { scopes_supported: ["openid", "profile", "email"] },
+    grantTypes: ["authorization_code", "refresh_token"],
+    resources: [
+      {
+        identifier: factoryMCPResource(baseURL),
+        allowedScopes: [...factoryMCPScopes],
+        accessTokenTtl: 300,
+      },
+    ],
     accessTokenExpiresIn: 300,
     idTokenExpiresIn: 300,
     allowDynamicClientRegistration: false,
@@ -110,6 +120,13 @@ export function factoryForgeIssuer(
     customUserInfoClaims: async ({ user }) => {
       await developer(user.id);
       return { preferred_username: `factory-${user.id.replaceAll("-", "")}` };
+    },
+    customAccessTokenClaims: async ({ user, scopes }) => {
+      if (scopes.some((scope) => factoryMCPScopes.some((allowed) => allowed === scope))) {
+        if (!user) throw new APIError("FORBIDDEN", { message: "User authentication is required" });
+        await developer(user.id);
+      }
+      return {};
     },
   });
   // The pinned plugin's generated OpenAPI parameter union contains explicit undefined keys.
@@ -158,5 +175,6 @@ export function factoryForgeIssuer(
       hooks: { ...native.hooks, before },
       endpoints: { ...native.endpoints, oauth2Authorize: adaptedAuthorize },
     },
+    factoryMCPRegistration(developer, factoryMCPResource(baseURL)),
   ] as const;
 }

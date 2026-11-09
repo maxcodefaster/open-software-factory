@@ -29,6 +29,10 @@ type LifecycleServices = Pick<
   | "runtimeController"
   | "wikiSourceUpdates"
   | "accessRevocation"
+  | "workspaceCommands"
+  | "workspaceFiles"
+  | "workspaceCollaboration"
+  | "workspaceSubmission"
 >;
 
 export function startFactoryLifecycle(application: LifecycleServices) {
@@ -125,6 +129,11 @@ export function startFactoryLifecycle(application: LifecycleServices) {
   jobs.every("Project image preparation needs retry", () => projectPreparation.drain(), 2_000);
   jobs.every("MCP credential recovery is unavailable", () => mcpConnections.recover(), 30_000);
   jobs.every(
+    "Shared submission observation is unavailable",
+    () => application.workspaceSubmission.recover(),
+    5000,
+  );
+  jobs.every(
     "Implementation order observation failed",
     () => implementationOrders.reconcile(),
     1_000,
@@ -138,6 +147,10 @@ export function startFactoryLifecycle(application: LifecycleServices) {
         // A restart during Pause or Resume leaves that outcome unconfirmed; wait for it first.
         drainNativeOperations(100_000),
         jobs.close(),
+        application.workspaceCommands.close(),
+        application.workspaceFiles.close(),
+        application.workspaceCollaboration.close(),
+        application.workspaceSubmission.close(),
         monitoringWorker.close(),
         deliveryController.close(),
         learningWorker.close(),

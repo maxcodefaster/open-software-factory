@@ -184,6 +184,7 @@ export type RuntimeDockTarget = {
   changeId?: string;
   projectId?: string;
   appChannel?: string;
+  workspaceId?: string;
 };
 
 export const requirementRevisionSchema = z.object({

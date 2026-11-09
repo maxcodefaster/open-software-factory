@@ -59,6 +59,7 @@ import { createMCPOAuthCallback } from "../mcp/oauth-callback";
 import { createMCPSecrets } from "../mcp/secrets";
 import { createMCPService } from "../mcp/service";
 import { createMCPSourceEndpoint } from "../mcp/sources";
+import { createExternalFactoryMCP } from "../mcp/external";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createModelRelay } from "../models/relay";
@@ -106,6 +107,12 @@ import { createDeveloperIDERuntime } from "../workspace/developer-ide-runtime";
 import { createWorkspaceService } from "../workspace/service";
 import { createWorkspaceSourceController } from "../workspace/source-controller";
 import { createWorkspaceSourceProtocol } from "../workspace/source-protocol";
+import { createWorkspaceSharing } from "../workspace/sharing";
+import { createWorkspaceCommands } from "../workspace/commands";
+import { createWorkspaceContainerFiles } from "../workspace/container-files";
+import { createWorkspaceTransferRoutes } from "../workspace/transfer-routes";
+import { createWorkspaceCollaboration } from "../workspace/collaboration";
+import { createWorkspaceSubmission } from "../workspace/submission";
 import { createPageHint } from "./page-hints";
 
 export async function createFactoryApplication() {
@@ -259,6 +266,13 @@ export async function createFactoryApplication() {
   );
   const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
   const workspaceSources = createWorkspaceSourceController(database, runtimeSecret);
+  const workspaceCollaboration = createWorkspaceCollaboration(database, workspaceSources);
+  const workspaceSharing = createWorkspaceSharing(database, async (workspaceID, userID) => {
+    workspaceCollaboration.revoke(workspaceID, userID);
+    workspaceSources.revokeSharedMember(workspaceID, userID);
+    await runtimeAccess.revokeWorkspaceMember(workspaceID, userID);
+  });
+  await workspaceSharing.recover().catch(reportFailure("Workspace access recovery is unavailable"));
   const reserveImages = {
     staging: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
     verification: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
@@ -278,6 +292,30 @@ export async function createFactoryApplication() {
     undefined,
     executionReserve,
   );
+  const workspaceCommands = createWorkspaceCommands(
+    database,
+    runtimeHub,
+    runtimeController,
+    runtimeSecret,
+  );
+  const workspaceFiles = createWorkspaceContainerFiles(
+    database,
+    runtimeHub,
+    runtimeController,
+    runtimeSecret,
+  );
+  const workspaceSubmission = createWorkspaceSubmission(
+    database,
+    runtimeHub,
+    workspaceCollaboration,
+    createForgejoClient({ apiURL: forgeAPIURL, token: forgeToken }),
+    { username: forgeOwner, password: forgeToken },
+  );
+  const workspaceTransferRoutes = createWorkspaceTransferRoutes({
+    identity: factoryAuth,
+    files: workspaceFiles,
+    origin: factoryOrigin,
+  });
   const releaseController = createReleaseController({
     database,
     signingKey: runtimeSecret,
@@ -329,6 +367,7 @@ export async function createFactoryApplication() {
       approve: (...args) => changeWriters.approve(...args),
       takeIdle: (...args) => changeWriters.takeIdle(...args),
     }),
+    workspaceCollaboration,
   );
   const revokeAccountAccess = createAccountRevocation({
     database,
@@ -360,6 +399,7 @@ export async function createFactoryApplication() {
     },
     revokeAccount: revokeAccountAccess,
     forgeOrigin: forgeAccess ? forgePublicOrigin : undefined,
+    mcpAuthorization: factoryAuth,
   });
   const observeRecoveredRuntimes = await runtimeController.recover();
   await workspaceSources.recover();
@@ -649,6 +689,22 @@ export async function createFactoryApplication() {
   await projectService.recover().catch(reportFailure("Registered Project recovery is unavailable"));
 
   const buildDirectory = factoryBuildDirectory();
+  const externalMCP = createExternalFactoryMCP({
+    database,
+    factoryAuth,
+    factoryOrigin,
+    workspaceSources,
+    workspaceSharing,
+    workspaceCommands,
+    workspaceFiles,
+    runtimeController,
+    workspaceCollaboration,
+    runtimeAccess,
+    workspaceSubmission,
+    runtimeHub,
+    projects: projectService,
+    writers: changeWriters,
+  });
   const planningCacheURL =
     process.env["FACTORY_ZERO_CACHE_PUBLIC_URL"] ??
     FACTORY_ZERO_CACHE_URL ??
@@ -737,6 +793,10 @@ export async function createFactoryApplication() {
         sources: workspaceSources,
         editors: developerEditors,
         revokeEditor: (userID) => developerIDEEdge.revokeUser(userID),
+        sharing: workspaceSharing,
+        collaboration: workspaceCollaboration,
+        submission: workspaceSubmission,
+        database,
       }),
       knowledge: createKnowledgeService({
         controller: knowledgeController,
@@ -788,6 +848,8 @@ export async function createFactoryApplication() {
     mcpConnections,
     mcpOAuthCallback,
     mcpSourceEndpoint,
+    externalMCP,
+    workspaceTransferRoutes,
     monitoringRoutes,
     monitoringWorker,
     observeRecoveredRuntimes,
@@ -813,7 +875,12 @@ export async function createFactoryApplication() {
     startFetch: serverFunctions.default.fetch,
     wikiSourceUpdates,
     workspaceSources,
+    workspaceSharing,
+    workspaceCommands,
     accessRevocation,
+    workspaceCollaboration,
+    workspaceSubmission,
+    workspaceFiles,
   };
 }
 export type FactoryApplication = Awaited<ReturnType<typeof createFactoryApplication>>;

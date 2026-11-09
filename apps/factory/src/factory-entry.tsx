@@ -3,12 +3,14 @@ import { defaultDesktopBackgroundKey } from "../../../packages/interface-domain/
 import { loadBootstrap } from "./bootstrap/client";
 import { plainErrorMessage } from "./command-error";
 import { SignIn } from "./sign-in";
+import { MCPAuthorization, mcpAuthorizationQuery } from "./mcp/authorization";
 
 const AuthenticatedFactory = lazy(async () => ({
   default: (await import("./factory")).AuthenticatedFactory,
 }));
 
 export function Factory() {
+  const authorization = mcpAuthorizationQuery(window.location.href);
   const bootstrap = createMemo(() => loadBootstrap());
   const [error, setError] = createSignal("");
   const authenticated = () => {
@@ -51,7 +53,15 @@ export function Factory() {
               }
             />
           </Match>
-          <Match when={authenticated()}>{(value) => <AuthenticatedFactory {...value()} />}</Match>
+          <Match when={authenticated()}>
+            {(value) =>
+              authorization ? (
+                <MCPAuthorization query={authorization} userName={value().session.user.name} />
+              ) : (
+                <AuthenticatedFactory {...value()} />
+              )
+            }
+          </Match>
         </Switch>
       </Loading>
     </Errored>

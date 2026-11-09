@@ -60,6 +60,7 @@ import {
   prefetchDeveloperWorkspaceChunks,
 } from "../workspace-chunks";
 import { WorkspaceTabbar, workspacePanelID } from "../workspace-tabbar";
+import { WorkspaceSharingBar } from "../workspace-sharing";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import { browserWarmupEnvironment, scheduleWarmup } from "../workspace-warmup";
 import type { DesktopMutation, FactoryDesktopProps, TicketDetail } from "./contracts";
@@ -717,6 +718,28 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
           }}
         />
         <Show when={ideMounted()}>
+          <Show
+            when={
+              model.workspaceView() === "ide" &&
+              model.workspaceVisible() &&
+              model.canDevelopProject()
+            }
+          >
+            <WorkspaceSharingBar
+              projectID={model.selectedProjectID()}
+              workspaceID={model.activeWorkspaceTab()?.workspaceID}
+              userID={model.bootstrap.session.user.id}
+              onOpen={(workspace) =>
+                model.openIDETarget({
+                  id: `shared:${workspace.workspaceID}`,
+                  label:
+                    workspace.kind === "ticket" ? workspace.name : `${workspace.name}'s workspace`,
+                  detail: "Shared source",
+                  workspaceId: workspace.workspaceID,
+                })
+              }
+            />
+          </Show>
           <DeveloperIDEWorkspace
             userID={model.bootstrap.session.user.id}
             projectID={model.selectedProjectID()}

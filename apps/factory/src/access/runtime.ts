@@ -145,6 +145,13 @@ export function createRuntimeAccess(
         if (grant.userID === userID && ids.has(grant.attemptID)) revoke(token);
       }
     },
+    async revokeWorkspaceMember(workspaceID: string, userID: string) {
+      const attempts = await database.client<{ id: string }[]>`
+        SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspaceID}`;
+      const ids = new Set(attempts.map((attempt) => attempt.id));
+      for (const [token, grant] of grants)
+        if (grant.userID === userID && ids.has(grant.attemptID)) revoke(token);
+    },
     async sweep() {
       for (const [token, grant] of grants) {
         if (!(await valid(grant))) revoke(token);
