@@ -905,6 +905,17 @@ test("an idle claim admits only the native Source drain and internal checkpoint 
       terminalRevision: 1,
     }),
   );
+  hub.message(
+    child,
+    JSON.stringify({
+      type: "hello",
+      role: "child",
+      commandCount: 0,
+      terminalCount: 0,
+      terminalBusy: 0,
+      terminalRevision: 1,
+    }),
+  );
   now = 1000;
   try {
     expect(hub.claimIdle("attempt", 100)).toBe(true);
@@ -1637,7 +1648,11 @@ describe("Runtime Connector recovery", () => {
     expect(sends).toBe(1);
     hub.message(
       child,
-      JSON.stringify({ type: "operation-response", operationId: input.operationId }),
+      JSON.stringify({
+        type: "operation-response",
+        operationId: input.operationId,
+        action: input.action,
+      }),
     );
     await expect(first).resolves.toBeUndefined();
   });

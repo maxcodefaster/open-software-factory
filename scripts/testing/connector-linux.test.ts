@@ -88,6 +88,7 @@ for (const [signal, code] of [
       const calls = await f.calls();
       const run = calls.find((args) => args[0] === "run");
       const name = run?.[(run?.indexOf("--name") ?? -1) + 1];
+      if (!name) throw new Error("Owned Connector fixture name was not recorded");
       expect(name).toMatch(/^factory-connector-check-[a-f0-9-]{36}$/);
       expect(calls).toContainEqual(["rm", "--force", name]);
       expect(calls).toContainEqual(["network", "rm", name]);

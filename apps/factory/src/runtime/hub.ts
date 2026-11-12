@@ -858,6 +858,9 @@ export class RuntimeHub {
   }
 
   async childOperation(attemptID: string, operation: Record<string, string>): Promise<void> {
+    const operationID = operation["operationId"];
+    if (operationID && this.#pendingChildOperations.has(operationID))
+      throw new Error("Runtime child operation is already pending");
     await this.childRequest(attemptID, operation);
   }
 
