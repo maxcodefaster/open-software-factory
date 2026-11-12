@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   type ConversationMode,
   type InterviewQuestion,
+  interviewQuestionInput,
   projectAgentAnswerOutput,
   projectAgentOutput,
   sourceCitationInput,
@@ -28,6 +29,8 @@ const citation = z.discriminatedUnion("source", [
 ]);
 const citations = z.array(citation).max(12).default([]);
 const [answer, question, round, requirement, epic, technicalDesign] = projectAgentOutput.options;
+const [singleChoice, multipleChoice] = interviewQuestionInput.options;
+const productInterviewQuestion = z.discriminatedUnion("type", [singleChoice, multipleChoice]);
 const planning = z.discriminatedUnion("kind", [
   answer.extend({ citations }),
   question.extend({ citations }),
@@ -36,8 +39,8 @@ const planning = z.discriminatedUnion("kind", [
   epic.extend({ citations }),
 ]);
 const interview = z.discriminatedUnion("kind", [
-  question.extend({ citations }),
-  round.extend({ citations }),
+  question.extend({ question: productInterviewQuestion, citations }),
+  round.extend({ questions: z.array(productInterviewQuestion).min(1).max(4), citations }),
   requirement.extend({ citations }),
 ]);
 const automaticInput = z.discriminatedUnion("kind", [

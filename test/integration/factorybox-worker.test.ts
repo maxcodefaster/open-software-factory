@@ -660,6 +660,77 @@ test("explicit operator recovery keeps one store and Source while admitting a di
   }
 }, 30_000);
 
+test("retained recovery admits cleanup-only failures after confirmed worker termination without rewriting history", async () => {
+  const f = await admittedWorker();
+  try {
+    const attemptID = await f.attempt("failed");
+    await f.database.client`UPDATE factory.runtime_attempt SET state='cleanup-failed',
+      factorybox_admission_id=${f.original.admissionID},failure='Retained backing retirement is unconfirmed'
+      WHERE id=${attemptID}`;
+    const before = [
+      ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`),
+    ];
+    const request = {
+      actorID: f.actorID,
+      requestID: crypto.randomUUID(),
+      storage: "retain" as const,
+    };
+    const result = await recoverFactoryboxWorker(
+      f.database,
+      f.kube.kubernetes,
+      profile,
+      runtimeImage,
+      request,
+    );
+    expect(
+      await recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, request),
+    ).toEqual(result);
+    const current = await factoryboxAllocation(f.database.client);
+    expect(current.claimUID).toBe(f.original.claimUID);
+    expect(current.sourceClaimUID).toBe(f.original.sourceClaimUID);
+    expect(current.namespaceUID).toBe(f.original.namespaceUID);
+    expect(current.podUID).toBeNull();
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`),
+    ]).toEqual(before);
+    expect((await retainedFactoryboxProfile(f.database.client)).retainedStore?.storeID).toBe(
+      f.identity.storeID,
+    );
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
+test("cleanup-only recovery still refuses fresh storage, live workers and unfinished execution", async () => {
+  for (const scenario of ["fresh", "live-worker", "starting"] as const) {
+    const f = await admittedWorker();
+    try {
+      const attemptID = await f.attempt("starting");
+      await f.database.client`UPDATE factory.runtime_attempt SET
+        state=${scenario === "starting" ? "starting" : "cleanup-failed"},
+        factorybox_admission_id=${f.original.admissionID} WHERE id=${attemptID}`;
+      if (scenario === "live-worker") Reflect.set(f.pod, "status", { phase: "Running" });
+      const before = [
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ];
+      await expect(
+        recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, {
+          actorID: f.actorID,
+          requestID: crypto.randomUUID(),
+          storage: scenario === "fresh" ? "fresh" : "retain",
+        }),
+      ).rejects.toThrow(
+        scenario === "live-worker" ? "Stop the original worker" : "settle through Stop",
+      );
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ]).toEqual(before);
+    } finally {
+      await f.dispose();
+    }
+  }
+}, 60_000);
+
 test("explicit fresh storage recovery admits a new store without resizing or moving retained Source", async () => {
   const f = await admittedWorker();
   try {

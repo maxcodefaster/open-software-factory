@@ -1,0 +1,224 @@
+diff --git a/dist/esm/request-response.js b/dist/esm/request-response.js
+index 4ce23fa..32e783e 100644
+--- a/dist/esm/request-response.js
++++ b/dist/esm/request-response.js
+@@ -6,7 +6,7 @@ var globalObj = globalThis;
+ if (!globalObj[GLOBAL_EVENT_STORAGE_KEY]) globalObj[GLOBAL_EVENT_STORAGE_KEY] = new AsyncLocalStorage();
+ var eventStorage = globalObj[GLOBAL_EVENT_STORAGE_KEY];
+ function isPromiseLike(value) {
+-	return typeof value.then === "function";
++	return (typeof value === "object" || typeof value === "function") && value !== null && typeof value.then === "function";
+ }
+ function getSetCookieValues(headers) {
+ 	const headersWithSetCookie = headers;
+@@ -24,12 +24,23 @@ function mergeEventResponseHeaders(response, event) {
+ 	for (const cookie of eventSetCookies) response.headers.append("set-cookie", cookie);
+ }
+ function attachResponseHeaders(value, event) {
+-	if (isPromiseLike(value)) return value.then((resolved) => {
+-		if (resolved instanceof Response) mergeEventResponseHeaders(resolved, event);
+-		return resolved;
+-	});
+-	if (value instanceof Response) mergeEventResponseHeaders(value, event);
+-	return value;
++	if (isPromiseLike(value)) return Promise.resolve(value).then((resolved) => {
++		const response = ensureResponse(resolved);
++		mergeEventResponseHeaders(response, event);
++		return response;
++	}, (error) => attachResponseHeaders(handleResponseError(error), event));
++	const response = ensureResponse(value);
++	mergeEventResponseHeaders(response, event);
++	return response;
++}
++function ensureResponse(value) {
++	if (value instanceof Response) return value;
++	return new Response("Internal Server Error", { status: 500 });
++}
++function handleResponseError(error) {
++	if (error instanceof Response) return error;
++	if (error instanceof Error) throw error;
++	return new Response("Internal Server Error", { status: 500 });
+ }
+ function requestHandler(handler) {
+ 	return (request, requestOpts) => {
+@@ -43,7 +54,13 @@ function requestHandler(handler) {
+ 			});
+ 			throw error;
+ 		}
+-		return toResponse(attachResponseHeaders(eventStorage.run({ h3Event }, () => handler(request, requestOpts)), h3Event), h3Event);
++		let response;
++		try {
++			response = eventStorage.run({ h3Event }, () => handler(request, requestOpts));
++		} catch (error) {
++			response = handleResponseError(error);
++		}
++		return toResponse(attachResponseHeaders(response, h3Event), h3Event);
+ 	};
+ }
+ function getH3Event() {
+@@ -227,4 +244,4 @@ function getValidatedQuery(schema) {
+ //#endregion
+ export { clearResponseHeaders, clearSession, deleteCookie, getCookie, getCookies, getRequest, getRequestHeader, getRequestHeaders, getRequestHost, getRequestIP, getRequestProtocol, getRequestUrl, getResponse, getResponseHeader, getResponseHeaders, getResponseStatus, getSession, getValidatedQuery, removeResponseHeader, requestHandler, sealSession, setCookie, setResponseHeader, setResponseHeaders, setResponseStatus, unsealSession, updateSession, useSession };
+ 
+-//# sourceMappingURL=request-response.js.map
+\ No newline at end of file
++//# sourceMappingURL=request-response.js.map
+diff --git a/dist/esm/server-functions-handler.js b/dist/esm/server-functions-handler.js
+index c493774..35c014d 100644
+--- a/dist/esm/server-functions-handler.js
++++ b/dist/esm/server-functions-handler.js
+@@ -50,20 +50,16 @@ var handleServerAction = async ({ request, context, serverFnId }) => {
+ 					const payloadParam = url.searchParams.get("payload");
+ 					if (payloadParam && payloadParam.length > MAX_PAYLOAD_SIZE) throw new Error("Payload too large");
+ 					const payload = payloadParam ? parsePayload(JSON.parse(payloadParam)) : {};
+-					payload.context = safeObjectMerge(payload.context, context);
+-					payload.method = methodUpper;
+-					return await action(payload);
++					return await action({ data: payload?.data, context: safeObjectMerge(payload?.context, context), method: methodUpper });
+ 				}
+ 				let jsonPayload;
+ 				if (contentType?.includes("application/json")) jsonPayload = await request.json();
+ 				const payload = jsonPayload ? parsePayload(jsonPayload) : {};
+-				payload.context = safeObjectMerge(payload.context, context);
+-				payload.method = methodUpper;
+-				return await action(payload);
++				return await action({ data: payload?.data, context: safeObjectMerge(payload?.context, context), method: methodUpper });
+ 			})();
+-			const unwrapped = res.result || res.error;
++			const unwrapped = res.error !== void 0 ? res.error : res.result;
+ 			if (isNotFound(res)) res = isNotFoundResponse(res);
+-			if (!isServerFn) return unwrapped;
++			if (!isServerFn && (unwrapped instanceof Response || unwrapped === null || typeof unwrapped !== "object")) return unwrapped;
+ 			if (unwrapped instanceof Response) {
+ 				if (isRedirect(unwrapped)) return unwrapped;
+ 				unwrapped.headers.set(X_TSS_RAW_RESPONSE, "true");
+@@ -213,4 +209,4 @@ function isNotFoundResponse(error) {
+ //#endregion
+ export { handleServerAction };
+ 
+-//# sourceMappingURL=server-functions-handler.js.map
+\ No newline at end of file
++//# sourceMappingURL=server-functions-handler.js.map
+diff --git a/src/request-response.ts b/src/request-response.ts
+index e0ad8a3..6c52ed0 100644
+--- a/src/request-response.ts
++++ b/src/request-response.ts
+@@ -65,8 +65,8 @@ type HeadersWithGetSetCookie = Headers & {
+ 
+ type MaybePromise<T> = T | Promise<T>
+ 
+-function isPromiseLike<T>(value: MaybePromise<T>): value is Promise<T> {
+-  return typeof (value as Promise<T>).then === 'function'
++function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
++  return (typeof value === 'object' || typeof value === 'function') && value !== null && typeof (value as PromiseLike<unknown>).then === 'function'
+ }
+ 
+ function getSetCookieValues(headers: Headers): Array<string> {
+@@ -98,24 +98,32 @@ function mergeEventResponseHeaders(response: Response, event: H3Event): void {
+   }
+ }
+ 
+-function attachResponseHeaders<T>(
+-  value: MaybePromise<T>,
++function attachResponseHeaders(
++  value: unknown,
+   event: H3Event,
+-): MaybePromise<T> {
++): MaybePromise<Response> {
+   if (isPromiseLike(value)) {
+-    return value.then((resolved) => {
+-      if (resolved instanceof Response) {
+-        mergeEventResponseHeaders(resolved, event)
+-      }
+-      return resolved
+-    })
++    return Promise.resolve(value).then((resolved) => {
++      const response = ensureResponse(resolved)
++      mergeEventResponseHeaders(response, event)
++      return response
++    }, (error) => attachResponseHeaders(handleResponseError(error), event))
+   }
+ 
+-  if (value instanceof Response) {
+-    mergeEventResponseHeaders(value, event)
+-  }
++  const response = ensureResponse(value)
++  mergeEventResponseHeaders(response, event)
++  return response
++}
++
++function ensureResponse(value: unknown): Response {
++  if (value instanceof Response) return value
++  return new Response('Internal Server Error', { status: 500 })
++}
+ 
+-  return value
++function handleResponseError(error: unknown): Response {
++  if (error instanceof Response) return error
++  if (error instanceof Error) throw error
++  return new Response('Internal Server Error', { status: 500 })
+ }
+ 
+ export function requestHandler<TRegister = unknown>(
+@@ -135,9 +143,12 @@ export function requestHandler<TRegister = unknown>(
+       throw error
+     }
+ 
+-    const response = eventStorage.run({ h3Event }, () =>
+-      handler(request, requestOpts),
+-    )
++    let response: unknown
++    try {
++      response = eventStorage.run({ h3Event }, () => handler(request, requestOpts))
++    } catch (error) {
++      response = handleResponseError(error)
++    }
+     return h3_toResponse(attachResponseHeaders(response, h3Event), h3Event)
+   }
+ }
+diff --git a/src/server-functions-handler.ts b/src/server-functions-handler.ts
+index e7d961d..6ee5754 100644
+--- a/src/server-functions-handler.ts
++++ b/src/server-functions-handler.ts
+@@ -142,10 +142,11 @@ export const handleServerAction = async ({
+           const payload: any = payloadParam
+             ? parsePayload(JSON.parse(payloadParam))
+             : {}
+-          payload.context = safeObjectMerge(payload.context, context)
+-          payload.method = methodUpper
+-          // Send it through!
+-          return await action(payload)
++          return await action({
++            data: payload?.data,
++            context: safeObjectMerge(payload?.context, context),
++            method: methodUpper,
++          })
+         }
+ 
+         let jsonPayload
+@@ -154,18 +155,20 @@ export const handleServerAction = async ({
+         }
+ 
+         const payload = jsonPayload ? parsePayload(jsonPayload) : {}
+-        payload.context = safeObjectMerge(payload.context, context)
+-        payload.method = methodUpper
+-        return await action(payload)
++        return await action({
++          data: payload?.data,
++          context: safeObjectMerge(payload?.context, context),
++          method: methodUpper,
++        })
+       })()
+ 
+-      const unwrapped = res.result || res.error
++      const unwrapped = res.error !== undefined ? res.error : res.result
+ 
+       if (isNotFound(res)) {
+         res = isNotFoundResponse(res)
+       }
+ 
+-      if (!isServerFn) {
++      if (!isServerFn && (unwrapped instanceof Response || unwrapped === null || typeof unwrapped !== 'object')) {
+         return unwrapped
+       }
+ 

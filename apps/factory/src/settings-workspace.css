@@ -5,6 +5,10 @@
   overflow: hidden;
   grid-template-columns: var(--history-panel-width) minmax(0, 1fr);
 }
+
+.settings-content .work-settings {
+  padding: var(--space-3) var(--space-6) var(--space-6);
+}
 .settings-sidebar {
   min-height: 0;
   overflow-y: auto;
@@ -12,7 +16,7 @@
   border-right: 1px solid var(--line-subtle);
 }
 .settings-sidebar h2 {
-  margin: 0 var(--space-2) var(--space-6);
+  margin: 0 var(--space-2) var(--space-4);
   font-size: var(--text-lg);
   font-weight: var(--weight-medium);
 }
@@ -30,10 +34,11 @@
   padding-inline: var(--space-2);
   text-overflow: ellipsis;
 }
-.settings-scope-hint {
-  margin: calc(-1 * var(--space-2)) var(--space-2) var(--space-4);
-  font-size: var(--text-xs);
-  color: var(--color-ink-muted);
+
+.settings-navigation-groups > [data-settings-scope="libraries"]:not(:first-child) {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line-subtle);
 }
 .settings-setup-recovery {
   margin: var(--space-4) var(--space-6) var(--space-6);
@@ -204,6 +209,7 @@
       > .settings-configuration-host:not([hidden])
         .skill-library:not([data-monitoring="true"])
         > .skill-library-heading:not([hidden])
+        .workspace-navigation-trigger
     )
     > .settings-content-heading,
   .settings-content:has(> .settings-configuration-host:not([hidden]) .input-overview-heading)

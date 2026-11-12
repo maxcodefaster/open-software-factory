@@ -44,6 +44,7 @@ test("App grants bind the exact declared App and expire obsolete path cookies on
         .every((cookie) => cookie.startsWith("factory_runtime_access=; Path=/runtime/")),
     ).toBe(true);
     expect(response.headers.get("location")).not.toContain("factory-grant");
+    expect(new URL(response.headers.get("location") ?? "").pathname).toBe("/");
     expect(access.has(token)).toBe(false);
     const cookie = fixtureValue(cookies.at(0), "App credential cookie").split(";")[0] ?? "";
     expect(cookie).not.toBe("");
@@ -55,6 +56,23 @@ test("App grants bind the exact declared App and expire obsolete path cookies on
     expect(await access.authorize(request, owned.attemptID, "app", "app")).toBeUndefined();
     expect(await access.authorize(request, owned.attemptID, "app", "app-other")).toBeUndefined();
     expect(await access.authorize(request, owned.attemptID, "ide")).toBeUndefined();
+    const nestedToken = await access.issue(grant);
+    const nested = fixtureValue(
+      await access.redeem(
+        new URL(
+          `${origin}/runtime/${owned.attemptID}/preview/app-forms/drafts/owned?revision=1&route=%2Fforms%2F&factory-grant=${nestedToken}`,
+        ),
+        owned.attemptID,
+        "app",
+        "/",
+        "app-forms",
+      ),
+      "nested App response",
+    );
+    const nestedLocation = new URL(nested.headers.get("location") ?? "");
+    expect(nestedLocation.pathname).toBe("/drafts/owned");
+    expect(nestedLocation.searchParams.get("revision")).toBe("1");
+    expect(nestedLocation.searchParams.get("route")).toBe("/forms/");
     await owned.database.client`DELETE FROM auth.session WHERE id=${sessionID}`;
     expect(await access.authorize(request, owned.attemptID, "app", "app-forms")).toBeUndefined();
     expect(revoked).toContain(admitted);

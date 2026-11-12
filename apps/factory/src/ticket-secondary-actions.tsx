@@ -1,4 +1,4 @@
-import { Portal } from "@solidjs/web";
+import { type JSX, Portal } from "@solidjs/web";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Epic } from "./api-contracts";
 import { plainFailureMessage } from "./command-error";
@@ -7,7 +7,7 @@ import { bindPopoverKeyboard } from "./popover-keyboard";
 import type { TicketHeaderAction } from "./ticket-action-bar";
 import type { TicketDependenciesProps } from "./ticket-dependencies";
 
-type ActionView = "actions" | "epic" | "dependency" | "diagnostics";
+type ActionView = "actions" | "epic" | "dependency" | "diagnostics" | "request";
 
 export function TicketSecondaryActions(props: {
   epics: readonly Epic[];
@@ -28,7 +28,7 @@ export function TicketSecondaryActions(props: {
   converted: boolean;
   onCodingOptions?: (() => void) | undefined;
   codingOptionsDisabled?: boolean | undefined;
-  onOpenIDE?: (() => void) | undefined;
+  requestDetails?: JSX.Element;
   reviewSourceURL?: string | undefined;
   onReloadReview?: (() => void) | undefined;
   compactActions?: readonly TicketHeaderAction[];
@@ -120,7 +120,9 @@ export function TicketSecondaryActions(props: {
                     ? "Assign to Epic"
                     : view() === "dependency"
                       ? "Add dependency"
-                      : "Diagnostics"
+                      : view() === "request"
+                        ? "Request details"
+                        : "Diagnostics"
               }
             >
               <Show when={view() === "actions"}>
@@ -155,18 +157,15 @@ export function TicketSecondaryActions(props: {
                     <span>Reload review</span>
                   </button>
                 </Show>
-                <Show when={props.onOpenIDE}>
+                <Show when={props.requestDetails}>
                   <button
                     type="button"
                     role="menuitem"
                     class="quiet-button"
-                    onClick={() => {
-                      finish();
-                      props.onOpenIDE?.();
-                    }}
+                    onClick={() => show("request")}
                   >
-                    <Icon name="ide" />
-                    <span>Open IDE</span>
+                    <Icon name="ticket" />
+                    <span>Request details</span>
                   </button>
                 </Show>
                 <Show when={props.reviewSourceURL}>
@@ -303,9 +302,12 @@ export function TicketSecondaryActions(props: {
                       ? "Assign to Epic"
                       : view() === "dependency"
                         ? "Add dependency"
-                        : "Diagnostics"}
+                        : view() === "request"
+                          ? "Request details"
+                          : "Diagnostics"}
                   </span>
                 </header>
+                <Show when={view() === "request"}>{props.requestDetails}</Show>
                 <Show when={view() === "epic" || view() === "dependency"}>
                   <div class="ticket-picker-search">
                     <Icon name="search" />

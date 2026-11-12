@@ -149,7 +149,7 @@ for (const restore of [false, true])
         await openTicket(developer);
         const cold = performance.now();
         await developer.getByRole("button", { name: "Ticket actions", exact: true }).click();
-        await developer.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+        await developer.getByRole("button", { name: "Open IDE", exact: true }).click();
         const frame = developer.locator('iframe[title="Factory IDE"]');
         const ide = frame.contentFrame();
         await expect(ide.locator("#theia-app-shell")).toBeVisible({ timeout: 600_000 });
@@ -260,7 +260,7 @@ for (const restore of [false, true])
           ).toHaveCount(0);
           await developer.getByRole("tab", { name: title, exact: true }).click();
           await developer.getByRole("button", { name: "Ticket actions", exact: true }).click();
-          await developer.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+          await developer.getByRole("button", { name: "Open IDE", exact: true }).click();
           await expect(ide.locator("#theia-app-shell")).toBeVisible({ timeout: 600_000 });
           await expect(ide.locator(".theia-preload")).toHaveCount(0);
           await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();

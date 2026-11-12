@@ -53,18 +53,20 @@ export default function RichDocumentEditor(props: RichDocumentSurfaceProps) {
       onEditor?.(instance.element, instance);
     },
   );
+  // Read lazy JSX properties in the component owner, never for the first time
+  // inside onSettled, where Solid cannot create their compiler-generated memos.
+  const initial = untrack(() => ({
+    value: props.value,
+    editable: props.editable,
+    label: props.label,
+    className: `${props.class}${props.editable ? " inline-editor-surface" : ""}`,
+    field: props.field,
+    ...(props.placeholder ? { placeholder: props.placeholder } : {}),
+  }));
   onSettled(() => {
     if (!host || !root) return;
     // The engine is mounted once. Value, permissions and accessibility metadata
     // above remain reactive; event callbacks read their current handlers.
-    const initial = untrack(() => ({
-      value: props.value,
-      editable: props.editable,
-      label: props.label,
-      className: `${props.class}${props.editable ? " inline-editor-surface" : ""}`,
-      field: props.field,
-      ...(props.placeholder ? { placeholder: props.placeholder } : {}),
-    }));
     const instance = createDocumentEditor({
       host,
       ...initial,

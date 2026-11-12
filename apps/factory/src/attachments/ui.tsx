@@ -32,7 +32,7 @@ import {
   restoreAttachmentContent,
   splitAttachmentContent,
 } from "./composer";
-import { AttachmentFiles, AttachmentHelp } from "./controls";
+import { AttachmentFiles } from "./controls";
 import "./attachments.css";
 
 type FileTransfer = {
@@ -189,6 +189,7 @@ export function AttachmentPicker(props: {
   remove?(id: string): void;
   ref?(handle: AttachmentPickerHandle): void;
 }) {
+  const helpID = `attachment-help-${crypto.randomUUID()}`;
   const project = useAttachmentProject();
   let scope: Scope | undefined;
   try {
@@ -652,7 +653,8 @@ export function AttachmentPicker(props: {
             onClick={() => choose()}
             disabled={blocked()}
             aria-label="Add image or file"
-            title="Add image or file"
+            aria-describedby={props.horizontal ? helpID : undefined}
+            title={`Add image or file. PNG, JPG, WebP, PDF, DOCX, TXT and Markdown${sizeRestrictions()}. ${privacy()}`}
           >
             <Icon name="attachment" />
             <span class={props.horizontal ? "sr-only" : undefined}>
@@ -676,13 +678,9 @@ export function AttachmentPicker(props: {
               {selectionSummary()}
             </small>
           </Show>
-          <AttachmentHelp>
-            <strong>Attach images or documents</strong>
-            <p class="attachment-restrictions">
-              PNG, JPG, WebP, PDF, DOCX, TXT and Markdown{sizeRestrictions()}
-            </p>
-            <p>{privacy()}</p>
-          </AttachmentHelp>
+          <span class="sr-only" id={helpID}>
+            PNG, JPG, WebP, PDF, DOCX, TXT and Markdown{sizeRestrictions()}. {privacy()}
+          </span>
         </Show>
         <Show when={props.showButton !== false && !props.horizontal}>
           <small class="attachment-restrictions">

@@ -207,7 +207,9 @@ export function createTicketDocumentController(
         await sql`INSERT INTO factory.ticket_document_revision(
           id, ticket_id, ordinal, title, description, canonical_content, content_digest, requirement_revision_id, input_digest, created_by, author_kind, proposal_entry_id)
           VALUES (${input.commandId}, ${ticketID}, ${ordinal}, ${input.title}, ${input.description}, ${canonical}, ${digest(canonical)}, ${revisionID}, ${inputDigest}, ${userID}, ${input.proposalEntryId ? "ai" : "human"}, ${input.proposalEntryId ?? null})`;
-        await sql`UPDATE factory.ticket SET title = ${input.title}, description = ${input.description}, version = version + 1, updated_at = now() WHERE id = ${ticketID}`;
+        await sql`UPDATE factory.ticket SET title = ${input.title}, description = ${input.description},
+          state = CASE WHEN state IN ('inbox','backlog') AND ${complete.success} THEN 'ready' ELSE state END,
+          version = version + 1, updated_at = now() WHERE id = ${ticketID}`;
         if (fullPlanningSource && revisionID)
           await continuePlanning?.(sql, {
             commandID: input.commandId,

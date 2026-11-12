@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends ca-certifica
 FROM tools AS build
 WORKDIR /opt/factory
 COPY package.json bun.lock ./
+COPY patches ./patches
 RUN bun install --frozen-lockfile
 COPY . .
 RUN NODE_ENV=production bun run factory:build
@@ -30,6 +31,7 @@ RUN NODE_ENV=production bun run factory:build
 FROM tools AS dependencies
 WORKDIR /opt/factory
 COPY package.json bun.lock ./
+COPY patches ./patches
 RUN bun install --production --frozen-lockfile
 
 FROM tools AS factory

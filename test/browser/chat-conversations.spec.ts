@@ -190,13 +190,13 @@ test("saved chat stays tidy across screen sizes, long Markdown and a growing dra
       await expect(draft).toHaveValue("Keep the current navigation.");
       await page.screenshot({ path: `${evidence}/long-content-${width}.png` });
     }
-    const attachmentHelp = panel.getByLabel("Attachment formats and limits", { exact: true });
-    await attachmentHelp.click();
-    await expect(
-      panel.getByText("Only you can access these files, including after sending."),
-    ).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(attachmentHelp).toBeFocused();
+    const attachmentButton = panel.getByRole("button", { name: "Add image or file", exact: true });
+    await expect(attachmentButton).toHaveAccessibleDescription(
+      /Only you can access these files, including after sending\./,
+    );
+    await attachmentButton.focus();
+    await expect(attachmentButton).toBeFocused();
+    await expect(panel.getByLabel("Attachment formats and limits", { exact: true })).toHaveCount(0);
     expect(commissioned).toBe(0);
   } finally {
     await deleteFactoryProject(projectID, database);

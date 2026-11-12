@@ -433,6 +433,7 @@ for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(`${origin}/learning.html?flow`);
     const flow = page.getByRole("region", { name: "Learning history overview" });
+    await page.locator(".work-history > summary").click();
     const detail = flow.locator(".learning-flow-detail");
     await expect(flow.getByRole("button", { pressed: true })).toHaveAccessibleName(
       "Oct 26 Read sources before asking again Adopted v4",
@@ -601,6 +602,7 @@ test("stream selection survives local updates and reaches evidence by keyboard",
 }) => {
   await page.goto(`${origin}/learning.html?flow`);
   const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   const pending = flow.getByRole("button", { name: /Clarify incomplete Input/ });
   const button = await pending.elementHandle();
   await pending.focus();
@@ -624,18 +626,22 @@ test("stream has truthful empty, unchanged, uncertain and bounded history states
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 1000 });
-  const flow = page.getByRole("region", { name: "Learning history overview" });
   await page.goto(`${origin}/learning.html?empty`);
+  const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   await expect(flow.locator(".learning-flow-node")).toHaveCount(0);
   await expect(flow.getByRole("img")).toHaveCount(0);
   await expect(flow).toContainText("Opening this page starts no AI call");
   await flow.screenshot({ path: `${directory}/flow-empty-390.png` });
   await page.goto(`${origin}/learning.html?calibration`);
+  await page.locator(".work-history > summary").click();
   await expect(flow.locator(".learning-flow-node")).toHaveCount(0);
   await page.goto(`${origin}/learning.html?no-change`);
+  await page.locator(".work-history > summary").click();
   await expect(flow.locator(".learning-flow-node")).toHaveCount(1);
   await expect(flow.locator(".learning-flow-outcome")).toHaveText("No change proposed");
   await page.goto(`${origin}/learning.html?flow&uncertain&readonly&paused`);
+  await page.locator(".work-history > summary").click();
   await flow.getByRole("button", { name: /Shorten source citations/ }).click();
   await expect(flow.locator(".learning-flow-outcome")).toHaveText("Unconfirmed");
   await expect(flow.locator(".learning-flow-description")).toContainText("No automatic retry");
@@ -645,6 +651,7 @@ test("stream has truthful empty, unchanged, uncertain and bounded history states
   ).toBeEnabled();
   await flow.screenshot({ path: `${directory}/flow-uncertain-390.png` });
   await page.goto(`${origin}/learning.html?flow&many&long`);
+  await page.locator(".work-history > summary").click();
   await expect(flow).toContainText("Latest 4 of 7 records");
   await expect(flow.locator(".learning-flow-node")).toHaveCount(4);
   await expect(flow.locator(".learning-flow-detail h4")).toContainText(
@@ -668,6 +675,7 @@ test("stream touch targets remain usable at 320px without decorative motion", as
     const page = await context.newPage();
     await page.goto(`${origin}/learning.html?flow`);
     const flow = page.getByRole("region", { name: "Learning history overview" });
+    await page.locator(".work-history > summary").click();
     await flow.getByRole("button", { name: /Clarify incomplete Input/ }).tap();
     await expect(flow.locator(".learning-flow-outcome")).toHaveText("Proposed");
     const targets = await flow.locator("button").evaluateAll((buttons) =>
@@ -697,6 +705,7 @@ test("an unavailable applied revision keeps its source review inspectable", asyn
   await page.setViewportSize({ width: 390, height: 1000 });
   await page.goto(`${origin}/learning.html?flow&missing-revision`);
   const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   await expect(flow.locator(".learning-flow-outcome")).toHaveText("Revision unavailable");
   await expect(flow.locator(".learning-flow-description")).toContainText(
     "exact applied revision is not included",
@@ -715,6 +724,7 @@ test("hover previews the record and its wave segment without changing selection"
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${origin}/learning.html?flow`);
   const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   const field = flow.locator(".learning-flow-field");
   const selected = await field.getAttribute("data-active-record");
   const kept = flow.getByRole("button", { name: /Shorten source citations/ });
@@ -746,6 +756,7 @@ test("keyboard previews remain non-modal and selection exposes the same informat
 }) => {
   await page.goto(`${origin}/learning.html?flow`);
   const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   const popup = flow.locator(".learning-flow-preview");
   const pending = flow.getByRole("button", { name: /Clarify incomplete Input/ });
   await flow.getByRole("button", { name: /Read sources before asking again/ }).hover();
@@ -781,6 +792,7 @@ test("the stream reflows on live resizing and dismisses obsolete hover geometry"
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto(`${origin}/learning.html?flow`);
   const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   await flow.getByRole("button", { name: /Shorten source citations/ }).hover();
   await expect(flow.locator(".learning-flow-preview")).toBeVisible();
   for (const width of [640, 320, 1000]) {
@@ -835,6 +847,7 @@ test("history replacement removes previews and adapts from no records to a full 
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${origin}/learning.html?flow&refresh`);
   const flow = page.getByRole("region", { name: "Learning history overview" });
+  await page.locator(".work-history > summary").click();
   await flow.getByRole("button", { name: /Shorten source citations/ }).hover();
   await expect(flow.locator(".learning-flow-preview")).toBeVisible();
   // Dispatch the fixture's incoming data update without moving the pointer away first.
@@ -864,6 +877,7 @@ test("motion is a finite interaction response and respects reduced motion", asyn
     const page = await context.newPage();
     await page.goto(`${origin}/learning.html?flow&refresh`);
     const flow = page.getByRole("region", { name: "Learning history overview" });
+    await page.locator(".work-history > summary").click();
     await expect(flow.locator(".learning-flow-trace")).toHaveCount(0);
     await flow.getByRole("button", { name: /Shorten source citations/ }).hover();
     const trace = flow.locator(".learning-flow-trace");

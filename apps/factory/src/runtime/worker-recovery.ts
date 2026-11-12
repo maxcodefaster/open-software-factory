@@ -135,7 +135,8 @@ export async function recoverFactoryboxWorker(
           if (
             (
               await transaction`SELECT id FROM factory.runtime_attempt
-              WHERE factorybox_admission_id=${current.admissionID} AND state NOT IN ('failed','stopped') LIMIT 1`
+               WHERE factorybox_admission_id=${current.admissionID} AND state NOT IN ('failed','stopped')
+                 AND NOT (${storage === "retain"} AND state='cleanup-failed') LIMIT 1`
             ).length ||
             (
               await transaction`SELECT id FROM factory.execution_slot
@@ -143,6 +144,9 @@ export async function recoverFactoryboxWorker(
             ).length
           )
             throw refused("Worker recovery requires all prior execution to settle through Stop");
+          // A terminal original Pod cannot execute these cleanup-only attempts.
+          // Retaining the exact store lets the successor observe their pending
+          // retirement. It neither declares cleanup successful nor releases data.
           const next = factoryboxRuntimeProfile.parse(configured);
           if (next.nodeName !== current.nodeName || next.architecture !== profile.architecture)
             throw refused(

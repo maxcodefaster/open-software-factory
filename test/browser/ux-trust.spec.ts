@@ -1651,7 +1651,7 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
   // Build follows the explicit IDE target, not Ticket selection alone. The
   // source service is intentionally absent in this controller-only UI fixture.
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   const panel = page.locator(".agent-panel");
   const status = panel.locator(".agent-state");
   const draft = panel.getByLabel("Message conversation");
@@ -2099,7 +2099,7 @@ test("keeps Build ready, working and stopped states compact across workspace wid
     .filter({ hasText: "Build state visual check" })
     .click();
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   for (const nextState of ["idle", "working", "stopped"] as const) {
     state = nextState;
     if (state === "idle") {
@@ -2655,6 +2655,15 @@ test("uses readable workspace tabs with keyboard navigation and an accessible ov
   const tabs = page.getByRole("tablist", { name: "Open workspace views" });
   await expect(tabs).toBeVisible({ timeout: 5_000 });
   await expect(tabs.getByRole("tab")).toHaveCount(9);
+  const tabScroller = page.locator(".workspace-tabs");
+  await tabScroller.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+  await tabScroller.hover();
+  await page.mouse.wheel(0, 400);
+  await expect.poll(() => tabScroller.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await page.mouse.wheel(0, -400);
+  await expect.poll(() => tabScroller.evaluate((element) => element.scrollLeft)).toBe(0);
   const first = tabs.getByRole("tab", { name: tabTitle(1), exact: true });
   await expect(first).toHaveAttribute("title", tabTitle(1));
   expect(

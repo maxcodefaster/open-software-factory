@@ -242,7 +242,6 @@ function Surface() {
               setAction("Technical design saved");
               return true;
             }}
-            onWriteRequirements={noop}
             onSaveDocument={async () => {
               if (query.has("proposal"))
                 setCommands((value) => ({ ...value, saves: value.saves + 1 }));

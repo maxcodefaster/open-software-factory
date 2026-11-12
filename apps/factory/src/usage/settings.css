@@ -10,13 +10,6 @@
   line-height: var(--leading-body);
   margin: 0;
 }
-.usage-section-title {
-  margin: var(--space-4) 0 0;
-  padding-top: var(--space-5);
-  border-top: 1px solid var(--line-subtle);
-  font-size: var(--text-lg);
-  font-weight: var(--weight-medium);
-}
 .usage-totals {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

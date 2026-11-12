@@ -1,44 +1,45 @@
 import { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
-import { bindViewContribution } from "@theia/core/lib/browser/shell/view-contribution";
-import { WidgetFactory } from "@theia/core/lib/browser/widget-manager";
-import { ApplicationShellOptions } from "@theia/core/lib/browser/shell/application-shell";
 import { LabelProviderContribution } from "@theia/core/lib/browser/label-provider";
+import { ApplicationShellOptions } from "@theia/core/lib/browser/shell/application-shell";
+import { bindViewContribution } from "@theia/core/lib/browser/shell/view-contribution";
 import { StatusBar, StatusBarImpl } from "@theia/core/lib/browser/status-bar/status-bar";
-import { ContainerModule } from "@theia/core/shared/inversify";
+import { WidgetFactory } from "@theia/core/lib/browser/widget-manager";
 import { ResourceResolver } from "@theia/core/lib/common/resource";
+import { ContainerModule } from "@theia/core/shared/inversify";
 import { FileServiceContribution } from "@theia/filesystem/lib/browser/file-service";
-import { SearchInWorkspaceServer } from "@theia/search-in-workspace/lib/common/search-in-workspace-interface";
-import { SearchInWorkspaceClientImpl } from "@theia/search-in-workspace/lib/browser/search-in-workspace-service";
-import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
-import { createFileNavigatorContainer } from "@theia/navigator/lib/browser/navigator-container";
-import { FileNavigatorWidget } from "@theia/navigator/lib/browser/navigator-widget";
-import { FileNavigatorTree } from "@theia/navigator/lib/browser/navigator-tree";
-import { FileNavigatorModel } from "@theia/navigator/lib/browser/navigator-model";
-import { FactoryWorkspaceNavigator } from "./factory-workspace-navigator";
-import { FactoryWorkspaceTree } from "./factory-workspace-tree";
-import { FactoryWorkspaceLabels } from "./factory-workspace-labels";
-import { FactoryStatusBar } from "./factory-status-bar";
-import { FactoryWorkspaceSelection } from "./factory-workspace-selection";
-import { FactorySourceClient } from "./factory-source-client";
-import { FactoryWorkspaceFileContribution, FactoryWorkspaceFiles } from "./factory-workspace-files";
-import { FactoryWorkspaceSearch } from "./factory-workspace-search";
-import { FactoryDiagnosticsContribution } from "./factory-diagnostics";
-import { FactoryLanguageTools } from "./factory-language-tools";
 import { LanguageGrammarDefinitionContribution } from "@theia/monaco/lib/browser/textmate/textmate-contribution";
-import { FactoryLanguageGrammars } from "./factory-language-grammars";
-import { FactoryChromeContribution } from "./factory-chrome";
+import { createFileNavigatorContainer } from "@theia/navigator/lib/browser/navigator-container";
+import { FileNavigatorModel } from "@theia/navigator/lib/browser/navigator-model";
+import { FileNavigatorTree } from "@theia/navigator/lib/browser/navigator-tree";
+import { FileNavigatorWidget } from "@theia/navigator/lib/browser/navigator-widget";
+import { SearchInWorkspaceClientImpl } from "@theia/search-in-workspace/lib/browser/search-in-workspace-service";
+import { SearchInWorkspaceServer } from "@theia/search-in-workspace/lib/common/search-in-workspace-interface";
+import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
 import { FactoryActivityNavigation } from "./factory-activity-navigation";
-import { FactoryWriterContribution } from "./factory-writer";
+import { FactoryChromeContribution } from "./factory-chrome";
+import { FactoryDiagnosticsContribution } from "./factory-diagnostics";
+import { FactoryLanguageGrammars } from "./factory-language-grammars";
+import { FactoryLanguageTools } from "./factory-language-tools";
 import {
   FactoryRuntimeContribution,
   FactoryRuntimeWidget,
   factoryRuntimeWidgetID,
 } from "./factory-runtime-widget";
+import { FactorySourceClient } from "./factory-source-client";
+import { FactoryStatusBar } from "./factory-status-bar";
 import {
   FactoryTerminalContribution,
   FactoryTerminalWidget,
   factoryTerminalWidgetID,
 } from "./factory-terminal-widget";
+import { FactoryWorkspaceFileContribution, FactoryWorkspaceFiles } from "./factory-workspace-files";
+import { FactoryWorkspaceLabels } from "./factory-workspace-labels";
+import { FactoryWorkspaceNavigator } from "./factory-workspace-navigator";
+import { FactoryWorkspaceSearch } from "./factory-workspace-search";
+import { FactoryWorkspaceSelection } from "./factory-workspace-selection";
+import { FactoryWorkspaceTree } from "./factory-workspace-tree";
+import { FactoryWorkspaceWidget } from "./factory-workspace-widget";
+import { FactoryWriterContribution } from "./factory-writer";
 import "./factory-ide.css";
 import { FactoryGitContribution, FactoryGitWidget, factoryGitWidgetID } from "./factory-git-widget";
 
@@ -71,6 +72,7 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     const navigator = createFileNavigatorContainer(container);
     navigator.rebind(FileNavigatorTree).to(FactoryWorkspaceTree).inSingletonScope();
     navigator.rebind(FileNavigatorModel).to(FactoryWorkspaceNavigator).inSingletonScope();
+    navigator.rebind(FileNavigatorWidget).to(FactoryWorkspaceWidget).inSingletonScope();
     return navigator.get(FileNavigatorWidget);
   });
   bind(FactorySourceClient)

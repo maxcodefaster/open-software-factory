@@ -1,12 +1,73 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import type { RuntimeSocketData } from "../runtime/hub";
+import { createApiProtocol } from "./protocols/api";
 import { createRuntimeProtocol } from "./protocols/runtime";
 import { startFactoryTransport } from "./transport";
 
 const id = "01994a7d-0000-7000-8000-000000000001";
 const hex = id.replaceAll("-", "");
 const origin = "https://factory.example";
+
+test("App grants open customer paths at the isolated origin root without a Factory router prefix", async () => {
+  const authorized: unknown[] = [];
+  const grants: unknown[] = [];
+  const services = {
+    factoryOrigin: origin,
+    requireSession: async () => ({ user: { id: "actor" }, session: { id: "session" } }),
+    accessController: {
+      authorizeAPI: async () => {},
+      requireRuntime: async (...args: unknown[]) => {
+        authorized.push(args);
+      },
+    },
+    mcpOAuthCallback: async () => undefined,
+    forgeIdentityRoutes: async () => undefined,
+    reviewMediaRoutes: async () => undefined,
+    sourceProtocol: async () => undefined,
+    demandRuntime: async () => true,
+    runtimeReady: async () => true,
+    runtimeHub: { hasAppChannel: () => true },
+    runtimeAccess: {
+      issue: async (input: unknown) => {
+        grants.push(input);
+        return "owned";
+      },
+    },
+  } as unknown as Parameters<typeof createApiProtocol>[0];
+  const api = createApiProtocol(services);
+  for (const [route, suffix, channel] of [
+    ["app", "/", "app"],
+    ["preview/app", "/", "app"],
+    ["preview/app-forms", "/drafts/owned?revision=1&route=%2Fforms%2F", "app-forms"],
+    ["ide", "/", "ide"],
+  ]) {
+    const path = `/runtime/${id}/${route}${suffix}`;
+    const response = await api(
+      new Request(`${origin}/api/runtime-access?${new URLSearchParams({ path, embed: "1" })}`),
+    );
+    expect(response.status).toBe(302);
+    const destination = new URL(response.headers.get("location") ?? "");
+    expect(destination.hostname).toBe(
+      `${hex}${channel === "app-forms" ? "app-forms" : `-${channel}`}.runtime.factory.example`,
+    );
+    expect(destination.pathname).toBe(
+      channel === "ide" ? `/runtime/${id}/ide/` : new URL(suffix!, origin).pathname,
+    );
+    expect(destination.searchParams.get("factory-grant")).toBe("owned");
+    if (channel === "app-forms") {
+      expect(destination.searchParams.get("revision")).toBe("1");
+      expect(destination.searchParams.get("route")).toBe("/forms/");
+    }
+    expect(authorized.at(-1)).toEqual(["actor", id, channel === "ide" ? "ide" : "app"]);
+    expect(grants.at(-1)).toMatchObject({
+      attemptID: id,
+      userID: "actor",
+      sessionID: "session",
+      mode: "embedded",
+    });
+  }
+});
 
 test("a failed Preview navigation reports attachment failure instead of displaying Factory JSON", async () => {
   const services = {

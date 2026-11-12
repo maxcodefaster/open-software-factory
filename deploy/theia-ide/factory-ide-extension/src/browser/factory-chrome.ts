@@ -74,6 +74,8 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
     this.#resizeObserver = new ResizeObserver(() => {
       const width = this.shell.node.clientWidth;
       const panel = this.shell.leftPanelHandler;
+      if (width > 0 && width < 600 && this.editors.currentEditor)
+        this.#collapseExplorerWhenNarrow();
       if (width > 0 && width < 1000 && panel.dockPanel.isVisible) {
         const maximum = Math.max(140, Math.floor(width * 0.32));
         const current = panel.container.node.clientWidth;
@@ -131,6 +133,7 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
       return;
     }
     const label = this.labels.getDetails(resource) ?? `Source · ${resource.authority.slice(0, 8)}`;
+    this.#collapseExplorerWhenNarrow();
     void this.statusBar.setElement("factory-buffer-workspace", {
       text: `File · ${label}`,
       tooltip: `This file belongs to ${label}. Switching the Explorer does not move it to another Workspace.`,

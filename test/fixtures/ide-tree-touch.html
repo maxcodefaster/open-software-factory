@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8"><title>Tree touch activation</title></head>
+  <body>
+    <div id="panel" style="width:300px;height:100px;padding:20px">
+      <button id="file" type="button">package.json</button>
+    </div>
+    <output aria-label="Opened file">No file</output>
+    <script type="module">
+      import { isTreeTouchClick, treeTouchGesture } from "../../deploy/theia-ide/factory-ide-extension/src/browser/factory-tree-touch.ts";
+
+      const gesture = treeTouchGesture();
+      const panel = document.querySelector("#panel");
+      const file = document.querySelector("#file");
+      const output = document.querySelector("output");
+      let activations = 0;
+      file.addEventListener("pointerdown", event => gesture.down(event,"owned-file"));
+      file.addEventListener("pointercancel", () => gesture.cancel());
+      file.addEventListener("pointerup", event => {
+        if (gesture.up(event) === "owned-file") {
+          output.textContent = "package.json";
+          output.dataset.activations = String(++activations);
+        }
+      });
+      file.addEventListener("click", event => {
+        if (!isTreeTouchClick(event)) output.dataset.mouseClicks = "1";
+      });
+      panel.addEventListener("mouseenter", () => {
+        panel.style.pointerEvents = "none";
+        setTimeout(() => { panel.style.pointerEvents = ""; },100);
+      });
+    </script>
+  </body>
+</html>

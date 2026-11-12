@@ -159,7 +159,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
     async function start(kind: "cold" | "stopped") {
       const started = performance.now();
       await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-      await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+      await page.getByRole("button", { name: "Open IDE", exact: true }).click();
       const receipt = await startEditorCompute(page);
       const list = await serverCall(
         requestFunction(page.request, "getRuntimeAttempts", [projectID]),

@@ -178,6 +178,11 @@ export function createApiProtocol(services: ApiServices) {
         destination.host = new URL(
           appRuntimeOrigin(factoryOrigin, attemptID, previewChannel ?? channel),
         ).host;
+        // The isolated hostname already identifies the App. Its router must see
+        // the same customer path in the browser as the upstream server sees.
+        if (channel === "app")
+          destination.pathname =
+            destination.pathname.slice(`/runtime/${attemptID}/${route}`.length) || "/";
         destination.searchParams.set("factory-grant", token);
         return Response.redirect(destination, 302);
       }

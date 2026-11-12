@@ -152,7 +152,6 @@ export type TicketWorkspaceProps = {
   onTechnicalPlanning?(): void;
   onSaveTechnicalDesign?(revisionID: string, content: TechnicalDesignContent): Promise<boolean>;
   planningBusy?: boolean;
-  onWriteRequirements(): void;
   onSaveDocument(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
   onConfirmRequirements(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
   clarificationAction: { label: string; status: boolean };
@@ -355,7 +354,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const [slashMenu, setSlashMenu] = createSignal<SlashMenu>();
   const [slashIndex, setSlashIndex] = createSignal(0);
   const specificationVisible = () =>
-    Boolean(props.latestRevision || proposal() || props.current.ticket.state === "ready");
+    Boolean(canEditSpecification() || props.latestRevision || proposal());
   const filteredSlashBlocks = () =>
     filterDocumentBlocks(
       specificationVisible()
@@ -439,7 +438,6 @@ function TicketDocument(props: TicketWorkspaceProps) {
     setHistoryRevisionID(undefined);
   }
   let documentElement: HTMLElement | undefined;
-  let requestDetailsElement: HTMLDetailsElement | undefined;
   const [formattingElement, setFormattingElement] = createSignal<HTMLDivElement>();
   const [commandElement, setCommandElement] = createSignal<HTMLDivElement>();
   const acceptanceElements = new Map<number, HTMLElement>();
@@ -1179,8 +1177,21 @@ function TicketDocument(props: TicketWorkspaceProps) {
         label: "Open Epic",
         run: () => ticket.convertedToEpicId && props.onOpenEpic(ticket.convertedToEpicId),
       });
-    if (props.change && props.onOpenPreview)
-      actions.push({ id: "preview", label: "Open Live Preview", run: props.onOpenPreview });
+    if (!ticket.trashedAt && props.change && props.onOpenPreview)
+      actions.push({
+        id: "preview",
+        label: "Open Live Preview",
+        persistent: true,
+        run: props.onOpenPreview,
+      });
+    if (
+      !ticket.trashedAt &&
+      props.change &&
+      props.canDevelop &&
+      props.onOpenIDE &&
+      !["cancelled", "cancelling", "delivered"].includes(props.change.state)
+    )
+      actions.push({ id: "ide", label: "Open IDE", persistent: true, run: props.onOpenIDE });
     if (!ticket.trashedAt && review?.addFeedback)
       actions.push({ id: "feedback", label: "Add feedback", run: review.addFeedback });
     if (ticket.trashedAt)
@@ -1222,20 +1233,6 @@ function TicketDocument(props: TicketWorkspaceProps) {
         primary: true,
         disabled: props.pending,
         run: () => props.change && props.onRetryPromotion?.(props.change.id),
-      });
-    if (
-      !ticket.trashedAt &&
-      !ticket.convertedToEpicId &&
-      ["inbox", "backlog"].includes(ticket.state) &&
-      !props.change &&
-      !proposal()
-    )
-      actions.push({
-        id: "requirements",
-        label: "Write requirements",
-        primary: true,
-        disabled: props.pending || saving() || hasChanges(),
-        run: props.onWriteRequirements,
       });
     if (requirementsIncomplete())
       actions.push({
@@ -1331,7 +1328,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const compactActions = createMemo(() => {
     const actions = headerActions();
     const primary = actions.find((action) => action.primary)?.id;
-    return primary ? actions.filter((action) => action.id !== primary) : [];
+    return primary ? actions.filter((action) => action.id !== primary && !action.persistent) : [];
   });
 
   return (
@@ -1372,6 +1369,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                 />
                 <TicketActionBar
                   actions={headerActions()}
+                  people={props.people}
                   menu={
                     <Show
                       when={
@@ -1383,13 +1381,23 @@ function TicketDocument(props: TicketWorkspaceProps) {
                       <TicketSecondaryActions
                         compactActions={compactActions()}
                         onReloadReview={reviewActions()?.reload}
-                        onOpenIDE={
-                          !props.current.ticket.trashedAt &&
-                          props.change &&
-                          props.canDevelop &&
-                          !["cancelled", "cancelling", "delivered"].includes(props.change.state)
-                            ? props.onOpenIDE
-                            : undefined
+                        requestDetails={
+                          separateSummary() ? (
+                            <RichTextSurface
+                              attachmentScopeKey={`ticket:${props.current.ticket.id}:description`}
+                              value={draftDescription()}
+                              label="Request details"
+                              field="description"
+                              editable={canEditSpecification()}
+                              placeholder="Add planning context"
+                              class="ticket-inline-description markdown-body"
+                              {...richTextHandlers({
+                                field: "description",
+                                slash: true,
+                                update: updateDescription,
+                              })}
+                            />
+                          ) : undefined
                         }
                         reviewSourceURL={
                           props.canDevelop
@@ -1460,25 +1468,24 @@ function TicketDocument(props: TicketWorkspaceProps) {
                       !props.change &&
                       !proposal() &&
                       props.current.ticket.state === "ready" &&
+                      (technicalDirty() ||
+                        props.current.technicalPlanningPending ||
+                        (technical() &&
+                          technical()?.requirementRevisionId !== props.latestRevision?.id) ||
+                        (props.current.technicalDesignPresent && !props.canDevelop)) &&
                       props.latestRevision
                     }
                   >
-                    {(revision) => (
-                      <span>
-                        {revision().approvalId
-                          ? "Implementation scope"
-                          : technicalDirty()
-                            ? "Editing technical design"
-                            : props.current.technicalPlanningPending
-                              ? "Technical planning required"
-                              : technical() &&
-                                  technical()?.requirementRevisionId !== props.latestRevision?.id
-                                ? "Technical design out of date"
-                                : props.current.technicalDesignPresent && !props.canDevelop
-                                  ? "Developer review required"
-                                  : "Ready to implement"}
-                      </span>
-                    )}
+                    <span>
+                      {technicalDirty()
+                        ? "Editing technical design"
+                        : props.current.technicalPlanningPending
+                          ? "Technical planning required"
+                          : technical() &&
+                              technical()?.requirementRevisionId !== props.latestRevision?.id
+                            ? "Technical design out of date"
+                            : "Developer review required"}
+                    </span>
                   </Show>
                   <Show when={proposal()}>
                     <span>Review proposal</span>
@@ -1518,7 +1525,16 @@ function TicketDocument(props: TicketWorkspaceProps) {
                     !props.computeWait &&
                     !props.codingPause &&
                     !props.current.ticket.trashedAt &&
-                    !props.current.ticket.convertedToEpicId
+                    !props.current.ticket.convertedToEpicId &&
+                    (props.change ||
+                      props.planningBusy ||
+                      props.awaitingAnswer ||
+                      proposal() ||
+                      props.current.implementationOrder ||
+                      props.current.technicalPlanningPending ||
+                      technicalDirty() ||
+                      requirementsIncomplete() ||
+                      (!draftDescription().trim() && !draftSummary().trim()))
                   }
                 >
                   <p class="ticket-progress" role="status" aria-label="Ticket progress">
@@ -1600,9 +1616,6 @@ function TicketDocument(props: TicketWorkspaceProps) {
                   </span>
                 </Show>
               </div>
-              <Show when={props.people}>
-                <div class="ticket-document-people">{props.people}</div>
-              </Show>
               <Show when={props.computeWait && !props.codingPause}>
                 <p class="agent-activity-notice" role="status">
                   Waiting for execution capacity. Work starts automatically when space is available.
@@ -1765,47 +1778,23 @@ function TicketDocument(props: TicketWorkspaceProps) {
                     <h2>Product</h2>
                   </div>
                   <div class="ticket-requirements-intro">
-                    <details
-                      class="ticket-request-details"
-                      ref={requestDetailsElement}
-                      open={
-                        !separateSummary() ||
-                        Boolean(requestDetailsElement?.contains(document.activeElement))
-                      }
-                    >
-                      <summary hidden={!separateSummary()}>Request details</summary>
-                      {/* Keep the editor mounted and never fold focused text when a proposal arrives. */}
-                      <RichTextSurface
-                        attachmentScopeKey={`ticket:${props.current.ticket.id}:description`}
-                        value={draftDescription()}
-                        label="Ticket description"
-                        field="description"
-                        editable={canEditSpecification()}
-                        placeholder="Add planning context"
-                        class="ticket-inline-description markdown-body"
-                        {...richTextHandlers({
-                          field: "description",
-                          slash: true,
-                          update: updateDescription,
-                        })}
-                      />
-                    </details>
-                    <Show when={separateSummary()}>
-                      <RichTextSurface
-                        attachmentScopeKey={`ticket:${props.current.ticket.id}:summary`}
-                        value={draftSummary()}
-                        label="Specification summary"
-                        field="summary"
-                        editable={canEditSpecification()}
-                        placeholder="Describe the intended product change. Type / for blocks."
-                        class="ticket-inline-description ticket-specification-summary markdown-body"
-                        {...richTextHandlers({
-                          field: "summary",
-                          slash: true,
-                          update: setDraftSummary,
-                        })}
-                      />
-                    </Show>
+                    <RichTextSurface
+                      attachmentScopeKey={`ticket:${props.current.ticket.id}:summary`}
+                      value={separateSummary() ? draftSummary() : draftDescription()}
+                      label={separateSummary() ? "Specification summary" : "Ticket description"}
+                      field="summary"
+                      editable={canEditSpecification()}
+                      placeholder="Describe the intended product change. Type / for blocks."
+                      class="ticket-inline-description ticket-specification-summary markdown-body"
+                      {...richTextHandlers({
+                        field: "summary",
+                        slash: true,
+                        update: (value) => {
+                          if (!separateSummary()) setDraftDescription(value);
+                          setDraftSummary(value);
+                        },
+                      })}
+                    />
                   </div>
 
                   <TicketDependencies {...props.dependencies} />
@@ -1845,7 +1834,10 @@ function TicketDocument(props: TicketWorkspaceProps) {
                           </div>
                         </div>
                         <Show
-                          when={draftNonGoals().some((block) => block.value().trim()) || editing()}
+                          when={
+                            draftNonGoals().some((block) => block.value().trim()) ||
+                            canEditSpecification()
+                          }
                         >
                           <div class="specification-block">
                             <h3>Out of scope</h3>

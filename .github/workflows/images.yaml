@@ -2,42 +2,92 @@ name: Publish distribution images
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to publish or resume
+        required: true
+        type: string
+      overwrite_existing:
+        description: Replace existing beta.1 image tags after the owner approves the correction
+        required: false
+        default: false
+        type: boolean
+      use_local_gate:
+        description: Use the release's passed exact-commit beta gate receipt instead of repeating source checks
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
-  group: distribution-${{ github.event.release.tag_name }}
+  group: distribution-${{ github.event.release.tag_name || inputs.release_tag }}
   cancel-in-progress: false
 env:
+  RELEASE_OVERWRITE: ${{ inputs.overwrite_existing || 'false' }}
   BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
   SBOM_GENERATOR: docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
+  COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v2.5.3@sha256:f1946d0f30fc8e3777b02f2201e02efdba9fe38f4918162f937052fac98e083f
 jobs:
   release:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      local_gate_passed: ${{ steps.local-gate.outputs.passed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - name: Validate release tag and consolidated source
         id: version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          if [[ "$RELEASE_OVERWRITE" == true ]]; then
+            test "$RELEASE_TAG" = v0.1.0-beta.1
+          fi
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           git merge-base --is-ancestor HEAD origin/main
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Validate the published exact-commit local gate receipt
+        id: local-gate
+        env:
+          USE_LOCAL_GATE: ${{ inputs.use_local_gate || 'false' }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$USE_LOCAL_GATE" != true ]]; then
+            printf 'passed=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          revision="$(git rev-parse HEAD)"
+          curl --fail --location --silent --show-error \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/beta-gate-${revision:0:12}.json" \
+            --output "$RUNNER_TEMP/local-gate.json"
+          jq -e --arg revision "$revision" '
+            .schema == 1 and .commit == $revision and .passed == true and
+            (.steps | length) == 11 and
+            ([.steps[] | select(.passed == true) | .name] | sort) ==
+            (["clean-tree", "forbidden-terms", "secrets", "docs", "format", "lint",
+              "typecheck", "unit", "connector", "controllers", "browser"] | sort)
+          ' "$RUNNER_TEMP/local-gate.json"
+          printf 'passed=true\n' >> "$GITHUB_OUTPUT"
   verify:
     needs: release
+    if: ${{ needs.release.outputs.local_gate_passed != 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/checks.yaml
+    with:
+      source_ref: ${{ github.event.release.tag_name || inputs.release_tag }}
   roles:
     needs: [release, verify]
+    if: ${{ !cancelled() && needs.release.result == 'success' && (needs.verify.result == 'success' || needs.release.outputs.local_gate_passed == 'true') }}
     permissions:
       contents: read
       packages: write
@@ -58,8 +108,22 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - &install-cosign
+        name: Install pinned Cosign
+        run: |
+          set -euo pipefail
+          docker pull "$COSIGN_IMAGE"
+          container="$(docker create --network=none "$COSIGN_IMAGE")"
+          trap 'docker rm "$container" > /dev/null' EXIT
+          executable="$(docker image inspect "$COSIGN_IMAGE" --format '{{json .Config.Entrypoint}}' | jq -er 'if length == 1 then .[0] | select(startswith("/")) else error("unexpected Cosign entrypoint") end')"
+          directory="$RUNNER_TEMP/factory-release-bin"
+          install -d "$directory"
+          docker cp "$container:$executable" "$directory/cosign"
+          chmod 0555 "$directory/cosign"
+          "$directory/cosign" version --json | jq -e '.gitVersion == "v2.5.3"'
+          printf '%s\n' "$directory" >> "$GITHUB_PATH"
       - name: Read native proof tool pins
         id: proof-tools
         run: |
@@ -79,14 +143,26 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           REVISION="$(git rev-parse HEAD)"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if release_exists "$IMAGE_ROOT/factory:$RELEASE"; then
+          if release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite; then
             echo 'This distribution version is already published. Choose a new version.'
             exit 1
           fi
           docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
           for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
+            reuse=false
             if release_exists "$image"; then
+              if ! release_overwrite; then
+                release_require_revision "$image" "$REVISION"
+                reuse=true
+              elif [[ "$(release_revision "$image")" == "$REVISION" ]] &&
+                cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+                  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                  "$IMAGE_ROOT/$role@$(release_digest "$image")" > /dev/null 2>&1; then
+                reuse=true
+              fi
+            fi
+            if [[ "$reuse" == true ]]; then
               release_require_revision "$image" "$REVISION"
               echo "Reusing the architecture image from an earlier attempt: $image"
             else
@@ -103,8 +179,17 @@ jobs:
                 --file "$dockerfile" "${target[@]}" --tag "$image")
               attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")
               if [[ "$role" == runtime-host ]]; then
-                "${build[@]}" --provenance=false --sbom=false --load .
+                "${build[@]}" --provenance=false --sbom=false --load \
+                  --metadata-file "$RUNNER_TEMP/runtime-host-proven.json" .
                 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+                # Export metadata can omit the config digest. Hash the actual config
+                # of the loaded image that the native proofs will execute instead.
+                proof_archive="$RUNNER_TEMP/runtime-host-proven.tar"
+                docker image save --output "$proof_archive" "$image_id"
+                config_file="$(tar -xOf "$proof_archive" manifest.json | jq -er 'if length == 1 then .[0].Config else error("unexpected proof image count") end')"
+                proven_config="sha256:$(tar -xOf "$proof_archive" -- "$config_file" | sha256sum | awk '{print $1}')"
+                rm -- "$proof_archive"
+                [[ "$proven_config" =~ ^sha256:[a-f0-9]{64}$ ]]
                 bash scripts/runtime/compose-inputs-proof.sh "$image_id"
                 registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
                 bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
@@ -112,7 +197,12 @@ jobs:
                 # The proven layers come from the build cache. Publish them with attestations
                 # and refuse any result whose image configuration is not the proven one.
                 "${build[@]}" "${attest[@]}" --push --metadata-file "$RUNNER_TEMP/runtime-host.json" .
-                test "$(jq -r '."containerimage.config.digest"' "$RUNNER_TEMP/runtime-host.json")" = "$image_id"
+                # Attestations wrap the native image in an index. Resolve its native
+                # child and compare the real OCI config descriptor, not optional metadata.
+                native_child="$(docker buildx imagetools inspect "$image" --raw | jq -er --arg arch "$ARCH" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)] | if length == 1 then .[0].digest else error("unexpected published platform count") end')"
+                published_config="$(docker buildx imagetools inspect "$image@$native_child" --raw | jq -er '.config.digest')"
+                printf 'proven-config=%s published-config=%s\n' "$proven_config" "$published_config"
+                test "$published_config" = "$proven_config"
               else
                 "${build[@]}" "${attest[@]}" --push .
               fi
@@ -122,6 +212,7 @@ jobs:
           done
   manifests:
     needs: [release, roles]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.roles.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -135,8 +226,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Publish multi-architecture role manifests
         id: publish
         env:
@@ -156,6 +248,7 @@ jobs:
           printf 'artifacts=%s\n' "$artifacts" >> "$GITHUB_OUTPUT"
   factory:
     needs: [release, manifests]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.manifests.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -176,8 +269,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Build native Factory with exact runtime references
         id: build
         env:
@@ -190,11 +284,28 @@ jobs:
           REVISION="$(git rev-parse HEAD)"
           image="$IMAGE_ROOT/factory:$RELEASE-$ARCH"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if release_exists "$IMAGE_ROOT/factory:$RELEASE"; then
+          if release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite; then
             echo 'This distribution version is already published. Choose a new release version.'
             exit 1
           fi
+          reuse=false
           if release_exists "$image"; then
+            if ! release_overwrite; then
+              release_require_revision "$image" "$REVISION"
+              reuse=true
+            elif [[ "$(release_revision "$image")" == "$REVISION" ]] &&
+              cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                "$IMAGE_ROOT/factory@$(release_digest "$image")" > /dev/null 2>&1; then
+              if docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
+                --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
+                --env "EXPECTED_RUNTIME_ARTIFACTS=$FACTORY_RUNTIME_ARTIFACTS" "$image" -e \
+                'const ordered=(v)=>JSON.stringify(Object.entries(v).sort(([a],[b])=>a.localeCompare(b)));if(ordered(await Bun.file("runtime-artifacts.json").json())!==ordered(JSON.parse(process.env.EXPECTED_RUNTIME_ARTIFACTS)))throw new Error("Runtime references changed");'; then
+                reuse=true
+              fi
+            fi
+          fi
+          if [[ "$reuse" == true ]]; then
             release_require_revision "$image" "$REVISION"
             echo "Reusing the Factory architecture image from an earlier attempt: $image"
           else
@@ -218,17 +329,45 @@ jobs:
             --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
             --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \
             "$IMAGE_REF" /smoke/image-smoke.ts
+      - name: Verify the image security backport before generating its scoped VEX
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
+            --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
+            --volume "$PWD/scripts/factory/framework-image-proof.ts:/proof/framework-image-proof.ts:ro" \
+            --volume "$PWD/test/fixtures/framework-transport-security.ts:/proof/framework-transport-security.ts:ro" \
+            --volume "$PWD/templates/starter-app/.factory/framework-security.json:/proof/framework-security.json:ro" \
+            "$IMAGE_REF" /proof/framework-image-proof.ts "$IMAGE_REF" \
+            /proof/framework-security.json /proof/framework-transport-security.ts \
+            > "$RUNNER_TEMP/framework-security-proof.json"
+          jq -e '.vex' "$RUNNER_TEMP/framework-security-proof.json" > "$RUNNER_TEMP/framework-security.vex.json"
       - name: Scan the Factory image for fixable critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TRIVY_VEX: ${{ runner.temp }}/framework-security.vex.json
+          TRIVY_PLATFORM: linux/${{ matrix.arch }}
+          TRIVY_SHOW_SUPPRESSED: "true"
         with:
           image-ref: ${{ steps.build.outputs.ref }}
           scanners: vuln
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: 1
+          format: json
+          output: ${{ runner.temp }}/factory-security-scan.json
+      - name: Retain image security proof and scan evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: factory-security-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/framework-security-proof.json
+            ${{ runner.temp }}/framework-security.vex.json
+            ${{ runner.temp }}/factory-security-scan.json
+          if-no-files-found: error
       - name: Sign the Factory architecture image
         env:
           IMAGE_REF: ${{ steps.build.outputs.ref }}
@@ -236,8 +375,11 @@ jobs:
           set -euo pipefail
           source scripts/factory/release-lib.sh
           release_sign "$IMAGE_REF"
+          cosign attest --yes --type https://openvex.dev/ns/v0.2.0 \
+            --predicate "$RUNNER_TEMP/framework-security.vex.json" "$IMAGE_REF"
   distribution:
     needs: [release, factory]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.factory.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -251,8 +393,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Publish the Factory manifest
         id: publish
         env:
@@ -265,6 +408,7 @@ jobs:
           image="$IMAGE_ROOT/factory:$RELEASE"
           digest="$(release_combine "$image" "$image-arm64" "$image-amd64")"
           release_sign "$IMAGE_ROOT/factory@$digest"
+          printf 'factory=%s@%s\n' "$IMAGE_ROOT/factory" "$digest" >> "$GITHUB_OUTPUT"
           {
             echo "### Factory $RELEASE"
             echo
@@ -276,6 +420,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
   chart:
     needs: [release, distribution]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.distribution.result == 'success' }}
     permissions:
       contents: write
       packages: write
@@ -287,11 +432,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
       - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
         with:
           version: 2026.10.3
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - *install-cosign
       - name: Package the chart with the released images
         run: |
           set -euo pipefail
@@ -300,19 +446,27 @@ jobs:
           mise exec -- bun scripts/release/package-chart.ts --version "$RELEASE" \
             --factory-image "$FACTORY_IMAGE" --output dist
           mise exec -- helm lint "dist/factory-$RELEASE.tgz" --set "factorybox.nodeName=lint-node" \
-            --set publicURL=http://127.0.0.1:3000 --set forgejoPublicURL=http://127.0.0.1:3001 --set development=true
+            --set publicURL=http://127.0.0.1:3000 --set forgejoPublicURL=http://127.0.0.1:3001 \
+            --set development=true --set developmentZeroURL=http://127.0.0.1:3002
+          mise exec -- helm lint "dist/factory-$RELEASE.tgz" --values "dist/factory-amd64-$RELEASE.yaml" \
+            --set factorybox.nodeName=lint-node --set publicURL=http://127.0.0.1:3000 \
+            --set forgejoPublicURL=http://127.0.0.1:3001 --set development=true \
+            --set developmentZeroURL=http://127.0.0.1:3002
       - name: Publish and sign the chart
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           printf '%s' "$GHCR_TOKEN" | mise exec -- helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           pushed="$(mise exec -- helm push "dist/factory-$RELEASE.tgz" "oci://ghcr.io/$owner/charts" 2>&1)"
           echo "$pushed"
           digest="$(sed -n 's/^Digest: //p' <<< "$pushed" | head -n1)"
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           cosign sign --yes "ghcr.io/$owner/charts/factory@$digest"
-          gh release upload "$TAG" "dist/factory-$RELEASE.tgz" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" "dist/factory-$RELEASE.tgz" \
+            "dist/factory-arm64-$RELEASE.yaml" "dist/factory-amd64-$RELEASE.yaml" \
+            --clobber --repo "$GITHUB_REPOSITORY"

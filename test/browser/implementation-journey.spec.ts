@@ -276,7 +276,7 @@ test("review distinguishes source checks from App video timing", async ({ page }
 
 for (const state of [
   { id: "personal-draft", primary: "Write requirements" },
-  { id: "idea", primary: "Write requirements" },
+  { id: "idea", primary: "" },
   { id: "requirements", primary: "Implement" },
   { id: "proposal", primary: "Confirm answers" },
   { id: "preparing", primary: "" },
@@ -480,12 +480,12 @@ for (const state of [
     for (const width of [1440, 900, 430, 320]) {
       await page.setViewportSize({ width, height: 960 });
       await page.mouse.move(1, 1);
-      for (const button of await toolbar.locator(":scope > button:visible").all())
+      for (const button of await toolbar.locator(":scope > .ticket-header-action:visible").all())
         await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       const metrics = await toolbar.evaluate((element) => {
-        const buttons = [...element.querySelectorAll<HTMLButtonElement>(":scope > button")].filter(
-          (button) => button.getClientRects().length,
-        );
+        const buttons = [
+          ...element.querySelectorAll<HTMLButtonElement>(":scope > .ticket-header-action"),
+        ].filter((button) => button.getClientRects().length);
         return {
           icons: buttons.reduce(
             (count, button) => count + button.querySelectorAll("svg").length,
@@ -600,13 +600,16 @@ test("the specification leads while request details remain available and editabl
       .getByRole("region", { name: "requirements", exact: true })
       .locator(".ticket-card-body")
       .click();
-    const details = page.locator(".ticket-request-details");
-    const description = page.getByRole("textbox", { name: "Ticket description", exact: true });
+    const description = page.getByRole("textbox", { name: "Request details", exact: true });
+    const openDetails = async () => {
+      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Request details", exact: true }).click();
+    };
     await expect(
       page.getByRole("textbox", { name: "Specification summary", exact: true }),
     ).toBeVisible();
     await expect(description).toBeHidden();
-    await details.locator("summary").click();
+    await openDetails();
     await expect(description).toHaveText(request);
     await description.fill("Revised request context stays intact.");
     await expect
@@ -615,15 +618,15 @@ test("the specification leads while request details remain available and editabl
         return row?.["description"];
       })
       .toBe("Revised request context stays intact.");
-    await details.locator("summary").click();
+    await page.keyboard.press("Escape");
     await expect(description).toBeHidden();
-    await details.locator("summary").click();
+    await openDetails();
     await expect(description).toHaveText("Revised request context stays intact.");
     await mkdir(".factory/test-results/implementation-journey", { recursive: true });
     await page.screenshot({
       path: ".factory/test-results/implementation-journey/request-details-expanded.png",
     });
-    await details.locator("summary").click();
+    await page.keyboard.press("Escape");
     await page.screenshot({
       path: ".factory/test-results/implementation-journey/specification-first.png",
     });
@@ -1729,7 +1732,7 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
     .getByRole("button")
     .click();
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const panel = page.locator(".agent-panel");
   const reasoning = panel.getByLabel("Reasoning", { exact: true });
@@ -1798,7 +1801,7 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
     .getByRole("button")
     .click();
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   await expect(reasoning).toHaveValue("high");
   expect(starts).toHaveLength(1);
@@ -2027,9 +2030,7 @@ for (const role of ["developer", "product-contributor"] as const) {
         composer.getByRole("button", { name: "Save feedback", exact: true }),
       ).toBeEnabled();
       if (role !== "developer")
-        await expect(member.getByRole("menuitem", { name: "Open IDE", exact: true })).toHaveCount(
-          0,
-        );
+        await expect(member.getByRole("button", { name: "Open IDE", exact: true })).toHaveCount(0);
       await member.screenshot({ path: `${evidence}/${role}-review-feedback.png` });
       await member.setViewportSize({ width: 390, height: 844 });
       await expect(
@@ -2159,7 +2160,7 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
     .getByRole("button")
     .click();
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const rows = page.locator("details.agent-activity");
   await expect(rows).toHaveCount(3);
@@ -2346,7 +2347,7 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
       .getByRole("button")
       .click();
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     const rows = page.locator("details.agent-activity");
     await expect.poll(stream.requests).toBe(1);
@@ -2554,7 +2555,7 @@ test("returning to the same Ticket keeps its retained Coding stream observable",
       .getByRole("button");
     await ticket.click();
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await expect(page.getByText("Retained implementation output.", { exact: true })).toBeVisible();
     await expect(page.getByRole("status", { name: "Commit recovery" })).toBeVisible();
@@ -3545,8 +3546,8 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   const scope = navigation.getByRole("combobox", { name: "Settings scope", exact: true });
   await expect(scope.locator("option")).toHaveText([
     "Project · Implementation UX",
-    "Libraries · Skills, MCP connections",
-    "Personal · Model overrides, Login & security",
+    "Libraries",
+    "Personal",
     "Factory administration",
   ]);
   await expect(scope).toHaveValue("project");
@@ -3672,7 +3673,11 @@ test("Trash and Restore preserve an unimplemented Ticket without dispatch", asyn
   await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled();
   const actions = page.locator(".ticket-header-actions");
   await expect(actions.locator('[data-primary="true"]')).toHaveText("Restore");
-  await expect(actions.locator(":scope > :last-child")).toHaveAttribute("data-primary", "true");
+  await expect(actions.locator(":scope > .ticket-header-action").last()).toHaveAttribute(
+    "data-primary",
+    "true",
+  );
+  await expect(actions.locator(":scope > :last-child")).toHaveClass("ticket-secondary-actions");
   await mkdir(".factory/test-results/ticket-action-bar/states", { recursive: true });
   await page.locator(".ticket-document-heading").screenshot({
     path: ".factory/test-results/ticket-action-bar/states/trashed-1440.png",

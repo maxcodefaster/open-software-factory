@@ -5,6 +5,9 @@ and as an asset of the GitHub release. The released chart pins the released Fact
 signed Factorybox worker that passed its native conformance. The operator supplies Kubernetes;
 this chart does not install OrbStack, Docker, a VM, an Ingress controller or a cluster.
 
+The release publishes native Linux arm64 and amd64 images. Each worker needs admission on its
+own node. Azure AKS has not been qualified.
+
 ## Prerequisites
 
 - A Linux node (Ubuntu 22.04 or newer, kernel 5.15 or newer, cgroup v2, 4 KiB pages) for the pinned
@@ -115,6 +118,10 @@ helm install factory oci://ghcr.io/maxcodefaster/charts/factory --version 0.1.0-
   --wait=legacy --timeout 20m
 ```
 
+On amd64, also pass `--values
+https://github.com/maxcodefaster/open-software-factory/releases/download/v0.1.0-beta.1/factory-amd64-0.1.0-beta.1.yaml`.
+This selects the signed amd64 worker and its executable hash.
+
 Check the signatures first with `cosign verify --certificate-identity-regexp
 '^https://github.com/maxcodefaster/open-software-factory/' --certificate-oidc-issuer
 https://token.actions.githubusercontent.com ghcr.io/maxcodefaster/charts/factory:0.1.0-beta.1`.
@@ -127,7 +134,7 @@ image: your-registry/factory@sha256:YOUR_BUILT_APPLICATION_DIGEST
 factorybox:
   image: your-registry/factorybox@sha256:YOUR_VERIFIED_WORKER_DIGEST
   executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
-  architecture: arm64 # use the architecture of the pinned worker bundle
+  architecture: arm64 # arm64 or amd64
   nodeName: YOUR_ADMITTED_NODE
 publicURL: https://factory.example.com
 forgejoPublicURL: https://git.example.com

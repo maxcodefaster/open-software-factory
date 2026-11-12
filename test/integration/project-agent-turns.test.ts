@@ -223,7 +223,25 @@ test.each([false, true])(
       kind: "round",
       message: "One unresolved decision",
       questions: [
-        { type: "free-text", prompt: "What should the follow-up include?", placeholder: "" },
+        singleTicket
+          ? {
+              type: "multi-select",
+              prompt: "What should the follow-up include?",
+              options: [
+                {
+                  id: "views",
+                  label: "Private saved views",
+                  description: "Retain each person's filters.",
+                },
+                {
+                  id: "export",
+                  label: "Filtered CSV export",
+                  description: "Export only matching rows.",
+                },
+              ],
+              allowCustom: true,
+            }
+          : { type: "free-text", prompt: "What should the follow-up include?", placeholder: "" },
       ],
       citations: [],
     });
@@ -405,7 +423,23 @@ test("a Ticket interview receives its admitted Ticket and immutable Spec context
   const owned = await fixture({
     kind: "question",
     message: "One consequential product decision remains.",
-    question: { type: "free-text", prompt: "What should the first run explain?", placeholder: "" },
+    question: {
+      type: "single-select",
+      prompt: "What should the first run explain?",
+      options: [
+        {
+          id: "workflow",
+          label: "The product workflow",
+          description: "Explain how to start the first task.",
+        },
+        {
+          id: "account",
+          label: "Account setup",
+          description: "Explain the initial account configuration.",
+        },
+      ],
+      allowCustom: true,
+    },
     citations: [],
   });
   const ticketID = crypto.randomUUID();

@@ -201,7 +201,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
-  await chooseSettingsPage(page, "Monitoring", "Factory administration");
+  await chooseSettingsPage(page, "Usage & limits", "Factory administration");
   const usage = page.getByRole("region", { name: "Usage & limits" });
   await expect(usage.getByLabel("Monthly Coding allowance")).toHaveValue("", { timeout: 5000 });
   navigations.length = 0;
@@ -267,7 +267,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
     .click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
-  await chooseSettingsPage(page, "Monitoring", "Project · Usage transport proof");
+  await chooseSettingsPage(page, "Usage & limits", "Project · Usage transport proof");
   await expect(usage.getByLabel("Monthly Coding allowance")).toBeDisabled();
   await expect(usage.getByText("Effective: 5 USD")).toBeVisible();
   await expect(usage.getByRole("button", { name: "Save limits" })).toHaveCount(0);

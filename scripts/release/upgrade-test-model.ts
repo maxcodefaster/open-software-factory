@@ -725,6 +725,12 @@ export function seedSQL(input: SeedInput) {
   const [firstRevision, secondRevision] = input.revisionIDs;
   return [
     "BEGIN;",
+    // This lane fingerprints retained data, not native dispatch. A zero reserve
+    // does not prevent personal/prebuild compute; its supported policy does.
+    `INSERT INTO factory.execution_policy(scope,version,policy,updated_by)
+      VALUES('factory',1,'{"sandboxes":0}'::jsonb,${id(input.adminID)})
+      ON CONFLICT(scope) DO UPDATE SET policy=factory.execution_policy.policy || '{"sandboxes":0}'::jsonb,
+        version=factory.execution_policy.version+1,updated_by=EXCLUDED.updated_by,updated_at=now();`,
     `INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${id(input.projectID)},${text(input.slug)},${text(input.name)},${text(input.repositoryURL)},'main','.devcontainer/devcontainer.json',${id(input.adminID)});`,
     `INSERT INTO factory.project_membership(project_id,user_id,role,updated_by,manage_project)
