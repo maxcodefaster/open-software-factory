@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -27,36 +28,43 @@ var (
 )
 
 type Assignment struct {
-	Version                int                 `json:"version"`
-	RuntimeAttemptID       string              `json:"runtimeAttemptId"`
-	Generation             uint64              `json:"generation"`
-	WorkspaceFolder        string              `json:"workspaceFolder"`
-	RemoteWorkspaceFolder  string              `json:"remoteWorkspaceFolder"`
-	RepositoryURL          string              `json:"repositoryUrl"`
-	RepositoryIdentity     string              `json:"repositoryIdentity"`
-	PreserveWorkspace      bool                `json:"preserveWorkspace"`
-	Revision               string              `json:"revision"`
-	DevcontainerPath       string              `json:"devcontainerPath"`
-	ComposeProjectName     string              `json:"composeProjectName"`
-	ControlURL             string              `json:"controlUrl"`
-	Channels               []Channel           `json:"channels"`
-	Processes              []Process           `json:"processes"`
-	ConnectorStateDir      string              `json:"connectorStateDir,omitempty"`
-	BrowserToolsImage      string              `json:"browserToolsImage,omitempty"`
-	EnvironmentVersion     *uint64             `json:"environmentVersion,omitempty"`
-	RuntimeEnvironment     map[string]string   `json:"-"`
-	EnvironmentSecretsFile string              `json:"-"`
-	DockerConfigDirectory  string              `json:"-"`
-	RegistryCAFile         string              `json:"-"`
-	Prebuild               *PrebuildAssignment `json:"prebuild,omitempty"`
-	EffectiveConfiguration string              `json:"-"`
-	PrebuildCacheImage     string              `json:"-"`
-	PreparedImage          *PrebuildResult     `json:"preparedImage,omitempty"`
-	PublicImageBuild       bool                `json:"-"`
-	BuildEnvironmentSHA256 string              `json:"-"`
-	DeferRuntimeProcesses  bool                `json:"deferRuntimeProcesses,omitempty"`
-	containerOrigin        *containerOrigin
-	preparedRootFSImage    string
+	Version                   int                 `json:"version"`
+	RuntimeAttemptID          string              `json:"runtimeAttemptId"`
+	Generation                uint64              `json:"generation"`
+	WorkspaceFolder           string              `json:"workspaceFolder"`
+	RemoteWorkspaceFolder     string              `json:"remoteWorkspaceFolder"`
+	RepositoryURL             string              `json:"repositoryUrl"`
+	RepositoryIdentity        string              `json:"repositoryIdentity"`
+	PreserveWorkspace         bool                `json:"preserveWorkspace"`
+	Revision                  string              `json:"revision"`
+	DevcontainerPath          string              `json:"devcontainerPath"`
+	ComposeProjectName        string              `json:"composeProjectName"`
+	ControlURL                string              `json:"controlUrl"`
+	Channels                  []Channel           `json:"channels"`
+	Processes                 []Process           `json:"processes"`
+	ConnectorStateDir         string              `json:"connectorStateDir,omitempty"`
+	BrowserToolsImage         string              `json:"browserToolsImage,omitempty"`
+	EnvironmentVersion        *uint64             `json:"environmentVersion,omitempty"`
+	RuntimeEnvironment        map[string]string   `json:"-"`
+	EnvironmentSecretsFile    string              `json:"-"`
+	DockerConfigDirectory     string              `json:"-"`
+	RegistryCAFile            string              `json:"-"`
+	Prebuild                  *PrebuildAssignment `json:"prebuild,omitempty"`
+	EffectiveConfiguration    string              `json:"-"`
+	PrebuildCacheImage        string              `json:"-"`
+	PreparedImage             *PrebuildResult     `json:"preparedImage,omitempty"`
+	PublicImageBuild          bool                `json:"-"`
+	BuildEnvironmentSHA256    string              `json:"-"`
+	DeferRuntimeProcesses     bool                `json:"deferRuntimeProcesses,omitempty"`
+	containerOrigin           *containerOrigin
+	preparedRootFSImage       string
+	nativeDependencyReference string
+	// Set only by the verified native bootstrap, never decoded from Project JSON.
+	nativeActorUID       string
+	nativeRetainedSource bool
+	// Installed only by native-parent after checkout and Actor identity validation.
+	// Never serialized into the Child or accepted from a Project assignment.
+	nativeSource http.Handler
 }
 
 type containerOrigin struct {

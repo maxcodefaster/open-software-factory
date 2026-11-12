@@ -1,5 +1,6 @@
 .git
 .factory
+core.[0-9]*
 .env
 .env.*
 !.env.example

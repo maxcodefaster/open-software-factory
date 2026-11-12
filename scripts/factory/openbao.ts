@@ -5,8 +5,14 @@ import upstream from "../../upstream.json";
 import { bootstrapOpenBao, openBaoPolicyVersion } from "./openbao-bootstrap";
 
 const identitySchema = z
-  .object({ owner: z.uuid(), port: z.number().int().min(1024).max(65535) })
-  .strict();
+  .object({
+    owner: z.uuid(),
+    port: z.number().int().min(1024).max(65535),
+    uid: z.number().int().nonnegative().optional(),
+    gid: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .refine((value) => (value.uid === undefined) === (value.gid === undefined));
 
 // Only the source-development launcher supervises a host Docker service.
 // Installed Factory uses the same bootstrap protocol against its Kubernetes Service.
@@ -27,7 +33,12 @@ export async function localOpenBao(stateDirectory: string) {
     try {
       await writeFile(
         identityFile,
-        JSON.stringify({ owner: crypto.randomUUID(), port: listener.port }),
+        JSON.stringify({
+          owner: crypto.randomUUID(),
+          port: listener.port,
+          uid: process.getuid?.() ?? 0,
+          gid: process.getgid?.() ?? 0,
+        }),
         { mode: 0o600, flag: "wx" },
       );
     } finally {
@@ -35,6 +46,9 @@ export async function localOpenBao(stateDirectory: string) {
     }
   }
   const identity = identitySchema.parse(JSON.parse(await readFile(identityFile, "utf8")));
+  // Older identities retain their original root profile. Do not silently chown
+  // retained ciphertext or replace a retained container to adopt a new owner.
+  const runtimeUser = `${identity.uid ?? 0}:${identity.gid ?? 0}`;
   const container = `factory-openbao-${identity.owner}`;
   const volume = `${container}-data`;
   async function command(args: string[], input?: string, env?: Record<string, string>) {
@@ -117,7 +131,7 @@ export async function localOpenBao(stateDirectory: string) {
   const caFile = resolve(await command(["mkcert", "-CAROOT"]), "rootCA.pem");
 
   async function startConfigured(refreshPolicy = false) {
-    if (!(await owned("volume", volume)))
+    if (!(await owned("volume", volume))) {
       await docker(
         "volume",
         "create",
@@ -125,7 +139,44 @@ export async function localOpenBao(stateDirectory: string) {
         `factory.openbao-owner=${identity.owner}`,
         volume,
       );
+      // Only a freshly created, exactly labelled volume receives initialization.
+      // The service itself stays capability-free and reads its private host
+      // configuration as the recorded owner, not root with DAC bypass grants.
+      if (!(await owned("volume", volume)))
+        throw new Error("Fresh OpenBao volume ownership is unconfirmed");
+      await docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--user",
+        "0:0",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--cap-add",
+        "FOWNER",
+        "--read-only",
+        "--security-opt",
+        "no-new-privileges",
+        "--mount",
+        `type=volume,source=${volume},target=/bao/data`,
+        "--entrypoint",
+        "/bin/sh",
+        upstream.openbao.image,
+        "-ec",
+        'chown "$1" /bao/data; chmod 0700 /bao/data',
+        "owned-openbao-volume",
+        runtimeUser,
+      );
+    }
     if (await owned("container", container)) {
+      const currentUser = await docker("inspect", "--format", "{{.Config.User}}", container);
+      if (currentUser !== runtimeUser)
+        throw new Error("OpenBao runtime user differs from its retained identity");
       const image = await docker("inspect", "--format", "{{.Config.Image}}", container);
       if (image !== upstream.openbao.image) {
         await docker("pull", upstream.openbao.image);
@@ -134,6 +185,26 @@ export async function localOpenBao(stateDirectory: string) {
       }
     }
     if (!(await owned("container", container))) {
+      const dataOwner = await docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--user",
+        "0:0",
+        "--cap-drop",
+        "ALL",
+        "--read-only",
+        "--mount",
+        `type=volume,source=${volume},target=/bao/data,readonly`,
+        "--entrypoint",
+        "/bin/sh",
+        upstream.openbao.image,
+        "-ec",
+        "stat -c '%u:%g' /bao/data",
+      );
+      if (dataOwner !== runtimeUser || !(await owned("volume", volume)))
+        throw new Error("OpenBao data ownership differs; retained data was not changed");
       await docker(
         "run",
         "--detach",
@@ -142,7 +213,7 @@ export async function localOpenBao(stateDirectory: string) {
         "--label",
         `factory.openbao-owner=${identity.owner}`,
         "--user",
-        "0:0",
+        runtimeUser,
         "--cap-drop",
         "ALL",
         "--memory",

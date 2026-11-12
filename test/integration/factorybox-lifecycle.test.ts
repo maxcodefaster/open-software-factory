@@ -736,8 +736,10 @@ test.each([
       try {
         await eventually(
           () => database.client`
-            SELECT pid FROM pg_stat_activity WHERE datname=current_database()
-              AND wait_event='advisory' AND query LIKE '%factorybox-worker-lifecycle%'`,
+            SELECT activity.pid FROM pg_stat_activity activity JOIN pg_locks waiting ON waiting.pid=activity.pid
+            WHERE activity.datname=current_database() AND activity.wait_event='advisory'
+              AND waiting.locktype='advisory' AND NOT waiting.granted
+              AND waiting.objid=hashtext('factorybox-worker-lifecycle')::oid`,
           (rows) => rows.length === 1,
           "Execution never waited for the shared native worker",
         );

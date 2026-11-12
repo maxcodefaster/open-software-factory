@@ -5,9 +5,6 @@ and as an asset of the GitHub release. The released chart pins the released Fact
 signed Factorybox worker that passed its native conformance. The operator supplies Kubernetes;
 this chart does not install OrbStack, Docker, a VM, an Ingress controller or a cluster.
 
-Platform support for `v0.1.0-beta.1`: Linux on arm64 is the only verified platform. amd64 and
-Azure AKS are not supported yet; the chart refuses neither, but nothing has been proven there.
-
 ## Prerequisites
 
 - A Linux node (Ubuntu 22.04 or newer, kernel 5.15 or newer, cgroup v2, 4 KiB pages) for the pinned
@@ -43,6 +40,12 @@ Secret `list` and Pod `list` are cluster-wide for the node-wide Pod scan and the
 emptiness listing, and a Role cannot narrow them either. The only narrowed grant is the optional
 backup ServiceAccount: a Role in the release Namespace that lets it `get` and exec into the
 Forgejo Pod (`resourceNames`) and nothing else.
+
+With native Workspace configuration enabled, Factory additionally has WorkerPool
+`get/list/create` and SandboxConfig `get` in `ate.dev`. Native capacity copies the
+admitted worker/profile pins into distinct pools on suitable joined nodes. It has
+no WorkerPool patch/delete permission and does not resize or replace retained pools.
+See the [native profile contract](../../substrate/README.md) for qualification limits.
 
 ## Hardening
 
@@ -124,7 +127,7 @@ image: your-registry/factory@sha256:YOUR_BUILT_APPLICATION_DIGEST
 factorybox:
   image: your-registry/factorybox@sha256:YOUR_VERIFIED_WORKER_DIGEST
   executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
-  architecture: arm64 # amd64 is not supported yet
+  architecture: arm64 # use the architecture of the pinned worker bundle
   nodeName: YOUR_ADMITTED_NODE
 publicURL: https://factory.example.com
 forgejoPublicURL: https://git.example.com
@@ -177,11 +180,93 @@ failure, `kubectl logs job/RELEASE-preflight` names each failed check and its fi
 Fresh worker resource admission checks the configured node's readiness and allocatable resources
 and its assigned Pods before selecting a finite aggregate budget. The worker reserves the remaining
 memory after other scheduling requests and `factorybox.memoryHeadroomMiB`, 2048 MiB by default.
-Its CPU ceiling follows node allocatable CPU; `factorybox.cpuRequestMilli` remains the smaller
+Its CPU ceiling subtracts other Pods' scheduling and allocated resize reservations from node
+allocatable CPU; `factorybox.cpuRequestMilli` remains the smaller
 scheduling reserve. The selected profile and bootstrap image are retained before worker creation.
 The pinned native binary must admit finite aggregate budgets. Existing workers, including the
 original 3 CPU / 3 GiB profile, never resize during an upgrade. Native qualification fixtures keep
 their original ceilings; a different worker budget still needs native deployment evidence.
+Deleting, unschedulable, pressured and tainted nodes are refused for fresh resource admission.
+This includes soft reservation taints; Factory does not add tolerations to seize reserved nodes.
+These checks do not resize or re-admit an existing worker's retained budget.
+
+### Fresh Verification placement
+
+New Verification discovers already-joined Linux nodes through the existing Kubernetes connection.
+No approval, model call or opt-in node label is involved. Architecture and kernel policy, Ready and
+schedulable state, pressure and taints, and CPU/RAM scheduling reservations determine eligibility;
+the pinned native worker still checks its actual capabilities before any Sandbox Start. Only the
+configured architecture's pinned worker bundle is eligible. Discovery does not provision nodes.
+
+Each destination retains its own worker, admission, Namespace, store claim, immutable profile and
+native Pod/store/boot/epoch identity. A Verification's placement is saved before external creation
+and remains fixed through waiting, restart, observation and cleanup. Changed node or worker identity,
+missing original resources and uncertain creation are not permission to create a replacement or
+repeat native work. Worker CPU/RAM ceilings and the installation's existing execution limits remain
+finite; capacity refusal waits rather than stopping unrelated work or selecting by process RSS.
+
+Remote Verification uses a fresh private checkout of the exact candidate commit and its selected
+Verification grants. It never reuses a promoted Staging seed across workers, mounts the original
+Workspace Source claim on the destination, or writes back to canonical Source. Its commands and
+credentials can still have effects. Review and Delivery remain tied to the submitted commit and
+Forgejo run; independent candidate review stays on the Change runtime.
+Fresh runners also retain the native job handle of that exact Forgejo run before execution. The
+pinned runner's existing `--handle` support prevents older queued runs sharing the Verification
+label from consuming a different candidate's Sandbox. Retained executions are not rewritten.
+
+Available remote placement does not reclaim submitted Coding compute on the original worker.
+Same-worker handoff keeps its existing settlement, writer/terminal fences and confirmed Stop safety.
+Development, Coding and ordinary same-worker Pause/Resume retain their original Workspace Source
+and worker identities. New Coding/Ticket Source co-placement and authenticated Session Continue or
+cross-node recovery are not provided by this milestone. The source-development changes require
+native product evidence before deployment; they do not upgrade an existing installation themselves.
+
+The explicit Linux amd64 product acceptance fixture runs the current controllers, canonical Source,
+native Factorybox and Connector, and an owned Forgejo with real Actions jobs:
+
+```sh
+mise exec -- env TMPDIR=/tmp/opencode bun --no-env-file test test/integration/verification-pool.native.test.ts
+```
+
+It reads already-published runtime images and the public registry CA through the current Kubernetes
+connection (`open-factory-envbox-smoke/registry`); it does not change that registry or the installation.
+Docker hosts two uniquely owned k3s nodes on a subnet separate from the Sandbox's private Compose
+networks. An opaque Unix-socket relay avoids host firewall changes. Namespaces, PostgreSQL, Forgejo,
+native identities, exact-commit evidence, fault assertions and exact cleanup receipts are recorded
+under `.factory/test-results/verification-native-*`. Two nodes on one host test scheduling and
+concurrency, not additional physical capacity. This fixture is not a production rollout.
+
+### Coding transcript archives
+
+Completed Coding and independent-review turns enqueue best-effort native OpenCode transcript
+archives in the existing private object bucket. The pinned producer and client are OpenCode 2.0.27;
+its experimental native export/import interfaces were checked against the packaged server.
+Unsanitized native exports preserve conversation text and available tool inputs/results. Treat
+them as sensitive Project data: no public URLs or raw transcript diagnostics are provided.
+Native JSON is split into 1 MiB objects and referenced by a versioned, checksummed manifest.
+Private execution-store images are not transcript objects.
+
+PostgreSQL retains checkpoint identity, approved Source and runtime-artifact references, manifest
+pointers, save/retry state and compact tool/timing/token/cost summaries, not transcript bodies.
+Native checkpoints retain their pinned Actor image/template/runtime and last confirmed private Source
+manifest reference, not provisioning credentials. That Source generation is not atomic with the turn.
+An archived Coding conversation can read its exact saved terminal-turn history without waking compute.
+Missing, corrupt or older checkpoints are not substituted; reading never imports a Session or prompts.
+The existing authenticated Coding status includes `transcriptArchive.latest` and
+`transcriptArchive.lastSaved`. Failed saves are retried by the existing controller sweep and
+on runtime reconnection, with at least one minute between failed attempts. Archive failures
+do not block turn settlement, Verification or otherwise authorized product effects.
+
+Only completed native messages through the recorded turn are saved. Recovery is to the last
+successfully saved checkpoint; unsaved latest work can be lost. Export does not capture unfinished
+messages, RAM, processes, PTYs, dependencies or every externally referenced file/media byte.
+Existing authoritative intent/outcome records and uncertain-outcome reconciliation remain separate.
+The native import adapter performs preparation only, restoring neither permissions, secret grants
+nor environment credentials, and never prompts. An explicit Continue is required for inference.
+It does not provide a new authenticated cross-node product recovery command: current development
+Source is still a node-bound RWO mount. A fresh sandbox needs available durable Source, including
+available uncommitted files, and the existing approved-input and secret-grant paths; a transcript
+alone cannot supply missing Source or authorize replay of an unknown external action.
 
 Factory bootstraps the retained database, encrypted OpenBao and its scoped credentials, Forgejo
 service identities and the native OIDC connection. It checks actual writable runtime storage.
@@ -243,6 +328,12 @@ Source development uses the same default; `FACTORY_LOCAL_ZERO_SYNC_WORKERS` over
 local Compose service. Worker-count changes require the normal service update.
 
 ## Local development acceptance
+
+The image also packages the pinned native Substrate gRPC bridge and Source service. Optional fresh
+personal Workspace provisioning is explicitly Project-scoped, not a runtime-default
+switch or migration. See [the concrete Substrate configuration](../../substrate/README.md#fresh-factory-workspace-provisioning)
+for the separate native Owner/Editor credentials, required rotation, immutable
+profile/image bindings, same-node sleeping Source handoff and remaining qualification limits.
 
 During rapid development, build the application image with the maintained image command and make
 it available to the selected cluster. No public chart publication is necessary:
@@ -659,10 +750,8 @@ trust or disable TLS verification.
 
 The development Helm chart lives in [deploy/helm/factory](README.md).
 Releases publish it as a signed OCI chart that pins the released Factory image and the verified
-worker; `v0.1.0-beta.1` is verified on arm64 Linux only, and amd64 and Azure AKS are not
-supported yet. The worker needs a private cgroup namespace, which the Docker runtime of the
-verified node gives privileged Pods and a default containerd setup may not; the other platforms
-have not passed the native conformance. A checkout can still install it directly. Kubernetes is provided by the operator. Factory does not
+worker. The worker needs a private cgroup namespace and must pass its native capability gate.
+A checkout can still install it directly. Kubernetes is provided by the operator. Factory does not
 install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
 Local tools and the Factory image pin `kubectl` 1.35.6. Use a Kubernetes API server
 within one minor version, 1.34 through 1.36, as required by the upstream version-skew policy.
@@ -900,10 +989,8 @@ them is a virtual machine boundary, and a kernel bug can cross it. Plan the node
 
 ### Managed clusters such as Azure AKS
 
-Azure AKS is not supported yet. The notes below describe the intended setup and are not verified.
-
 Factory runs on a standard managed cluster when one dedicated node can host the privileged
-Factorybox worker. Nothing here is verified on AKS yet. Run the preflight first, and treat its
+Factorybox worker. Run the preflight first, and treat its
 FAIL lines as blockers.
 
 **Node pool.** Use one Ubuntu 22.04 amd64 node (`--os-sku Ubuntu`), kernel 5.15 or newer, cgroup v2,

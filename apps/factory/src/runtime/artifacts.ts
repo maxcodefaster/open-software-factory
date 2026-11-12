@@ -58,12 +58,17 @@ export async function freezeRuntimeArtifacts(
     runtimePublicFactoryOrigin(retained.publicFactoryOrigin ?? undefined);
     return retained;
   }
-  const [attempt] = await sql<Array<{ role: RuntimeArtifactRole }>>`
-    SELECT CASE WHEN isolated_kind IN ('verification','publication') THEN 'verification'
+  const [attempt] = await sql<
+    Array<{ role: RuntimeArtifactRole; workerID: string; profile: unknown; singleton: boolean }>
+  >`
+    SELECT attempt.factorybox_worker_id AS "workerID",admission.profile,worker.singleton,
+      CASE WHEN isolated_kind IN ('verification','publication') THEN 'verification'
       WHEN isolated_kind='staging' THEN 'staging'
       WHEN change_id IS NOT NULL AND workspace_id IS NOT NULL THEN 'build'
       ELSE 'development' END AS role
-    FROM factory.runtime_attempt WHERE id=${attemptID} AND state='create-intended'
+    FROM factory.runtime_attempt attempt JOIN factory.factorybox_worker worker ON worker.id=attempt.factorybox_worker_id
+    JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
+    WHERE attempt.id=${attemptID} AND state='create-intended'
       AND stop_intended_at IS NULL`;
   if (!attempt) throw new Error("Runtime artifact selection requires active create intent");
   const runtimeHostImage = pinnedImage(
@@ -79,7 +84,9 @@ export async function freezeRuntimeArtifacts(
   >`SELECT factorybox_profile AS profile FROM factory.execution_slot WHERE assigned_attempt_id=${attemptID}`;
   const profile = slot
     ? factoryboxRuntimeProfile.parse(slot.profile)
-    : await retainedFactoryboxProfile(sql, configuration.factoryboxProfile, runtimeHostImage);
+    : !attempt.singleton
+      ? factoryboxRuntimeProfile.parse(attempt.profile)
+      : await retainedFactoryboxProfile(sql, configuration.factoryboxProfile, runtimeHostImage);
   const publicFactoryOrigin =
     attempt.role === "verification"
       ? null

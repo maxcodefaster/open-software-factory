@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import { renderFactoryboxRuntime } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
-import type { runFactoryboxKubernetes } from "../../packages/runtime-kubernetes/src/factorybox-worker";
+import {
+  factoryboxWorkerDeclaration,
+  type runFactoryboxKubernetes,
+} from "../../packages/runtime-kubernetes/src/factorybox-worker";
 import {
   factoryboxFixtureCommand,
   factoryboxFixtureTarget,
@@ -170,6 +173,21 @@ test("fixture targets bind the exact Sandbox and never use a shared Pod's Attemp
     { identity: { ...f.row.identity, storeID: "d".repeat(32) } },
   ])
     expect(() => factoryboxFixtureTarget({ ...f.row, ...patch })).toThrow();
+});
+
+test("native fixture retains the controller's exact initialized worker declaration", () => {
+  const f = fixture();
+  const declaration = factoryboxWorkerDeclaration.parse({
+    namespace: f.resources.namespace,
+    claim: f.resources.claim,
+    pod: f.resources.pod,
+  });
+  const target = factoryboxFixtureTarget({
+    ...f.row,
+    request: { ...f.row.request, workerDeclaration: declaration },
+  });
+  expect(target.input.workerDeclaration).toEqual(declaration);
+  expect(target.identity).toEqual(f.target.identity);
 });
 
 test("fixture native exec observes the original epoch, uses its native owner and rechecks before exec", async () => {

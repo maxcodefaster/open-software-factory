@@ -1,0 +1,32 @@
+# Explicit operator strategic-merge patch for an OWNED Factory Deployment only.
+# No Kubernetes RBAC is granted to the native API client.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: factory
+spec:
+  template:
+    spec:
+      serviceAccountName: factory-substrate-control
+      automountServiceAccountToken: false
+      containers:
+        - name: factory
+          volumeMounts:
+            - name: substrate-control
+              mountPath: /run/factory/substrate-control
+              readOnly: true
+      volumes:
+        - name: substrate-control
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 600
+                  path: token
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: ca.pem

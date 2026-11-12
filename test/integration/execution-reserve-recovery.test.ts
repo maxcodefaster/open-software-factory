@@ -246,7 +246,9 @@ test("reserve preparation proceeds without the native worker but waits for it be
     await eventually(
       () => database.client`
         SELECT pid FROM pg_stat_activity WHERE datname=current_database()
-          AND wait_event='advisory' AND query LIKE '%factorybox-worker-lifecycle%'`,
+          AND wait_event='advisory' AND EXISTS(SELECT 1 FROM pg_locks waiting
+            WHERE waiting.pid=pg_stat_activity.pid AND waiting.locktype='advisory' AND NOT waiting.granted
+              AND waiting.objid=hashtext('factorybox-worker-lifecycle')::oid)`,
       (rows) => rows.length === 1,
       "Reserve native mutation never waited for the shared worker",
     );

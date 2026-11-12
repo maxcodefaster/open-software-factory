@@ -1,0 +1,23 @@
+{
+  "substrate": {
+    "release": "v1.0.0",
+    "commit": "b34fbee742906494b5eb4f1f36987176bf8770a4",
+    "workerImage": "ghcr.io/agent-substrate/substrate/ateworker-gvisor@sha256:f8987236c6256f58c4b2625e543b43f4ae4bdded6ee6821c03d966effb7c0f17",
+    "workerSha256": "bcbe90cd52dd71f23d6449538cb2611fa865457ced36c7029be408f952b43102",
+    "cliSha256": "9f2444d8c9327cf3efa13d46468f6d83b856c5080017a29747249e1220605569"
+  },
+  "gvisor": {
+    "version": "nightly-20261109-975fb172241c",
+    "commit": "975fb172241c7946a9f67b4f52e0349d9240589a",
+    "url": "https://storage.googleapis.com/gvisor/releases/nightly/2026-11-09/x86_64/gvisor.tar.zstd",
+    "sha256": "1d9120e4aa42ff7d9653f3f265219b68bd1674a23cee389c6a935ce7357ba9b5",
+    "sha512": "02fb9b8b49fc2bdcb7ff9f2a8a4159219f416c0f670ffc54c401651e53081454d3fbce54d7783bd2c3d1bf246fd677d9ec04934e3c3f64605050b26dd433b114",
+    "runscSha256": "4b2be59adc0da986d3dbb2e081bbf73e986e943fe9c4fa1b1433c72fb18100f0"
+  },
+  "envoy": {
+    "version": "1.39.5",
+    "commit": "abcc910ca2c0690d7dbd96557f6dbc8f5090aaa0",
+    "sha256": "2057b6e3c2e18738eee1e42edd35dfbdfc615e873a2d060677ff178c5d1238f5",
+    "moduleSha256": "40b3fc18a5da763e4e190453c73058827f2bfa8f55490a958236efb1910b45b6"
+  }
+}

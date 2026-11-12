@@ -2,6 +2,8 @@ import { rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 const nativeNames = new Set([
+  "substrate-adapter.native",
+  "substrate-workspaces.native",
   "repository-mirrors.native",
   "forgejo-diagnostics.native",
   "native-project-releases",
@@ -20,6 +22,18 @@ const nativeNames = new Set([
   "openbao",
 ]);
 const selfContainedControllerTests = new Set([
+  "substrate-adapter.test.ts",
+  "substrate-adapter.native.test.ts",
+  "substrate-upgrade.test.ts",
+  "substrate-workspaces.test.ts",
+  "substrate-verification.test.ts",
+  "substrate-prebuild.test.ts",
+  "substrate-prebuild-upgrade.test.ts",
+  "substrate-workspaces.native.test.ts",
+  "substrate-source.test.ts",
+  "substrate-source-preservation.test.ts",
+  "substrate-source-preservation-upgrade.test.ts",
+  "openbao.test.ts",
   "postgres-baseline.test.ts",
   "server-function-repository-mirrors.test.ts",
   "client-budgets.test.ts",

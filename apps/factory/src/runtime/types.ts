@@ -29,6 +29,15 @@ export type RuntimeAttemptView = {
   appReadyAt?: Record<string, string>;
   /** The native record proves the paused Sandbox's Resume failed (resuming, or its discard needs another try); the owner may start fresh. */
   restoreFailed?: boolean;
+  native?: {
+    engine: "substrate";
+    actorUID?: string;
+    state: string;
+    version?: string;
+    coldRestart: true;
+    portable: false;
+    sourceHandoff: "pending" | "confirmed-same-node";
+  };
 };
 
 export type RuntimeProcessView = {

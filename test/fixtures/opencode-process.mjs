@@ -72,6 +72,7 @@ let reportUsage = false;
 let failure;
 let spawnChild = false;
 let runTool = false;
+let shellEffect = false;
 let nativeBrowser = false;
 let nativeBrowserPending = false;
 let nativeAttachmentID;
@@ -95,7 +96,12 @@ function complete(response, coding = true, summary = false) {
         : runTool && coding
           ? {
               name: "shell",
-              arguments: JSON.stringify({ command: "true", description: "Owned budget boundary" }),
+              arguments: JSON.stringify({
+                command: shellEffect
+                  ? "printf 'once\\n' >> restart-side-effect.txt; printf 'owned completed tool result'"
+                  : "true",
+                description: "Owned budget boundary",
+              }),
             }
           : spawnChild
             ? {
@@ -123,7 +129,10 @@ function complete(response, coding = true, summary = false) {
   if ((nativeBrowser || nativeAttachmentID) && coding && nativeBrowserPending)
     nativeBrowserPending = false;
   if (spawnChild) spawnChild = false;
-  if (coding) runTool = false;
+  if (coding) {
+    runTool = false;
+    shellEffect = false;
+  }
   const deltas = call
     ? [
         {
@@ -230,6 +239,10 @@ const control = createServer(async (request, response) => {
       failure = "Unrelated provider access failure";
     if (request.url === "/control/child" && request.method === "POST") spawnChild = true;
     if (request.url === "/control/tool" && request.method === "POST") runTool = true;
+    if (request.url === "/control/tool-effect" && request.method === "POST") {
+      runTool = true;
+      shellEffect = true;
+    }
     if (request.url === "/v1/chat/completions" && request.method === "POST") {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
@@ -306,6 +319,7 @@ const control = createServer(async (request, response) => {
         "/control/fail",
         "/control/child",
         "/control/tool",
+        "/control/tool-effect",
         "/control/browser-mcp",
       ].includes(request.url)
     ) {

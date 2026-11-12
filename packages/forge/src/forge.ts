@@ -830,6 +830,35 @@ export function createForgejoClient(options: {
           }),
         );
     },
+    async verificationJobHandle(repository: ForgeRepository, runID: number, commitSha: string) {
+      const run = z
+        .object({
+          id: z.literal(runID),
+          commit_sha: z.literal(commitSha),
+          workflow_id: z.literal("factory-verification.yml"),
+          event: z.literal("pull_request"),
+        })
+        .parse(await json(`${repositoryPath(repository)}/actions/runs/${runID}`));
+      const jobs = z
+        .array(
+          z.object({
+            run_id: z.literal(run.id),
+            handle: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+            runs_on: z.array(z.string()),
+            status: z.string(),
+          }),
+        )
+        .parse(await json(`${repositoryPath(repository)}/actions/runs/${runID}/jobs`));
+      const eligible = jobs.filter(
+        (job) =>
+          job.runs_on.includes("factory-verification") &&
+          ["waiting", "running"].includes(job.status),
+      );
+      const selected = eligible.at(0);
+      if (eligible.length !== 1 || !selected)
+        throw new Error("Verification requires one exact native job handle before runner creation");
+      return selected.handle;
+    },
     async registerEphemeralRunner(
       repository: ForgeRepository,
       name: string,

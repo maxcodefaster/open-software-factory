@@ -71,8 +71,15 @@ func (assignment Assignment) registryProjectImages(images []string) ([]string, b
 	unique := make(map[string]bool)
 	for _, image := range images {
 		key := image
-		if image == assignment.preparedRootFSImage {
+		nativeReference := false
+		if assignment.nativeActorUID != "" && assignment.nativeDependencyReference != "" {
+			candidate, candidateErr := projectReferenceKey(image)
+			expected, expectedErr := projectReferenceKey(assignment.nativeDependencyReference)
+			nativeReference = candidateErr == nil && expectedErr == nil && candidate == expected
+		}
+		if image == assignment.preparedRootFSImage || nativeReference {
 			found = true
+			key = assignment.preparedRootFSImage
 		} else {
 			var err error
 			key, err = projectReferenceKey(image)

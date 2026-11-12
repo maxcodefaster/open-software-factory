@@ -159,6 +159,7 @@ test.each([
   { prerequisite: "starting", reason: "Live Workspace status is unavailable" },
   { prerequisite: "session-missing", reason: "OpenCode Session is not yet identifiable" },
   { prerequisite: "assigned-stopped", reason: "Stopped compute cannot prove" },
+  { prerequisite: "assigned-paused", reason: "Paused compute retains assigned input" },
   { prerequisite: "generation-changed", reason: "different Workspace generation" },
 ] as const)(
   "Stop recovery summary describes $prerequisite without new execution",
@@ -166,7 +167,7 @@ test.each([
     const owned = await fixture();
     const connected = owned.hub.connected;
     try {
-      if (prerequisite === "assigned-stopped") {
+      if (prerequisite === "assigned-stopped" || prerequisite === "assigned-paused") {
         const admitted = await createChangeAdmission(owned.database, buildModelID).admit(
           owned.changeID,
           owned.userID,
@@ -174,7 +175,8 @@ test.each([
         );
         await owned.database.client`UPDATE factory.change_agent_turn_intent
         SET runtime_attempt_id = ${owned.attemptID} WHERE turn_id = ${admitted.turn.id}`;
-        await owned.database.client`UPDATE factory.runtime_attempt SET state = 'stopped'
+        await owned.database
+          .client`UPDATE factory.runtime_attempt SET state = ${prerequisite === "assigned-paused" ? "paused" : "stopped"}
         WHERE id = ${owned.attemptID}`;
       }
       if (prerequisite === "disconnected") owned.hub.connected = () => false;

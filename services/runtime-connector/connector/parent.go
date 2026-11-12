@@ -114,8 +114,19 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		return dockerErr
 	}
 	control, err := dialControl(ctx, assignment, "parent", token)
-	if err != nil {
+	if err != nil && os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID") == "" {
 		return err
+	}
+	var initialBackoff reconnectBackoff
+	for err != nil {
+		// Like Child, Parent may start before Factory has observed a native
+		// allocation. Reconnect transport only; no checkout/hook was started.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(initialBackoff.next()):
+		}
+		control, err = dialControl(ctx, assignment, "parent", token)
 	}
 	defer func() { control.close() }()
 	if err := control.write(Message{
@@ -123,6 +134,7 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		Role:       "parent",
 		AttemptID:  assignment.RuntimeAttemptID,
 		Generation: assignment.Generation,
+		Channels:   parentChannels(assignment),
 	}); err != nil {
 		return fmt.Errorf("send parent hello: %w", err)
 	}
@@ -133,8 +145,7 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	checkoutErr := checkoutProject(ctx, assignment)
 	finishCheckout()
 	if err := checkoutErr; err != nil {
-		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-		return err
+		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
 	if assignment.Prebuild != nil {
 		return runPrebuildAttempt(ctx, assignment, token, control)
@@ -143,8 +154,7 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		cleanup, err := prepareFreshDevcontainer(ctx, &assignment, token, preparedDependencies)
 		defer cleanup()
 		if err != nil {
-			control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-			return err
+			return retainParentStartupFailure(ctx, assignment, token, &control, err)
 		}
 	}
 	preparation := prepareBrowserImage(ctx, func(ctx context.Context) error {
@@ -160,13 +170,8 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	finishDevcontainer()
 	if err != nil {
-		if !errors.Is(err, errDevcontainerNotStarted) {
-			if cleanupErr := cleanupAttempt(assignment); cleanupErr != nil {
-				err = fmt.Errorf("%w; cleanup failed: %v", err, cleanupErr)
-			}
-		}
-		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-		return err
+		err = cleanupFailedParentStartup(assignment, err)
+		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
 	if prepared == nil {
 		// The CLI's standalone image path has no Compose label. Preserve that
@@ -183,7 +188,11 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		PreserveWorkspace:  assignment.PreserveWorkspace,
 		ContainerOrigin:    assignment.containerOrigin,
 	}
+	retainingFailure := false
 	defer func() {
+		if retainingFailure && keepsParentStartupSource(assignment) {
+			return
+		}
 		if err := cleanupProject(state); err != nil && returnError == nil {
 			returnError = err
 			control.write(Message{Type: "status", Phase: "cleanup-failed", Error: err.Error()})
@@ -193,7 +202,8 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		control.write(Message{Type: "status", Phase: "stopped"})
 	}()
 	if err := writeParentState(assignment, state); err != nil {
-		return err
+		retainingFailure = true
+		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
 	browser := newBrowserRuntimeManager(ctx, assignment, result.ContainerID, result.RemoteUser)
 	browser.preparation = preparation
@@ -212,8 +222,8 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	finishInjection()
 	if err := injectionErr; err != nil {
-		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-		return err
+		retainingFailure = true
+		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
 	if err := announceChildStarted(ctx, assignment, token, &control); err != nil {
 		return err
@@ -247,7 +257,10 @@ func applyRuntimeEnvironment(ctx context.Context, assignment *Assignment, enviro
 	ctx = context.WithValue(ctx, runtimeVariablesContextKey{}, assignment.RuntimeEnvironment)
 	for _, registry := range environment.Bundle.Registries {
 		if registry.Certificate != "" {
-			directory := filepath.Join("/etc/docker/certs.d", registry.Host)
+			directory, err := registryCertificateDirectory(*assignment, registry.Host)
+			if err != nil {
+				return ctx, files.cleanup, err
+			}
 			if err := os.MkdirAll(directory, 0700); err != nil {
 				return ctx, files.cleanup, errors.New("Registry trust preparation failed")
 			}
@@ -294,20 +307,17 @@ func reconcilePreparedProject(assignment Assignment, environment runtimeEnvironm
 func runPrebuildAttempt(ctx context.Context, assignment Assignment, token string, control *controlConnection) error {
 	bounded, cancel := context.WithTimeout(ctx, prebuildTimeout)
 	defer cancel()
-	platform, err := runtimePrebuildPlatform(bounded)
-	var result PrebuildResult
-	if err == nil {
-		result, err = ProducePrebuild(bounded, assignment, PrebuildRequest{Commit: assignment.Revision, Platform: platform, ImageRepository: assignment.Prebuild.ImageRepository})
-	}
-	if err == nil {
-		err = publishRuntimePrebuild(bounded, assignment, token, result)
-	}
-	if err != nil {
-		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-		return err
-	}
-	control.write(Message{Type: "status", Phase: "stopped"})
-	return nil
+	return servePrebuildControl(bounded, assignment, token, control, func(ctx context.Context) error {
+		platform, err := runtimePrebuildPlatform(ctx)
+		if err != nil {
+			return err
+		}
+		result, err := ProducePrebuild(ctx, assignment, PrebuildRequest{Commit: assignment.Revision, Platform: platform, ImageRepository: assignment.Prebuild.ImageRepository})
+		if err != nil {
+			return err
+		}
+		return publishRuntimePrebuild(ctx, assignment, token, result)
+	})
 }
 
 // prepareFreshDevcontainer selects a prebuilt image when one is compatible and
@@ -344,7 +354,24 @@ func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token
 			}
 		}
 	}
-	return cleanup, prepareDevcontainerProject(ctx, *assignment)
+	if err := prepareDevcontainerProject(ctx, *assignment); err != nil {
+		return cleanup, err
+	}
+	if assignment.nativeActorUID != "" && assignment.EffectiveConfiguration == "" {
+		path, image, remove, err := prepareNativeDependencies(ctx, assignment)
+		cleanups = append(cleanups, remove)
+		if err != nil {
+			return cleanup, err
+		}
+		if path != "" {
+			assignment.EffectiveConfiguration = path
+			assignment.preparedRootFSImage = image
+			// Validate the generated overlay with the same boundary checks. Source
+			// still declares the original image, Features, hooks and Compose data.
+			return cleanup, prepareDevcontainerProject(ctx, *assignment)
+		}
+	}
+	return cleanup, nil
 }
 
 // serveParentControl reads Factory control messages until Stop or cancellation.
@@ -358,10 +385,17 @@ func serveParentControl(
 	browser *browserRuntimeManager,
 	handle func(context.Context, Message) Message,
 ) error {
+	browserHandle := browser.handle
+	if assignment.nativeSource != nil {
+		fence := &parentSourceFence{}
+		handle = fence.wrap(handle)
+		browserHandle = fence.wrap(browserHandle)
+	}
 	operations := startParentOperations(ctx, handle)
 	defer operations.stop()
 	connectionContext, disconnect := browserConnectionContext(ctx)
 	defer func() { disconnect() }()
+	sourceStreams := &parentSourceStreams{handler: assignment.nativeSource}
 	for {
 		var message Message
 		if err := (*control).read(&message); err != nil {
@@ -383,9 +417,17 @@ func serveParentControl(
 			(*control).write(Message{Type: "status", Phase: "stopping"})
 			return nil
 		}
+		if message.Type == "http-request" {
+			sourceStreams.start(connectionContext, *control, message)
+			continue
+		}
+		if message.Type == "stream-close" {
+			sourceStreams.close(message.StreamID)
+			continue
+		}
 		if message.Type == "operation-request" {
 			if strings.HasPrefix(message.Action, "browser-") {
-				go handleBrowserControlOperation(connectionContext, disconnect, *control, browser, message)
+				go handleBrowserControlOperation(connectionContext, disconnect, *control, browserHandle, message)
 				continue
 			}
 			if !operations.submit(*control, message) {
@@ -451,13 +493,33 @@ func (operations *parentOperations) stop() {
 	<-operations.done
 }
 
-func handleBrowserControlOperation(ctx context.Context, disconnect context.CancelFunc, control *controlConnection, browser *browserRuntimeManager, message Message) {
-	if err := control.write(browser.handle(ctx, message)); err != nil {
+func handleBrowserControlOperation(ctx context.Context, disconnect context.CancelFunc, control *controlConnection, handle func(context.Context, Message) Message, message Message) {
+	if err := control.write(handle(ctx, message)); err != nil {
 		// A failed response cannot leave Parent reading another request on a
 		// half-open socket while Factory waits for acknowledgements. Close only
 		// this captured connection; recovery never replays the operation.
 		disconnect()
 		_ = control.close()
+	}
+}
+
+// A long bootstrap can outlive its first socket. Reconnect only to report its
+// failure, never to repeat checkout, Features or lifecycle hooks.
+func reportParentStartupFailure(ctx context.Context, assignment Assignment, token string, control **controlConnection, failure error) {
+	message := Message{Type: "status", Phase: "failed", Error: failure.Error()}
+	// An unread startup socket can accept a local write after its peer closed.
+	// Use a fresh authenticated transport for the terminal fact, never a new boot.
+	(*control).close()
+	if ctx.Err() != nil {
+		return
+	}
+	connected, err := dialControl(ctx, assignment, "parent", token)
+	if err != nil {
+		return
+	}
+	*control = connected
+	if connected.write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation, Channels: parentChannels(assignment)}) == nil {
+		_ = connected.write(message)
 	}
 }
 
@@ -477,6 +539,7 @@ func announceChildStarted(ctx context.Context, assignment Assignment, token stri
 				if err := connected.write(Message{
 					Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID,
 					Generation: assignment.Generation,
+					Channels:   parentChannels(assignment),
 				}); err == nil {
 					*control = connected
 					backoff.reset()
@@ -500,6 +563,36 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 		return response
 	}
 	switch message.Action {
+	case "source-drain":
+		if assignment.nativeSource == nil {
+			response.Error = "native Source is unavailable"
+			break
+		}
+		// Stop, do not delete, every container in this Actor-private daemon.
+		// Parent operations are already serialized with Git; stopped container
+		// identities, filesystems, hooks and volumes remain in native ROOTFS.
+		output, err := exec.CommandContext(ctx, "docker", "ps", "--quiet", "--no-trunc").Output()
+		if err == nil {
+			ids := strings.Fields(string(output))
+			for _, id := range ids {
+				if len(id) != 64 || strings.Trim(id, "0123456789abcdef") != "" {
+					err = errors.New("private container identity is invalid")
+					break
+				}
+			}
+			if err == nil && len(ids) != 0 {
+				err = exec.CommandContext(ctx, "docker", append([]string{"stop", "--time", "10"}, ids...)...).Run()
+			}
+			if err == nil {
+				output, err = exec.CommandContext(ctx, "docker", "ps", "--quiet", "--no-trunc").Output()
+				if err == nil && strings.TrimSpace(string(output)) != "" {
+					err = errors.New("private container writers remain running")
+				}
+			}
+		}
+		if err != nil {
+			response.Error = "private Docker Source writers could not be drained"
+		}
 	case "workspace-git":
 		result, err := personalGit(ctx, assignment, message)
 		if err != nil {
@@ -510,6 +603,9 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 	case "skills-install":
 		response.Error = errorText(installAdmittedSkills(ctx, assignment, message.Data))
 	case "git-prepare-commit", "git-observe-commit", "git-prepare-integration":
+		if assignment.nativeActorUID != "" {
+			ctx = context.WithValue(ctx, nativeCommitGitKey{}, true)
+		}
 		commit, err := prepareCommit(ctx, assignment.WorkspaceFolder, message)
 		if err != nil {
 			response.Error = err.Error()
@@ -517,6 +613,9 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 			response.CommitSHA = commit
 		}
 	case "git-push":
+		if assignment.nativeActorUID != "" {
+			ctx = context.WithValue(ctx, nativeCommitGitKey{}, true)
+		}
 		remote, err := pushCommit(ctx, assignment.WorkspaceFolder, message)
 		if err != nil {
 			response.Error = err.Error()
@@ -573,6 +672,11 @@ func prepareDevcontainerProject(ctx context.Context, assignment Assignment) erro
 }
 
 func validateDevcontainerConfiguration(ctx context.Context, assignment Assignment, merged bool) ([]string, error) {
+	if assignment.nativeActorUID != "" {
+		if err := reserveNativeDevcontainerLockfile(assignment); err != nil {
+			return nil, err
+		}
+	}
 	configPath := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
 	arguments := []string{
 		"read-configuration",
@@ -776,7 +880,9 @@ func validateRunArguments(workspace string, arguments []string) error {
 
 func validateContainerBoundary(container inspectedContainer, assignment Assignment) error {
 	host := container.HostConfig
-	if host.Privileged || host.PidMode != "" || host.IpcMode == "host" || strings.HasPrefix(host.IpcMode, "container:") || host.NetworkMode == "host" || strings.HasPrefix(host.NetworkMode, "container:") || host.UTSMode == "host" || host.CgroupnsMode == "host" || len(host.CapAdd) > 0 || len(host.Devices) > 0 || len(host.VolumesFrom) > 0 {
+	_, cgroupNamespaceError := os.Stat("/proc/self/ns/cgroup")
+	forbiddenCgroups := host.CgroupnsMode == "host" && !nativeActorCgroups(assignment, os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID"), cgroupNamespaceError)
+	if host.Privileged || host.PidMode != "" || host.IpcMode == "host" || strings.HasPrefix(host.IpcMode, "container:") || host.NetworkMode == "host" || strings.HasPrefix(host.NetworkMode, "container:") || host.UTSMode == "host" || forbiddenCgroups || len(host.CapAdd) > 0 || len(host.Devices) > 0 || len(host.VolumesFrom) > 0 {
 		return errors.New("resolved Dev Container crosses a forbidden host boundary")
 	}
 	for _, option := range host.SecurityOpt {
@@ -1129,6 +1235,9 @@ func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
 }
 
 func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainerResult, error) {
+	if err := requireNativeDependencyReference(ctx, assignment); err != nil {
+		return devcontainerResult{}, fmt.Errorf("%w: %w", errDevcontainerNotStarted, err)
+	}
 	if err := removePreviousPrimary(ctx, assignment); err != nil {
 		return devcontainerResult{}, fmt.Errorf("%w: %w", errDevcontainerNotStarted, err)
 	}
@@ -1150,6 +1259,11 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	}
 	if assignment.EnvironmentSecretsFile != "" {
 		arguments = append(arguments, "--secrets-file", assignment.EnvironmentSecretsFile, "--oci-auth-hardening")
+	}
+	if assignment.nativeActorUID != "" {
+		// Compose creates its network during up. Defer user commands until the
+		// exact primary and its actual Actor-private gateway can be inspected.
+		arguments = append(arguments, "--skip-post-create")
 	}
 	// A compatible prebuild is already selected by EffectiveConfiguration.
 	// --cache-from would ask the CLI to build again; for an image-only Compose
@@ -1216,6 +1330,11 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	if err := validateContainerBoundary(container, assignment); err != nil {
 		return devcontainerResult{}, err
 	}
+	if assignment.nativeActorUID != "" {
+		if err := runNativeLifecycle(ctx, assignment, result); err != nil {
+			return devcontainerResult{}, err
+		}
+	}
 	// A standalone primary has no Compose owner. Keep its actual CLI identity;
 	// exact attempt/generation and primary ID own browser access and cleanup.
 	return result, nil
@@ -1247,10 +1366,11 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	for _, copy := range [][2]string{{executable, connectorPath}, {temporaryName, assignmentPath}} {
-		if output, err := exec.CommandContext(ctx, "docker", "cp", copy[0], result.ContainerID+":"+copy[1]).CombinedOutput(); err != nil {
-			return fmt.Errorf("copy Connector child artifact: %w: %s", err, output)
-		}
+	if err := copyChildExecutable(ctx, result.ContainerID, executable, connectorPath); err != nil {
+		return err
+	}
+	if err := exec.CommandContext(ctx, "docker", "cp", temporaryName, result.ContainerID+":"+assignmentPath).Run(); err != nil {
+		return fmt.Errorf("copy Connector child assignment: %w", err)
 	}
 	if err := injectApprovedTools(ctx, assignment, result.ContainerID); err != nil {
 		return err
@@ -1258,11 +1378,13 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err := prepareChildPermissions(ctx, result.ContainerID, connectorPath, assignmentPath); err != nil {
 		return err
 	}
-	command := exec.CommandContext(
-		ctx,
-		"docker", "exec", "--interactive", "--user", result.RemoteUser,
-		result.ContainerID, connectorPath, "child", "--assignment", assignmentPath, "--token-stdin",
-	)
+	transport, err := nativeChildTransport(ctx, result.ContainerID, assignment.Generation)
+	if err != nil {
+		return err
+	}
+	arguments := append([]string{"exec", "--interactive", "--user", result.RemoteUser}, transport...)
+	arguments = append(arguments, result.ContainerID, connectorPath, "child", "--assignment", assignmentPath, "--token-stdin")
+	command := exec.CommandContext(ctx, "docker", arguments...)
 	credentials, _ := json.Marshal(map[string]any{"token": token, "environment": assignment.RuntimeEnvironment})
 	command.Stdin = strings.NewReader(string(credentials))
 	command.Stdout = os.Stdout
@@ -1335,8 +1457,8 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		if output, err := exec.CommandContext(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput(); err != nil {
 			return fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "cp", tool, containerID+":/opt/factory/opencode/bun").CombinedOutput(); err != nil {
-			return fmt.Errorf("inject OpenCode: %w: %s", err, output)
+		if err := copyChildExecutable(ctx, containerID, tool, "/opt/factory/opencode/bun"); err != nil {
+			return fmt.Errorf("inject OpenCode: %w", err)
 		}
 		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput(); err != nil {
 			return fmt.Errorf("prepare OpenCode: %w: %s", err, output)
@@ -1346,8 +1468,8 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput(); err != nil {
 			return fmt.Errorf("create Forgejo Runner destination: %w: %s", err, output)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "cp", "/usr/local/bin/forgejo-runner", containerID+":/opt/factory/forgejo-runner").CombinedOutput(); err != nil {
-			return fmt.Errorf("inject Forgejo Runner: %w: %s", err, output)
+		if err := copyChildExecutable(ctx, containerID, "/usr/local/bin/forgejo-runner", "/opt/factory/forgejo-runner"); err != nil {
+			return fmt.Errorf("inject Forgejo Runner: %w", err)
 		}
 		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput(); err != nil {
 			return fmt.Errorf("prepare Forgejo Runner: %w: %s", err, output)

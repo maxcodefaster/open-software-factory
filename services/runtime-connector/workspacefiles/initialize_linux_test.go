@@ -84,6 +84,56 @@ func TestSourceInitializationPublishesOnceAndRetainsHumanWork(t *testing.T) {
 	}
 }
 
+func TestActorCheckoutReusesInitializerWithoutSysboxOwnership(t *testing.T) {
+	if !actorSourceIDMap("         0       1000          1\n         1     100000      65536\n") {
+		t.Fatal("normal private RootlessKit mapping rejected")
+	}
+	for _, invalid := range []string{"0 0 4294967295", "0 0 1\n1 100000 65536", "0 1000 65536", "0 1000 1\n1 200000 65536"} {
+		if actorSourceIDMap(invalid) {
+			t.Fatal("unqualified source identity accepted")
+		}
+	}
+	parent := t.TempDir()
+	repository := t.TempDir()
+	ctx := context.Background()
+	for _, args := range [][]string{{"init", "--initial-branch=main"}, {"config", "user.name", "Owned"}, {"config", "user.email", "owned@example.invalid"}} {
+		if _, err := initGit(ctx, repository, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repository, "source"), []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initGit(ctx, repository, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initGit(ctx, repository, "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := initGit(ctx, repository, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := Initialization{WorkspaceID: "owned-workspace", ProjectID: "owned-project", Revision: revision, RepositoryURL: "file://" + repository, OriginURL: "https://factory.example/owned.git", Branch: "main"}
+	if err := initialize(ctx, parent, intent, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(parent, "project", "source")
+	if err := os.WriteFile(source, []byte("dirty private Source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := initialize(ctx, parent, intent, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(source)
+	if string(content) != "dirty private Source" {
+		t.Fatal("native recovery overwrote human Source")
+	}
+	if err := InitializeActor(ctx, parent, intent); err == nil {
+		t.Fatal("arbitrary Actor source parent accepted")
+	}
+}
+
 func TestPersonalSourceStartsOnANamedBranchWithoutChangingTicketInitialization(t *testing.T) {
 	parent, intent := initializerFixture(t)
 	intent.Branch = "main"

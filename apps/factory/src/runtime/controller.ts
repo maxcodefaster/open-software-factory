@@ -21,12 +21,14 @@ import {
   factoryboxAdmissionID,
   factoryboxAssignmentSecret,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
+import { observeFactoryboxNodes } from "../../../../packages/runtime-kubernetes/src/factorybox-node-discovery";
 import { configuredFactoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { FactoryboxCapacityRefusedError } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import {
   type RuntimeManifestInput,
   renderRuntimeResources,
 } from "../../../../packages/runtime-kubernetes/src/manifest";
+import type { SubstrateCall } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import {
   parseSystemContract,
   type SystemContract,
@@ -36,7 +38,7 @@ import {
   personalWorkspaceIdentity,
   ticketWorkspaceIdentity,
 } from "../../../../packages/workspace-domain/src/workspace";
-import { createAccessController } from "../access/controller";
+import { createAccessController, projectAuthorityIn } from "../access/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
 import { CommandError } from "../command-error";
 import { logFailure, reportFailure } from "../failure-log";
@@ -67,8 +69,14 @@ import { recoveredConnectionObserver } from "./recovered-connections";
 import type { ExecutionReserve } from "./reserve-controller";
 import { createRetryBackoff } from "./retry-backoff";
 import { freezeStagingConfiguration } from "./staging-configuration";
+import { configuredSubstrate, createSubstrateExecution } from "./substrate";
+import type { createSubstrateCapacity } from "./substrate-capacity";
+import { createSubstratePrebuild } from "./substrate-prebuild";
+import { createSubstrateVerification } from "./substrate-verification";
+import { configuredSubstrateWorkspaces, createSubstrateWorkspaces } from "./substrate-workspaces";
 import type { RuntimeAttemptView } from "./types";
 import { prepareVerificationHandoff } from "./verification-handoff";
+import { selectVerificationPlacement } from "./verification-placement";
 import {
   createFactoryboxWorker,
   factoryboxAllocation,
@@ -121,7 +129,8 @@ export function createRuntimeController(
   database: Database,
   hub: RuntimeHub,
   connectorSecret: string,
-  sources: Pick<ReturnType<typeof createWorkspaceSourceController>, "prepareExecution">,
+  sources: Pick<ReturnType<typeof createWorkspaceSourceController>, "prepareExecution"> &
+    Partial<Pick<ReturnType<typeof createWorkspaceSourceController>, "substrate">>,
   kubernetes: KubernetesClient = createKubernetesClient(),
   readRegistryCA: () => Promise<string> = readRuntimeRegistryCA,
   reserve?: ExecutionReserve,
@@ -130,7 +139,102 @@ export function createRuntimeController(
     importedExportsEveryMS: 2 * 60_000,
     pausedSettleMS: 10 * 60_000,
   }),
+  observeWorkers = observeFactoryboxNodes,
+  nativeConfiguration = configuredSubstrate(),
+  nativeCall?: SubstrateCall,
+  nativeWorkspaceConfiguration = configuredSubstrateWorkspaces(),
+  nativeProvisionerCall?: SubstrateCall,
+  nativeCapacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "ensure" | "requireReady">,
 ) {
+  if (nativeConfiguration && nativeWorkspaceConfiguration)
+    throw new Error(
+      "Configure either prepared native binding or fresh Workspace provisioning, not both",
+    );
+  const substrate = nativeConfiguration
+    ? createSubstrateExecution(
+        database,
+        hub,
+        connectorSecret,
+        nativeConfiguration,
+        nativeCall,
+        sources.substrate,
+      )
+    : undefined;
+  const nativeWorkspaces = nativeWorkspaceConfiguration
+    ? createSubstrateWorkspaces(
+        database,
+        hub,
+        connectorSecret,
+        nativeWorkspaceConfiguration,
+        nativeCall,
+        nativeProvisionerCall,
+        resolveSystemContract,
+        sources.substrate,
+        nativeCapacity,
+      )
+    : undefined;
+  function requireIsolatedOwner(projectID: string, kind: string) {
+    if (nativeWorkspaces?.matchesProject(projectID) || substrate?.matchesProject(projectID))
+      throw new CommandError(
+        "unavailable",
+        `Native ${kind} execution is not enabled. No legacy runtime was created.`,
+      );
+  }
+  const nativeVerification = nativeWorkspaceConfiguration
+    ? createSubstrateVerification(
+        database,
+        hub,
+        connectorSecret,
+        nativeWorkspaceConfiguration,
+        nativeCall,
+        nativeProvisionerCall,
+        nativeCapacity,
+      )
+    : undefined;
+  const nativePrebuild = nativeWorkspaceConfiguration
+    ? createSubstratePrebuild(
+        database,
+        hub,
+        connectorSecret,
+        nativeWorkspaceConfiguration,
+        nativeCall,
+        nativeProvisionerCall,
+        nativeCapacity,
+      )
+    : undefined;
+  async function nativeFor(attemptID: string) {
+    const [row] = await database.client<
+      { substrate: boolean }[]
+    >`SELECT substrate FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    if (!row?.substrate) return undefined;
+    const prebuild = await nativePrebuild?.forAttempt(attemptID);
+    if (prebuild) return prebuild;
+    const verification = await nativeVerification?.forAttempt(attemptID);
+    if (verification) return verification;
+    const workspace = await nativeWorkspaces?.forAttempt(attemptID);
+    if (workspace) return workspace;
+    if (!substrate?.matchesAttempt(attemptID))
+      throw new Error(
+        "Native Attempt requires its original explicitly configured adapter; legacy dispatch refused",
+      );
+    return substrate;
+  }
+  async function observeNativeAttempt(attempt: RuntimeAttemptView) {
+    const native = await nativeFor(attempt.id);
+    if (!native) return attempt;
+    const observation = await native.get();
+    if (observation.state === "ACTOR_STATE_CRASHED") {
+      // Native observation persisted the crash. Return that saved outcome, not
+      // the row read before the observation completed.
+      const [recorded] = await database.client<
+        Pick<RuntimeAttemptView, "state" | "failure" | "updatedAt">[]
+      >`
+        SELECT state,failure,updated_at AS "updatedAt" FROM factory.runtime_attempt WHERE id=${attempt.id}`;
+      if (!recorded) throw new Error("Recorded native runtime outcome is unavailable");
+      return { ...attempt, ...recorded, native: observation };
+    }
+    return { ...attempt, native: observation };
+  }
   const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(
     process.env["FACTORY_RUNTIME_HOST_IMAGE"],
   );
@@ -154,6 +258,28 @@ export function createRuntimeController(
     apiURL: FACTORY_FORGEJO_API_URL,
     token: FACTORY_FORGEJO_TOKEN,
   });
+  async function verificationJob(verificationID: string, sql: Database["client"]) {
+    const [row] = await sql<
+      Array<{ handle: string | null; runID: string | null; commit: string; repository: string }>
+    >`
+      SELECT verification.runner_job_handle AS handle,verification.action_run_id AS "runID",
+        verification.commit_sha AS commit,project.repository_url AS repository
+      FROM factory.verification verification JOIN factory.change change ON change.id=verification.change_id
+      JOIN factory.project project ON project.id=change.project_id WHERE verification.id=${verificationID}`;
+    if (!row || row.handle || !row.runID) return row?.handle ?? undefined;
+    const handle = await forge.verificationJobHandle(
+      forgeRepositoryFromURL(row.repository),
+      Number(row.runID),
+      row.commit,
+    );
+    const [saved] = await sql<Array<{ handle: string }>>`UPDATE factory.verification
+      SET runner_job_handle=COALESCE(runner_job_handle,${handle})
+      WHERE id=${verificationID} AND action_run_id=${row.runID} AND commit_sha=${row.commit}
+        AND state IN ('pending','runner-starting','running') RETURNING runner_job_handle AS handle`;
+    if (!saved || saved.handle !== handle)
+      throw new Error("Verification job authority changed before execution");
+    return saved.handle;
+  }
   const cleanupRetries = new Set<string>();
   const startupObservations = new Set<string>();
   const reconnectObservations = new Map<string, ReturnType<typeof setTimeout>>();
@@ -273,8 +399,11 @@ export function createRuntimeController(
     await withResourceLock(
       attemptID,
       async (sql) => {
-        const intent = await sql<{ state: string; stopped: boolean }[]>`
-        SELECT state, stop_intended_at IS NOT NULL AS stopped
+        const intent = await sql<
+          { state: string; stopped: boolean; workerID: string; admissionID: string }[]
+        >`
+        SELECT state, stop_intended_at IS NOT NULL AS stopped,
+          factorybox_worker_id AS "workerID",factorybox_admission_id AS "admissionID"
         FROM factory.runtime_attempt WHERE id = ${attemptID}
       `;
         if (
@@ -285,6 +414,7 @@ export function createRuntimeController(
           hub.revoke(attemptID);
           return;
         }
+        const binding = intent[0];
         await freezeStagingConfiguration(sql, attemptID, input.resources);
         reserve?.refill();
         const activated = await computeWait.launch(
@@ -301,7 +431,10 @@ export function createRuntimeController(
             ...ports,
             kubernetes: {
               apply: (resources) =>
-                worker.provision(resources, input.factoryboxProfile, input.runtimeHostImage),
+                worker.provision(resources, input.factoryboxProfile, input.runtimeHostImage, {
+                  workerID: binding.workerID,
+                  admissionID: binding.admissionID,
+                }),
               getPod: (namespace, podName) => kubernetes.getPod(namespace, podName),
             },
             transitionObserved: (podUID, namespaceUID) =>
@@ -388,7 +521,16 @@ export function createRuntimeController(
     // mutation, then drain this assigned Sandbox's retained checkpoints too.
     await factorybox.deleteSandbox(attemptID, Boolean(removedByReserve));
     if (!removedByReserve) {
-      const shared = await factoryboxAllocation(sql);
+      const [binding] = await sql<Array<{ workerID: string; admissionID: string }>>`
+          SELECT factorybox_worker_id AS "workerID",factorybox_admission_id AS "admissionID"
+          FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!binding) throw new Error("Cleanup lost its retained worker binding");
+      const shared = await factoryboxAllocation(
+        sql,
+        undefined,
+        binding.workerID,
+        binding.admissionID,
+      );
       const namespaceUID = attempt.namespaceUID ?? shared.namespaceUID;
       if (namespaceUID)
         await kubernetes.deleteSecret({
@@ -498,6 +640,15 @@ export function createRuntimeController(
   // proves it failed is classified once (see observeFailedResume) and then left
   // for the owner's explicit decision; nothing here dispatches another restore.
   async function resumeExisting(attemptID: string, deadline?: number) {
+    const native = await nativeFor(attemptID);
+    if (native) {
+      const [attempt] = await database.client<
+        { userID: string }[]
+      >`SELECT created_by AS "userID" FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt) throw new Error("Native Attempt missing");
+      await native.resume(attempt.userID);
+      return;
+    }
     const [classified] = await database.client<Array<{ failed: boolean }>>`
       SELECT resume_failed_at IS NOT NULL AS failed FROM factory.runtime_attempt WHERE id=${attemptID}`;
     if (classified?.failed) return;
@@ -555,6 +706,57 @@ export function createRuntimeController(
     );
   });
   async function updateStatus(attemptID: string, phase: string, error?: string) {
+    const native = await nativeFor(attemptID);
+    if (native) {
+      if (["stopped", "failed", "cleanup-failed"].includes(phase)) {
+        const [preparation] = await database.client<{ id: string; state: string }[]>`
+          SELECT id,state FROM factory.project_image_preparation WHERE runtime_attempt_id=${attemptID}`;
+        if (preparation) {
+          const unsupported = error?.startsWith(
+            "prebuild Compose cannot depend on the producer environment",
+          );
+          if (preparation.state === "running")
+            await database.client`UPDATE factory.project_image_preparation SET state=${unsupported ? "unsupported" : "failed"},failure=${unsupported ? "Image preparation was skipped: Compose build inputs depend on environment variables. Normal startup remains available." : (error ?? "Image preparation ended without a confirmed publication; normal startup remains available.")},updated_at=now()
+              WHERE id=${preparation.id} AND state='running'`;
+          // Only an isolated producer is disposable here. The common adapter
+          // retains Stop before exact-UID Delete and confirms absence; a status
+          // message alone never settles cleanup or releases the producer lock.
+          await native.stop();
+          return;
+        }
+      }
+      const failed = phase === "failed" || phase === "cleanup-failed" || phase === "stopped";
+      const reconnecting = phase === "disconnected" || phase === "reconnecting";
+      // Startup progress is not a failure. Its asynchronous observation can
+      // finish after readiness and must not overwrite that confirmed result.
+      if (phase !== "ready" && !failed && !reconnecting) return;
+      if (reconnecting && hub.ready(attemptID)) return;
+      const observed = await native.get();
+      if (reconnecting && hub.ready(attemptID)) return;
+      const ready =
+        phase === "ready" && observed.state === "ACTOR_STATE_RUNNING" && hub.ready(attemptID);
+      const apps = hub.appChannels(attemptID);
+      const healthy = ready
+        ? Object.fromEntries(
+            hub
+              .processes(attemptID)
+              .filter((process) => process.state === "running" && apps.includes(process.name))
+              .map((process) => [process.name, new Date().toISOString()]),
+          )
+        : {};
+      const changed = await database.client`UPDATE factory.runtime_attempt SET
+        state=CASE WHEN ${ready} THEN 'ready'::factory.runtime_attempt_state WHEN ${failed} THEN 'failed'::factory.runtime_attempt_state WHEN ${reconnecting} THEN 'starting'::factory.runtime_attempt_state ELSE state END,
+        ready_at=CASE WHEN ${ready} THEN COALESCE(ready_at,now()) ELSE ready_at END,
+        app_ready_at=CASE WHEN ${ready} THEN ${JSON.stringify(healthy)}::text::jsonb || app_ready_at ELSE app_ready_at END,
+        failure=${ready ? null : (error ?? `Native observation: ${observed.state}; Connector ${phase}`)},updated_at=now()
+         WHERE id=${attemptID} AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
+      if (changed.count === 1 && ready) {
+        clearReconnectObservation(attemptID);
+        await settleReadyChange(attemptID);
+        await logReadyTiming(attemptID);
+      }
+      return;
+    }
     if (["failed", "cleanup-failed", "stopped"].includes(phase)) {
       const [current] = await database.client<
         Array<{ state: string }>
@@ -1016,6 +1218,9 @@ export function createRuntimeController(
           ? await sources.prepareExecution(attempt.id)
           : undefined;
         const artifacts = await artifactsFor(attempt.id, sql);
+        const verificationHandle = row.verificationID
+          ? await verificationJob(row.verificationID, sql)
+          : undefined;
         const resources = renderAttemptResources(
           {
             ...identity,
@@ -1058,6 +1263,7 @@ export function createRuntimeController(
                       row.isolatedKind === "publication"
                         ? "factory-publication"
                         : "factory-verification",
+                    ...(verificationHandle ? { handle: verificationHandle } : {}),
                     ...(row.publicationID && row.publicationHandle && publicationVersion
                       ? {
                           handle: row.publicationHandle,
@@ -1105,7 +1311,10 @@ export function createRuntimeController(
           return;
         }
         const applied = await computeWait.launch(attempt.id, () =>
-          worker.provision(resources, artifacts.factoryboxProfile, artifacts.runtimeHostImage),
+          worker.provision(resources, artifacts.factoryboxProfile, artifacts.runtimeHostImage, {
+            workerID: row.workerID,
+            admissionID: factoryboxAdmissionID(row.workerID, row.podName),
+          }),
         );
         if (!applied) return;
         const namespace = await kubernetes.getNamespace(row.namespace);
@@ -1171,6 +1380,16 @@ export function createRuntimeController(
   }
 
   return {
+    async authorizeConnector(request: Request) {
+      const attemptID = request.headers.get("x-factory-runtime-attempt");
+      if (!attemptID) return false;
+      try {
+        const native = await nativeFor(attemptID);
+        return native ? native.authorizeConnector(request) : true;
+      } catch {
+        return false;
+      }
+    },
     async recoverWorker(input: WorkerRecoveryInput) {
       return recoverFactoryboxWorker(
         database,
@@ -1186,6 +1405,11 @@ export function createRuntimeController(
     },
     async resumeForApp(attemptID: string, userID: string, deadline?: number) {
       await createAccessController(database).requireRuntime(userID, attemptID, "app");
+      const native = await nativeFor(attemptID);
+      if (native) {
+        await native.resume(userID);
+        return this.get(attemptID);
+      }
       const current = await this.get(attemptID);
       if (!current || current.failure || !["pausing", "paused", "resuming"].includes(current.state))
         return current;
@@ -1207,6 +1431,20 @@ export function createRuntimeController(
       return this.get(attemptID);
     },
     async pause(attemptID: string) {
+      const native = await nativeFor(attemptID);
+      if (native) {
+        try {
+          await native.suspend();
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : "Native Pause is unconfirmed";
+          await database.client`UPDATE factory.runtime_attempt SET failure=COALESCE(failure,${message}),updated_at=now()
+            WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+          // Keep the original Actor, Source fence and unsettled intent. A
+          // transport failure is never permission to discard or retry work.
+          throw cause;
+        }
+        return this.get(attemptID);
+      }
       try {
         await factorybox.pause(attemptID);
       } catch (cause) {
@@ -1318,11 +1556,19 @@ export function createRuntimeController(
           SELECT preparation.project_id AS "projectID",preparation.revision,preparation.runtime_attempt_id AS "attemptID",project.created_by AS "userID",project.repository_url AS "repositoryURL",project.devcontainer_path AS "devcontainerPath",preparation.environment,preparation.environment_version::text AS "environmentVersion"
           FROM factory.project_image_preparation preparation JOIN factory.project project ON project.id=preparation.project_id WHERE preparation.id=${preparationID} AND preparation.state IN ('pending','running')`;
         if (!job) return;
+        if (
+          nativePrebuild?.matchesProject(job.projectID) &&
+          (!job.attemptID || (await nativeFor(job.attemptID)))
+        ) {
+          await nativePrebuild.start(preparationID);
+          return;
+        }
         await requireSetupReady(lock, job.projectID);
         projectLock = `runtime:${job.projectID}`;
         await lock`SELECT pg_advisory_lock(hashtext(${projectLock}))`;
         let attemptID = job.attemptID;
         if (!attemptID) {
+          requireIsolatedOwner(job.projectID, "prebuild");
           const [next] = await lock<Array<{ generation: string }>>`
             SELECT COALESCE(MAX(generation),0)+1 AS generation FROM factory.runtime_attempt
             WHERE project_id=${job.projectID} AND change_id IS NULL AND workspace_id IS NULL`;
@@ -1435,7 +1681,13 @@ export function createRuntimeController(
         }
       }
     },
+    async admitNativeCapacity() {
+      await nativeCapacity?.ensure();
+    },
     async recover() {
+      await nativeCapacity
+        ?.ensure()
+        .catch(reportFailure("Native worker capacity admission is unavailable"));
       await worker.retainDeclaration().catch(() => {
         console.error("Original Factorybox declaration needs observation");
       });
@@ -1486,7 +1738,7 @@ export function createRuntimeController(
           parent_connector_token_hash AS "parentTokenHash",
           child_connector_token_hash AS "childTokenHash"
         FROM factory.runtime_attempt
-        WHERE state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
+        WHERE NOT substrate AND state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=factory.runtime_attempt.id)
       `;
       for (const attempt of attempts) {
@@ -1501,7 +1753,7 @@ export function createRuntimeController(
       }
       await database.client`
         UPDATE factory.runtime_attempt SET state = 'starting', updated_at = now()
-        WHERE state = 'ready'
+        WHERE state = 'ready' AND NOT substrate
       `;
       const deferredCreates: Array<() => Promise<void>> = [];
       for (const attempt of attempts) {
@@ -1584,6 +1836,20 @@ export function createRuntimeController(
       return () => {
         if (observing) return;
         observing = true;
+        if (substrate)
+          void substrate.recover().catch(reportFailure("Native runtime observation unavailable"));
+        if (nativeWorkspaces)
+          void nativeWorkspaces
+            .recover()
+            .catch(reportFailure("Native Workspace observation unavailable"));
+        if (nativeVerification)
+          void nativeVerification
+            .recover()
+            .catch(reportFailure("Native Verification observation unavailable"));
+        if (nativePrebuild)
+          void nativePrebuild
+            .recover()
+            .catch(reportFailure("Native prebuild observation unavailable"));
         for (const create of deferredCreates)
           void create().catch(reportFailure("Reserved runtime recovery failed"));
         observeConnections();
@@ -1601,6 +1867,14 @@ export function createRuntimeController(
     async start(projectID: string, userID: string) {
       await createAccessController(database).requireDevelopment(userID, projectID);
       await requireSetupReady(database.client, projectID);
+      if (nativeWorkspaces?.matchesProject(projectID)) {
+        const id = await nativeWorkspaces.start(userID);
+        return this.get(id);
+      }
+      if (substrate?.matchesProject(projectID)) {
+        const id = await substrate.start(userID);
+        return this.get(id);
+      }
       const workspaceIdentity = personalWorkspaceIdentity(projectID, userID);
       // Source preparation, infrastructure calls and result reads use the
       // application pool. Session coordination must not reserve one of its slots.
@@ -1838,6 +2112,7 @@ export function createRuntimeController(
         `;
         let configured: SystemContract | undefined;
         if (!previews[0]?.attemptID) {
+          requireIsolatedOwner(projectID, "Staging");
           const revision = await resolveRepositoryRevision(
             project.repositoryURL,
             project.defaultBranch,
@@ -1871,6 +2146,7 @@ export function createRuntimeController(
             return current;
           }
         }
+        requireIsolatedOwner(projectID, "Staging");
         const systemContract =
           configured ?? (await resolveSystemContract(project.repositoryURL, preview.revision));
         const generations = await lock<Array<{ generation: string }>>`
@@ -2001,6 +2277,10 @@ export function createRuntimeController(
       const projectID = lockRows[0]?.projectID;
       if (!projectID) throw new Error("Change not found");
       await requireSetupReady(database.client, projectID);
+      if (nativeWorkspaces?.matchesProject(projectID)) {
+        const id = await nativeWorkspaces.start(userID, changeID);
+        return this.get(id);
+      }
       const lock = database.coordination();
       try {
         await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
@@ -2263,10 +2543,63 @@ export function createRuntimeController(
       `;
       const verification = rows[0];
       if (!verification) return null;
+      if (nativeVerification?.matchesProject(verification.projectID)) {
+        const [retained] = verification.attemptID
+          ? await database.client<
+              { native: boolean }[]
+            >`SELECT substrate AS native FROM factory.runtime_attempt WHERE id=${verification.attemptID}`
+          : [];
+        if (!verification.attemptID || retained?.native) {
+          await database.client.begin((tx) =>
+            projectAuthorityIn(tx, userID, verification.projectID),
+          );
+          await verificationJob(verificationID, database.client);
+          const id = await nativeVerification.start(verificationID, userID);
+          return this.get(id);
+        }
+      }
+      if (!verification.attemptID) requireIsolatedOwner(verification.projectID, "Verification");
       if (!verification.runnerUUID || !verification.runnerToken) {
         throw new Error("Verification runner is not registered");
       }
-      const handoff = await prepareVerificationHandoff(database, hub, verificationID);
+      // A retained Attempt never goes through node selection again. For new
+      // work, pin placement before either remote creation or same-worker Stop.
+      const [retainedBinding] = verification.attemptID
+        ? await database.client<Array<{ workerID: string; admissionID: string }>>`
+            SELECT factorybox_worker_id AS "workerID",factorybox_admission_id AS "admissionID"
+            FROM factory.runtime_attempt WHERE id=${verification.attemptID}`
+        : [];
+      const placement = retainedBinding
+        ? {
+            allocation: await factoryboxAllocation(
+              database.client,
+              undefined,
+              retainedBinding.workerID,
+              retainedBinding.admissionID,
+            ),
+            refused: [],
+          }
+        : await database.client.begin(async (sql) => {
+            await sql`SELECT id FROM factory.verification WHERE id=${verificationID} FOR UPDATE`;
+            return selectVerificationPlacement(
+              sql,
+              configuredFactoryboxRuntimeProfile(),
+              pinnedRuntimeHostImage,
+              observeWorkers,
+              verificationID,
+            );
+          });
+      const handoff = await prepareVerificationHandoff(
+        database,
+        hub,
+        verificationID,
+        placement.allocation.id,
+      );
+      if (placement.refused.length)
+        console.info("[factory] Verification node refusal", {
+          verificationID,
+          nodes: placement.refused,
+        });
       if (handoff.stopAttemptID) await this.stop(handoff.stopAttemptID);
       // Continuation never replaces an existing execution, including a failed
       // or stopped one. Only the explicit verified bootstrap retry can clear
@@ -2288,8 +2621,15 @@ export function createRuntimeController(
           WHERE project_id = ${verification.projectID} AND isolated_kind IS NOT NULL
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(verificationID, generation, lock);
+        const identity = {
+          ...runtimeIdentity(verificationID, generation),
+          workerID: placement.allocation.id,
+          namespace: placement.allocation.namespace,
+          podName: placement.allocation.podName,
+          admissionID: placement.allocation.admissionID,
+        };
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
+        const jobHandle = await verificationJob(verificationID, lock);
         await lock`BEGIN`;
         try {
           const active = await lock<Array<{ id: string }>>`
@@ -2312,17 +2652,17 @@ export function createRuntimeController(
             identity.attemptID,
             verification.projectID,
             "verification",
-            "verification",
+            placement.allocation.singleton ? "verification" : undefined,
           );
           await lock`
             INSERT INTO factory.runtime_attempt(
               id, project_id, verification_id, isolated_kind, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, factorybox_admission_id
+              create_intended_at, created_by, factorybox_worker_id, factorybox_admission_id
             ) VALUES (
               ${identity.attemptID}, ${verification.projectID}, ${verificationID}, 'verification',
               ${generation}, ${verification.commitSHA}, 'create-intended', ${hashConnectorToken(tokens.parent)},
-              ${hashConnectorToken(tokens.child)}, now(), ${userID}, ${identity.admissionID}
+              ${hashConnectorToken(tokens.child)}, now(), ${userID}, ${identity.workerID}, ${identity.admissionID}
             )
           `;
           await artifactsFor(identity.attemptID, lock);
@@ -2359,6 +2699,7 @@ export function createRuntimeController(
             verification: {
               runnerUUID: verification.runnerUUID,
               runnerToken: verification.runnerToken,
+              ...(jobHandle ? { jobHandle } : {}),
             },
           },
           lock,
@@ -2402,6 +2743,7 @@ export function createRuntimeController(
         if (!row.runnerUUID || !row.runnerToken || !row.jobHandle)
           throw new Error("Bound publication runner is required");
         await createAccessController(database).requireDevelopment(userID, row.projectID);
+        requireIsolatedOwner(row.projectID, "publication");
         projectLock = `runtime:isolated:${row.projectID}`;
         await lock`SELECT pg_advisory_lock(hashtext(${projectLock}))`;
         const [sequence] = await lock<{ generation: number }[]>`
@@ -2485,6 +2827,7 @@ export function createRuntimeController(
       const promotion = rows[0];
       if (!promotion) throw new Error("Promotion was not found");
       if (promotion.attemptID) return this.get(promotion.attemptID);
+      requireIsolatedOwner(promotion.projectID, "Staging replacement");
       const lock = database.coordination();
       try {
         await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
@@ -2580,7 +2923,9 @@ export function createRuntimeController(
         LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
         WHERE attempt.id = ${attemptID}
       `;
-      return attempts[0] ?? null;
+      const attempt = attempts[0];
+      if (!attempt) return null;
+      return observeNativeAttempt(attempt);
     },
     async processOutput(attemptID: string) {
       const attempts = await database.client<Array<{ state: string }>>`
@@ -2645,7 +2990,7 @@ export function createRuntimeController(
       return { closed: true };
     },
     async list(projectID: string | undefined, userID: string) {
-      return database.client<RuntimeAttemptView[]>`
+      const attempts = await database.client<RuntimeAttemptView[]>`
         SELECT attempt.id, attempt.project_id AS "projectId", attempt.change_id AS "changeId",
           attempt.workspace_id AS "workspaceId", workspace.kind AS "workspaceKind",
           workspace.owner_user_id AS "ownerUserId", attempt.generation, attempt.revision,
@@ -2671,6 +3016,7 @@ export function createRuntimeController(
           ))
         ORDER BY attempt.created_at DESC
       `;
+      return Promise.all(attempts.map(observeNativeAttempt));
     },
     status: updateStatus,
     // Discards a paused Sandbox whose Resume positively failed (the native record
@@ -2727,6 +3073,11 @@ export function createRuntimeController(
         : this.start(row.projectID, userID);
     },
     async stop(attemptID: string) {
+      const native = await nativeFor(attemptID);
+      if (native) {
+        await native.stop();
+        return this.get(attemptID);
+      }
       clearReconnectObservation(attemptID);
       const projects = await database.client<Array<{ projectID: string }>>`
         SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id = ${attemptID}

@@ -10,6 +10,7 @@ import {
   retireFactoryboxExports,
   retireImportedFactoryboxExports,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-export-retention";
+import { requireOriginalFactoryboxNode } from "../../../../packages/runtime-kubernetes/src/factorybox-node-discovery";
 import {
   type FactoryboxBackingRequest,
   type FactoryboxCheckpointRequest,
@@ -87,17 +88,19 @@ type Retained = {
 };
 // The same predicates reclaimRetiredFactoryboxBacking selects on, without its
 // identity and cursor checks, so an idle sweep can skip the worker entirely.
-async function retiredBackingPending(sql: SQL) {
+async function retiredBackingPending(sql: SQL, workerID: string) {
   const [pending] = await sql<Array<{ pending: boolean }>>`SELECT
     EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation operation
       JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
       JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
       WHERE operation.action='retire-sandbox' AND operation.completed_at IS NULL
         AND attempt.state IN ('stopped','failed') AND admission.retired_at IS NOT NULL
+        AND admission.worker_id=${workerID}
         AND admission.retirement_observation->>'kind'='operator-recovery')
     OR EXISTS(SELECT 1 FROM factory.execution_slot slot
       JOIN factory.factorybox_worker_admission admission ON admission.id=slot.factorybox_admission_id
       WHERE slot.state='deleted' AND slot.factorybox_retirement_request IS NOT NULL
+        AND admission.worker_id=${workerID}
         AND slot.factorybox_retirement_observation IS NULL AND admission.retired_at IS NOT NULL
         AND admission.retirement_observation->>'kind'='operator-recovery') AS pending`;
   return pending?.pending === true;
@@ -121,9 +124,9 @@ export function createFactoryboxExecution(
   reclaim?: FactoryboxReclaimPolicy,
 ) {
   let reclaiming: Promise<void> | null = null;
-  let importedExportsAt = Number.NEGATIVE_INFINITY;
+  const importedExportsAt = new Map<string, number>();
   let reclaimAfter: string | null = null;
-  let retiredCursor: RetiredBackingCursor = { attempts: null, slots: null };
+  const retiredCursors = new Map<string, RetiredBackingCursor>();
   const deadlines = new AsyncLocalStorage<number>();
   const phases = new AsyncLocalStorage<Record<string, number>>();
   const inspections = createInspectionReuse();
@@ -159,17 +162,26 @@ export function createFactoryboxExecution(
     deadline = performance.now() + nativeLifecycleWindowMS,
     background = false,
   ) {
+    const [binding] = await database.client<
+      Array<{ workerID: string; singleton: boolean; nodeName: string; nodeIdentity: unknown }>
+    >`
+      SELECT worker.id AS "workerID",worker.singleton,worker.node_name AS "nodeName",worker.node_identity AS "nodeIdentity"
+      FROM factory.runtime_attempt attempt JOIN factory.factorybox_worker worker ON worker.id=attempt.factorybox_worker_id
+      WHERE attempt.id=${attemptID}`;
     const connection = database.coordination();
     const lease: NativeLease = createNativeLease(
       connection,
       background ? "background" : "foreground",
       () => deadline,
+      binding && !binding.singleton ? { workerID: binding.workerID } : {},
     );
     const started = performance.now();
     const timings: Record<string, number> = {};
     let outcome = "ok";
     try {
       await connection`SELECT pg_advisory_lock(hashtext(${`factorybox:${attemptID}`}))`;
+      if (binding && !binding.singleton)
+        await requireOriginalFactoryboxNode(binding.nodeName, binding.nodeIdentity, run);
       return await withCommandDeadline(deadline, () =>
         deadlines.run(deadline, () =>
           phases.run(timings, () =>
@@ -850,58 +862,65 @@ export function createFactoryboxExecution(
     reclaimStorage() {
       if (reclaiming) return reclaiming;
       reclaiming = (async () => {
-        const [current] = await database.client<Array<{ id: string }>>`
-          SELECT saved.runtime_attempt_id AS id FROM factory.factorybox_runtime saved
+        const currentWorkers = await database.client<Array<{ id: string; workerID: string }>>`
+          SELECT DISTINCT ON (admission.worker_id) saved.runtime_attempt_id AS id,admission.worker_id AS "workerID" FROM factory.factorybox_runtime saved
           JOIN factory.runtime_attempt attempt ON attempt.id=saved.runtime_attempt_id
           JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
           WHERE admission.retired_at IS NULL AND saved.identity IS NOT NULL
-          ORDER BY saved.runtime_attempt_id LIMIT 1`;
+          ORDER BY admission.worker_id,saved.runtime_attempt_id`;
         // An idle installation takes no lock and runs no kubectl here. Retained
         // backing work and the imported export cache each earn a locked sweep.
-        const exportsDue =
-          !reclaim || performance.now() - importedExportsAt >= reclaim.importedExportsEveryMS;
-        const backingDue =
-          !reclaim ||
-          (reclaim.backoff.due("retained-backing") &&
-            (await retiredBackingPending(database.client)));
-        if (current && (exportsDue || backingDue)) {
-          try {
-            await locked(
-              current.id,
-              "sweep-storage",
-              async (connection) => {
-                const saved = await retained(connection, current.id);
-                if (!saved?.identity) return;
-                if (exportsDue) {
-                  importedExportsAt = performance.now();
-                  try {
-                    await retireImportedFactoryboxExports(saved.request, saved.identity, run);
-                  } catch (cause) {
-                    if (cause instanceof NativeSlotBusyError) {
-                      importedExportsAt = Number.NEGATIVE_INFINITY;
-                      throw cause;
+        for (const current of currentWorkers) {
+          const backingKey = `retained-backing:${current.workerID}`;
+          const backingDue =
+            !reclaim ||
+            (reclaim.backoff.due(backingKey) &&
+              (await retiredBackingPending(database.client, current.workerID)));
+          const exportsDue =
+            !reclaim ||
+            performance.now() -
+              (importedExportsAt.get(current.workerID) ?? Number.NEGATIVE_INFINITY) >=
+              reclaim.importedExportsEveryMS;
+          if (exportsDue || backingDue) {
+            try {
+              await locked(
+                current.id,
+                "sweep-storage",
+                async (connection) => {
+                  const saved = await retained(connection, current.id);
+                  if (!saved?.identity) return;
+                  if (exportsDue) {
+                    importedExportsAt.set(current.workerID, performance.now());
+                    try {
+                      await retireImportedFactoryboxExports(saved.request, saved.identity, run);
+                    } catch (cause) {
+                      if (cause instanceof NativeSlotBusyError) {
+                        importedExportsAt.delete(current.workerID);
+                        throw cause;
+                      }
+                      console.error("Factorybox imported export retirement needs observation");
                     }
-                    console.error("Factorybox imported export retirement needs observation");
                   }
-                }
-                if (!backingDue) return;
-                retiredCursor = await reclaimRetiredFactoryboxBacking(
-                  connection,
-                  { request: saved.request, identity: saved.identity },
-                  retiredCursor,
-                  run,
-                );
-                if (retiredCursor.failed) reclaim?.backoff.failed("retained-backing");
-                else reclaim?.backoff.succeeded("retained-backing");
-              },
-              undefined,
-              true,
-            );
-          } catch (cause) {
-            // Foreground work kept the worker busy; nothing was dispatched.
-            if (!(cause instanceof NativeSlotBusyError)) {
-              reclaim?.backoff.failed("retained-backing");
-              console.error("Factorybox retained backing retirement needs observation");
+                  if (!backingDue) return;
+                  const retiredCursor = await reclaimRetiredFactoryboxBacking(
+                    connection,
+                    { request: saved.request, identity: saved.identity },
+                    retiredCursors.get(current.workerID) ?? { attempts: null, slots: null },
+                    run,
+                  );
+                  retiredCursors.set(current.workerID, retiredCursor);
+                  if (retiredCursor.failed) reclaim?.backoff.failed(backingKey);
+                  else reclaim?.backoff.succeeded(backingKey);
+                },
+                undefined,
+                true,
+              );
+            } catch (cause) {
+              // Foreground work kept the worker busy; nothing was dispatched.
+              if (!(cause instanceof NativeSlotBusyError)) {
+                reclaim?.backoff.failed(backingKey);
+                console.error("Factorybox retained backing retirement needs observation");
+              }
             }
           }
         }
@@ -1061,6 +1080,7 @@ export function createFactoryboxExecution(
               slotForkRequest: unknown;
               slotStandby: unknown;
               workerID: string;
+              admissionID: string;
               workspaceID: string | null;
               projectID: string;
               generation: string;
@@ -1071,7 +1091,7 @@ export function createFactoryboxExecution(
           SELECT attempt.state,attempt.failure,attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.kubernetes_uid AS "podUID",
             artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",slot.id AS "slotID",slot.factorybox_identity AS "slotIdentity",
             slot.factorybox_fork_request AS "slotForkRequest",slot.factorybox_standby AS "slotStandby",
-            attempt.factorybox_worker_id AS "workerID",attempt.workspace_id AS "workspaceID",
+            attempt.factorybox_worker_id AS "workerID",attempt.factorybox_admission_id AS "admissionID",attempt.workspace_id AS "workspaceID",
             attempt.project_id AS "projectID",attempt.generation,
             attempt.kubernetes_namespace AS namespace,attempt.kubernetes_pod_name AS "podName"
           FROM factory.runtime_attempt attempt JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
@@ -1096,7 +1116,12 @@ export function createFactoryboxExecution(
           )
             throw new Error("Runtime resources belong to another Factory worker");
           const owner = attempt.slotID ?? attempt.workspaceID ?? attemptID;
-          const worker = await factoryboxAllocation(connection);
+          const worker = await factoryboxAllocation(
+            connection,
+            undefined,
+            attempt.workerID,
+            attempt.admissionID,
+          );
           if (worker.workerID !== attempt.workerID || worker.podName !== attempt.podName)
             throw new Error("Runtime Attempt belongs to another Factory worker admission");
           const request: FactoryboxRuntimeInput = {

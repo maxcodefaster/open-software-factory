@@ -28,7 +28,7 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if kind == "" {
 		kind = "build"
 	}
-	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" && kind != "prepared-image" && kind != "prepared-rootfs" {
+	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" && kind != "prepared-image" && kind != "prepared-rootfs" && kind != "runtime-environment" {
 		t.Fatal("unknown native Compose proof recipe")
 	}
 	preparedRecipe := kind == "prepared-image" || kind == "prepared-rootfs"
@@ -228,6 +228,16 @@ exec %q "$@"
 		encoded, _ = json.Marshal(compose)
 		files[".devcontainer/compose.json"] = string(encoded)
 	}
+	if kind == "runtime-environment" {
+		var compose map[string]any
+		json.Unmarshal([]byte(files[".devcontainer/compose.json"]), &compose)
+		for _, value := range compose["services"].(map[string]any) {
+			value.(map[string]any)["environment"] = map[string]string{"STARTER_RUNTIME_ONLY": "${PREPARED_RUNTIME_VALUE:?Runtime grant required}"}
+		}
+		encoded, _ := json.Marshal(compose)
+		files[".devcontainer/compose.json"] = string(encoded)
+		t.Setenv("PREPARED_RUNTIME_VALUE", "unapproved-producer-host-value")
+	}
 	for path, content := range files {
 		path = filepath.Join(root, path)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -275,6 +285,16 @@ exec %q "$@"
 		t.Fatal(err)
 	}
 	first := time.Since(started)
+	if kind == "runtime-environment" {
+		original, err := os.ReadFile(filepath.Join(root, ".devcontainer/compose.json"))
+		if err != nil || string(original) != files[".devcontainer/compose.json"] {
+			t.Fatal("prebuild rewrote consumer Runtime settings")
+		}
+		config := command("docker", "image", "inspect", "--format", "{{json .Config}}", result.Image)
+		if strings.Contains(config, "STARTER_RUNTIME_ONLY") || strings.Contains(config, "unapproved-producer-host-value") {
+			t.Fatal("Runtime environment entered the published image")
+		}
+	}
 	beforeReplay, err := os.ReadFile("/tmp/owned-cache-trims")
 	if err != nil || strings.Count(string(beforeReplay), "trim\n") != strings.Count(string(initialTrims), "trim\n")+1 {
 		t.Fatal("newly published image did not retain bounded private build-cache cleanup")
@@ -380,6 +400,9 @@ exec %q "$@"
 		}
 	}()
 	consumer := time.Since(started)
+	if kind == "runtime-environment" && command("docker", "exec", container.ContainerID, "printenv", "STARTER_RUNTIME_ONLY") != "fresh-after-image-preparation" {
+		t.Fatal("consumer did not resolve its separately admitted fresh Runtime grant")
+	}
 	observation := command("docker", "exec", container.ContainerID, "node", "-e",
 		`const fs=require("fs"); const dependency=fs.existsSync("/opt/project-seed")?require("/workspace/project/dependency/node_modules/local-dependency"):"image-only"; const values={dependency,feature:fs.existsSync("/opt/prebuilt-feature")?fs.readFileSync("/opt/prebuilt-feature","utf8"):"absent",createHook:fs.readFileSync("/workspace/project/create-hook","utf8"),projectHook:fs.readFileSync("/workspace/project/project-hook","utf8"),featureHook:fs.existsSync("/workspace/project/feature-hook")?fs.readFileSync("/workspace/project/feature-hook","utf8"):""}; fs.writeFileSync("/workspace/project/dependency/manual","still writable"); process.stdout.write(JSON.stringify(values));`)
 	dependency := "exact offline dependency"
@@ -514,24 +537,5 @@ exec %q "$@"
 		grants.cleanup()
 		dependencyRebuildMS = provePreparedRootFSRebuild(t, preparedRootFS).Milliseconds()
 	}
-	summary := map[string]any{
-		"nativeComponentProof": true, "nativeFactoryboxProof": false, "platform": platform,
-		"primaryKind": kind, "preparedDependency": kind != "image-only",
-		"image": result.Image, "firstBuildMS": first.Milliseconds(), "replayMS": replayed.Milliseconds(),
-		"consumerStartMS": consumer.Milliseconds(), "requiredHooks": true, "writableDependency": true,
-		"producerGraphEvictedBeforeConsumer": true,
-		"freshGrantDependencyRebuildMS":      dependencyRebuildMS,
-		"nonRootPreparedChildArtifacts":      kind == "build-no-features",
-		"credentialFreePreparedImage":        preparedRecipe,
-		"preparedPrimaryDependenciesReused":  kind == "prepared-rootfs",
-		"modelCalls":                         0, "projectCredentials": false,
-	}
-	encoded, _ := json.Marshal(summary)
-	if err := os.WriteFile("/tmp/compose-prebuild-result.json", encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile("/tmp/compose-prebuild-result-"+kind+".json", encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	fmt.Println(string(encoded))
+	t.Logf("Offline native Compose component %s on %s passed: first build %dms, completed-result reuse %dms, cache-independent consumer %dms, fresh-grant rebuild %dms; this is not Factory/Substrate E2E qualification", kind, platform, first.Milliseconds(), replayed.Milliseconds(), consumer.Milliseconds(), dependencyRebuildMS)
 }

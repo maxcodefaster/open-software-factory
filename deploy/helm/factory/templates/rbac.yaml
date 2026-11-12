@@ -61,13 +61,23 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumes]
     verbs: [get, patch]
-  # Worker admission reads the configured node; retained Stop reads a recorded storage node.
+  # Verification discovers joined nodes; admission and retained Stop read the exact selected node.
   - apiGroups: [""]
     resources: [nodes]
-    verbs: [get]
+    verbs: [get, list]
   - apiGroups: ["metrics.k8s.io"]
     resources: [pods]
     verbs: [get]
+  {{- if .Values.substrate.workspaceConfigurationSecret }}
+  # Native capacity observes the admitted profile and creates distinct pools for
+  # joined suitable nodes. It cannot patch/delete the original retained pools.
+  - apiGroups: ["ate.dev"]
+    resources: [workerpools]
+    verbs: [get, list, create]
+  - apiGroups: ["ate.dev"]
+    resources: [sandboxconfigs]
+    verbs: [get]
+  {{- end }}
   # The storage check lists these in its disposable Namespace to prove it is empty before delete.
   - apiGroups: [""]
     resources: [services, serviceaccounts, configmaps, replicationcontrollers]

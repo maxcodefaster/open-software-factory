@@ -94,12 +94,12 @@ export function runtimePreparationCopy(value: FactoryRuntimeState | undefined) {
   if (["loading", "create-intended", "starting", "reconnecting", "resuming"].includes(value.state))
     return "Preparing Workspace compute. Your source files remain available.";
   if (value.state === "pausing" || value.state === "paused")
-    return "Workspace compute is paused. Continue working to resume it.";
+    return "Workspace compute is paused. Start it when you need a terminal or App. Source files remain available.";
   if (value.state === "cleanup-failed")
     return "Cleanup of the previous compute is unconfirmed. A new Start is blocked until it is confirmed. Your source files remain available.";
   if (["stop-intended", "stopping"].includes(value.state))
     return "Workspace compute is stopping. Your source files remain available.";
-  return "Workspace compute starts automatically when you open it for editing.";
+  return "Workspace compute is stopped. Start it when you need a terminal or App.";
 }
 
 export class FactoryRuntimeContext {
@@ -109,7 +109,6 @@ export class FactoryRuntimeContext {
   #cancel: AbortController | undefined;
   #observing = false;
   #writable = false;
-  #demanded = false;
   #lastActivity = -Infinity;
   #preparationFailure: string | undefined;
   constructor(
@@ -131,12 +130,11 @@ export class FactoryRuntimeContext {
       },
     };
   }
-  select(workspaceID: string, automatic = false) {
+  select(workspaceID: string) {
     this.#cancel?.abort();
     this.#cancel = new AbortController();
     const selection = ++this.#selection;
     this.#writable = false;
-    this.#demanded = automatic;
     this.#lastActivity = -Infinity;
     this.#preparationFailure = undefined;
     this.#set({ workspaceID, attemptID: null, state: "loading", failure: null });
@@ -152,16 +150,11 @@ export class FactoryRuntimeContext {
   setWritable(workspaceID: string, allowed: boolean) {
     if (workspaceID !== this.#value?.workspaceID) return;
     this.#writable = allowed;
-    // A read-only opening is not a deferred request to start compute when
-    // someone else's work later stops or releases writing authority.
-    if (!allowed) this.#demanded = false;
-    this.#prepareDemand();
+    // Source selection and changes in editing authority never demand compute.
   }
   async use() {
     const current = this.#value;
     if (!current || !this.#writable) return;
-    this.#demanded = true;
-    this.#prepareDemand();
     if (current.state !== "ready" || Date.now() - this.#lastActivity < 15_000) return;
     this.#lastActivity = Date.now();
     try {
@@ -170,31 +163,11 @@ export class FactoryRuntimeContext {
         { method: "POST", credentials: "same-origin", signal: this.#cancel?.signal ?? null },
       );
       if (response.status === 409 && this.#value?.workspaceID === current.workspaceID) {
-        this.#demanded = true;
         await this.observe();
       }
     } catch {
       // A lost activity report does not authorize a second Start.
-    } finally {
-      if (this.#value?.workspaceID === current.workspaceID && this.#value.state === "ready")
-        this.#demanded = false;
     }
-  }
-  #prepareDemand() {
-    const current = this.#value;
-    if (!this.#demanded || !current) return;
-    if (
-      current.state === "ready" ||
-      current.state === "failed" ||
-      current.state === "unavailable"
-    ) {
-      this.#demanded = false;
-      return;
-    }
-    if (!this.#writable || this.#preparationFailure) return;
-    if (!["stopped", "paused"].includes(current.state)) return;
-    this.#demanded = false;
-    void this.prepare();
   }
   async observe() {
     const current = this.#value;
@@ -364,7 +337,6 @@ export class FactoryRuntimeContext {
       return;
     this.#value = value;
     for (const listener of this.#listeners) listener(value);
-    this.#prepareDemand();
   }
 }
 export const factoryRuntimeContext = new FactoryRuntimeContext();

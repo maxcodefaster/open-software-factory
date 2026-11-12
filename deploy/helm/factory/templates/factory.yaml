@@ -31,7 +31,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
         factory.dev/upgrade-revision: {{ .Release.Revision | quote }}
-        {{- $existing := include "factory.existingSecretChecksum" (dict "root" . "names" (list .Values.existingSecrets.credentials .Values.existingSecrets.objects .Values.existingSecrets.openbaoTLS)) }}
+        {{- $existing := include "factory.existingSecretChecksum" (dict "root" . "names" (list .Values.existingSecrets.credentials .Values.existingSecrets.objects .Values.existingSecrets.openbaoTLS .Values.substrate.workspaceConfigurationSecret)) }}
         {{- if $existing }}
         checksum/existing-secrets: {{ $existing }}
         {{- end }}
@@ -84,6 +84,10 @@ spec:
           envFrom:
             - configMapRef: {name: "{{ include "factory.name" . }}-config"}
           env:
+            {{- if .Values.substrate.workspaceConfigurationSecret }}
+            - name: FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION
+              value: /run/factory/substrate-configuration/configuration.json
+            {{- end }}
             - name: FACTORY_OBJECT_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef: {name: {{ include "factory.objectsSecret" . | quote }}, key: access-key-id}
@@ -135,10 +139,39 @@ spec:
             - {name: state, mountPath: /var/lib/factory}
             - {name: temporary, mountPath: /tmp}
             - {name: openbao-tls, mountPath: /run/factory/openbao, readOnly: true}
+            {{- if .Values.substrate.workspaceConfigurationSecret }}
+            - {name: substrate-configuration, mountPath: /run/factory/substrate-configuration, readOnly: true}
+            - {name: substrate-control, mountPath: /run/factory/substrate-control, readOnly: true}
+            - {name: substrate-provisioner, mountPath: /run/factory/substrate-provisioner, readOnly: true}
+            {{- end }}
             {{- if .Values.registryCASecret }}
             - {name: registry-ca, mountPath: /run/factory/registry, readOnly: true}
             {{- end }}
       volumes:
+        {{- if .Values.substrate.workspaceConfigurationSecret }}
+        - name: substrate-configuration
+          secret:
+            secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
+            items: [{key: configuration.json, path: configuration.json}, {key: factory-ca.pem, path: factory-ca.pem}]
+        - name: substrate-provisioner
+          secret:
+            secretName: {{ required "substrate.provisionerTokenSecret is required for native Workspace provisioning" .Values.substrate.provisionerTokenSecret | quote }}
+            items: [{key: token, path: token}]
+        - name: substrate-control
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 600
+                  path: token
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: ca.pem
+        {{- end }}
         - name: state
           persistentVolumeClaim: {claimName: "{{ include "factory.name" . }}-state"}
         - name: temporary

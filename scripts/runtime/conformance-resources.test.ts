@@ -171,6 +171,10 @@ test("successful workload cleanup gets its own deadline without extending worklo
     command,
   );
   try {
+    expect(() => runtime.execArgs(["true"], false, undefined, "foreign-sandbox")).toThrow(
+      "unowned Sandbox",
+    );
+    expect(() => runtime.execArgs(["true"])).toThrow("not running");
     now = 419_000;
     await runtime.passed();
     now = 420_001;

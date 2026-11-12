@@ -38,6 +38,336 @@ function connectorSocket(role: "parent" | "child") {
   } as unknown as ServerWebSocket<RuntimeSocketData>;
 }
 
+test.each([true, false])(
+  "failed Parent preserves only its advertised Source/checkpoint protocol, advertised=%s",
+  async (advertised) => {
+    const hub = new RuntimeHub(async () => {});
+    const parent = connectorSocket("parent");
+    const frames: Array<Record<string, string>> = [];
+    parent.send = ((text: string) => {
+      frames.push(JSON.parse(text));
+      return 1;
+    }) as typeof parent.send;
+    hub.open(parent);
+    hub.message(
+      parent,
+      JSON.stringify({
+        type: "hello",
+        role: "parent",
+        channels: advertised ? [{ name: "source", kind: "source" }] : [],
+      }),
+    );
+    hub.message(
+      parent,
+      JSON.stringify({ type: "status", phase: "failed", error: "original bootstrap failed" }),
+    );
+    try {
+      expect(hub.ready("attempt")).toBe(false);
+      expect(hub.sourceConnected("attempt")).toBe(advertised);
+      for (const action of ["workspace-git", "browser-open", "skills-install"])
+        await expect(
+          hub.parentOperation("attempt", { operationId: action, action }),
+        ).rejects.toThrow("only retained Source");
+      if (advertised) {
+        const drain = hub.parentOperation("attempt", {
+          operationId: "recorded-drain",
+          action: "source-drain",
+        });
+        hub.message(
+          parent,
+          JSON.stringify({
+            type: "operation-response",
+            operationId: "recorded-drain",
+            action: "source-drain",
+          }),
+        );
+        await drain;
+        const read = hub.request(
+          "attempt",
+          "source",
+          new Request("http://source/"),
+          "/v1/workspaces/owned/read",
+        );
+        const request = frames.find((frame) => frame["type"] === "http-request");
+        if (!request) throw Error("Source request was not forwarded");
+        hub.message(
+          parent,
+          JSON.stringify({ type: "http-response", streamId: request["streamId"], status: 200 }),
+        );
+        hub.message(parent, JSON.stringify({ type: "stream-end", streamId: request["streamId"] }));
+        expect((await read).status).toBe(200);
+      } else {
+        await expect(
+          hub.parentOperation("attempt", { operationId: "denied-drain", action: "source-drain" }),
+        ).rejects.toThrow("only retained Source");
+      }
+      hub.message(parent, JSON.stringify({ type: "status", phase: "stopped" }));
+      expect(hub.sourceConnected("attempt")).toBe(false);
+      expect(
+        (
+          await hub.request(
+            "attempt",
+            "source",
+            new Request("http://source/"),
+            "/v1/workspaces/owned/read",
+          )
+        ).status,
+      ).toBe(503);
+      await expect(
+        hub.parentOperation("attempt", { operationId: "after-stop", action: "source-drain" }),
+      ).rejects.toThrow("only retained Source");
+    } finally {
+      hub.revoke("attempt");
+    }
+  },
+);
+
+test("Parent failure fences a delayed non-Source operation at its actual dispatch boundary", async () => {
+  const hub = new RuntimeHub(async () => {});
+  const parent = connectorSocket("parent");
+  let sent = 0;
+  parent.send = (() => {
+    sent++;
+    return 1;
+  }) as typeof parent.send;
+  hub.open(parent);
+  const gate = Promise.withResolvers<void>();
+  const operation = hub.parentOperation(
+    "attempt",
+    { operationId: "delayed-git", action: "workspace-git" },
+    async (send) => {
+      await gate.promise;
+      send();
+    },
+  );
+  hub.message(
+    parent,
+    JSON.stringify({ type: "status", phase: "failed", error: "original failure" }),
+  );
+  gate.resolve();
+  try {
+    await expect(operation).rejects.toThrow("only retained Source");
+    expect(sent).toBe(0);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test.each(["parent", "child"] as const)(
+  "%s disconnect fails its own operations and HTTP without cancelling the other Connector",
+  async (closedRole) => {
+    const hub = new RuntimeHub(async () => {});
+    const sockets = { parent: connectorSocket("parent"), child: connectorSocket("child") };
+    const frames: Record<"parent" | "child", Array<Record<string, string>>> = {
+      parent: [],
+      child: [],
+    };
+    for (const role of ["parent", "child"] as const) {
+      sockets[role].send = ((text: string) => {
+        frames[role].push(JSON.parse(text));
+        return 1;
+      }) as typeof sockets.parent.send;
+      hub.open(sockets[role]);
+      hub.message(
+        sockets[role],
+        JSON.stringify({
+          type: "hello",
+          role,
+          channels: role === "parent" ? [{ name: "source", kind: "source" }] : [],
+        }),
+      );
+    }
+    const settled = <T>(promise: Promise<T>) =>
+      promise.then(
+        () => "completed",
+        (error: Error) => error.message,
+      );
+    try {
+      const operations = {
+        parent: settled(
+          hub.parentOperation("attempt", { operationId: "drain", action: "source-drain" }),
+        ),
+        child: settled(
+          hub.childOperation("attempt", { operationId: "child-work", action: "process-start" }),
+        ),
+      };
+      const requests = {
+        parent: settled(
+          hub.request(
+            "attempt",
+            "source",
+            new Request("http://source/"),
+            "/v1/workspaces/workspace/read",
+          ),
+        ),
+        child: settled(hub.request("attempt", "app", new Request("http://app/"), "/")),
+      };
+      const liveRole = closedRole === "parent" ? "child" : "parent";
+      hub.close(sockets[closedRole]);
+      expect(hub.ready("attempt")).toBe(false);
+      const operation = frames[liveRole].find((frame) => frame["type"] === "operation-request");
+      const request = frames[liveRole].find((frame) => frame["type"] === "http-request");
+      if (!operation || !request) throw new Error("Actual Connector requests were not dispatched");
+      hub.message(
+        sockets[liveRole],
+        JSON.stringify({
+          type: "operation-response",
+          operationId: operation["operationId"],
+          action: operation["action"],
+        }),
+      );
+      hub.message(
+        sockets[liveRole],
+        JSON.stringify({ type: "http-response", streamId: request["streamId"], status: 200 }),
+      );
+      hub.message(
+        sockets[liveRole],
+        JSON.stringify({ type: "stream-end", streamId: request["streamId"] }),
+      );
+      expect(await operations[closedRole]).toBe("Runtime channel disconnected");
+      expect(await requests[closedRole]).toBe("Runtime channel disconnected");
+      expect(await operations[liveRole]).toBe("completed");
+      expect(await requests[liveRole]).toBe("completed");
+    } finally {
+      hub.revoke("attempt");
+    }
+  },
+);
+
+test("canonical Source HTTP uses only the advertising Parent and strips all other credentials", async () => {
+  const hub = new RuntimeHub(async () => {});
+  const parent = connectorSocket("parent");
+  const child = connectorSocket("child");
+  const sent = Promise.withResolvers<{
+    streamId: string;
+    headers: Record<string, string>;
+    data: string;
+  }>();
+  const closed: string[] = [];
+  parent.send = ((text: string) => {
+    const message = JSON.parse(text);
+    if (message.type === "http-request") sent.resolve(message);
+    if (message.type === "stream-close") closed.push(message.streamId);
+    return 1;
+  }) as typeof parent.send;
+  hub.open(parent);
+  hub.open(child);
+  try {
+    expect(hub.sourceConnected("attempt")).toBe(false);
+    expect(
+      (await hub.request("attempt", "source", new Request("http://source/"), "/")).status,
+    ).toBe(503);
+    hub.message(
+      parent,
+      JSON.stringify({
+        type: "hello",
+        role: "parent",
+        channels: [{ name: "source", kind: "source" }],
+      }),
+    );
+    expect(hub.sourceConnected("attempt")).toBe(true);
+    const pending = hub.request(
+      "attempt",
+      "source",
+      new Request("http://source/", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer browser-secret",
+          cookie: "session=private",
+          "X-Factory-Writer-Epoch": "1",
+          "X-Factory-Source-Epoch": "999",
+        },
+        body: JSON.stringify({ path: "private.txt" }),
+      }),
+      "/v1/workspaces/workspace/read",
+    );
+    const frame = await sent.promise;
+    expect(frame.headers).toEqual({ "x-factory-writer-epoch": "1" });
+    expect(Buffer.from(frame.data, "base64").toString()).toBe('{"path":"private.txt"}');
+    // A Child with the same Attempt/generation is still not this stream's owner.
+    hub.message(
+      child,
+      JSON.stringify({ type: "http-response", streamId: frame.streamId, status: 201 }),
+    );
+    hub.message(
+      parent,
+      JSON.stringify({ type: "http-response", streamId: frame.streamId, status: 200 }),
+    );
+    const response = await pending;
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+    expect(closed).toEqual([frame.streamId]);
+    hub.message(parent, JSON.stringify({ type: "status", phase: "failed" }));
+    expect(hub.sourceConnected("attempt")).toBe(true);
+    expect(hub.ready("attempt")).toBe(false);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test("Source capability is re-established after Parent reconnect; old sockets cannot answer new requests", async () => {
+  const hub = new RuntimeHub(async () => {});
+  const first = connectorSocket("parent");
+  const second = connectorSocket("parent");
+  hub.open(first);
+  hub.message(
+    first,
+    JSON.stringify({
+      type: "hello",
+      role: "parent",
+      channels: [{ name: "source", kind: "source" }],
+    }),
+  );
+  hub.close(first);
+  hub.open(second);
+  expect(hub.sourceConnected("attempt")).toBe(false);
+  hub.message(
+    first,
+    JSON.stringify({
+      type: "hello",
+      role: "parent",
+      channels: [{ name: "source", kind: "source" }],
+    }),
+  );
+  expect(hub.sourceConnected("attempt")).toBe(false);
+  hub.message(
+    second,
+    JSON.stringify({
+      type: "hello",
+      role: "parent",
+      channels: [{ name: "source", kind: "source" }],
+    }),
+  );
+  expect(hub.sourceConnected("attempt")).toBe(true);
+  const sent = Promise.withResolvers<{ streamId: string }>();
+  second.send = ((text: string) => {
+    const frame = JSON.parse(text);
+    if (frame.type === "http-request") sent.resolve(frame);
+    return 1;
+  }) as typeof second.send;
+  try {
+    const pending = hub.request(
+      "attempt",
+      "source",
+      new Request("http://source/"),
+      "/v1/workspaces/workspace/events",
+    );
+    const frame = await sent.promise;
+    hub.message(
+      first,
+      JSON.stringify({ type: "http-response", streamId: frame.streamId, status: 201 }),
+    );
+    hub.message(
+      second,
+      JSON.stringify({ type: "http-response", streamId: frame.streamId, status: 200 }),
+    );
+    expect((await pending).status).toBe(200);
+    hub.revoke("attempt");
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
 test("open Connector transports cannot announce readiness before the child's health checks", () => {
   const phases: string[] = [];
   const hub = new RuntimeHub(async (_id, phase) => {
@@ -366,6 +696,102 @@ test("background HTTP reads cannot keep compute awake while a pending write rema
   } finally {
     hub.revoke("attempt");
     await Promise.allSettled([read, ...(write ? [write] : [])]);
+  }
+});
+
+test("an idle claim admits only the native Source drain and internal checkpoint traffic needed to finish its pause", async () => {
+  let now = 0;
+  const hub = new RuntimeHub(
+    async () => {},
+    () => now,
+  );
+  const parent = connectorSocket("parent");
+  const frames: Array<Record<string, string>> = [];
+  parent.send = ((raw: string) => {
+    const frame = JSON.parse(String(raw));
+    frames.push(frame);
+    queueMicrotask(() => {
+      if (frame.type === "operation-request")
+        hub.message(
+          parent,
+          JSON.stringify({
+            type: "operation-response",
+            operationId: frame.operationId,
+            action: frame.action,
+          }),
+        );
+      if (frame.type === "http-request") {
+        hub.message(
+          parent,
+          JSON.stringify({ type: "http-response", streamId: frame.streamId, status: 200 }),
+        );
+        hub.message(parent, JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
+      }
+    });
+    return 1;
+  }) as typeof parent.send;
+  const child = connectorSocket("child");
+  hub.open(parent);
+  hub.message(
+    parent,
+    JSON.stringify({
+      type: "hello",
+      role: "parent",
+      channels: [{ name: "source", kind: "source" }],
+    }),
+  );
+  hub.open(child);
+  hub.message(
+    child,
+    JSON.stringify({
+      type: "terminal-state",
+      terminalCount: 0,
+      terminalBusy: 0,
+      terminalRevision: 1,
+    }),
+  );
+  now = 1000;
+  try {
+    expect(hub.claimIdle("attempt", 100)).toBe(true);
+    await expect(
+      hub.parentOperation("attempt", { operationId: "git", action: "workspace-git" }),
+    ).rejects.toThrow("Runtime is stopping");
+    await expect(
+      hub.childOperation("attempt", { operationId: "run", action: "run" }),
+    ).rejects.toThrow("Runtime is stopping");
+    const prefix = "/v1/workspaces/01994a7d-0000-7000-8000-000000000001";
+    for (const [channel, origin, method, path] of [
+      ["app", "http://source.internal", "POST", `${prefix}/checkpoint`],
+      ["source", "https://factory.test", "POST", `${prefix}/checkpoint`],
+      ["source", "http://source.internal", "GET", `${prefix}/checkpoint`],
+      ["source", "http://source.internal", "POST", `${prefix}/write`],
+      ["source", "http://source.internal", "POST", `${prefix}/read`],
+      ["source", "http://source.internal", "POST", `${prefix}/fence`],
+      ["source", "http://source.internal", "POST", `${prefix}/chunk?other=1`],
+    ] as const) {
+      const response = await hub.request("attempt", channel, new Request(origin, { method }), path);
+      expect(response.status).toBe(503);
+    }
+    expect(frames).toHaveLength(0);
+    await hub.parentOperation("attempt", { operationId: "frozen-source", action: "source-drain" });
+    for (const operation of ["checkpoint", "chunk"]) {
+      const response = await hub.request(
+        "attempt",
+        "source",
+        new Request("http://source.internal/", { method: "POST", body: "{}" }),
+        `${prefix}/${operation}`,
+      );
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    expect(frames.map((frame) => frame["action"] ?? frame["path"])).toEqual([
+      "source-drain",
+      `${prefix}/checkpoint`,
+      `${prefix}/chunk`,
+    ]);
+    expect(hub.use("attempt")).toBe(false);
+  } finally {
+    hub.revoke("attempt");
   }
 });
 

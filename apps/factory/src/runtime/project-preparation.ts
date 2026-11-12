@@ -4,6 +4,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import type { ProjectEnvironment } from "../../../../packages/project-domain/src/environment";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
 import { requireSetupReady } from "../setup/execution-gate";
+import { substratePrebuildGrantIn } from "./substrate-prebuild-grant";
 
 type Database = ReturnType<typeof createDatabase>;
 const result = z
@@ -90,7 +91,9 @@ export function createProjectPreparation(input: {
           for (const attempt of expired) await input.expire?.(attempt.id);
           const completed = await connection<
             Array<{ id: string }>
-          >`SELECT attempt.id FROM factory.project_image_preparation preparation JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id WHERE preparation.state='succeeded' AND attempt.state IN ('starting','ready') AND attempt.stop_intended_at IS NULL`;
+          >`SELECT attempt.id FROM factory.project_image_preparation preparation JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id WHERE preparation.state='succeeded'
+             AND ((attempt.state IN ('starting','ready') AND attempt.stop_intended_at IS NULL)
+               OR (attempt.substrate AND attempt.state IN ('stop-intended','stopping','cleanup-failed')))`;
           for (const attempt of completed) await input.finish?.(attempt.id);
           await connection`UPDATE factory.project_image_preparation preparation SET state=CASE WHEN attempt.failure LIKE 'prebuild Compose cannot depend on the producer environment%' THEN 'unsupported' ELSE 'failed' END,failure=CASE WHEN attempt.failure LIKE 'prebuild Compose cannot depend on the producer environment%' THEN 'Image preparation was skipped: the Compose file references environment variables, which a prebuilt image cannot resolve. Normal startup remains available.' ELSE 'Image preparation was interrupted; normal startup remains available.' END,updated_at=now()
             FROM factory.runtime_attempt attempt WHERE preparation.runtime_attempt_id=attempt.id AND preparation.state='running'
@@ -104,7 +107,9 @@ export function createProjectPreparation(input: {
           // without making it an indefinite global image-production lock.
           const active =
             await connection`SELECT preparation.id FROM factory.project_image_preparation preparation LEFT JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id
-              WHERE preparation.state='running' OR (attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed') AND NOT EXISTS(
+              WHERE preparation.state='running' OR (attempt.substrate AND EXISTS(
+                SELECT 1 FROM factory.substrate_binding binding WHERE binding.runtime_attempt_id=attempt.id AND binding.deleted_at IS NULL))
+              OR (attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed') AND NOT EXISTS(
                 SELECT 1 FROM factory.factorybox_lifecycle_operation deletion JOIN factory.factorybox_runtime native ON native.runtime_attempt_id=deletion.runtime_attempt_id
                 WHERE deletion.runtime_attempt_id=attempt.id AND deletion.action='delete' AND deletion.completed_at IS NOT NULL
                   AND deletion.observation->>'phase'='deleted' AND deletion.observation->>'id'=native.request->>'sandboxID')) LIMIT 1`;
@@ -155,8 +160,14 @@ export function createProjectPreparation(input: {
             imageRepository: string | null;
             jobEnvironment: string | null;
             publicBuild: boolean;
+            substrate: boolean;
+            userID: string;
           }>
-        >`SELECT attempt.project_id AS "projectID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,factory.image_build_is_public(intent.secret_key) AS "publicBuild",preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",split_part(artifact.runtime_host_image,'/',1)||'/open-factory/prebuilds/'||attempt.project_id::text AS "imageRepository" FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id LEFT JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id AND attempt.isolated_kind='prebuild' WHERE attempt.id=${attemptID} AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL FOR SHARE OF attempt`;
+        >`SELECT attempt.project_id AS "projectID",attempt.substrate,attempt.created_by AS "userID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,factory.image_build_is_public(intent.secret_key) AS "publicBuild",preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",
+          CASE WHEN attempt.substrate THEN native.intent->>'imageRepository' ELSE split_part(artifact.runtime_host_image,'/',1)||'/open-factory/prebuilds/'||attempt.project_id::text END AS "imageRepository"
+          FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id LEFT JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id AND attempt.isolated_kind='prebuild'
+          LEFT JOIN factory.substrate_prebuild native ON native.runtime_attempt_id=attempt.id AND native.preparation_id=preparation.id
+          WHERE attempt.id=${attemptID} AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL FOR SHARE OF attempt`;
         const hash = hashConnectorToken(token);
         if (
           !attempt ||
@@ -202,6 +213,19 @@ export function createProjectPreparation(input: {
             headers: { "cache-control": "no-store" },
           });
         if (job?.state !== "running") return denied();
+        if (attempt.substrate) {
+          try {
+            await substratePrebuildGrantIn(
+              transaction,
+              attempt.projectID,
+              attempt.jobID,
+              attemptID,
+              attempt.userID,
+            );
+          } catch {
+            return denied();
+          }
+        }
         await transaction`UPDATE factory.project_image_preparation SET state='succeeded',identity=${upload.identity},image=${upload.image},failure=NULL,updated_at=now() WHERE id=${attempt.jobID} AND state='running'`;
         return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
       })

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/repositoryurl"
 )
@@ -69,11 +70,23 @@ func gitOutput(ctx context.Context, workspace string, arguments ...string) (stri
 }
 
 func workspaceGitCommand(ctx context.Context, workspace string, arguments ...string) *exec.Cmd {
+	if ctx.Value(nativeCommitGitKey{}) == true {
+		// Native Source has one development owner, not the legacy shared-root
+		// metadata contract. Local commit/filter work must never become root-owned
+		// or inherit network credentials. This fact is set only by native Parent.
+		command := hardenedGitCommand(ctx, workspace, nil, arguments...)
+		if os.Geteuid() == 0 {
+			command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{}}}
+		}
+		return command
+	}
 	// Parent Git owns writes, but the canonical Source and non-root Dev Container
 	// must still read its resulting refs and objects. Keep the Parent's private
 	// bootstrap umask; scope this mode to Git's own metadata only.
 	return hardenedGitCommand(ctx, workspace, []string{"-c", "core.sharedRepository=0644"}, arguments...)
 }
+
+type nativeCommitGitKey struct{}
 
 func gitOutputWithEnv(ctx context.Context, workspace string, environment []string, arguments ...string) (string, error) {
 	command := workspaceGitCommand(ctx, workspace, arguments...)
@@ -134,21 +147,29 @@ func prepareCommit(ctx context.Context, workspace string, message Message) (stri
 		if _, err := gitOutput(ctx, workspace, "rev-parse", "--verify", "MERGE_HEAD"); err == nil {
 			return "", errors.New("another integration is already in progress")
 		}
-		environment, cleanup, err := commitGitEnvironment(message)
-		if err != nil {
-			return "", err
-		}
-		defer cleanup()
-		if _, err := gitOutputWithEnv(ctx, workspace, environment, "fetch", "--no-tags", "--", message.RepositoryURL, message.MergeParentSHA); err != nil {
-			return "", errors.New("integration source could not be fetched")
+		if ctx.Value(nativeCommitGitKey{}) == true {
+			if err := fetchNativeIntegration(ctx, workspace, message); err != nil {
+				return "", err
+			}
+		} else {
+			environment, cleanup, err := commitGitEnvironment(message)
+			if err != nil {
+				return "", err
+			}
+			defer cleanup()
+			if _, err := gitOutputWithEnv(ctx, workspace, environment, "fetch", "--no-tags", "--", message.RepositoryURL, message.MergeParentSHA); err != nil {
+				return "", errors.New("integration source could not be fetched")
+			}
 		}
 		_, mergeError := gitOutput(ctx, workspace,
 			"-c", "user.name="+message.AuthorName, "-c", "user.email="+message.AuthorEmail,
 			"merge", "--no-ff", "--no-commit", message.MergeParentSHA)
 		// Conflicts also materialize files that the retained implementer must
 		// be able to read and resolve in its normal development identity.
-		if err := ensureTrackedWorkspaceOwnership(ctx, workspace); err != nil {
-			return "", err
+		if ctx.Value(nativeCommitGitKey{}) != true {
+			if err := ensureTrackedWorkspaceOwnership(ctx, workspace); err != nil {
+				return "", err
+			}
 		}
 		if mergeError != nil {
 			unmerged, observationErr := gitOutput(ctx, workspace, "ls-files", "--unmerged")
@@ -239,6 +260,12 @@ func pushCommit(ctx context.Context, workspace string, message Message) (string,
 	if head != message.CommitSHA {
 		return "", errors.New("workspace HEAD no longer matches the push intent")
 	}
+	if ctx.Value(nativeCommitGitKey{}) == true {
+		if !repositoryurl.Valid(message.RepositoryURL) {
+			return "", errors.New("push destination is not an admitted repository URL")
+		}
+		return pushNativeCommit(ctx, workspace, message)
+	}
 	environment, cleanup, err := commitGitEnvironment(message)
 	if err != nil {
 		return "", err
@@ -297,10 +324,18 @@ func checkoutProject(ctx context.Context, assignment Assignment) error {
 		if identityErr != nil || strings.TrimSpace(string(repositoryIdentity)) != assignment.RepositoryIdentity {
 			return errors.New("workspace folder exists but its repository identity does not match the assignment")
 		}
-		if originErr := workspaceGitCommand(
-			ctx, assignment.WorkspaceFolder,
-			"remote", "set-url", "origin", assignment.RepositoryURL,
-		).Run(); originErr != nil {
+		var originErr error
+		if assignment.nativeActorUID != "" {
+			// The verified native checkout belongs to the development user. A
+			// root Git config rewrite would create metadata its fenced Source
+			// service cannot preserve. This fixed operation needs no network.
+			_, originErr = personalGitCommand(ctx, assignment.WorkspaceFolder,
+				"remote", "set-url", "origin", assignment.RepositoryURL)
+		} else {
+			originErr = workspaceGitCommand(ctx, assignment.WorkspaceFolder,
+				"remote", "set-url", "origin", assignment.RepositoryURL).Run()
+		}
+		if originErr != nil {
 			return errors.New("Workspace Git origin could not be refreshed")
 		}
 		if assignment.PreserveWorkspace {

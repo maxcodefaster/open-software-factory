@@ -74,6 +74,7 @@ export class RuntimeParentOperationError extends Error {
 
 type PendingHTTP = {
   attemptID: string;
+  connector: ServerWebSocket<RuntimeSocketData>;
   accessToken?: string;
   controller: ReadableStreamDefaultController<Uint8Array>;
   body: ReadableStream<Uint8Array>;
@@ -99,6 +100,7 @@ type ConnectorAuthority = {
   parentHash: string;
   childHash: string;
   generation: number;
+  actorUID?: string;
 };
 
 type StatusObservation = {
@@ -109,9 +111,11 @@ type StatusObservation = {
 
 export class RuntimeHub {
   readonly #terminalSockets = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
+  readonly #failedSourceParents = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
   readonly #parents = new Map<string, ServerWebSocket<RuntimeSocketData>>();
   readonly #children = new Map<string, ServerWebSocket<RuntimeSocketData>>();
   readonly #readyChildren = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
+  readonly #sourceParents = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
   readonly #browsers = new Map<string, BrowserStream>();
   readonly #browserStreams = new Map<ServerWebSocket<RuntimeSocketData>, string>();
   readonly #pendingHTTP = new Map<string, PendingHTTP>();
@@ -119,6 +123,7 @@ export class RuntimeHub {
     string,
     {
       attemptID: string;
+      connector: ServerWebSocket<RuntimeSocketData>;
       action: string;
       fingerprint: string;
       promise: Promise<ParentOperationResult>;
@@ -131,6 +136,7 @@ export class RuntimeHub {
     string,
     {
       attemptID: string;
+      connector: ServerWebSocket<RuntimeSocketData>;
       resolve(): void;
       reject(error: Error): void;
       timer: Timer;
@@ -227,8 +233,19 @@ export class RuntimeHub {
     deliver();
   }
 
-  allow(attemptID: string, generation: number, parentHash: string, childHash: string) {
-    this.#tokens.set(attemptID, { parentHash, childHash, generation });
+  allow(
+    attemptID: string,
+    generation: number,
+    parentHash: string,
+    childHash: string,
+    actorUID?: string,
+  ) {
+    this.#tokens.set(attemptID, {
+      parentHash,
+      childHash,
+      generation,
+      ...(actorUID ? { actorUID } : {}),
+    });
   }
 
   authorize(request: Request, hashToken: (token: string) => string): RuntimeSocketData | null {
@@ -247,6 +264,8 @@ export class RuntimeHub {
     if (
       !expected ||
       expected.generation !== generation ||
+      (expected.actorUID !== undefined &&
+        request.headers.get("x-factory-runtime-actor-uid") !== expected.actorUID) ||
       (role === "parent" ? expected.parentHash : expected.childHash) !==
         hashToken(authorization.slice(7))
     )
@@ -285,6 +304,8 @@ export class RuntimeHub {
       return;
     }
     this.#readyChildren.delete(socket);
+    this.#sourceParents.delete(socket);
+    this.#failedSourceParents.delete(socket);
     connections.set(socket.data.attemptID, socket);
     this.#touch(socket.data.attemptID);
   }
@@ -319,8 +340,16 @@ export class RuntimeHub {
     if (
       message.type === "status" &&
       ["stopped", "failed", "cleanup-failed"].includes(message.phase ?? "")
-    )
+    ) {
       this.#terminalSockets.add(socket);
+      if (
+        socket.data.role === "parent" &&
+        message.phase === "failed" &&
+        this.#sourceParents.has(socket)
+      )
+        this.#failedSourceParents.add(socket);
+      else this.#failedSourceParents.delete(socket);
+    }
     if (socket.data.role === "child" && message.type === "hello" && message.role === "child") {
       this.#readyChildren.add(socket);
       const activity = this.#activity.get(socket.data.attemptID);
@@ -406,6 +435,10 @@ export class RuntimeHub {
       return;
     }
     if (socket.data.role === "parent" && message.type === "hello" && message.role === "parent") {
+      if (
+        message.channels?.some((channel) => channel.name === "source" && channel.kind === "source")
+      )
+        this.#sourceParents.add(socket);
       const timer = this.#disconnectTimers.get(`${socket.data.attemptID}:parent`);
       if (timer) clearTimeout(timer);
       this.#disconnectTimers.delete(`${socket.data.attemptID}:parent`);
@@ -420,7 +453,8 @@ export class RuntimeHub {
       message.operationId
     ) {
       const pending = this.#pendingChildOperations.get(message.operationId);
-      if (!pending || pending.attemptID !== socket.data.attemptID) return;
+      if (!pending || pending.attemptID !== socket.data.attemptID || pending.connector !== socket)
+        return;
       clearTimeout(pending.timer);
       this.#pendingChildOperations.delete(message.operationId);
       if (message.error) pending.reject(new Error(message.error));
@@ -436,6 +470,7 @@ export class RuntimeHub {
       if (
         !pending ||
         pending.attemptID !== socket.data.attemptID ||
+        pending.connector !== socket ||
         this.#parents.get(pending.attemptID) !== socket ||
         pending.action !== message.action
       )
@@ -455,7 +490,14 @@ export class RuntimeHub {
     if (!message.streamId) return;
     const pending = this.#pendingHTTP.get(message.streamId);
     if (pending) {
-      if (socket.data.role !== "child" || pending.attemptID !== socket.data.attemptID) return;
+      if (
+        pending.connector !== socket ||
+        pending.attemptID !== socket.data.attemptID ||
+        (socket.data.role === "parent" ? this.#parents : this.#children).get(
+          socket.data.attemptID,
+        ) !== socket
+      )
+        return;
       if (message.type === "http-response") {
         if (pending.responded) return;
         try {
@@ -543,7 +585,7 @@ export class RuntimeHub {
       const role = socket.data.role;
       const attemptID = socket.data.attemptID;
       connections.delete(socket.data.attemptID);
-      this.#failAttemptStreams(attemptID, "Runtime channel disconnected");
+      this.#failAttemptStreams(attemptID, "Runtime channel disconnected", socket);
       if (this.#terminalSockets.has(socket)) return;
       this.#observeStatus(socket, "reconnecting", `${role} connector reconnecting`);
       const timerKey = `${attemptID}:${role}`;
@@ -570,15 +612,31 @@ export class RuntimeHub {
     accessToken?: string,
     originScopedCookies = false,
   ) {
-    if (this.#idleClaims.has(attemptID))
+    // The existing Workspace lock and Source writer epoch have already fenced
+    // this internal checkpoint. An idle claim must block user traffic, not the
+    // preservation RPCs needed to finish that same pause.
+    const checkpointTraffic =
+      channel === "source" &&
+      request.method === "POST" &&
+      new URL(request.url).origin === "http://source.internal" &&
+      /^\/v1\/workspaces\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/(?:checkpoint|chunk)$/.test(
+        path,
+      );
+    if (this.#idleClaims.has(attemptID) && !checkpointTraffic)
       return new Response("Runtime is stopping", { status: 503 });
-    const child = this.#children.get(attemptID);
+    // Source is a concrete, Parent-only protocol over the canonical Actor
+    // checkout. It is not a Project-declared App or arbitrary proxy target.
+    const connections = channel === "source" ? this.#parents : this.#children;
+    const child = connections.get(attemptID);
     if (!child) return new Response("Runtime is not ready", { status: 503 });
+    if (channel === "source" && !this.sourceConnected(attemptID))
+      return new Response("Native Source protocol is unavailable", { status: 503 });
     const body =
       request.method === "GET" || request.method === "HEAD"
         ? Buffer.alloc(0)
         : Buffer.from(await request.arrayBuffer());
-    if (body.length > 1 << 20) return new Response("Request body is too large", { status: 413 });
+    if (body.length > (channel === "source" ? 4 << 20 : 1 << 20))
+      return new Response("Request body is too large", { status: 413 });
     const streamID = crypto.randomUUID();
     if (request.signal.aborted) throw new Error("Runtime request was cancelled");
     const promise = new Promise<Response>((resolve, reject) => {
@@ -603,6 +661,7 @@ export class RuntimeHub {
       request.signal.addEventListener("abort", abort, { once: true });
       const pending: PendingHTTP = {
         attemptID,
+        connector: child,
         ...(accessToken ? { accessToken } : {}),
         controller,
         body,
@@ -634,11 +693,14 @@ export class RuntimeHub {
     // Admission guards run after asynchronous body consumption, at the actual
     // frame-send boundary. They must not await the upstream response.
     const send = () => {
-      if (this.#idleClaims.has(attemptID)) throw new Error("Runtime is stopping");
+      if (this.#idleClaims.has(attemptID) && !checkpointTraffic)
+        throw new Error("Runtime is stopping");
       if (!this.#pendingHTTP.has(streamID)) throw new Error("Runtime request is no longer pending");
       if (request.signal.aborted) throw new Error("Runtime request was cancelled");
-      if (this.#children.get(attemptID) !== child)
+      if (connections.get(attemptID) !== child)
         throw new Error("Runtime connection changed before dispatch");
+      if (channel === "source" && !this.sourceConnected(attemptID))
+        throw new Error("Native Source protocol is unavailable");
       if (
         child.send(
           JSON.stringify({
@@ -647,9 +709,14 @@ export class RuntimeHub {
             channel,
             method: request.method,
             path,
-            headers: this.hasAppChannel(attemptID, channel)
-              ? appRuntimeHeaders(request, path)
-              : safeRuntimeHeaders(request.headers),
+            headers:
+              channel === "source"
+                ? {
+                    "x-factory-writer-epoch": request.headers.get("X-Factory-Writer-Epoch") ?? "",
+                  }
+                : this.hasAppChannel(attemptID, channel)
+                  ? appRuntimeHeaders(request, path)
+                  : safeRuntimeHeaders(request.headers),
             ...(channel === "ide"
               ? { theiaConnectionToken: theiaConnectionToken(request.headers) }
               : {}),
@@ -688,9 +755,19 @@ export class RuntimeHub {
     operation: Record<string, string | number> & { operationId: string; action: string },
     beforeSend?: (send: () => void) => Promise<void>,
   ): Promise<ParentOperationResult> {
-    if (this.#idleClaims.has(attemptID)) throw new Error("Runtime is stopping");
+    const checkpointDrain = () =>
+      operation.action === "source-drain" && this.sourceConnected(attemptID);
+    if (this.#idleClaims.has(attemptID) && !checkpointDrain())
+      throw new Error("Runtime is stopping");
     const parent = this.#parents.get(attemptID);
     if (!parent) throw new Error("Runtime parent is not ready");
+    const permitted = () =>
+      !this.#terminalSockets.has(parent) ||
+      (operation.action === "source-drain" &&
+        this.#failedSourceParents.has(parent) &&
+        this.#sourceParents.has(parent));
+    if (!permitted())
+      throw new Error("Failed Parent permits only retained Source checkpoint operations");
     const operationID = operation["operationId"];
     if (!operationID) throw new Error("Operation identity is required");
     const payload = { ...operation };
@@ -718,6 +795,7 @@ export class RuntimeHub {
     );
     const target = {
       attemptID,
+      connector: parent,
       action: payload["action"] ?? "",
       fingerprint,
       promise,
@@ -727,11 +805,14 @@ export class RuntimeHub {
     };
     this.#pendingOperations.set(operationID, target);
     const send = () => {
-      if (this.#idleClaims.has(attemptID)) throw new Error("Runtime is stopping");
+      if (this.#idleClaims.has(attemptID) && !checkpointDrain())
+        throw new Error("Runtime is stopping");
       if (!target || this.#pendingOperations.get(operationID) !== target)
         throw new Error("Runtime parent operation is no longer pending");
       if (this.#parents.get(attemptID) !== parent)
         throw new Error("Runtime parent connection changed before dispatch");
+      if (!permitted())
+        throw new Error("Failed Parent permits only retained Source checkpoint operations");
       if (parent.send(JSON.stringify({ ...payload, type: "operation-request" })) <= 0)
         throw new Error("Runtime parent operation could not be sent");
       this.#touch(attemptID);
@@ -760,7 +841,13 @@ export class RuntimeHub {
         this.#pendingChildOperations.delete(operationID);
         reject(new Error("Runtime child operation timed out"));
       }, 20_000);
-      this.#pendingChildOperations.set(operationID, { attemptID, resolve, reject, timer });
+      this.#pendingChildOperations.set(operationID, {
+        attemptID,
+        connector: child,
+        resolve,
+        reject,
+        timer,
+      });
     });
     this.#touch(attemptID);
     if (child.send(JSON.stringify({ type: "operation-request", ...operation })) <= 0) {
@@ -847,6 +934,15 @@ export class RuntimeHub {
   }
   parentConnected(attemptID: string) {
     return this.#parents.has(attemptID);
+  }
+
+  sourceConnected(attemptID: string) {
+    const parent = this.#parents.get(attemptID);
+    return Boolean(
+      parent &&
+        this.#sourceParents.has(parent) &&
+        (!this.#terminalSockets.has(parent) || this.#failedSourceParents.has(parent)),
+    );
   }
 
   use(attemptID: string) {
@@ -994,34 +1090,47 @@ export class RuntimeHub {
     if (pending.responded) pending.controller.error(error);
     else pending.reject(error);
     try {
-      this.#children
-        .get(pending.attemptID)
-        ?.send(JSON.stringify({ type: "stream-close", streamId: streamID }));
+      pending.connector.send(JSON.stringify({ type: "stream-close", streamId: streamID }));
     } catch {
       /* The request is already failed and released. */
     }
   }
 
-  #failAttemptStreams(attemptID: string, message: string) {
-    this.processEvents.closeAttempt(attemptID);
+  #failAttemptStreams(
+    attemptID: string,
+    message: string,
+    connector?: ServerWebSocket<RuntimeSocketData>,
+  ) {
+    // A native Source drain deliberately stops Child containers while Parent
+    // confirms the frozen export. Only the disconnected socket's work failed;
+    // suspend/revocation still invalidate every stream and operation below.
+    if (!connector || (connector.data.kind === "connector" && connector.data.role === "child"))
+      this.processEvents.closeAttempt(attemptID);
     for (const [streamID, browser] of this.#browsers) {
-      if (browser.socket.data.kind === "browser" && browser.socket.data.attemptID === attemptID) {
+      if (
+        browser.socket.data.kind === "browser" &&
+        browser.socket.data.attemptID === attemptID &&
+        (!connector || browser.connector === connector)
+      ) {
         browser.socket.close(1012, message);
         this.#browsers.delete(streamID);
         this.#browserStreams.delete(browser.socket);
       }
     }
     for (const [streamID, pending] of this.#pendingHTTP) {
-      if (pending.attemptID === attemptID) this.#failHTTP(streamID, pending, message);
+      if (pending.attemptID === attemptID && (!connector || pending.connector === connector))
+        this.#failHTTP(streamID, pending, message);
     }
     for (const [operationID, pending] of this.#pendingOperations) {
-      if (pending.attemptID !== attemptID) continue;
+      if (pending.attemptID !== attemptID || (connector && pending.connector !== connector))
+        continue;
       clearTimeout(pending.timer);
       this.#pendingOperations.delete(operationID);
       pending.reject(new Error(message));
     }
     for (const [operationID, pending] of this.#pendingChildOperations) {
-      if (pending.attemptID !== attemptID) continue;
+      if (pending.attemptID !== attemptID || (connector && pending.connector !== connector))
+        continue;
       clearTimeout(pending.timer);
       this.#pendingChildOperations.delete(operationID);
       pending.reject(new Error(message));

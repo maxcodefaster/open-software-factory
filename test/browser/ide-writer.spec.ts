@@ -68,7 +68,7 @@ for (const width of [1440, 900, 390]) {
       await expect(dialog).toBeHidden();
       await expect(opener).toBeFocused();
     });
-    test("an observed Stop and editing grant do not revive the old compute demand", async ({
+    test("editing stays asleep after Stop or Pause until an explicit compute action", async ({
       page,
     }) => {
       const activate = (control: Locator) => (width === 390 ? control.tap() : control.click());
@@ -83,8 +83,22 @@ for (const width of [1440, 900, 390]) {
       await expect(starts).toHaveText("0");
       await page.screenshot({ path: resolve(evidence, `stopped-without-restart-${width}.png`) });
       await activate(page.getByRole("button", { name: "Continue editing", exact: true }));
+      await page.keyboard.press("ArrowRight");
+      await expect(status).toHaveText("stopped");
+      await expect(starts).toHaveText("0");
+      await activate(page.getByRole("button", { name: "Start compute", exact: true }));
       await expect(status).toHaveText("ready");
       await expect(starts).toHaveText("1");
+      await activate(page.getByRole("button", { name: "Observe external Pause", exact: true }));
+      await expect(status).toHaveText("paused");
+      await activate(page.getByRole("button", { name: "Continue editing", exact: true }));
+      await page.keyboard.press("ArrowLeft");
+      await expect(status).toHaveText("paused");
+      await expect(starts).toHaveText("1");
+      await page.screenshot({ path: resolve(evidence, `paused-without-resume-${width}.png`) });
+      await activate(page.getByRole("button", { name: "Resume compute", exact: true }));
+      await expect(status).toHaveText("ready");
+      await expect(starts).toHaveText("2");
     });
   });
 }

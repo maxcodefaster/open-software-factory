@@ -241,7 +241,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
               : "Request editing"
             : "Take over editing";
       if (takeOver && value.canWrite) {
-        factoryRuntimeContext.select(workspaceID, true);
+        factoryRuntimeContext.select(workspaceID);
         factoryRuntimeContext.setWritable(workspaceID, true);
       }
     } catch (cause) {

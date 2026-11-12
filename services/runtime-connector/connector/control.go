@@ -2,9 +2,12 @@ package connector
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -25,9 +28,18 @@ func dialControl(ctx context.Context, assignment Assignment, role string, token 
 	headers.Set("X-Factory-Runtime-Attempt", assignment.RuntimeAttemptID)
 	headers.Set("X-Factory-Runtime-Generation", fmt.Sprint(assignment.Generation))
 	headers.Set("X-Factory-Connector-Role", role)
+	if uid := os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID"); uid != "" {
+		headers.Set("X-Factory-Runtime-Actor-UID", uid)
+	}
+	tlsConfig, err := controlTLSConfig()
+	if err != nil {
+		return nil, err
+	}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: controlHandshakeTimeout,
 		Subprotocols:     []string{ConnectorProtocol},
+		Proxy:            http.ProxyFromEnvironment,
+		TLSClientConfig:  tlsConfig,
 	}
 	connection, response, err := dialer.DialContext(ctx, assignment.ControlURL, headers)
 	if response != nil && response.Body != nil {
@@ -45,6 +57,42 @@ func dialControl(ctx context.Context, assignment Assignment, role string, token 
 	control.armReadDeadline(controlReadTimeout)
 	go control.keepAlive(ctx)
 	return control, nil
+}
+
+// Both Parent and Child use dialControl, including reconnects. Reopen the
+// projected trust bundle for each handshake, rather than caching the first
+// CA for the process lifetime. Keep public roots and hostname verification.
+func controlTLSConfig() (*tls.Config, error) {
+	var roots *x509.CertPool
+	// The native profile explicitly supplies the combined public + MITM bundle
+	// in SSL_CERT_FILE. Go caches SystemCertPool, including that file's old CA,
+	// so reopen the authoritative bundle rather than retaining removed anchors.
+	if path := os.Getenv("SSL_CERT_FILE"); path != "" {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read configured trust bundle: %w", err)
+		}
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("invalid configured trust bundle")
+		}
+	} else {
+		var err error
+		roots, err = x509.SystemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf("read system trust: %w", err)
+		}
+	}
+	if path := os.Getenv("FACTORY_CONNECTOR_CA_FILE"); path != "" {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read Factory trust bundle: %w", err)
+		}
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("invalid Factory trust bundle")
+		}
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}, nil
 }
 
 // Every frame from Factory, including its pong replies to our pings, extends

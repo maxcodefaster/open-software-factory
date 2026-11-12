@@ -88,6 +88,8 @@ import { createIdleCompute } from "../runtime/idle";
 import { createProjectPreparation } from "../runtime/project-preparation";
 import { createExecutionReserve } from "../runtime/reserve-controller";
 import { createRuntimeService } from "../runtime/service";
+import { createSubstrateCapacity } from "../runtime/substrate-capacity";
+import { configuredSubstrateWorkspaces } from "../runtime/substrate-workspaces";
 import { createServerFunctionEndpoint } from "../server-functions/endpoint";
 import { createProjectSetupController } from "../setup/controller";
 import { createSetupInspection } from "../setup/inspection";
@@ -106,6 +108,7 @@ import { createDeveloperIDERuntime } from "../workspace/developer-ide-runtime";
 import { createWorkspaceService } from "../workspace/service";
 import { createWorkspaceSourceController } from "../workspace/source-controller";
 import { createWorkspaceSourceProtocol } from "../workspace/source-protocol";
+import { createSubstrateSources } from "../workspace/substrate-source";
 import { createPageHint } from "./page-hints";
 
 export async function createFactoryApplication() {
@@ -258,7 +261,15 @@ export async function createFactoryApplication() {
     createVerificationTools(database),
   );
   const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
-  const workspaceSources = createWorkspaceSourceController(database, runtimeSecret);
+  const workspaceSources = createWorkspaceSourceController(
+    database,
+    runtimeSecret,
+    undefined,
+    undefined,
+    undefined,
+    runtimeHub,
+    createSubstrateSources(database, runtimeHub),
+  );
   const reserveImages = {
     staging: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
     verification: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
@@ -269,6 +280,11 @@ export async function createFactoryApplication() {
     staging: reserveImages.staging,
     verification: reserveImages.verification,
   });
+  const nativeSetup = configuredSubstrateWorkspaces();
+  const nativeCapacity =
+    nativeSetup?.deployment === "fresh-workspaces"
+      ? createSubstrateCapacity(database, nativeSetup)
+      : undefined;
   runtimeController = createRuntimeController(
     database,
     runtimeHub,
@@ -277,6 +293,13 @@ export async function createFactoryApplication() {
     undefined,
     undefined,
     executionReserve,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    nativeSetup,
+    undefined,
+    nativeCapacity,
   );
   const releaseController = createReleaseController({
     database,
@@ -598,6 +621,9 @@ export async function createFactoryApplication() {
     secrets: createImportSecrets(),
     signingKey: runtimeSecret,
     importOrigins: projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"]),
+    ...(nativeSetup?.setupID
+      ? { projectIdentity: { setupID: nativeSetup.setupID, projectID: nativeSetup.projectID } }
+      : {}),
     onCreated: async (projectID, userID) => {
       // Configuration confirmation owns runtime readiness. Creation itself keeps
       // planning available without starting arbitrary imported Project code.

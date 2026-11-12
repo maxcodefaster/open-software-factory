@@ -15,7 +15,7 @@
     "services/*"
   ],
   "scripts": {
-    "check": "bun run check:docs && bun run format:check && bun run lint && bun run typecheck && bun run test:unit && bun run connector:check",
+    "check": "bun run check:docs && bun run format:check && bun run lint && bun run typecheck && bun run test:unit && bun run connector:check && bun run substrate:check",
     "check:integration": "bun run check && bun run test:postgres && bun run test:controllers",
     "beta:gate": "bun scripts/release/beta-gate.ts",
     "release:clean-room": "bun scripts/release/clean-room.ts",
@@ -31,6 +31,7 @@
     "connector:check": "bun run connector:check:host && bun run connector:check:linux",
     "connector:check:host": "cd services/runtime-connector && go test -race ./... && go vet ./...",
     "connector:check:linux": "bun scripts/testing/connector-linux.ts",
+    "substrate:check": "cd services/substrate-control && go test -race ./... && go vet ./...",
     "db:migrate": "bun packages/db/src/migrate.ts",
     "factory:dev": "vite --config apps/factory/vite.config.ts",
     "factory:build": "vite build --config apps/factory/vite.config.ts && bun scripts/factory/compress-assets.ts && bun scripts/factory/build-retained-stop.ts",

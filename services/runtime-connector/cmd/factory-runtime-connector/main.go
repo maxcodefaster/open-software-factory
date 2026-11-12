@@ -31,6 +31,71 @@ func main() {
 	if len(os.Args) < 2 {
 		fail("usage: factory-runtime-connector <parent|child>")
 	}
+	if os.Args[1] == "native-parent" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := connector.RunSubstrateParent(ctx); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
+	if os.Args[1] == "native-source" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := connector.RunSubstrateSource(ctx); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
+	if os.Args[1] == "native-source-preserve" {
+		if len(os.Args) != 4 {
+			fail("native-source-preserve requires original Actor UID and fenced checkpoint ID")
+		}
+		if err := connector.RunSubstrateSourcePreserve(os.Args[2], os.Args[3], os.Stdout); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
+	if os.Args[1] == "native-source-preserve-reconcile" {
+		if len(os.Args) != 5 {
+			fail("native-source-preserve-reconcile requires original Actor UID, fenced checkpoint ID and completed predecessor checksum")
+		}
+		if err := connector.RunSubstrateSourcePreserveReconciled(os.Args[2], os.Args[3], os.Args[4], os.Stdout); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
+	if os.Args[1] == "source-host" || os.Args[1] == "source-service" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		var err error
+		if os.Args[1] == "source-host" {
+			err = connector.RunSourceHost(ctx)
+		} else {
+			err = connector.RunSourceService(ctx)
+		}
+		if err != nil {
+			fail(err.Error())
+		}
+		return
+	}
+	if os.Args[1] == "native-source-restore" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := connector.RunSubstrateSourceRestore(ctx); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
+	if os.Args[1] == "source-materialize" {
+		if len(os.Args) != 4 {
+			fail("source-materialize requires confirmed bundle and private destination")
+		}
+		if err := connector.RunSourceMaterialize(os.Args[2], os.Args[3]); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
 	if os.Args[1] == "prepared-control" {
 		flags := flag.NewFlagSet("prepared-control", flag.ExitOnError)
 		action := flags.String("action", "", "fixed private prepared child operation")

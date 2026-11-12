@@ -165,6 +165,24 @@ async function currentAuthorityIn(
 }
 
 export function createAgentTurnStore(database: Database) {
+  async function validateExecutionIn(
+    sql: AgentTurnTransaction,
+    id: string,
+    ownerToken: string,
+    forward?: (sql: AgentTurnTransaction) => Promise<void>,
+  ) {
+    const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
+      AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
+      AND state IN ('pending', 'dispatching', 'running') FOR UPDATE`;
+    if (!rows[0] || !(await currentAuthorityIn(database, sql, turn(rows[0])))) return false;
+    // Authority locks can outlast the lease. Recheck after the last lock wait.
+    const live = await sql<{ id: string }[]>`SELECT id FROM factory.agent_turn
+      WHERE id = ${id} AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
+        AND state IN ('pending', 'dispatching', 'running')`;
+    if (!live[0]) return false;
+    await forward?.(sql);
+    return true;
+  }
   async function observeCommit(
     id: string,
     persist: (sql: AgentTurnTransaction, current: boolean) => Promise<void>,
@@ -370,25 +388,13 @@ export function createAgentTurnStore(database: Database) {
       });
     },
 
+    validateExecutionIn,
     async validateExecution(
       id: string,
       ownerToken: string,
       forward?: (sql: AgentTurnTransaction) => Promise<void>,
     ) {
-      return database.client.begin(async (sql) => {
-        const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
-          AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
-          AND state IN ('pending', 'dispatching', 'running') FOR UPDATE`;
-        if (!rows[0] || !(await currentAuthorityIn(database, sql, turn(rows[0])))) return false;
-        // Authority locks can outlast the lease. Do not authorize an external
-        // operation using the ownership snapshot from before that wait.
-        const live = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
-          WHERE id = ${id} AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
-            AND state IN ('pending', 'dispatching', 'running')`;
-        if (!live[0]) return false;
-        await forward?.(sql);
-        return true;
-      });
+      return database.client.begin((sql) => validateExecutionIn(sql, id, ownerToken, forward));
     },
 
     async claimExternalRecovery(id: string, milliseconds = 30_000) {

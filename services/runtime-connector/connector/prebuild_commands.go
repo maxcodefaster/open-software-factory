@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,14 @@ func prebuildEnvironment(home string) []string {
 func prebuildCommand(ctx context.Context, home, name string, arguments ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, name, arguments...)
 	command.Env = prebuildEnvironment(home)
+	if native, _ := ctx.Value(nativePrebuildTransportKey{}).(bool); native {
+		command.Env = assignedEnvironment(command.Env, map[string]string{
+			"DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+			"HTTP_PROXY":  "http://127.0.0.1:8888", "HTTPS_PROXY": "http://127.0.0.1:8888",
+			"http_proxy": "http://127.0.0.1:8888", "https_proxy": "http://127.0.0.1:8888",
+			"NO_PROXY": "localhost,127.0.0.1", "no_proxy": "localhost,127.0.0.1",
+		})
+	}
 	if directory, ok := ctx.Value(dockerConfigContextKey{}).(string); ok {
 		command.Env = assignedEnvironment(command.Env, map[string]string{"DOCKER_CONFIG": directory})
 	}
@@ -67,6 +74,20 @@ func buildProjectPrebuild(ctx context.Context, operation prebuildOperation, snap
 	} else if !errors.Is(err, errPrebuildImageUnavailable) {
 		return "", err
 	}
+	// An absent local tag is not proof that an earlier CLI build never ran.
+	// A Dockerfile/Feature can have effects beyond this private graph. Only a
+	// positively observed, label/platform-bound image above settles a lost reply;
+	// never repeat an already-dispatched build after failure or cold restart.
+	marker := filepath.Join(operation.Directory, "build-dispatched")
+	if info, err := os.Lstat(marker); err == nil {
+		stored, readErr := os.ReadFile(marker)
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || readErr != nil || string(stored) != operation.Identity+"\n"+operation.Tag+"\n" {
+			return "", errors.New("Project prebuild dispatch ownership differs")
+		}
+		return "", errors.New("Project prebuild build outcome is unconfirmed; original build was not repeated")
+	} else if !os.IsNotExist(err) {
+		return "", errors.New("Project prebuild dispatch observation is unavailable")
+	}
 	home := filepath.Join(operation.Directory, "home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return "", err
@@ -83,6 +104,16 @@ func buildProjectPrebuild(ctx context.Context, operation prebuildOperation, snap
 		source, err := os.ReadFile(path)
 		if err != nil {
 			return "", err
+		}
+		if selected := operation.Input.nativeBase; selected != nil {
+			if string(source) != "FROM "+selected.base+"\n" {
+				return "", errors.New("native prebuild generated base recipe changed")
+			}
+			reference, err := activateNativePrebuildBase(ctx, selected)
+			if err != nil {
+				return "", err
+			}
+			source = []byte("FROM " + reference + "\n")
 		}
 		// CLI 0.89.0 forwards --label in its image/Feature path, but not its
 		// Dockerfile path. Put ordinary image metadata in this private snapshot
@@ -106,10 +137,30 @@ func buildProjectPrebuild(ctx context.Context, operation prebuildOperation, snap
 		arguments = append(arguments, "--frozen-lockfile")
 	}
 	command := prebuildCommand(ctx, home, "devcontainer", arguments...)
-	// Full upstream output stays outside product state, and cannot disclose
-	// registry diagnostics or repository-controlled text through this command.
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
+	// Retain upstream diagnostics in private Runtime logs, never in the product
+	// result or error returned to the Project interface.
+	command.Stdout = os.Stderr
+	command.Stderr = os.Stderr
+	if selected := operation.Input.nativeBase; selected != nil {
+		if err := requireNativeDependencyReference(ctx, selected.assignment); err != nil {
+			return "", err
+		}
+	}
+	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", errors.New("Project prebuild already has a build dispatch intent")
+	}
+	_, writeErr := file.WriteString(operation.Identity + "\n" + operation.Tag + "\n")
+	if err := errors.Join(writeErr, file.Sync(), file.Close()); err != nil {
+		return "", err
+	}
+	directory, err := os.Open(operation.Directory)
+	if err != nil {
+		return "", err
+	}
+	if err := errors.Join(directory.Sync(), directory.Close()); err != nil {
+		return "", err
+	}
 	if command.Run() != nil {
 		return "", errors.New("Project prebuild failed; check the committed recipe, immutable inputs and registry trust")
 	}
@@ -151,7 +202,9 @@ func pushProjectPrebuild(ctx context.Context, operation prebuildOperation, image
 	if err != nil || image.ID != imageID {
 		return "", errors.New("prebuild local artifact no longer matches its persisted result")
 	}
-	if prebuildCommand(ctx, filepath.Join(operation.Directory, "home"), "docker", "push", operation.Tag).Run() != nil {
+	push := prebuildCommand(ctx, filepath.Join(operation.Directory, "home"), "docker", "push", operation.Tag)
+	push.Stdout, push.Stderr = os.Stderr, os.Stderr
+	if push.Run() != nil {
 		return "", errors.New("Project prebuild publication failed; check approved registry connectivity and trust")
 	}
 	// Pull the publication name to confirm the registry acknowledgement and

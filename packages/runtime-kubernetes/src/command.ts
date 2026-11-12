@@ -27,8 +27,9 @@ export async function runEnvironmentCommand(
   argv: readonly string[],
   environment: Record<string, string | undefined>,
   limits: { timeoutMS: number; outputBytes: number },
+  input?: string,
 ) {
-  return executeCommand(argv, undefined, limits, environment);
+  return executeCommand(argv, input, limits, environment);
 }
 
 async function executeCommand(

@@ -1,5 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { RuntimeHub } from "../runtime/hub";
+import type { RuntimeAttemptView } from "../runtime/types";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import {
   cancelQueuedOpenCodeInput,
@@ -25,6 +26,7 @@ export function createChangeAgentStop(
   database: Database,
   hub: RuntimeHub,
   settleRetained?: (target: RetainedStopTarget) => Promise<boolean>,
+  observeRuntime?: (attemptID: string) => Promise<RuntimeAttemptView | null>,
 ) {
   const usage = createRecordedOpenCodeUsage(database);
   async function settleTarget(changeID: string, target: StopTarget) {
@@ -75,6 +77,8 @@ export function createChangeAgentStop(
             THEN 'The stopped input belongs to a different Workspace generation; its outcome still needs confirmation.'
           WHEN attempt.state = 'stopped' AND intent.runtime_attempt_id IS NOT NULL
             THEN 'Stopped compute cannot prove that assigned input was canceled. Restarting alone does not confirm Stop.'
+          WHEN attempt.state = 'paused' AND intent.runtime_attempt_id IS NOT NULL
+            THEN 'Paused compute retains assigned input. A durable Source checkpoint does not confirm its cancellation.'
           WHEN session.opencode_session_id IS NULL
             THEN 'The OpenCode Session is not yet identifiable; its create outcome still needs confirmation.'
           WHEN attempt.state <> 'ready' OR NOT ${hub.connected(target.attemptID)}
@@ -111,6 +115,7 @@ export function createChangeAgentStop(
             bootstrap: boolean | null;
             intendedSessionID: string | null;
             sessionConfirmed: boolean;
+            implementationConfirmed: boolean;
           }
         >
       >`SELECT session.runtime_attempt_id AS "attemptID", session.opencode_session_id AS "sessionID",
@@ -119,7 +124,8 @@ export function createChangeAgentStop(
         intent.prompt_id AS "promptID", intent.runtime_attempt_id AS "intentAttemptID",
         change.runtime_attempt_id AS "currentAttemptID",intent.bootstrap,
         intent.session_id AS "intendedSessionID",
-        session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed"
+        session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed",
+        session.implementation_session_confirmed_at IS NOT NULL AS "implementationConfirmed"
         FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id = session.runtime_attempt_id
         JOIN factory.change change ON change.id = session.change_id
@@ -136,11 +142,29 @@ export function createChangeAgentStop(
       // is durable. Stop fences late confirmation. With exact compute teardown,
       // an unconfirmed bootstrap therefore has no queued input to cancel.
       // Reused or confirmed Sessions still require native history.
-      const unsubmittedBootstrap =
-        current.runtimeState === "stopped" &&
+      const freshBootstrap =
         current.bootstrap === true &&
         !current.sessionConfirmed &&
         current.sessionID === current.intendedSessionID;
+      const paused =
+        freshBootstrap && !current.implementationConfirmed && current.runtimeState === "paused"
+          ? await observeRuntime?.(current.attemptID)
+          : null;
+      const pausedBootstrap = Boolean(
+        paused?.id === current.attemptID &&
+          paused.changeId === changeID &&
+          paused.workspaceKind === "ticket" &&
+          paused.state === "paused" &&
+          paused.native?.engine === "substrate" &&
+          Boolean(paused.native.actorUID) &&
+          paused.native.state === "ACTOR_STATE_SUSPENDED" &&
+          paused.native.sourceHandoff === "confirmed-same-node",
+      );
+      // Only a never-confirmed fresh bootstrap may use the retained native
+      // compute fence. A confirmed/reused Session still needs queued-input
+      // settlement; Source durability alone can never supply that result.
+      const unsubmittedBootstrap =
+        freshBootstrap && (current.runtimeState === "stopped" || pausedBootstrap);
       const retainedSettled =
         !unsubmittedBootstrap &&
         current.stopID &&
@@ -169,7 +193,7 @@ export function createChangeAgentStop(
       )
         return false;
       if (current.intentAttemptID && current.intentAttemptID !== current.attemptID) return false;
-      if (current.runtimeState !== "stopped" && !retainedSettled) {
+      if (current.runtimeState !== "stopped" && !retainedSettled && !unsubmittedBootstrap) {
         if (mode === "observe" && !current.dispatched) return false;
         if (
           !current.stopID ||
@@ -231,6 +255,11 @@ export function createChangeAgentStop(
         const changes = await sql<Array<{ id: string }>>`SELECT id FROM factory.change
           WHERE id = ${changeID} AND runtime_attempt_id = ${current.attemptID} FOR UPDATE`;
         if (!changes[0]) return false;
+        if (pausedBootstrap) {
+          const [paused] = await sql`SELECT id FROM factory.runtime_attempt
+            WHERE id=${current.attemptID} AND change_id=${changeID} AND state='paused' AND substrate`;
+          if (!paused) return false;
+        }
         if (retainedSettled) {
           const [stopped] = await sql`SELECT id FROM factory.runtime_attempt
             WHERE id=${current.attemptID} AND state='stopped'`;
@@ -244,6 +273,7 @@ export function createChangeAgentStop(
           AND stop_id IS NOT DISTINCT FROM ${current.stopID} AND runtime_attempt_id = ${current.attemptID}
           AND opencode_session_id IS NOT DISTINCT FROM ${current.sessionID}
           AND (NOT ${unsubmittedBootstrap} OR native_session_confirmed_at IS NULL)
+          AND (NOT ${pausedBootstrap} OR implementation_session_confirmed_at IS NULL)
         RETURNING change_id AS id`;
         return confirmed.length === 1;
       });

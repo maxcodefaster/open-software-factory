@@ -55,8 +55,14 @@ if (new URL(window.location.href).searchParams.has("compute")) {
       return Response.json({ workspaceID, attemptID, state, failure: null });
     },
   );
+  const start = document.createElement("button");
+  start.type = "button";
+  start.className = "theia-button";
+  start.addEventListener("click", () => void context.prepare());
   context.subscribe((value) => {
     status.value = value?.state ?? "loading";
+    start.textContent = value?.state === "paused" ? "Resume compute" : "Start compute";
+    start.hidden = !value || !["stopped", "paused"].includes(value.state);
   });
   const stop = document.createElement("button");
   stop.type = "button";
@@ -64,6 +70,14 @@ if (new URL(window.location.href).searchParams.has("compute")) {
   stop.textContent = "Observe external Stop";
   stop.addEventListener("click", () => {
     state = "stopped";
+    void context.observe();
+  });
+  const pause = document.createElement("button");
+  pause.type = "button";
+  pause.className = "theia-button";
+  pause.textContent = "Observe external Pause";
+  pause.addEventListener("click", () => {
+    state = "paused";
     void context.observe();
   });
   const grant = document.createElement("button");
@@ -77,10 +91,10 @@ if (new URL(window.location.href).searchParams.has("compute")) {
   use.textContent = "Continue editing";
   // The actual IDE observes trusted pointer, wheel and keyboard input.
   observeFactoryRuntimeUse(document, () => context.use());
-  section.append(heading, status, count, stop, grant, use);
+  section.append(heading, status, count, stop, pause, grant, use, start);
   section.style.cssText = "display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:24px";
   document.querySelector("main")?.append(section);
-  context.select(workspaceID, true);
+  context.select(workspaceID);
   context.setWritable(workspaceID, false);
 }
 

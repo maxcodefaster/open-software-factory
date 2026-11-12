@@ -30,6 +30,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
     factoryHost,
     factoryOrigin,
     runtimeAccess,
+    runtimeController,
     runtimeHub,
     runtimeReady,
   } = application;
@@ -78,7 +79,8 @@ export function startFactoryTransport(application: FactoryTransportServices) {
       }
       if (url.pathname === "/internal/runtime-connect") {
         const data = runtimeHub.authorize(request, hashConnectorToken);
-        if (!data) return new Response("Unauthorized", { status: 401 });
+        if (!data || !(await runtimeController.authorizeConnector(request)))
+          return new Response("Unauthorized", { status: 401 });
         if (
           !server.upgrade(connectionRequest, {
             data,

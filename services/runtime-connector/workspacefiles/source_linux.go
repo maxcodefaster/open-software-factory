@@ -41,11 +41,12 @@ type File struct {
 }
 
 type Source struct {
-	root     *os.File
-	life     sync.RWMutex
-	writes   sync.Mutex
-	closed   chan struct{}
-	watchers sync.WaitGroup
+	root        *os.File
+	archiveRoot *os.File
+	life        sync.RWMutex
+	writes      sync.Mutex
+	closed      chan struct{}
+	watchers    sync.WaitGroup
 }
 
 func Open(checkout string) (*Source, error) {
@@ -54,6 +55,50 @@ func Open(checkout string) (*Source, error) {
 		return nil, err
 	}
 	return &Source{root: os.NewFile(uintptr(fd), checkout), closed: make(chan struct{})}, nil
+}
+
+// An independent Source process receives only this already-pinned checkout
+// descriptor, not access to its Factory-private ancestor directories.
+func OpenDescriptor(file *os.File) (*Source, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != 1000 || stat.Gid != 1000 {
+		return nil, errors.New("Source descriptor ownership is unavailable")
+	}
+	fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &Source{root: os.NewFile(uintptr(fd), fmt.Sprintf("/proc/self/fd/%d/.", fd)), closed: make(chan struct{})}, nil
+}
+
+// Native Source receives a separately pinned read-only/noatime view of the
+// SAME checkout inode. CRUD keeps its original development-owned descriptor;
+// only complete archive enumeration uses this view. No new Source writer or
+// Project-accessible mount is exposed.
+func (source *Source) AttachArchiveDescriptor(file *os.File) error {
+	source.life.Lock()
+	defer source.life.Unlock()
+	if source.root == nil {
+		return os.ErrClosed
+	}
+	if source.archiveRoot != nil {
+		return errors.New("Source archive view already exists")
+	}
+	var canonical, view unix.Stat_t
+	if unix.Fstat(int(source.root.Fd()), &canonical) != nil || unix.Fstat(int(file.Fd()), &view) != nil || canonical.Dev != view.Dev || canonical.Ino != view.Ino || view.Uid != 1000 || view.Gid != 1000 || view.Mode&unix.S_IFMT != unix.S_IFDIR || !readOnlyNoAtime(file) {
+		return errors.New("Source archive view differs from its read-only checkout binding")
+	}
+	fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	source.archiveRoot = os.NewFile(uintptr(fd), fmt.Sprintf("/proc/self/fd/%d/.", fd))
+	return nil
+}
+
+func readOnlyNoAtime(file *os.File) bool {
+	var fs unix.Statfs_t
+	return unix.Fstatfs(int(file.Fd()), &fs) == nil && fs.Flags&unix.ST_RDONLY != 0 && fs.Flags&unix.ST_NOATIME != 0
 }
 
 func (source *Source) Close() error {
@@ -66,6 +111,12 @@ func (source *Source) Close() error {
 	close(source.closed)
 	err := source.root.Close()
 	source.root = nil
+	if source.archiveRoot != nil {
+		if archiveErr := source.archiveRoot.Close(); err == nil {
+			err = archiveErr
+		}
+		source.archiveRoot = nil
+	}
 	source.life.Unlock()
 	source.watchers.Wait()
 	return err

@@ -15,7 +15,7 @@ type Transport = (
 // The worker's native controller takes a non-blocking flock for every store
 // command, including state reads. Two commands in flight therefore fail with
 // EWOULDBLOCK instead of queueing. Factory serializes each native command
-// across every process with the advisory lock `factorybox-worker-lifecycle`
+// across every process with its worker-local advisory lifecycle lock
 // and holds it only for the command itself. Image export, Kubernetes reads and
 // DB-only steps run without it.
 //
@@ -59,8 +59,13 @@ export function createNativeLease(
   connection: SQL,
   priority: NativePriority,
   deadline: () => number = () => performance.now() + nativeLifecycleWindowMS,
-  options: { pollMS?: number; maxWaitMS?: number; clock?: Clock } = {},
+  options: { pollMS?: number; maxWaitMS?: number; clock?: Clock; workerID?: string } = {},
 ): NativeLease {
+  // Keep the legacy default worker keys so retained controllers and ordinary
+  // Source/Pause/Resume still serialize. Each new pool worker has its own store.
+  const key = (name: string) => (options.workerID ? `${name}:${options.workerID}` : name);
+  const lifecycleKey = key("factorybox-worker-lifecycle");
+  const foregroundKey = key("factorybox-worker-foreground");
   const clock = options.clock ?? realClock;
   const pollMS = options.pollMS ?? 200;
   const maxWaitMS = options.maxWaitMS ?? 30_000;
@@ -73,23 +78,23 @@ export function createNativeLease(
     const remaining = Math.ceil(deadline() - clock.now());
     if (remaining <= 0) throw new Error("Factorybox worker deadline expired before admission");
     await connection`SELECT set_config('lock_timeout',${`${remaining}ms`},false)`;
-    await connection`SELECT pg_advisory_lock_shared(hashtext('factorybox-worker-foreground'))`;
+    await connection`SELECT pg_advisory_lock_shared(hashtext(${foregroundKey}))`;
     announced = true;
-    await connection`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
+    await connection`SELECT pg_advisory_lock(hashtext(${lifecycleKey}))`;
   }
   async function background(started: number) {
     for (;;) {
       const [idle] = await connection<
         Array<{ granted: boolean }>
-      >`SELECT pg_try_advisory_lock(hashtext('factorybox-worker-foreground')) AS granted`;
+      >`SELECT pg_try_advisory_lock(hashtext(${foregroundKey})) AS granted`;
       if (idle?.granted) {
         try {
           const [taken] = await connection<
             Array<{ granted: boolean }>
-          >`SELECT pg_try_advisory_lock(hashtext('factorybox-worker-lifecycle')) AS granted`;
+          >`SELECT pg_try_advisory_lock(hashtext(${lifecycleKey})) AS granted`;
           if (taken?.granted) return;
         } finally {
-          await connection`SELECT pg_advisory_unlock(hashtext('factorybox-worker-foreground'))`;
+          await connection`SELECT pg_advisory_unlock(hashtext(${foregroundKey}))`;
         }
       }
       if (clock.now() >= deadline() || clock.now() - started >= maxWaitMS)
@@ -100,7 +105,7 @@ export function createNativeLease(
   async function unannounce() {
     if (!announced) return;
     announced = false;
-    await connection`SELECT pg_advisory_unlock_shared(hashtext('factorybox-worker-foreground'))`;
+    await connection`SELECT pg_advisory_unlock_shared(hashtext(${foregroundKey}))`;
   }
   const lease: NativeLease = {
     priority,
@@ -128,7 +133,7 @@ export function createNativeLease(
       held = false;
       timing.heldMS += clock.now() - heldSince;
       try {
-        await connection`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
+        await connection`SELECT pg_advisory_unlock(hashtext(${lifecycleKey}))`;
       } finally {
         await unannounce();
       }

@@ -461,6 +461,8 @@ export async function fixture(
           await sql`DELETE FROM factory.pull_request_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_agent_session WHERE change_id = ${changeID}`;
           await sql`DELETE FROM factory.candidate_review WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.verification_compute_placement WHERE verification_id IN
+            (SELECT id FROM factory.verification WHERE change_id=${changeID})`;
           await sql`DELETE FROM factory.verification WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.mcp_observation WHERE turn_id IN
             (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
@@ -479,6 +481,8 @@ export async function fixture(
           await sql`DELETE FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID}`;
           await sql`DELETE FROM factory.mcp_access_decision WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.mcp_project_grant WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.session_archive WHERE turn_id IN
+            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
           await sql`SET LOCAL session_replication_role = origin`;
           await sql`DELETE FROM factory.agent_turn WHERE project_id = ${projectID}`;
           await sql`SET LOCAL session_replication_role = replica`;

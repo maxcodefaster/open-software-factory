@@ -5,6 +5,15 @@ import { browserLane, controllerNeedsDatabase, integrationLane } from "./lanes";
 test("explicit lanes keep paid calls and retained-installation restarts outside defaults", () => {
   expect(integrationLane("test/integration/project-environment.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/native-skill-loading.test.ts")).toBe("native");
+  expect(integrationLane("test/integration/substrate-adapter.native.test.ts")).toBe("native");
+  expect(integrationLane("test/integration/substrate-workspaces.native.test.ts")).toBe("native");
+  expect(integrationLane("test/integration/substrate-workspaces.test.ts")).toBe("controllers");
+  expect(integrationLane("test/integration/substrate-verification.test.ts")).toBe("controllers");
+  expect(integrationLane("test/integration/substrate-source.test.ts")).toBe("controllers");
+  expect(integrationLane("test/integration/substrate-source-preservation.test.ts")).toBe(
+    "controllers",
+  );
+  expect(integrationLane("test/integration/substrate-adapter.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/team-delivery.live.test.ts")).toBe("live");
   expect(browserLane("agent-turn-live.spec.ts")).toBe("paid");
   expect(browserLane("project-agent.spec.ts")).toBe("paid");
@@ -21,6 +30,22 @@ test("the default browser selection excludes explicitly paid cases in mixed jour
 });
 
 test("self-contained protocol and PostgreSQL proofs do not acquire an unused shared database", () => {
+  expect(controllerNeedsDatabase("test/integration/substrate-adapter.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-adapter.native.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-upgrade.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-workspaces.native.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/substrate-workspaces.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-verification.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-source.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-source-preservation.test.ts")).toBe(
+    false,
+  );
+  expect(
+    controllerNeedsDatabase("test/integration/substrate-source-preservation-upgrade.test.ts"),
+  ).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/openbao.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/postgres-baseline.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-knowledge.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-workspaces.test.ts")).toBe(

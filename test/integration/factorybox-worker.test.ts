@@ -45,6 +45,35 @@ const manifest = z
 const runtimeImage = `registry.invalid/runtime@sha256:${"a".repeat(64)}`;
 const key = (kind: string, name: string) => `${kind.toLowerCase()}/${name}`;
 
+test("fresh isolated default execution binds its original node through the persisted destination without Workspace Source preparation", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const kube = infrastructure();
+  const worker = createFactoryboxWorker(database, kube.kubernetes);
+  try {
+    const original = await factoryboxAllocation(database.client);
+    expect(original.nodeName).toBeNull();
+    const destination = { workerID: original.id, admissionID: original.admissionID };
+    await worker.provision(resources(original), profile, runtimeImage, destination);
+    const bound = await factoryboxAllocation(
+      database.client,
+      undefined,
+      original.id,
+      original.admissionID,
+    );
+    expect(bound.id).toBe(original.id);
+    expect(bound.admissionID).toBe(original.admissionID);
+    expect(bound.nodeName).toBe(profile.nodeName);
+    expect(bound.profile).toEqual(profile);
+    await expect(
+      factoryboxAllocation(database.client, "another-node", original.id, original.admissionID),
+    ).rejects.toThrow("retained node");
+  } finally {
+    await database.client.end();
+    await host.dispose();
+  }
+});
+
 test("node-derived worker budget is retained before create and never reselected for an admitted worker", async () => {
   const host = await factoryProcess();
   const database = host.connect();

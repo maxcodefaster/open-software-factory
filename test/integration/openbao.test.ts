@@ -39,6 +39,9 @@ test("pinned OpenBao encrypts persistent values, limits Factory credentials and 
   }
   try {
     const configuration = await service.start();
+    expect(
+      (await docker("inspect", "--format", "{{.Config.User}}", service.container)).trim(),
+    ).toBe(`${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`);
     const adapter = createOpenBaoEnvironmentSecrets({
       address: configuration.FACTORY_OPENBAO_URL,
       tokenFile: configuration.FACTORY_OPENBAO_TOKEN_FILE,
@@ -61,8 +64,9 @@ test("pinned OpenBao encrypts persistent values, limits Factory credentials and 
     });
     expect(deletion.status).toBe(403);
     expect(
-      JSON.parse(await readFile(join(service.directory, "bootstrap.json"), "utf8")).root_token,
-    ).toBe("");
+      JSON.parse(await readFile(join(service.directory, "bootstrap.json"), "utf8")).root_token ===
+        "",
+    ).toBe(true);
     expect(
       (
         await docker(
@@ -140,8 +144,9 @@ test("pinned OpenBao encrypts persistent values, limits Factory credentials and 
     );
     expect(unauthenticatedRoot.ok).toBe(false);
     expect(
-      JSON.parse(await readFile(join(service.directory, "bootstrap.json"), "utf8")).root_token,
-    ).toBe("");
+      JSON.parse(await readFile(join(service.directory, "bootstrap.json"), "utf8")).root_token ===
+        "",
+    ).toBe(true);
     // The local scoped AppRole renews credentials after a long stopped session.
     await writeFile(configuration.FACTORY_OPENBAO_TOKEN_FILE, "expired-owned-token", {
       mode: 0o600,

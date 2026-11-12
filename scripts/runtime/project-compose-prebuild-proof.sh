@@ -6,6 +6,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 image="${1:?Pass an immutable runtime-host image}"
 node_image="${2:?Pass an immutable native Node image}"
 registry_image="${3:?Pass an immutable Registry image}"
+recipes="${4:-build image-only build-no-features dependency-seed prepared-image runtime-environment}"
+for kind in $recipes; do
+  case "$kind" in build|image-only|build-no-features|dependency-seed|prepared-image|prepared-rootfs|runtime-environment) ;; *) echo "Unknown Compose component recipe" >&2; exit 1 ;; esac
+done
 for reference in "$image" "$node_image" "$registry_image"; do
   if [[ ! "$reference" =~ ^sha256:[a-f0-9]{64}$ && ! "$reference" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]; then
     echo "The Compose prebuild proof requires immutable image references" >&2
@@ -34,13 +38,9 @@ printf '{"owner":"%s","image":"%s","platform":"linux/%s","nativeFactoryboxProof"
 cleanup() {
   result=$?
   trap - EXIT
-  if docker inspect "$name" > "$directory/container.json" 2> "$directory/cleanup-observation.log"; then
+  if docker inspect "$name" > "$directory/container.inspect.log" 2> "$directory/cleanup-observation.log"; then
     actual="$(docker inspect --format '{{ index .Config.Labels "factory.compose-prebuild-proof" }}' "$name")"
     if [[ "$actual" != "$owner" ]]; then echo "Owned Compose proof identity changed" >&2; exit 1; fi
-    docker cp "$name:/tmp/compose-prebuild-result.json" "$directory/native-result.json" 2>/dev/null || true
-    for kind in build image-only build-no-features dependency-seed prepared-image; do
-      docker cp "$name:/tmp/compose-prebuild-result-$kind.json" "$directory/native-$kind-result.json" 2>/dev/null || true
-    done
     docker cp "$name:/tmp/owned-devcontainer-build.log" "$directory/devcontainer-build.log" 2>/dev/null || true
     docker cp "$name:/tmp/owned-devcontainer-up.log" "$directory/devcontainer-up.log" 2>/dev/null || true
     docker rm --force --volumes "$name" > "$directory/cleanup.log" || result=1
@@ -57,7 +57,7 @@ cleanup() {
       else result=1; fi
     fi
   done
-  printf '{"owner":"%s","exitCode":%s,"nativeFactoryboxProof":false}\n' "$owner" "$result" > "$directory/result.json"
+  printf 'Owned offline Compose component %s finished with exit code %s; raw tool logs retained in %s\n' "$owner" "$result" "$directory"
   exit "$result"
 }
 trap cleanup EXIT
@@ -74,6 +74,7 @@ docker save --output "$directory/images.tar" "$node_alias" "$registry_alias"
 docker create --pull=never --name "$name" --label "factory.compose-prebuild-proof=$owner" \
   --privileged --cgroupns=private --network=none --cpus=3 --memory=3g --pids-limit=512 \
   --env "FACTORY_COMPOSE_PREBUILD_NATIVE=1" \
+  --env "FACTORY_COMPOSE_PROOF_KINDS=$recipes" \
   --env "FACTORY_COMPOSE_PROOF_PLATFORM=linux/$architecture" \
   --env "FACTORY_COMPOSE_PROOF_NODE_REF=$node_alias" --env "FACTORY_COMPOSE_PROOF_REGISTRY_REF=$registry_alias" \
   --entrypoint timeout "$image" -s KILL 420 /bin/sh -euc '
@@ -85,7 +86,7 @@ docker create --pull=never --name "$name" --label "factory.compose-prebuild-proo
       if ! kill -0 "$daemon" 2>/dev/null; then cat /tmp/owned-dockerd.log; exit 1; fi
       sleep 0.1
     done
-    for kind in build image-only build-no-features dependency-seed prepared-image; do
+    for kind in $FACTORY_COMPOSE_PROOF_KINDS; do
       docker load --input /tmp/images.tar >/dev/null
       export FACTORY_COMPOSE_PROOF_NODE="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_NODE_REF")"
       export FACTORY_COMPOSE_PROOF_REGISTRY="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_REGISTRY_REF")"

@@ -13,7 +13,7 @@ import { reportFailure } from "../failure-log";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createOpenBaoModelSecrets } from "../models/secrets";
-import { runtimeRepositoryCloneURL } from "../runtime/endpoints";
+import { runtimeRepositoryCloneURL, substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/native";
@@ -42,6 +42,7 @@ import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
 import { observeOpenCodeUsage } from "./opencode-usage";
 import { createReviewAdmission } from "./review-admission";
 import { waitForBuildSandbox } from "./runtime-readiness";
+import { createSessionArchives } from "./session-archive-store";
 import { createChangeAgentStop, type RetainedStopTarget } from "./stop";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
@@ -54,6 +55,7 @@ import {
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
   startPersisted(changeID: string, userID: string): Promise<RuntimeAttemptView | null>;
+  get?(attemptID: string): Promise<RuntimeAttemptView | null>;
 };
 type AgentRow = {
   changeID: string;
@@ -174,6 +176,7 @@ export function createAgentController(
       });
   }
   const usageJournal = createRecordedOpenCodeUsage(database);
+  const archives = createSessionArchives(database, (attemptID) => opencode(hub, attemptID));
   const modelSettings = createModelSettingsController(database);
   const modelConnections = createModelConnections(
     database,
@@ -195,6 +198,7 @@ export function createAgentController(
     settleRetainedStop
       ? (target) => settleRetainedStop(target, observationController.signal)
       : undefined,
+    runtime.get?.bind(runtime),
   );
   const admitReview = createReviewAdmission(database);
   const commitTransport = createAgentCommitTransport(database, hub);
@@ -818,16 +822,22 @@ export function createAgentController(
         state: string;
         lastError: string | null;
         repositoryURL: string;
+        native: boolean;
+        nativeIntent: unknown;
       }>
     >`
       SELECT operation.id, operation.change_id AS "changeID", operation.runtime_attempt_id AS "attemptID",
         operation.branch_name AS "branchName", operation.expected_parent_sha AS "expectedParentSHA",
         operation.merge_parent_sha AS "mergeParentSHA",
         operation.commit_sha AS "commitSHA", operation.commit_message AS "commitMessage", operation.state, operation.last_error AS "lastError",
-        project.repository_url AS "repositoryURL"
+        project.repository_url AS "repositoryURL",COALESCE(attempt.substrate,false) AS native,
+        binding.intent AS "nativeIntent"
       FROM factory.change_commit_operation operation
       JOIN factory.change change ON change.id=operation.change_id
-      JOIN factory.project project ON project.id=change.project_id WHERE operation.id = ${operationID}
+      JOIN factory.project project ON project.id=change.project_id
+      LEFT JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+      LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+      WHERE operation.id = ${operationID}
     `;
     const operation = operations[0];
     if (!operation || ["succeeded", "failed"].includes(operation.state)) return;
@@ -867,9 +877,11 @@ export function createAgentController(
         expectedSha: operation.expectedParentSHA,
         mergeParentSha: operation.mergeParentSHA ?? "",
         commitSha: commitSHA,
-        repositoryURL: operation.repositoryURL.startsWith("file://")
-          ? operation.repositoryURL
-          : runtimeRepositoryCloneURL(operation.repositoryURL),
+        repositoryURL: operation.native
+          ? substrateRepositoryCloneURL(operation.repositoryURL, operation.nativeIntent)
+          : operation.repositoryURL.startsWith("file://")
+            ? operation.repositoryURL
+            : runtimeRepositoryCloneURL(operation.repositoryURL),
         username:
           process.env["FACTORY_FORGEJO_USERNAME"] ??
           process.env["FACTORY_FORGEJO_OWNER"] ??
@@ -1186,6 +1198,7 @@ export function createAgentController(
               if (!settled)
                 throw new CommandError("conflict", "Review no longer owns this exact candidate");
               notifyActivity(changeID);
+              run(archives.savePending());
               return;
             }
             const settled = await turns.settle(
@@ -1213,6 +1226,7 @@ export function createAgentController(
                 "Build outcome no longer owns its current authority",
               );
             notifyActivity(changeID);
+            run(archives.savePending());
             await reconcileCommit(turnID);
             return;
           }
@@ -1324,6 +1338,7 @@ export function createAgentController(
     },
     async recover() {
       if (closed) return;
+      run(archives.savePending());
       // Failure settlement and its Session projection can lose their connection
       // independently. Restore only the exact failed Turn's diagnostic state;
       // this neither executes work nor resolves uncertain external outcomes.
@@ -1366,6 +1381,7 @@ export function createAgentController(
     // Startup runs before the Connector listener exists. Readiness resumes
     // recorded commits and Stop only, never an inference request or new runtime.
     recoverRuntimeWork(attemptID: string) {
+      run(archives.savePending());
       const work = Promise.all([
         recoverRuntimeCommits(attemptID),
         (async () => {
@@ -1389,15 +1405,23 @@ export function createAgentController(
     },
 
     async recoverRetainedStops() {
-      if (closed || !settleRetainedStop) return;
+      if (closed || (!settleRetainedStop && !runtime.get)) return;
       const stopped = await database.client<{ changeID: string }[]>`
         SELECT session.change_id AS "changeID" FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
-        WHERE session.stop_pending AND attempt.state IN ('failed','cleanup-failed','stopped')`;
+        WHERE session.stop_pending AND (attempt.state IN ('failed','cleanup-failed','stopped')
+          OR (${Boolean(runtime.get)} AND attempt.substrate AND attempt.state='paused'
+            AND session.native_session_confirmed_at IS NULL
+            AND session.implementation_session_confirmed_at IS NULL
+            AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
+              WHERE intent.turn_id=session.stop_turn_id AND intent.bootstrap
+                AND intent.session_id=session.opencode_session_id
+                AND intent.runtime_attempt_id=attempt.id)))`;
       for (const session of stopped) run(reconcileStop(session.changeID));
     },
 
     async dispatchReadyPending() {
+      run(archives.savePending());
       const pending = await database.client<
         Array<{ id: string }>
       >`SELECT turn.id FROM factory.agent_turn turn
@@ -1410,7 +1434,7 @@ export function createAgentController(
             JOIN factory.runtime_attempt previous ON previous.id=writer.fence_attempt_id
             WHERE writer.change_id=turn.change_id AND writer.turn_id=turn.id
               AND writer.state='agent-preparing' AND writer.fence_required
-              AND previous.state='stopped'
+              AND (previous.state='stopped' OR (previous.substrate AND previous.state='paused'))
           )))
           AND (turn.owner_token IS NULL OR turn.owner_expires_at<=clock_timestamp())
           AND NOT EXISTS(SELECT 1 FROM factory.coding_pause WHERE turn_id=turn.id AND resumed_by_turn_id IS NULL)
@@ -1653,7 +1677,8 @@ export function createAgentController(
           AND (context.id=${contextID ?? null} OR (${contextID ?? null}::uuid IS NULL AND context.original)) LIMIT 1`;
       if (!context) return;
       if (!context.confirmed) return { messages: [], messagesAvailable: true };
-      if (!context.attemptID || !hub.connected(context.attemptID)) return;
+      if (!context.attemptID || !hub.connected(context.attemptID))
+        return archives.retainedMessages(context.id).catch(() => undefined);
       const intents = await database.client<{ promptID: string; text: string | null }[]>`
         SELECT intent.prompt_id AS "promptID",
           CASE WHEN turn.input->>'kind'='change-start' THEN NULL ELSE turn.input->>'text' END AS text
@@ -1687,7 +1712,7 @@ export function createAgentController(
           messagesAvailable: true,
         };
       } catch {
-        return;
+        return archives.retainedMessages(context.id).catch(() => undefined);
       }
     },
     async newConversation(
@@ -1712,6 +1737,7 @@ export function createAgentController(
       });
     },
     async get(changeID: string, turnID?: string, history = true, includeNavigation = true) {
+      const transcriptArchive = await archives.status(changeID);
       const [waiting] = await database.client<
         Array<{ reason: string }>
       >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
@@ -1782,6 +1808,7 @@ export function createAgentController(
           stopId: null,
           codingPause: codingPause ?? null,
           computeWait: waiting?.reason ?? null,
+          transcriptArchive,
         };
       }
       let messages: ReturnType<typeof projectMessages> = [];
@@ -1878,6 +1905,7 @@ export function createAgentController(
       return {
         codingPause: codingPause ?? null,
         computeWait: waiting?.reason ?? null,
+        transcriptArchive,
         state:
           session.state === "stopped"
             ? "stopped"

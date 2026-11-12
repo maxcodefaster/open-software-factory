@@ -187,10 +187,11 @@ func injectPreparedChild(ctx context.Context, assignment Assignment, result devc
 	if err = file.Close(); err != nil {
 		return nil, err
 	}
-	for _, artifact := range [][2]string{{executable, "/tmp/factory-prepared-connector"}, {file.Name(), "/tmp/factory-prepared-assignment.json"}} {
-		if err := exec.CommandContext(ctx, "docker", "cp", artifact[0], result.ContainerID+":"+artifact[1]).Run(); err != nil {
-			return nil, errors.New("prepared child artifact delivery failed")
-		}
+	if err := copyChildExecutable(ctx, result.ContainerID, executable, "/tmp/factory-prepared-connector"); err != nil {
+		return nil, err
+	}
+	if err := exec.CommandContext(ctx, "docker", "cp", file.Name(), result.ContainerID+":/tmp/factory-prepared-assignment.json").Run(); err != nil {
+		return nil, errors.New("prepared child assignment delivery failed")
 	}
 	// Only the public, credential-free recipe is readable by the configured
 	// remote user. Fresh Runtime tokens still arrive through the private RPC.

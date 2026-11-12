@@ -37,6 +37,9 @@ export function createProjectSetupController(options: {
   secrets: ImportSecrets;
   signingKey: string;
   importOrigins: readonly string[];
+  // An installation may reserve its explicitly selected fresh Project identity
+  // for one authenticated setup. It cannot retarget another draft or old intent.
+  projectIdentity?: { setupID: string; projectID: string };
   onCreated(projectID: string, userID: string): Promise<void>;
 }) {
   const sql = options.database.client;
@@ -235,6 +238,11 @@ export function createProjectSetupController(options: {
       if (!draft || draft["id"] !== value.id) throw conflict();
       if (draft["command_id"]) {
         if (draft["command_id"] !== value.commandID) throw conflict();
+        if (options.projectIdentity?.setupID === value.id) {
+          const [saved] =
+            await transaction`SELECT project_id FROM factory.project_repository_intent WHERE command_id=${value.commandID}`;
+          if (saved?.["project_id"] !== options.projectIdentity.projectID) throw conflict();
+        }
         return false;
       }
       if (
@@ -258,7 +266,16 @@ export function createProjectSetupController(options: {
         }
       if (value.importToken && draft["kind"] !== "import") throw conflict();
       if (value.importToken && !options.secrets.configured) throw unavailable();
-      const projectID = crypto.randomUUID();
+      const projectID =
+        options.projectIdentity?.setupID === value.id
+          ? options.projectIdentity.projectID
+          : crypto.randomUUID();
+      await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`project-setup-identity:${projectID}`},0))`;
+      // Check before recording/dispatching Git creation. A retained Project or
+      // another admitted setup is never converted or adopted as the fresh one.
+      const [existing] = await transaction`SELECT id FROM factory.project WHERE id=${projectID}
+        UNION ALL SELECT project_id FROM factory.project_repository_intent WHERE project_id=${projectID}`;
+      if (existing) throw conflict();
       const fingerprint = createHmac("sha256", options.signingKey)
         .update(
           JSON.stringify({

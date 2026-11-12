@@ -1,14 +1,57 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type { APIRequestContext } from "@playwright/test";
 import { createRuntimeService } from "../../apps/factory/src/runtime/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { SystemContractError } from "../../packages/system-contract/src/system-contract";
 import {
+  callFactoryFunction,
   compiledFactoryEndpoint,
   decodeFactoryResponse as decodeResponse,
   factoryFunctionRequest,
   requestFunction,
 } from "../fixtures/server-functions";
+
+test("the native Stop client defers its socket idle budget to the lifecycle owner while preserving explicit cancellation and ordinary read bounds", async () => {
+  let options: BunFetchRequestInit | undefined;
+  let input: Request | undefined;
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  const mocked = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(
+      async (request: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        calls++;
+        input = request as Request;
+        options = init;
+        throw new Error("Owned transport disconnected; outcome unconfirmed");
+      },
+      { preconnect: originalFetch.preconnect },
+    ),
+  );
+  const cancellation = new AbortController();
+  const origin = "https://owned-lifecycle-command.test";
+  try {
+    await expect(
+      callFactoryFunction(
+        origin,
+        "stopRuntimeAttempt",
+        [crypto.randomUUID()],
+        {},
+        cancellation.signal,
+      ),
+    ).rejects.toThrow("outcome unconfirmed");
+    expect(calls).toBe(1);
+    expect(options).toEqual({ timeout: false });
+    cancellation.abort();
+    expect(input?.signal.aborted).toBe(true);
+    await expect(callFactoryFunction(origin, "getRuntimeAttempts", [])).rejects.toThrow(
+      "outcome unconfirmed",
+    );
+    expect(options).toBeUndefined();
+    expect(calls).toBe(2);
+  } finally {
+    mocked.mockRestore();
+  }
+});
 
 test("native browser request fixtures mask credential-bearing transport errors and never replay", async () => {
   const credential = "owned-fixture-cookie-must-not-appear";

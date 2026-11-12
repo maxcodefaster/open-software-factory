@@ -5,36 +5,39 @@ import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 type Owned = Awaited<ReturnType<typeof fixture>>;
 
-test("an unconfirmed reused Session still needs native queued-input evidence after teardown", async () => {
-  const owned = await fixture();
-  try {
-    const admitted = await createChangeAdmission(owned.database, buildModelID).admit(
-      owned.changeID,
-      owned.userID,
-      {
-        kind: "change-prompt",
-        commandId: crypto.randomUUID(),
-        text: "Retained Session must not be treated as an empty bootstrap",
-      },
-    );
-    const [intent] = await owned.database.client<{ bootstrap: boolean }[]>`
+test.each(["stopped", "paused"] as const)(
+  "an unconfirmed reused Session still needs native queued-input evidence after %s",
+  async (runtimeState) => {
+    const owned = await fixture();
+    try {
+      const admitted = await createChangeAdmission(owned.database, buildModelID).admit(
+        owned.changeID,
+        owned.userID,
+        {
+          kind: "change-prompt",
+          commandId: crypto.randomUUID(),
+          text: "Retained Session must not be treated as an empty bootstrap",
+        },
+      );
+      const [intent] = await owned.database.client<{ bootstrap: boolean }[]>`
       UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${owned.attemptID}
       WHERE turn_id=${admitted.turn.id} RETURNING bootstrap`;
-    expect(intent?.bootstrap).toBe(false);
-    await owned.database.client`UPDATE factory.change_agent_session
+      expect(intent?.bootstrap).toBe(false);
+      await owned.database.client`UPDATE factory.change_agent_session
       SET native_session_confirmed_at=NULL,active_turn_id=${admitted.turn.id},state='starting'
       WHERE change_id=${owned.changeID}`;
-    const stop = createChangeAgentStop(owned.database, owned.hub);
-    await stop.persist(owned.changeID);
-    await owned.database.client`UPDATE factory.runtime_attempt SET state='stopped'
+      const stop = createChangeAgentStop(owned.database, owned.hub);
+      await stop.persist(owned.changeID);
+      await owned.database.client`UPDATE factory.runtime_attempt SET state=${runtimeState}
       WHERE id=${owned.attemptID}`;
-    expect(await stop.confirm(owned.changeID)).toBe(false);
-    expect(owned.interrupts()).toBe(0);
-    expect(owned.requests()).toBe(0);
-  } finally {
-    await owned.dispose();
-  }
-});
+      expect(await stop.confirm(owned.changeID)).toBe(false);
+      expect(owned.interrupts()).toBe(0);
+      expect(owned.requests()).toBe(0);
+    } finally {
+      await owned.dispose();
+    }
+  },
+);
 
 test.each([false, true])(
   "a stopped fresh Session without native confirmation has no queued input, confirmed=%s",

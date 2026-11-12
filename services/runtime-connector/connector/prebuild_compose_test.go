@@ -44,6 +44,7 @@ test "$1" = compose
 shift
 test "$1" = -f
 file="$2"
+case "$*" in *--no-interpolate*) ;; *) exit 1 ;; esac
 cat "$file"
 `
 	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
@@ -133,6 +134,73 @@ func TestPrebuildComposeRejectsProducerEnvironmentInterpolation(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "environment") {
 		t.Fatalf("environment-dependent Compose must fail closed, got %v", err)
+	}
+}
+
+func TestPrebuildComposeRuntimeEnvironmentIsExcludedWithoutChangingConsumerSource(t *testing.T) {
+	assignment, _ := composePrebuildRepository(t)
+	composePrebuildDocker(t)
+	path := filepath.Join(assignment.WorkspaceFolder, ".devcontainer", "compose.json")
+	content := `{"services":{"workspace":{"image":"node@sha256:` + strings.Repeat("a", 64) + `","environment":{"DATABASE_URL":"${DATABASE_URL:?Set DATABASE_URL in Factory environment settings}","BETTER_AUTH_SECRET":"${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in Factory environment settings}","BETTER_AUTH_URL":"${BETTER_AUTH_URL:-http://localhost:4300}"},"depends_on":["database"],"volumes":["..:/workspace/project"]},"database":{"image":"postgres@sha256:` + strings.Repeat("b", 64) + `","environment":{"POSTGRES_PASSWORD":"${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Factory environment settings}"},"volumes":["data:/var/lib/postgresql/data"]}},"volumes":{"data":{}}}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Runtime-only Compose environment"}} {
+		if output, err := exec.Command("git", append([]string{"-C", assignment.WorkspaceFolder}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("Compose fixture: %s: %v", output, err)
+		}
+	}
+	out, _ := exec.Command("git", "-C", assignment.WorkspaceFolder, "rev-parse", "HEAD").Output()
+	input, snapshot, err := prepareFixturePrebuildInput(context.Background(), assignment, PrebuildRequest{Commit: strings.TrimSpace(string(out)), Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Dir(snapshot))
+	if input.Version != 3 {
+		t.Fatal("Runtime-free producer did not retain its distinct recipe version")
+	}
+	resolved, err := os.ReadFile(filepath.Join(snapshot, ".devcontainer", "compose.json"))
+	var model struct {
+		Services map[string]map[string]json.RawMessage `json:"services"`
+	}
+	if err != nil || json.Unmarshal(resolved, &model) != nil {
+		t.Fatal("private producer Compose is unavailable", err)
+	}
+	for name, service := range model.Services {
+		if service["environment"] != nil || service["env_file"] != nil || strings.Contains(string(resolved), "${") {
+			t.Fatalf("Runtime settings entered the private producer %s: %s", name, resolved)
+		}
+	}
+	authored, err := os.ReadFile(path)
+	if err != nil || string(authored) != content {
+		t.Fatal("producer modified authored Runtime environment")
+	}
+	var config map[string]json.RawMessage
+	declaration, err := os.ReadFile(filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath))
+	if err != nil || json.Unmarshal(declaration, &config) != nil {
+		t.Fatal("authored Dev Container is unavailable")
+	}
+	directory := t.TempDir()
+	if err := configureComposePrebuildConsumer(assignment.WorkspaceFolder, filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath), directory, "registry.factory/prebuilds/project-one@sha256:"+strings.Repeat("c", 64), config); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	if json.Unmarshal(config["dockerComposeFile"], &files) != nil || len(files) != 2 || files[0] != path {
+		t.Fatal("consumer lost the original Runtime settings")
+	}
+}
+
+func TestStarterComposeRuntimeSettingsAreNotProducerInputs(t *testing.T) {
+	root, err := filepath.Abs("../../../templates/starter-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected := os.Getenv("FACTORY_STARTER_TEMPLATE_DIRECTORY"); selected != "" {
+		root = selected
+	}
+	path := filepath.Join(root, ".devcontainer", "compose.yaml")
+	if err := admitComposePrebuildSources(root, []string{path}); err != nil {
+		t.Fatalf("shipped Starter Runtime settings are not build inputs: %v", err)
 	}
 }
 

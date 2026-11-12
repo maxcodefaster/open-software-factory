@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
@@ -22,6 +23,7 @@ test.each(["development", "production"] as const)(
     const id = crypto.randomUUID();
     const host = `${id.replaceAll("-", "")}-app.runtime.localhost:3000`;
     const prefix = `/runtime/${id}/preview/app`;
+    const otherPrefix = `/runtime/${id}/app`;
     const screenshots = resolve(starter.directory, "screenshots");
     const releaseRequests: (() => void)[] = [];
     try {
@@ -183,16 +185,16 @@ test.each(["development", "production"] as const)(
             );
           }
           assetPaths.push(url.pathname);
-          if (!url.pathname.startsWith(`${prefix}/`))
-            return new Response("Unscoped request", { status: 404 });
-          const path = url.pathname.slice(prefix.length) + url.search;
+          const mount = [prefix, otherPrefix].find((path) => url.pathname.startsWith(`${path}/`));
+          if (!mount) return new Response("Unscoped request", { status: 404 });
+          const path = url.pathname.slice(mount.length) + url.search;
           const response = await fetch(`http://127.0.0.1:${number}${path}`, {
             method: request.method,
             headers: appRuntimeHeaders(request, path),
             ...(request.body ? { body: request.body } : {}),
             redirect: "manual",
           });
-          return scopeAppCookies(response, prefix);
+          return scopeAppCookies(response, mount);
         },
       });
       browser = await chromium.launch({
@@ -224,6 +226,32 @@ test.each(["development", "production"] as const)(
       });
       const appURL = `http://${id.replaceAll("-", "")}-app.runtime.localhost:${proxy.port}${prefix}/`;
       await page.goto(appURL);
+      if (mode === "development") {
+        // The root health graph, App and Preview share one checkout but not a
+        // Vite dependency cache. A second mount must not invalidate the first
+        // page's lazy Server Function decoder after it has loaded.
+        const other = await browser.newPage();
+        await other.goto(appURL.replace(prefix, otherPrefix));
+        await other.getByRole("button", { name: "Create an account", exact: true }).click();
+        await other.getByLabel("Name", { exact: true }).fill("Other mount member");
+        await other
+          .getByLabel("Email", { exact: true })
+          .fill(`${crypto.randomUUID()}@starter.test`);
+        await other.getByLabel("Password", { exact: true }).fill(crypto.randomUUID());
+        await other.getByRole("button", { name: "Create account", exact: true }).click();
+        await visible(other.getByRole("heading", { name: "You're home." })).toBeVisible();
+        expect(
+          assetPaths.some((path) =>
+            path.startsWith(
+              `${otherPrefix}/node_modules/.vite/factory/${createHash("sha256").update(otherPrefix).digest("hex")}/`,
+            ),
+          ),
+        ).toBe(true);
+        await other.close();
+        // Developers run the shipped checks while the dev server is still up.
+        // That production build must not stale a page's lazy decoder imports.
+        await starter.command(["npm", "run", "check"]);
+      }
       async function navigateHome() {
         const missing = await page.goto(`${appURL}missing`);
         expect(missing?.status()).toBe(404);
@@ -281,6 +309,14 @@ test.each(["development", "production"] as const)(
       await page.screenshot({ path: resolve(screenshots, "signup-pending.png") });
       signupGate.resolve();
       await visible(page.getByRole("heading", { name: "You're home." })).toBeVisible();
+      if (mode === "development")
+        expect(
+          pageRequests.some((path) =>
+            path.startsWith(
+              `${prefix}/node_modules/.vite/factory/${createHash("sha256").update(prefix).digest("hex")}/`,
+            ),
+          ),
+        ).toBe(true);
       expect(signups).toBe(1);
       await page.unroute("**/api/auth/sign-up/email");
       const signoutGate = Promise.withResolvers<void>();
@@ -410,7 +446,11 @@ test.each(["development", "production"] as const)(
       await visible(app.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
       await embeddedContext.close();
       expect(errors).toEqual([]);
-      expect(assetPaths.filter((path) => !path.startsWith(`${prefix}/`))).toEqual([]);
+      expect(
+        assetPaths.filter(
+          (path) => ![prefix, otherPrefix].some((mount) => path.startsWith(`${mount}/`)),
+        ),
+      ).toEqual([]);
     } finally {
       for (const release of releaseRequests) release();
       await browser?.close();

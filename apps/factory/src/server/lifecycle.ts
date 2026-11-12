@@ -29,7 +29,8 @@ type LifecycleServices = Pick<
   | "runtimeController"
   | "wikiSourceUpdates"
   | "accessRevocation"
->;
+> &
+  Partial<Pick<FactoryApplication, "workspaceSources">>;
 
 export function startFactoryLifecycle(application: LifecycleServices) {
   const {
@@ -63,6 +64,11 @@ export function startFactoryLifecycle(application: LifecycleServices) {
     .start()
     .catch(reportFailure("Execution reserve startup failed"));
   idleCompute.start();
+  jobs.every(
+    "Native worker capacity admission is unavailable",
+    () => runtimeController.admitNativeCapacity(),
+    15_000,
+  );
   jobs.every("Delivery observation failed", () => deliveryController.sweep(), 1_000, true);
   jobs.every("Input observation failed", () => monitoringWorker.sweep(), 2_000, true);
   jobs.every(
@@ -149,6 +155,7 @@ export function startFactoryLifecycle(application: LifecycleServices) {
         executionReserve.close(),
         idleCompute.close(),
         application.accessRevocation.close(),
+        application.workspaceSources?.close(),
         agentController?.shutdown(),
       ]);
     })();

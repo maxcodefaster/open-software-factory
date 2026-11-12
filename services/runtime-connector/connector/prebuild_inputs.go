@@ -71,6 +71,10 @@ func removeInterruptedPrebuildSnapshots(root, repository string) error {
 
 func preparePrebuildInputWith(ctx context.Context, assignment Assignment, request PrebuildRequest, read prebuildConfigurationReader) (prebuildInput, string, error) {
 	var input prebuildInput
+	ctx, err := nativePrebuildContext(ctx, assignment)
+	if err != nil {
+		return input, "", err
+	}
 	root, err := prebuildRoot(assignment)
 	if err != nil {
 		return input, "", err
@@ -183,7 +187,7 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 	}
 	var immutable []string
 	if config.DockerComposeFile != nil {
-		config, immutable, err = prepareComposePrebuild(ctx, snapshot, configPath, config)
+		config, immutable, err = prepareComposePrebuild(ctx, snapshot, configPath, config, assignment)
 		if err != nil {
 			return input, "", err
 		}
@@ -276,8 +280,14 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 	}
 	sort.Strings(immutable)
 	input = prebuildInput{Version: 1, Repository: assignment.RepositoryIdentity, Commit: request.Commit, Tree: tree, Configuration: configuration, Dockerfile: dockerfileRelative, Platform: request.Platform, ImageRepository: named.Name(), CLIVersion: prebuildCLIVersion, CLIIntegrity: prebuildCLIIntegrity, ImmutableInputs: immutable}
+	if config.nativeBase != nil {
+		input.NativeTransportSHA256 = config.nativeBase.transport
+		input.nativeBase = config.nativeBase
+	}
 	if config.DockerComposeFile != nil {
-		input.Version = 2
+		// v3 excludes unresolved Runtime service environments from the producer.
+		// Do not adopt a v2 producer's result under these different build inputs.
+		input.Version = 3
 		input.ComposeService = config.Service
 	}
 	if assignment.EnvironmentVersion != nil && !assignment.PublicImageBuild {

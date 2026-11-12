@@ -129,6 +129,7 @@ test("two Starts overlap their exports but never their native commands, and reti
   } finally {
     await Promise.all(connections.map((connection) => connection.end({ timeout: 1 })));
     await database.client.end({ timeout: 2 });
+    await processFixture.dispose();
   }
 }, 30_000);
 
@@ -163,5 +164,39 @@ test("a background sweep gives up without dispatching while foreground work hold
   } finally {
     await Promise.all([held, sweeper, waiter].map((connection) => connection.end({ timeout: 1 })));
     await database.client.end({ timeout: 2 });
+    await processFixture.dispose();
+  }
+}, 30_000);
+
+test("a remote worker's native command does not wait behind the retained default worker but remains serialized within its own store", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect();
+  const connections = [
+    database.coordination(),
+    database.coordination(),
+    database.coordination(),
+  ] as const;
+  const workerID = crypto.randomUUID();
+  const deadline = () => performance.now() + 2000;
+  const a = createNativeLease(connections[0], "foreground", deadline);
+  const b = createNativeLease(connections[1], "foreground", deadline, { workerID });
+  const bAgain = createNativeLease(connections[2], "background", deadline, {
+    workerID,
+    pollMS: 10,
+    maxWaitMS: 80,
+  });
+  try {
+    await a.acquire();
+    await b.acquire();
+    expect(a.held && b.held).toBe(true);
+    await expect(bAgain.acquire()).rejects.toBeInstanceOf(NativeSlotBusyError);
+    await b.release();
+    await bAgain.acquire();
+    expect(a.held && bAgain.held).toBe(true);
+  } finally {
+    await Promise.all([a, b, bAgain].map((lease) => lease.release()));
+    await Promise.all(connections.map((sql) => sql.end({ timeout: 1 })));
+    await database.client.end();
+    await fixture.dispose();
   }
 }, 30_000);

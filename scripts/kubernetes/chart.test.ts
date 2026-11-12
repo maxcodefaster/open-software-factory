@@ -155,6 +155,62 @@ test("maintenance resources are independently configurable without changing the 
   ).toBe("200m");
 });
 
+test("native Workspace configuration adds only native pool create/observe and profile reads alongside separate rotating credentials", async () => {
+  const missing = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "substrate.workspaceConfigurationSecret=native-workspaces",
+  ]);
+  expect(missing.exitCode).not.toBe(0);
+  expect(missing.stderr).toContain("substrate.provisionerTokenSecret");
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    "--namespace",
+    "factory-proof",
+    ...localValues,
+    "--set",
+    "substrate.workspaceConfigurationSecret=native-workspaces",
+    "--set",
+    "substrate.provisionerTokenSecret=native-provisioner",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const all = parseAllDocuments(result.stdout).map((d) => d.toJSON() as Resource);
+  const app = all.find((r) => r.kind === "Deployment" && r.metadata.name === "portable");
+  expect(app?.spec?.template?.spec.containers[0]?.env).toContainEqual({
+    name: "FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION",
+    value: "/run/factory/substrate-configuration/configuration.json",
+  });
+  expect(JSON.stringify(app?.spec?.template?.spec.volumes)).toContain(
+    '"audience":"api.ate-system.svc"',
+  );
+  expect(JSON.stringify(app?.spec?.template?.spec.volumes)).toContain('"expirationSeconds":600');
+  expect(JSON.stringify(app?.spec?.template?.spec.volumes)).toContain(
+    '"secretName":"native-provisioner"',
+  );
+  const roles = (rows: Resource[]) =>
+    rows.filter((r) => r.kind === "ClusterRole" || r.kind === "Role");
+  expect(
+    roles(all).flatMap(
+      (role) => role.rules?.filter((rule) => rule.apiGroups?.includes("ate.dev")) ?? [],
+    ),
+  ).toEqual([
+    { apiGroups: ["ate.dev"], resources: ["workerpools"], verbs: ["get", "list", "create"] },
+    { apiGroups: ["ate.dev"], resources: ["sandboxconfigs"], verbs: ["get"] },
+  ]);
+  const withoutNativeRules: Resource[] = roles(all).map((role) => ({
+    ...role,
+    ...(role.rules
+      ? { rules: role.rules.filter((rule) => !rule.apiGroups?.includes("ate.dev")) }
+      : {}),
+  }));
+  expect(withoutNativeRules).toEqual(roles(await resources()));
+});
+
 test("worker storage capacity is explicit before its immutable first admission", async () => {
   const defaultConfig = (await resources()).find(
     (resource) =>
@@ -1011,7 +1067,7 @@ test("the application ServiceAccount has no cluster-wide Secret watch, update or
   }
   expect(granted("", "pods/exec").sort()).toEqual(["create", "get"]);
   expect(granted("", "pods/portforward").sort()).toEqual(["create", "get"]);
-  expect(granted("", "nodes")).toEqual(["get"]);
+  expect(granted("", "nodes")).toEqual(["get", "list"]);
   expect(granted("", "events")).toEqual([]);
   expect(granted("storage.k8s.io", "storageclasses")).toEqual([]);
 });

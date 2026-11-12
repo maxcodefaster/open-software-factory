@@ -621,7 +621,13 @@ export async function callFactoryFunction<N extends FunctionName>(
   signal?: AbortSignal,
 ): Promise<FunctionResult<N>> {
   const result = await decodeFactoryResponse<FunctionResult<N>>(
-    await fetch(await factoryFunctionRequest(base, name, args, headers, signal)),
+    await fetch(
+      await factoryFunctionRequest(base, name, args, headers, signal),
+      // Native synchronous checkpoints can exceed Bun's five-minute socket
+      // idle timer. Let the lifecycle owner finish; an explicit caller signal
+      // still cancels transport, and an uncertain result is never redispatched.
+      name === "stopRuntimeAttempt" ? { timeout: false } : undefined,
+    ),
   );
   if (result === undefined) throw new Error(`Factory function returned no result: ${name}`);
   return result as FunctionResult<N>;

@@ -1,0 +1,8 @@
+{
+  "containerd": {
+    "version": "2.4.1",
+    "revision": "f2551031d7276a770f65f98c9b52e57e7dad07e8",
+    "url": "https://github.com/containerd/containerd/releases/download/v2.4.1/containerd-static-2.4.1-linux-amd64.tar.gz",
+    "sha256": "02ad3a7e80d7d2c018c7134d5eca7e301283db6895f100b957fb52ad8e5a30fd"
+  }
+}

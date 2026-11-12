@@ -1,13 +1,13 @@
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
 import type { SystemContract } from "../../system-contract/src/system-contract";
+import { runtimeAgentProcess } from "./agent-process";
 import { factoryboxAssignmentSecret, factoryboxSharedLabels } from "./factorybox-location";
 import {
   type FactoryboxRuntimeProfile,
   factoryboxSandboxID,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
-import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
-import { verificationSupervisor } from "./verification-process";
+import { type RuntimeVerification, runtimeVerificationProcess } from "./verification-process";
 
 export interface RuntimeManifestInput {
   readonly attemptID: string;
@@ -51,40 +51,12 @@ export interface RuntimeManifestInput {
     readonly browserURL: string;
     readonly browserToken: string;
   };
-  readonly verification?: {
-    readonly forgeURL: string;
-    readonly runnerUUID: string;
-    readonly runnerToken: string;
-    readonly runnerLabel: string;
-    readonly handle?: string;
-    readonly publication?: {
-      id: string;
-      version: string;
-      credentialURL: string;
-      credentialToken: string;
-      registryURL?: string;
-    };
-  };
+  readonly verification?: RuntimeVerification;
 }
 
 export function renderRuntimeResources(input: RuntimeManifestInput) {
   const ownerID = input.runtimeOwnerID ?? input.attemptID;
   const mode = input.mode ?? "development";
-  const publication = input.verification?.publication;
-  const publicationEnvironment = publication
-    ? {
-        FACTORY_RELEASE_ID: publication.id,
-        FACTORY_RELEASE_VERSION: publication.version,
-        FACTORY_RELEASE_SOURCE: "/workspace/project",
-        FACTORY_RELEASE_CREDENTIAL_URL: publication.credentialURL,
-        FACTORY_RELEASE_CREDENTIAL_TOKEN: publication.credentialToken,
-        FACTORY_RELEASE_REGISTRY: new URL(publication.registryURL ?? input.verification.forgeURL)
-          .host,
-        FACTORY_RELEASE_REGISTRY_URL: new URL(
-          publication.registryURL ?? input.verification.forgeURL,
-        ).origin,
-      }
-    : {};
   if (input.agent && !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(input.agent.browserToolsImage))
     throw new Error("Build browser image must be pinned by exact digest");
   if (
@@ -185,105 +157,8 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
           ? { env: { FACTORY_APP_ORIGINS: JSON.stringify(input.appOrigins) } }
           : {}),
       })),
-      ...(input.agent
-        ? [
-            {
-              name: "agent",
-              command: [
-                "sh",
-                "-c",
-                "umask 077; export OPENCODE_DB=/workspace/project/.git/factory-opencode.db; exec /opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs",
-              ],
-              env: {
-                FACTORY_BUILD_BROWSER_COMMAND: `/tmp/factory-runtime-connector-${input.generation}`,
-                FACTORY_BUILD_BROWSER_URL: input.agent.browserURL,
-                FACTORY_BUILD_BROWSER_TOKEN: input.agent.browserToken,
-                OPENCODE_PASSWORD: input.agent.modelToken,
-                OPENCODE_DISABLE_MODELS_FETCH: "1",
-                FACTORY_OPENCODE_TOKEN: input.agent.modelToken,
-                FACTORY_OPENCODE_CONFIG: JSON.stringify({
-                  skills: ["/opt/factory/admitted-skills"],
-                  model: `factory/${input.agent.modelID}`,
-                  providers: {
-                    factory: {
-                      package: openCodeModelConfiguration(input.agent).package,
-                      canonical: input.agent.provider ?? "openai",
-                      env: ["FACTORY_OPENCODE_TOKEN"],
-                      name: "Factory",
-                      settings: {
-                        transport: "http",
-                        compaction: { type: "summary" },
-                        baseURL: input.agent.modelBaseURL,
-                        apiKey: input.agent.modelToken,
-                        ...openCodeModelConfiguration(input.agent).settings,
-                      },
-                      models: Object.fromEntries(
-                        input.agent.modelIDs.map((id) => [
-                          id,
-                          openCodeModelMetadata(input.agent?.provider, id),
-                        ]),
-                      ),
-                    },
-                  },
-                  permissions: [{ action: "*", resource: "*", effect: "allow" }],
-                }),
-              },
-            },
-          ]
-        : []),
-      ...(input.verification
-        ? [
-            {
-              name: "verification",
-              command: [
-                "sh",
-                "-c",
-                `umask 077; mkdir -p "$HOME/.factory-runner"; printf %s "$FACTORY_RUNNER_CONFIG" > "$HOME/.factory-runner/config.yml"; exec node -e '${verificationSupervisor}'`,
-              ],
-              env: {
-                ...(input.verification.handle
-                  ? { FACTORY_RUNNER_HANDLE: input.verification.handle }
-                  : {}),
-                ...publicationEnvironment,
-                FACTORY_RUNNER_CONFIG: [
-                  "log:",
-                  "  level: info",
-                  "  job_level: info",
-                  "runner:",
-                  "  capacity: 1",
-                  "  timeout: 30m",
-                  "  shutdown_timeout: 1m",
-                  // Native runner job processes use configured envs, not the supervisor's env.
-                  ...(publication
-                    ? [
-                        "  envs:",
-                        ...Object.entries(publicationEnvironment).map(
-                          ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
-                        ),
-                      ]
-                    : []),
-                  "cache:",
-                  "  enabled: false",
-                  "host:",
-                  "  workdir_parent: /tmp/factory-actions",
-                  "server:",
-                  "  connections:",
-                  "    factory:",
-                  `      url: ${input.verification.forgeURL}`,
-                  `      uuid: ${input.verification.runnerUUID}`,
-                  `      token: ${input.verification.runnerToken}`,
-                  "      fetch_interval: 1s",
-                  "      labels:",
-                  `        - ${input.verification.runnerLabel}:host`,
-                  ...(input.verification.publication
-                    ? [`        - factory-release-${input.verification.publication.id}:host`]
-                    : []),
-                  "",
-                ].join("\n"),
-              },
-            },
-          ]
-        : []),
+      ...(input.agent ? [runtimeAgentProcess(input.agent, input.generation)] : []),
+      ...(input.verification ? [runtimeVerificationProcess(input.verification)] : []),
     ],
     connectorStateDir: "/home/coder/connector-state",
   });

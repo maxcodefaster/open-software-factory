@@ -152,13 +152,24 @@ export const runtimeAttemptSchema = z.object({
   failure: optionalString,
   generation: z.string().optional(),
   revision: z.string().optional(),
-  kubernetesNamespace: z.string().optional(),
-  kubernetesPodName: z.string().optional(),
+  kubernetesNamespace: optionalString,
+  kubernetesPodName: optionalString,
   createdAt: optionalString,
   updatedAt: optionalString,
   readyAt: optionalString,
   appReadyAt: z.record(z.string(), z.string()).optional(),
   restoreFailed: z.boolean().optional(),
+  native: z
+    .object({
+      engine: z.literal("substrate"),
+      actorUID: z.uuid().optional(),
+      state: z.string(),
+      version: z.string().optional(),
+      coldRestart: z.literal(true),
+      portable: z.literal(false),
+      sourceHandoff: z.enum(["pending", "confirmed-same-node"]),
+    })
+    .optional(),
 });
 export type RuntimeAttempt = z.infer<typeof runtimeAttemptSchema>;
 export const appPreviewsSchema = z.object({
@@ -303,6 +314,28 @@ export type WriterView = z.infer<typeof writerViewSchema>;
 
 export const agentViewSchema = z.object({
   computeWait: optionalString,
+  transcriptArchive: z
+    .object({
+      latest: z
+        .object({
+          turnID: z.uuid(),
+          state: z.enum(["pending", "failed", "saved"]),
+          attempts: z.number().int().nonnegative(),
+          lastError: z.string().max(2000).nullable(),
+        })
+        .nullable(),
+      lastSaved: z
+        .object({
+          turnID: z.uuid(),
+          sessionID: z.string().max(200),
+          runtimeAttemptID: z.uuid(),
+          savedAt: z.string(),
+          throughMessageID: z.string(),
+        })
+        .nullable(),
+      recovery: z.string().max(2000),
+    })
+    .optional(),
   codingPause: z.object({ reason: z.string(), turnID: z.uuid() }).nullable().optional(),
   state: z.enum(["idle", "starting", "working", "waiting", "stopped", "failed", "committed"]),
   runtimeState: optionalString,

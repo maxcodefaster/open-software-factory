@@ -7,10 +7,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,18 +23,25 @@ type Access struct {
 	ServiceID   string `json:"serviceId"`
 	Epoch       uint64 `json:"epoch"`
 	Token       string `json:"token"`
+	WriterEpoch uint64 `json:"writerEpoch,omitempty"`
+	OwnerEpoch  uint64 `json:"ownerEpoch,omitempty"`
+	ReadOnly    bool   `json:"readOnly,omitempty"`
 }
 
 type Service struct {
-	source      *Source
-	access      Access
-	ctx         context.Context
-	revoke      context.CancelFunc
-	life        sync.RWMutex
-	active      bool
-	writes      sync.Mutex
-	writerEpoch uint64
-	writable    bool
+	source           *Source
+	access           Access
+	ctx              context.Context
+	revoke           context.CancelFunc
+	life             sync.RWMutex
+	active           bool
+	writes           sync.Mutex
+	writerEpoch      uint64
+	ownerEpoch       uint64
+	writable         bool
+	checkpointID     string
+	checkpointFile   *os.File
+	checkpointBundle Bundle
 }
 
 var sourceIdentity = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -42,7 +52,13 @@ func NewService(source *Source, access Access) (*Service, error) {
 		return nil, errors.New("invalid source service assignment")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Service{source: source, access: access, ctx: ctx, revoke: cancel, active: true}, nil
+	ownerEpoch := access.OwnerEpoch
+	if ownerEpoch == 0 {
+		ownerEpoch = access.WriterEpoch
+	}
+	return &Service{source: source, access: access, ctx: ctx, revoke: cancel, active: true,
+		writerEpoch: access.WriterEpoch, ownerEpoch: ownerEpoch,
+		writable: access.WriterEpoch != 0 && !access.ReadOnly}, nil
 }
 
 // Factory rechecks current human authority before forwarding each operation.
@@ -59,18 +75,25 @@ func (service *Service) Revoke() {
 	defer service.life.Unlock()
 	service.active = false
 	service.revoke()
+	if service.checkpointFile != nil {
+		name := service.checkpointFile.Name()
+		service.checkpointFile.Close()
+		os.Remove(name)
+	}
 }
 
 type sourceRequest struct {
-	Path        string  `json:"path"`
-	Content     []byte  `json:"content,omitempty"`
-	Version     string  `json:"version,omitempty"`
-	Search      *Search `json:"search,omitempty"`
-	Destination string  `json:"destination,omitempty"`
-	Overwrite   bool    `json:"overwrite,omitempty"`
-	Recursive   bool    `json:"recursive,omitempty"`
-	WriterEpoch uint64  `json:"writerEpoch,omitempty"`
-	Writable    bool    `json:"writable,omitempty"`
+	Path         string  `json:"path"`
+	Content      []byte  `json:"content,omitempty"`
+	Version      string  `json:"version,omitempty"`
+	Search       *Search `json:"search,omitempty"`
+	Destination  string  `json:"destination,omitempty"`
+	Overwrite    bool    `json:"overwrite,omitempty"`
+	Recursive    bool    `json:"recursive,omitempty"`
+	WriterEpoch  uint64  `json:"writerEpoch,omitempty"`
+	Writable     bool    `json:"writable,omitempty"`
+	CheckpointID string  `json:"checkpointId,omitempty"`
+	Chunk        int     `json:"chunk,omitempty"`
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -110,6 +133,52 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		sourceError(response, http.StatusBadRequest, "Invalid source request")
 		return
 	}
+	if operation == "checkpoint" || operation == "chunk" {
+		service.writes.Lock()
+		defer service.writes.Unlock()
+		if !sourceIdentity.MatchString(input.CheckpointID) || input.WriterEpoch == 0 || input.WriterEpoch < service.ownerEpoch {
+			sourceError(response, http.StatusConflict, "Source checkpoint writer changed")
+			return
+		}
+		if operation == "checkpoint" {
+			if service.checkpointID != "" && (service.checkpointID != input.CheckpointID || service.ownerEpoch != input.WriterEpoch) {
+				sourceError(response, 409, "Source checkpoint identity changed")
+				return
+			}
+			// Storage-owner transfer and Change human/Agent authority are distinct
+			// existing leases. A checkpoint must not replace the Change fence.
+			service.ownerEpoch, service.writable = input.WriterEpoch, false
+			service.checkpointID = input.CheckpointID
+			if service.checkpointFile == nil {
+				file, err := os.CreateTemp("", "factory-source-bundle-*")
+				if err != nil {
+					response.Header().Set("X-Factory-Source-Checkpoint-Failure", checkpointFailureReason(err))
+					service.error(response, err)
+					return
+				}
+				bundle, err := service.source.ExportBundle(file)
+				if err != nil {
+					file.Close()
+					os.Remove(file.Name())
+					response.Header().Set("X-Factory-Source-Checkpoint-Failure", checkpointFailureReason(err))
+					service.error(response, err)
+					return
+				}
+				service.checkpointID, service.checkpointFile, service.checkpointBundle = input.CheckpointID, file, bundle
+			}
+			response.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(response).Encode(service.checkpointBundle)
+			return
+		}
+		if service.checkpointID != input.CheckpointID || service.writable || input.WriterEpoch != service.ownerEpoch || input.Chunk < 0 || input.Chunk >= len(service.checkpointBundle.Chunks) {
+			sourceError(response, 409, "Source checkpoint is unconfirmed")
+			return
+		}
+		response.Header().Set("Content-Type", "application/octet-stream")
+		size := min(int64(SourceChunkBytes), service.checkpointBundle.Bytes-int64(input.Chunk)*SourceChunkBytes)
+		io.CopyN(response, io.NewSectionReader(service.checkpointFile, int64(input.Chunk)*SourceChunkBytes, size), size)
+		return
+	}
 	mutation := operation == "write" || operation == "mkdir" || operation == "rename" || operation == "delete"
 	if mutation || operation == "fence" {
 		// Decode first. A timed-out upload cannot queue behind a fence then run
@@ -118,6 +187,10 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		service.writes.Lock()
 		defer service.writes.Unlock()
 		if operation == "fence" {
+			if service.checkpointID != "" && input.Writable {
+				sourceError(response, http.StatusConflict, "Source owner is frozen for checkpoint")
+				return
+			}
 			if input.WriterEpoch == 0 || input.WriterEpoch < service.writerEpoch ||
 				(input.WriterEpoch == service.writerEpoch && input.Writable != service.writable) {
 				sourceError(response, http.StatusConflict, "Source writer changed")
@@ -177,6 +250,41 @@ func sourceError(response http.ResponseWriter, status int, message string) {
 	json.NewEncoder(response).Encode(map[string]string{"error": message})
 }
 
+// Internal checkpoint diagnostics contain only fixed categories or errno. Never
+// forward filesystem errors containing private paths, Source bytes or tokens.
+func checkpointFailureReason(err error) string {
+	switch {
+	case errors.Is(err, ErrPath):
+		return "path-boundary"
+	case errors.Is(err, ErrConflict):
+		return "conflicting-writer"
+	case errors.Is(err, ErrTooLarge):
+		return "size-limit"
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return "io-" + strconv.Itoa(int(errno))
+	}
+	switch err.Error() {
+	case "unsupported Source ownership or mode":
+		return "ownership-mode"
+	case "unsupported Source entry", "unsupported Source entry type":
+		return "entry-type"
+	case "external Git directory is unsupported":
+		return "external-git"
+	case "Source xattrs could not be enumerated":
+		return "xattr-enumeration"
+	case "unsupported Source xattr namespace":
+		return "xattr-namespace"
+	case "Source xattr is unavailable":
+		return "xattr-value"
+	case "Source hardlink leaves the checkout":
+		return "external-hardlink"
+	default:
+		return "unconfirmed"
+	}
+}
+
 func (service *Service) error(response http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrConflict):
@@ -211,10 +319,17 @@ func (service *Service) events(response http.ResponseWriter, request *http.Reque
 	response.WriteHeader(http.StatusOK)
 	io.WriteString(response, "data: {\"kind\":\"resync\",\"path\":\"\"}\n\n")
 	flusher.Flush()
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-heartbeat.C:
+			if _, err := io.WriteString(response, ": source\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case change, open := <-stream:
 			if !open {
 				return

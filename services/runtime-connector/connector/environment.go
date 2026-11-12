@@ -49,6 +49,19 @@ var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 type dockerConfigContextKey struct{}
 type registryCAContextKey struct{}
 
+func registryCertificateDirectory(assignment Assignment, host string) (string, error) {
+	if assignment.nativeActorUID == "" {
+		return filepath.Join("/etc/docker/certs.d", host), nil
+	}
+	// The verified profile runs dockerd through RootlessKit. Moby reads its
+	// per-registry trust from the daemon's config home, not /etc/docker.
+	if assignment.nativeActorUID != os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID") || os.Getenv("HOME") != "/home/rootless" ||
+		(os.Getenv("XDG_CONFIG_HOME") != "" && os.Getenv("XDG_CONFIG_HOME") != "/home/rootless/.config") {
+		return "", errors.New("Native registry trust directory authority is unavailable")
+	}
+	return filepath.Join("/home/rootless/.config/docker/certs.d", host), nil
+}
+
 func runtimeDockerCommand(ctx context.Context, arguments ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, "docker", arguments...)
 	if values, ok := ctx.Value(runtimeVariablesContextKey{}).(map[string]string); ok {
@@ -78,6 +91,11 @@ func devcontainerEnvironment(assignment Assignment) []string {
 	values["NODE_EXTRA_CA_CERTS"] = factoryRegistryCAFile
 	if assignment.RegistryCAFile != "" {
 		values["NODE_EXTRA_CA_CERTS"] = assignment.RegistryCAFile
+	}
+	if assignment.nativeActorUID != "" {
+		// The CLI otherwise derives project_devcontainer from the checkout path,
+		// which is not the native assignment's frozen private Compose identity.
+		values["COMPOSE_PROJECT_NAME"] = assignment.ComposeProjectName
 	}
 	return assignedEnvironment(os.Environ(), values)
 }
@@ -210,11 +228,18 @@ func prepareEnvironmentFiles(environment runtimeEnvironment) (environmentFiles, 
 	if err := requireMemoryFilesystem("/dev/shm"); err != nil {
 		return environmentFiles{}, err
 	}
-	factoryCA, err := os.ReadFile(factoryRegistryCAFile)
+	trustFile, buildDirectory := factoryRegistryCAFile, "/run/factory-build-secrets"
+	if os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID") != "" {
+		if os.Getenv("XDG_RUNTIME_DIR") != "/run/user/1000" || os.Getenv("SSL_CERT_FILE") == "" {
+			return environmentFiles{}, errors.New("Native private environment storage/trust is unavailable")
+		}
+		trustFile, buildDirectory = os.Getenv("SSL_CERT_FILE"), "/run/user/1000/factory-build-secrets"
+	}
+	factoryCA, err := os.ReadFile(trustFile)
 	if err != nil {
 		return environmentFiles{}, errors.New("Admitted Factory registry trust is unavailable")
 	}
-	files, err := prepareEnvironmentFilesAt(environment, "/dev/shm", "/run/factory-build-secrets")
+	files, err := prepareEnvironmentFilesAt(environment, "/dev/shm", buildDirectory)
 	if err != nil {
 		return environmentFiles{}, err
 	}
@@ -229,6 +254,12 @@ func prepareEnvironmentFiles(environment runtimeEnvironment) (environmentFiles, 
 	if err != nil {
 		files.cleanup()
 		return environmentFiles{}, errors.New("Runtime registry trust preparation failed")
+	}
+	if os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID") != "" {
+		if err := nativeDockerProxy(files); err != nil {
+			files.cleanup()
+			return environmentFiles{}, err
+		}
 	}
 	return files, nil
 }
@@ -261,8 +292,13 @@ func prepareEnvironmentFilesAt(environment runtimeEnvironment, memoryDirectory, 
 	// runtime lock. A crash never leaves values on the retained Docker/workspace disk.
 	if target, err := os.Readlink(buildDirectory); err == nil {
 		root := filepath.Dir(target)
-		info, statErr := os.Lstat(root)
-		if filepath.Dir(root) != memoryDirectory || !strings.HasPrefix(filepath.Base(root), "factory-environment-") || filepath.Base(target) != "build" || statErr != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		var pointer, previous unix.Stat_t
+		pointerErr := unix.Lstat(buildDirectory, &pointer)
+		statErr := unix.Lstat(root, &previous)
+		if filepath.Dir(root) != memoryDirectory || !strings.HasPrefix(filepath.Base(root), "factory-environment-") || target != filepath.Join(root, "build") ||
+			pointerErr != nil || pointer.Mode&unix.S_IFMT != unix.S_IFLNK || int(pointer.Uid) != os.Geteuid() ||
+			(statErr != nil && !os.IsNotExist(statErr)) ||
+			(statErr == nil && (previous.Mode&unix.S_IFMT != unix.S_IFDIR || previous.Mode&0777 != 0700 || int(previous.Uid) != os.Geteuid())) {
 			lock.Close()
 			return environmentFiles{}, errors.New("Interrupted build secret ownership is unconfirmed")
 		}
@@ -270,9 +306,14 @@ func prepareEnvironmentFilesAt(environment runtimeEnvironment, memoryDirectory, 
 			lock.Close()
 			return environmentFiles{}, err
 		}
-		if err := os.RemoveAll(root); err != nil {
-			lock.Close()
-			return environmentFiles{}, err
+		// ROOTFS cold restart retains the pointer but replaces /dev/shm. An
+		// absent target has nothing to recover or delete: unlink only our owned
+		// pointer, then materialize the authenticated environment in fresh memory.
+		if statErr == nil {
+			if err := os.RemoveAll(root); err != nil {
+				lock.Close()
+				return environmentFiles{}, err
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		lock.Close()

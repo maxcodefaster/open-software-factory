@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
-import upstream from "../../upstream.json";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import upstream from "../../upstream.json";
 
 // The host check cannot cover *_linux.go on macOS. Build/race/vet the same source
 // on Linux with a digest-pinned Go image containing its native C compiler.
@@ -71,12 +71,16 @@ try {
       "/go:size=2g",
       "--mount",
       `type=bind,src=${resolve("services/runtime-connector")},dst=/source,readonly`,
+      "--mount",
+      `type=bind,src=${resolve("templates/starter-app")},dst=/templates/starter-app,readonly`,
       "--workdir",
       "/source",
       "--env",
       "GOCACHE=/tmp/go-build",
       "--env",
       "CGO_ENABLED=1",
+      "--env",
+      "FACTORY_STARTER_TEMPLATE_DIRECTORY=/templates/starter-app",
       upstream.go.testImage,
       "sh",
       "-ec",

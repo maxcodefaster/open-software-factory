@@ -1,0 +1,6 @@
+version = 2
+disabled_plugins = ["io.containerd.grpc.v1.cri"]
+root = "/home/rootless/.local/share/docker/containerd/daemon"
+state = "/run/user/1000/docker/containerd/daemon"
+[grpc]
+  address = "/run/user/1000/docker/containerd/containerd.sock"

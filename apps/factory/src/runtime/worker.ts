@@ -12,6 +12,7 @@ import {
   factoryboxLocation,
   factoryboxSharedLabels,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
+import { requireOriginalFactoryboxNode } from "../../../../packages/runtime-kubernetes/src/factorybox-node-discovery";
 import { admitFactoryboxWorkerResources } from "../../../../packages/runtime-kubernetes/src/factorybox-resource-admission";
 import {
   configuredFactoryboxRuntimeProfile,
@@ -37,27 +38,30 @@ type SQL = Database["client"] | TransactionSql;
 export const terminatedFactoryboxWorkerFailure =
   "Original Factorybox worker terminated; execution cannot start on it. Source and worker history are retained. A fresh Start can recover failed initial setup after prior work settles. An already admitted worker requires operator recovery.";
 
-// All Sandboxes share one native controller lock. Keep its commands ordered
-// across reserve, execution and retirement controllers, including other Factory
-// processes connected to this installation's database.
+// Keep lifecycle commands ordered within their worker across Factory processes.
+// The retained default keeps its original key; remote workers use their own key.
 export async function withFactoryboxWorkerLock<T>(
   sql: Database["client"],
   action: () => Promise<T>,
   deadline = performance.now() + nativeLifecycleWindowMS,
+  workerID?: string,
 ) {
+  const key = workerID ? `factorybox-worker-lifecycle:${workerID}` : "factorybox-worker-lifecycle";
   const remaining = Math.ceil(deadline - performance.now());
   if (remaining <= 0) throw new Error("Factorybox worker deadline expired before admission");
   await sql`SELECT set_config('lock_timeout',${`${remaining}ms`},false)`;
-  await sql`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
+  await sql`SELECT pg_advisory_lock(hashtext(${key}))`;
   try {
     return await withCommandDeadline(deadline, action);
   } finally {
-    await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
+    await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
   }
 }
 
 type Worker = {
   id: string;
+  singleton: boolean;
+  nodeIdentity: unknown | null;
   admissionID: string;
   nodeName: string | null;
   namespaceUID: string | null;
@@ -83,14 +87,17 @@ const resource = z
   })
   .passthrough();
 
-async function read(sql: SQL) {
+async function read(sql: SQL, workerID?: string, admissionID?: string) {
   const [worker] = await sql<Worker[]>`SELECT worker.id,admission.id AS "admissionID",
+    worker.singleton,worker.node_identity AS "nodeIdentity",
     worker.node_name AS "nodeName",worker.namespace_uid AS "namespaceUID",
     worker.source_claim_uid AS "sourceClaimUID",admission.claim_uid AS "claimUID",
     admission.pod_uid AS "podUID",admission.profile,admission.runtime_host_image AS "runtimeHostImage",
     admission.identity,admission.create_attempted AS attempted,admission.declaration
     FROM factory.factorybox_worker worker JOIN factory.factorybox_worker_admission admission
-      ON admission.worker_id=worker.id AND admission.retired_at IS NULL WHERE worker.singleton`;
+      ON admission.worker_id=worker.id
+      AND (${admissionID ?? null}::uuid IS NULL AND admission.retired_at IS NULL OR admission.id=${admissionID ?? null}::uuid)
+    WHERE (${workerID ?? null}::uuid IS NULL AND worker.singleton OR worker.id=${workerID ?? null}::uuid)`;
   if (!worker) throw new Error("Factory worker intent is missing");
   return worker;
 }
@@ -130,7 +137,26 @@ export async function retainedFactoryboxProfile(
   return factoryboxRuntimeProfile.parse(retained.profile);
 }
 
-export async function factoryboxAllocation(sql: SQL, nodeName?: string | null) {
+export async function factoryboxAllocation(
+  sql: SQL,
+  nodeName?: string | null,
+  workerID?: string,
+  admissionID?: string,
+) {
+  if (workerID) {
+    let worker = await read(sql, workerID, admissionID);
+    if (nodeName && worker.nodeName !== nodeName) {
+      if (!worker.singleton || worker.nodeName)
+        throw new Error("Execution worker differs from its retained node");
+      // Fresh isolated default execution has no Workspace Source preparation to
+      // pin this field first. Preserve its original one-time node binding too.
+      const pinned = await sql`UPDATE factory.factorybox_worker SET node_name=${nodeName}
+        WHERE id=${workerID} AND node_name IS NULL`;
+      if (pinned.count !== 1) throw new Error("Original worker node changed before binding");
+      worker = await read(sql, workerID, admissionID);
+    }
+    return { ...factoryboxLocation(worker.id, worker.admissionID), ...worker };
+  }
   await sql`SELECT factory.ensure_factorybox_admission()`;
   if (nodeName) {
     const updated =
@@ -160,11 +186,17 @@ export async function rememberFactoryboxSource(
     throw new Error("Shared canonical Source storage differs from its original Factory identity");
 }
 
-async function bindProfile(sql: SQL, profileInput: unknown, image: string) {
+async function bindProfile(
+  sql: SQL,
+  profileInput: unknown,
+  image: string,
+  workerID?: string,
+  admissionID?: string,
+) {
   const profile = factoryboxRuntimeProfile.parse(profileInput);
   if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(image))
     throw new Error("Factory worker consumer image must be pinned");
-  const worker = await factoryboxAllocation(sql, profile.nodeName);
+  const worker = await factoryboxAllocation(sql, profile.nodeName, workerID, admissionID);
   const updated = await sql`UPDATE factory.factorybox_worker_admission
     SET profile=coalesce(profile,${JSON.stringify(profile)}::text::jsonb),
       runtime_host_image=coalesce(runtime_host_image,${image})
@@ -174,12 +206,12 @@ async function bindProfile(sql: SQL, profileInput: unknown, image: string) {
     throw new Error(
       "Factory worker profile is already pinned; refusing a different worker profile",
     );
-  const bound = await read(sql);
+  const bound = await read(sql, worker.id, worker.admissionID);
   if (worker.admissionID === worker.id)
     await sql`UPDATE factory.factorybox_worker
       SET profile=coalesce(profile,${JSON.stringify(profile)}::text::jsonb),
         runtime_host_image=coalesce(runtime_host_image,${bound.runtimeHostImage}) WHERE id=${worker.id}`;
-  return read(sql);
+  return read(sql, worker.id, worker.admissionID);
 }
 
 export async function rememberFactoryboxIdentity(
@@ -188,7 +220,7 @@ export async function rememberFactoryboxIdentity(
   value: FactoryboxWorkerIdentity,
 ) {
   const identity = factoryboxWorkerIdentity.parse(value);
-  const worker = await read(sql);
+  const worker = await read(sql, workerID);
   const profile = factoryboxRuntimeProfile.parse(worker.profile);
   if (
     worker.id !== workerID ||
@@ -303,52 +335,66 @@ export function createFactoryboxWorker(
   return {
     async retainDeclaration() {
       // Do not allocate a worker or start compute while recovering a receipt.
-      const missing = await database.client`SELECT id FROM factory.factorybox_worker_admission
-        WHERE retired_at IS NULL AND declaration IS NULL AND identity IS NOT NULL LIMIT 1`;
+      const missing = await database.client<
+        Array<{ id: string; workerID: string; singleton: boolean }>
+      >`
+        SELECT admission.id,worker.id AS "workerID",worker.singleton
+        FROM factory.factorybox_worker_admission admission JOIN factory.factorybox_worker worker ON worker.id=admission.worker_id
+        WHERE admission.retired_at IS NULL AND admission.declaration IS NULL AND admission.identity IS NOT NULL`;
       if (!missing.length) return;
-      const sql = database.coordination();
-      try {
-        await withFactoryboxWorkerLock(sql, async () => {
-          await sql`SELECT pg_advisory_lock(hashtext('factorybox-worker-create'))`;
-          try {
-            const worker = await read(sql);
-            if (worker.declaration || !worker.identity || !worker.runtimeHostImage) return;
-            const location = factoryboxLocation(worker.id, worker.admissionID);
-            const pod = await kubernetes.getPod(location.namespace, location.podName);
-            if (pod?.phase !== "Running" || !pod.ready) return;
-            requireRuntimePodArtifacts(
-              pod,
-              worker.runtimeHostImage,
-              factoryboxRuntimeProfile.parse(worker.profile).image,
-            );
-            // This renders only the worker projection. No Sandbox or Runtime
-            // Attempt is admitted, created, resumed or replayed here.
-            const input = {
-              ...location,
-              attemptID: worker.admissionID,
-              sandboxID: factoryboxSandboxID(worker.admissionID),
-              runtimeOwnerID: worker.id,
-              runtimeHostImage: worker.runtimeHostImage,
-              profile: factoryboxRuntimeProfile.parse(worker.profile),
-              labels: {},
-              sharedSource: false,
-            };
-            const declaration = await observeOriginalFactoryboxDeclaration(
-              factoryboxRuntimeRequest(input),
-              factoryboxWorkerIdentity.parse(worker.identity),
-              renderFactoryboxRuntime(input),
-            );
-            const retained = await sql`UPDATE factory.factorybox_worker_admission
+      for (const selected of missing) {
+        const sql = database.coordination();
+        try {
+          await withFactoryboxWorkerLock(
+            sql,
+            async () => {
+              const createKey = selected.singleton
+                ? "factorybox-worker-create"
+                : `factorybox-worker-create:${selected.workerID}`;
+              await sql`SELECT pg_advisory_lock(hashtext(${createKey}))`;
+              try {
+                const worker = await read(sql, selected.workerID, selected.id);
+                if (worker.declaration || !worker.identity || !worker.runtimeHostImage) return;
+                const location = factoryboxLocation(worker.id, worker.admissionID);
+                const pod = await kubernetes.getPod(location.namespace, location.podName);
+                if (pod?.phase !== "Running" || !pod.ready) return;
+                requireRuntimePodArtifacts(
+                  pod,
+                  worker.runtimeHostImage,
+                  factoryboxRuntimeProfile.parse(worker.profile).image,
+                );
+                // This renders only the worker projection. No Sandbox or Runtime
+                // Attempt is admitted, created, resumed or replayed here.
+                const input = {
+                  ...location,
+                  attemptID: worker.admissionID,
+                  sandboxID: factoryboxSandboxID(worker.admissionID),
+                  runtimeOwnerID: worker.id,
+                  runtimeHostImage: worker.runtimeHostImage,
+                  profile: factoryboxRuntimeProfile.parse(worker.profile),
+                  labels: {},
+                  sharedSource: false,
+                };
+                const declaration = await observeOriginalFactoryboxDeclaration(
+                  factoryboxRuntimeRequest(input),
+                  factoryboxWorkerIdentity.parse(worker.identity),
+                  renderFactoryboxRuntime(input),
+                );
+                const retained = await sql`UPDATE factory.factorybox_worker_admission
               SET declaration=${JSON.stringify(declaration)}::text::jsonb
               WHERE id=${worker.admissionID} AND declaration IS NULL AND retired_at IS NULL`;
-            if (retained.count !== 1)
-              throw new Error("Original worker declaration changed during recovery");
-          } finally {
-            await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-create'))`;
-          }
-        });
-      } finally {
-        await sql.end({ timeout: 1 });
+                if (retained.count !== 1)
+                  throw new Error("Original worker declaration changed during recovery");
+              } finally {
+                await sql`SELECT pg_advisory_unlock(hashtext(${createKey}))`;
+              }
+            },
+            undefined,
+            selected.singleton ? undefined : selected.workerID,
+          );
+        } finally {
+          await sql.end({ timeout: 1 });
+        }
       }
     },
     async location(sql: SQL = database.client, recovery?: { actorID: string; requestID: string }) {
@@ -359,12 +405,29 @@ export function createFactoryboxWorker(
       resources: readonly unknown[],
       profile: FactoryboxRuntimeProfile,
       runtimeHostImage: string,
+      destination?: { workerID: string; admissionID: string },
     ) {
       const declared = resources.map((value) => resource.parse(value));
       const sql = database.coordination();
+      let createKey: string | undefined;
       try {
-        await sql`SELECT pg_advisory_lock(hashtext('factorybox-worker-create'))`;
-        const worker = await bindProfile(sql, profile, runtimeHostImage);
+        const selected = destination
+          ? await read(sql, destination.workerID, destination.admissionID)
+          : undefined;
+        createKey =
+          selected && !selected.singleton
+            ? `factorybox-worker-create:${selected.id}`
+            : "factorybox-worker-create";
+        await sql`SELECT pg_advisory_lock(hashtext(${createKey}))`;
+        const worker = await bindProfile(
+          sql,
+          profile,
+          runtimeHostImage,
+          destination?.workerID,
+          destination?.admissionID,
+        );
+        if (!worker.singleton)
+          await requireOriginalFactoryboxNode(profile.nodeName, worker.nodeIdentity);
         const bootstrapImage = worker.runtimeHostImage;
         if (!bootstrapImage) throw new Error("Factory worker bootstrap image is missing");
         const location = factoryboxLocation(worker.id, worker.admissionID);
@@ -557,7 +620,7 @@ export function createFactoryboxWorker(
         };
       } finally {
         try {
-          await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-create'))`;
+          if (createKey) await sql`SELECT pg_advisory_unlock(hashtext(${createKey}))`;
         } finally {
           await sql.end({ timeout: 1 });
         }

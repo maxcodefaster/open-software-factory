@@ -1,20 +1,20 @@
 <div align="center">
 
-<img alt="The Open Software Factory board with Tickets from idea to review" src="assets/screens/board.jpg" width="100%">
+<img alt="Your cloud. Your workflow. Your software factory. The Factory board shows work from idea to review." src="assets/story/hero.png" width="100%">
 
 # Open Software Factory
 
-**You decide what gets built. Agents build it in isolation, and prove it.**
+**Your cloud. Your workflow. Your software factory.**
 
-A self-hosted software factory. People approve the requirements and the verified commit.
-Agents do everything between those two decisions, inside Sandboxes that pause with their memory.
+A self-hosted software factory for enterprise teams. Turn business intent into verified software:
+business teams, developers and coding agents in one delivery workflow, on Kubernetes you control.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-2c5a7a)](LICENSE)
 [![Release](https://img.shields.io/badge/release-v0.1.0--beta.1-2c5a7a)](https://github.com/maxcodefaster/open-software-factory/releases)
 [![Verified on](https://img.shields.io/badge/verified%20on-Linux%20arm64-2c5a7a)](#where-it-runs)
 [![Telemetry](https://img.shields.io/badge/telemetry-none-2c5a7a)](SECURITY.md)
 
-[Why](#why-factory) · [The cycle](#the-cycle) · [Features](#features) · [Factory Box](#factory-box) · [Where it runs](#where-it-runs) · [Install](#install) · [Develop](#developing)
+[Why](#why-factory) · [The cycle](#the-cycle) · [Features](#features) · [Performance](#performance-with-context) · [Factory Box](#factory-box) · [Where it runs](#where-it-runs) · [Install](#install) · [Develop](#developing)
 
 </div>
 
@@ -22,22 +22,25 @@ Agents do everything between those two decisions, inside Sandboxes that pause wi
 
 ## Why Factory
 
-Coding agents write code faster than people can read it. The bottleneck moved. It is no longer typing,
-it is trust: what did the agent build, did it build the right thing, and can it run somewhere that
-cannot hurt anything else.
+Your team already has a product, a repository and a way to decide what changes. Factory connects
+those decisions to agent execution: business teams define the outcome, developers work with real
+source and tools, and people approve the verified commit before delivery.
 
-Factory is built on three beliefs.
+Bring your existing Git history and Dev Container, rather than rewriting your application for an
+agent platform. Project requirements, environment settings, model choices and approved instructions
+make the workflow fit the work. An AI Interview is optional; writing requirements needs no model.
 
-- **People decide twice.** They approve the requirements before work starts, and the exact verified
-  commit before it ships. Everything in between runs without asking for attention.
-- **An agent needs a real machine.** Not a chat window and not a stripped sandbox. A Sandbox has your
-  Dev Container, its own Docker daemon, a live Preview and an IDE. It pauses with its RAM and
-  resumes where it stopped.
-- **A claim needs evidence.** Verification runs on the exact commit, an independent review reads that same
-  commit, and Factory records which decision authorized which change.
+- **Fits your workflow.** From a business request to testable requirements, implementation,
+  independent review and a deliberate delivery decision. The source, approvals and history stay connected.
+- **Runs real projects.** Agents use your project's Dev Container, private Docker daemon and running
+  services. People can open the IDE and Preview, inspect the work or continue it themselves.
+- **Keeps you in control.** Task-scoped execution, scoped secrets, checks on the exact commit and
+  recorded human approval. Idle development Sandboxes pause with their memory; progress is retained,
+  not rebuilt from scratch on every visit.
 
-It is open source, self-hosted and sends no telemetry. Your source stays in your Forgejo, your
-secrets stay in your OpenBao, and you choose the models.
+Factory is open source, self-hosted and sends no telemetry. Git is held in your Forgejo, secrets in
+your OpenBao, and you choose the model connections. Model calls send their authorized context to
+the provider you select. Self-hosting is not a claim that inference stays on your node.
 
 ## The cycle
 
@@ -48,63 +51,71 @@ secrets stay in your OpenBao, and you choose the models.
 
 ## Features
 
-### A board that shows where work stands
+### Business intent. One shared delivery workflow.
 
-<img alt="Board with Tickets in Ideas, Requirements, Implementation and Review" src="assets/screens/board.jpg" width="100%">
+<img alt="A product specification with acceptance criteria in Factory. Business intent becomes reviewable requirements." src="assets/story/intent.png" width="100%">
 
 Tickets move from Ideas through Requirements and Implementation to Review. Every Project has its own
-board, History and Trash, and every Ticket has an address you can share.
+board, History and Trash. Share a Ticket with the people who define the outcome and the people who
+build it. Write requirements directly, with a summary and independently testable acceptance criteria.
 
-### An interview that asks only what the source cannot answer
+Ask AI to clarify when you want an Interview: it reads the repository first and asks what the source
+cannot settle. A technical design can follow from the real code. Reading and saving do not start
+inference. Implement approves the exact saved requirements and commissions Coding.
 
-<img alt="AI interview with single choice questions next to the draft product spec" src="assets/screens/interview.jpg" width="100%">
+### Real code. Real tools. Isolated execution.
 
-Write a sentence or a full spec. The interview reads the repository first and asks only what it cannot
-settle itself, one decision at a time, each with a recommended answer.
+<img alt="The Factory IDE with a real project, installed dependencies and running services." src="assets/story/build.png" width="100%">
 
-### A spec you can approve line by line
+Implementation runs in a Sandbox with your Project's Dev Container. Keep your package manager,
+build commands, databases and service stack. Open the IDE while an agent works and follow its edits;
+open the Preview to see the running App, not a description of it. The editor is an independent service,
+so source access does not require keeping execution compute awake.
 
-<img alt="Product spec with acceptance criteria and the Confirm product spec action" src="assets/screens/spec.jpg" width="100%">
+### A verified change. A deliberate decision.
 
-The result is a product spec with testable acceptance criteria and a clear list of what is out of
-scope. Nothing gets built until a person confirms it. A technical design follows from the real source.
-
-### An agent that works where you would
-
-<img alt="IDE with the agent editing files while the cursor follows its changes" src="assets/screens/ide.jpg" width="100%">
-
-Implementation runs in a Sandbox with your Project's Dev Container. Open the IDE while the agent works
-and its cursor follows the edits. Open the Preview and see the running App, not a description of it.
-
-### Review before delivery
-
-<img alt="Independent review of the exact commit with checks and the delivery decision" src="assets/screens/review.jpg" width="100%">
+<img alt="Factory shows successful checks and independent review alongside a recorded App QA session." src="assets/story/deliver.png" width="100%">
 
 Verification runs on the exact commit. An independent reviewer reads that same commit and records a
-QA session of the running App. Only then does Factory offer Delivery, and a person presses the button.
+QA session of the running App. Factory retains the checks, review and decision that authorized the
+change. Delivery promotes the approved change to the project's Staging Preview; operating a production
+application is a separate deployment responsibility.
 
-### A Wiki that stays true to the code
+### Knowledge, access and continuity
 
-<img alt="Project Wiki with generated guides" src="assets/screens/wiki.jpg" width="100%">
+- **Knowledge that follows the source.** Generate Wiki guides with a configured model. Pages keep
+  revisions and human edits. Repeated corrections can become proposed instructions; people decide
+  what is adopted.
+- **Roles and scoped secrets.** Separate product work, development and administration. Environment
+  values are scoped, encrypted in OpenBao and hidden in the interface.
+- **Backups and recovery.** Back up database, Git, objects and secrets together. Restore rehearsals
+  check recovery rather than assuming a successful backup is enough.
+- **Pause compute, not progress.** Idle development Sandboxes release their anonymous RAM and resume
+  the same processes. Retained snapshots and disk still occupy storage, and Staging stays running
+  for reviewers. Pausing a Sandbox does not automatically stop or reduce the bill for a cloud node.
 
-Factory writes guides from the repository and updates them when the source changes. Pages keep their
-revisions, people can edit them, and the next update respects the edit.
+The illustrations above frame the repository's existing public demo screenshots. They are not new
+live recordings, and the same images remain available in [assets/screens](assets/screens).
 
-### Sandboxes that pause with their memory
+## Performance with context
 
-<img alt="The running App in the Preview of a Sandbox" src="assets/screens/preview.jpg" width="100%">
+A command-ready Sandbox and a fully running application are different milestones. Factory's numbers
+must say which one was measured, on which hardware, and with which cache and resource limits.
 
-An idle Sandbox pauses and gives its RAM back. The next click resumes the same processes where they
-stopped. Staging keeps running for the people who review.
+The [native lifecycle benchmark](scripts/runtime/README.md) runs the maintained two-service
+Dev Container fixture with 256 MiB of random application memory. Each resume verifies the same
+process, memory hash, request counter and container identities. It measures pause and resume through
+the Kubernetes transport, ending resume only when the App answers its state probe.
 
-### Access, secrets and backups you can reason about
+Provider comparisons are a separate test lane. [Battleships](https://battleships.dev/llms.txt)
+combines public pricing with benchmarks from [ComputeSDK](https://www.computesdk.com/benchmarks/sandboxes)
+and [StarSling](https://starsling.dev/hpc-sandbox-benchmarks), including real repository workloads.
+Our lifecycle fixture is not one of those workloads and is not a speed ranking against their providers.
+Use the same pinned suite and resource shape before claiming a comparison.
 
-<img alt="Environment variables with hidden values, scoped per environment" src="assets/screens/environments.jpg" width="100%">
-
-Roles separate product work from development and administration. Secrets live encrypted in OpenBao and
-stay hidden in the interface. Backups cover the database, Git and the object store, and a restore
-rehearsal proves they work. Repeated corrections and review findings become proposed skills, and people
-decide what the agents learn.
+Complex project runs should additionally report complete App startup, dependency setup, database
+readiness, preserved state and long-run failures. No private project names, source, screenshots or
+results are part of this README. An unmeasured result stays unmeasured.
 
 ## Factory Box
 
@@ -114,31 +125,38 @@ Linux system container on [Sysbox](https://github.com/nestybox/sysbox), so the S
 Docker daemon without a privileged container. It uses [CRIU](https://criu.org) to checkpoint a running
 Sandbox, RAM included, and restore it later.
 
-The philosophy is practical. A microVM gives the strongest wall, but it needs hardware virtualization,
-and most managed Kubernetes nodes do not offer it. A plain container is light but cannot be a real
-development machine. Factory Box takes the middle: a full development environment that runs on an
-ordinary Kubernetes node, with no special kernel build.
+The philosophy is practical. A microVM supplies a separate guest kernel but needs hardware
+virtualization, which is not available on every managed node type. Factory Box instead uses Linux
+system containers: a full development environment with private Docker, without KVM or a special
+kernel build. That is a different trust boundary, not a claim of VM-equivalent security.
 
 | | Plain container | gVisor | MicroVM (Firecracker, Kata) | **Factory Box** |
 | --- | --- | --- | --- | --- |
 | Kernel | Shared with the node | Userspace kernel | Own guest kernel | Shared with the node |
-| Docker daemon inside | Needs a privileged container | Limited | Yes | Yes, private per Sandbox |
+| Docker daemon inside | Requires suitable privileges or a rootless setup | Depends on runtime support | Yes, with suitable guest privileges | Yes, private per Sandbox |
 | Pause with memory | No | Checkpoint support | Snapshot | Yes, in seconds |
 | Needs hardware virtualization | No | No | Yes | No |
-| Runs on ordinary managed nodes | Yes | With a runtime class | Rarely | Yes |
-| Strength of the wall | Weakest | Medium | Strongest | Medium |
+| Node requirement | Container runtime | Configured sandbox runtime | Hardware virtualization and runtime | Admitted Linux capabilities and privileged worker Pod |
+| Trust boundary | Shared host kernel | Userspace kernel intercepts system calls | Separate guest kernel | User-namespaced system containers; shared host kernel |
 
-The trade is stated plainly. A shared kernel means a kernel bug is a node bug. A microVM escape is also
-possible, as published research shows, but the wall is higher. That is why Factory keeps one worker per
-installation, runs Sandboxes in user namespaces, and refuses nodes that fail its capability check.
-Give untrusted tenants their own installation and their own nodes.
+The trade is stated plainly. The outer worker is privileged and shares the node kernel; its project
+containers do not receive the node Docker socket or Kubernetes ServiceAccount. User namespaces and
+scoped capabilities are not an independent guest kernel. Keep each worker in one trust domain and
+give mutually untrusted tenants their own installations and nodes. The capability check admits
+compatible nodes; it does not certify security or qualify a new cloud platform.
 
 ## Where it runs
 
-Factory is plain Kubernetes: one Helm chart, no cloud specific resources and no operator to trust.
-The same chart runs on a laptop with OrbStack, on a server with k3s and on a managed cluster, and it
-scales out by adding nodes. The node needs a recent Linux kernel and permission for one privileged
-worker Pod. The worker checks the node's kernel capabilities before it admits any Sandbox.
+Factory is deployed through one Helm chart, with no cloud-specific resources or custom operator.
+Choose Kubernetes infrastructure, storage, DNS and model connections you control. A laptop cluster,
+an on-premises server and a hyperscaler's managed cluster follow the same deployment contract,
+but each platform still needs verification. Cloud portability is the design, not a claim that every
+managed cluster is already qualified.
+
+The worker needs an admitted Linux node and permission for a privileged worker Pod. It checks kernel
+capabilities before admitting a Sandbox. The current control plane is a single-instance deployment;
+adding nodes alone does not provide high availability or automatic execution scale-out. Read the
+[chart README](deploy/helm/factory/README.md) for its precise storage and trust requirements.
 
 | Platform | Status in v0.1.0-beta.1 |
 | --- | --- |

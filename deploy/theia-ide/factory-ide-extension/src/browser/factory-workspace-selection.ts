@@ -1,14 +1,14 @@
-import { inject, injectable } from "@theia/core/shared/inversify";
-import type { MaybePromise } from "@theia/core/lib/common/types";
 import { Deferred } from "@theia/core/lib/common/promise-util";
+import type { MaybePromise } from "@theia/core/lib/common/types";
 import URI from "@theia/core/lib/common/uri";
-import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
+import { inject, injectable } from "@theia/core/shared/inversify";
 import type { FileStat } from "@theia/filesystem/lib/common/files";
-import { workspaceResource, workspaceScheme } from "./factory-workspace-files";
-import { requestedWorkspace, selectedWorkspaceLocation } from "./factory-workspace-location";
+import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
 import { authorizedFactoryOrigin } from "./factory-parent-context";
 import { factoryRuntimeContext } from "./factory-runtime-context";
+import { workspaceResource, workspaceScheme } from "./factory-workspace-files";
 import { FactoryWorkspaceLabels } from "./factory-workspace-labels";
+import { requestedWorkspace, selectedWorkspaceLocation } from "./factory-workspace-location";
 
 // Keep Theia's root/preference/watch lifecycle. Only selection and URI identity
 // differ; selecting Factory source never invokes upstream's window-reload path.
@@ -107,7 +107,7 @@ export class FactoryWorkspaceSelection extends WorkspaceService {
     if (serial !== this.selection) return;
     await this.setWorkspace(stat);
     if (serial !== this.selection) return;
-    factoryRuntimeContext.select(workspaceID, true);
+    factoryRuntimeContext.select(workspaceID);
     if (this.navigatorWorkspace === workspaceID) this.acknowledge(workspaceID);
   }
 

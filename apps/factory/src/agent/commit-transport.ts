@@ -1,6 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
-import { runtimeRepositoryCloneURL } from "../runtime/endpoints";
+import { runtimeRepositoryCloneURL, substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
 import { createAgentTurnStore } from "./turn-store";
 
@@ -23,14 +23,18 @@ export function createAgentCommitTransport(
   ) =>
     hub.parentOperation(attemptID, operation, async (send) => {
       const allowed = await turns.validateCommit(operation.operationId, async (sql) => {
-        const current = await sql<Array<{ id: string; repositoryURL: string }>>`
-          SELECT operation.id,project.repository_url AS "repositoryURL" FROM factory.change_commit_operation operation
+        const current = await sql<
+          Array<{ id: string; repositoryURL: string; native: boolean; nativeIntent: unknown }>
+        >`
+          SELECT operation.id,project.repository_url AS "repositoryURL",attempt.substrate AS native,
+            binding.intent AS "nativeIntent" FROM factory.change_commit_operation operation
           JOIN factory.change change ON change.id = operation.change_id
           JOIN factory.project project ON project.id=change.project_id
           JOIN factory.change_writer writer ON writer.change_id=change.id AND writer.state='agent' AND writer.turn_id=operation.id
           JOIN factory.change_agent_session session ON session.change_id = change.id
           JOIN factory.change_agent_turn_intent intent ON intent.turn_id = operation.id
           JOIN factory.runtime_attempt attempt ON attempt.id = operation.runtime_attempt_id
+          LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
           WHERE operation.id = ${operation.operationId} AND operation.source = 'agent'
             AND operation.runtime_attempt_id = ${attemptID} AND change.runtime_attempt_id = ${attemptID}
             AND attempt.state = 'ready' AND intent.runtime_attempt_id = ${attemptID}
@@ -48,9 +52,11 @@ export function createAgentCommitTransport(
           );
         if (operation.action === "git-push") {
           const repository = current[0].repositoryURL;
-          const destination = repository.startsWith("file://")
-            ? repository
-            : runtimeRepositoryCloneURL(repository);
+          const destination = current[0].native
+            ? substrateRepositoryCloneURL(repository, current[0].nativeIntent)
+            : repository.startsWith("file://")
+              ? repository
+              : runtimeRepositoryCloneURL(repository);
           if (operation["repositoryURL"] !== destination)
             throw new CommandError(
               "conflict",

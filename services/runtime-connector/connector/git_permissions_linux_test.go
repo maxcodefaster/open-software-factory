@@ -5,9 +5,120 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/open-software-factory/open-software-factory/services/runtime-connector/workspacefiles"
 )
+
+func TestNativeCheckoutRefreshKeepsGitMetadataOwnedByDevelopmentUser(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires the owned root Linux Connector fixture")
+	}
+	root, err := os.MkdirTemp("", "factory-owned-native-git-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if err := os.Chmod(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "project")
+	if err := os.Mkdir(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Match the native initializer, not legacy shared-root Git initialization.
+	git := func(arguments ...string) {
+		t.Helper()
+		if output, err := hardenedGitCommand(context.Background(), workspace, nil, arguments...).CombinedOutput(); err != nil {
+			t.Fatalf("owned native Git initialization: %v: %s", err, output)
+		}
+	}
+	git("init", "--initial-branch=main")
+	git("config", "user.name", "Owned native Source")
+	git("config", "user.email", "owned@example.invalid")
+	git("config", "factory.repositoryIdentity", "owned-native-source")
+	git("remote", "add", "origin", "https://example.invalid/old.git")
+	commitFile(t, workspace, "app.txt", "dirty retained Source\n")
+	git("add", "app.txt")
+	git("commit", "-m", "Owned native seed")
+	if err := filepath.WalkDir(workspace, func(name string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(name, 1000, 1000)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkoutProject(context.Background(), Assignment{
+		WorkspaceFolder: workspace, PreserveWorkspace: true, RepositoryIdentity: "owned-native-source",
+		RepositoryURL: "https://example.invalid/current.git", nativeActorUID: "owned-native-actor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(workspace, ".git", "config"))
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != 1000 || info.Sys().(*syscall.Stat_t).Gid != 1000 {
+		t.Fatal("native Parent replaced canonical Git metadata with another owner's file")
+	}
+	origin, err := personalGitCommand(context.Background(), workspace, "remote", "get-url", "origin")
+	if err != nil || strings.TrimSpace(origin) != "https://example.invalid/current.git" {
+		t.Fatal("native origin was not refreshed")
+	}
+	base, err := personalGitCommand(context.Background(), workspace, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, workspace, "app.txt", "owned native implementation\n")
+	assignment := Assignment{WorkspaceFolder: workspace, nativeActorUID: "owned-native-actor"}
+	message := Message{Action: "git-prepare-commit", OperationID: "owned-native-commit", ExpectedSHA: strings.TrimSpace(base), CommitMessage: "Owned native implementation", AuthorName: "Factory", AuthorEmail: "owned@example.invalid"}
+	result := handleParentOperation(context.Background(), assignment, message)
+	if result.Error != "" || !validCommitSHA(result.CommitSHA) {
+		t.Fatalf("native commit was not confirmed: %s", result.Error)
+	}
+	message.Action = "git-observe-commit"
+	if recovered := handleParentOperation(context.Background(), assignment, message); recovered.Error != "" || recovered.CommitSHA != result.CommitSHA {
+		t.Fatal("native commit observation did not retain the same exact operation")
+	}
+	message.Action = "git-prepare-integration"
+	message.OperationID = "owned-incomplete-native-integration"
+	message.ExpectedSHA = result.CommitSHA
+	if refused := handleParentOperation(context.Background(), assignment, message); refused.Error != "integration intent is incomplete" {
+		t.Fatal("an incomplete native integration changed retained Source")
+	}
+	if err := filepath.WalkDir(workspace, func(name string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(name)
+		if err != nil {
+			return err
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if stat.Uid != 1000 || stat.Gid != 1000 || stat.Mode&07000 != 0 {
+			t.Errorf("owned native Source metadata changed: %s uid=%d gid=%d mode=%#o", name, stat.Uid, stat.Gid, stat.Mode)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if t.Failed() {
+		return
+	}
+	source, err := workspacefiles.Open(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	archive, err := os.CreateTemp(root, "source-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	if _, err := source.ExportBundle(archive); err != nil {
+		t.Fatalf("normal native checkout prevented a complete Source checkpoint: %v", err)
+	}
+}
 
 func TestParentCommitKeepsCanonicalGitReadable(t *testing.T) {
 	if os.Geteuid() != 0 {

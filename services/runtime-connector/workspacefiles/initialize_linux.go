@@ -72,6 +72,13 @@ func initGit(ctx context.Context, directory string, args ...string) (string, err
 	}
 	command := exec.CommandContext(ctx, "git", append(base, args...)...)
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/tmp", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+	// Transport only. Actor checkout needs its normal restricted proxy and CA;
+	// never inherit Connector capabilities, Git configuration or Project grants.
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH"} {
+		if value, ok := os.LookupEnv(name); ok {
+			command.Env = append(command.Env, name+"="+value)
+		}
+	}
 	output, err := command.Output()
 	if err != nil {
 		var exit *exec.ExitError
@@ -102,6 +109,43 @@ func preparedCheckout(ctx context.Context, directory, projectID string) bool {
 }
 
 func Initialize(ctx context.Context, parent string, input Initialization) error {
+	return initialize(ctx, parent, input, 101000, 101000)
+}
+
+// InitializeActor reuses the canonical atomic checkout initializer without the
+// Sysbox host-UID mapping. It is not a Source handoff or a retained conversion.
+func InitializeActor(ctx context.Context, parent string, input Initialization) error {
+	if err := ValidateActorSourceIdentity(parent); err != nil { return err }
+	// The existing initializer leaves its private staging identity after atomic
+	// publication. Missing published Source is not permission to clone over a loss.
+	if _, err := os.Lstat(filepath.Join(parent, "project")); os.IsNotExist(err) {
+		staging := filepath.Join(parent, ".factory-source-init-"+input.WorkspaceID)
+		if _, prior := os.Lstat(filepath.Join(staging, "identity.json")); prior == nil {
+			if _, unpublished := os.Lstat(filepath.Join(staging, "checkout")); os.IsNotExist(unpublished) {
+				return errors.New("original Actor Source is missing; reinitialization is refused")
+			}
+		}
+	}
+	return initialize(ctx, parent, input, 1000, 1000)
+}
+
+func ValidateActorSourceIdentity(parent string) error {
+	uidMap, uidErr := os.ReadFile("/proc/self/uid_map")
+	gidMap, gidErr := os.ReadFile("/proc/self/gid_map")
+	// connector.sh enters RootlessKit's existing private user namespace. Its
+	// root maps to the unprivileged Actor UID 1000, NOT to host/Actor root.
+	if os.Geteuid() != 0 || os.Getegid() != 0 || uidErr != nil || gidErr != nil || !actorSourceIDMap(string(uidMap)) || !actorSourceIDMap(string(gidMap)) || parent != "/home/rootless/persist" {
+		return errors.New("Actor Source requires its private RootlessKit identity and durable parent")
+	}
+	return nil
+}
+
+func actorSourceIDMap(value string) bool {
+	fields := strings.Fields(value)
+	return len(fields) == 6 && fields[0] == "0" && fields[1] == "1000" && fields[2] == "1" && fields[3] == "1" && fields[4] == "100000" && fields[5] == "65536"
+}
+
+func initialize(ctx context.Context, parent string, input Initialization, uid, gid int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -222,7 +266,7 @@ func Initialize(ctx context.Context, parent string, input Initialization) error 
 		if err != nil {
 			return err
 		}
-		return os.Lchown(name, 101000, 101000) // Sysbox's exact 100000 + canonical development UID 1000.
+		return os.Lchown(name, uid, gid)
 	}); err != nil {
 		return errors.New("source checkout ownership could not be prepared")
 	}

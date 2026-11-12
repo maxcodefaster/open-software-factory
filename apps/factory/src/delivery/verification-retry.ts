@@ -65,6 +65,8 @@ export async function retryVerificationBootstrap(
         AND verification.repair_prompted_at IS NULL AND verification.completed_at IS NOT NULL
         AND NOT EXISTS(SELECT 1 FROM factory.factorybox_runtime native
           WHERE native.runtime_attempt_id=attempt.id AND native.inputs_released_at IS NULL)
+        AND (NOT attempt.substrate OR EXISTS(SELECT 1 FROM factory.substrate_binding binding
+          WHERE binding.runtime_attempt_id=attempt.id AND binding.deleted_at IS NOT NULL))
         AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
           AND state IN ('pending','dispatching','running','uncertain'))
         AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id

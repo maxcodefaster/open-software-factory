@@ -31,7 +31,7 @@ func admitComposePrebuildSources(snapshot string, files []string) error {
 		if decoder.Decode(&document) != nil || decoder.Decode(&trailing) != io.EOF {
 			return errors.New("prebuild Compose source is invalid")
 		}
-		if err := admitComposePrebuildStrings(document); err != nil {
+		if err := admitComposePrebuildDocumentStrings(document); err != nil {
 			return err
 		}
 		base := filepath.Dir(path)
@@ -135,6 +135,43 @@ func composePrebuildList(value any) []any {
 		return list
 	}
 	return []any{value}
+}
+
+// Service environment is a Runtime input, not an image-build input. Compose
+// reads it without interpolation below, and the isolated producer removes that
+// field before invoking build. Everywhere else (including image, build, file
+// selection and extension definitions) still rejects producer interpolation.
+func admitComposePrebuildDocumentStrings(document map[string]any) error {
+	for key, value := range document {
+		if key != "services" {
+			if err := admitComposePrebuildStrings(map[string]any{key: value}); err != nil {
+				return err
+			}
+			continue
+		}
+		services, ok := value.(map[string]any)
+		if !ok {
+			return errors.New("prebuild Compose services are invalid")
+		}
+		for name, value := range services {
+			if !composeServiceName.MatchString(name) {
+				return errors.New("prebuild Compose service name is invalid")
+			}
+			service, ok := value.(map[string]any)
+			if !ok {
+				return errors.New("prebuild Compose service is invalid")
+			}
+			for field, value := range service {
+				if field == "environment" {
+					continue
+				}
+				if err := admitComposePrebuildStrings(map[string]any{field: value}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func admitComposePrebuildStrings(value any) error {

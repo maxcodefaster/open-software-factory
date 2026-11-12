@@ -27,10 +27,13 @@ export class ComputeCapacityError extends CommandError {
 export async function computeAllocationIn(sql: SQL, projectID: string | null) {
   const [allocation] = await sql<Array<{ sandboxes: number; cpuMilli: number; memoryMiB: number }>>`
     WITH allocations AS (
-      SELECT CASE WHEN isolated_kind='staging' THEN 100 WHEN isolated_kind='verification' THEN 250 ELSE 500 END AS cpu,
-        CASE WHEN isolated_kind='staging' THEN 256 WHEN isolated_kind='verification' THEN 768 ELSE 1024 END AS memory
-      FROM factory.runtime_attempt WHERE state NOT IN ('stopped','failed')
-        AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=factory.runtime_attempt.id)
+      SELECT CASE WHEN attempt.substrate THEN coalesce((binding.intent#>>'{resources,cpuMilli}')::int,1500)
+          WHEN isolated_kind='staging' THEN 100 WHEN isolated_kind='verification' THEN 250 ELSE 500 END AS cpu,
+        CASE WHEN attempt.substrate THEN coalesce((binding.intent#>>'{resources,memoryMiB}')::int,1024)
+          WHEN isolated_kind='staging' THEN 256 WHEN isolated_kind='verification' THEN 768 ELSE 1024 END AS memory
+      FROM factory.runtime_attempt attempt LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+      WHERE state NOT IN ('stopped','failed')
+        AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id)
         AND (${projectID}::uuid IS NULL OR project_id=${projectID})
       UNION ALL SELECT CASE WHEN role='staging' THEN 100 ELSE 250 END, CASE WHEN role='staging' THEN 256 ELSE 768 END
       FROM factory.execution_slot WHERE ${projectID}::uuid IS NULL AND state IN ('creating','ready','retiring') AND assigned_attempt_id IS NULL
@@ -44,11 +47,17 @@ export async function admitComputeIn(
   kind: ComputeClass,
   adoptingSlot = false,
   capturedClass: ComputeClass = kind,
+  selectedResources?: { cpuMilli: number; memoryMiB: number },
 ) {
+  if (
+    selectedResources &&
+    Object.values(selectedResources).some((value) => !Number.isSafeInteger(value) || value <= 0)
+  )
+    throw new Error("Compute resource reservation must be positive finite integers");
   await lockUsageIn(sql);
   await sql`SELECT pg_advisory_xact_lock(hashtext('factory-execution-capacity'))`;
   const policy = await policyIn(sql, projectID);
-  const reservation = computeReservation(kind);
+  const reservation = { ...computeReservation(kind), ...selectedResources };
   const captured = computeReservation(capturedClass);
   for (const scope of [
     { id: null, policy: policy.factory },

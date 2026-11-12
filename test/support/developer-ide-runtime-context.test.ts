@@ -129,7 +129,7 @@ test("quiet runtime observation follows externally started compute without reset
   expect(calls.every((method) => method === "GET")).toBe(true);
 });
 
-test("deliberately opening an editable Workspace starts once after writing authority arrives", async () => {
+test("editable Source and writing authority stay read-only until explicit compute preparation", async () => {
   let state = "stopped";
   const calls: string[] = [];
   const context = new FactoryRuntimeContext(
@@ -145,7 +145,7 @@ test("deliberately opening an editable Workspace starts once after writing autho
       });
     },
   );
-  context.select(runtime.workspaceID, true);
+  context.select(runtime.workspaceID);
   await Bun.sleep(0);
   expect(calls).toEqual(["GET"]);
   context.setWritable("44444444-4444-4444-8444-444444444444", true);
@@ -154,6 +154,10 @@ test("deliberately opening an editable Workspace starts once after writing autho
   await Bun.sleep(0);
   context.setWritable(runtime.workspaceID, true);
   await context.observe();
+  await context.use();
+  expect(context.value?.state).toBe("stopped");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(0);
+  await context.prepare();
   expect(context.value?.state).toBe("ready");
   expect(calls.filter((method) => method === "POST")).toHaveLength(1);
 });
@@ -171,7 +175,7 @@ test("an observation-only IDE cannot reuse its old opening demand after Coding S
   );
   // The IDE was opened while the Agent held writing authority. It is still
   // observing the same Workspace when a later explicit Stop completes.
-  context.select(runtime.workspaceID, true);
+  context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, false);
   await Bun.sleep(0);
   expect(context.value?.state).toBe("ready");
@@ -182,9 +186,12 @@ test("an observation-only IDE cannot reuse its old opening demand after Coding S
   await context.observe();
   expect(context.value?.state).toBe("stopped");
   expect(calls.filter((method) => method === "POST")).toHaveLength(0);
-  // Genuine subsequent use is a new demand, not a replay of the old one.
+  // Typing in the Source editor is activity, not a new compute request.
   await context.use();
   await Bun.sleep(0);
+  expect(context.value?.state).toBe("stopped");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(0);
+  await context.prepare();
   expect(context.value?.state).toBe("ready");
   expect(calls.filter((method) => method === "POST")).toHaveLength(1);
 });
@@ -200,22 +207,22 @@ test("read-only selection of stopped Source does not wait indefinitely to start 
       return Response.json({ ...runtime, state, failure: null });
     },
   );
-  context.select(runtime.workspaceID, true);
+  context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, false);
   await Bun.sleep(0);
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(0);
   expect(context.value?.state).toBe("stopped");
   expect(calls.filter((method) => method === "POST")).toHaveLength(0);
-  // Explicitly opening it again for editing may still prepare compute.
-  context.select(runtime.workspaceID, true);
+  // Reopening Source still does not prepare compute.
+  context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(0);
-  expect(context.value?.state).toBe("ready");
-  expect(calls.filter((method) => method === "POST")).toHaveLength(1);
+  expect(context.value?.state).toBe("stopped");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(0);
 });
 
-test("idle observation never wakes compute; real use resumes the original paused Attempt", async () => {
+test("Source activity never wakes compute; explicit preparation resumes the original paused Attempt", async () => {
   let state = "ready";
   const calls: string[] = [];
   const context = new FactoryRuntimeContext(
@@ -231,7 +238,7 @@ test("idle observation never wakes compute; real use resumes the original paused
       return Response.json({ ...runtime, state, failure: null });
     },
   );
-  context.select(runtime.workspaceID, true);
+  context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(0);
   state = "paused";
@@ -241,6 +248,9 @@ test("idle observation never wakes compute; real use resumes the original paused
   expect(calls.filter((call) => call.startsWith("POST"))).toHaveLength(0);
   await context.use();
   await Bun.sleep(0);
+  expect(context.value?.state).toBe("paused");
+  expect(calls.filter((call) => call === "POST:ensure")).toHaveLength(0);
+  await context.prepare();
   expect(context.value?.attemptID).toBe(runtime.attemptID);
   expect(context.value?.state).toBe("ready");
   expect(calls.filter((call) => call === "POST:ensure")).toHaveLength(1);
@@ -248,10 +258,11 @@ test("idle observation never wakes compute; real use resumes the original paused
   state = "paused";
   await context.use();
   await Bun.sleep(0);
-  expect(calls.filter((call) => call === "POST:ensure")).toHaveLength(2);
+  expect(context.value?.state).toBe("paused");
+  expect(calls.filter((call) => call === "POST:ensure")).toHaveLength(1);
 });
 
-test("failed automatic preparation is visible and is never repeated by observations or typing", async () => {
+test("failed explicit preparation is visible and is never repeated by observations or typing", async () => {
   const calls: string[] = [];
   const context = new FactoryRuntimeContext(
     () => base,
@@ -261,9 +272,11 @@ test("failed automatic preparation is visible and is never repeated by observati
       return Response.json({ ...runtime, state: "stopped", failure: null });
     },
   );
-  context.select(runtime.workspaceID, true);
+  context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(0);
+  expect(context.value?.state).toBe("stopped");
+  await context.prepare();
   expect(context.value?.state).toBe("failed");
   expect(context.value?.failure).toContain("unconfirmed");
   await context.observe();
@@ -342,7 +355,7 @@ test("an unknown restore outcome stays quarantined with no Start fresh", async (
       });
     },
   );
-  context.select(runtime.workspaceID, true);
+  context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(50);
   await context.startFresh();

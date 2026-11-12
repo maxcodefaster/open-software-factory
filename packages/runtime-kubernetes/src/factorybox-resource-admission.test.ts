@@ -172,6 +172,87 @@ test("large-node decimal requests never lose their fractional scheduler reservat
   ).toBe(16 * 1024 ** 2 - 2048 - 1);
 });
 
+test("CPU budgets charge init peaks, sidecars, resize, overhead and terminating Pods", () => {
+  const cpu = (name: string, value: string) => ({ name, resources: { requests: { cpu: value } } });
+  const items = [
+    {
+      metadata: { deletionTimestamp: "2026-11-09T00:00:00Z" },
+      spec: {
+        nodeName: profile.nodeName,
+        containers: [cpu("app", "500m")],
+        initContainers: [
+          cpu("first", "2"),
+          { ...cpu("sidecar", "250m"), restartPolicy: "Always" },
+          cpu("last", "1"),
+        ],
+        overhead: { cpu: "100m" },
+      },
+      status: { phase: "Running" },
+    },
+    {
+      spec: { nodeName: profile.nodeName, containers: [cpu("app", "500m")] },
+      status: {
+        phase: "Running",
+        containerStatuses: [{ name: "app", allocatedResources: { cpu: "1" } }],
+      },
+    },
+    {
+      spec: {
+        nodeName: profile.nodeName,
+        containers: [cpu("app", "500m")],
+        resources: { requests: { cpu: "1" } },
+      },
+      status: { phase: "Running", allocatedResources: { cpu: "1500m" } },
+    },
+    {
+      spec: { nodeName: profile.nodeName, containers: [cpu("done", "8")] },
+      status: { phase: "Succeeded" },
+    },
+  ];
+  expect(selectFactoryboxWorkerResources(profile, node(), { items }).cpuMilli).toBe(3400);
+});
+
+test.each(["NoSchedule", "NoExecute", "PreferNoSchedule"])(
+  "taint %s prevents fresh admission without bypass",
+  (effect) => {
+    expect(() =>
+      selectFactoryboxWorkerResources(
+        profile,
+        {
+          ...node(),
+          spec: { taints: [{ key: "reserved-for-other-work", effect }] },
+        },
+        { items: [] },
+      ),
+    ).toThrow(`reserved-for-other-work (${effect})`);
+  },
+);
+
+test("deleting nodes and exhausted CPU cannot be admitted", () => {
+  expect(() =>
+    selectFactoryboxWorkerResources(
+      profile,
+      {
+        ...node(),
+        metadata: { ...node().metadata, deletionTimestamp: "2026-11-09T00:00:00Z" },
+      },
+      { items: [] },
+    ),
+  ).toThrow("not ready");
+  expect(() =>
+    selectFactoryboxWorkerResources(profile, node(), {
+      items: [
+        {
+          spec: {
+            nodeName: profile.nodeName,
+            containers: [{ name: "other", resources: { requests: { cpu: "7.900001" } } }],
+          },
+        },
+      ],
+    }),
+  ).toThrow("No schedulable worker budget");
+});
+
 test("resource selection observes only the original node and never mutates Kubernetes", async () => {
   const calls: string[][] = [];
   const selected = await admitFactoryboxWorkerResources(profile, async (args) => {

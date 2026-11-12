@@ -11,8 +11,26 @@ export const monitoringNativeSource = z
   })
   .strict();
 
-export async function ownedMonitoringForge(directory: string, id: string, network?: string) {
+export async function ownedMonitoringForge(
+  directory: string,
+  id: string,
+  network?: string,
+  publicURL?: string,
+) {
   z.uuid().parse(id);
+  if (publicURL) {
+    const url = new URL(publicURL);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    )
+      throw new Error("An exact owned Forge public HTTPS origin is required");
+    publicURL = `${url.origin}/`;
+  }
   const container = `factory-owned-monitoring-forge-${id}`;
   const volumes = [`${container}-data`, `${container}-config`];
   const image =
@@ -20,6 +38,7 @@ export async function ownedMonitoringForge(directory: string, id: string, networ
   const owner = "factory-mutation";
   const tokenFile = resolve(directory, "forge-token");
   const originFile = resolve(directory, "forge-origin");
+  const publicFile = resolve(directory, "forge-public-origin");
   async function docker(...args: string[]) {
     const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "ignore" });
     const [output, status] = await Promise.all([new Response(child.stdout).text(), child.exited]);
@@ -44,6 +63,16 @@ export async function ownedMonitoringForge(directory: string, id: string, networ
     "--format",
     "{{.Names}}",
   );
+  const savedPublic = await readFile(publicFile, "utf8").catch((cause: unknown) => {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw cause;
+  });
+  if (savedPublic !== undefined && savedPublic !== publicURL)
+    throw new Error("Owned Forge public origin differs from retained configuration");
+  if (publicURL && savedPublic === undefined) {
+    if (existing) throw new Error("Retained Forge has no recorded public HTTPS origin");
+    await writeFile(publicFile, publicURL, { mode: 0o600, flag: "wx" });
+  }
   let origin = await readFile(originFile, "utf8").catch((cause: unknown) => {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw cause;
@@ -121,6 +150,7 @@ export async function ownedMonitoringForge(directory: string, id: string, networ
       "FORGEJO__service__DISABLE_REGISTRATION=true",
       "--env",
       "FORGEJO__actions__ENABLED=true",
+      ...(publicURL ? ["--env", `FORGEJO__server__ROOT_URL=${publicURL}`] : []),
       "--publish",
       `127.0.0.1:${address.port}:3000`,
       image,

@@ -33,6 +33,7 @@ import {
   type FactoryboxWorkerIdentity,
   inspectFactoryboxWorker,
 } from "../../packages/runtime-kubernetes/src/factorybox-worker";
+import { preparationFailureDiagnostics } from "./conformance-diagnostics";
 
 export const conformanceLabel = "factory.dev/conformance-owner";
 
@@ -178,6 +179,20 @@ export function createConformanceRuntime(
       flag: "wx",
       mode: 0o600,
     });
+  const retainPreparationFailure = async (pod: unknown) => {
+    try {
+      const diagnostics = await preparationFailureDiagnostics(
+        owner,
+        input.namespace,
+        input.podName,
+        pod,
+        (args, limits) => run(args, undefined, limits),
+      );
+      await save("preparation-failure.json", diagnostics);
+    } catch {
+      // Diagnostics never extend the admission window or replace its native cause.
+    }
+  };
   const metrics = createFactoryboxMetrics((target) => readFactoryboxSandboxSample(target, run));
   const operation = async (value: FactoryboxOperation) => {
     if (!identity) throw new Error("Worker has no admitted cluster identity");
@@ -314,12 +329,16 @@ export function createConformanceRuntime(
             ...(pod.status?.initContainerStatuses ?? []),
             ...(pod.status?.containerStatuses ?? []),
           ].some((container) => container.state?.terminated?.exitCode > 0)
-        )
+        ) {
+          await retainPreparationFailure(pod);
           throw new Error("Original Factorybox cluster worker terminated before HTTP readiness");
-        if (deadline - performance.now() < 120_000)
+        }
+        if (deadline - performance.now() < 120_000) {
+          await retainPreparationFailure(pod);
           throw new Error(
             "Factorybox cluster worker did not become ready within its preparation window",
           );
+        }
         await Bun.sleep(1000);
       }
       identity = await inspectFactoryboxWorker(request, undefined, run, declaration);
@@ -378,8 +397,10 @@ print(json.dumps({'importSourceRetired':True,'nativeBaseReverified':True,'sealed
         .parse(view.record);
       await save("started.json", view);
     },
-    execArgs(args: string[], interactive = false, user?: string) {
-      if (!identity || !record) throw new Error("Factorybox conformance Sandbox is not running");
+    execArgs(args: string[], interactive = false, user?: string, sandboxID = input.sandboxID) {
+      owned(sandboxID);
+      const selected = sandboxID === input.sandboxID ? record : forks.get(sandboxID);
+      if (!identity || !selected) throw new Error("Factorybox conformance Sandbox is not running");
       return kubernetesCommand([
         "exec",
         ...(interactive ? ["-i"] : []),
@@ -394,7 +415,7 @@ print(json.dumps({'importSourceRetired':True,'nativeBaseReverified':True,'sealed
         `${identity.controllerRoot}/runtime`,
         "exec",
         ...(user ? ["--user", user] : []),
-        record.runtime_id,
+        selected.runtime_id,
         ...args,
       ]);
     },

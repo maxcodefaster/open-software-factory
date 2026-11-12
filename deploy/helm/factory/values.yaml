@@ -160,3 +160,9 @@ maintenance:
     limits:
       cpu: "1"
       memory: 256Mi
+substrate:
+  # Explicit fresh-Workspace opt-in only. No retained Workspace is converted.
+  workspaceConfigurationSecret: ""
+  # Separately rotated, short-lived native global-owner credential (key: token).
+  # Actor calls use the application's projected editor token, never this one.
+  provisionerTokenSecret: ""

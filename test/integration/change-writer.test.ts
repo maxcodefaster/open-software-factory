@@ -8,6 +8,7 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import type { RuntimeAttemptView } from "../../apps/factory/src/runtime/types";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
@@ -378,6 +379,147 @@ test("observing settled work never takes editing; explicit takeover retains its 
     await processFixture.dispose();
   }
 }, 30_000);
+
+test.each(["confirmed", "source-pending", "native-running", "generic-paused"] as const)(
+  "Ticket writer accepts only independently confirmed native paused compute: %s",
+  async (observation) => {
+    const owned = await fixture();
+    const native: NonNullable<RuntimeAttemptView["native"]> = {
+      engine: "substrate",
+      actorUID: crypto.randomUUID(),
+      state: observation === "native-running" ? "ACTOR_STATE_RUNNING" : "ACTOR_STATE_SUSPENDED",
+      coldRestart: true,
+      portable: false,
+      sourceHandoff: observation === "source-pending" ? "pending" : "confirmed-same-node",
+    };
+    const grants: string[][] = [];
+    let stops = 0;
+    const controller = createChangeWriterController({
+      database: owned.database,
+      agentUsername: "owned-control",
+      stopDeadlineMs: 0,
+      runtime: {
+        async stop() {
+          stops++;
+        },
+        async get() {
+          return { state: "paused", ...(observation === "generic-paused" ? {} : { native }) };
+        },
+      },
+      async stopAgent() {
+        throw new Error("Settled Session must not be stopped again");
+      },
+      async protect(_changeID, writers) {
+        grants.push([...writers]);
+      },
+    });
+    try {
+      const commandID = crypto.randomUUID();
+      if (observation === "confirmed") {
+        const human = await controller.takeOver(owned.changeID, owned.userID, commandID);
+        expect(human).toMatchObject({ state: "human", canWrite: true, stopPending: false });
+        const turnID = crypto.randomUUID();
+        await owned.database.client.begin((sql) =>
+          claimAgentWriterIn(sql, owned.changeID, turnID, owned.userID),
+        );
+        expect(await controller.prepareAgent(owned.changeID, turnID)).toBe(true);
+        expect(grants.at(-1)).toEqual(["owned-control"]);
+        expect(stops).toBe(2);
+      } else {
+        await expect(controller.takeOver(owned.changeID, owned.userID, commandID)).rejects.toThrow(
+          "compute has not stopped",
+        );
+        expect(await controller.status(owned.changeID, owned.userID)).toMatchObject({
+          state: "handoff",
+          canWrite: false,
+        });
+        expect(grants.at(-1)).toEqual([]);
+      }
+      expect(stops).toBeGreaterThan(0);
+      expect(owned.requests()).toBe(0);
+      expect(owned.interrupts()).toBe(0);
+    } finally {
+      await owned.dispose();
+    }
+  },
+  60_000,
+);
+
+test("native paused compute cannot settle an assigned Agent input or bypass its Stop barrier", async () => {
+  const owned = await fixture();
+  const admission = createChangeAdmission(owned.database, buildModelID);
+  const stop = createChangeAgentStop(owned.database, owned.hub, async () => {
+    throw new Error("Native paused Source is not the legacy retained Stop path");
+  });
+  let stopCompute = 0;
+  const controller = createChangeWriterController({
+    database: owned.database,
+    agentUsername: "owned-control",
+    stopDeadlineMs: 0,
+    runtime: {
+      async stop() {
+        stopCompute++;
+      },
+      async get() {
+        return {
+          state: "paused",
+          native: {
+            engine: "substrate",
+            state: "ACTOR_STATE_SUSPENDED",
+            coldRestart: true,
+            portable: false,
+            sourceHandoff: "confirmed-same-node",
+          },
+        };
+      },
+    },
+    async stopAgent(changeID) {
+      await stop.persist(changeID);
+      expect(await stop.confirm(changeID)).toBe(false);
+    },
+    async protect() {},
+  });
+  try {
+    const admitted = await admission.admit(owned.changeID, owned.userID, {
+      kind: "change-prompt",
+      commandId: crypto.randomUUID(),
+      text: "Assigned input must not run on restart",
+    });
+    await owned.database
+      .client`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${owned.attemptID} WHERE turn_id=${admitted.turn.id}`;
+    await owned.database
+      .client`UPDATE factory.change_agent_session SET state='working',active_turn_id=${admitted.turn.id} WHERE change_id=${owned.changeID}`;
+    await owned.database
+      .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${owned.attemptID}`;
+    const commandID = crypto.randomUUID();
+    await expect(controller.takeOver(owned.changeID, owned.userID, commandID)).rejects.toThrow(
+      "confirmed Agent Stop",
+    );
+    expect(await controller.status(owned.changeID, owned.userID)).toMatchObject({
+      state: "handoff",
+      canWrite: false,
+      stopPending: true,
+    });
+    expect(stopCompute).toBe(0);
+    const [saved] = await owned.database.client<
+      { stopID: string }[]
+    >`SELECT stop_id AS "stopID" FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
+    if (!saved) throw new Error("Saved Stop missing");
+    expect(await stop.confirm(owned.changeID, saved.stopID, "observe")).toBe(false);
+    await expect(
+      admission.admit(owned.changeID, owned.userID, {
+        kind: "change-prompt",
+        commandId: crypto.randomUUID(),
+        text: "Must remain blocked",
+      }),
+    ).rejects.toThrow();
+    expect(owned.requests()).toBe(0);
+    expect(owned.interrupts()).toBe(0);
+    expect(owned.commitCalls).toEqual([]);
+  } finally {
+    await owned.dispose();
+  }
+}, 60_000);
 
 test("failed bootstrap takeover tears down exact compute before confirming an unsubmitted Agent Stop", async () => {
   const processFixture = await factoryProcess();

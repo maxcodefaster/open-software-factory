@@ -72,7 +72,7 @@ func immutablePrebuildImage(ctx context.Context, image string) (string, error) {
 // Resolve the real Compose merge with the pinned CLI's own Compose command.
 // Only this isolated committed snapshot is rewritten. No services or lifecycle
 // hooks run, and the producer's sanitized environment carries no Runtime grants.
-func prepareComposePrebuild(ctx context.Context, snapshot, configPath string, config prebuildConfiguration) (prebuildConfiguration, []string, error) {
+func prepareComposePrebuild(ctx context.Context, snapshot, configPath string, config prebuildConfiguration, assignment Assignment) (prebuildConfiguration, []string, error) {
 	files, err := committedComposeFiles(snapshot, configPath, config.DockerComposeFile)
 	if err != nil {
 		return config, nil, err
@@ -84,7 +84,7 @@ func prepareComposePrebuild(ctx context.Context, snapshot, configPath string, co
 	for _, path := range files {
 		arguments = append(arguments, "-f", path)
 	}
-	arguments = append(arguments, "config", "--format", "json", "--no-env-resolution")
+	arguments = append(arguments, "config", "--format", "json", "--no-env-resolution", "--no-interpolate")
 	command := prebuildCommand(ctx, "/tmp", "docker", arguments...)
 	command.Dir = snapshot
 	content, err := command.Output()
@@ -102,6 +102,11 @@ func prepareComposePrebuild(ctx context.Context, snapshot, configPath string, co
 		if !composeServiceName.MatchString(name) {
 			return config, nil, errors.New("prebuild Compose service name is invalid")
 		}
+		// Only this committed, isolated snapshot is rewritten. No Runtime
+		// variable or env-file value is resolved, passed to build, or copied
+		// into its image. Consumers still use the original service files.
+		delete(service, "environment")
+		delete(service, "env_file")
 		var image string
 		if raw := service["image"]; raw != nil && json.Unmarshal(raw, &image) != nil {
 			return config, nil, errors.New("prebuild Compose image is invalid")
@@ -128,6 +133,14 @@ func prepareComposePrebuild(ctx context.Context, snapshot, configPath string, co
 			service["image"], _ = json.Marshal(key)
 			immutable = append(immutable, key)
 			if name == config.Service {
+				base := key
+				selected, err := prepareNativePrebuildBase(ctx, assignment, key)
+				if err != nil {
+					return config, nil, err
+				}
+				if selected != nil {
+					config.nativeBase = selected
+				}
 				// Give image-only primary services an owned image too. Compose's
 				// build path does not consistently forward --label without Features.
 				path := filepath.Join(filepath.Dir(configPath), ".factory-prebuild-base.Dockerfile")
@@ -135,7 +148,7 @@ func prepareComposePrebuild(ctx context.Context, snapshot, configPath string, co
 				if err != nil {
 					return config, nil, errors.New("prebuild Compose private Dockerfile already has an owner")
 				}
-				_, writeErr := file.WriteString("FROM " + key + "\n")
+				_, writeErr := file.WriteString("FROM " + base + "\n")
 				closeErr := file.Close()
 				if err := errors.Join(writeErr, closeErr); err != nil {
 					return config, nil, err

@@ -175,3 +175,52 @@ test("anonymous dispatch is limited to exact compiled public IDs and has neither
     ).toBe(401);
   expect(attempted).toBe(2);
 });
+
+test("active authenticated HTTP handlers outlast the socket idle interval without a timeout override", async () => {
+  const lifecycleID = "owned-native-stop";
+  const readID = "owned-native-read";
+  let effects = 0;
+  const endpoint = createServerFunctionEndpoint({
+    origin,
+    services,
+    session: async (request) =>
+      request.headers.get("cookie") === "owned-session" ? { user: { id: "owner" } } : null,
+    maintenance: async () => false,
+    requireFresh: async () => {},
+    functionIDs: new Set([lifecycleID, readID]),
+    async handle(input, { context: { factory } }) {
+      const lifecycle = new URL(input.url).pathname.endsWith(lifecycleID);
+      if (lifecycle) {
+        z.uuid().parse((await input.json()).attemptID);
+        await factory.beforeWrite(false);
+        effects++;
+      }
+      await Bun.sleep(2100);
+      return Response.json({ recorded: lifecycle ? "paused" : "read" });
+    },
+  });
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    idleTimeout: 1,
+    fetch(request) {
+      return endpoint(request);
+    },
+  });
+  const call = (id: string) =>
+    fetch(`${server.url}_server/data/${id}`, {
+      method: "POST",
+      headers: { origin, cookie: "owned-session", "content-type": "application/json" },
+      body: JSON.stringify({ attemptID: crypto.randomUUID() }),
+      signal: AbortSignal.timeout(6000),
+    });
+  try {
+    const completed = await call(lifecycleID);
+    expect(await completed.json()).toEqual({ recorded: "paused" });
+    expect(effects).toBe(1);
+    expect(await (await call(readID)).json()).toEqual({ recorded: "read" });
+    expect(effects).toBe(1);
+  } finally {
+    await server.stop(true);
+  }
+}, 10_000);

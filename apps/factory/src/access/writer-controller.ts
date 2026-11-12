@@ -1,6 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { forgeUsername } from "../../../../packages/forge/src/access";
 import { CommandError } from "../command-error";
+import type { RuntimeAttemptView } from "../runtime/types";
 import { lockChangeWriterIn } from "./change-writer";
 import { projectDevelopmentAuthorityIn } from "./controller";
 import { type WriterActivity, writerActivity } from "./writer-activity";
@@ -30,7 +31,7 @@ type WriterView = {
 };
 type RuntimeBoundary = {
   stop(attemptID: string): Promise<unknown>;
-  get(attemptID: string): Promise<{ state: string } | null>;
+  get(attemptID: string): Promise<Pick<RuntimeAttemptView, "state" | "native"> | null>;
 };
 export function createChangeWriterController(options: {
   database: Database;
@@ -63,8 +64,20 @@ export function createChangeWriterController(options: {
     await options.runtime.stop(attemptID);
     const deadline = performance.now() + (options.stopDeadlineMs ?? 45_000);
     for (;;) {
-      const state = (await options.runtime.get(attemptID))?.state;
+      const attempt = await options.runtime.get(attemptID);
+      const state = attempt?.state;
       if (state === "stopped") return true;
+      // Product native Stop retains the original Actor and private Docker data.
+      // Only the independently observed durable ROOTFS + released Source owner
+      // fences its compute; a generic paused row is not teardown evidence. Agent
+      // queued-input settlement remains a separate prerequisite below.
+      if (
+        state === "paused" &&
+        attempt?.native?.engine === "substrate" &&
+        attempt.native.state === "ACTOR_STATE_SUSPENDED" &&
+        attempt.native.sourceHandoff === "confirmed-same-node"
+      )
+        return true;
       if (performance.now() < deadline) {
         await Bun.sleep(100);
         continue;
@@ -310,9 +323,11 @@ export function createChangeWriterController(options: {
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id=writer.fence_attempt_id
         WHERE writer.change_id=${changeID} AND writer.state='handoff' AND writer.handoff_kind='takeover'
           AND writer.requested_by=${userID} AND writer.request_id IS NOT NULL
-          AND (writer.fence_attempt_id IS NULL OR attempt.state='stopped')`;
-      // Continue only the same person's recorded request after positive teardown
-      // evidence. Takeover rechecks permissions, Stop, source and branch fences.
+          AND (writer.fence_attempt_id IS NULL OR attempt.state='stopped'
+            OR (attempt.substrate AND attempt.state='paused'))`;
+      // Continue only the same person's recorded request. A native paused row
+      // merely schedules observation; takeover still rechecks the exact durable
+      // native result, permissions, Agent Stop, Source and branch fences.
       if (pending) return this.takeOver(changeID, userID, pending.commandID);
       const [release] = await database.client<{ commandID: string; epoch: number }[]>`
         SELECT writer.request_id AS "commandID",decision.writer_epoch::float8 AS epoch

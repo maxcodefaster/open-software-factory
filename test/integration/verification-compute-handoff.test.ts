@@ -5,9 +5,13 @@ import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { observeFactoryboxNodes } from "../../packages/runtime-kubernetes/src/factorybox-node-discovery";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import {
+  installOwnedRuntimeConfiguration,
+  ownedFactoryboxProfile,
+} from "../fixtures/runtime-configuration";
 
 let restoreConfiguration: () => void;
 beforeAll(() => {
@@ -15,7 +19,7 @@ beforeAll(() => {
 });
 afterAll(() => restoreConfiguration());
 
-async function submitted() {
+async function submitted(remote = false) {
   const host = await factoryProcess();
   const owned = await fixture(undefined, undefined, host.connect());
   const coding = owned.controller();
@@ -39,9 +43,9 @@ async function submitted() {
     const verificationID = crypto.randomUUID();
     await owned.database.client`INSERT INTO factory.verification(
       id,change_id,commit_sha,pull_request_number,runner_name,runner_uuid,runner_token,
-      action_run_id,created_by)
+      action_run_id,runner_job_handle,created_by)
       VALUES(${verificationID},${owned.changeID},${"d".repeat(40)},1,'owned-handoff',
-        ${crypto.randomUUID()},'owned-handoff-not-a-secret',1,${owned.userID})`;
+        ${crypto.randomUUID()},'owned-handoff-not-a-secret',1,'owned-handoff-job',${owned.userID})`;
     // Keep this controller proof offline. The assertion is before even admitting
     // a Verification Runtime, not a simulated successful Sysbox teardown.
     await owned.database
@@ -69,6 +73,7 @@ async function submitted() {
       close() {},
     } as unknown as ServerWebSocket<RuntimeSocketData>;
     owned.hub.open(parent);
+    let discoveries = 0;
     const runtime = createRuntimeController(
       owned.database,
       owned.hub,
@@ -85,6 +90,36 @@ async function submitted() {
         },
       },
       async () => "",
+      undefined,
+      undefined,
+      remote
+        ? async () => {
+            discoveries++;
+            if (discoveries !== 1)
+              throw new Error(
+                "Retained Verification must not rediscover or adopt another destination",
+              );
+            return {
+              candidates: [
+                {
+                  nodeName: "owned-node-b",
+                  identity: {
+                    uid: "owned-node-b-uid",
+                    bootID: "owned-node-b-boot",
+                    architecture: "amd64",
+                    operatingSystem: "linux",
+                  },
+                  profile: {
+                    ...ownedFactoryboxProfile,
+                    nodeName: "owned-node-b",
+                    resources: { cpuMilli: 3000, memoryMiB: 3072 },
+                  },
+                },
+              ],
+              refused: [],
+            };
+          }
+        : observeFactoryboxNodes,
     );
     const stopped: string[] = [];
     const stop = spyOn(runtime, "stop").mockImplementation(async (id) => {
@@ -119,6 +154,7 @@ async function submitted() {
       stop,
       child,
       parent,
+      discoveries: () => discoveries,
       async close() {
         stop.mockRestore();
         owned.hub.revoke(owned.attemptID);
@@ -134,6 +170,74 @@ async function submitted() {
     throw error;
   }
 }
+
+// Controller-only evidence. Native two-node evidence must use real Kubernetes,
+// Factorybox, Source and Forgejo and is recorded separately from this fixture.
+test("fresh remote Verification retains destination before compute and never reclaims concurrent work or canonical Source on A", async () => {
+  const f = await submitted(true);
+  try {
+    f.hub.message(
+      f.child,
+      JSON.stringify({
+        type: "terminal-state",
+        terminalRevision: 2,
+        terminalCount: 1,
+        terminalBusy: 1,
+      }),
+    );
+    const before = await f.retained();
+    const verification = await f.runtime.startVerification(f.verificationID, f.userID);
+    if (!verification) throw new Error("Owned remote Verification intent is missing");
+    expect(verification?.state).toBe("create-intended");
+    expect(verification?.revision).toBe("d".repeat(40));
+    const [binding] = await f.database.client<
+      Array<{
+        workerID: string;
+        admissionID: string;
+        namespace: string;
+        workspaceID: string | null;
+        profile: unknown;
+      }>
+    >`
+      SELECT attempt.factorybox_worker_id AS "workerID",attempt.factorybox_admission_id AS "admissionID",
+        attempt.kubernetes_namespace AS namespace,attempt.workspace_id AS "workspaceID",artifact.factorybox_profile AS profile
+      FROM factory.runtime_attempt attempt JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
+      WHERE attempt.id=${verification.id}`;
+    expect(binding?.workspaceID).toBeNull();
+    expect(binding?.profile).toMatchObject({
+      nodeName: "owned-node-b",
+      resources: { cpuMilli: 3000, memoryMiB: 3072 },
+    });
+    const [coding] = await f.database.client<
+      Array<{ workerID: string; namespace: string; state: string }>
+    >`
+      SELECT factorybox_worker_id AS "workerID",kubernetes_namespace AS namespace,state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+    if (!coding) throw new Error("Owned Coding runtime is missing");
+    expect(coding?.state).toBe("ready");
+    expect(binding?.workerID).not.toBe(coding?.workerID);
+    expect(binding?.namespace).not.toBe(coding?.namespace);
+    expect(f.stopped).toEqual([]);
+    expect(await f.retained()).toEqual(before);
+    expect((await f.runtime.startVerification(f.verificationID, f.userID))?.id).toBe(
+      verification?.id,
+    );
+    expect(f.discoveries()).toBe(1);
+    expect(f.stopped).toEqual([]);
+    await expect(
+      Promise.resolve(f.database
+        .client`UPDATE factory.runtime_attempt SET factorybox_worker_id=${coding.workerID}
+      WHERE id=${verification.id}`),
+    ).rejects.toThrow();
+    await expect(
+      Promise.resolve(f.database
+        .client`UPDATE factory.verification_compute_placement SET worker_id=${coding.workerID}
+      WHERE verification_id=${f.verificationID}`),
+    ).rejects.toThrow("immutable");
+    expect(f.requests()).toBe(1);
+  } finally {
+    await f.close();
+  }
+}, 30_000);
 
 test("fresh Verification waits for confirmed release of its submitted Coding runtime", async () => {
   const f = await submitted();
@@ -377,9 +481,9 @@ test.each([
         verificationID = crypto.randomUUID();
         await f.database.client`INSERT INTO factory.verification(
           id,change_id,commit_sha,pull_request_number,runner_name,runner_uuid,runner_token,
-          action_run_id,created_by)
+          action_run_id,runner_job_handle,created_by)
           VALUES(${verificationID},${f.changeID},${"a".repeat(40)},1,'owned-earlier-candidate',
-            ${crypto.randomUUID()},'owned-earlier-not-a-secret',2,${f.userID})`;
+            ${crypto.randomUUID()},'owned-earlier-not-a-secret',2,'owned-earlier-job',${f.userID})`;
       }
       const before = await f.retained();
       await f.runtime.startVerification(verificationID, f.userID);
@@ -426,9 +530,9 @@ test("a completed integration releases its own execution without replacing the r
       WHERE id=${f.verificationID}`;
     await f.database.client`INSERT INTO factory.verification(
       id,change_id,commit_sha,pull_request_number,runner_name,runner_uuid,runner_token,
-      action_run_id,created_by)
+      action_run_id,runner_job_handle,created_by)
       VALUES(${verificationID},${f.changeID},${commit},1,'owned-integration-handoff',
-        ${crypto.randomUUID()},'owned-integration-not-a-secret',2,${f.userID})`;
+        ${crypto.randomUUID()},'owned-integration-not-a-secret',2,'owned-integration-job',${f.userID})`;
     const child = {
       data: { kind: "connector", role: "child", attemptID: integrationRuntime, generation: 2 },
       send: () => 1,

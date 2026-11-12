@@ -4,12 +4,13 @@ import type { RuntimeHub } from "./hub";
 type Database = ReturnType<typeof createDatabase>;
 
 // A submitted Agent Sandbox is not an input for fresh Verification. Record its
-// ordinary Stop before admitting another private Docker tree, then wait for the
-// original cleanup result. Source, Sessions and the submitted candidate remain.
+// ordinary Stop only when Verification has selected that SAME worker, then wait
+// for its original cleanup result. Remote capacity never stops work on A.
 export async function prepareVerificationHandoff(
   database: Database,
   hub: Pick<RuntimeHub, "claimIdle" | "releaseIdle">,
   verificationID: string,
+  destinationWorkerID?: string,
 ): Promise<{ ready: boolean; stopAttemptID?: string }> {
   let claimed: string | undefined;
   let recorded = false;
@@ -31,9 +32,10 @@ export async function prepareVerificationHandoff(
           state: string | null;
           verificationAttemptID: string | null;
           verificationState: string;
+          workerID: string | null;
         }[]
       >`
-        SELECT attempt.id AS "attemptID",attempt.state,
+        SELECT attempt.id AS "attemptID",attempt.state,attempt.factorybox_worker_id AS "workerID",
           verification.runtime_attempt_id AS "verificationAttemptID",
           verification.state AS "verificationState"
         FROM factory.verification verification
@@ -46,6 +48,7 @@ export async function prepareVerificationHandoff(
           AND change.state='active' AND change.cancel_requested_at IS NULL
           AND ticket.trashed_at IS NULL FOR UPDATE OF verification`;
       if (!current) return { ready: false };
+      if (destinationWorkerID && current.workerID !== destinationWorkerID) return { ready: true };
       if (current.verificationAttemptID && current.verificationState === "running")
         return { ready: true };
       if (!current.attemptID || current.state === "stopped") return { ready: true };

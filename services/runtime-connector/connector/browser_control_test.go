@@ -73,7 +73,7 @@ func TestBrowserControlResponseFailureClosesItsExactConnection(t *testing.T) {
 			fail.Store(failed)
 			authority, cancelAuthority := browserConnectionContext(context.Background())
 			defer cancelAuthority()
-			handleBrowserControlOperation(authority, cancelAuthority, control, manager, browserScopeMessage(manager, scope, "browser-renew"))
+			handleBrowserControlOperation(authority, cancelAuthority, control, manager.handle, browserScopeMessage(manager, scope, "browser-renew"))
 			if (authority.Err() != nil) != failed {
 				t.Fatal("browser authority did not follow this exact response connection")
 			}

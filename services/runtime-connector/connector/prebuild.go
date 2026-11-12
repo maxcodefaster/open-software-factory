@@ -37,20 +37,22 @@ type PrebuildResult struct {
 }
 
 type prebuildInput struct {
-	Version            int      `json:"version"`
-	Repository         string   `json:"repository"`
-	Commit             string   `json:"commit"`
-	Tree               string   `json:"tree"`
-	Configuration      string   `json:"configuration"`
-	Dockerfile         string   `json:"dockerfile,omitempty"`
-	Platform           string   `json:"platform"`
-	ImageRepository    string   `json:"imageRepository"`
-	CLIVersion         string   `json:"cliVersion"`
-	CLIIntegrity       string   `json:"cliIntegrity"`
-	ImmutableInputs    []string `json:"immutableInputs"`
-	EnvironmentVersion uint64   `json:"environmentVersion"`
-	EnvironmentSHA256  string   `json:"environmentSHA256,omitempty"`
-	ComposeService     string   `json:"composeService,omitempty"`
+	Version               int      `json:"version"`
+	Repository            string   `json:"repository"`
+	Commit                string   `json:"commit"`
+	Tree                  string   `json:"tree"`
+	Configuration         string   `json:"configuration"`
+	Dockerfile            string   `json:"dockerfile,omitempty"`
+	Platform              string   `json:"platform"`
+	ImageRepository       string   `json:"imageRepository"`
+	CLIVersion            string   `json:"cliVersion"`
+	CLIIntegrity          string   `json:"cliIntegrity"`
+	ImmutableInputs       []string `json:"immutableInputs"`
+	EnvironmentVersion    uint64   `json:"environmentVersion"`
+	EnvironmentSHA256     string   `json:"environmentSHA256,omitempty"`
+	ComposeService        string   `json:"composeService,omitempty"`
+	NativeTransportSHA256 string   `json:"nativeTransportSha256,omitempty"`
+	nativeBase            *nativePrebuildBase
 }
 
 type prebuildIntent struct {
@@ -69,6 +71,7 @@ type prebuildOperation struct {
 }
 
 type prebuildConfiguration struct {
+	nativeBase        *nativePrebuildBase
 	Document          json.RawMessage `json:"-"`
 	Image             string          `json:"image"`
 	Dockerfile        string          `json:"dockerFile"`
@@ -141,6 +144,10 @@ func ProducePrebuild(parent context.Context, assignment Assignment, request Preb
 func producePrebuildWith(parent context.Context, assignment Assignment, request PrebuildRequest,
 	build func(context.Context, prebuildOperation, string) (string, error), push func(context.Context, prebuildOperation, string) (string, error), read prebuildConfigurationReader) (PrebuildResult, error) {
 	var result PrebuildResult
+	parent, err := nativePrebuildContext(parent, assignment)
+	if err != nil {
+		return result, err
+	}
 	ctx, cancel := context.WithTimeout(parent, prebuildProduceTimeout)
 	defer cancel()
 	root, err := prebuildRoot(assignment)

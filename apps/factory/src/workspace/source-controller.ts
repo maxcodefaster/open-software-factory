@@ -22,8 +22,11 @@ import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { runtimeFactoryURL, runtimeRepositoryCloneURL } from "../runtime/endpoints";
 import { resolveRepositoryRevision, serveRuntimeRepository } from "../runtime/git-http";
+import type { RuntimeHub } from "../runtime/hub";
+import { configuredSubstrateWorkspaces } from "../runtime/substrate-workspaces";
 import { factoryboxAllocation, rememberFactoryboxSource } from "../runtime/worker";
 import { requireSetupReady } from "../setup/execution-gate";
+import type { createSubstrateSources } from "./substrate-source";
 
 type Database = ReturnType<typeof createDatabase>;
 type SourceSQL = Database["client"] | AgentTurnTransaction;
@@ -89,6 +92,9 @@ export function createWorkspaceSourceController(
   secret: string,
   client: WorkspaceSourceClient = createWorkspaceSourceClient(),
   now: () => number = () => performance.now(),
+  nativeProjectID = configuredSubstrateWorkspaces()?.projectID,
+  nativeHub?: Pick<RuntimeHub, "request" | "sourceConnected">,
+  nativeSources?: ReturnType<typeof createSubstrateSources>,
 ) {
   const streams = new Map<
     AbortController,
@@ -96,6 +102,62 @@ export function createWorkspaceSourceController(
   >();
   const pending = new Map<string, { wakeup: boolean }>();
   let closed = false;
+  async function nativeRow(workspaceID: string, sql: SourceSQL = database.client) {
+    const [current] = await sql<
+      {
+        workspaceID: string;
+        projectName: string;
+        kind: string;
+        ticketTitle: string | null;
+        attemptID: string | null;
+        generation: string | null;
+        ready: boolean;
+        sourceOwner: "actor" | "service" | null;
+        sourceWritable: boolean | null;
+        sourceEpoch: string | null;
+      }[]
+    >`SELECT w.id AS "workspaceID",p.name AS "projectName",w.kind,t.title AS "ticketTitle",a.id AS "attemptID",a.generation::text AS generation,
+      (a.state='ready' AND a.stop_intended_at IS NULL AND b.actor_uid IS NOT NULL
+        AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL) AS ready,
+      s.owner AS "sourceOwner",s.writable AS "sourceWritable",s.writer_epoch::text AS "sourceEpoch"
+       FROM factory.development_workspace w JOIN factory.project p ON p.id=w.project_id
+       LEFT JOIN factory.ticket t ON t.id=w.ticket_id
+      LEFT JOIN factory.runtime_attempt a ON a.workspace_id=w.id AND a.substrate
+        AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=w.id AND newer.generation>a.generation)
+      LEFT JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+      LEFT JOIN factory.substrate_source s ON s.workspace_id=w.id AND s.actor_uid=b.actor_uid
+      WHERE w.id=${workspaceID} AND w.substrate`;
+    return current ?? null;
+  }
+  async function nativeView(
+    current: NonNullable<Awaited<ReturnType<typeof nativeRow>>>,
+  ): Promise<SourceWorkspaceView> {
+    const ready = nativeSources
+      ? Boolean(
+          current.sourceWritable &&
+            (current.sourceOwner === "service"
+              ? await nativeSources.available(current.workspaceID)
+              : current.ready &&
+                current.attemptID &&
+                nativeHub?.sourceConnected(current.attemptID)),
+        )
+      : Boolean(
+          current.ready && current.attemptID && nativeHub?.sourceConnected(current.attemptID),
+        );
+    return {
+      workspaceID: current.workspaceID,
+      label:
+        current.kind === "personal"
+          ? `Personal · ${current.projectName}`
+          : `Ticket · ${current.ticketTitle ?? current.projectName}`,
+      state: ready ? "ready" : "preparing",
+      serviceID: `source-${current.workspaceID.replaceAll("-", "")}`,
+      epoch: Number(current.sourceEpoch ?? current.generation ?? 1),
+      failure: ready
+        ? null
+        : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
+    };
+  }
   async function row(
     workspaceID: string,
     sql: SourceSQL = database.client,
@@ -225,6 +287,7 @@ export function createWorkspaceSourceController(
     for (const [controller, stream] of streams)
       if (stream.workspaceID === workspaceID) controller.abort();
   }
+  nativeSources?.onTransfer(revokeWorkspace);
   async function reconcile(workspaceID: string) {
     // Checkout and connection warming must not hold the application pool used
     // by source reads and Stop. This connection owns only this reconciliation.
@@ -334,8 +397,10 @@ export function createWorkspaceSourceController(
     });
   }
   async function ensure(workspaceID: string, userID: string) {
-    const images = pinnedSourceImages();
     await database.client.begin((sql) => authority(workspaceID, userID, sql));
+    const native = await nativeRow(workspaceID);
+    if (native) return nativeView(native);
+    const images = pinnedSourceImages();
     const [runtime] = await database.client<
       Array<{ namespace: string; podName: string; podUID: string }>
     >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",kubernetes_uid AS "podUID" FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} AND state IN ('ready','pausing','paused','resuming') ORDER BY generation DESC LIMIT 1`;
@@ -378,12 +443,45 @@ export function createWorkspaceSourceController(
       await sql`UPDATE factory.workspace_source SET storage_node=${storageNode} WHERE workspace_id=${workspaceID} AND storage_node IS NULL`;
   }
   return {
+    substrate: nativeSources,
+    nativeRestore(request: Request, attemptID: string) {
+      return (
+        nativeSources?.restoreEndpoint(request, attemptID) ??
+        Promise.resolve(new Response(null, { status: 404 }))
+      );
+    },
+    nativePreservation(request: Request, attemptID: string) {
+      return (
+        nativeSources?.preservationEndpoint(request, attemptID) ??
+        Promise.resolve(new Response(null, { status: 404 }))
+      );
+    },
     ensure,
     async fenceChange(changeID: string, epoch: string, writable: boolean) {
       const [workspace] = await database.client<
         { id: string }[]
       >`SELECT id FROM factory.development_workspace WHERE change_id=${changeID}`;
-      if (workspace) await fenceSource(workspace.id, epoch, writable, database.client);
+      if (!workspace) return;
+      if (await nativeRow(workspace.id)) {
+        await database.client.begin(async (sql) => {
+          // Handoff may already hold the Change row lock on another connection.
+          // Never wait behind a Source save that is waiting for that row.
+          const [lock] = await sql<{ acquired: boolean }[]>`
+            SELECT pg_try_advisory_xact_lock(hashtext(${`runtime:${workspace.id}`})) AS acquired`;
+          if (!lock?.acquired)
+            throw new CommandError(
+              "unavailable",
+              "Source owner is busy; writing fence is unconfirmed",
+            );
+          const current = await nativeRow(workspace.id, sql);
+          if (!nativeSources)
+            throw new CommandError("unavailable", "Native Source writing fence is unavailable");
+          if (current?.attemptID)
+            await nativeSources.fence(workspace.id, current.attemptID, epoch, writable, sql);
+        });
+        return;
+      }
+      await fenceSource(workspace.id, epoch, writable, database.client);
     },
     async prepareExecution(attemptID: string): Promise<RuntimeSourceAttachment> {
       const images = pinnedSourceImages();
@@ -394,7 +492,8 @@ export function createWorkspaceSourceController(
           SELECT attempt.workspace_id AS "workspaceID" FROM factory.runtime_attempt attempt
           JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
             AND workspace.project_id=attempt.project_id
-          WHERE attempt.id=${attemptID} AND attempt.state='create-intended'
+           WHERE attempt.id=${attemptID} AND attempt.state='create-intended'
+             AND NOT attempt.substrate AND NOT workspace.substrate
             AND attempt.stop_intended_at IS NULL
             AND (workspace.kind='personal' OR EXISTS (
               SELECT 1 FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
@@ -476,6 +575,15 @@ export function createWorkspaceSourceController(
     },
     async ensurePersonal(projectID: string, userID: string) {
       const identity = personalWorkspaceIdentity(projectID, userID);
+      if (projectID === nativeProjectID) {
+        await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, projectID));
+        if (!(await nativeRow(identity.workspaceID)))
+          throw new CommandError(
+            "unavailable",
+            "Start this fresh native Workspace once to initialize Source. No compute or legacy Workspace was created by editor access.",
+          );
+        return ensure(identity.workspaceID, userID);
+      }
       // No runtime, Change, App, turn or model request is created by source preparation.
       await database.client.begin(async (sql) => {
         await projectDevelopmentAuthorityIn(sql, userID, projectID);
@@ -516,12 +624,22 @@ export function createWorkspaceSourceController(
         await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
         if (!change.ready || !["starting", "active", "failed"].includes(change.state))
           throw new CommandError("unavailable", "Change source is not ready for editing");
+        if (change.projectID === nativeProjectID) {
+          if (!(await nativeRow(identity.workspaceID, sql)))
+            throw new CommandError(
+              "unavailable",
+              "Start this fresh native Ticket Workspace to initialize Source. Editor access did not create compute or a legacy Workspace.",
+            );
+          return;
+        }
         await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by) VALUES(${identity.workspaceID},${change.projectID},'ticket',${change.ticketID},${changeID},${change.branch},${change.revision},${userID}) ON CONFLICT(id) DO NOTHING`;
       });
       return ensure(identity.workspaceID, userID);
     },
     async get(workspaceID: string, userID: string) {
       await database.client.begin((sql) => authority(workspaceID, userID, sql));
+      const native = await nativeRow(workspaceID);
+      if (native) return nativeView(native);
       const current = await row(workspaceID);
       if (!current) throw new CommandError("not-found", "Source access not prepared");
       return view(current);
@@ -540,15 +658,77 @@ export function createWorkspaceSourceController(
         // Do not hold membership locks while a browser slowly uploads its request body.
         const content =
           operation === "events" ? undefined : await boundedSourceBody(request, controller.signal);
-        const admittedRequest =
-          content === undefined
-            ? request
-            : new Request(request.url, {
-                method: "POST",
-                body: content,
-                signal: controller.signal,
-              });
+        const admittedRequest = new Request(request.url, {
+          method: operation === "events" ? "GET" : "POST",
+          ...(content === undefined ? {} : { body: content }),
+          signal: controller.signal,
+        });
         const result = await database.client.begin(async (sql) => {
+          if (await nativeRow(workspaceID, sql)) {
+            // Same existing Workspace lock as Suspend/Resume. Admit file writes
+            // before a lifecycle command, never against a sleeping old ROOTFS.
+            // The editor resolves/stat/reads files concurrently. Queue brief
+            // file-request contention under the same exclusive lifecycle lock,
+            // rather than failing every request behind the first metadata read.
+            // A long Pause/Resume still returns busy and retains the buffer.
+            const [policy] = await sql<{ timeout: string }[]>`
+              SELECT current_setting('lock_timeout') AS timeout`;
+            await sql`SELECT set_config('lock_timeout','2000ms',true)`;
+            try {
+              await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${workspaceID}`}))`;
+            } catch (cause) {
+              if ((cause as { code?: string }).code !== "55P03") throw cause;
+              throw new CommandError(
+                "unavailable",
+                "Native Source owner is busy. Keep your editor buffer and retry; compute was not started.",
+              );
+            }
+            await sql`SELECT set_config('lock_timeout',${policy?.timeout ?? "0"},true)`;
+            const workspace = await authority(workspaceID, userID, sql);
+            const current = await nativeRow(workspaceID, sql);
+            if (nativeSources && current?.attemptID) {
+              if (current.sourceOwner !== "service" && !current.ready)
+                throw new CommandError(
+                  "unavailable",
+                  "Actor Source is not ready; compute was not started",
+                );
+              if (["write", "mkdir", "rename", "delete"].includes(operation)) {
+                const writer = await workspaceWriteAuthorityIn(sql, workspaceID, userID);
+                admittedRequest.headers.set(
+                  "X-Factory-Writer-Epoch",
+                  writer.writerEpoch ?? current.sourceEpoch ?? "1",
+                );
+              }
+              streams.set(controller, { userID, workspaceID, projectID: workspace.projectID });
+              return nativeSources.forward(
+                workspaceID,
+                current.attemptID,
+                operation,
+                admittedRequest,
+                sql,
+              );
+            }
+            if (
+              !current?.ready ||
+              !current.attemptID ||
+              !nativeHub?.sourceConnected(current.attemptID)
+            )
+              throw new CommandError(
+                "unavailable",
+                "Native canonical Source is not connected; compute was not started",
+              );
+            if (["write", "mkdir", "rename", "delete"].includes(operation)) {
+              const writer = await workspaceWriteAuthorityIn(sql, workspaceID, userID);
+              admittedRequest.headers.set("X-Factory-Writer-Epoch", writer.writerEpoch ?? "1");
+            }
+            streams.set(controller, { userID, workspaceID, projectID: workspace.projectID });
+            return nativeHub.request(
+              current.attemptID,
+              "source",
+              admittedRequest,
+              `/v1/workspaces/${workspaceID}/${operation}`,
+            );
+          }
           if (["write", "mkdir", "rename", "delete"].includes(operation)) {
             const writer = await workspaceWriteAuthorityIn(sql, workspaceID, userID);
             if (writer.writerEpoch) {
@@ -611,6 +791,11 @@ export function createWorkspaceSourceController(
     async stop(workspaceID: string, userID: string) {
       await database.client.begin(async (sql) => {
         await authority(workspaceID, userID, sql);
+        if (await nativeRow(workspaceID, sql))
+          throw new CommandError(
+            "unavailable",
+            "Native Source is retained by this Workspace. Independent Source Stop is not enabled; no data was released.",
+          );
         await sql`UPDATE factory.workspace_source SET state='stop-intended',stop_intended_at=COALESCE(stop_intended_at,now()),updated_at=now() WHERE workspace_id=${workspaceID} AND state<>'stopped'`;
       });
       revokeWorkspace(workspaceID);
@@ -656,6 +841,7 @@ export function createWorkspaceSourceController(
       closed = true;
       for (const controller of streams.keys()) controller.abort();
       client.close();
+      await nativeSources?.close();
       const deadline = now() + 5_000;
       while (pending.size && now() < deadline) await Bun.sleep(10);
     },

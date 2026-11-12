@@ -14,6 +14,7 @@ import {
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
   executeFactoryboxOperation,
+  factoryboxWorkerDeclaration,
   factoryboxWorkerIdentity,
   runFactoryboxKubernetes,
 } from "../../packages/runtime-kubernetes/src/factorybox-worker";
@@ -29,6 +30,7 @@ const retainedInput = z.strictObject({
   labels: z.record(z.string(), z.string()),
   runtimeHostImage: z.string(),
   workerRuntimeHostImage: z.string().optional(),
+  workerDeclaration: factoryboxWorkerDeclaration.optional(),
   profile: factoryboxRuntimeProfile,
   sharedSource: z.boolean(),
   storageNode: z.string().optional(),
@@ -55,12 +57,14 @@ const rowSchema = z.object({
 // an exec. Bind the retained native Sandbox, assignment and worker epoch first.
 export function factoryboxFixtureTarget(value: unknown) {
   const row = rowSchema.parse(value);
-  const { reserve, storageNode, workerRuntimeHostImage, ...required } = row.request;
+  const { reserve, storageNode, workerRuntimeHostImage, workerDeclaration, ...required } =
+    row.request;
   const input: FactoryboxRuntimeInput = {
     ...required,
     ...(reserve === undefined ? {} : { reserve }),
     ...(storageNode === undefined ? {} : { storageNode }),
     ...(workerRuntimeHostImage === undefined ? {} : { workerRuntimeHostImage }),
+    ...(workerDeclaration === undefined ? {} : { workerDeclaration }),
   };
   const { identity } = row;
   const location = factoryboxLocation(row.workerID);

@@ -1,0 +1,22 @@
+{
+  "globalFlags": [
+    "-log-format",
+    "json",
+    "--alsologtostderr",
+    "--allow-suid",
+    "--host-settings=ignore",
+    "--net-raw",
+    "--allow-packet-socket-write",
+    "--tar-timestamp-resolution=nanoseconds"
+  ],
+  "commands": {
+    "create": { "globalFlags": ["--cpu-num-from-quota"] },
+    "start": { "globalFlags": ["-allow-connected-on-save"] },
+    "restore": {
+      "globalFlags": ["--cpu-num-from-quota"],
+      "subcommandFlags": ["-background", "-detach"]
+    },
+    "delete": { "subcommandFlags": ["-force"] },
+    "list": { "subcommandFlags": ["-quiet"] }
+  }
+}

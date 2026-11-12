@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer, type ViteDevServer } from "vite";
@@ -27,6 +28,32 @@ function developmentServer(basePath: string) {
       root: fileURLToPath(new URL("../", import.meta.url)),
       configLoader: "native",
       base: `${basePath}/`,
+      // Optimized modules embed their public base. App, Preview and root health
+      // graphs must not replace each other's lazy dependency chunks.
+      cacheDir: fileURLToPath(
+        new URL(
+          `../node_modules/.vite/factory/${createHash("sha256").update(basePath).digest("hex")}`,
+          import.meta.url,
+        ),
+      ),
+      // These lazily reached auth/router entries otherwise invalidate the
+      // decoder chunk during the first successful signup's session refresh.
+      optimizeDeps: {
+        include: [
+          "@better-auth/core/env",
+          "@better-auth/core/error",
+          "@better-auth/core/utils/string",
+          "@better-auth/core/utils/url",
+          "@better-fetch/fetch",
+          "@tanstack/history",
+          "@tanstack/router-core",
+          "@tanstack/router-core/isServer",
+          "@tanstack/router-core/scroll-restoration-script",
+          "@tanstack/router-core/ssr/client",
+          "defu",
+          "nanostores",
+        ],
+      },
       server: { middlewareMode: true, ws: { server }, allowedHosts: true },
     });
     servers.set(basePath, pending);
