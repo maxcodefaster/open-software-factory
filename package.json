@@ -29,7 +29,7 @@
     "factorybox:build": "bun scripts/runtime/factorybox-build.ts",
     "factorybox:publish": "bun scripts/runtime/factorybox-publish.ts",
     "connector:check": "bun run connector:check:host && bun run connector:check:linux",
-    "connector:check:host": "cd services/runtime-connector && go test -race ./... && go vet ./...",
+    "connector:check:host": "cd services/runtime-connector && go test -p 2 -race ./... && go vet -p 2 ./...",
     "connector:check:linux": "bun scripts/testing/connector-linux.ts",
     "substrate:check": "cd services/substrate-control && go test -race ./... && go vet ./...",
     "db:migrate": "bun packages/db/src/migrate.ts",

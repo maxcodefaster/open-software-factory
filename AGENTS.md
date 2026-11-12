@@ -18,10 +18,16 @@
 
 - Factory is the sole product control plane. No Coder stack, Terraform, generic runtime providers,
   compatibility layers or old migrations.
-- Every new Sandbox uses an admitted, pinned Factorybox worker with Sysbox and CRIU, a private
-  Docker daemon, the exact Dev Containers CLI and the Factory Runtime Connector. Keep each
-  worker in one trust domain. Run upstream components exactly pinned; ordered runtime patches
-  and native qualification belong to the standalone Factorybox repository.
+- Substrate is the sole target execution runtime. Factory owns product authority and execution
+  intent; the pinned official Substrate owns Actor lifecycle and snapshots. Reuse its native
+  operations, with private Docker, the exact Dev Containers CLI and the Factory Runtime Connector.
+  ROOTFS cold restart is accepted; warm memory restore is not a prerequisite. Preserve TLS,
+  egress, writer ownership and external-effect safeguards. No private runtime fork or new lifecycle engine.
+- This is greenfield development, not a Factorybox interoperability or retained-installation
+  migration programme. Remove obsolete execution paths instead of adding compatibility branches.
+  Preserve real user data and unrelated work, but do not build product recovery features solely
+  to rescue disposable failed fixtures. Recreate an exactly owned fixture when that is the simpler
+  correct test. Do not describe the runtime replacement as shipped until its full product path works.
 - Keep vendor/framework types behind Factory adapters and out of domain modules.
 - Use Solid 2 APIs and OpenCode 2 through `@opencode/client`. No OpenCode 1 compatibility SDK.
   Zero is for planning mutations/cached reads; runtime lifecycle and decisions use authenticated commands.
@@ -89,5 +95,8 @@
   UI changes need affected browser checks and inspected screenshots; runtime changes need native proof.
 - Live fixtures must own separate resources. Cleanup requires exact ownership and preserves unrelated
   data. Never reset the retained installation to make a test pass.
+- Use one implementation owner and one heavy verification lane on a host. Cancellation must clean
+  up owned subprocesses and containers; an interrupted check is not a pass. Never use an indefinite
+  log follower as a progress check or keep automatic continuations running after an explicit takeover.
 - Change approach when work stalls instead of repeating unproductive steps. Finish with concrete
   evidence and any remaining limits.
