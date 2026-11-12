@@ -878,7 +878,9 @@ export function createDeliveryController(
           await database.client`SELECT session.change_id FROM factory.change_agent_session session
           JOIN factory.change_writer writer ON writer.change_id=session.change_id
           LEFT JOIN factory.agent_turn turn ON turn.id=session.active_turn_id
-          WHERE session.change_id=${changeID} AND (session.stop_pending OR session.state IN ('failed','stopped','waiting')
+           WHERE session.change_id=${changeID} AND (session.stop_pending OR (session.state IN ('failed','stopped','waiting') AND NOT EXISTS(
+             SELECT id FROM factory.change_commit_operation WHERE change_id=${changeID} AND source::text='workspace' AND state='succeeded'
+               AND sequence=(SELECT max(sequence) FROM factory.change_commit_operation WHERE change_id=${changeID} AND state='succeeded')))
             OR (session.state IN ('starting','working') AND turn.authority->'review' IS NULL)
             OR writer.state IN ('human','handoff') OR EXISTS(
               SELECT 1 FROM factory.candidate_review review

@@ -17,6 +17,8 @@ type ApiServices = Pick<
   | "developerIDEEdge"
   | "factoryAuth"
   | "factoryOrigin"
+  | "externalMCP"
+  | "workspaceTransferRoutes"
   | "forgeIdentityRoutes"
   | "mcpOAuthCallback"
   | "requireSession"
@@ -37,6 +39,8 @@ export function createApiProtocol(services: ApiServices) {
     developerIDEEdge,
     factoryAuth,
     factoryOrigin,
+    externalMCP,
+    workspaceTransferRoutes,
     forgeIdentityRoutes,
     mcpOAuthCallback,
     requireSession,
@@ -72,6 +76,9 @@ export function createApiProtocol(services: ApiServices) {
       if (url.pathname === "/api/auth/.well-known/openid-configuration" && request.method === "GET")
         return json(await factoryAuth.discovery());
       if (url.pathname.startsWith("/api/auth/")) return factoryAuth.handler(request);
+      if (url.pathname === "/api/mcp") return externalMCP(request);
+      if (url.pathname.startsWith("/api/workspace-transfers/"))
+        return workspaceTransferRoutes(request);
       if (url.pathname === "/api/zero/query" && request.method === "POST") {
         return handleZeroQuery(request, database, await requireSession(request));
       }

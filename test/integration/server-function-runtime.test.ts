@@ -129,6 +129,7 @@ test("compiled Stop confirms an authorized prebuild without rejecting its settle
     updatedAt: new Date("2026-10-28T00:01:00Z"),
   };
   const runtime = createRuntimeService({
+    database: { client: async () => [{ id: null }] },
     access: {
       async requireRuntime(userID: string, id: string, channel: string) {
         expect([userID, id, channel]).toEqual([actor, attemptID, "ide"]);

@@ -1,0 +1,54 @@
+.workspace-sharing-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.workspace-sharing-choice select {
+  max-width: 18rem;
+}
+.workspace-sharing-dialog {
+  width: min(38rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  padding: 0;
+  color: var(--color-ink);
+  background: var(--material-document);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-control);
+}
+.workspace-sharing-dialog::backdrop {
+  background: rgb(0 0 0 / 30%);
+}
+.workspace-sharing-body {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+.workspace-sharing-body p {
+  margin: 0;
+}
+.workspace-sharing-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, auto);
+  align-items: center;
+  gap: var(--space-3);
+}
+.workspace-sharing-error {
+  margin: var(--space-2);
+}
+@media (max-width: 600px) {
+  .workspace-sharing-choice {
+    flex-wrap: wrap;
+  }
+  .workspace-sharing-choice select {
+    max-width: 12rem;
+  }
+}
+.workspace-sharing-controls {
+  grid-column: 1 / -1;
+  min-width: 0;
+  align-self: start;
+}
+.workspace-sharing-controls .workspace-action-bar {
+  padding: var(--space-1) var(--space-2);
+}

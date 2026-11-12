@@ -104,6 +104,8 @@
     "turndown": "7.2.4",
     "turndown-plugin-gfm": "1.0.2",
     "yaml": "2.9.1",
+    "yjs": "13.6.33",
+    "y-protocols": "1.0.7",
     "zod": "4.6.7"
   },
   "devDependencies": {

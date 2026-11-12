@@ -31,6 +31,10 @@ type terminalSession struct {
 	output     []byte
 	executable os.FileInfo
 	cpu        uint64
+	digest     string
+	startedAt  string
+	outputSize uint64
+	cancelled  bool
 }
 
 type terminalManager struct {
@@ -42,6 +46,8 @@ type terminalManager struct {
 	streams    map[string]string
 	revision   uint64
 	busy       int
+	completed  map[string]CommandView
+	closedIDs  []string
 }
 
 func (manager *terminalManager) observation() Message {
@@ -86,6 +92,7 @@ func newTerminalManager(ctx context.Context, assignment Assignment, send func(Me
 		send:       send,
 		sessions:   make(map[string]*terminalSession),
 		streams:    make(map[string]string),
+		completed:  make(map[string]CommandView),
 	}
 }
 
@@ -154,7 +161,7 @@ func (manager *terminalManager) start(id string) (*terminalSession, error) {
 		return nil, err
 	}
 	executable, _ := os.Stat(command.Path)
-	return &terminalSession{id: id, file: file, command: command, executable: executable}, nil
+	return &terminalSession{id: id, file: file, command: command, executable: executable, startedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
 }
 
 func (manager *terminalManager) read(session *terminalSession) {
@@ -164,6 +171,7 @@ func (manager *terminalManager) read(session *terminalSession) {
 		if count > 0 {
 			content := append([]byte(nil), buffer[:count]...)
 			manager.mutex.Lock()
+			session.outputSize += uint64(count)
 			session.output = append(session.output, content...)
 			if len(session.output) > maxTerminalScrollback {
 				session.output = append([]byte(nil), session.output[len(session.output)-maxTerminalScrollback:]...)
@@ -185,6 +193,29 @@ func (manager *terminalManager) read(session *terminalSession) {
 	}
 	_ = session.command.Wait()
 	manager.mutex.Lock()
+	var final *CommandView
+	if session.digest != "" {
+		view := manager.commandSnapshot(session, session.outputSize-uint64(len(session.output)))
+		view.Stdout = append([]byte(nil), session.output...)
+		view.StdoutNext = session.outputSize
+		view.State = "exited"
+		if session.cancelled || manager.ctx.Err() != nil {
+			view.State = "cancelled"
+		}
+		view.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		code := session.command.ProcessState.ExitCode()
+		view.ExitCode = &code
+		manager.completed[session.id] = view
+		manager.closedIDs = append(manager.closedIDs, session.id)
+		if len(manager.closedIDs) > 128 {
+			old := manager.completed[manager.closedIDs[0]]
+			old.Stdout = nil
+			old.StdoutFrom = old.StdoutNext
+			manager.completed[old.ID] = old
+			manager.closedIDs = manager.closedIDs[1:]
+		}
+		final = &view
+	}
 	current := manager.sessions[session.id]
 	if current == session {
 		delete(manager.sessions, session.id)
@@ -195,12 +226,153 @@ func (manager *terminalManager) read(session *terminalSession) {
 	}
 	streamID := session.attachment
 	manager.mutex.Unlock()
+	if final != nil {
+		final.Stdout = nil
+		data, _ := json.Marshal(final)
+		_ = manager.send(Message{Type: "command-state", Data: string(data)})
+	}
 	if current == session {
 		manager.publish()
 	}
 	if streamID != "" {
 		_ = manager.send(Message{Type: "stream-close", StreamID: streamID})
 	}
+}
+
+// MCP observes the same retained PTY without taking over its browser attachment.
+func (manager *terminalManager) openCommand(input CommandRequest) (CommandView, error) {
+	if !commandIDPattern.MatchString(input.ID) || len(input.Digest) != 64 {
+		return CommandView{}, errors.New("invalid terminal command identity")
+	}
+	manager.mutex.Lock()
+	if previous, exists := manager.completed[input.ID]; exists {
+		manager.mutex.Unlock()
+		if previous.Digest != input.Digest {
+			return CommandView{}, errors.New("terminal identity already belongs to another operation")
+		}
+		return terminalCompletedPage(previous, 0), nil
+	}
+	session := manager.sessions[input.ID]
+	created := false
+	if session == nil {
+		if len(manager.sessions) >= maxTerminalSessions || manager.ctx.Err() != nil {
+			manager.mutex.Unlock()
+			return CommandView{}, errors.New("terminal execution is unavailable")
+		}
+		var err error
+		session, err = manager.start(input.ID)
+		if err != nil {
+			manager.mutex.Unlock()
+			return CommandView{}, err
+		}
+		session.digest = input.Digest
+		manager.sessions[input.ID] = session
+		manager.revision++
+		created = true
+	} else if session.digest != input.Digest {
+		manager.mutex.Unlock()
+		return CommandView{}, errors.New("terminal identity already belongs to another operation")
+	}
+	view := manager.commandSnapshot(session, 0)
+	manager.mutex.Unlock()
+	if created {
+		go manager.read(session)
+		manager.publish()
+	}
+	return view, nil
+}
+
+func (manager *terminalManager) commandSnapshot(session *terminalSession, cursor uint64) CommandView {
+	start := session.outputSize - uint64(len(session.output))
+	lost := cursor < start
+	if cursor < start {
+		cursor = start
+	}
+	if cursor > session.outputSize {
+		cursor = session.outputSize
+	}
+	end := min(session.outputSize, cursor+16384)
+	return CommandView{ID: session.id, Digest: session.digest, State: "running", PID: session.command.Process.Pid,
+		StartedAt: session.startedAt, Stdout: append([]byte(nil), session.output[cursor-start:end-start]...),
+		StdoutFrom: cursor, StdoutNext: end, OutputLost: lost}
+}
+
+func (manager *terminalManager) readCommand(input CommandRead) (CommandView, error) {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	session := manager.sessions[input.ID]
+	if session == nil {
+		if previous, exists := manager.completed[input.ID]; exists {
+			return terminalCompletedPage(previous, input.Stdout), nil
+		}
+	}
+	if session == nil || session.digest == "" {
+		return CommandView{}, errors.New("terminal outcome is unavailable in this runtime")
+	}
+	return manager.commandSnapshot(session, input.Stdout), nil
+}
+
+func terminalCompletedPage(view CommandView, cursor uint64) CommandView {
+	start := view.StdoutFrom
+	view.OutputLost = cursor < start
+	if cursor < start {
+		cursor = start
+	}
+	if cursor > view.StdoutNext {
+		cursor = view.StdoutNext
+	}
+	end := min(view.StdoutNext, cursor+16384)
+	view.Stdout = append([]byte(nil), view.Stdout[cursor-start:end-start]...)
+	view.StdoutFrom, view.StdoutNext = cursor, end
+	return view
+}
+
+type terminalCommandInput struct {
+	ID      string `json:"id"`
+	Input   []byte `json:"input,omitempty"`
+	Columns uint16 `json:"columns,omitempty"`
+	Rows    uint16 `json:"rows,omitempty"`
+}
+
+func (manager *terminalManager) inputCommand(input terminalCommandInput, resize bool) (CommandView, error) {
+	if len(input.Input) > 8192 {
+		return CommandView{}, errors.New("terminal input is too large")
+	}
+	manager.mutex.Lock()
+	session := manager.sessions[input.ID]
+	manager.mutex.Unlock()
+	if session == nil || session.digest == "" {
+		return CommandView{}, errors.New("terminal is unavailable")
+	}
+	var err error
+	if resize {
+		if input.Columns < 2 || input.Columns > 500 || input.Rows < 1 || input.Rows > 500 {
+			return CommandView{}, errors.New("invalid terminal size")
+		}
+		err = pty.Setsize(session.file, &pty.Winsize{Cols: input.Columns, Rows: input.Rows})
+	} else {
+		_, err = session.file.Write(input.Input)
+	}
+	if err != nil {
+		return CommandView{}, err
+	}
+	return manager.readCommand(CommandRead{ID: input.ID})
+}
+
+func (manager *terminalManager) closeCommand(input CommandRead) (CommandView, error) {
+	view, err := manager.readCommand(input)
+	if err != nil {
+		return CommandView{}, err
+	}
+	if view.State != "running" {
+		return view, nil
+	}
+	if err := manager.close(input.ID); err != nil {
+		return CommandView{}, err
+	}
+	view.State = "cancelled"
+	view.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return view, nil
 }
 
 func (manager *terminalManager) write(message Message) (bool, error) {
@@ -266,6 +438,7 @@ func (manager *terminalManager) close(id string) error {
 		return nil
 	}
 	delete(manager.sessions, id)
+	session.cancelled = true
 	manager.revision++
 	if session.attachment != "" {
 		delete(manager.streams, session.attachment)

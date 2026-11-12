@@ -305,6 +305,99 @@ test("canonical Source HTTP uses only the advertising Parent and strips all othe
   }
 });
 
+test("queued WebSocket backpressure is accepted for child and parent RPC frames", async () => {
+  const hub = new RuntimeHub(async () => {});
+  const parent = {
+    ...connectorSocket("parent"),
+    send: () => -1,
+  } as ServerWebSocket<RuntimeSocketData>;
+  const child = {
+    ...connectorSocket("child"),
+    send: () => -1,
+  } as ServerWebSocket<RuntimeSocketData>;
+  hub.open(parent);
+  hub.open(child);
+  try {
+    const request = hub.childRequest("attempt", {
+      operationId: "queued-chunk",
+      action: "file-upload-chunk",
+      data: "large chunk",
+    });
+    queueMicrotask(() =>
+      hub.message(
+        child,
+        JSON.stringify({
+          type: "operation-response",
+          operationId: "queued-chunk",
+          action: "file-upload-chunk",
+          data: "accepted queued bytes",
+        }),
+      ),
+    );
+    expect(await request).toBe("accepted queued bytes");
+    const operation = hub.parentOperation("attempt", {
+      operationId: "queued-parent",
+      action: "git-prepare-commit",
+    });
+    queueMicrotask(() =>
+      hub.message(
+        parent,
+        JSON.stringify({
+          type: "operation-response",
+          operationId: "queued-parent",
+          action: "git-prepare-commit",
+          data: "accepted queued parent",
+        }),
+      ),
+    );
+    expect((await operation).data).toBe("accepted queued parent");
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test("detached Commands protect compute from idle Pause until their native outcome", () => {
+  let now = 0;
+  const hub = new RuntimeHub(
+    async () => {},
+    () => now,
+  );
+  const parent = connectorSocket("parent"),
+    child = connectorSocket("child");
+  hub.open(parent);
+  hub.open(child);
+  hub.message(
+    child,
+    JSON.stringify({
+      type: "hello",
+      role: "child",
+      channels: [],
+      terminalCount: 0,
+      terminalBusy: 0,
+      terminalRevision: 1,
+      commandCount: 1,
+    }),
+  );
+  const observed: string[] = [];
+  const unsubscribe = hub.onCommandState((id, data) => observed.push(`${id}:${data}`));
+  try {
+    now = 10_000;
+    expect(hub.attended("attempt")).toBe(false);
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    hub.message(child, JSON.stringify({ type: "command-state", commandCount: -1, data: "{}" }));
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    hub.message(
+      child,
+      JSON.stringify({ type: "command-state", commandCount: 0, data: '{"state":"exited"}' }),
+    );
+    expect(observed.at(-1)).toBe('attempt:{"state":"exited"}');
+    expect(hub.claimIdle("attempt", 100)).toBe(true);
+  } finally {
+    unsubscribe();
+    hub.revoke("attempt");
+  }
+});
+
 test("Source capability is re-established after Parent reconnect; old sockets cannot answer new requests", async () => {
   const hub = new RuntimeHub(async () => {});
   const first = connectorSocket("parent");
@@ -363,6 +456,51 @@ test("Source capability is re-established after Parent reconnect; old sockets ca
     );
     expect((await pending).status).toBe(200);
     hub.revoke("attempt");
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test("structured child commands return observations and recheck authority at dispatch", async () => {
+  const hub = new RuntimeHub(async () => {});
+  const sent: unknown[] = [];
+  const child = {
+    ...connectorSocket("child"),
+    send(value: string) {
+      sent.push(JSON.parse(value));
+      return 1;
+    },
+  } as ServerWebSocket<RuntimeSocketData>;
+  hub.open(connectorSocket("parent"));
+  hub.open(child);
+  try {
+    const result = hub.childRequest("attempt", {
+      operationId: "command-read-1",
+      action: "command-read",
+      data: '{"id":"command-1"}',
+    });
+    expect(sent.at(-1)).toMatchObject({ action: "command-read" });
+    hub.message(
+      child,
+      JSON.stringify({
+        type: "operation-response",
+        operationId: "command-read-1",
+        action: "command-read",
+        data: '{"state":"running"}',
+      }),
+    );
+    expect(await result).toBe('{"state":"running"}');
+    const count = sent.length;
+    await expect(
+      hub.childRequest(
+        "attempt",
+        { operationId: "command-start-1", action: "command-start" },
+        async () => {
+          throw new Error("Workspace access removed");
+        },
+      ),
+    ).rejects.toThrow("Workspace access removed");
+    expect(sent).toHaveLength(count);
   } finally {
     hub.revoke("attempt");
   }
@@ -473,7 +611,13 @@ test("idle admission retains detached PTYs and unknown observations, not unatten
   const observe = (terminalCount: number, terminalRevision: number, terminalBusy = terminalCount) =>
     hub.message(
       child,
-      JSON.stringify({ type: "terminal-state", terminalCount, terminalBusy, terminalRevision }),
+      JSON.stringify({
+        type: "terminal-state",
+        terminalCount,
+        terminalBusy,
+        terminalRevision,
+        commandCount: 0,
+      }),
     );
   try {
     now = 1000;
@@ -524,6 +668,7 @@ test("an unattended Workspace pauses after the quiet grace; an open IDE keeps th
     child,
     JSON.stringify({
       type: "terminal-state",
+      commandCount: 0,
       terminalCount: 0,
       terminalBusy: 0,
       terminalRevision: 1,
@@ -540,6 +685,7 @@ test("an unattended Workspace pauses after the quiet grace; an open IDE keeps th
       child,
       JSON.stringify({
         type: "terminal-state",
+        commandCount: 0,
         terminalCount: 0,
         terminalBusy: 0,
         terminalRevision: 1,
@@ -554,6 +700,7 @@ test("an unattended Workspace pauses after the quiet grace; an open IDE keeps th
       child,
       JSON.stringify({
         type: "terminal-state",
+        commandCount: 0,
         terminalCount: 0,
         terminalBusy: 0,
         terminalRevision: 1,
@@ -602,7 +749,13 @@ test("open terminals block automatic Pause even when the shell reports an idle p
   const observe = (terminalBusy: number, terminalRevision: number) =>
     hub.message(
       child,
-      JSON.stringify({ type: "terminal-state", terminalCount: 1, terminalBusy, terminalRevision }),
+      JSON.stringify({
+        type: "terminal-state",
+        terminalCount: 1,
+        terminalBusy,
+        terminalRevision,
+        commandCount: 0,
+      }),
     );
   try {
     observe(0, 1);
@@ -638,6 +791,7 @@ test("automatic Pause requires a fresh and consistent empty terminal observation
       child,
       JSON.stringify({
         type: "terminal-state",
+        commandCount: 0,
         terminalCount,
         terminalBusy: 0,
         terminalRevision,
@@ -671,6 +825,7 @@ test("background HTTP reads cannot keep compute awake while a pending write rema
     child,
     JSON.stringify({
       type: "terminal-state",
+      commandCount: 0,
       terminalCount: 0,
       terminalBusy: 0,
       terminalRevision: 1,

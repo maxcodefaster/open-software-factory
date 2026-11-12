@@ -62,7 +62,13 @@ export async function prepareVerificationHandoff(
             AND (state IN ('starting','working') OR stop_pending))
           OR EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${scope.changeID}
             AND state NOT IN ('succeeded','failed')) AS active,
-          EXISTS(SELECT 1 FROM factory.change_agent_session session
+           (EXISTS(SELECT 1 FROM factory.workspace_submission receipt
+             JOIN factory.change_commit_operation submitted ON submitted.id=receipt.id
+             JOIN factory.verification verification ON verification.change_id=submitted.change_id
+             JOIN factory.change_writer writer ON writer.change_id=submitted.change_id
+             WHERE submitted.change_id=${scope.changeID} AND verification.id=${verificationID}
+               AND submitted.state='succeeded' AND submitted.commit_sha=verification.commit_sha
+               AND submitted.runtime_attempt_id=${current.attemptID} AND writer.state='unassigned') OR EXISTS(SELECT 1 FROM factory.change_agent_session session
             JOIN factory.change_writer writer ON writer.change_id=session.change_id
             JOIN factory.agent_turn turn ON turn.id=session.active_turn_id
               AND turn.change_id=session.change_id
@@ -75,7 +81,7 @@ export async function prepareVerificationHandoff(
               AND (writer.state='unassigned' OR (writer.state='agent' AND writer.turn_id=turn.id))
               AND submitted.commit_sha=verification.commit_sha
               AND (session.runtime_attempt_id=${current.attemptID}
-                OR submitted.runtime_attempt_id=${current.attemptID})) AS submitted`;
+                 OR submitted.runtime_attempt_id=${current.attemptID}))) AS submitted`;
       // An active or unrelated writer is never reclaimed for this purpose.
       // Existing admission rules still own independently commissioned execution.
       if (work?.active || !work?.submitted) return { ready: true };

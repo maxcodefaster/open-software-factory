@@ -40,6 +40,7 @@ import { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 import { FactoryWorkspaceTree } from "./factory-workspace-tree";
 import { FactoryWorkspaceWidget } from "./factory-workspace-widget";
 import { FactoryWriterContribution } from "./factory-writer";
+import { FactoryCollaboration } from "./factory-collaboration";
 import "./factory-ide.css";
 import { FactoryGitContribution, FactoryGitWidget, factoryGitWidgetID } from "./factory-git-widget";
 
@@ -110,6 +111,8 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     },
   }));
   bind(FactoryWriterContribution).toSelf().inSingletonScope();
+  bind(FactoryCollaboration).toSelf().inSingletonScope();
+  bind(FrontendApplicationContribution).toService(FactoryCollaboration);
   bind(FrontendApplicationContribution).toService(FactoryWriterContribution);
 
   bind(FactoryDiagnosticsContribution).toSelf().inSingletonScope();

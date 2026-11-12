@@ -4,6 +4,7 @@ import {
   createPersonalGit,
   personalGitRepository,
 } from "../../apps/factory/src/workspace/personal-git";
+import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
@@ -57,7 +58,9 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
       },
     };
     const git = createPersonalGit(database, hub);
-    await expect(git.read(workspaceID, crypto.randomUUID())).rejects.toThrow("personal Workspace");
+    await expect(git.read(workspaceID, crypto.randomUUID())).rejects.toThrow(
+      "Account access is disabled",
+    );
     await expect(
       git.read(
         fixtureValue(
@@ -76,6 +79,26 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
     expect(
       await database.client`SELECT id FROM factory.personal_git_operation WHERE workspace_id=${workspaceID}`,
     ).toHaveLength(0);
+    const peer = crypto.randomUUID();
+    await database.client`INSERT INTO auth."user"(id,name,email)VALUES(${peer},'Git collaborator',${`${peer}@factory.invalid`})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)VALUES(${owned.projectID},${peer},'developer',${owned.userID})`;
+    await expect(git.read(workspaceID, peer)).rejects.toThrow("Workspace not found");
+    await createWorkspaceSharing(database, () => {}).decide(owned.userID, {
+      commandID: crypto.randomUUID(),
+      workspaceID,
+      userID: peer,
+      permission: "collaborate",
+      expectedVersion: 0,
+    });
+    expect(await git.read(workspaceID, peer)).toEqual({ head, branch: "main", files: [] });
+    expect(
+      (
+        await git.mutate(workspaceID, peer, "fetch", {
+          commandID: crypto.randomUUID(),
+          expectedHead: head,
+        })
+      ).head,
+    ).toBe(head);
     const command = {
       commandID: crypto.randomUUID(),
       expectedHead: head,

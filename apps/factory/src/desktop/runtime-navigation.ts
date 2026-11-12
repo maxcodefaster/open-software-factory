@@ -11,7 +11,11 @@ import type { ActivityNavigationRequest } from "../ide-messages";
 import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
 import { ensureStaging, startFreshRuntimeAttempt } from "../server-functions/runtime";
-import { ensureChangeSource, ensurePersonalSource } from "../server-functions/workspaces";
+import {
+  ensureChangeSource,
+  ensurePersonalSource,
+  ensureWorkspaceSource,
+} from "../server-functions/workspaces";
 import type { WorkspaceTab } from "../workspace-tabs";
 import type { DesktopMutation, TicketDetail } from "./contracts";
 
@@ -69,9 +73,11 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     await dependencies.mutate(async () => {
       const source = await untilReachable(() =>
         serverCall(
-          target.changeId
-            ? ensureChangeSource({ data: [target.changeId] })
-            : ensurePersonalSource({ data: [projectID] }),
+          target.workspaceId
+            ? ensureWorkspaceSource({ data: [target.workspaceId] })
+            : target.changeId
+              ? ensureChangeSource({ data: [target.changeId] })
+              : ensurePersonalSource({ data: [projectID] }),
         ),
       ).catch((cause: unknown) => {
         dependencies.updateWorkspaceTab(

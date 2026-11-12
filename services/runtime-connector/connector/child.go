@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,8 @@ type childRuntime struct {
 	processes      *processManager
 	terminals      *terminalManager
 	languages      *languageManager
+	commands       *commandManager
+	files          *containerFileManager
 }
 
 type terminalControl struct {
@@ -122,6 +125,27 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		control.close()
 		<-agentDone
 	}()
+	runtime.commands = newCommandManager(ctx, assignment, runtime.send)
+	defer runtime.commands.close()
+	if processes.development {
+		runtime.files, err = newContainerFileManager("/")
+		if err != nil {
+			return fail(errors.New("container file access could not initialize"))
+		}
+		defer runtime.files.close()
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					runtime.files.sweep()
+				}
+			}
+		}()
+	}
 	runtime.terminals = newTerminalManager(ctx, assignment, runtime.send)
 	go runtime.terminals.watch()
 	defer runtime.terminals.closeAll()
@@ -131,6 +155,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		runtime.languages.reconnect()
 		runtime.setControl(control)
 		terminals := runtime.terminals.observation()
+		commandCount := runtime.commands.activeCount()
 		if err := control.write(Message{
 			Type:             "hello",
 			Role:             "child",
@@ -140,10 +165,12 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 			TerminalCount:    terminals.TerminalCount,
 			TerminalBusy:     terminals.TerminalBusy,
 			TerminalRevision: terminals.TerminalRevision,
+			CommandCount:     &commandCount,
 		}); err != nil {
 			control.close()
 		} else {
 			processes.connect(control)
+			runtime.commands.reconnect()
 			readErrors := make(chan error, 1)
 			go func() { readErrors <- runtime.readLoop(ctx, control) }()
 			select {
@@ -292,6 +319,10 @@ func (runtime *childRuntime) setControl(control *controlConnection) {
 }
 
 func (runtime *childRuntime) send(message Message) error {
+	if (message.Type == "terminal-state" || message.Type == "command-state") && runtime.commands != nil {
+		count := runtime.commands.activeCount()
+		message.CommandCount = &count
+	}
 	runtime.controlLock.RLock()
 	control := runtime.control
 	runtime.controlLock.RUnlock()
@@ -315,6 +346,106 @@ func (runtime *childRuntime) handleOperation(message Message) {
 		response.Error = errorText(runtime.processes.action(message.Process, message.Action))
 	} else if message.Action == "terminal-close" {
 		response.Error = errorText(runtime.terminals.close(message.TerminalID))
+	} else if strings.HasPrefix(message.Action, "file-") && runtime.files != nil && runtime.processes != nil && runtime.processes.development {
+		var input ContainerFileRequest
+		var value any
+		err := json.Unmarshal([]byte(message.Data), &input)
+		if err == nil {
+			switch message.Action {
+			case "file-context":
+				value = map[string]any{"workspaceFolder": runtime.assignment.WorkspaceFolder, "userID": os.Geteuid()}
+			case "file-stat":
+				value, err = runtime.files.stat(input)
+			case "file-read":
+				value, err = runtime.files.read(input)
+			case "file-list":
+				value, err = runtime.files.list(input)
+			case "file-mkdir", "file-delete", "file-rename":
+				value, err = runtime.files.mutate(message.Action, input)
+			case "file-upload-begin":
+				value, err = runtime.files.beginUpload(input)
+			case "file-upload-chunk":
+				value, err = runtime.files.upload(input)
+			case "file-upload-commit":
+				value, err = runtime.files.commitUpload(input)
+			case "file-download-begin":
+				value, err = runtime.files.beginDownload(input)
+			case "file-download-chunk":
+				value, err = runtime.files.download(input)
+			case "file-release":
+				err = runtime.files.release(input)
+				value = map[string]bool{"released": err == nil}
+			case "file-transfer-status":
+				value, err = runtime.files.status(input)
+			default:
+				err = errors.New("unsupported container file operation")
+			}
+		}
+		response.Error = errorText(err)
+		if err == nil {
+			data, encodeErr := json.Marshal(value)
+			response.Error = errorText(encodeErr)
+			response.Data = string(data)
+		}
+	} else if strings.HasPrefix(message.Action, "pty-") && runtime.processes != nil && runtime.processes.development && runtime.terminals != nil {
+		var view CommandView
+		var err error
+		switch message.Action {
+		case "pty-open":
+			var input CommandRequest
+			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
+				view, err = runtime.terminals.openCommand(input)
+			}
+		case "pty-read", "pty-close":
+			var input CommandRead
+			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
+				if message.Action == "pty-read" {
+					view, err = runtime.terminals.readCommand(input)
+				} else {
+					view, err = runtime.terminals.closeCommand(input)
+				}
+			}
+		case "pty-input", "pty-resize":
+			var input terminalCommandInput
+			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
+				view, err = runtime.terminals.inputCommand(input, message.Action == "pty-resize")
+			}
+		default:
+			err = errors.New("unsupported PTY operation")
+		}
+		response.Error = errorText(err)
+		if err == nil {
+			data, encodeErr := json.Marshal(view)
+			response.Error = errorText(encodeErr)
+			response.Data = string(data)
+		}
+	} else if strings.HasPrefix(message.Action, "command-") && runtime.processes != nil && runtime.processes.development && runtime.commands != nil {
+		var view CommandView
+		var err error
+		if message.Action == "command-start" {
+			var input CommandRequest
+			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
+				view, err = runtime.commands.start(input)
+			}
+		} else {
+			var input CommandRead
+			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
+				switch message.Action {
+				case "command-read":
+					view, err = runtime.commands.read(input)
+				case "command-cancel":
+					view, err = runtime.commands.cancel(input.ID)
+				default:
+					err = errors.New("unsupported command operation")
+				}
+			}
+		}
+		response.Error = errorText(err)
+		if err == nil {
+			data, encodeErr := json.Marshal(view)
+			response.Error = errorText(encodeErr)
+			response.Data = string(data)
+		}
 	} else {
 		response.Error = "unsupported child operation"
 	}

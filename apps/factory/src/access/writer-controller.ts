@@ -93,6 +93,8 @@ export function createChangeWriterController(options: {
     return database.client.begin(async (sql) => {
       const writer = await lockChangeWriterIn(sql, changeID);
       await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+      const [shared] =
+        await sql`SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND collaboration_enabled`;
       const [actor] = await sql<
         { id: string; name: string; delegated: boolean; workState: string | null }[]
       >`
@@ -128,7 +130,11 @@ export function createChangeWriterController(options: {
       return {
         state: writer.state,
         epoch: Number(writer.epoch),
-        canWrite: !stopPending && writer.state === "human" && writer.userID === userID,
+        canWrite:
+          writer.available &&
+          !stopPending &&
+          writer.state === "human" &&
+          (writer.userID === userID || Boolean(shared)),
         stopPending,
         yours: writer.userID === userID || writer.requestedBy === userID,
         commandID: writer.requestedBy === userID ? writer.requestID : null,
@@ -161,17 +167,19 @@ export function createChangeWriterController(options: {
       await database.client.begin(async (sql) => {
         const writer = await lockChangeWriterIn(sql, changeID);
         await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+        const [shared] =
+          await sql`SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND collaboration_enabled`;
         if (
           !writer.available ||
           writer.state !== "human" ||
-          writer.userID !== userID ||
+          (writer.userID !== userID && !shared) ||
           writer.epoch !== String(expectedEpoch)
         )
           throw new CommandError(
             "conflict",
             "Editing context changed. Keep your draft and check the current writer.",
           );
-        activity.observe(changeID, userID, writer.epoch, kind);
+        activity.observe(changeID, shared ? (writer.userID ?? userID) : userID, writer.epoch, kind);
       });
     },
     /** Pure observation: opening the shared chat must never acquire editing. */

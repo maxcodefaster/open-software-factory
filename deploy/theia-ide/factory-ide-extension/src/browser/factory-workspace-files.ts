@@ -26,6 +26,7 @@ import {
   SourceResponseError,
   type SourceTransport,
 } from "./factory-source-client";
+import { sharedEditorDocuments } from "./factory-collaboration-registry";
 
 export const workspaceScheme = "factory-workspace";
 
@@ -293,6 +294,12 @@ export class FactoryWorkspaceFiles
   }
 
   async writeFile(resource: URI, content: Uint8Array, options: FileWriteOptions): Promise<void> {
+    const shared = sharedEditorDocuments.get(resource.toString());
+    if (shared) {
+      const file = sourceFile(await shared.save());
+      this.versions.set(resource.toString(), file.version);
+      return;
+    }
     this.clearDirectoryMetadata(resource.authority);
     if (content.length > 2 << 20)
       throw createFileSystemProviderError(
@@ -349,6 +356,7 @@ export class FactoryWorkspaceFiles
     const root = new URI(`${workspaceScheme}://${workspaceID}/`);
     const resource = change.path ? root.resolve(change.path) : root;
     workspaceResource(resource);
+    if (sharedEditorDocuments.has(resource.toString()) && change.kind === "updated") return;
     if (change.kind === "resync") {
       this.watchConnection(workspaceID, undefined);
       const observed = [...this.versions.keys()]

@@ -205,6 +205,26 @@ export function createIdentityConfiguration(
       await refresh();
       return active.session(request);
     },
+    async mcpDiscovery() {
+      await refresh();
+      return active.mcpDiscovery();
+    },
+    async mcpResourceMetadata() {
+      await refresh();
+      return active.mcpResourceMetadata();
+    },
+    async mcpSession(request: Request) {
+      await refresh();
+      return active.mcpSession(request);
+    },
+    async mcpConsentDetails(request: Request, query: string) {
+      await refresh();
+      return active.mcpConsentDetails(request, query);
+    },
+    async mcpConsent(request: Request, query: string, accept: boolean, work: boolean) {
+      await refresh();
+      return active.mcpConsent(request, query, accept, work);
+    },
     async requireFresh(request: Request) {
       await refresh();
       return active.requireFresh(request);

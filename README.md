@@ -53,6 +53,70 @@ Project Wikis keep revisions and human edits. Roles separate product work, devel
 administration. OpenBao encrypts secrets. Backups include Git, database, objects and secrets.
 Learning proposals need approval before adoption.
 
+## Use a local agent with Factory compute
+
+Point a remote MCP client at `https://YOUR_FACTORY/api/mcp`. Sign in to Factory in your local
+browser and approve that client. Factory uses user OAuth with PKCE. It does not import your local
+browser sessions or model credentials. Your agent and browser stay local; shell commands and
+interactive terminals run as the development user inside the selected Workspace's Dev Container.
+
+Use `listProjects`, `listWorkspaces` and `openWorkspace` to select an existing Project or Workspace.
+Personal development does not require a Ticket. `startWorkspace`, `pauseWorkspace` and
+`stopWorkspace` control that Workspace's compute. Commands, terminals and container-file access
+resume paused compute, but never silently restart explicitly stopped or failed compute. A laptop
+disconnect does not cancel admitted remote commands. Use their returned IDs to observe outcomes.
+
+For Ticket work, `listTicketWorkspaces` returns retained Changes and `openWorkspace` accepts their
+`changeID`. `getWorkspaceEditing` reports the current editing phase. An explicit
+`takeOverTicketEditing` uses Factory's existing handoff and its observed writer epoch before a
+local agent can change a Ticket checkout. It does not start Coding or approve requirements.
+
+File tools default to `location: "checkout"`, with paths relative to retained source. Those reads
+do not wake compute. Select `location: "container"` for absolute paths inside the actual Dev
+Container. `getContainerContext` reports its Workspace folder and effective user ID. Container
+access requires development scope and collaboration permission. Keep the returned file version
+when changing an existing file. Versions detect observed changes; they do not coordinate arbitrary
+concurrent shell, formatter or Git writes, or save another editor's unsaved buffer.
+
+For binary or larger files, `beginFileTransfer` binds an upload or download to one user, Workspace
+and Runtime Attempt. Transfers support files up to 128 MiB and expire after 30 minutes. Use its
+authenticated HTTP URL for raw chunks up to 256 KiB, or the MCP chunk tools for smaller chunks.
+Send the MCP OAuth Bearer token in the `Authorization` header, never in the URL. An upload needs
+its byte length and SHA-256, and `commitFileTransfer` publishes it only after verification.
+Verify an assembled download against its reported SHA-256. `releaseFileTransfer` closes the
+handle and removes only its own unpublished temporary file. File bytes do not enter product history.
+
+Reuse request IDs only for the same deliberate operation. After a lost response, observe the
+existing command or transfer rather than starting a replacement. Unknown outcomes are not success.
+Command output and terminal scrollback are bounded and temporary. Save complete logs as files
+deliberately if you need to retain them.
+
+Personal Workspaces are private by default, including their development Previews. Their owner can
+explicitly grant another current Project Developer observation or collaboration through
+`shareWorkspace`. Participants use the same Dev Container, processes and Docker environment.
+Removing access does not cancel already-started code or stop shared compute. Command cancellation
+and Workspace Stop are separate actions. Project permissions remain the upper bound.
+
+In the IDE, use **Share Workspace** to manage personal access or choose a shared Workspace. Shared
+editing uses Yjs to merge document edits and show authenticated participants and cursors. Factory
+retains the shared buffer without requiring the owner's browser to stay open. Save writes that
+buffer to canonical source. If a shell, formatter or Git operation changes the saved file while
+the shared buffer has unsaved edits, Factory keeps the buffer and reports a conflict. The editor's
+conflict action compares both versions before you choose which to keep.
+
+Local agents can use `readSharedDocument`, `editSharedDocument` and `saveSharedDocument` to work
+with the same buffer. Reads are paged; edits require the exact observed revision. Agents appear
+under their authenticated user and OAuth client, not as an anonymous editor.
+
+For a Ticket Workspace in its human editing phase, **Enable shared editing** lets current Project
+Developers collaborate. **Submit saved checkout** captures the saved shared source for normal
+exact-commit Verification and independent review. Unsaved shared buffers must be saved or resolved
+first. Submission is not requirements approval, a passing review, or Delivery approval.
+
+For OpenCode V2, add the remote server with `opencode mcp add factory --url https://YOUR_FACTORY/api/mcp`,
+then use `/mcps` to sign in. Other MCP clients use the same URL and OAuth flow. No Factory-specific
+agent plugin is required.
+
 ## Released Factorybox measurements
 
 <img alt="Median pause 4.07 seconds, median resume to a healthy App 2.99 seconds, ten of ten state checks passed" src="assets/story/lifecycle.svg" width="100%">

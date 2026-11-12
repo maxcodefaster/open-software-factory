@@ -1,9 +1,21 @@
 import { createServerFn } from "@tanstack/solid-start";
+import { getRequestEvent } from "@solidjs/web";
 import { z } from "zod";
 import { identityConfigurationWrite } from "../../../../packages/identity-domain/src/configuration";
 import { managedUserInput, memberInput, passwordChangeInput } from "../access/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
+
+export const getMCPAuthorization = createServerFn({ method: "POST" })
+  .validator((args: [query: string]) => args)
+  .handler(async ({ data: [query] }) =>
+    factoryFunction(async () => {
+      const request = getRequestEvent()?.request;
+      if (!request) throw new Error("MCP authorization requires its authenticated request");
+      const context = factoryFunctionContext();
+      return context.access.mcpAuthorization(request, z.string().max(16384).parse(query));
+    }),
+  );
 
 export const getSecurityPolicy = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)

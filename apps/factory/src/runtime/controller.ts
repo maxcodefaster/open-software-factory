@@ -39,6 +39,7 @@ import {
   ticketWorkspaceIdentity,
 } from "../../../../packages/workspace-domain/src/workspace";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createOpenCodeClient } from "../agent/opencode-client";
 import { CommandError } from "../command-error";
 import { logFailure, reportFailure } from "../failure-log";
@@ -1864,18 +1865,38 @@ export function createRuntimeController(
         }, 1_000).unref();
       };
     },
-    async start(projectID: string, userID: string) {
+    async start(projectID: string, userID: string, selectedWorkspaceID?: string) {
       await createAccessController(database).requireDevelopment(userID, projectID);
       await requireSetupReady(database.client, projectID);
-      if (nativeWorkspaces?.matchesProject(projectID)) {
-        const id = await nativeWorkspaces.start(userID);
+      const selected = selectedWorkspaceID
+        ? await database.client.begin((sql) =>
+            workspaceWriteAuthorityIn(sql, selectedWorkspaceID, userID),
+          )
+        : undefined;
+      if (
+        selected &&
+        (selected.kind !== "personal" || selected.projectID !== projectID || !selected.ownerID)
+      )
+        throw new CommandError("not-found", "Personal Workspace not found");
+      const ownerID = selected?.ownerID ?? userID;
+      const workspaceIdentity = personalWorkspaceIdentity(projectID, ownerID);
+      if (selectedWorkspaceID && selectedWorkspaceID !== workspaceIdentity.workspaceID)
+        throw new CommandError(
+          "conflict",
+          "Personal Workspace identity differs from its retained owner",
+        );
+      if (nativeWorkspaces?.matchesProject(projectID) || substrate?.matchesProject(projectID)) {
+        if (ownerID !== userID)
+          throw new CommandError(
+            "unavailable",
+            "Native shared compute Start is not enabled. The owner's Workspace was not replaced or started as another user.",
+          );
+        const id = nativeWorkspaces?.matchesProject(projectID)
+          ? await nativeWorkspaces.start(userID)
+          : await substrate?.start(userID);
+        if (!id) throw new Error("Native Workspace configuration is unavailable");
         return this.get(id);
       }
-      if (substrate?.matchesProject(projectID)) {
-        const id = await substrate.start(userID);
-        return this.get(id);
-      }
-      const workspaceIdentity = personalWorkspaceIdentity(projectID, userID);
       // Source preparation, infrastructure calls and result reads use the
       // application pool. Session coordination must not reserve one of its slots.
       const lock = database.coordination();
@@ -1914,9 +1935,11 @@ export function createRuntimeController(
             workspace.kubernetes_namespace AS namespace,workspace.volume_name AS "volumeName"
           FROM factory.development_workspace workspace
           WHERE workspace.project_id = ${projectID} AND workspace.kind = 'personal'
-            AND workspace.owner_user_id = ${userID}
+            AND workspace.owner_user_id = ${ownerID}
         `;
         if (!workspaces[0]) {
+          if (selectedWorkspaceID)
+            throw new CommandError("not-found", "Shared Workspace not found");
           const revision = await resolveRepositoryRevision(
             project.repositoryUrl,
             project.defaultBranch,

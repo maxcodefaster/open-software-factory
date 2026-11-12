@@ -646,3 +646,32 @@
     animation: none;
   }
 }
+.factory-shared-conflict {
+  width: min(64rem, calc(100vw - 3rem));
+  max-height: calc(100vh - 3rem);
+  overflow: auto;
+}
+.factory-shared-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.factory-shared-compare label {
+  display: grid;
+  gap: 8px;
+}
+.factory-shared-compare textarea {
+  height: 20rem;
+  width: 100%;
+  box-sizing: border-box;
+  color: var(--theia-editor-foreground);
+  background: var(--theia-editor-background);
+}
+@media (max-width: 600px) {
+  .factory-shared-compare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .factory-shared-compare textarea {
+    height: 10rem;
+  }
+}

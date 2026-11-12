@@ -120,5 +120,5 @@ BEGIN
   RETURN NEW;
 END $$;
 
-INSERT INTO factory.schema_migration(version) VALUES(16);
+INSERT INTO factory.schema_migration(version) VALUES(29);
 COMMIT;

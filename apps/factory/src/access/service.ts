@@ -21,12 +21,18 @@ export function createAccessService(options: {
   revokeMember(projectID: string, userID: string): Promise<void>;
   revokeAccount(userID: string, disabled: boolean): Promise<void>;
   forgeOrigin: string | undefined;
+  mcpAuthorization?: Pick<ReturnType<typeof createIdentityConfiguration>, "mcpConsentDetails">;
 }) {
   const { database, identity } = options;
   const access = createAccessController(database);
   const memberships = createMembershipCommands(database);
   const accounts = createAccountCommands(database);
   return {
+    async mcpAuthorization(request: Request, query: string) {
+      if (!options.mcpAuthorization)
+        throw new CommandError("unavailable", "MCP authorization is unavailable");
+      return options.mcpAuthorization.mcpConsentDetails(request, query);
+    },
     async policy() {
       return { ...identity.policy };
     },

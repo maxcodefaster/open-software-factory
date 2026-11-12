@@ -36,6 +36,7 @@ type ConnectorMessage = {
   terminalCount?: number;
   terminalBusy?: number;
   terminalRevision?: number;
+  commandCount?: number;
   channels?: Array<{ name?: string; kind?: string }>;
   error?: string;
   streamId?: string;
@@ -137,12 +138,17 @@ export class RuntimeHub {
     {
       attemptID: string;
       connector: ServerWebSocket<RuntimeSocketData>;
-      resolve(): void;
+      action: string;
+      fingerprint: string;
+      promise: Promise<string | undefined>;
+      resolve(data?: string): void;
       reject(error: Error): void;
       timer: Timer;
     }
   >();
   readonly #tokens = new Map<string, ConnectorAuthority>();
+  readonly #commandCounts = new Map<string, number>();
+  readonly #commandListeners = new Set<(attemptID: string, data: string) => void>();
   readonly #disconnectTimers = new Map<string, Timer>();
   readonly #statusObservations = new Map<string, StatusObservation>();
   readonly #processes = new Map<string, Map<string, RuntimeProcessSnapshot>>();
@@ -359,6 +365,7 @@ export class RuntimeHub {
         activity.revision = -1;
       }
       this.#observeTerminals(socket.data.attemptID, message);
+      this.#commandCounts.set(socket.data.attemptID, message.commandCount ?? 0);
       const timer = this.#disconnectTimers.get(`${socket.data.attemptID}:child`);
       if (timer) clearTimeout(timer);
       this.#disconnectTimers.delete(`${socket.data.attemptID}:child`);
@@ -379,6 +386,26 @@ export class RuntimeHub {
     }
     if (socket.data.role === "child" && message.type === "terminal-state") {
       this.#observeTerminals(socket.data.attemptID, message);
+      if (
+        typeof message.commandCount === "number" &&
+        Number.isSafeInteger(message.commandCount) &&
+        message.commandCount >= 0 &&
+        message.commandCount <= 8
+      )
+        this.#commandCounts.set(socket.data.attemptID, message.commandCount);
+      return;
+    }
+    if (socket.data.role === "child" && message.type === "command-state") {
+      if (
+        typeof message.commandCount === "number" &&
+        Number.isSafeInteger(message.commandCount) &&
+        message.commandCount >= 0 &&
+        message.commandCount <= 8
+      )
+        this.#commandCounts.set(socket.data.attemptID, message.commandCount);
+      if (message.data && message.data.length <= 16_384)
+        for (const listener of this.#commandListeners)
+          listener(socket.data.attemptID, message.data);
       return;
     }
     if (socket.data.role === "child" && message.type === "status" && message.phase) {
@@ -458,7 +485,7 @@ export class RuntimeHub {
       clearTimeout(pending.timer);
       this.#pendingChildOperations.delete(message.operationId);
       if (message.error) pending.reject(new Error(message.error));
-      else pending.resolve();
+      else pending.resolve(message.data);
       return;
     }
     if (
@@ -722,7 +749,7 @@ export class RuntimeHub {
               : {}),
             data: body.toString("base64"),
           }),
-        ) <= 0
+        ) === 0
       )
         throw new Error("Connector send failed");
       if (
@@ -813,7 +840,7 @@ export class RuntimeHub {
         throw new Error("Runtime parent connection changed before dispatch");
       if (!permitted())
         throw new Error("Failed Parent permits only retained Source checkpoint operations");
-      if (parent.send(JSON.stringify({ ...payload, type: "operation-request" })) <= 0)
+      if (parent.send(JSON.stringify({ ...payload, type: "operation-request" })) === 0)
         throw new Error("Runtime parent operation could not be sent");
       this.#touch(attemptID);
     };
@@ -831,34 +858,73 @@ export class RuntimeHub {
   }
 
   async childOperation(attemptID: string, operation: Record<string, string>): Promise<void> {
+    await this.childRequest(attemptID, operation);
+  }
+
+  async childRequest(
+    attemptID: string,
+    operation: Record<string, string>,
+    beforeSend?: (send: () => void) => Promise<void>,
+  ): Promise<string | undefined> {
     if (this.#idleClaims.has(attemptID)) throw new Error("Runtime is stopping");
     const child = this.#children.get(attemptID);
     if (!child) throw new Error("Runtime child is not ready");
     const operationID = operation["operationId"];
     if (!operationID) throw new Error("Operation identity is required");
-    const promise = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#pendingChildOperations.delete(operationID);
-        reject(new Error("Runtime child operation timed out"));
-      }, 20_000);
-      this.#pendingChildOperations.set(operationID, {
-        attemptID,
-        connector: child,
-        resolve,
-        reject,
-        timer,
-      });
-    });
-    this.#touch(attemptID);
-    if (child.send(JSON.stringify({ type: "operation-request", ...operation })) <= 0) {
-      const pending = this.#pendingChildOperations.get(operationID);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.#pendingChildOperations.delete(operationID);
-      }
-      throw new Error("Runtime child operation could not be sent");
+    const fingerprint = JSON.stringify(
+      Object.entries(operation).sort(([left], [right]) => left.localeCompare(right)),
+    );
+    const previous = this.#pendingChildOperations.get(operationID);
+    if (previous) {
+      if (previous.attemptID !== attemptID || previous.fingerprint !== fingerprint)
+        throw new Error("Runtime child operation identity already has different input");
+      return previous.promise;
     }
+    const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
+    const timer = setTimeout(() => {
+      if (this.#pendingChildOperations.get(operationID) !== target) return;
+      this.#pendingChildOperations.delete(operationID);
+      reject(new Error("Runtime child operation timed out"));
+    }, 20_000);
+    const target = {
+      attemptID,
+      connector: child,
+      action: operation["action"] ?? "",
+      fingerprint,
+      promise,
+      resolve,
+      reject,
+      timer,
+    };
+    this.#pendingChildOperations.set(operationID, target);
+    const send = () => {
+      if (this.#pendingChildOperations.get(operationID) !== target)
+        throw new Error("Runtime child operation is no longer pending");
+      if (this.#idleClaims.has(attemptID) || this.#children.get(attemptID) !== child)
+        throw new Error("Runtime child changed before dispatch");
+      // Bun returns -1 when the frame was accepted into its backpressure queue.
+      // Only zero means the connection dropped the frame.
+      if (child.send(JSON.stringify({ type: "operation-request", ...operation })) === 0)
+        throw new Error("Runtime child operation could not be sent");
+      this.#touch(attemptID);
+    };
+    const forward = async () => {
+      if (beforeSend) await beforeSend(send);
+      else send();
+    };
+    void forward().catch((cause: unknown) => {
+      const pending = this.#pendingChildOperations.get(operationID);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.#pendingChildOperations.delete(operationID);
+      pending.reject(cause instanceof Error ? cause : new Error("Runtime child send failed"));
+    });
     return promise;
+  }
+
+  onCommandState(listener: (attemptID: string, data: string) => void) {
+    this.#commandListeners.add(listener);
+    return () => this.#commandListeners.delete(listener);
   }
 
   stop(attemptID: string) {
@@ -866,7 +932,7 @@ export class RuntimeHub {
     const parent = this.#parents.get(attemptID);
     if (!parent) return false;
     const sent = parent.send(JSON.stringify({ type: "stop" }));
-    if (sent <= 0) return false;
+    if (sent === 0) return false;
     return true;
   }
 
@@ -910,6 +976,7 @@ export class RuntimeHub {
     this.#parents.delete(attemptID);
     this.#children.delete(attemptID);
     this.#processes.delete(attemptID);
+    this.#commandCounts.delete(attemptID);
     this.#appChannels.delete(attemptID);
     parent?.close(1000, "Runtime stopped");
     child?.close(1000, "Runtime stopped");
@@ -970,6 +1037,7 @@ export class RuntimeHub {
       // Native PTY Resume currently fails to reopen /dev/tty. Do not admit
       // automatic Pause of an open terminal, including a detached idle shell.
       activity?.terminals !== 0 ||
+      this.#commandCounts.get(attemptID) !== 0 ||
       activity?.busyTerminals !== 0 ||
       this.now() - activity.terminalObservedAt > 15_000 ||
       this.now() - activity.lastUse < graceMS ||
