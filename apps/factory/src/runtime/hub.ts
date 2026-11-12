@@ -914,7 +914,7 @@ export class RuntimeHub {
     };
     void forward().catch((cause: unknown) => {
       const pending = this.#pendingChildOperations.get(operationID);
-      if (!pending) return;
+      if (pending !== target) return;
       clearTimeout(pending.timer);
       this.#pendingChildOperations.delete(operationID);
       pending.reject(cause instanceof Error ? cause : new Error("Runtime child send failed"));

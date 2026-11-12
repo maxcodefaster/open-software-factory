@@ -1,24 +1,38 @@
 import type { createOpenCodeClient } from "./opencode-client";
 
 type Client = ReturnType<typeof createOpenCodeClient>;
+type Source = {
+  controller: AbortController;
+  listeners: Set<(type: string) => void>;
+  done: Promise<void>;
+};
 
 // Notifications invalidate observations. They never grant execution authority or
 // prove settlement. Reconnection is read-only; consumers reconcile native state.
 export function createOpenCodeEvents(client: (attemptID: string) => Client) {
   let closed = false;
-  const sources = new Map<
-    string,
-    { controller: AbortController; listeners: Set<(type: string) => void>; done: Promise<void> }
-  >();
+  const active = new Map<string, Source>();
+  // Cancellation releases the attempt ID, not ownership of iterator cleanup.
+  const draining = new Set<Source>();
+  const drain = (attemptID: string, source: Source) => {
+    if (active.get(attemptID) !== source) return;
+    active.delete(attemptID);
+    draining.add(source);
+    source.listeners.clear();
+    source.controller.abort();
+  };
   return {
     subscribe(attemptID: string, notify: (type: string) => void) {
       if (closed) return () => {};
-      let source = sources.get(attemptID);
+      let source = active.get(attemptID);
       if (!source) {
         const controller = new AbortController();
         const listeners = new Set<(type: string) => void>();
         const emit = (type: string) => {
-          for (const listener of listeners) listener(type);
+          for (const listener of listeners) {
+            if (closed || controller.signal.aborted) break;
+            listener(type);
+          }
         };
         const done = (async () => {
           let failures = 0;
@@ -27,6 +41,7 @@ export function createOpenCodeEvents(client: (attemptID: string) => Client) {
               for await (const event of client(attemptID).event.subscribe({
                 signal: controller.signal,
               })) {
+                if (controller.signal.aborted) break;
                 failures = 0;
                 emit(event.type);
               }
@@ -46,24 +61,26 @@ export function createOpenCodeEvents(client: (attemptID: string) => Client) {
             });
           }
         })();
-        source = { controller, listeners, done };
-        sources.set(attemptID, source);
+        const owned: Source = {
+          controller,
+          listeners,
+          done: done.finally(() => draining.delete(owned)),
+        };
+        source = owned;
+        active.set(attemptID, source);
       }
       source.listeners.add(notify);
       const owned = source;
       return () => {
         owned.listeners.delete(notify);
-        if (owned.listeners.size || sources.get(attemptID) !== owned) return;
-        sources.delete(attemptID);
-        owned.controller.abort();
+        if (owned.listeners.size) return;
+        drain(attemptID, owned);
       };
     },
     async shutdown() {
       closed = true;
-      const active = [...sources.values()];
-      sources.clear();
-      for (const source of active) source.controller.abort();
-      await Promise.all(active.map((source) => source.done));
+      for (const [attemptID, source] of active) drain(attemptID, source);
+      await Promise.all([...draining].map((source) => source.done));
     },
   };
 }

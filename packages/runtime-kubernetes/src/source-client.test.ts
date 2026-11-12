@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { ownedFactoryboxLocation } from "../../../test/fixtures/runtime-configuration";
+import { fixtureValue } from "../../../test/fixtures/value";
 import { workspaceSourceIdentity } from "../../workspace-domain/src/source";
 import { createKubernetesClient } from "./client";
 import { renderWorkspaceSourceResources } from "./source-manifest";
@@ -58,6 +59,283 @@ function resources(request: SourceResources = input) {
       : {}),
   }));
 }
+
+function unavailableForward() {
+  return {
+    endpoint: Promise.reject(new Error("Source connection closed")),
+    cancel: new AbortController(),
+    child: { exited: Promise.resolve(0), kill() {} },
+  };
+}
+
+function forwardingFixture() {
+  const inventory = Promise.withResolvers<string | null>();
+  const validating = Promise.withResolvers<void>();
+  const forwarding = Promise.withResolvers<void>();
+  const opened: Array<{
+    ready: ReturnType<typeof Promise.withResolvers<string>>;
+    exit: ReturnType<typeof Promise.withResolvers<number>>;
+    cancel: AbortController;
+    kills: number;
+  }> = [];
+  let inventories = 0;
+  let deferInventory = true;
+  let readyAutomatically = false;
+  const waiters = new Map<
+    number,
+    ReturnType<typeof Promise.withResolvers<(typeof opened)[number]>>
+  >();
+  const requests: Array<{ url: string; options: RequestInit | undefined }> = [];
+  const client = createWorkspaceSourceClient(
+    createKubernetesClient(),
+    async (args) => {
+      if (!args[1]?.startsWith("pod/")) return null;
+      inventories++;
+      validating.resolve();
+      return deferInventory ? inventory.promise : JSON.stringify({ items: resources() });
+    },
+    Object.assign(
+      async (url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
+        options?.signal?.throwIfAborted();
+        requests.push({ url: String(url), options });
+        return Response.json({ kind: "directory" });
+      },
+      { preconnect: fetch.preconnect },
+    ),
+    () => {
+      const connection = {
+        ready: Promise.withResolvers<string>(),
+        exit: Promise.withResolvers<number>(),
+        cancel: new AbortController(),
+        kills: 0,
+      };
+      opened.push(connection);
+      waiters.get(opened.length - 1)?.resolve(connection);
+      if (readyAutomatically) connection.ready.resolve("http://127.0.0.1:4600");
+      forwarding.resolve();
+      return {
+        endpoint: connection.ready.promise,
+        cancel: connection.cancel,
+        child: {
+          exited: connection.exit.promise,
+          kill() {
+            connection.kills++;
+          },
+        },
+      };
+    },
+  );
+  return {
+    client,
+    opened,
+    requests,
+    validating: validating.promise,
+    forwarding: forwarding.promise,
+    inventories: () => inventories,
+    waitForForward(index: number) {
+      const connection = opened[index];
+      if (connection) return Promise.resolve(connection);
+      const waiter = Promise.withResolvers<(typeof opened)[number]>();
+      waiters.set(index, waiter);
+      return waiter.promise;
+    },
+    readyAutomatically() {
+      readyAutomatically = true;
+    },
+    allowFreshInventory() {
+      deferInventory = false;
+    },
+    releaseInventory() {
+      deferInventory = false;
+      inventory.resolve(JSON.stringify({ items: resources() }));
+    },
+    readyAll() {
+      for (const connection of opened) connection.ready.resolve("http://127.0.0.1:4600");
+    },
+  };
+}
+
+test("concurrent Source connect and request share validation and one opening forward", async () => {
+  const f = forwardingFixture();
+  const connect = f.client.connect(input);
+  const request = f.client.request(
+    input,
+    "stat",
+    new Request("http://factory.invalid/stat", {
+      method: "POST",
+      headers: { "X-Factory-Writer-Epoch": "7" },
+      body: '{"path":""}',
+    }),
+    new AbortController().signal,
+  );
+  try {
+    await f.validating;
+    f.releaseInventory();
+    await f.forwarding;
+    f.readyAll();
+    await Promise.all([connect, request]);
+    expect(f.inventories()).toBe(1);
+    expect(f.opened).toHaveLength(1);
+    expect(f.requests).toHaveLength(2);
+    for (const { options } of f.requests) {
+      const headers = new Headers(options?.headers);
+      expect(headers.get("Authorization")).toBe(`Bearer ${input.capability}`);
+      expect(headers.get("X-Factory-Source-Service")).toBe(input.identity.serviceID);
+      expect(headers.get("X-Factory-Source-Epoch")).toBe("1");
+    }
+    expect(new Headers(f.requests[1]?.options?.headers).get("X-Factory-Writer-Epoch")).toBe("7");
+  } finally {
+    f.client.close();
+  }
+});
+
+test.each(["close", "stop"] as const)(
+  "Source %s invalidates validation without opening a late forward",
+  async (action) => {
+    const f = forwardingFixture();
+    const pending = f.client.connect(input).then(
+      () => "connected",
+      () => "closed",
+    );
+    try {
+      await f.validating;
+      if (action === "close") f.client.close();
+      else await f.client.stop(input);
+      f.readyAutomatically();
+      f.releaseInventory();
+      expect(await pending).toBe("closed");
+      // Let invalidated validation finish before checking that no forward was created.
+      await f.client.observe(input);
+      expect(f.opened).toHaveLength(0);
+    } finally {
+      f.client.close();
+    }
+  },
+);
+
+test.each(["close", "stop"] as const)(
+  "Source %s owns a pending forward and its late exit cannot remove a reconnection",
+  async (action) => {
+    const f = forwardingFixture();
+    f.releaseInventory();
+    const pending = f.client.connect(input).then(
+      () => "connected",
+      () => "closed",
+    );
+    try {
+      await f.forwarding;
+      if (action === "close") f.client.close();
+      else await f.client.stop(input);
+      const old = fixtureValue(f.opened[0], "old Source forward");
+      expect(old.kills).toBe(1);
+      expect(old.cancel.signal.aborted).toBe(true);
+      expect(await pending).toBe("closed");
+      const reconnect = f.client.connect(input);
+      await f.waitForForward(1);
+      f.readyAll();
+      await reconnect;
+      old.exit.resolve(0);
+      await Promise.resolve();
+      await f.client.connect(input);
+      expect(f.opened).toHaveLength(2);
+      expect(f.opened[1]?.kills).toBe(0);
+      expect(old.kills).toBe(1);
+    } finally {
+      f.client.close();
+    }
+  },
+);
+
+test("Source readiness failure cleans its own forward and allows a fresh validation", async () => {
+  const f = forwardingFixture();
+  f.releaseInventory();
+  const pending = f.client.connect(input);
+  try {
+    await f.forwarding;
+    const old = fixtureValue(f.opened[0], "failed Source forward");
+    old.ready.reject(new Error("Source connection exceeded its deadline"));
+    await expect(pending).rejects.toThrow("Source connection exceeded its deadline");
+    expect(old.kills).toBe(1);
+    expect(old.cancel.signal.aborted).toBe(true);
+    const retry = f.client.connect(input);
+    await f.waitForForward(1);
+    f.readyAll();
+    await retry;
+    expect(f.inventories()).toBe(2);
+    expect(f.opened).toHaveLength(2);
+  } finally {
+    f.client.close();
+  }
+});
+
+test("a cancelled Source validation cannot open or remove a newer connection", async () => {
+  const f = forwardingFixture();
+  const pending = f.client.connect(input).catch(() => "closed");
+  try {
+    await f.validating;
+    f.client.close();
+    expect(await pending).toBe("closed");
+    f.allowFreshInventory();
+    const reconnect = f.client.connect(input);
+    const current = await f.waitForForward(0);
+    current.ready.resolve("http://127.0.0.1:4600");
+    await reconnect;
+    f.releaseInventory();
+    await f.client.observe(input);
+    await f.client.connect(input);
+    expect(f.opened).toHaveLength(1);
+    expect(current.kills).toBe(0);
+  } finally {
+    f.client.close();
+  }
+});
+
+test("Source child exit reconnects through a new validated forward", async () => {
+  const f = forwardingFixture();
+  f.releaseInventory();
+  try {
+    const first = f.client.connect(input);
+    const old = await f.waitForForward(0);
+    old.ready.resolve("http://127.0.0.1:4600");
+    await first;
+    old.exit.resolve(0);
+    await Promise.resolve();
+    expect(old.cancel.signal.aborted).toBe(true);
+    expect(old.kills).toBe(0);
+    const retry = f.client.connect(input);
+    const current = await f.waitForForward(1);
+    current.ready.resolve("http://127.0.0.1:4600");
+    await retry;
+    expect(f.inventories()).toBe(2);
+    expect(current.kills).toBe(0);
+  } finally {
+    f.client.close();
+  }
+});
+
+test.each(["namespaceUID", "claimUID", "podUID", "capability"] as const)(
+  "a retained Source forward cannot bypass a changed %s",
+  async (field) => {
+    const f = forwardingFixture();
+    f.releaseInventory();
+    try {
+      const first = f.client.connect(input);
+      const current = await f.waitForForward(0);
+      current.ready.resolve("http://127.0.0.1:4600");
+      await first;
+      await expect(f.client.connect({ ...input, [field]: "changed" })).rejects.toThrow(
+        "identity differs",
+      );
+      expect(f.inventories()).toBe(2);
+      expect(f.opened).toHaveLength(1);
+      expect(current.kills).toBe(0);
+      await f.client.connect(input);
+      expect(f.inventories()).toBe(2);
+    } finally {
+      f.client.close();
+    }
+  },
+);
 
 test.each(["epoch", "workspace"] as const)(
   "stopping one Source preserves another %s in the shared Factory namespace",
@@ -445,14 +723,18 @@ test("source readiness requires a directory stat, not arbitrary successful JSON"
 test("a current ready source observation is consumed once without duplicate infrastructure reads", async () => {
   const calls: string[][] = [];
   const observed = resources();
-  const client = createWorkspaceSourceClient(createKubernetesClient(), async (args) => {
-    calls.push(args);
-    return JSON.stringify({ items: observed });
-  });
+  const client = createWorkspaceSourceClient(
+    createKubernetesClient(),
+    async (args) => {
+      calls.push(args);
+      return JSON.stringify({ items: observed });
+    },
+    fetch,
+    unavailableForward,
+  );
   const result = await client.observe(input);
   expect(result?.ready).toBe(true);
-  // Invalid names stop the real supervisor immediately after endpoint selection.
-  // The assertion isolates inventory reuse, not connection success.
+  // A failed fake forward isolates inventory reuse without launching infrastructure.
   await expect(client.connect(input, result ?? undefined)).rejects.toThrow();
   expect(calls).toHaveLength(1);
   client.close();
@@ -478,10 +760,15 @@ test("observation reuse cannot bypass replacement identity or accept caller-forg
 
 test("source observations expire and cannot suppress later infrastructure revalidation", async () => {
   let inventories = 0;
-  const client = createWorkspaceSourceClient(createKubernetesClient(), async () => {
-    inventories += 1;
-    return JSON.stringify({ items: resources() });
-  });
+  const client = createWorkspaceSourceClient(
+    createKubernetesClient(),
+    async () => {
+      inventories += 1;
+      return JSON.stringify({ items: resources() });
+    },
+    fetch,
+    unavailableForward,
+  );
   const observed = await client.observe(input);
   await Bun.sleep(1_010);
   await expect(client.connect(input, observed ?? undefined)).rejects.toThrow();

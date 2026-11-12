@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createKubernetesClient, type KubernetesClient } from "./client";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
+import { createOwnedServiceForwards, type OwnedServiceForward } from "./owned-service-forward";
 import { startServiceForward } from "./service-forward";
 import { renderWorkspaceSourceResources, type WorkspaceSourceManifest } from "./source-manifest";
 
@@ -150,12 +151,6 @@ function intendedFields(actual: unknown, expected: unknown): boolean {
   return actual === expected;
 }
 
-type SourceForward = {
-  endpoint: Promise<string>;
-  cancel: AbortController;
-  child: { exited: Promise<number>; kill(): void };
-};
-
 export function validateSourceObservation(
   input: SourceResources,
   observed: {
@@ -242,19 +237,9 @@ export function createWorkspaceSourceClient(
     role: "source",
     namespace: string,
     podName: string,
-  ) => SourceForward = startServiceForward,
+  ) => OwnedServiceForward = startServiceForward,
 ): WorkspaceSourceClient {
-  const connections = new Map<
-    string,
-    {
-      origin: Promise<string>;
-      child: SourceForward["child"];
-      cancel: AbortController;
-      namespace: string;
-      workspaceID: string;
-      epoch: number;
-    }
-  >();
+  const connections = createOwnedServiceForwards<SourceResources>("Source");
   const observations = new WeakMap<
     SourceResourceObservation,
     {
@@ -287,29 +272,42 @@ export function createWorkspaceSourceClient(
   }
   async function endpoint(input: SourceResources, observation?: SourceResourceObservation) {
     if (!input.podUID) throw new Error("Source Pod outcome has not been recorded");
-    const key = `${input.namespace}:${input.identity.workspaceID}:${input.identity.epoch}:${input.podUID}`;
-    const retained = connections.get(key);
-    if (retained) return retained;
-    const recent = observation ? observations.get(observation) : undefined;
-    if (observation) observations.delete(observation);
-    const resources =
-      recent && recent.expires > performance.now() ? recent.resources : await inventory(input);
-    const current = completeSourceObservation(input, resources);
-    if (!current?.ready) throw new Error("Source Pod is no longer ready");
-    const opening = forward("source", input.namespace, input.identity.podName);
-    const connection = {
-      origin: opening.endpoint,
-      child: opening.child,
-      cancel: opening.cancel,
-      namespace: input.namespace,
-      workspaceID: input.identity.workspaceID,
-      epoch: input.identity.epoch,
-    };
-    connections.set(key, connection);
-    void opening.child.exited.then(() => {
-      if (connections.get(key) === connection) connections.delete(key);
-    });
-    return connection;
+    // Reuse only the exact recorded resource and assignment, never a changed
+    // storage UID, credential or generation that happens to name the same Pod.
+    const key = JSON.stringify([
+      input.namespace,
+      input.identity.workspaceID,
+      input.identity.serviceID,
+      input.identity.epoch,
+      input.identity.podName,
+      input.identity.secretName,
+      input.namespaceUID,
+      input.claimUID,
+      input.podUID,
+      input.workerID,
+      input.projectID,
+      input.storageNode,
+      input.sourceDirectory,
+      input.capability,
+      input.filesImage,
+      input.revision,
+      input.repositoryURL,
+      input.originURL,
+      input.branch,
+    ]);
+    return connections.open(
+      key,
+      input,
+      async () => {
+        const recent = observation ? observations.get(observation) : undefined;
+        if (observation) observations.delete(observation);
+        const resources =
+          recent && recent.expires > performance.now() ? recent.resources : await inventory(input);
+        const current = completeSourceObservation(input, resources);
+        if (!current?.ready) throw new Error("Source Pod is no longer ready");
+      },
+      () => forward("source", input.namespace, input.identity.podName),
+    );
   }
   return {
     async executionNode(input) {
@@ -439,17 +437,12 @@ export function createWorkspaceSourceClient(
       );
     },
     async stop(input) {
-      for (const [key, connection] of connections) {
-        if (
-          connection.namespace === input.namespace &&
-          connection.workspaceID === input.identity.workspaceID &&
-          connection.epoch === input.identity.epoch
-        ) {
-          connection.cancel.abort();
-          connection.child.kill();
-          connections.delete(key);
-        }
-      }
+      connections.disconnect(
+        (owner) =>
+          owner.namespace === input.namespace &&
+          owner.identity.workspaceID === input.identity.workspaceID &&
+          owner.identity.epoch === input.identity.epoch,
+      );
       for (const [plural, name, expectedUID] of [
         ["pods", input.identity.podName, input.podUID],
         ["secrets", input.identity.secretName, null],
@@ -501,11 +494,7 @@ export function createWorkspaceSourceClient(
       throw new Error("Source Pod deletion remains pending");
     },
     close() {
-      for (const connection of connections.values()) {
-        connection.cancel.abort();
-        connection.child.kill();
-      }
-      connections.clear();
+      connections.close();
     },
   };
 }

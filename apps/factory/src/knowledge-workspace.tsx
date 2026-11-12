@@ -14,9 +14,11 @@ import type {
 import { plainErrorMessage } from "./command-error";
 import { Icon } from "./icon";
 import {
+  acknowledgeDraft,
   draftDirty,
   draftFrom,
   type KnowledgeDraft,
+  type KnowledgeSubmission,
   pageSnapshot,
   readDraft,
   reconcileDraft,
@@ -129,8 +131,7 @@ export function KnowledgeWorkspace(props: {
   const [pageMenuOpen, setPageMenuOpen] = createSignal(false);
   let pageMenu: HTMLDivElement | undefined;
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
-  const savingKeys = new Set<string>();
-  const submissions = new Map<string, KnowledgeDraft>();
+  const submissions = new Map<string, KnowledgeSubmission>();
   const [historyOpen, setHistoryOpen] = createSignal(false);
   const [historyRevisionID, setHistoryRevisionID] = createSignal<string>();
   const [historyLoading, setHistoryLoading] = createSignal(false);
@@ -141,28 +142,41 @@ export function KnowledgeWorkspace(props: {
   const [restoring, setRestoring] = createSignal(false);
   async function restoreRevision(revision: KnowledgeRevision) {
     const page = props.selectedPage;
-    if (!page) return;
+    const key = draftKey;
+    const current = draft();
+    if (!page || !key || !current || draftDirty(current) || submissions.has(key)) return;
+    const submission: KnowledgeSubmission = {
+      kind: "restore",
+      draft: current,
+      target: {
+        id: page.id,
+        version: page.version + 1,
+        title: revision.title,
+        body: withoutRepeatedTitle(revision.body, revision.title),
+      },
+    };
+    const history = historyRequest;
+    submissions.set(key, submission);
+    clearTimeout(autosaveTimer);
     setRestoring(true);
     setRestoreError("");
     try {
       const saved = await props.onRestore(page.id, revision.id, page.version);
-      setDraft(
-        draftFrom({
-          id: saved.id,
-          version: saved.version,
-          title: saved.title,
-          body: withoutRepeatedTitle(saved.body, saved.title),
-        }),
-      );
-      closeHistory();
+      settleDraft(key, submission, saved);
+      if (draftKey === key && historyRequest === history) closeHistory();
     } catch (cause) {
-      setRestoreError(
-        cause instanceof Error
-          ? plainErrorMessage(cause.message)
-          : "Revision could not be restored.",
-      );
+      if (draftKey === key)
+        setRestoreError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Revision could not be restored.",
+        );
     } finally {
-      setRestoring(false);
+      submissions.delete(key);
+      if (draftKey === key) {
+        setRestoring(false);
+        scheduleSave();
+      }
     }
   }
   let historyRequest = 0;
@@ -207,17 +221,21 @@ export function KnowledgeWorkspace(props: {
   let draftKey: string | undefined;
   function retainDraft(current = untrack(draft)) {
     if (!draftKey) return;
+    storeDraft(draftKey, current);
+  }
+  function storeDraft(key: string, current: KnowledgeDraft | undefined) {
     if (current && draftDirty(current)) {
-      draftStore.set(draftKey, current);
+      draftStore.set(key, current);
       try {
-        localStorage.setItem(`wiki-draft:${draftKey}`, JSON.stringify(current));
+        localStorage.setItem(`wiki-draft:${key}`, JSON.stringify(current));
       } catch {
-        setSaveError("Browser storage is unavailable. Keep this page open until it saves.");
+        if (draftKey === key)
+          setSaveError("Browser storage is unavailable. Keep this page open until it saves.");
       }
     } else {
-      draftStore.delete(draftKey);
+      draftStore.delete(key);
       try {
-        localStorage.removeItem(`wiki-draft:${draftKey}`);
+        localStorage.removeItem(`wiki-draft:${key}`);
       } catch {
         /* Saved content is authoritative. */
       }
@@ -248,8 +266,10 @@ export function KnowledgeWorkspace(props: {
       const next = incoming;
       setDraft(next ? (retained ? reconcileDraft(retained, next) : draftFrom(next)) : undefined);
       setEditing(!!retained);
-      setSaveState("idle");
+      setSaveState(submissions.get(key)?.kind === "save" ? "saving" : "idle");
       setSaveError("");
+      setRestoring(submissions.get(key)?.kind === "restore");
+      setRestoreError("");
       setCompareOpen(false);
       setLinkNotice("");
       setPageMenuOpen(false);
@@ -277,12 +297,14 @@ export function KnowledgeWorkspace(props: {
       const current = untrack(draft);
       if (!incoming || current?.base.id !== incoming.id) return;
       const submitted = draftKey ? submissions.get(draftKey) : undefined;
-      const ownSave =
+      const ownWrite =
         submitted &&
-        incoming.version === submitted.base.version + 1 &&
-        incoming.title === submitted.title &&
-        incoming.body === submitted.body;
-      const next = ownSave ? { ...current, base: incoming } : reconcileDraft(current, incoming);
+        incoming.version === submitted.target.version &&
+        incoming.title === submitted.target.title &&
+        incoming.body === submitted.target.body;
+      const next = ownWrite
+        ? acknowledgeDraft(current, submitted, incoming)
+        : reconcileDraft(current, incoming);
       if (next !== current) {
         setDraft(next);
       }
@@ -338,6 +360,21 @@ export function KnowledgeWorkspace(props: {
     if (!props.selectedPage || props.openDocument) return;
     setEditing(true);
   }
+  function settleDraft(key: string, submission: KnowledgeSubmission, saved: KnowledgeSave) {
+    const current = draftKey === key ? draft() : draftStore.get(key);
+    if (!current) return;
+    const acknowledged = acknowledgeDraft(current, submission, {
+      id: saved.id,
+      version: saved.version,
+      title: saved.title,
+      body: withoutRepeatedTitle(saved.body, saved.title),
+    });
+    if (draftKey === key) {
+      setDraft(acknowledged);
+      setSaveState(current.base.version > saved.version ? "idle" : "saved");
+    }
+    storeDraft(key, acknowledged);
+  }
   async function save() {
     const key = draftKey;
     const submitted = draft();
@@ -347,11 +384,20 @@ export function KnowledgeWorkspace(props: {
       props.openDocument ||
       submitted.conflict ||
       !draftDirty(submitted) ||
-      savingKeys.has(key)
+      submissions.has(key)
     )
       return;
-    savingKeys.add(key);
-    submissions.set(key, submitted);
+    const submission: KnowledgeSubmission = {
+      kind: "save",
+      draft: submitted,
+      target: {
+        id: submitted.base.id,
+        version: submitted.base.version + 1,
+        title: submitted.title,
+        body: submitted.body,
+      },
+    };
+    submissions.set(key, submission);
     setSaveState("saving");
     setSaveError("");
     let failed = false;
@@ -362,38 +408,7 @@ export function KnowledgeWorkspace(props: {
         submitted.title,
         submitted.body,
       );
-      const current = draftKey === key ? draft() : draftStore.get(key);
-      if (current) {
-        if (current.base.version > saved.version) {
-          if (draftKey === key) setSaveState("idle");
-          return;
-        }
-        const acknowledged = {
-          ...current,
-          base: {
-            id: saved.id,
-            version: saved.version,
-            title: saved.title,
-            body: withoutRepeatedTitle(saved.body, saved.title),
-          },
-          conflict: false,
-        };
-        if (draftKey === key) {
-          setDraft(acknowledged);
-          setSaveState("saved");
-          retainDraft(acknowledged);
-        } else {
-          if (draftDirty(acknowledged)) draftStore.set(key, acknowledged);
-          else draftStore.delete(key);
-          try {
-            if (draftDirty(acknowledged))
-              localStorage.setItem(`wiki-draft:${key}`, JSON.stringify(acknowledged));
-            else localStorage.removeItem(`wiki-draft:${key}`);
-          } catch {
-            /* In-memory draft survives. */
-          }
-        }
-      }
+      settleDraft(key, submission, saved);
     } catch (cause) {
       failed = true;
       if (draftKey === key) {
@@ -409,7 +424,6 @@ export function KnowledgeWorkspace(props: {
         retainDraft();
       }
     } finally {
-      savingKeys.delete(key);
       submissions.delete(key);
       // Solid commits setters after this continuation. Do not inspect the old
       // "saving" snapshot and accidentally retry an unconfirmed write.

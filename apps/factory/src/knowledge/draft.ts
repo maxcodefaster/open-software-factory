@@ -5,6 +5,33 @@ import {
 
 export type PageSnapshot = { id: string; version: number; title: string; body: string };
 export type KnowledgeDraft = { base: PageSnapshot; title: string; body: string; conflict: boolean };
+export type KnowledgeSubmission = {
+  kind: "save" | "restore";
+  draft: KnowledgeDraft;
+  target: PageSnapshot;
+};
+
+/** Advance the saved base without discarding work made after submission. */
+export function acknowledgeDraft(
+  current: KnowledgeDraft,
+  submission: KnowledgeSubmission,
+  saved: PageSnapshot,
+): KnowledgeDraft {
+  if (current.base.id !== saved.id || current.base.version > saved.version) return current;
+  return {
+    ...current,
+    base: saved,
+    title:
+      submission.kind === "restore" && current.title === submission.draft.title
+        ? saved.title
+        : current.title,
+    body:
+      submission.kind === "restore" && current.body === submission.draft.body
+        ? saved.body
+        : current.body,
+    conflict: false,
+  };
+}
 export function pageSnapshot(page: {
   id: string;
   version: number;

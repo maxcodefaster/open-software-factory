@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { draftDirty, draftFrom, readDraft, reconcileDraft } from "./draft";
+import { acknowledgeDraft, draftDirty, draftFrom, readDraft, reconcileDraft } from "./draft";
 
 test("revisioned drafts adopt clean updates, merge disjoint edits and retain conflicting text", () => {
   const base = { id: "page", version: 1, title: "Guide", body: "First.\nLast." };
@@ -18,4 +18,15 @@ test("revisioned drafts adopt clean updates, merge disjoint edits and retain con
   expect(reconcileDraft(merged, base)).toBe(merged);
   expect(readDraft("page", { getItem: () => "broken" })).toBeUndefined();
   expect(readDraft("page", { getItem: () => JSON.stringify(dirty) })).toEqual(dirty);
+});
+
+test("acknowledgements cannot regress newer revisions or update a different page", () => {
+  const base = { id: "page", version: 1, title: "Guide", body: "Before" };
+  const draft = draftFrom(base);
+  const target = { ...base, version: 2, body: "Restored" };
+  const submission = { kind: "restore" as const, draft, target };
+  const newer = draftFrom({ ...base, version: 3, body: "Newer" });
+  expect(acknowledgeDraft(newer, submission, target)).toBe(newer);
+  const other = draftFrom({ ...base, id: "other" });
+  expect(acknowledgeDraft(other, submission, target)).toBe(other);
 });

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createKubernetesClient, type KubernetesClient } from "./client";
 import { kubernetesCommand } from "./config";
 import { type DeveloperIDEResources, renderDeveloperIDEResources } from "./developer-ide-manifest";
+import { createOwnedServiceForwards, type OwnedServiceForward } from "./owned-service-forward";
 import { startServiceForward } from "./service-forward";
 
 const metadata = z.object({
@@ -112,11 +113,13 @@ async function command(args: string[], input?: unknown) {
 export function createDeveloperIDEClient(
   kubernetes: KubernetesClient = createKubernetesClient(),
   execute: typeof command = command,
+  forward: (
+    role: "editor",
+    namespace: string,
+    podName: string,
+  ) => OwnedServiceForward = startServiceForward,
 ): DeveloperIDEClient {
-  const forwards = new Map<
-    string,
-    { child: ReturnType<typeof Bun.spawn>; endpoint: Promise<string> }
-  >();
+  const forwards = createOwnedServiceForwards<DeveloperIDEResources>("Developer IDE");
   async function observe(input: DeveloperIDEResources) {
     const [namespace, raw] = await Promise.all([
       kubernetes.getNamespace(input.identity.namespace),
@@ -127,12 +130,11 @@ export function createDeveloperIDEClient(
     return validateDeveloperIDEObservation(input, namespace, JSON.parse(raw));
   }
   function disconnect(input: DeveloperIDEResources) {
-    const key = input.identity.serviceID;
-    const retained = forwards.get(key);
-    if (retained) {
-      retained.child.kill();
-      forwards.delete(key);
-    }
+    forwards.disconnect(
+      (owner) =>
+        owner.identity.serviceID === input.identity.serviceID &&
+        owner.identity.namespace === input.identity.namespace,
+    );
   }
   return {
     observe,
@@ -152,20 +154,26 @@ export function createDeveloperIDEClient(
     },
     async endpoint(input) {
       if (!input.podUID) throw new Error("Developer IDE Pod outcome has not been recorded");
-      const key = input.identity.serviceID;
-      const retained = forwards.get(key);
-      if (retained) return retained.endpoint;
-      if (!(await observe(input))?.ready) throw new Error("Developer IDE is not ready");
-      const pending = startServiceForward(
-        "editor",
+      const key = JSON.stringify([
+        input.identity.userID,
+        input.identity.resourceID,
+        input.identity.serviceID,
+        input.identity.epoch,
         input.identity.namespace,
         input.identity.podName,
+        input.namespaceUID,
+        input.podUID,
+        input.image,
+      ]);
+      const connection = await forwards.open(
+        key,
+        input,
+        async () => {
+          if (!(await observe(input))?.ready) throw new Error("Developer IDE is not ready");
+        },
+        () => forward("editor", input.identity.namespace, input.identity.podName),
       );
-      forwards.set(key, pending);
-      void pending.child.exited.then(() => {
-        if (forwards.get(key) === pending) forwards.delete(key);
-      });
-      return pending.endpoint;
+      return connection.origin;
     },
     async stop(input) {
       disconnect(input);
@@ -199,8 +207,7 @@ export function createDeveloperIDEClient(
       throw new Error("Developer IDE Pod deletion remains pending");
     },
     close() {
-      for (const forward of forwards.values()) forward.child.kill();
-      forwards.clear();
+      forwards.close();
     },
   };
 }
