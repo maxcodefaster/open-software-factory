@@ -6,6 +6,7 @@ import {
   nativeCapacityCandidates,
   nativeCapacityNodeReady,
   nativeCapacityOwner,
+  nativeCapacityOriginalNode,
   nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
@@ -33,6 +34,13 @@ type Fact = {
   attemptedAt: string | null;
   rejected: boolean;
   pool: { uid: string } | null;
+};
+type InstallationIntent = {
+  database: string;
+  selector: Record<string, string>;
+  sandboxUID: string;
+  base: { uid: string; name: string; namespace: string; workerImage: string };
+  node: NativeCapacityNode;
 };
 
 // Installation capacity only. The native WorkerPool controller creates workers;
@@ -97,10 +105,52 @@ export function createSubstrateCapacity(
         json(["get", "sandboxconfig", config.profile, "-o", "json"]),
       ]);
       const base = requireNativeCapacityBase(poolsInput, selector, architecture);
+      const baseNamespace = base.metadata.namespace;
+      if (!baseNamespace) throw new Error("Original native WorkerPool namespace is unavailable");
       const sandboxUID = requireNativeCapacitySandbox(sandboxInput);
       const saved = await facts(sql);
       const ready: Array<{ cpuMilli: number; memoryMiB: number }> = [];
-      const confirmedNodes: NativeCapacityNode[] = [];
+      const [installed] = await sql<
+        { intent: InstallationIntent }[]
+      >`SELECT intent FROM factory.substrate_capacity_installation WHERE owner=${owner}`;
+      let original = installed?.intent;
+      const originalNode = nativeCapacityOriginalNode(nodesInput, base, architecture);
+      if (!original && originalNode && base.status?.readyReplicas === 1) {
+        original = {
+          database: config.database,
+          selector,
+          sandboxUID,
+          base: {
+            uid: base.metadata.uid,
+            name: base.metadata.name,
+            namespace: baseNamespace,
+            workerImage: base.spec.workerImage,
+          },
+          node: originalNode,
+        };
+        await sql`INSERT INTO factory.substrate_capacity_installation(owner,intent)
+          VALUES(${owner},${JSON.stringify(original)}::text::jsonb)`;
+      }
+      if (original) {
+        if (
+          original.database !== config.database ||
+          !isDeepStrictEqual(original.selector, selector) ||
+          original.sandboxUID !== sandboxUID ||
+          original.base.uid !== base.metadata.uid ||
+          original.base.name !== base.metadata.name ||
+          original.base.namespace !== base.metadata.namespace ||
+          original.base.workerImage !== base.spec.workerImage ||
+          original.node.architecture !== architecture
+        )
+          throw new Error("Native capacity profile or original installation identity changed");
+        if (
+          base.status?.readyReplicas === 1 &&
+          base.spec.template.nodeSelector["kubernetes.io/hostname"] === original.node.hostname &&
+          nativeCapacityNodeReady(nodesInput, original.node) &&
+          isDeepStrictEqual(nativeCapacityReservedPoolResources(base), original.node.resources)
+        )
+          ready.push(original.node.resources);
+      }
       for (const row of saved) {
         if (
           row.intent.database !== config.database ||
@@ -129,7 +179,6 @@ export function createSubstrateCapacity(
         );
         if (!row.pool)
           await sql`UPDATE factory.substrate_worker_capacity SET pool=${JSON.stringify({ uid: observed.metadata.uid })}::text::jsonb WHERE owner=${owner} AND node_uid=${row.nodeUID}`;
-        confirmedNodes.push(row.intent.node);
         if (
           observed.status?.readyReplicas === 1 &&
           nativeCapacityNodeReady(nodesInput, row.intent.node)
@@ -235,23 +284,7 @@ export function createSubstrateCapacity(
         );
         if (!row.pool)
           await sql`UPDATE factory.substrate_worker_capacity SET pool=${JSON.stringify({ uid: observed.metadata.uid })}::text::jsonb WHERE owner=${owner} AND node_uid=${node.uid}`;
-        confirmedNodes.push(row.intent.node);
         if (observed.status?.readyReplicas === 1) ready.push(row.intent.node.resources);
-      }
-      // The Actor selector already admits the original pool. Its reserved
-      // capacity must not disappear behind a smaller additional pool. Reuse
-      // only the UID/profile pinned by confirmed installation facts and the
-      // same ready node/boot; never adopt a matching label or resize a worker.
-      if (
-        base.status?.readyReplicas === 1 &&
-        confirmedNodes.some(
-          (node) =>
-            node.hostname === base.spec.template.nodeSelector["kubernetes.io/hostname"] &&
-            nativeCapacityNodeReady(nodesInput, node),
-        )
-      ) {
-        const resources = nativeCapacityReservedPoolResources(base);
-        if (resources) ready.push(resources);
       }
       return { ready, refused: discovered.refused };
     } finally {

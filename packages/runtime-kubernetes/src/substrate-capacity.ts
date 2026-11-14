@@ -124,6 +124,41 @@ export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCap
   );
 }
 
+export function nativeCapacityOriginalNode(
+  nodesInput: unknown,
+  pool: NativeCapacityPool,
+  architecture: NativeArchitecture,
+): NativeCapacityNode | null {
+  const resources = nativeCapacityReservedPoolResources(pool);
+  const hostname = pool.spec.template.nodeSelector["kubernetes.io/hostname"];
+  if (!resources || !hostname) return null;
+  const nodes = z
+    .object({
+      items: z.array(
+        z.object({
+          metadata: z.object({
+            name: z.string(),
+            uid: z.uuid(),
+            labels: z.record(z.string(), z.string()),
+          }),
+          status: z.object({ nodeInfo: z.object({ bootID: z.string() }) }),
+        }),
+      ),
+    })
+    .parse(nodesInput).items;
+  const node = nodes.find((value) => value.metadata.labels["kubernetes.io/hostname"] === hostname);
+  if (!node?.status.nodeInfo.bootID) return null;
+  const original: NativeCapacityNode = {
+    name: node.metadata.name,
+    uid: node.metadata.uid,
+    hostname,
+    bootID: node.status.nodeInfo.bootID,
+    architecture,
+    resources,
+  };
+  return nativeCapacityNodeReady(nodesInput, original) ? original : null;
+}
+
 export async function runNativeCapacityKubernetes(args: readonly string[], input?: string) {
   return runEnvironmentCommand(
     kubernetesCommand(["--request-timeout=10s", ...args]),

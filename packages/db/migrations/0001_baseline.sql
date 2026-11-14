@@ -14151,10 +14151,31 @@ END $$;
 CREATE TRIGGER substrate_actor_rpc_identity BEFORE INSERT OR UPDATE OR DELETE
 ON factory.substrate_actor_rpc FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_actor_rpc();
 
+CREATE TABLE factory.substrate_capacity_installation (
+  owner text PRIMARY KEY CHECK (owner ~ '^[a-f0-9]{32}$'),
+  intent jsonb NOT NULL CHECK (jsonb_typeof(intent)='object')
+);
+CREATE FUNCTION factory.protect_substrate_capacity_installation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'Native capacity installation identity is immutable';
+  END IF;
+  IF NEW.intent->>'database' IS DISTINCT FROM current_database()
+    OR COALESCE(NEW.intent#>>'{base,uid}','')=''
+    OR COALESCE(NEW.intent#>>'{node,uid}','')=''
+    OR COALESCE(NEW.intent->>'sandboxUID','')=''
+    THEN RAISE EXCEPTION 'Native capacity requires its observed installation identity'; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER substrate_capacity_installation_identity BEFORE INSERT OR UPDATE OR DELETE
+ON factory.substrate_capacity_installation
+FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_capacity_installation();
+
 INSERT INTO factory.installation_maintenance(singleton) VALUES(true);
 INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid());
 RESET check_function_bodies;
 RESET search_path;
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'96932677c67a2c92024351a655f87b475b9c25731ead26a489d7a4313ffa7b72');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'8f95d95e5d52574fbbb181320a29a98de94701069e0fe643f02b7325a4bb0200');
 COMMIT;

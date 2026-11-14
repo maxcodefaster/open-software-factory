@@ -10,6 +10,114 @@ import { substrateFixture } from "../fixtures/substrate";
 import { nativeCapacityFixture } from "../fixtures/substrate-capacity";
 
 test.each(["amd64", "arm64"] as const)(
+  "native %s admission counts its commissioned worker when no additional pool fits",
+  async (architecture) => {
+    const f = await substrateFixture();
+    const fixture = nativeCapacityFixture(architecture);
+    fixture.base.spec.template.resources = {
+      requests: { cpu: "6", memory: "12Gi" },
+      limits: { cpu: "6", memory: "12Gi" },
+    };
+    const original = structuredClone(fixture.base);
+    const node = fixture.node("native-a");
+    const pods = [
+      {
+        metadata: { uid: crypto.randomUUID() },
+        spec: {
+          nodeName: "native-a",
+          containers: [
+            { name: "original-worker", resources: fixture.base.spec.template.resources },
+            { name: "control-plane", resources: { requests: { cpu: "1855m", memory: "2Gi" } } },
+          ],
+        },
+        status: { phase: "Running" },
+      },
+    ];
+    const calls: string[][] = [];
+    const resources = { cpuMilli: 3000, memoryMiB: 4096 };
+    const config: SubstrateInstallationConfiguration = {
+      deployment: "fresh-workspaces",
+      database: f.config.database,
+      connection: f.config.connection,
+      provisioner: f.config.connection,
+      editorPrincipal: "user:system:serviceaccount:owned:control",
+      connectorURL: f.config.connectorURL,
+      factoryCAFile: "/unused/ca",
+      workloadImage: fixture.image,
+      profile: f.config.profile,
+      runtime: {
+        ...f.config.runtime,
+        version: {
+          ...f.config.runtime.version,
+          attributes: f.config.runtime.version.attributes.map((attribute) =>
+            attribute.key === "architecture" ? { ...attribute, value: architecture } : attribute,
+          ),
+        },
+      },
+      workerSelector: fixture.selector,
+      egressHosts: [],
+      resources,
+    };
+    const run: typeof runNativeCapacityKubernetes = async (args) => {
+      calls.push([...args]);
+      let value: unknown;
+      if (args[0] !== "get") throw Error("No additional native capacity fits this node");
+      if (args[1] === "workerpools") value = { items: [fixture.base] };
+      else if (args[1] === "nodes") value = { items: [node] };
+      else if (args[1] === "pods") value = { items: pods };
+      else if (args[1] === "sandboxconfig") value = fixture.sandbox;
+      else throw Error(`Unexpected native capacity command ${args.join(" ")}`);
+      return { exitCode: 0, stdout: JSON.stringify(value), stderr: "" };
+    };
+    try {
+      const capacity = createSubstrateCapacity(f.database, config, run);
+      await capacity.requireReady(resources);
+      expect((await capacity.ensure()).ready).toContainEqual({ cpuMilli: 6000, memoryMiB: 12288 });
+      expect(
+        await f.database.client`SELECT owner FROM factory.substrate_worker_capacity`,
+      ).toHaveLength(0);
+      expect(
+        await f.database.client`SELECT owner FROM factory.substrate_capacity_installation`,
+      ).toHaveLength(1);
+      await expect(
+        Promise.resolve(f.database.client`
+        UPDATE factory.substrate_capacity_installation SET intent='{}'::jsonb
+      `),
+      ).rejects.toThrow("immutable");
+      await expect(
+        Promise.resolve(f.database.client`
+        DELETE FROM factory.substrate_capacity_installation
+      `),
+      ).rejects.toThrow("immutable");
+      expect(fixture.base).toEqual(original);
+      expect(calls.every((args) => args[0] === "get")).toBe(true);
+      const restarted = createSubstrateCapacity(f.database, config, run);
+      await restarted.requireReady(resources);
+      fixture.base.status.readyReplicas = 0;
+      await expect(restarted.requireReady(resources)).rejects.toMatchObject({
+        code: "unavailable",
+      });
+      fixture.base.status.readyReplicas = 1;
+      const bootID = node.status.nodeInfo.bootID;
+      node.status.nodeInfo.bootID = crypto.randomUUID();
+      await expect(restarted.requireReady(resources)).rejects.toMatchObject({
+        code: "unavailable",
+      });
+      node.status.nodeInfo.bootID = bootID;
+      fixture.base.metadata.uid = crypto.randomUUID();
+      await expect(restarted.requireReady(resources)).rejects.toThrow(
+        "original installation identity",
+      );
+      fixture.base.metadata.uid = original.metadata.uid;
+      await restarted.requireReady(resources);
+    } finally {
+      await f.dispose();
+    }
+  },
+  60000,
+);
+
+test.each(["amd64", "arm64"] as const)(
   "native %s admission uses its confirmed fully reserved original worker without resizing a smaller additional pool",
   async (architecture) => {
     const f = await substrateFixture();

@@ -6,6 +6,7 @@ import { nativeCapacityFixture } from "../../../test/fixtures/substrate-capacity
 import {
   nativeCapacityCandidates,
   nativeCapacityNodeReady,
+  nativeCapacityOriginalNode,
   nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
@@ -13,6 +14,50 @@ import {
   requireNativeCapacitySandbox,
   runNativeCapacityKubernetes,
 } from "./substrate-capacity";
+
+test.each(["amd64", "arm64"] as const)(
+  "the commissioned %s pool needs its own Ready node and a fully reserved budget",
+  (architecture) => {
+    const f = nativeCapacityFixture(architecture);
+    f.base.spec.template.resources = {
+      requests: { cpu: "6", memory: "12Gi" },
+      limits: { cpu: "6", memory: "12Gi" },
+    };
+    const pool = requireNativeCapacityBase({ items: [f.base] }, f.selector, architecture);
+    const node = f.node("native-a");
+    const nodes = { items: [node] };
+    const original = nativeCapacityOriginalNode(nodes, pool, architecture);
+    expect(original).toMatchObject({
+      uid: node.metadata.uid,
+      bootID: node.status.nodeInfo.bootID,
+      architecture,
+      resources: { cpuMilli: 6000, memoryMiB: 12288 },
+    });
+    const pendingNode = f.node("joining-node");
+    const pending = {
+      ...pendingNode,
+      status: {
+        ...pendingNode.status,
+        nodeInfo: { ...pendingNode.status.nodeInfo, bootID: "" },
+      },
+    };
+    expect(nativeCapacityOriginalNode({ items: [node, pending] }, pool, architecture)).toEqual(
+      original,
+    );
+    expect(nativeCapacityOriginalNode({ items: [] }, pool, architecture)).toBeNull();
+    delete pool.spec.template.nodeSelector["kubernetes.io/hostname"];
+    expect(nativeCapacityOriginalNode(nodes, pool, architecture)).toBeNull();
+    pool.spec.template.nodeSelector["kubernetes.io/hostname"] = "native-a";
+    pool.spec.template.resources.requests["cpu"] = "250m";
+    expect(nativeCapacityOriginalNode(nodes, pool, architecture)).toBeNull();
+    node.spec = { unschedulable: true };
+    pool.spec.template.resources.requests["cpu"] = "6";
+    expect(nativeCapacityOriginalNode(nodes, pool, architecture)).toBeNull();
+    node.spec = {};
+    node.status.nodeInfo.architecture = architecture === "arm64" ? "amd64" : "arm64";
+    expect(nativeCapacityOriginalNode(nodes, pool, architecture)).toBeNull();
+  },
+);
 
 test("original native capacity counts only equal finite CPU and memory reservations", () => {
   const f = nativeCapacityFixture();

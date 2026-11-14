@@ -345,11 +345,11 @@ pools are not resized, patched, deleted or replaced.
 The native baseline retains the selected node/boot/architecture, original pool/profile,
 budget, creation intent and returned pool UID. Missing, rejected, changed or
 uncertain creates never authorize another create. The original node-pinned pool
-also counts once those confirmed installation facts bind its UID, worker image,
+has its own immutable installation observation binding its UID, worker image,
 profile and the same Ready node/boot. It must report a Ready replica and reserve
-its full finite CPU/memory limits. A smaller additional pool does not hide that
-existing capacity. This reads existing budgets without resizing a worker or
-promising a free Actor slot; Substrate still owns actual placement.
+its full finite CPU/memory limits. It counts even when no additional pool fits;
+confirming a second pool is not a prerequisite. This reads existing budgets without
+resizing a worker or promising a free Actor slot; Substrate still owns actual placement.
 These capacity changes still
 need controller, chart and native joined-node qualification before claiming that
 the shipped-template journey or different-node recovery has passed.
@@ -472,9 +472,8 @@ accepts that one resolved field only with an unexported assignment fact set by
 `native-parent` after the exact private RootlessKit UID/GID checks, matching
 projected Actor UID and actual absence of `/proc/self/ns/cgroup`. The Parent has
 authenticated that Actor-bound capability before container inspection. A Project
-JSON field or environment variable alone cannot enable it. Factorybox still
-rejects host cgroup namespaces, and every other container/mount/capability fence
-remains unchanged. There is **no qualified per-inner-container cgroup/resource
+JSON field or environment variable alone cannot enable it. Every other container,
+mount and capability fence remains unchanged. There is **no qualified per-inner-container cgroup/resource
 enforcement** in this profile; Actor-level native limits remain the boundary.
 
 Factory persists provisioning intent and external dispatch/outcomes before each
@@ -794,6 +793,11 @@ to Actors or Factory users.
 Match Kubernetes capacity to the host's enforced CPU and memory budget, including
 any outer container or VM limit. Qualify the native control plane while cold images
 are being downloaded and unpacked, not only while workers are idle.
+Kind can report the VM's memory instead of its node container's smaller enforced limit.
+Before admitting Actors, compare Node allocatable resources with both limits. Configure
+the new cluster's Kubelet reservations so allocatable memory fits the enforced node budget,
+then independently verify Node readiness and the resulting allocatable value. Do not
+resize a retained WorkerPool to compensate for overstated Node capacity.
 Reserve native API scheduling capacity before Factory's WorkerPool admission.
 The small shared-node profile uses
 [`api-resources-patch.yaml`](api-resources-patch.yaml): each of the two API replicas
