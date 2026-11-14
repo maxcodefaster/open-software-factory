@@ -1,17 +1,15 @@
 // Pure helpers for clean-room.ts. Nothing here touches the cluster, the network or the file system.
 import {
-  memoryHeadroomMiB,
-  newestCompleteSet,
-  podMemoryRequestMiB,
-  quantityMiB,
-  scratchRequestsMiB,
-} from "../kubernetes/restore-rehearsal-model";
+  kubernetesPodRequestedResources,
+  kubernetesResourceQuantity,
+} from "../../packages/runtime-kubernetes/src/worker-resource-admission";
+import type { NativeCleanRoomValues } from "./clean-room-native";
 
 export const ownerLabel = "factory.dev/clean-room-owner";
 export const managedBy = "factory-clean-room";
 export const releaseName = "factory";
 const namespacePattern = /^factory-cleanroom-([0-9a-f]{8})$/;
-const runtimeNamespace = /^factory-(box|editor)-[a-f0-9]{32}$/;
+const runtimeNamespace = /^factory-editor-[a-f0-9]{32}$/;
 
 export function cleanRoomNamespace(id: string) {
   if (!/^[0-9a-f]{8}$/.test(id)) throw new Error("A clean-room id is eight lowercase hex digits");
@@ -28,7 +26,11 @@ export function namespaceManifest(id: string, startedAt: Date) {
     kind: "Namespace",
     metadata: {
       name: cleanRoomNamespace(id),
-      labels: { [ownerLabel]: id, "app.kubernetes.io/managed-by": managedBy },
+      labels: {
+        [ownerLabel]: id,
+        "app.kubernetes.io/managed-by": managedBy,
+        "ate.dev/api-access": "true",
+      },
       annotations: { "factory.dev/clean-room-started-at": startedAt.toISOString() },
     },
   };
@@ -43,7 +45,7 @@ type NamespaceLike = {
 };
 
 /** Refuses a Namespace that does not carry this run's exact name and both owner labels. */
-export function verifyOwnedNamespace(namespace: NamespaceLike, id: string) {
+export function verifyOwnedNamespace(namespace: NamespaceLike, id: string, originalUID?: string) {
   const expected = cleanRoomNamespace(id);
   const labels = namespace.metadata?.labels ?? {};
   if (namespace.metadata?.name !== expected)
@@ -51,6 +53,8 @@ export function verifyOwnedNamespace(namespace: NamespaceLike, id: string) {
   if (labels[ownerLabel] !== id || labels["app.kubernetes.io/managed-by"] !== managedBy)
     throw new Error(`${expected} does not carry the clean-room owner label ${id}; nothing deleted`);
   if (!namespace.metadata?.uid) throw new Error(`${expected} has no UID`);
+  if (originalUID && namespace.metadata.uid !== originalUID)
+    throw new Error(`${expected} differs from its original Namespace UID; nothing changed`);
   return namespace.metadata.uid;
 }
 
@@ -124,7 +128,7 @@ export function ownedVolumes(
 }
 
 /**
- * Factory creates a Namespace per worker or editor when a Project runs. They carry no label that
+ * Factory creates a Namespace per independent editor. They carry no label that
  * names this run, so ownership is the UID the installation's own database recorded for them.
  */
 export function ownedRuntimeNamespaces(
@@ -143,6 +147,22 @@ export function ownedRuntimeNamespaces(
       name: namespace.metadata?.name ?? "",
       uid: namespace.metadata?.uid ?? "",
     }));
+}
+
+export function requireCleanRoomNativeInventory(result: { code: number; stdout: string }) {
+  if (result.code !== 0)
+    throw new Error("Native cleanup inventory is unavailable; installation retained");
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.includes("native-resources-present"))
+    throw new Error(
+      "Native cleanup is not yet qualified by this clean-room harness; installation retained",
+    );
+  if (lines.some((line) => !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(line)))
+    throw new Error("Native cleanup inventory is invalid; installation retained");
+  return new Set(lines);
 }
 
 export function runtimeNamespacesNotAttributed(
@@ -173,6 +193,7 @@ export type Options = {
   factoryImage: string;
   node: string;
   values: string;
+  nativeFixture: string;
   context: string;
   keep: boolean;
   withSandbox: boolean;
@@ -180,20 +201,24 @@ export type Options = {
   cleanup: string;
 };
 
-export const help = `Install a released chart on a fresh namespace of the current kubectl context, prove it works and remove it:
+export const help = `Check an owned native-chart control plane. This is not native product acceptance:
 
-  mise exec -- bun run release:clean-room [--chart FILE.tgz|oci://REF[:VERSION]] [--factory-image REF]
+  mise exec -- bun run release:clean-room --native-fixture FILE [--chart FILE.tgz|oci://REF[:VERSION]] [--factory-image REF]
     [--node NODE] [--values FILE] [--context NAME] [--small-requests] [--with-sandbox] [--keep]
   mise exec -- bun run release:clean-room --cleanup factory-cleanroom-<8 hex> [--context NAME]
 
 --chart defaults to packaging this working tree with scripts/release/package-chart.ts, using
---factory-image (required then) and the worker in deploy/factorybox/release.json.
---factory-image may be a published digest reference or a locally available tag.
+--factory-image (required then) and its exact embedded native artifact catalog.
+--factory-image must be an immutable digest reference.
+--native-fixture supplies explicit fresh native runtime, provisioner, Ingress certificate/key
+and public trust inputs. See deploy/helm/factory/README.md. No retained installation is copied.
 --node is required when the cluster has more than one node.
 --values supplies extra settings. Only storage and size settings are used; identity is never copied.
 --small-requests lowers scheduling memory requests so the control plane fits a crowded node.
 --with-sandbox runs the Project, Ticket and Wiki steps. Creating a Starter Project makes Factory
-admit a Factorybox worker, so it is off by default.
+create native execution resources, so it is off by default. Public HTTPS is required; the
+browser host must already trust the Ingress certificate. DNS and native workers are operator inputs.
+Native cleanup still refuses recorded or unobserved native resources rather than deleting them.
 --keep skips cleanup so you can debug the installation.
 Writes .factory/test-results/clean-room/<namespace>.json.`;
 
@@ -203,14 +228,18 @@ export function parseOptions(args: string[]): Options {
     factoryImage: "",
     node: "",
     values: "",
+    nativeFixture: "",
     context: "",
     keep: false,
     withSandbox: false,
     smallRequests: false,
     cleanup: "",
   };
+  const seen = new Set<string>();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
+    if (!flag || seen.has(flag)) throw new Error("Clean-room options must be unambiguous");
+    seen.add(flag);
     if (flag === "--keep") options.keep = true;
     else if (flag === "--with-sandbox") options.withSandbox = true;
     else if (flag === "--small-requests") options.smallRequests = true;
@@ -221,6 +250,7 @@ export function parseOptions(args: string[]): Options {
       else if (flag === "--factory-image") options.factoryImage = value;
       else if (flag === "--node") options.node = value;
       else if (flag === "--values") options.values = value;
+      else if (flag === "--native-fixture") options.nativeFixture = value;
       else if (flag === "--context") options.context = value;
       else if (flag === "--cleanup") options.cleanup = value;
       else throw new Error(help);
@@ -229,13 +259,27 @@ export function parseOptions(args: string[]): Options {
   if (options.cleanup) {
     if (!cleanRoomIDFromNamespace(options.cleanup))
       throw new Error("--cleanup takes a factory-cleanroom-<8 hex> namespace");
+    if (
+      options.nativeFixture ||
+      options.factoryImage ||
+      options.chart ||
+      options.values ||
+      options.node ||
+      options.keep ||
+      options.withSandbox ||
+      options.smallRequests
+    )
+      throw new Error("--cleanup accepts only its Namespace and optional context");
     return options;
   }
   if (options.node && !/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(options.node))
     throw new Error("--node must be a Kubernetes node name");
   if (!options.chart && !options.factoryImage)
     throw new Error("Pass --chart, or --factory-image so the working tree chart can be packaged.");
-  if (options.factoryImage) imageKind(options.factoryImage);
+  if (!options.nativeFixture)
+    throw new Error("Pass --native-fixture with explicit fresh native installation inputs.");
+  if (options.factoryImage && imageKind(options.factoryImage) !== "digest")
+    throw new Error("Native clean-room installation requires an immutable Factory image digest");
   if (options.chart) parseChartArgument(options.chart);
   return options;
 }
@@ -285,17 +329,21 @@ export function record(value: unknown): Values {
 /** What the chart's own defaults pin, and so what the caller does not have to supply. */
 export function pinning(defaults: Values) {
   const image = String(defaults["image"] ?? "");
-  const worker = record(defaults["factorybox"]);
   return {
     image,
     imagePinned: digestImage.test(image),
-    worker: {
-      image: String(worker["image"] ?? ""),
-      executableSHA256: String(worker["executableSHA256"] ?? ""),
-      architecture: String(worker["architecture"] ?? ""),
-    },
-    workerPinned: Boolean(worker["image"] && worker["executableSHA256"] && worker["architecture"]),
   };
+}
+
+export function requireNativeChart(defaults: Values) {
+  const native = record(defaults["substrate"]);
+  if (
+    typeof native["workspaceConfigurationSecret"] !== "string" ||
+    typeof native["provisionerTokenSecret"] !== "string" ||
+    "factorybox" in defaults ||
+    "executionReserveTarget" in defaults
+  )
+    throw new Error("Clean-room checks require the native-only Factory chart");
 }
 
 export function packageVersion(id: string) {
@@ -314,7 +362,6 @@ const allowedSettings = [
   "zeroSize",
   "zeroSyncWorkers",
   "imagePullPolicy",
-  "executionReserveTarget",
   "objectStorage.size",
   "objectStorage.resources",
   "backup.size",
@@ -326,13 +373,17 @@ const allowedSettings = [
   "zero.resources",
   "maintenance.resources",
   "networkPolicy.enabled",
-  "factorybox.cpuRequestMilli",
-  "factorybox.memoryHeadroomMiB",
-  "factorybox.storeGiB",
-  "factorybox.minimumStoreGiB",
-  "factorybox.claimGiB",
-  "factorybox.kernel",
 ] as const;
+
+// Optional requests for the clean-room control plane, not native Actor limits.
+const smallRequestsMiB = {
+  postgres: 64,
+  forgejo: 96,
+  objects: 32,
+  openbao: 64,
+  zero: 128,
+  factory: 256,
+} as const;
 
 function leafPaths(value: unknown, prefix = ""): string[] {
   const object = record(value);
@@ -398,9 +449,8 @@ export function deepMerge(base: Values, overlay: Values): Values {
 
 export type CleanRoomValuesInput = {
   node: string;
-  ports: { factory: number; forgejo: number; zero: number };
+  native: NativeCleanRoomValues;
   image?: string;
-  worker?: { image: string; executableSHA256: string; architecture: string };
   extra?: unknown;
   smallRequests?: boolean;
 };
@@ -413,23 +463,27 @@ function lowered(resources: unknown, memoryMiB: number, cpu: string) {
 /** Everything the run supplies itself. Nothing here comes from a retained installation. */
 export function cleanRoomValues(input: CleanRoomValuesInput, defaults: Values = {}) {
   const generic = genericSettings(input.extra);
-  const ports = [input.ports.factory, input.ports.forgejo, input.ports.zero];
-  if (ports.some((port) => !Number.isInteger(port) || port < 1024 || port > 65535))
-    throw new Error("Local ports must be integers from 1024 to 65535");
-  if (new Set(ports).size !== 3) throw new Error("Factory, Forgejo and planning need three ports");
   if (!input.node) throw new Error("A node name is required");
   let values: Values = {
-    development: true,
-    publicURL: `http://127.0.0.1:${input.ports.factory}`,
-    forgejoPublicURL: `http://127.0.0.1:${input.ports.forgejo}`,
-    developmentZeroURL: `http://127.0.0.1:${input.ports.zero}`,
-    ingress: { enabled: false },
+    development: false,
+    publicURL: input.native.factoryOrigin,
+    forgejoPublicURL: input.native.forgejoOrigin,
+    ingress: {
+      enabled: true,
+      className: input.native.ingressClass,
+      tlsSecret: input.native.tlsSecret,
+    },
+    substrate: {
+      workspaceConfigurationSecret: input.native.configurationSecret,
+      provisionerTokenSecret: input.native.provisionerSecret,
+    },
+    networkPolicy: {
+      ingressControllerNamespaceSelector: { matchLabels: input.native.ingressNamespaceLabels },
+    },
     backup: { enabled: true },
-    factorybox: { nodeName: input.node },
   };
   if (input.image)
     values = deepMerge(values, { image: input.image, imagePullPolicy: "IfNotPresent" });
-  if (input.worker) values = deepMerge(values, { factorybox: { ...input.worker } });
   values = deepMerge(values, generic.values);
   if (input.smallRequests) {
     const merged = deepMerge(defaults, values);
@@ -437,12 +491,12 @@ export function cleanRoomValues(input: CleanRoomValuesInput, defaults: Values = 
       resources: lowered(record(merged[key])["resources"], memoryMiB, cpu),
     });
     values = deepMerge(values, {
-      resources: lowered(merged["resources"], scratchRequestsMiB.factory, "100m"),
-      postgres: service("postgres", scratchRequestsMiB.postgres, "25m"),
-      forgejo: service("forgejo", scratchRequestsMiB.forgejo, "25m"),
-      openbao: service("openbao", scratchRequestsMiB.openbao, "25m"),
-      zero: service("zero", scratchRequestsMiB.zero, "50m"),
-      objectStorage: service("objectStorage", scratchRequestsMiB.objects, "25m"),
+      resources: lowered(merged["resources"], smallRequestsMiB.factory, "100m"),
+      postgres: service("postgres", smallRequestsMiB.postgres, "25m"),
+      forgejo: service("forgejo", smallRequestsMiB.forgejo, "25m"),
+      openbao: service("openbao", smallRequestsMiB.openbao, "25m"),
+      zero: service("zero", smallRequestsMiB.zero, "50m"),
+      objectStorage: service("objectStorage", smallRequestsMiB.objects, "25m"),
     });
   }
   return { values, ignored: generic.ignored };
@@ -451,43 +505,56 @@ export function cleanRoomValues(input: CleanRoomValuesInput, defaults: Values = 
 // ---- Capacity
 
 export type MemoryLine = { name: string; mib: number };
+type SchedulingLine = MemoryLine & { cpuMilli: number };
 
 const backupStoreMiB = 8;
 const testProbeMiB = 128;
 
-/** Scheduling memory the control plane asks for, including the backup store and the test hook. */
-export function controlPlaneRequests(values: Values): MemoryLine[] {
-  const request = (value: unknown) => {
-    const memory = record(record(value)["requests"])["memory"];
-    return typeof memory === "string" ? quantityMiB(memory) : 0;
+/** Scheduler reservations, including the backup store, backup init peak and test hook. */
+export function controlPlaneRequests(values: Values): SchedulingLine[] {
+  const request = (value: unknown, resource: "cpu" | "memory") => {
+    const resources = record(value);
+    const amount = record(resources["requests"])[resource] ?? record(resources["limits"])[resource];
+    if (amount === undefined) return 0;
+    if (typeof amount !== "string" && typeof amount !== "number")
+      throw new Error(`Control-plane ${resource} request is not a Kubernetes quantity`);
+    return kubernetesResourceQuantity(amount, resource);
   };
-  const section = (key: string) => request(record(values[key])["resources"]);
+  const line = (name: string, resources: unknown) => ({
+    name,
+    mib: request(resources, "memory") / 1024 ** 2,
+    cpuMilli: request(resources, "cpu"),
+  });
+  const section = (name: string, key = name) => line(name, record(values[key])["resources"]);
+  const backup = section("backup job", "backup");
   return [
-    { name: "factory", mib: request(values["resources"]) },
-    { name: "postgres", mib: section("postgres") },
-    { name: "forgejo", mib: section("forgejo") },
-    { name: "openbao", mib: section("openbao") },
-    { name: "zero", mib: section("zero") },
-    { name: "objects", mib: section("objectStorage") },
-    { name: "backup store", mib: backupStoreMiB },
-    { name: "backup job", mib: section("backup") },
-    { name: "helm test probe", mib: testProbeMiB },
+    line("factory", values["resources"]),
+    section("postgres"),
+    section("forgejo"),
+    section("openbao"),
+    section("zero"),
+    section("objects", "objectStorage"),
+    { name: "backup store", mib: backupStoreMiB, cpuMilli: 5 },
+    { ...backup, mib: Math.max(16, backup.mib), cpuMilli: Math.max(10, backup.cpuMilli) },
+    { name: "helm test probe", mib: testProbeMiB, cpuMilli: 50 },
   ];
 }
 
 export function totalMiB(lines: readonly MemoryLine[]) {
-  return Math.round(lines.reduce((sum, line) => sum + line.mib, 0));
+  return Math.ceil(lines.reduce((sum, line) => sum + line.mib, 0));
 }
 
-type PodLike = Parameters<typeof podMemoryRequestMiB>[0] & {
+type PodLike = {
   metadata?: { name?: string; namespace?: string };
+  spec: unknown;
+  status?: unknown;
 };
 
 export function largestRequesters(pods: readonly PodLike[], count = 5) {
   return pods
     .map((pod) => ({
       pod: `${pod.metadata?.namespace ?? "?"}/${pod.metadata?.name ?? "?"}`,
-      mib: Math.round(podMemoryRequestMiB(pod)),
+      mib: Math.ceil(kubernetesPodRequestedResources(pod).memoryBytes / 1024 ** 2),
     }))
     .filter((item) => item.mib > 0)
     .sort((left, right) => right.mib - left.mib)
@@ -497,13 +564,28 @@ export function largestRequesters(pods: readonly PodLike[], count = 5) {
 export function capacityVerdict(input: {
   node: string;
   allocatable: string;
+  allocatableCPU: string;
   pods: readonly PodLike[];
-  needed: readonly MemoryLine[];
+  needed: readonly SchedulingLine[];
   smallRequests: boolean;
 }) {
-  const headroomMiB = Math.round(memoryHeadroomMiB(input.allocatable, input.pods));
+  const allocated = kubernetesResourceQuantity(input.allocatable, "memory");
+  const allocatedCPU = kubernetesResourceQuantity(input.allocatableCPU, "cpu");
+  const requests = input.pods.map((pod) => kubernetesPodRequestedResources(pod));
+  const reserved = requests.reduce((sum, request) => sum + request.memoryBytes, 0);
+  const reservedCPU = requests.reduce((sum, request) => sum + request.cpuMilli, 0);
+  const neededMilliCPU = input.needed.reduce((sum, line) => sum + line.cpuMilli, 0);
+  if (
+    !Number.isSafeInteger(reserved) ||
+    !Number.isSafeInteger(reservedCPU) ||
+    !Number.isSafeInteger(neededMilliCPU) ||
+    input.needed.some((line) => !Number.isSafeInteger(line.cpuMilli) || line.cpuMilli < 0)
+  )
+    throw new Error("Node resource requests exceed safe admission accounting");
+  const headroomMiB = Math.floor((allocated - reserved) / 1024 ** 2);
+  const headroomMilliCPU = allocatedCPU - reservedCPU;
   const neededMiB = totalMiB(input.needed);
-  const fits = headroomMiB >= neededMiB;
+  const fits = headroomMiB >= neededMiB && headroomMilliCPU >= neededMilliCPU;
   const top = largestRequesters(input.pods)
     .map((item) => `${item.pod} (${item.mib} MiB)`)
     .join(", ");
@@ -511,12 +593,14 @@ export function capacityVerdict(input: {
     fits,
     node: input.node,
     headroomMiB,
+    headroomMilliCPU,
     neededMiB,
+    neededMilliCPU,
     detail: fits
-      ? `${headroomMiB} MiB of allocatable memory is unrequested on ${input.node}; the control plane needs ${neededMiB} MiB`
-      : `${input.node} has ${headroomMiB} MiB of allocatable memory unrequested; the control plane needs ${neededMiB} MiB. ${
+      ? `${headroomMiB} MiB of allocatable memory and ${headroomMilliCPU} millicores are unrequested on ${input.node}; the control plane needs ${neededMiB} MiB and ${neededMilliCPU} millicores`
+      : `${input.node} has ${headroomMiB} MiB of allocatable memory and ${headroomMilliCPU} millicores unrequested; the control plane needs ${neededMiB} MiB and ${neededMilliCPU} millicores. ${
           input.smallRequests ? "" : "Rerun with --small-requests, or "
-        }stop workloads there to free ${neededMiB - headroomMiB} MiB. The largest requesters are ${top || "none"}. Stop only what you can restart; this script stops nothing.`,
+        }stop workloads there to free ${Math.max(0, neededMiB - headroomMiB)} MiB and ${Math.max(0, neededMilliCPU - headroomMilliCPU)} millicores. The largest memory requesters are ${top || "none"}. Stop only what you can restart; this script stops nothing.`,
   };
 }
 
@@ -581,7 +665,7 @@ export function openbaoVerdict(output: string) {
 export const settingsLimit =
   "A clean installation holds no provider key, so this proves OpenBao is unsealed and the model connection list reads. It does not prove that a stored provider key decrypts.";
 export const projectLimit =
-  "Creating a Starter Project makes Factory prepare images and start Main-Preview, which admits a Factorybox worker. Without --with-sandbox the run stops at the empty board.";
+  "Creating a Starter Project prepares native images and starts Preview. This harness has not qualified native provisioning, cleanup or the complete Ticket journey. Without --with-sandbox the run stops at the empty board.";
 export const wikiLimit =
   "Wiki pages exist only after Wiki generation, which needs a configured model connection. A clean installation has none, so the page edit is skipped rather than faked.";
 
@@ -592,14 +676,15 @@ export function listSetsScript() {
 }
 
 export function newestSet(output: string) {
-  return newestCompleteSet(
+  return (
     output
       .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        const [name = "", complete = "0"] = line.split(" ");
-        return { name, complete: complete === "1" };
-      }),
+      .flatMap((line) => {
+        const match = /^(\d{8}T\d{6}Z) 1$/.exec(line);
+        return match?.[1] ? [match[1]] : [];
+      })
+      .sort()
+      .at(-1) ?? null
   );
 }
 
@@ -641,11 +726,15 @@ export function emptyCleanup(): CleanupState {
 
 export type Receipt = {
   schema: 1;
+  scope: "control-plane-check";
+  nativeProductAcceptance: false;
   id: string;
   namespace: string;
+  namespaceUID: string | null;
   release: string;
   state: "running" | "finished";
   passed: boolean;
+  interrupted: boolean;
   startedAt: string;
   finishedAt: string | null;
   durationMs: number | null;
@@ -655,6 +744,14 @@ export type Receipt = {
   tools: Record<string, string>;
   chart: Record<string, unknown>;
   images: Record<string, unknown>;
+  native: {
+    configurationSHA256?: string;
+    certificateSHA256?: string;
+    editorPrincipal?: string;
+    factoryOrigin?: string;
+    forgejoOrigin?: string;
+    secretNames?: string[];
+  };
   options: { keep: boolean; withSandbox: boolean; smallRequests: boolean; extraValues: boolean };
   scheduling: Record<string, unknown>;
   values: { ignoredKeys: string[] };
@@ -674,11 +771,15 @@ export function createReceipt(input: {
 }): Receipt {
   return {
     schema: 1,
+    scope: "control-plane-check",
+    nativeProductAcceptance: false,
     id: input.id,
     namespace: cleanRoomNamespace(input.id),
+    namespaceUID: null,
     release: releaseName,
     state: "running",
     passed: false,
+    interrupted: false,
     startedAt: input.startedAt.toISOString(),
     finishedAt: null,
     durationMs: null,
@@ -688,6 +789,7 @@ export function createReceipt(input: {
     tools: {},
     chart: {},
     images: {},
+    native: {},
     options: input.options,
     scheduling: {},
     values: { ignoredKeys: [] },
@@ -701,10 +803,13 @@ export function createReceipt(input: {
 
 /** Every run records each of these. The Project steps may be skipped only without --with-sandbox. */
 export const requiredChecks = [
+  "native-inputs",
   "tools",
   "capacity",
   "chart",
+  "chart-configuration",
   "namespace",
+  "native-secrets",
   "install",
   "helm-test",
   "readiness",
@@ -727,10 +832,12 @@ function skipAllowed(name: string, withSandbox: boolean) {
 }
 
 export function receiptVerdict(
-  receipt: Pick<Receipt, "checks" | "cleanup" | "options">,
+  receipt: Pick<Receipt, "checks" | "cleanup" | "options" | "namespaceUID" | "interrupted">,
   withSandbox = receipt.options.withSandbox,
 ) {
   const problems: string[] = [];
+  if (receipt.interrupted) problems.push("run was interrupted");
+  if (!receipt.namespaceUID) problems.push("original Namespace identity was not confirmed");
   for (const name of requiredChecks) {
     const check = receipt.checks.find((item) => item.name === name);
     if (!check) problems.push(`${name} was not run`);
@@ -754,6 +861,8 @@ export function finishReceipt(receipt: Receipt, finishedAt: Date, failure?: stri
   const reason = failure ?? (verdict.problems.length ? verdict.problems.join("; ") : undefined);
   return {
     ...receipt,
+    scope: "control-plane-check",
+    nativeProductAcceptance: false,
     state: "finished",
     passed: verdict.passed && !failure,
     finishedAt: finishedAt.toISOString(),

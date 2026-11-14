@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
@@ -8,7 +9,8 @@ const help = `Connect to a local Helm-installed Factory:
 
   mise exec -- bun run factory:connect [--namespace factory] [--release factory] [--context NAME]
 
-Reads the installed browser addresses and keeps all three loopback connections open.
+Reads the installed browser addresses and keeps Factory and planning loopback connections open.
+Forgejo keeps its configured HTTPS route and is not port-forwarded.
 Reconnecting never restarts Factory, changes its addresses or repeats model work.
 Keep this command running. Ctrl+C disconnects without stopping the installation.`;
 
@@ -91,6 +93,31 @@ function loopbackURL(value: string | undefined, path: string) {
   return url;
 }
 
+function forgeOrigin(value: string | undefined) {
+  const message = "Native Forgejo access requires its configured HTTPS DNS origin on port 443.";
+  let url: URL;
+  try {
+    url = new URL(value ?? "");
+  } catch {
+    throw new Error(message);
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash ||
+    url.port ||
+    !/^[a-z0-9.-]+$/.test(url.hostname) ||
+    isIP(url.hostname) ||
+    url.hostname === "localhost" ||
+    url.hostname.endsWith(".localhost")
+  )
+    throw new Error(message);
+  return url.origin;
+}
+
 export function localAccessConfiguration(value: unknown, options: Options) {
   const config = configSchema.parse(value);
   const name = options.release.slice(0, 40).replace(/-$/, "");
@@ -107,13 +134,12 @@ export function localAccessConfiguration(value: unknown, options: Options) {
       "Select the exact Factory development Helm release, not an Ingress installation.",
     );
   const factory = loopbackURL(config.data["FACTORY_BASE_URL"], "/");
-  const forgejo = loopbackURL(config.data["FACTORY_FORGEJO_PUBLIC_URL"], "/");
+  const forgejoURL = forgeOrigin(config.data["FACTORY_FORGEJO_PUBLIC_URL"]);
   const zero = loopbackURL(config.data["FACTORY_ZERO_CACHE_PUBLIC_URL"], "/zero");
   if (zero.hostname !== factory.hostname)
     throw new Error("Factory and the planning cache must use the same cookie hostname.");
   const targets = [
     { role: "Factory", component: "factory", remotePort: 3000, url: factory },
-    { role: "Forgejo", component: "forgejo", remotePort: 3000, url: forgejo },
     { role: "Planning", component: "zero", remotePort: 4848, url: zero },
   ].map((target) => ({
     ...target,
@@ -123,8 +149,8 @@ export function localAccessConfiguration(value: unknown, options: Options) {
     service: `${name}-${target.component}`,
   }));
   if (new Set(targets.map((target) => target.port)).size !== targets.length)
-    throw new Error("Local Factory, Forgejo and planning access require three distinct ports.");
-  return { uid: config.metadata.uid, targets };
+    throw new Error("Local Factory and planning access require distinct ports.");
+  return { uid: config.metadata.uid, targets, forgejoURL };
 }
 type Target = ReturnType<typeof localAccessConfiguration>["targets"][number];
 
@@ -366,6 +392,8 @@ export async function connectLocalFactory(
           report(announced ? "Local access restored." : "Local access connected.");
           if (!announced) {
             for (const entry of original.targets) report(`  ${entry.role}: ${entry.url}`);
+            report(`  Forgejo: ${original.forgejoURL}`);
+            report("Forgejo keeps its configured HTTPS route.");
             report("Keep this command running. Ctrl+C disconnects without stopping Factory.");
             announced = true;
           }

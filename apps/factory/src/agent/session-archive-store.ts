@@ -27,12 +27,11 @@ export function createSessionArchives(
       SELECT turn.id,intent.runtime_attempt_id,intent.session_id,intent.prompt_id,
         jsonb_build_object('projectID',turn.project_id,'workspaceID',attempt.workspace_id,
           'revision',attempt.revision,'requirementApprovalID',change.requirement_approval_id,
-          'branch',change.branch_name,'workerID',attempt.factorybox_worker_id,
-          'admissionID',attempt.factorybox_admission_id,
-          'runtimeArtifacts',COALESCE(artifact.runtime_host_image,provision.intent#>>'{configuration,workloadImage}'),
+          'branch',change.branch_name,
+          'runtimeArtifacts',provision.intent#>>'{configuration,workloadImage}',
           'environment',environment.environment,'environmentVersion',environment.version,
           'requirementRevisionID',approval.requirement_revision_id)
-        || CASE WHEN attempt.substrate THEN jsonb_build_object(
+        || jsonb_build_object(
           'nativeRuntime',jsonb_build_object('engine','substrate','profile',binding.intent->'profile',
             'runtime',binding.intent->'runtime','actorUID',binding.actor_uid,
             'templateUID',binding.intent->'templateUID','templateSHA256',binding.intent->'templateSHA256'),
@@ -41,15 +40,13 @@ export function createSessionArchives(
             'writerEpoch',source.checkpoint->'writerEpoch','bundleSHA256',source.checkpoint#>'{bundle,sha256}',
             'manifestKey','workspace-source/v1/'||attempt.workspace_id::text||'/'||(source.checkpoint->>'id')||'/manifest.json',
             'relationship','last-confirmed-generation-not-turn-atomic') ELSE NULL END)
-          ELSE '{}'::jsonb END
       FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
       JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
       JOIN factory.change change ON change.id=turn.change_id AND change.id=attempt.change_id
       JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
-       LEFT JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
        LEFT JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=attempt.id
-       LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-       LEFT JOIN factory.substrate_workspace provision ON provision.workspace_id=attempt.workspace_id
+       JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+       LEFT JOIN factory.substrate_workspace provision ON provision.workspace_id=attempt.workspace_id AND provision.generation=attempt.generation
        LEFT JOIN factory.substrate_source source ON source.workspace_id=attempt.workspace_id
       WHERE turn.state='completed'
         AND NOT EXISTS(SELECT 1 FROM factory.session_archive archive WHERE archive.turn_id=turn.id)

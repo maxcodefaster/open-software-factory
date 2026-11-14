@@ -29,7 +29,7 @@ func TestCommitControlFixture(t *testing.T) {
 	}
 	for {
 		var message Message
-		if err := control.connection.ReadJSON(&message); err != nil {
+		if err := control.read(&message); err != nil {
 			return
 		}
 		if message.Type != "operation-request" {

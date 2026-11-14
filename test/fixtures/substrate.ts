@@ -2,24 +2,26 @@ import { createHash } from "node:crypto";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import {
+  createSubstrateExecution,
   type SubstrateConfiguration,
   substrateActorSelector,
   substrateTemplateSHA256,
 } from "../../apps/factory/src/runtime/substrate";
-import type { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import {
   nativeActor,
   type SubstrateCall,
+  SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import {
   personalWorkspaceIdentity,
   ticketWorkspaceIdentity,
 } from "../../packages/workspace-domain/src/workspace";
 import { ownedPostgresServer, ownedTestDatabase } from "./postgres-server";
-import { installOwnedRuntimeConfiguration } from "./runtime-configuration";
 
 export const fixtureRuntime: SubstrateConfiguration["runtime"] = {
   sandboxClass: "gvisor",
@@ -74,7 +76,7 @@ export async function substrateFixture(
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${branch},${sourceRevision},'active',${userID})`;
       await sql`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at) VALUES(${crypto.randomUUID()},${changeID},'owned','native-ticket',${branch},${sourceRevision},${`native-fixture:${changeID}`},'succeeded',${sourceRevision},now())`;
     }
-    await sql`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,ticket_id,change_id,source_branch,source_revision,created_by,substrate,factorybox_worker_id) VALUES(${workspaceID},${projectID},${kind},${kind === "personal" ? userID : null},${kind === "ticket" ? ticketID : null},${kind === "ticket" ? changeID : null},${branch},${sourceRevision},${userID},true,NULL)`;
+    await sql`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,ticket_id,change_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${projectID},${kind},${kind === "personal" ? userID : null},${kind === "ticket" ? ticketID : null},${kind === "ticket" ? changeID : null},${branch},${sourceRevision},${userID})`;
   });
   const metadata = (n: string, uid: string, space?: string) => ({
     name: n,
@@ -116,12 +118,28 @@ export async function substrateFixture(
     nativeActor.parse({
       metadata: metadata(name, uid, atespace),
       actorTemplate: { atespace, name: "runtime" },
-      workerSelector: { matchLabels: substrateActorSelector("owned-native-secret", attemptID) },
+      workerSelector: {
+        matchLabels:
+          config.workerSelector ?? substrateActorSelector("owned-native-secret", attemptID),
+      },
       status: { state: "ACTOR_STATE_SUSPENDED" },
     });
-  let controller: ReturnType<typeof createRuntimeController>;
-  const hub = new RuntimeHub((id, phase, error) => controller.status(id, phase, error));
-  const restore = installOwnedRuntimeConfiguration();
+  let controller: ReturnType<typeof createRuntimeController> | undefined;
+  const hub = new RuntimeHub(async (id, phase, error) => {
+    await controller?.status(id, phase, error);
+  });
+  const forge = {
+    FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
+    FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
+    FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
+    FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
+    FACTORY_FORGEJO_OWNER: "owned-runtime-fixture",
+  };
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(forge)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
   return {
     database,
     config,
@@ -136,45 +154,121 @@ export async function substrateFixture(
     attemptID,
     atespace,
     hub,
-    controller(call?: SubstrateCall, sources?: ReturnType<typeof createSubstrateSources>) {
-      const withEgress: SubstrateCall | undefined = call
-        ? async (method, request) => {
-            if (method === "GetActorEgressPolicy")
-              return {
-                metadata: metadata("default", crypto.randomUUID(), atespace),
-                rules: [
-                  { tlsPassthrough: { hostnames: ["factory.test"], ports: { numbers: [443] } } },
-                ],
-              };
-            return call(method, request);
-          }
-        : undefined;
-      controller = createRuntimeController(
-        database,
-        hub,
-        "owned-native-secret",
-        {
-          substrate: sources,
-          async prepareExecution() {
-            throw new Error("Native slice cannot prepare legacy Source");
-          },
+    execution(call?: SubstrateCall, sources?: SubstrateSourceHandoff) {
+      return createSubstrateExecution(database, hub, "owned-native-secret", config, call, sources);
+    },
+    async controller(call: SubstrateCall, sources?: SubstrateSourceHandoff) {
+      // Controller tests begin with positively observed native provisioning,
+      // not an alternate production constructor for prepared Actors. Tests of
+      // provisioning itself use the ordinary empty-owner fixture.
+      const workerSelector = {
+        ...substrateActorSelector("owned-native-secret", attemptID),
+        "factory.runtime/profile": config.profile,
+        "factory.dev/deployment": "owned",
+      };
+      config.workerSelector = workerSelector;
+      const installation: SubstrateInstallationConfiguration = {
+        deployment: config.deployment,
+        database: config.database,
+        connection: config.connection,
+        provisioner: { ...config.connection, tokenFile: "/unused/owner-token" },
+        editorPrincipal: "user:system:serviceaccount:owned:factory-control",
+        connectorURL: config.connectorURL,
+        factoryCAFile: "/unused/factory-ca.pem",
+        workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
+        profile: config.profile,
+        runtime: config.runtime,
+        workerSelector,
+        egressHosts: config.egressHosts ?? [],
+        ...(config.resources ? { resources: config.resources } : {}),
+      };
+      const policy = {
+        metadata: metadata("default", crypto.randomUUID()),
+        bindings: [{ role: "editor", members: [installation.editorPrincipal] }],
+      };
+      const intent = {
+        configuration: { ...installation, projectID },
+        revision: sourceRevision,
+        repositoryURL: "https://example.invalid/fixture.git",
+        branch,
+        devcontainerPath: ".devcontainer/devcontainer.json",
+        templateSHA256: config.templateSHA256,
+        environment: config.environment ?? { version: 0, secretKey: null },
+        systemContract: {
+          version: 1,
+          primaryApp: "web",
+          apps: [
+            {
+              id: "web",
+              label: "Owned",
+              command: ["node", "server.mjs"],
+              port: 4300,
+              healthPath: "/",
+            },
+          ],
         },
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        config,
-        withEgress,
-      );
+      };
+      await database.client`INSERT INTO factory.substrate_workspace(
+        workspace_id,intent,atespace_attempted_at,atespace,
+        policy_attempted_at,policy,template_attempted_at,template)
+        VALUES(${workspaceID},${JSON.stringify(intent)}::text::jsonb,
+          ${space.metadata.createTime},${JSON.stringify(space)}::text::jsonb,
+          ${policy.metadata.createTime},${JSON.stringify(policy)}::text::jsonb,
+          ${template.metadata.createTime},${JSON.stringify(template)}::text::jsonb)`;
+      const withEgress: SubstrateCall = async (method, request) => {
+        if (method === "GetAtespaceAccessPolicy") return structuredClone(policy);
+        if (method === "GetActorEgressPolicy")
+          return {
+            metadata: metadata("default", crypto.randomUUID(), atespace),
+            rules: [{ tlsPassthrough: { hostnames: ["factory.test"], ports: { numbers: [443] } } }],
+          };
+        return call(method, request);
+      };
+      controller = createRuntimeController(database, hub, "owned-native-secret", {
+        configuration: installation,
+        ...(sources ? { sources } : {}),
+        call: withEgress,
+      });
       return controller;
     },
     async dispose() {
       hub.revoke(attemptID);
-      restore();
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       await database.client.end({ timeout: 1 });
       await target.dispose();
       await server.dispose();
     },
   };
+}
+
+export async function startSubstrateFixtureWorkspace(
+  fixture: Awaited<ReturnType<typeof substrateFixture>>,
+) {
+  let actor: ReturnType<typeof fixture.actor> | undefined;
+  const runtime = await fixture.controller(async (method) => {
+    if (method === "GetAtespace") return fixture.space;
+    if (method === "GetActorTemplate") return fixture.template;
+    if (method === "GetActor") {
+      if (!actor) throw new SubstrateRPCError("NotFound", "absent");
+      return structuredClone(actor);
+    }
+    if (method === "CreateActor") {
+      actor = fixture.actor();
+      return structuredClone(actor);
+    }
+    if (method === "ResumeActor" && actor) {
+      actor.metadata.version = "2";
+      actor.status = {
+        state: "ACTOR_STATE_RUNNING",
+        workerAssignment: { sandboxRuntime: fixture.config.runtime },
+      };
+      return { actor: structuredClone(actor) };
+    }
+    throw new Error(`Unexpected controlled native operation ${method}`);
+  });
+  await runtime.start(fixture.projectID, fixture.userID);
+  return runtime;
 }

@@ -8,7 +8,12 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { test } from "../fixtures/browser-test";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
+import {
+  browserBootstrap,
+  factoryFunctionMatcher,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 import { serveChatAssets } from "../support/chat-assets";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
@@ -537,16 +542,25 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
   const approvalID = crypto.randomUUID(),
     changeID = crypto.randomUUID(),
     workspaceID = crypto.randomUUID();
-  const attemptID = crypto.randomUUID(),
-    ben = crypto.randomUUID();
+  const ben = crypto.randomUUID();
   const suffix = projectID.replaceAll("-", "").slice(0, 12),
     slug = `shared-chat-${suffix}`;
   const database = createDatabase(1);
   let commissioned = 0;
+  const codingCommands = await Promise.all(
+    [
+      "startCoding",
+      "resumeCoding",
+      "sendCodingPrompt",
+      "requestCodingChanges",
+      "implementTicket",
+      "startTicketChange",
+    ].map(factoryFunctionMatcher),
+  );
   page.on("request", (request) => {
     if (
       request.method() === "POST" &&
-      /\/agent\/(?:start|prompt|resume)$/.test(new URL(request.url()).pathname)
+      codingCommands.some((matches) => matches(new URL(request.url())))
     )
       commissioned++;
   });
@@ -590,15 +604,24 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
           ${"a".repeat(40)},${changeID},'succeeded',${"a".repeat(40)},now())`;
       await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by)
         VALUES(${workspaceID},${projectID},'ticket',${ticketID},${changeID},${`factory/change-${suffix}`},${"a".repeat(40)},${session.user.id})`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
-        parent_connector_token_hash,child_connector_token_hash,create_intended_at,stop_intended_at,stopped_at,created_by)
-        VALUES(${attemptID},${projectID},${changeID},${workspaceID},1,${"a".repeat(40)},'stopped',
-          ${"b".repeat(64)},${"c".repeat(64)},now(),now(),now(),${session.user.id})`;
+      await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
+        VALUES(${crypto.randomUUID()},${projectID},${ticketID},'build',${session.user.id})`;
+    });
+    const attemptID = await recordUncreatedWorkspaceAttempt(database, {
+      workspaceID,
+      generation: 1,
+      createdBy: session.user.id,
+      parentHash: "b".repeat(64),
+      childHash: "c".repeat(64),
+      connectorURL: "wss://owned-chat.factory.invalid/internal/runtime-connect",
+      state: "stopped",
+    });
+    await database.client.begin(async (sql) => {
+      await sql`UPDATE factory.runtime_attempt SET stop_intended_at=now(),stopped_at=now()
+        WHERE id=${attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${attemptID} WHERE id=${changeID}`;
       await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
         VALUES(${changeID},${attemptID},${`ses_owned_${suffix}`},'committed',now(),${session.user.id})`;
-      await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
-        VALUES(${crypto.randomUUID()},${projectID},${ticketID},'build',${session.user.id})`;
     });
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
@@ -648,6 +671,9 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
     await page.screenshot({
       path: ".factory/test-results/chat-collaboration/shared-draft-narrow.png",
     });
+    expect(
+      await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${projectID}`,
+    ).toHaveLength(0);
   } finally {
     await deleteFactoryProject(projectID, database);
     await database.client.end();

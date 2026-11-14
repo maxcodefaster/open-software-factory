@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { fixtureValue } from "../../../test/fixtures/value";
 import { developerIDEIdentity } from "../../workspace-domain/src/developer-ide";
-import { createKubernetesClient } from "./client";
 import { createDeveloperIDEClient, validateDeveloperIDEObservation } from "./developer-ide";
+import { createDeveloperIDEKubernetesClient } from "./developer-ide-kubernetes";
 import { renderDeveloperIDEResources } from "./developer-ide-manifest";
 
 const input = {
@@ -47,7 +47,7 @@ function forwardingFixture() {
   let deferInventory = true;
   let readyAutomatically = false;
   let absent = false;
-  const kubernetes = createKubernetesClient(async () => ({
+  const kubernetes = createDeveloperIDEKubernetesClient(async () => ({
     stdout: JSON.stringify({
       ...namespace,
       metadata: { ...namespace.metadata, uid: input.namespaceUID },
@@ -295,7 +295,7 @@ test("stopping one editor generation preserves another generation's owned forwar
   );
   const opened: Array<{ podName: string; cancel: AbortController; kills: number }> = [];
   const client = createDeveloperIDEClient(
-    createKubernetesClient(async () => ({
+    createDeveloperIDEKubernetesClient(async () => ({
       stdout: JSON.stringify({
         ...namespace,
         metadata: { ...namespace.metadata, uid: input.namespaceUID },
@@ -312,7 +312,7 @@ test("stopping one editor generation preserves another generation's owned forwar
       const pod = pods.get(args[2] ?? "");
       return pod ? JSON.stringify(pod) : null;
     },
-    (_role, _namespace, podName) => {
+    (_namespace, podName) => {
       const owned = { podName, cancel: new AbortController(), kills: 0 };
       opened.push(owned);
       return {
@@ -379,7 +379,7 @@ test("an incompatible unrecorded editor is neither adopted nor deleted; recorded
       containers: [{ ...expected.spec.containers[0], image: `other@sha256:${"2".repeat(64)}` }],
     },
   };
-  const kubernetes = createKubernetesClient(async (args) => {
+  const kubernetes = createDeveloperIDEKubernetesClient(async (args) => {
     if (args[0] !== "get") throw new Error("Must not mutate the occupied namespace");
     return {
       stdout: JSON.stringify({

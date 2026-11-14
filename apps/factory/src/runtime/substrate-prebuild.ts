@@ -12,6 +12,7 @@ import {
   type SubstrateCall,
   SubstrateRPCError,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
+import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
 import { CommandError } from "../command-error";
 import { runtimeSourceCapability } from "./git-http";
 import type { RuntimeHub } from "./hub";
@@ -183,12 +184,18 @@ export function createSubstratePrebuild(
         const [publicationGrant] = await sql`SELECT command_id FROM factory.environment_write
           WHERE project_id=${config.projectID} AND environment=${environment.environment}
             AND secret_key=${environment.secretKey} AND base_version=${environment.version - 1}
-            AND state='committed' AND manifest @> ${JSON.stringify({ registries: [{ host: registry, hasPassword: true }] })}::text::jsonb`;
-        if (!publicationGrant)
+            AND state='committed' AND manifest @> ${JSON.stringify({ registries: [{ host: registry, hasPassword: true, publish: true }] })}::text::jsonb`;
+        if (!publicationGrant) {
+          await sql`UPDATE factory.project_image_preparation
+            SET state='unsupported',
+              failure='Prepared image publication is not authorized in this Environment. Normal Dev Container startup remains available.',
+              updated_at=now()
+            WHERE id=${preparationID} AND state='pending' AND runtime_attempt_id IS NULL`;
           throw new CommandError(
             "unavailable",
             "Native prebuild requires a committed Project Environment registry publication grant. No runtime was created.",
           );
+        }
         if (!prior) await capacity?.requireReady(substrateResourceReservation(selected));
         const imageRepository = `${registry}/open-factory/prebuilds/${config.projectID}`;
         const atespace = `fa-${attemptID.replaceAll("-", "")}`;
@@ -218,7 +225,11 @@ export function createSubstratePrebuild(
             // has no editor HTTP target, App, agent or canonical Source grant.
             channels: [{ name: "ide", kind: "ide", target: "", healthPath: "" }],
             processes: [],
-            prebuild: { id: preparationID, platform: "linux/amd64", imageRepository },
+            prebuild: {
+              id: preparationID,
+              platform: `linux/${nativeRuntimeArchitecture(selected.runtime)}`,
+              imageRepository,
+            },
           },
           source: {
             workspaceId: attemptID,

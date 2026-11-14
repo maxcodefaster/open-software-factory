@@ -1,267 +1,177 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { stripVTControlCharacters } from "node:util";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
-import type { ComputeClass } from "../../../../packages/runtime-domain/src/compute";
-import {
-  hashConnectorToken,
-  runtimeConnectorTokens,
-  runtimeIdentity,
-  runtimePublicationToken,
-} from "../../../../packages/runtime-domain/src/identity";
-import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
-import {
-  createKubernetesClient,
-  type KubernetesClient,
-  KubernetesObservationUnavailableError,
-  type RuntimePodObservation,
-  readRuntimeRegistryCA,
-  requireRuntimePodArtifacts,
-} from "../../../../packages/runtime-kubernetes/src/client";
-import {
-  factoryboxAdmissionID,
-  factoryboxAssignmentSecret,
-} from "../../../../packages/runtime-kubernetes/src/factorybox-location";
-import { observeFactoryboxNodes } from "../../../../packages/runtime-kubernetes/src/factorybox-node-discovery";
-import { configuredFactoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
-import { FactoryboxCapacityRefusedError } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
-import {
-  type RuntimeManifestInput,
-  renderRuntimeResources,
-} from "../../../../packages/runtime-kubernetes/src/manifest";
 import type { SubstrateCall } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import {
   parseSystemContract,
-  type SystemContract,
   SystemContractError,
 } from "../../../../packages/system-contract/src/system-contract";
-import {
-  personalWorkspaceIdentity,
-  ticketWorkspaceIdentity,
-} from "../../../../packages/workspace-domain/src/workspace";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { createOpenCodeClient } from "../agent/opencode-client";
+import { createAccessController, projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
-import { logFailure, reportFailure } from "../failure-log";
+import {
+  createChangeAgentStop,
+  requireStoppedAgentInputsIn,
+  type RetainedStopTarget,
+} from "../agent/stop";
+import { reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
-import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
-import { createComputeWait } from "../usage/compute-wait";
-import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
-import type { createWorkspaceSourceController } from "../workspace/source-controller";
-import { agentConfiguration } from "./agent-configuration";
-import { runtimeAppOrigins } from "./app-origins";
-import { freezeRuntimeArtifacts, type RuntimeArtifactIntent } from "./artifacts";
-import { runtimeFactoryURL, runtimeForgeURL, runtimeReleaseRegistryURL } from "./endpoints";
-import { createFactoryboxExecution } from "./factorybox";
-import {
-  prepareRuntimeRepository,
-  readRepositoryFileAtRevision,
-  removeRuntimeRepository,
-  resolveRepositoryRevision,
-  runtimeSourceCapability,
-} from "./git-http";
+import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
+import { readRepositoryFileAtRevision } from "./git-http";
 import type { RuntimeHub } from "./hub";
-import {
-  launchRuntimeResources,
-  type RuntimeLaunchInput,
-  type RuntimeLaunchPorts,
-} from "./launcher";
-import { recoveredConnectionObserver } from "./recovered-connections";
-import type { ExecutionReserve } from "./reserve-controller";
-import { createRetryBackoff } from "./retry-backoff";
-import { freezeStagingConfiguration } from "./staging-configuration";
-import { configuredSubstrate, createSubstrateExecution } from "./substrate";
 import type { createSubstrateCapacity } from "./substrate-capacity";
+import { createSubstrateIsolated } from "./substrate-isolated";
 import { createSubstratePrebuild } from "./substrate-prebuild";
 import { createSubstrateVerification } from "./substrate-verification";
-import { configuredSubstrateWorkspaces, createSubstrateWorkspaces } from "./substrate-workspaces";
-import type { RuntimeAttemptView } from "./types";
-import { prepareVerificationHandoff } from "./verification-handoff";
-import { selectVerificationPlacement } from "./verification-placement";
 import {
-  createFactoryboxWorker,
-  factoryboxAllocation,
-  terminatedFactoryboxWorkerFailure,
-} from "./worker";
-import { recoverFactoryboxWorker, type WorkerRecoveryInput } from "./worker-recovery";
+  configuredSubstrateInstallation,
+  createSubstrateWorkspaces,
+  type SubstrateInstallationConfiguration,
+  substrateInstallationConfiguration,
+  substrateWorkspaceConfiguration,
+} from "./substrate-workspaces";
+import type { RuntimeAttemptView } from "./types";
 
 type Database = ReturnType<typeof createDatabase>;
-type ExecutionIdentity = ReturnType<typeof runtimeIdentity> & {
-  workerID: string;
-  namespace: string;
-  podName: string;
+export type RuntimeControllerOptions = {
+  configuration?: SubstrateInstallationConfiguration;
+  call?: SubstrateCall;
+  provisionerCall?: SubstrateCall;
+  sources?: SubstrateSourceHandoff;
+  capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "ensure" | "requireReady">;
+  stopCoding?: (changeID: string) => Promise<unknown>;
 };
-const systemContractPath = ".factory/system.json";
 
-function renderAttemptResources(
-  input: Omit<
-    RuntimeManifestInput,
-    | "runtimeHostImage"
-    | "factoryboxProfile"
-    | "workerID"
-    | "reserveSlotID"
-    | "environmentVersion"
-    | "appOrigins"
-  >,
-  artifacts: RuntimeArtifactIntent,
-) {
-  const appOrigins = input.systemContract
-    ? runtimeAppOrigins(artifacts.publicFactoryOrigin, input.attemptID, input.systemContract)
-    : undefined;
-  return renderRuntimeResources({
-    ...input,
-    runtimeHostImage: artifacts.runtimeHostImage,
-    factoryboxProfile: artifacts.factoryboxProfile,
-    workerID: artifacts.workerID,
-    ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
-    environmentVersion: artifacts.environmentVersion,
-    ...(appOrigins ? { appOrigins } : {}),
-  });
-}
-
-function requirePinnedRuntimeHostImage(value: string | undefined) {
-  if (!value?.includes("@sha256:")) {
-    throw new Error("FACTORY_RUNTIME_HOST_IMAGE must be pinned by digest");
-  }
-  return value;
-}
-
+// Factory owns commands, authority and persisted intent. There is exactly one
+// execution backend: the admitted official Substrate Actor adapter.
 export function createRuntimeController(
   database: Database,
   hub: RuntimeHub,
   connectorSecret: string,
-  sources: Pick<ReturnType<typeof createWorkspaceSourceController>, "prepareExecution"> &
-    Partial<Pick<ReturnType<typeof createWorkspaceSourceController>, "substrate">>,
-  kubernetes: KubernetesClient = createKubernetesClient(),
-  readRegistryCA: () => Promise<string> = readRuntimeRegistryCA,
-  reserve?: ExecutionReserve,
-  factorybox = createFactoryboxExecution(database, hub, undefined, {
-    backoff: createRetryBackoff(15_000, 5 * 60_000),
-    importedExportsEveryMS: 2 * 60_000,
-    pausedSettleMS: 10 * 60_000,
-  }),
-  observeWorkers = observeFactoryboxNodes,
-  nativeConfiguration = configuredSubstrate(),
-  nativeCall?: SubstrateCall,
-  nativeWorkspaceConfiguration = configuredSubstrateWorkspaces(),
-  nativeProvisionerCall?: SubstrateCall,
-  nativeCapacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "ensure" | "requireReady">,
+  options: RuntimeControllerOptions = {},
 ) {
-  if (nativeConfiguration && nativeWorkspaceConfiguration)
-    throw new Error(
-      "Configure either prepared native binding or fresh Workspace provisioning, not both",
-    );
-  const substrate = nativeConfiguration
-    ? createSubstrateExecution(
-        database,
-        hub,
-        connectorSecret,
-        nativeConfiguration,
-        nativeCall,
-        sources.substrate,
-      )
-    : undefined;
-  const nativeWorkspaces = nativeWorkspaceConfiguration
-    ? createSubstrateWorkspaces(
-        database,
-        hub,
-        connectorSecret,
-        nativeWorkspaceConfiguration,
-        nativeCall,
-        nativeProvisionerCall,
-        resolveSystemContract,
-        sources.substrate,
-        nativeCapacity,
-      )
-    : undefined;
-  function requireIsolatedOwner(projectID: string, kind: string) {
-    if (nativeWorkspaces?.matchesProject(projectID) || substrate?.matchesProject(projectID))
-      throw new CommandError(
-        "unavailable",
-        `Native ${kind} execution is not enabled. No legacy runtime was created.`,
-      );
-  }
-  const nativeVerification = nativeWorkspaceConfiguration
-    ? createSubstrateVerification(
-        database,
-        hub,
-        connectorSecret,
-        nativeWorkspaceConfiguration,
-        nativeCall,
-        nativeProvisionerCall,
-        nativeCapacity,
-      )
-    : undefined;
-  const nativePrebuild = nativeWorkspaceConfiguration
-    ? createSubstratePrebuild(
-        database,
-        hub,
-        connectorSecret,
-        nativeWorkspaceConfiguration,
-        nativeCall,
-        nativeProvisionerCall,
-        nativeCapacity,
-      )
-    : undefined;
-  async function nativeFor(attemptID: string) {
-    const [row] = await database.client<
-      { substrate: boolean }[]
-    >`SELECT substrate FROM factory.runtime_attempt WHERE id=${attemptID}`;
-    if (!row?.substrate) return undefined;
-    const prebuild = await nativePrebuild?.forAttempt(attemptID);
-    if (prebuild) return prebuild;
-    const verification = await nativeVerification?.forAttempt(attemptID);
-    if (verification) return verification;
-    const workspace = await nativeWorkspaces?.forAttempt(attemptID);
-    if (workspace) return workspace;
-    if (!substrate?.matchesAttempt(attemptID))
-      throw new Error(
-        "Native Attempt requires its original explicitly configured adapter; legacy dispatch refused",
-      );
-    return substrate;
-  }
-  async function observeNativeAttempt(attempt: RuntimeAttemptView) {
-    const native = await nativeFor(attempt.id);
-    if (!native) return attempt;
-    const observation = await native.get();
-    if (observation.state === "ACTOR_STATE_CRASHED") {
-      // Native observation persisted the crash. Return that saved outcome, not
-      // the row read before the observation completed.
-      const [recorded] = await database.client<
-        Pick<RuntimeAttemptView, "state" | "failure" | "updatedAt">[]
-      >`
-        SELECT state,failure,updated_at AS "updatedAt" FROM factory.runtime_attempt WHERE id=${attempt.id}`;
-      if (!recorded) throw new Error("Recorded native runtime outcome is unavailable");
-      return { ...attempt, ...recorded, native: observation };
-    }
-    return { ...attempt, native: observation };
-  }
-  const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(
-    process.env["FACTORY_RUNTIME_HOST_IMAGE"],
-  );
-  const artifactConfiguration = {
-    hostImages: {
-      development: pinnedRuntimeHostImage,
-      staging: pinnedRuntimeHostImage,
-      build: pinnedRuntimeHostImage,
-      verification: pinnedRuntimeHostImage,
-    },
-    browserToolsImage: process.env["FACTORY_BROWSER_TOOLS_IMAGE"],
-    publicFactoryOrigin: new URL(process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000").origin,
-  };
-  const artifactsFor = (attemptID: string, sql: Database["client"]) =>
-    freezeRuntimeArtifacts(sql, attemptID, artifactConfiguration);
+  const selected = options.configuration ?? configuredSubstrateInstallation();
+  if (!selected) throw new Error("Factory requires its Substrate installation configuration");
+  const installation = substrateInstallationConfiguration(selected);
   const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
-  if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER) {
+  if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER)
     throw new Error("Forgejo configuration is required");
-  }
   const forge = createForgejoClient({
     apiURL: FACTORY_FORGEJO_API_URL,
     token: FACTORY_FORGEJO_TOKEN,
   });
-  async function verificationJob(verificationID: string, sql: Database["client"]) {
-    const [row] = await sql<
-      Array<{ handle: string | null; runID: string | null; commit: string; repository: string }>
+  const projects = new Map<
+    string,
+    {
+      workspaces: ReturnType<typeof createSubstrateWorkspaces>;
+      verification: ReturnType<typeof createSubstrateVerification>;
+      prebuild: ReturnType<typeof createSubstratePrebuild>;
+      isolated: ReturnType<typeof createSubstrateIsolated>;
+    }
+  >();
+  async function readContract(repositoryURL: string, revision: string) {
+    let content: string;
+    try {
+      if (repositoryURL.startsWith("file://")) {
+        content = await readRepositoryFileAtRevision(
+          repositoryURL,
+          revision,
+          ".factory/system.json",
+        );
+      } else {
+        const repository = forgeRepositoryFromURL(
+          repositoryURL,
+          () => new SystemContractError("Project repository URL is invalid"),
+        );
+        if (repository.owner !== FACTORY_FORGEJO_OWNER)
+          throw new Error("Project Forge owner is not allowed");
+        content = await forge.getFile(repository, ".factory/system.json", revision);
+      }
+    } catch (cause) {
+      throw new SystemContractError(
+        `Cannot read .factory/system.json at ${revision.slice(0, 12)}: ${cause instanceof Error ? cause.message : "unknown error"}`,
+      );
+    }
+    return parseSystemContract(content);
+  }
+  function project(projectID: string) {
+    const existing = projects.get(projectID);
+    if (existing) return existing;
+    const configuration = substrateWorkspaceConfiguration({ ...installation, projectID });
+    const owners = {
+      workspaces: createSubstrateWorkspaces(
+        database,
+        hub,
+        connectorSecret,
+        configuration,
+        options.call,
+        options.provisionerCall,
+        readContract,
+        options.sources,
+        options.capacity,
+      ),
+      verification: createSubstrateVerification(
+        database,
+        hub,
+        connectorSecret,
+        configuration,
+        options.call,
+        options.provisionerCall,
+        options.capacity,
+      ),
+      prebuild: createSubstratePrebuild(
+        database,
+        hub,
+        connectorSecret,
+        configuration,
+        options.call,
+        options.provisionerCall,
+        options.capacity,
+      ),
+      isolated: createSubstrateIsolated(
+        database,
+        hub,
+        connectorSecret,
+        configuration,
+        readContract,
+        options.call,
+        options.provisionerCall,
+        options.capacity,
+      ),
+    };
+    projects.set(projectID, owners);
+    return owners;
+  }
+  async function execution(attemptID: string) {
+    const [attempt] = await database.client<{ projectID: string }[]>`
+      SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    if (!attempt) throw new CommandError("not-found", "Runtime Attempt not found");
+    const owners = project(attempt.projectID);
+    const runtime =
+      (await owners.isolated.forAttempt(attemptID)) ??
+      (await owners.prebuild.forAttempt(attemptID)) ??
+      (await owners.verification.forAttempt(attemptID)) ??
+      (await owners.workspaces.forAttempt(attemptID));
+    if (!runtime) throw new Error("Runtime Attempt requires its persisted Substrate owner binding");
+    return runtime;
+  }
+  async function observe(attempt: RuntimeAttemptView) {
+    const observation = await (await execution(attempt.id)).get();
+    if (observation.state === "ACTOR_STATE_CRASHED") {
+      const [recorded] = await database.client<
+        Pick<RuntimeAttemptView, "state" | "failure" | "updatedAt">[]
+      >`
+        SELECT state,failure,updated_at AS "updatedAt" FROM factory.runtime_attempt WHERE id=${attempt.id}`;
+      if (!recorded) throw new Error("Recorded runtime outcome is unavailable");
+      return { ...attempt, ...recorded, native: observation };
+    }
+    return { ...attempt, native: observation };
+  }
+  async function verificationJob(verificationID: string) {
+    const [row] = await database.client<
+      { handle: string | null; runID: string | null; commit: string; repository: string }[]
     >`
       SELECT verification.runner_job_handle AS handle,verification.action_run_id AS "runID",
         verification.commit_sha AS commit,project.repository_url AS repository
@@ -273,2718 +183,310 @@ export function createRuntimeController(
       Number(row.runID),
       row.commit,
     );
-    const [saved] = await sql<Array<{ handle: string }>>`UPDATE factory.verification
-      SET runner_job_handle=COALESCE(runner_job_handle,${handle})
+    const [saved] = await database.client<{ handle: string }[]>`
+      UPDATE factory.verification SET runner_job_handle=COALESCE(runner_job_handle,${handle})
       WHERE id=${verificationID} AND action_run_id=${row.runID} AND commit_sha=${row.commit}
         AND state IN ('pending','runner-starting','running') RETURNING runner_job_handle AS handle`;
     if (!saved || saved.handle !== handle)
       throw new Error("Verification job authority changed before execution");
     return saved.handle;
   }
-  const cleanupRetries = new Set<string>();
-  const startupObservations = new Set<string>();
-  const reconnectObservations = new Map<string, ReturnType<typeof setTimeout>>();
-  function clearReconnectObservation(attemptID: string) {
-    const timer = reconnectObservations.get(attemptID);
+  const reconnects = new Map<string, ReturnType<typeof setTimeout>>();
+  function clearReconnect(attemptID: string) {
+    const timer = reconnects.get(attemptID);
     if (timer) clearTimeout(timer);
-    reconnectObservations.delete(attemptID);
+    reconnects.delete(attemptID);
   }
   function observeReconnectLater(attemptID: string) {
-    if (reconnectObservations.has(attemptID)) return;
+    if (reconnects.has(attemptID)) return;
     const timer = setTimeout(() => {
-      reconnectObservations.delete(attemptID);
-      void updateStatus(attemptID, "disconnected", "Waiting for runtime connectors").catch(
-        (cause) => {
-          logFailure("Runtime reconnect observation", cause);
-          observeReconnectLater(attemptID);
-        },
+      reconnects.delete(attemptID);
+      void status(attemptID, "disconnected", "Waiting for runtime connectors").catch(
+        reportFailure("Runtime reconnect observation is unavailable"),
       );
     }, 15_000);
     timer.unref();
-    reconnectObservations.set(attemptID, timer);
+    reconnects.set(attemptID, timer);
   }
-  let cleanupTail: Promise<void> = Promise.resolve();
-  const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
-  const computeWait = createComputeWait(database, reserve);
-  const worker = createFactoryboxWorker(database, kubernetes, configuredFactoryboxRuntimeProfile);
-  async function executionIdentity(
-    ownerID: string,
-    generation: number,
-    sql: Database["client"],
-    actorID?: string,
-  ) {
-    const identity = runtimeIdentity(ownerID, generation);
-    const location = await worker.location(
-      sql,
-      actorID ? { actorID, requestID: identity.attemptID } : undefined,
-    );
-    return {
-      ...identity,
-      ...location,
-      admissionID: factoryboxAdmissionID(location.workerID, location.podName),
-    };
-  }
-  let drainingCompute = false;
-  async function admitOrWait(
-    sql: Database["client"],
-    attemptID: string,
-    projectID: string,
-    kind: ComputeClass,
-    role?: "staging" | "verification",
-  ) {
-    try {
-      if (reserve) return await reserve.admit(sql, attemptID, role, { projectID, kind });
-      await admitComputeIn(sql, projectID, kind);
-      return null;
-    } catch (cause) {
-      if (!(cause instanceof ComputeCapacityError)) throw cause;
-      await sql`INSERT INTO factory.runtime_compute_wait(attempt_id) VALUES(${attemptID}) ON CONFLICT DO NOTHING`;
-      return null;
-    }
-  }
-  async function waiting(attemptID: string) {
-    return (
-      (
-        await database.client`SELECT attempt_id FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`
-      ).length > 0
-    );
-  }
-  async function withResourceLock<T>(
-    attemptID: string,
-    action: (sql: Database["client"]) => Promise<T>,
-    connection?: Database["client"],
-  ) {
-    const reserved = connection ? undefined : database.coordination();
-    const lock = connection ?? reserved;
-    if (!lock) throw new Error("Runtime resource connection missing");
-    const key = `runtime-resources:${attemptID}`;
-    try {
-      await lock`SELECT pg_advisory_lock(hashtext(${key}))`;
-      return await action(lock);
-    } finally {
-      try {
-        await lock`SELECT pg_advisory_unlock(hashtext(${key}))`;
-      } finally {
-        await reserved?.end({ timeout: 1 });
-      }
-    }
-  }
-  async function recordCreated(
-    sql: Database["client"],
-    attemptID: string,
-    podUID: string,
-    namespaceUID: string,
-  ) {
-    const observed = await sql<{ state: string }[]>`
-      UPDATE factory.runtime_attempt SET
-        state = CASE WHEN state = 'create-intended' AND stop_intended_at IS NULL
-          THEN 'starting'::factory.runtime_attempt_state ELSE state END,
-        kubernetes_uid = ${podUID}, kubernetes_namespace_uid = ${namespaceUID},
-        create_observed_at = now(), updated_at = now()
-      WHERE id = ${attemptID}
-        AND (kubernetes_uid IS NULL OR kubernetes_uid = ${podUID})
-        AND (kubernetes_namespace_uid IS NULL OR kubernetes_namespace_uid = ${namespaceUID})
-      RETURNING state
-    `;
-    if (!observed[0]) throw new Error("Runtime create identities do not match persisted intent");
-    const active = observed[0].state === "starting";
-    if (!active) hub.revoke(attemptID);
-    return active;
-  }
-  async function launchAttempt(
-    attemptID: string,
-    input: RuntimeLaunchInput,
-    ports: Omit<RuntimeLaunchPorts, "kubernetes" | "transitionObserved">,
-    connection: Database["client"],
-  ) {
-    await withResourceLock(
-      attemptID,
-      async (sql) => {
-        const intent = await sql<
-          { state: string; stopped: boolean; workerID: string; admissionID: string }[]
-        >`
-        SELECT state, stop_intended_at IS NOT NULL AS stopped,
-          factorybox_worker_id AS "workerID",factorybox_admission_id AS "admissionID"
-        FROM factory.runtime_attempt WHERE id = ${attemptID}
-      `;
-        if (
-          intent[0]?.state !== "create-intended" ||
-          intent[0].stopped ||
-          (await waiting(attemptID))
-        ) {
-          hub.revoke(attemptID);
-          return;
-        }
-        const binding = intent[0];
-        await freezeStagingConfiguration(sql, attemptID, input.resources);
-        reserve?.refill();
-        const activated = await computeWait.launch(
-          attemptID,
-          () => reserve?.activate(attemptID, input.resources) ?? Promise.resolve(null),
+  async function status(attemptID: string, phase: string, error?: string) {
+    const native = await execution(attemptID);
+    if (["stopped", "failed", "cleanup-failed"].includes(phase)) {
+      const [preparation] = await database.client<{ id: string; state: string }[]>`
+        SELECT id,state FROM factory.project_image_preparation WHERE runtime_attempt_id=${attemptID}`;
+      if (preparation) {
+        const unsupported = error?.startsWith(
+          "prebuild Compose cannot depend on the producer environment",
         );
-        if (activated) {
-          if (await recordCreated(sql, attemptID, activated.podUID, activated.namespaceUID))
-            void ports.observe().catch((cause) => ports.fail("observe", cause));
-          return;
-        }
-        await computeWait.launch(attemptID, () =>
-          launchRuntimeResources(input, {
-            ...ports,
-            kubernetes: {
-              apply: (resources) =>
-                worker.provision(resources, input.factoryboxProfile, input.runtimeHostImage, {
-                  workerID: binding.workerID,
-                  admissionID: binding.admissionID,
-                }),
-              getPod: (namespace, podName) => kubernetes.getPod(namespace, podName),
-            },
-            transitionObserved: (podUID, namespaceUID) =>
-              recordCreated(sql, attemptID, podUID, namespaceUID),
-          }),
-        );
-      },
-      connection,
-    );
-  }
-  async function resolveSystemContract(repositoryURL: string, revision: string) {
-    let content: string;
-    try {
-      if (repositoryURL.startsWith("file://")) {
-        content = await readRepositoryFileAtRevision(repositoryURL, revision, systemContractPath);
-      } else {
-        const repository = forgeRepositoryFromURL(
-          repositoryURL,
-          () => new SystemContractError("Project repository URL is invalid"),
-        );
-        if (repository.owner !== FACTORY_FORGEJO_OWNER) {
-          throw new Error("Project Forge owner is not allowed");
-        }
-        content = await forge.getFile(repository, systemContractPath, revision);
-      }
-    } catch (cause) {
-      throw new SystemContractError(
-        `Cannot read ${systemContractPath} at ${revision.slice(0, 12)}: ${
-          cause instanceof Error ? cause.message : "unknown error"
-        }`,
-      );
-    }
-    return parseSystemContract(content);
-  }
-  async function settleReadyChange(attemptID: string) {
-    await database.client`
-      UPDATE factory.change SET state = 'active', version = version + 1
-      WHERE runtime_attempt_id = ${attemptID} AND state = 'starting'
-    `;
-  }
-  function runtimeRepositoryURL(_repositoryURL: string, attemptID: string) {
-    return runtimeFactoryURL(
-      `/internal/runtime-source/${attemptID}/${runtimeSourceCapability(attemptID)}`,
-    );
-  }
-  async function cleanupAttempt(attemptID: string) {
-    // Cleanup holds a resource connection while usage and reserve accounting need
-    // another. Queue cleanup so recovery cannot reserve the entire shared pool.
-    const current = cleanupTail.then(() =>
-      withResourceLock(attemptID, (sql) => cleanupResources(sql, attemptID)),
-    );
-    cleanupTail = current.catch(() => {});
-    await current;
-  }
-  async function cleanupResources(sql: Database["client"], attemptID: string) {
-    const attempts = await sql<
-      Array<{
-        namespace: string;
-        namespaceUID: string | null;
-        podName: string;
-        generation: string;
-        uid: string | null;
-        workspaceID: string | null;
-      }>
-    >`
-      SELECT attempt.kubernetes_namespace AS namespace,
-        attempt.kubernetes_namespace_uid AS "namespaceUID",
-        attempt.kubernetes_pod_name AS "podName", attempt.generation,
-        attempt.kubernetes_uid AS uid,
-        attempt.workspace_id AS "workspaceID"
-      FROM factory.runtime_attempt attempt
-      WHERE attempt.id = ${attemptID}
-    `;
-    const attempt = attempts[0];
-    if (!attempt) return;
-    if (hub.connected(attemptID)) {
-      await createRecordedOpenCodeUsage(database).drainAttempt(
-        attemptID,
-        createOpenCodeClient((request, path) => hub.request(attemptID, "agent", request, path)),
-      );
-    } else await createRecordedOpenCodeUsage(database).markUnavailable(attemptID);
-    const removedByReserve = await reserve?.cleanup(attemptID, Number(attempt.generation));
-    // Reserve cleanup already owns Delete. Observe that result without another
-    // mutation, then drain this assigned Sandbox's retained checkpoints too.
-    await factorybox.deleteSandbox(attemptID, Boolean(removedByReserve));
-    if (!removedByReserve) {
-      const [binding] = await sql<Array<{ workerID: string; admissionID: string }>>`
-          SELECT factorybox_worker_id AS "workerID",factorybox_admission_id AS "admissionID"
-          FROM factory.runtime_attempt WHERE id=${attemptID}`;
-      if (!binding) throw new Error("Cleanup lost its retained worker binding");
-      const shared = await factoryboxAllocation(
-        sql,
-        undefined,
-        binding.workerID,
-        binding.admissionID,
-      );
-      const namespaceUID = attempt.namespaceUID ?? shared.namespaceUID;
-      if (namespaceUID)
-        await kubernetes.deleteSecret({
-          namespace: attempt.namespace,
-          namespaceUID,
-          name: factoryboxAssignmentSecret(attemptID),
-          ownerID: attempt.workspaceID ?? attemptID,
-          attemptID,
-        });
-      else if (await kubernetes.getNamespace(attempt.namespace))
-        throw new Error("Shared Namespace outcome is unconfirmed; assignment was retained");
-    }
-    await removeRuntimeRepository(attemptID);
-    await reserve?.removed(sql, attemptID);
-    reserve?.refill();
-    hub.revoke(attemptID);
-  }
-  function retryCleanup(attemptID: string) {
-    if (cleanupRetries.has(attemptID)) return;
-    cleanupRetries.add(attemptID);
-    void (async () => {
-      try {
-        for (;;) {
-          const rows = await database.client<
-            Array<{
-              state: string;
-              failure: string | null;
-              cleanupAttempts: number;
-              failedStop: boolean;
-            }>
-          >`
-            SELECT state, failure, cleanup_attempts AS "cleanupAttempts",
-              state='failed' AND stop_intended_at IS NOT NULL AND stopped_at IS NULL AS "failedStop"
-            FROM factory.runtime_attempt WHERE id = ${attemptID}
-          `;
-          const attempt = rows[0];
-          if (!attempt || (attempt.state !== "stopping" && !attempt.failedStop)) return;
-          if (attempt.cleanupAttempts >= 12) break;
-          try {
-            await cleanupAttempt(attemptID);
-            await database.client.begin(async (transaction) => {
-              const settled = await transaction<Array<{ state: string }>>`
-                UPDATE factory.runtime_attempt
-                SET state = CASE WHEN stop_intended_at IS NOT NULL
-                    THEN 'stopped'::factory.runtime_attempt_state
-                    ELSE 'failed'::factory.runtime_attempt_state END,
-                  stopped_at = CASE WHEN stop_intended_at IS NOT NULL THEN now() ELSE stopped_at END,
-                  failure = CASE WHEN stop_intended_at IS NOT NULL THEN NULL ELSE failure END,
-                  updated_at = now()
-                WHERE id = ${attemptID} AND (state='stopping' OR
-                  (state='failed' AND stop_intended_at IS NOT NULL AND stopped_at IS NULL))
-                RETURNING state
-              `;
-              const state = settled[0]?.state;
-              if (state === "stopped" || state === "failed") {
-                await transaction`
-                  UPDATE factory.change SET
-                    state = CASE WHEN ${state} = 'stopped' AND cancel_requested_at IS NOT NULL
-                      THEN 'cancelled'::factory.change_state ELSE 'failed'::factory.change_state END,
-                    cancelled_at = CASE WHEN ${state} = 'stopped' AND cancel_requested_at IS NOT NULL
-                      THEN now() ELSE cancelled_at END,
-                    failure = CASE WHEN ${state} = 'failed'
-                      THEN COALESCE(failure, 'Runtime cleanup failed') ELSE failure END,
-                    version = version + 1
-                  WHERE runtime_attempt_id = ${attemptID}
-                    AND state IN ('starting', 'active', 'cancelling')
-                    AND (${state} = 'failed' OR cancel_requested_at IS NOT NULL)
-                `;
-              }
-            });
-            return;
-          } catch (cause) {
-            const message = cause instanceof Error ? cause.message : "unknown cleanup error";
-            await database.client`
-              UPDATE factory.runtime_attempt SET
-                failure = ${`${attempt.failure?.split("; cleanup retry failed:")[0] ?? "runtime cleanup pending"}; cleanup retry failed: ${message}`},
-                cleanup_attempts = cleanup_attempts + 1,
-                updated_at = now()
-              WHERE id = ${attemptID} AND (state='stopping' OR
-                (state='failed' AND stop_intended_at IS NOT NULL AND stopped_at IS NULL))
-            `;
-            if (attempt.cleanupAttempts < 11) await Bun.sleep(5_000);
-          }
-        }
-        await database.client.begin(async (transaction) => {
-          await transaction`
-            UPDATE factory.runtime_attempt SET state = 'cleanup-failed', updated_at = now()
-            WHERE id = ${attemptID} AND state = 'stopping'
-          `;
-          await transaction`
-            UPDATE factory.change SET state = 'failed',
-              failure = COALESCE(failure, 'Runtime cleanup failed'), version = version + 1
-            WHERE runtime_attempt_id = ${attemptID}
-              AND state IN ('starting', 'active', 'cancelling')
-              AND (cancel_requested_at IS NOT NULL OR EXISTS(
-                SELECT 1 FROM factory.runtime_attempt WHERE id=${attemptID}
-                  AND stop_intended_at IS NULL
-              ))
-          `;
-        });
-      } finally {
-        cleanupRetries.delete(attemptID);
-      }
-    })();
-  }
-  // Resume an existing paused attempt. A Resume whose native record positively
-  // proves it failed is classified once (see observeFailedResume) and then left
-  // for the owner's explicit decision; nothing here dispatches another restore.
-  async function resumeExisting(attemptID: string, deadline?: number) {
-    const native = await nativeFor(attemptID);
-    if (native) {
-      const [attempt] = await database.client<
-        { userID: string }[]
-      >`SELECT created_by AS "userID" FROM factory.runtime_attempt WHERE id=${attemptID}`;
-      if (!attempt) throw new Error("Native Attempt missing");
-      await native.resume(attempt.userID);
-      return;
-    }
-    const [classified] = await database.client<Array<{ failed: boolean }>>`
-      SELECT resume_failed_at IS NOT NULL AS failed FROM factory.runtime_attempt WHERE id=${attemptID}`;
-    if (classified?.failed) return;
-    try {
-      await factorybox.resume(attemptID, deadline);
-    } catch (cause) {
-      if (await factorybox.observeFailedResume(attemptID).catch(() => false)) return;
-      throw cause;
-    }
-  }
-  async function beginCleanup(attemptID: string, failure?: string, observedAt?: string) {
-    clearReconnectObservation(attemptID);
-    const projects = await database.client<Array<{ projectID: string }>>`
-      SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id = ${attemptID}
-    `;
-    const projectID = projects[0]?.projectID;
-    if (!projectID) return;
-    const lock = database.coordination();
-    let changed = false;
-    try {
-      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
-      // Bind observed timestamps as text: the driver's timestamp serializer
-      // would discard PostgreSQL microseconds and silently defeat this fence.
-      const result = await lock`
-        UPDATE factory.runtime_attempt SET state = 'stopping',
-          failure = CASE
-            WHEN state IN ('create-intended','starting','ready') AND ${failure ?? null}::text IS NOT NULL
-              THEN ${failure ?? null}
-            ELSE COALESCE(CASE WHEN failure IN ('parent connector reconnecting','child connector reconnecting')
-              THEN NULL ELSE failure END, ${failure ?? null})
-          END, updated_at = now()
-        WHERE id = ${attemptID}
-          AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping')
-          AND (${observedAt ?? null}::text IS NULL OR updated_at=${observedAt ?? null}::text::timestamptz)
-      `;
-      changed = result.count === 1;
-    } finally {
-      try {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
-      } finally {
-        await lock.end({ timeout: 1 });
+        if (preparation.state === "running")
+          await database.client`UPDATE factory.project_image_preparation
+            SET state=${unsupported ? "unsupported" : "failed"},
+              failure=${unsupported ? "Image preparation was skipped: Compose build inputs depend on environment variables. Normal startup remains available." : (error ?? "Image preparation ended without a confirmed publication; normal startup remains available.")},
+              updated_at=now() WHERE id=${preparation.id} AND state='running'`;
+        await native.stop();
+        return;
       }
     }
-    if (!changed) return;
-    hub.revoke(attemptID);
-    retryCleanup(attemptID);
+    const failed = ["failed", "cleanup-failed", "stopped"].includes(phase);
+    const reconnecting = ["disconnected", "reconnecting"].includes(phase);
+    if (phase !== "ready" && !failed && !reconnecting) return;
+    if (reconnecting && hub.ready(attemptID)) return;
+    const observed = await native.get();
+    if (reconnecting && hub.ready(attemptID)) return;
+    const ready =
+      phase === "ready" && observed.state === "ACTOR_STATE_RUNNING" && hub.ready(attemptID);
+    const apps = hub.appChannels(attemptID);
+    const healthy = ready
+      ? Object.fromEntries(
+          hub
+            .processes(attemptID)
+            .filter((process) => process.state === "running" && apps.includes(process.name))
+            .map((process) => [process.name, new Date().toISOString()]),
+        )
+      : {};
+    const changed = await database.client`UPDATE factory.runtime_attempt SET
+      state=CASE WHEN ${ready} THEN 'ready'::factory.runtime_attempt_state WHEN ${failed} THEN 'failed'::factory.runtime_attempt_state WHEN ${reconnecting} THEN 'starting'::factory.runtime_attempt_state ELSE state END,
+      ready_at=CASE WHEN ${ready} THEN COALESCE(ready_at,now()) ELSE ready_at END,
+      app_ready_at=CASE WHEN ${ready} THEN ${JSON.stringify(healthy)}::text::jsonb || app_ready_at ELSE app_ready_at END,
+      failure=${ready ? null : (error ?? `Native observation: ${observed.state}; Connector ${phase}`)},updated_at=now()
+      WHERE id=${attemptID} AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
+    if (changed.count === 1 && ready) {
+      clearReconnect(attemptID);
+      await database.client`UPDATE factory.change SET state='active',version=version+1
+        WHERE runtime_attempt_id=${attemptID} AND state='starting'`;
+    } else if (changed.count === 1 && reconnecting) observeReconnectLater(attemptID);
   }
   hub.onAppRunning((attemptID, app) => {
-    // Apps already running at Connector readiness are stamped with that
-    // transition. This covers an App that reports healthy afterwards.
     void database.client`UPDATE factory.runtime_attempt
       SET app_ready_at=jsonb_set(app_ready_at,ARRAY[${app}]::text[],to_jsonb(now()::text))
       WHERE id=${attemptID} AND state='ready' AND NOT app_ready_at ? ${app}`.catch(
-      reportFailure("App readiness timestamp"),
+      reportFailure("App readiness timestamp is unavailable"),
     );
   });
-  async function updateStatus(attemptID: string, phase: string, error?: string) {
-    const native = await nativeFor(attemptID);
-    if (native) {
-      if (["stopped", "failed", "cleanup-failed"].includes(phase)) {
-        const [preparation] = await database.client<{ id: string; state: string }[]>`
-          SELECT id,state FROM factory.project_image_preparation WHERE runtime_attempt_id=${attemptID}`;
-        if (preparation) {
-          const unsupported = error?.startsWith(
-            "prebuild Compose cannot depend on the producer environment",
-          );
-          if (preparation.state === "running")
-            await database.client`UPDATE factory.project_image_preparation SET state=${unsupported ? "unsupported" : "failed"},failure=${unsupported ? "Image preparation was skipped: Compose build inputs depend on environment variables. Normal startup remains available." : (error ?? "Image preparation ended without a confirmed publication; normal startup remains available.")},updated_at=now()
-              WHERE id=${preparation.id} AND state='running'`;
-          // Only an isolated producer is disposable here. The common adapter
-          // retains Stop before exact-UID Delete and confirms absence; a status
-          // message alone never settles cleanup or releases the producer lock.
-          await native.stop();
-          return;
-        }
-      }
-      const failed = phase === "failed" || phase === "cleanup-failed" || phase === "stopped";
-      const reconnecting = phase === "disconnected" || phase === "reconnecting";
-      // Startup progress is not a failure. Its asynchronous observation can
-      // finish after readiness and must not overwrite that confirmed result.
-      if (phase !== "ready" && !failed && !reconnecting) return;
-      if (reconnecting && hub.ready(attemptID)) return;
-      const observed = await native.get();
-      if (reconnecting && hub.ready(attemptID)) return;
-      const ready =
-        phase === "ready" && observed.state === "ACTOR_STATE_RUNNING" && hub.ready(attemptID);
-      const apps = hub.appChannels(attemptID);
-      const healthy = ready
-        ? Object.fromEntries(
-            hub
-              .processes(attemptID)
-              .filter((process) => process.state === "running" && apps.includes(process.name))
-              .map((process) => [process.name, new Date().toISOString()]),
-          )
-        : {};
-      const changed = await database.client`UPDATE factory.runtime_attempt SET
-        state=CASE WHEN ${ready} THEN 'ready'::factory.runtime_attempt_state WHEN ${failed} THEN 'failed'::factory.runtime_attempt_state WHEN ${reconnecting} THEN 'starting'::factory.runtime_attempt_state ELSE state END,
-        ready_at=CASE WHEN ${ready} THEN COALESCE(ready_at,now()) ELSE ready_at END,
-        app_ready_at=CASE WHEN ${ready} THEN ${JSON.stringify(healthy)}::text::jsonb || app_ready_at ELSE app_ready_at END,
-        failure=${ready ? null : (error ?? `Native observation: ${observed.state}; Connector ${phase}`)},updated_at=now()
-         WHERE id=${attemptID} AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
-      if (changed.count === 1 && ready) {
-        clearReconnectObservation(attemptID);
-        await settleReadyChange(attemptID);
-        await logReadyTiming(attemptID);
-      }
-      return;
-    }
-    if (["failed", "cleanup-failed", "stopped"].includes(phase)) {
-      const [current] = await database.client<
-        Array<{ state: string }>
-      >`SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
-      if (current && ["pausing", "paused", "resuming"].includes(current.state)) return;
-    }
-    if (phase === "disconnected") {
-      const [attempt] = await database.client<
-        {
-          state: string;
-          namespace: string;
-          podName: string;
-          uid: string | null;
-          observedAt: string;
-        }[]
-      >`SELECT state, kubernetes_namespace AS namespace, kubernetes_pod_name AS "podName",
-        kubernetes_uid AS uid, updated_at::text AS "observedAt"
-        FROM factory.runtime_attempt WHERE id=${attemptID}`;
-      if (!attempt || !["starting", "ready"].includes(attempt.state)) return;
-      let failure: string | undefined;
-      try {
-        const pod = await kubernetes.getPod(attempt.namespace, attempt.podName);
-        if (!pod) failure = "Runtime Pod disappeared while connectors were reconnecting";
-        else if (!attempt.uid || pod.uid !== attempt.uid)
-          failure = "Runtime Pod UID changed while connectors were reconnecting";
-        else if (pod.phase === "Failed" || pod.phase === "Succeeded")
-          failure = "Runtime Pod terminated while connectors were reconnecting";
-        else if (await factorybox.hasExited(attemptID))
-          failure =
-            "Factorybox Sandbox exited while runtime connectors were reconnecting. Source is retained.";
-      } catch {
-        // A failed observation proves neither resource loss nor permission to delete.
-      }
-      if (failure) {
-        await beginCleanup(attemptID, failure, attempt.observedAt);
-        return;
-      }
-      // Transport loss alone must not delete live compute or revoke its reconnect tokens.
-      const changed = await database.client`UPDATE factory.runtime_attempt SET state='starting',
-        failure=${error ?? "Waiting for runtime connectors"}, updated_at=now()
-        WHERE id=${attemptID} AND state IN ('starting','ready')
-          AND updated_at=${attempt.observedAt}::text::timestamptz`;
-      if (changed.count === 1) observeReconnectLater(attemptID);
-      return;
-    }
-    if (phase === "stopped") {
-      await database.client`UPDATE factory.runtime_attempt attempt SET stop_intended_at=COALESCE(stop_intended_at,now()) WHERE attempt.id=${attemptID} AND attempt.isolated_kind='prebuild' AND attempt.state IN ('starting','ready') AND EXISTS(SELECT 1 FROM factory.project_image_preparation preparation WHERE preparation.runtime_attempt_id=attempt.id AND preparation.state='succeeded')`;
-      await beginCleanup(attemptID);
-      return;
-    } else if (phase === "failed" || phase === "cleanup-failed") {
-      await beginCleanup(attemptID, error ?? "runtime failed");
-      return;
-    }
-    const state =
-      phase === "ready"
-        ? "ready"
-        : phase === "reconnecting"
-          ? "starting"
-          : phase === "stopping"
-            ? "stopping"
-            : null;
-    if (!state) return;
-    const apps = state === "ready" ? hub.appChannels(attemptID) : [];
-    // Connector readiness implies the declared Apps passed their checks. Stamp
-    // those running now; later restarts never overwrite the first observation.
-    const readyAt = new Date().toISOString();
-    const healthy = Object.fromEntries(
-      hub
-        .processes(attemptID)
-        .filter((process) => process.state === "running" && apps.includes(process.name))
-        .map((process) => [process.name, readyAt]),
-    );
-    // Prepared Forks can reconnect before startup observation. Keep them
-    // starting until that observer has retained their native ownership, so
-    // early Connector readiness cannot skip adoption and later cleanup.
-    const changed = await database.client`
-      UPDATE factory.runtime_attempt SET state = ${state}::factory.runtime_attempt_state,
-        declared_apps=CASE WHEN declared_apps='[]'::jsonb
-          THEN ${JSON.stringify(apps)}::text::jsonb ELSE declared_apps END,
-        ready_at = CASE WHEN ${state} = 'ready' AND state <> 'ready' THEN now() ELSE ready_at END,
-        app_ready_at = CASE WHEN ${state} = 'ready' AND state <> 'ready'
-          THEN ${JSON.stringify(healthy)}::text::jsonb ELSE app_ready_at END,
-        failure = ${error ?? null}, stopped_at = CASE WHEN ${state} = 'stopped' THEN now() ELSE stopped_at END,
-        updated_at = now() WHERE id = ${attemptID}
-          AND (
-            (${state} = 'ready' AND state IN ('starting', 'ready')) OR
-            (${state} = 'starting' AND state IN ('starting', 'ready')) OR
-            (${state} = 'stopping' AND state IN ('stop-intended', 'stopping'))
-          )
-          AND (${state}<>'ready' OR NOT EXISTS(
-            SELECT 1 FROM factory.execution_slot slot
-            WHERE slot.assigned_attempt_id=runtime_attempt.id AND slot.template_id IS NOT NULL
-              AND NOT EXISTS(
-                SELECT 1 FROM factory.factorybox_runtime saved
-                JOIN factory.factorybox_lifecycle_operation started
-                  ON started.runtime_attempt_id=saved.runtime_attempt_id AND started.action='start'
-                  AND started.completed_at IS NOT NULL
-                WHERE saved.runtime_attempt_id=runtime_attempt.id
-                  AND saved.request->>'sandboxID'='runtime-'||replace(slot.id::text,'-',''))))
-    `;
-    if (changed.count === 1 && state === "ready") {
-      clearReconnectObservation(attemptID);
-      await settleReadyChange(attemptID);
-      await logReadyTiming(attemptID);
-    }
-  }
-  // One compact line per attempt that became ready: how long Connector
-  // readiness took after the create intent, and how long Apps took after that.
-  async function logReadyTiming(attemptID: string) {
-    try {
-      const [row] = await database.client<
-        Array<{ sinceIntentMS: number | null; apps: unknown }>
-      >`SELECT round(extract(epoch FROM (ready_at-create_intended_at))*1000)::int AS "sinceIntentMS",
-          app_ready_at AS apps
-        FROM factory.runtime_attempt WHERE id=${attemptID} AND ready_at IS NOT NULL`;
-      if (row)
-        console.info(
-          "[factory] runtime ready timing",
-          JSON.stringify({ attemptID, sinceCreateIntentMS: row.sinceIntentMS, apps: row.apps }),
-        );
-    } catch {
-      /* Timing is diagnostic; it never changes the lifecycle. */
-    }
-  }
-  async function observeStartup(
-    attemptID: string,
-    _runtimeOwnerID: string,
-    namespace: string,
-    podName: string,
-    resources: readonly unknown[],
-  ) {
-    if (startupObservations.has(attemptID)) return;
-    startupObservations.add(attemptID);
-    try {
-      await observeStartupWindow(attemptID, namespace, podName, resources);
-    } finally {
-      startupObservations.delete(attemptID);
-    }
-  }
-  async function observeStartupWindow(
-    attemptID: string,
-    namespace: string,
-    podName: string,
-    resources: readonly unknown[],
-  ) {
-    let deadline = performance.now() + nativeLifecycleWindowMS;
-    let workerReady = false;
-    // Reconcile Start once per observer, including after Factory recovery.
-    // Waiting for repository hooks must not repeat native preparation checks.
-    let startConfirmed = false;
-    while (performance.now() < deadline) {
-      const attempt = await database.client<
-        Array<{ state: string; uid: string | null; observedAt: string }>
-      >`
-          SELECT state, kubernetes_uid AS uid,updated_at::text AS "observedAt"
-          FROM factory.runtime_attempt WHERE id = ${attemptID}
-        `;
-      const current = attempt[0];
-      if (current?.state !== "starting") return;
-      let pod: RuntimePodObservation | null;
-      try {
-        pod = await kubernetes.getPod(namespace, podName);
-      } catch (cause) {
-        if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
-        // An unavailable read says nothing about the owned Pod. Reobserve
-        // within this startup window; do not clean up or replay its create.
-        await Bun.sleep(1_000);
-        continue;
-      }
-      if (!pod || !current.uid || current.uid !== pod.uid) {
-        await database.client`UPDATE factory.runtime_attempt SET failure='Original Factorybox worker is unavailable; its execution identity was retained',updated_at=now()
-              WHERE id=${attemptID} AND state='starting'
-                AND failure IS DISTINCT FROM 'Original Factorybox worker is unavailable; its execution identity was retained'`;
-        return;
-      }
-      if (pod.phase === "Failed" || pod.phase === "Succeeded") {
-        await beginCleanup(attemptID, terminatedFactoryboxWorkerFailure, current.observedAt);
-        return;
-      }
-      if (pod.ready) {
-        if (!workerReady) {
-          // Worker/PVC admission is platform preparation, not time spent on
-          // this Sandbox's qualified lifecycle. Keep each window bounded.
-          workerReady = true;
-          deadline = performance.now() + nativeLifecycleWindowMS;
-        }
-        try {
-          if (!startConfirmed) {
-            await factorybox.ensureStarted(attemptID, resources, deadline);
-            startConfirmed = true;
-          }
-          if (hub.ready(attemptID)) await updateStatus(attemptID, "ready");
-          else if (!hub.parentConnected(attemptID) && (await factorybox.hasExited(attemptID)))
-            await beginCleanup(
-              attemptID,
-              "Factorybox Sandbox exited before runtime connectors became ready. Source is retained.",
-              current.observedAt,
-            );
-        } catch (cause) {
-          if (cause instanceof FactoryboxCapacityRefusedError) {
-            // A verified refusal precedes native dispatch. Admission waiting
-            // must not spend the Sandbox's qualified lifecycle window.
-            // Unknown outcomes keep the original deadline and are not replayed.
-            deadline = performance.now() + nativeLifecycleWindowMS;
-          }
-          const failure =
-            cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed";
-          await database.client`UPDATE factory.runtime_attempt SET failure=${failure},updated_at=now()
-                WHERE id=${attemptID} AND state='starting' AND failure IS DISTINCT FROM ${failure}`;
-        }
-      }
-      await Bun.sleep(1_000);
-    }
-    // This bounds native admission observation, not the Project's setup hooks.
-    // A confirmed Sandbox with its original Parent still connected has not
-    // failed. Its Connector owns the eventual ready/error outcome; transport
-    // loss still enters the existing exact-identity reconnect observation.
-    if (startConfirmed && hub.parentConnected(attemptID)) return;
-    await database.client`UPDATE factory.runtime_attempt
-          SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
-          WHERE id=${attemptID} AND state='starting' AND (failure IS NULL OR failure='')`;
-  }
-
-  async function launchIsolated(
-    input: {
-      identity: ExecutionIdentity;
-      generation: number;
-      projectID: string;
-      repositoryURL: string;
-      revision: string;
-      devcontainerPath: string;
-      kind: "staging" | "verification" | "publication";
-      parentToken: string;
-      childToken: string;
-      verification?: {
-        runnerUUID: string;
-        runnerToken: string;
-        jobHandle?: string;
-        publicationID?: string;
-        version?: string;
-      };
-    },
-    connection: Database["client"],
-  ) {
-    const repositoryURL = runtimeRepositoryURL(input.repositoryURL, input.identity.attemptID);
-    try {
-      const publicationVersion = input.verification?.version;
-      if (input.verification?.publicationID && !publicationVersion)
-        throw new Error("Publication create intent is missing its version");
-      if (input.repositoryURL.startsWith("file://")) {
-        await prepareRuntimeRepository(
-          input.identity.attemptID,
-          input.repositoryURL,
-          input.revision,
-        );
-      }
-      const systemContract =
-        input.kind === "verification" || input.kind === "publication"
-          ? undefined
-          : await resolveSystemContract(input.repositoryURL, input.revision);
-      const artifacts = await artifactsFor(input.identity.attemptID, connection);
-      const resources = renderAttemptResources(
-        {
-          ...input.identity,
-          generation: input.generation,
-          projectID: input.projectID,
-          repositoryURL,
-          revision: input.revision,
-          devcontainerPath: input.devcontainerPath,
-          connectorToken: input.parentToken,
-          childConnectorToken: input.childToken,
-          controlURL,
-          registryCA: await readRegistryCA(),
-          mode: input.kind,
-          ...(systemContract ? { systemContract } : {}),
-          ...(input.verification
-            ? {
-                verification: {
-                  forgeURL: runtimeForgeURL(),
-                  runnerUUID: input.verification.runnerUUID,
-                  runnerToken: input.verification.runnerToken,
-                  runnerLabel:
-                    input.kind === "publication" ? "factory-publication" : "factory-verification",
-                  ...(input.verification.jobHandle ? { handle: input.verification.jobHandle } : {}),
-                  ...(input.verification.publicationID && publicationVersion
-                    ? {
-                        publication: {
-                          id: input.verification.publicationID,
-                          version: publicationVersion,
-                          credentialURL: runtimeFactoryURL(
-                            `/internal/releases/${input.verification.publicationID}/credentials`,
-                          ),
-                          registryURL: runtimeReleaseRegistryURL(),
-                          credentialToken: runtimePublicationToken(
-                            connectorSecret,
-                            input.verification.publicationID,
-                          ),
-                        },
-                      }
-                    : {}),
-                },
-              }
-            : {}),
-        },
-        artifacts,
-      );
-      await launchAttempt(
-        input.identity.attemptID,
-        {
-          resources,
-          namespace: input.identity.namespace,
-          podName: input.identity.podName,
-          missingPodMessage: `${input.kind} Pod was not observed after create`,
-          runtimeHostImage: artifacts.runtimeHostImage,
-          factoryboxProfile: artifacts.factoryboxProfile,
-        },
-        {
-          observe: () =>
-            observeStartup(
-              input.identity.attemptID,
-              input.identity.attemptID,
-              input.identity.namespace,
-              input.identity.podName,
-              resources,
-            ),
-          fail: async (phase, cause) => {
-            const message = cause instanceof Error ? cause.message : "unknown error";
-            if (phase === "observe") {
-              await updateStatus(
-                input.identity.attemptID,
-                "failed",
-                `${input.kind} observer failed: ${message}`,
-              );
-            }
-          },
-        },
-        connection,
-      );
-    } catch (cause) {
-      await database.client`
-        UPDATE factory.runtime_attempt SET state = 'stopping',
-          failure = ${`${input.kind} create failed: ${cause instanceof Error ? cause.message : "unknown error"}`},
-          updated_at = now()
-        WHERE id = ${input.identity.attemptID}
-          AND state IN ('create-intended', 'starting')
-      `;
-      hub.revoke(input.identity.attemptID);
-      retryCleanup(input.identity.attemptID);
-      throw cause;
-    }
-  }
-  async function recoverCreateAttempt(attempt: {
-    id: string;
-    generation: string;
-    parentTokenHash: string;
-    childTokenHash: string;
-  }) {
-    if (await waiting(attempt.id)) return;
-    try {
-      await withResourceLock(attempt.id, async (sql) => {
-        const intent = await sql<{ state: string; stopped: boolean }[]>`
-    SELECT state, stop_intended_at IS NOT NULL AS stopped
-    FROM factory.runtime_attempt WHERE id = ${attempt.id}
-  `;
-        if (intent[0]?.state !== "create-intended" || intent[0].stopped) {
-          hub.revoke(attempt.id);
-          return;
-        }
-        const rows = await sql<
-          Array<{
-            namespace: string;
-            podName: string;
-            projectID: string;
-            changeID: string | null;
-            workspaceID: string | null;
-            isolatedKind: "staging" | "verification" | "publication" | null;
-            publicationID: string | null;
-            publicationVersion: string | null;
-            publicationHandle: string | null;
-            verificationID: string | null;
-            runnerUUID: string | null;
-            runnerToken: string | null;
-            repositoryURL: string;
-            revision: string;
-            devcontainerPath: string;
-            namespaceUID: string | null;
-            workerID: string;
-          }>
-        >`
-      SELECT kubernetes_namespace AS namespace, kubernetes_pod_name AS "podName",
-      attempt.project_id AS "projectID", attempt.change_id AS "changeID",
-      attempt.workspace_id AS "workspaceID",
-      attempt.isolated_kind AS "isolatedKind",
-      attempt.verification_id AS "verificationID",
-      COALESCE(verification.runner_uuid::text,publication.runner_uuid) AS "runnerUUID",
-      COALESCE(verification.runner_token,publication.runner_token) AS "runnerToken",
-      publication.id AS "publicationID",publication.job_handle AS "publicationHandle",
-      release.version AS "publicationVersion",
-      project.repository_url AS "repositoryURL",
-      attempt.revision, project.devcontainer_path AS "devcontainerPath",
-      attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.factorybox_worker_id AS "workerID"
-    FROM factory.runtime_attempt attempt
-    JOIN factory.project project ON project.id = attempt.project_id
-    LEFT JOIN factory.verification verification ON verification.id = attempt.verification_id
-    LEFT JOIN factory.release_attempt publication ON publication.runtime_attempt_id=attempt.id
-    LEFT JOIN factory.project_release release ON release.id=publication.release_id
-    WHERE attempt.id = ${attempt.id}
-  `;
-        const row = rows[0];
-        if (!row) return;
-        if (row.isolatedKind === "verification" && (!row.runnerUUID || !row.runnerToken)) {
-          throw new Error("Verification create intent is missing its ephemeral runner");
-        }
-        const publicationVersion = row.publicationVersion;
-        if (
-          row.isolatedKind === "publication" &&
-          (!row.publicationID ||
-            !publicationVersion ||
-            !row.publicationHandle ||
-            !row.runnerUUID ||
-            !row.runnerToken)
-        )
-          throw new Error("Publication create intent is missing its bound runner or version");
-        const generation = Number(attempt.generation);
-        const runtimeOwnerID = row.workspaceID ?? attempt.id;
-        const expectedIdentity = runtimeIdentity(
-          row.workspaceID ??
-            row.changeID ??
-            (row.isolatedKind === "staging"
-              ? `staging:${row.projectID}`
-              : (row.verificationID ?? row.publicationID ?? row.projectID)),
-          generation,
-        );
-        const identity = {
-          ...expectedIdentity,
-          workerID: row.workerID,
-          namespace: row.namespace,
-          podName: row.podName,
-        };
-        if (identity.attemptID !== attempt.id) {
-          throw new Error("create intent identity does not match its deterministic identity");
-        }
-        const tokens = runtimeConnectorTokens(connectorSecret, attempt.id, generation);
-        if (
-          hashConnectorToken(tokens.parent) !== attempt.parentTokenHash ||
-          hashConnectorToken(tokens.child) !== attempt.childTokenHash
-        ) {
-          throw new Error("create intent credentials cannot be reconstructed");
-        }
-        if (row.repositoryURL.startsWith("file://")) {
-          await prepareRuntimeRepository(attempt.id, row.repositoryURL, row.revision);
-        }
-        const expectedRepositoryURL = runtimeRepositoryURL(row.repositoryURL, attempt.id);
-        const systemContract =
-          row.isolatedKind === "verification" || row.isolatedKind === "publication"
-            ? undefined
-            : await resolveSystemContract(row.repositoryURL, row.revision);
-        const canonicalSource = row.workspaceID
-          ? await sources.prepareExecution(attempt.id)
-          : undefined;
-        const artifacts = await artifactsFor(attempt.id, sql);
-        const verificationHandle = row.verificationID
-          ? await verificationJob(row.verificationID, sql)
-          : undefined;
-        const resources = renderAttemptResources(
-          {
-            ...identity,
-            generation,
-            projectID: row.projectID,
-            runtimeOwnerID,
-            repositoryURL: expectedRepositoryURL,
-            repositoryIdentity: row.projectID,
-            preserveWorkspace: row.workspaceID !== null,
-            ...(canonicalSource ? { storageNode: canonicalSource.storageNode } : {}),
-            revision: row.revision,
-            devcontainerPath: row.devcontainerPath,
-            connectorToken: tokens.parent,
-            childConnectorToken: tokens.child,
-            controlURL,
-            registryCA: await readRegistryCA(),
-            mode: row.isolatedKind ?? "development",
-            ...(systemContract ? { systemContract } : {}),
-            ...(row.changeID && row.workspaceID
-              ? {
-                  agent: await agentConfiguration(
-                    database,
-                    row.changeID,
-                    connectorSecret,
-                    attempt.id,
-                    generation,
-                    artifacts.browserToolsImage,
-                  ),
-                }
-              : {}),
-            ...((row.isolatedKind === "verification" || row.isolatedKind === "publication") &&
-            row.runnerUUID &&
-            row.runnerToken
-              ? {
-                  verification: {
-                    forgeURL: runtimeForgeURL(),
-                    runnerUUID: row.runnerUUID,
-                    runnerToken: row.runnerToken,
-                    runnerLabel:
-                      row.isolatedKind === "publication"
-                        ? "factory-publication"
-                        : "factory-verification",
-                    ...(verificationHandle ? { handle: verificationHandle } : {}),
-                    ...(row.publicationID && row.publicationHandle && publicationVersion
-                      ? {
-                          handle: row.publicationHandle,
-                          publication: {
-                            id: row.publicationID,
-                            version: publicationVersion,
-                            credentialURL: runtimeFactoryURL(
-                              `/internal/releases/${row.publicationID}/credentials`,
-                            ),
-                            registryURL: runtimeReleaseRegistryURL(),
-                            credentialToken: runtimePublicationToken(
-                              connectorSecret,
-                              row.publicationID,
-                            ),
-                          },
-                        }
-                      : {}),
-                  },
-                }
-              : {}),
-          },
-          artifacts,
-        );
-        await freezeStagingConfiguration(sql, attempt.id, resources);
-        const activated = await computeWait.launch(
-          attempt.id,
-          () => reserve?.activate(attempt.id, resources) ?? Promise.resolve(null),
-        );
-        if (activated) {
-          if (await recordCreated(sql, attempt.id, activated.podUID, activated.namespaceUID))
-            void observeStartup(
-              attempt.id,
-              runtimeOwnerID,
-              row.namespace,
-              row.podName,
-              resources,
-            ).catch((cause) =>
-              updateStatus(
-                attempt.id,
-                "failed",
-                cause instanceof Error ? cause.message : "Reserved runtime recovery failed",
-              ),
-            );
-          reserve?.refill();
-          return;
-        }
-        const applied = await computeWait.launch(attempt.id, () =>
-          worker.provision(resources, artifacts.factoryboxProfile, artifacts.runtimeHostImage, {
-            workerID: row.workerID,
-            admissionID: factoryboxAdmissionID(row.workerID, row.podName),
-          }),
-        );
-        if (!applied) return;
-        const namespace = await kubernetes.getNamespace(row.namespace);
-        const pod = await kubernetes.getPod(row.namespace, row.podName);
-        const secretName = factoryboxAssignmentSecret(artifacts.reserveSlotID ?? attempt.id);
-        const [parentToken, childToken, assignmentText] = await Promise.all([
-          kubernetes.readSecret(row.namespace, secretName, "parent-token"),
-          kubernetes.readSecret(row.namespace, secretName, "child-token"),
-          kubernetes.readSecret(row.namespace, secretName, "assignment.json"),
-        ]);
-        const assignment = JSON.parse(assignmentText) as {
-          runtimeAttemptId?: string;
-          generation?: number;
-          repositoryUrl?: string;
-          revision?: string;
-          devcontainerPath?: string;
-          composeProjectName?: string;
-        };
-        if (
-          !namespace ||
-          !pod ||
-          namespace.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-          namespace.labels["factory.dev/runtime-owner"] !== artifacts.workerID ||
-          pod.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-          pod.labels["factory.dev/runtime-owner"] !== artifacts.workerID ||
-          assignment.runtimeAttemptId !== attempt.id ||
-          assignment.generation !== generation ||
-          assignment.repositoryUrl !== expectedRepositoryURL ||
-          assignment.revision !== row.revision ||
-          assignment.devcontainerPath !== row.devcontainerPath ||
-          assignment.composeProjectName !== identity.composeProjectName ||
-          hashConnectorToken(parentToken) !== attempt.parentTokenHash ||
-          hashConnectorToken(childToken) !== attempt.childTokenHash
-        )
-          throw new Error("create intent resources do not match persisted credentials");
-        requireRuntimePodArtifacts(
-          pod,
-          applied.workerRuntimeHostImage ?? artifacts.runtimeHostImage,
-          artifacts.factoryboxProfile.image,
-        );
-        if (!(await recordCreated(sql, attempt.id, pod.uid, namespace.uid))) return;
-        void observeStartup(
-          attempt.id,
-          runtimeOwnerID,
-          row.namespace,
-          row.podName,
-          resources,
-        ).catch(async (cause) => {
-          await updateStatus(
-            attempt.id,
-            "failed",
-            `startup observer failed: ${cause instanceof Error ? cause.message : "unknown error"}`,
-          );
-        });
-      });
-    } catch (cause) {
-      await updateStatus(
-        attempt.id,
-        "failed",
-        `create intent recovery failed: ${cause instanceof Error ? cause.message : "unknown error"}`,
-      );
-    }
-  }
-
   return {
+    async settleRetainedInputStop(target: RetainedStopTarget, signal: AbortSignal) {
+      return (await execution(target.attemptID)).settleInputStop(target, signal);
+    },
     async authorizeConnector(request: Request) {
       const attemptID = request.headers.get("x-factory-runtime-attempt");
       if (!attemptID) return false;
       try {
-        const native = await nativeFor(attemptID);
-        return native ? native.authorizeConnector(request) : true;
+        return await (await execution(attemptID)).authorizeConnector(request);
       } catch {
         return false;
       }
     },
-    async recoverWorker(input: WorkerRecoveryInput) {
-      return recoverFactoryboxWorker(
-        database,
-        kubernetes,
-        configuredFactoryboxRuntimeProfile(),
-        pinnedRuntimeHostImage,
-        input,
-      );
-    },
-    async reclaimStorage() {
-      await worker.retainDeclaration();
-      await factorybox.reclaimStorage();
-    },
-    async resumeForApp(attemptID: string, userID: string, deadline?: number) {
-      await createAccessController(database).requireRuntime(userID, attemptID, "app");
-      const native = await nativeFor(attemptID);
-      if (native) {
-        await native.resume(userID);
-        return this.get(attemptID);
-      }
-      const current = await this.get(attemptID);
-      if (!current || current.failure || !["pausing", "paused", "resuming"].includes(current.state))
-        return current;
-      try {
-        await factorybox.resume(attemptID, deadline);
-      } catch (cause) {
-        const observed = await this.get(attemptID);
-        if (!observed || !["starting", "ready"].includes(observed.state)) {
-          await database.client`UPDATE factory.runtime_attempt SET
-            failure=${cause instanceof Error ? cause.message : "Factorybox Resume is unconfirmed"},updated_at=now()
-            WHERE id=${attemptID} AND state='resuming' AND resume_failed_at IS NULL`;
-          // A positively recorded native failure lets the owner start fresh. An
-          // unknown outcome stays exactly as recorded.
-          await factorybox.observeFailedResume(attemptID).catch(() => false);
-          throw cause;
-        }
-      }
-      if (hub.ready(attemptID)) await updateStatus(attemptID, "ready");
-      return this.get(attemptID);
-    },
-    async pause(attemptID: string) {
-      const native = await nativeFor(attemptID);
-      if (native) {
-        try {
-          await native.suspend();
-        } catch (cause) {
-          const message = cause instanceof Error ? cause.message : "Native Pause is unconfirmed";
-          await database.client`UPDATE factory.runtime_attempt SET failure=COALESCE(failure,${message}),updated_at=now()
-            WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
-          // Keep the original Actor, Source fence and unsettled intent. A
-          // transport failure is never permission to discard or retry work.
-          throw cause;
-        }
-        return this.get(attemptID);
-      }
-      try {
-        await factorybox.pause(attemptID);
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : "Factorybox Pause is unconfirmed";
-        await database.client`UPDATE factory.runtime_attempt SET failure=${message},updated_at=now()
-          WHERE id=${attemptID} AND state='pausing'`;
-        // A failed memory capture, for example an inotify watch on a deleted file, leaves nothing
-        // to resume, and the half-paused Sandbox would block the private backing of every other
-        // Sandbox. Files live in the canonical Source, so discard it. The next open starts fresh.
-        if (/retained source capture:/.test(message)) {
-          console.error(
-            `Factorybox Pause failed to capture ${attemptID}; discarding the Sandbox. ${message.slice(0, 200)}`,
-          );
-          await this.stop(attemptID).catch(() => undefined);
-        }
-        throw cause;
-      }
-      return this.get(attemptID);
-    },
-    async drainComputeWaits() {
-      if (drainingCompute) return;
-      drainingCompute = true;
-      try {
-        const attempts = await database.client<
-          Array<{
-            id: string;
-            generation: string;
-            parentTokenHash: string;
-            childTokenHash: string;
-            preparationID: string | null;
-          }>
-        >`
-          SELECT attempt.id,attempt.generation::text AS generation,attempt.parent_connector_token_hash AS "parentTokenHash",
-            attempt.child_connector_token_hash AS "childTokenHash",preparation.id AS "preparationID"
-          FROM factory.runtime_compute_wait waiting JOIN factory.runtime_attempt attempt ON attempt.id=waiting.attempt_id
-          LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id
-          ORDER BY waiting.created_at,attempt.id LIMIT 16`;
-        for (const attempt of attempts) {
-          if (await computeWait.admit(attempt.id)) {
-            hub.allow(
-              attempt.id,
-              Number(attempt.generation),
-              attempt.parentTokenHash,
-              attempt.childTokenHash,
-            );
-            if (attempt.preparationID) await this.startProjectPrebuild(attempt.preparationID);
-            else await recoverCreateAttempt(attempt);
-          } else {
-            const [stopped] =
-              await database.client`SELECT id FROM factory.runtime_attempt WHERE id=${attempt.id} AND state='stop-intended'`;
-            if (stopped) await this.stop(attempt.id);
-          }
-        }
-        // An observation window can end while capacity refuses all dispatch.
-        // Continue that persisted, unattempted intent when capacity returns.
-        // A used Start or an incomplete dispatched preparation must never gain
-        // another native execution window merely because observation expired.
-        const pending = await database.client<
-          Array<{ id: string; namespace: string; podName: string }>
-        >`
-          SELECT attempt.id,attempt.kubernetes_namespace AS namespace,
-            attempt.kubernetes_pod_name AS "podName"
-          FROM factory.runtime_attempt attempt
-          JOIN factory.factorybox_runtime saved ON saved.runtime_attempt_id=attempt.id
-          WHERE attempt.state='starting' AND attempt.stop_intended_at IS NULL
-            AND attempt.kubernetes_uid IS NOT NULL AND saved.inputs_released_at IS NULL
-            AND NOT (attempt.id=ANY(${[...startupObservations]}::uuid[]))
-            AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id)
-            AND EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation
-              WHERE runtime_attempt_id=attempt.id AND action IN ('prepare','start') AND attempted_at IS NULL)
-            AND NOT EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation
-              WHERE runtime_attempt_id=attempt.id AND action='start' AND attempted_at IS NOT NULL)
-            AND NOT EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation
-              WHERE runtime_attempt_id=attempt.id AND action='prepare'
-                AND attempted_at IS NOT NULL AND completed_at IS NULL)
-          ORDER BY attempt.updated_at,attempt.id LIMIT 16`;
-        for (const attempt of pending) {
-          const resources = await factorybox.startupResources(attempt.id);
-          if (!resources) continue;
-          void observeStartup(
-            attempt.id,
-            attempt.id,
-            attempt.namespace,
-            attempt.podName,
-            resources,
-          ).catch(reportFailure("Retained unattempted startup observation failed"));
-        }
-      } finally {
-        drainingCompute = false;
-      }
-    },
-    async startProjectPrebuild(preparationID: string) {
-      const lock = database.coordination();
-      let projectLock: string | undefined;
-      try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`project-prebuild:${preparationID}`}))`;
-        const [job] = await lock<
-          Array<{
-            projectID: string;
-            revision: string;
-            attemptID: string | null;
-            userID: string;
-            repositoryURL: string;
-            devcontainerPath: string;
-            environment: string;
-            environmentVersion: string;
-          }>
-        >`
-          SELECT preparation.project_id AS "projectID",preparation.revision,preparation.runtime_attempt_id AS "attemptID",project.created_by AS "userID",project.repository_url AS "repositoryURL",project.devcontainer_path AS "devcontainerPath",preparation.environment,preparation.environment_version::text AS "environmentVersion"
-          FROM factory.project_image_preparation preparation JOIN factory.project project ON project.id=preparation.project_id WHERE preparation.id=${preparationID} AND preparation.state IN ('pending','running')`;
-        if (!job) return;
-        if (
-          nativePrebuild?.matchesProject(job.projectID) &&
-          (!job.attemptID || (await nativeFor(job.attemptID)))
-        ) {
-          await nativePrebuild.start(preparationID);
-          return;
-        }
-        await requireSetupReady(lock, job.projectID);
-        projectLock = `runtime:${job.projectID}`;
-        await lock`SELECT pg_advisory_lock(hashtext(${projectLock}))`;
-        let attemptID = job.attemptID;
-        if (!attemptID) {
-          requireIsolatedOwner(job.projectID, "prebuild");
-          const [next] = await lock<Array<{ generation: string }>>`
-            SELECT COALESCE(MAX(generation),0)+1 AS generation FROM factory.runtime_attempt
-            WHERE project_id=${job.projectID} AND change_id IS NULL AND workspace_id IS NULL`;
-          const generation = Number(next?.generation ?? 1);
-          const identity = await executionIdentity(
-            `project-prebuild:${preparationID}`,
-            generation,
-            lock,
-          );
-          attemptID = identity.attemptID;
-          const tokens = runtimeConnectorTokens(connectorSecret, attemptID, generation);
-          await lock`BEGIN`;
-          try {
-            await lock`SELECT pg_advisory_xact_lock(hashtext(${`project-environment:${job.projectID}:${job.environment}`}))`;
-            const [current] = await lock<
-              Array<{ version: string }>
-            >`SELECT version::text AS version FROM factory.project_environment WHERE project_id=${job.projectID} AND environment=${job.environment}`;
-            if ((current?.version ?? "0") !== job.environmentVersion) {
-              await lock`UPDATE factory.project_image_preparation SET state='unsupported',failure='Settings changed before preparation; normal startup remains available.',updated_at=now() WHERE id=${preparationID}`;
-              await lock`COMMIT`;
-              return;
-            }
-            await admitOrWait(lock, attemptID, job.projectID, "prebuild");
-            await lock`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,factorybox_admission_id)
-              VALUES(${attemptID},${job.projectID},'prebuild',${generation},${job.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${job.userID},${identity.admissionID})`;
-            await lock`UPDATE factory.project_image_preparation SET runtime_attempt_id=${attemptID},state='running',updated_at=now() WHERE id=${preparationID}`;
-            await artifactsFor(attemptID, lock);
-            await lock`COMMIT`;
-          } catch (cause) {
-            await lock`ROLLBACK`;
-            throw cause;
-          }
-        }
-        if (await waiting(attemptID)) return;
-        const [attempt] = await lock<
-          Array<{ state: string; generation: number; namespace: string; podName: string }>
-        >`SELECT state,generation::float8 AS generation,kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName" FROM factory.runtime_attempt WHERE id=${attemptID}`;
-        if (attempt?.state !== "create-intended") return;
-        const generation = attempt.generation;
-        const tokens = runtimeConnectorTokens(connectorSecret, attemptID, generation);
-        await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
-        projectLock = undefined;
-        hub.allow(
-          attemptID,
-          generation,
-          hashConnectorToken(tokens.parent),
-          hashConnectorToken(tokens.child),
-        );
-        if (job.repositoryURL.startsWith("file://"))
-          await prepareRuntimeRepository(attemptID, job.repositoryURL, job.revision);
-        const artifacts = await artifactsFor(attemptID, lock);
-        const registry = artifacts.runtimeHostImage.slice(
-          0,
-          artifacts.runtimeHostImage.indexOf("/"),
-        );
-        const resources = renderAttemptResources(
-          {
-            attemptID,
-            generation,
-            namespace: attempt.namespace,
-            podName: attempt.podName,
-            composeProjectName: runtimeIdentity(`project-prebuild:${preparationID}`, generation)
-              .composeProjectName,
-            projectID: job.projectID,
-            repositoryURL: runtimeRepositoryURL(job.repositoryURL, attemptID),
-            revision: job.revision,
-            devcontainerPath: job.devcontainerPath,
-            connectorToken: tokens.parent,
-            childConnectorToken: tokens.child,
-            controlURL,
-            registryCA: await readRegistryCA(),
-            mode: "prebuild",
-            prebuild: {
-              id: preparationID,
-              platform: "native",
-              imageRepository: `${registry}/open-factory/prebuilds/${job.projectID}`,
-            },
-          },
-          artifacts,
-        );
-        await launchAttempt(
-          attemptID,
-          {
-            resources,
-            namespace: attempt.namespace,
-            podName: attempt.podName,
-            missingPodMessage: "Project image preparation compute was not observed",
-            runtimeHostImage: artifacts.runtimeHostImage,
-            factoryboxProfile: artifacts.factoryboxProfile,
-          },
-          {
-            observe: () =>
-              observeStartup(attemptID, attemptID, attempt.namespace, attempt.podName, resources),
-            fail: async () => {
-              await updateStatus(
-                attemptID,
-                "failed",
-                "Project image preparation could not start; normal startup remains available",
-              );
-            },
-          },
-          lock,
-        );
-      } finally {
-        try {
-          if (projectLock) await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
-          await lock`SELECT pg_advisory_unlock(hashtext(${`project-prebuild:${preparationID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
-      }
-    },
     async admitNativeCapacity() {
-      await nativeCapacity?.ensure();
+      await options.capacity?.ensure();
     },
     async recover() {
-      await nativeCapacity
-        ?.ensure()
-        .catch(reportFailure("Native worker capacity admission is unavailable"));
-      await worker.retainDeclaration().catch(() => {
-        console.error("Original Factorybox declaration needs observation");
-      });
-      // Failed attempts have already left active allocation. A retained Stop must
-      // clean their exact resources without competing with a newer Workspace attempt.
-      const failedStops = await database.client<{ id: string }[]>`
-        SELECT id FROM factory.runtime_attempt WHERE state='failed' AND stop_intended_at IS NOT NULL`;
-      for (const attempt of failedStops)
-        await this.stop(attempt.id).catch(reportFailure("Retained runtime Stop needs retry"));
-      // A Stop that reached 'stopped' without its native Delete being confirmed leaves an
-      // unresolved Sandbox record that blocks backing retirement for every later Stop.
-      for (const id of await factorybox.stoppedWithUnconfirmedDelete().catch(() => []))
-        await factorybox
-          .deleteSandbox(id)
-          .catch(reportFailure("Stopped runtime's native Delete needs observation"));
-      await database.client`
-        UPDATE factory.change change SET
-          state = CASE WHEN attempt.state = 'stopped' AND change.cancel_requested_at IS NOT NULL
-            THEN 'cancelled'::factory.change_state ELSE 'failed'::factory.change_state END,
-          cancelled_at = CASE
-            WHEN attempt.state = 'stopped' AND change.cancel_requested_at IS NOT NULL
-            THEN now() ELSE change.cancelled_at END,
-          failure = CASE WHEN attempt.state = 'failed'
-            THEN COALESCE(change.failure, attempt.failure, 'Runtime failed') ELSE change.failure END,
-          version = change.version + 1
-        FROM factory.runtime_attempt attempt
-        WHERE change.runtime_attempt_id = attempt.id
-          AND change.state IN ('starting', 'active', 'cancelling')
-          AND attempt.state IN ('stopped', 'failed')
-          AND (attempt.state='failed' OR change.cancel_requested_at IS NOT NULL)
-      `;
-      await database.client`
-        UPDATE factory.runtime_attempt SET state = 'stopping', cleanup_attempts = 0,
-          updated_at = now()
-        WHERE state = 'cleanup-failed'
-      `;
-      const attempts = await database.client<
-        Array<{
-          id: string;
-          generation: string;
-          parentTokenHash: string;
-          childTokenHash: string;
-          state: string;
-          isolatedKind: string | null;
-        }>
-      >`
-        SELECT id, generation, state, isolated_kind AS "isolatedKind",
-          parent_connector_token_hash AS "parentTokenHash",
-          child_connector_token_hash AS "childTokenHash"
-        FROM factory.runtime_attempt
-        WHERE NOT substrate AND state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=factory.runtime_attempt.id)
-      `;
-      for (const attempt of attempts) {
-        if (["create-intended", "starting", "ready"].includes(attempt.state)) {
-          hub.allow(
-            attempt.id,
-            Number(attempt.generation),
-            attempt.parentTokenHash,
-            attempt.childTokenHash,
-          );
-        }
-      }
-      await database.client`
-        UPDATE factory.runtime_attempt SET state = 'starting', updated_at = now()
-        WHERE state = 'ready' AND NOT substrate
-      `;
-      const deferredCreates: Array<() => Promise<void>> = [];
-      for (const attempt of attempts) {
-        if (["starting", "ready"].includes(attempt.state)) {
-          deferredCreates.push(async () => {
-            const resources = await factorybox.startupResources(attempt.id);
-            if (!resources) return;
-            const pod = resources[0];
-            if (!pod) return;
-            await observeStartup(
-              attempt.id,
-              Reflect.get(pod.metadata.labels, "factory.dev/runtime-owner") ?? attempt.id,
-              pod.metadata.namespace,
-              pod.metadata.name,
-              resources,
-            );
-          });
-          continue;
-        }
-        if (attempt.state === "pausing") {
-          deferredCreates.push(async () => {
-            await this.pause(attempt.id);
-          });
-          continue;
-        }
-        if (attempt.state === "resuming") {
-          deferredCreates.push(async () => {
-            await resumeExisting(attempt.id);
-            if (hub.ready(attempt.id)) await updateStatus(attempt.id, "ready");
-          });
-          continue;
-        }
-        if (attempt.state === "create-intended") {
-          const [preparation] = await database.client<
-            Array<{ id: string }>
-          >`SELECT id FROM factory.project_image_preparation WHERE runtime_attempt_id=${attempt.id}`;
-          if (preparation) {
-            deferredCreates.push(() => this.startProjectPrebuild(preparation.id));
-            continue;
-          }
-          const recoverCreate = () => recoverCreateAttempt(attempt);
-          // A warm slot can activate immediately. Start it only when the authenticated listener exists.
-          if (await reserve?.assigned(database.client, attempt.id))
-            deferredCreates.push(recoverCreate);
-          else await recoverCreate();
-        }
-        if (attempt.state === "stop-intended") {
-          await database.client`
-            UPDATE factory.runtime_attempt SET state = 'stopping', updated_at = now()
-            WHERE id = ${attempt.id} AND state = 'stop-intended'
-          `;
-          retryCleanup(attempt.id);
-        } else if (attempt.state === "stopping" || attempt.state === "cleanup-failed") {
-          retryCleanup(attempt.id);
-        }
-      }
-      const observeConnections = recoveredConnectionObserver(attempts, {
-        connected: (id) =>
-          attempts.find((attempt) => attempt.id === id)?.isolatedKind === "prebuild"
-            ? hub.parentConnected(id)
-            : hub.connected(id),
-        state: async (id) =>
-          (
-            await database.client<Array<{ state: string }>>`
-            SELECT state FROM factory.runtime_attempt WHERE id = ${id}
-          `
-          )[0]?.state,
-        disconnected: (id) =>
-          this.status(id, "disconnected", "connectors did not return after Factory restart"),
-      });
-      const staging = await database.client<Array<{ projectID: string; userID: string }>>`
-        SELECT staging.project_id AS "projectID", project.created_by AS "userID"
-        FROM factory.staging_preview staging
-        JOIN factory.project project ON project.id = staging.project_id
-        LEFT JOIN factory.runtime_attempt attempt ON attempt.id=staging.runtime_attempt_id
-        WHERE attempt.stop_intended_at IS NULL AND attempt.state IS DISTINCT FROM 'stopped'
-          AND attempt.state IS DISTINCT FROM 'failed'
-      `;
+      const ids = await database.client<{ projectID: string }[]>`
+        SELECT DISTINCT project_id AS "projectID" FROM factory.runtime_attempt`;
       let observing = false;
       return () => {
         if (observing) return;
         observing = true;
-        if (substrate)
-          void substrate.recover().catch(reportFailure("Native runtime observation unavailable"));
-        if (nativeWorkspaces)
-          void nativeWorkspaces
-            .recover()
-            .catch(reportFailure("Native Workspace observation unavailable"));
-        if (nativeVerification)
-          void nativeVerification
-            .recover()
-            .catch(reportFailure("Native Verification observation unavailable"));
-        if (nativePrebuild)
-          void nativePrebuild
-            .recover()
-            .catch(reportFailure("Native prebuild observation unavailable"));
-        for (const create of deferredCreates)
-          void create().catch(reportFailure("Reserved runtime recovery failed"));
-        observeConnections();
-        setTimeout(() => {
-          void (async () => {
-            for (const preview of staging) {
-              await this.ensureStaging(preview.projectID, preview.userID).catch((cause) => {
-                console.error("Staging recovery failed", cause);
-              });
-            }
-          })();
-        }, 1_000).unref();
+        for (const id of ids) {
+          const owners = project(id.projectID);
+          for (const owner of [
+            owners.workspaces,
+            owners.verification,
+            owners.prebuild,
+            owners.isolated,
+          ])
+            void owner.recover().catch(reportFailure("Native runtime observation is unavailable"));
+        }
       };
     },
     async start(projectID: string, userID: string, selectedWorkspaceID?: string) {
       await createAccessController(database).requireDevelopment(userID, projectID);
       await requireSetupReady(database.client, projectID);
-      const selected = selectedWorkspaceID
-        ? await database.client.begin((sql) =>
-            workspaceWriteAuthorityIn(sql, selectedWorkspaceID, userID),
-          )
-        : undefined;
-      if (
-        selected &&
-        (selected.kind !== "personal" || selected.projectID !== projectID || !selected.ownerID)
-      )
-        throw new CommandError("not-found", "Personal Workspace not found");
-      const ownerID = selected?.ownerID ?? userID;
-      const workspaceIdentity = personalWorkspaceIdentity(projectID, ownerID);
-      if (selectedWorkspaceID && selectedWorkspaceID !== workspaceIdentity.workspaceID)
-        throw new CommandError(
-          "conflict",
-          "Personal Workspace identity differs from its retained owner",
+      if (selectedWorkspaceID) {
+        const selected = await database.client.begin((sql) =>
+          workspaceWriteAuthorityIn(sql, selectedWorkspaceID, userID),
         );
-      if (nativeWorkspaces?.matchesProject(projectID) || substrate?.matchesProject(projectID)) {
-        if (ownerID !== userID)
-          throw new CommandError(
-            "unavailable",
-            "Native shared compute Start is not enabled. The owner's Workspace was not replaced or started as another user.",
-          );
-        const id = nativeWorkspaces?.matchesProject(projectID)
-          ? await nativeWorkspaces.start(userID)
-          : await substrate?.start(userID);
-        if (!id) throw new Error("Native Workspace configuration is unavailable");
-        return this.get(id);
-      }
-      // Source preparation, infrastructure calls and result reads use the
-      // application pool. Session coordination must not reserve one of its slots.
-      const lock = database.coordination();
-      try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
-        const projects = await lock<
-          Array<{
-            id: string;
-            repositoryUrl: string;
-            defaultBranch: string;
-            devcontainerPath: string;
-          }>
-        >`
-        SELECT id, repository_url AS "repositoryUrl", default_branch AS "defaultBranch",
-          devcontainer_path AS "devcontainerPath"
-        FROM factory.project WHERE id = ${projectID}
-      `;
-        const project = projects[0];
-        if (!project) throw new Error("Project not found");
-        let workspaces = await lock<
-          Array<{
-            id: string;
-            revision: string;
-            namespace: string;
-            volumeName: string;
-          }>
-        >`
-          SELECT workspace.id, COALESCE((
-            SELECT operation.result->>'head' FROM factory.personal_git_operation operation
-            WHERE operation.workspace_id=workspace.id AND operation.user_id=workspace.owner_user_id
-              AND operation.branch=${project.defaultBranch}
-              AND operation.action='pull' AND operation.state='succeeded'
-              AND operation.result->>'head'<>operation.expected_head
-            ORDER BY operation.completed_at DESC,operation.created_at DESC,operation.id DESC LIMIT 1
-          ),workspace.source_revision) AS revision,
-            workspace.kubernetes_namespace AS namespace,workspace.volume_name AS "volumeName"
-          FROM factory.development_workspace workspace
-          WHERE workspace.project_id = ${projectID} AND workspace.kind = 'personal'
-            AND workspace.owner_user_id = ${ownerID}
-        `;
-        if (!workspaces[0]) {
-          if (selectedWorkspaceID)
-            throw new CommandError("not-found", "Shared Workspace not found");
-          const revision = await resolveRepositoryRevision(
-            project.repositoryUrl,
-            project.defaultBranch,
-          );
-          workspaces = await lock<
-            Array<{ id: string; revision: string; namespace: string; volumeName: string }>
-          >`
-            INSERT INTO factory.development_workspace(
-              id, project_id, kind, owner_user_id, source_branch, source_revision,
-              created_by
-            ) VALUES (
-              ${workspaceIdentity.workspaceID}, ${projectID}, 'personal', ${userID},
-              ${project.defaultBranch}, ${revision}, ${userID}
-            )
-            RETURNING id, source_revision AS revision, kubernetes_namespace AS namespace,
-              volume_name AS "volumeName"
-          `;
-        }
-        const workspace = workspaces[0];
-        if (!workspace) throw new Error("Personal Development Workspace was not created");
-        const active = await lock<
-          Array<{
-            id: string;
-            generation: string;
-            parentTokenHash: string;
-            childTokenHash: string;
-          }>
-        >`
-        SELECT id, generation,
-          parent_connector_token_hash AS "parentTokenHash",
-          child_connector_token_hash AS "childTokenHash"
-        FROM factory.runtime_attempt
-        WHERE workspace_id = ${workspace.id}
-          AND state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
-        LIMIT 1
-      `;
-        const existing = active[0];
-        if (existing) {
-          const current = await this.get(existing.id);
-          const currentState = current?.state;
-          if (currentState === "paused" || currentState === "resuming") {
-            await resumeExisting(existing.id);
-            if (hub.ready(existing.id)) await updateStatus(existing.id, "ready");
-            return this.get(existing.id);
-          }
-          if (["create-intended", "starting", "ready"].includes(String(currentState))) {
-            hub.allow(
-              existing.id,
-              Number(existing.generation),
-              existing.parentTokenHash,
-              existing.childTokenHash,
-            );
-          }
-          if (
-            current?.state === "starting" &&
-            current.kubernetesNamespace &&
-            current.kubernetesPodName &&
-            !startupObservations.has(existing.id)
-          ) {
-            // A worker can become Ready after the initial observation window.
-            // Renew only an intent that never reached native preparation/dispatch.
-            const [unprepared] = await lock`SELECT id FROM factory.runtime_attempt attempt
-              WHERE attempt.id=${existing.id} AND attempt.state='starting'
-                AND attempt.stop_intended_at IS NULL AND attempt.kubernetes_uid IS NOT NULL
-                AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id)
-                AND NOT EXISTS(SELECT 1 FROM factory.factorybox_runtime WHERE runtime_attempt_id=attempt.id)
-                AND NOT EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=attempt.id)`;
-            if (unprepared) {
-              const resources = await factorybox.startupResources(existing.id);
-              if (resources)
-                void observeStartup(
-                  existing.id,
-                  workspace.id,
-                  current.kubernetesNamespace,
-                  current.kubernetesPodName,
-                  resources,
-                ).catch(reportFailure("Retained personal startup observation failed"));
-            }
-          }
-          return current;
-        }
-        const generations = await lock<Array<{ generation: string }>>`
-        SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-        FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
-      `;
-        const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(workspace.id, generation, lock, userID);
-        if (identity.namespace !== workspace.namespace)
-          throw new Error("Workspace belongs to another Factory");
-        // Initialization remains immutable. Only a confirmed advancing Pull
-        // adopts newer published configuration for a fresh personal Attempt.
-        // Local commits, unchanged/failed Pulls and existing Attempts keep
-        // their original authority; Start never pulls or resets Source.
-        const revision = workspace.revision;
-        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
-        const token = tokens.parent;
-        const childToken = tokens.child;
-        const tokenHash = hashConnectorToken(token);
-        const childTokenHash = hashConnectorToken(childToken);
-        const repositoryURL = runtimeRepositoryURL(project.repositoryUrl, identity.attemptID);
-        const systemContract = await resolveSystemContract(project.repositoryUrl, revision);
-        await lock`BEGIN`;
-        try {
-          await admitOrWait(lock, identity.attemptID, projectID, "development");
-          await lock`
-        INSERT INTO factory.runtime_attempt(
-          id, project_id, workspace_id, generation, revision, state,
-          parent_connector_token_hash, child_connector_token_hash,
-          create_intended_at, created_by, declared_apps, factorybox_admission_id
-        ) VALUES (
-          ${identity.attemptID}, ${projectID}, ${workspace.id}, ${generation}, ${revision}, 'create-intended',
-          ${tokenHash}, ${childTokenHash}, now(), ${userID},
-          ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
-          ${identity.admissionID}
+        if (selected.kind !== "personal" || selected.projectID !== projectID || !selected.ownerID)
+          throw new CommandError("not-found", "Personal Workspace not found");
+        if (
+          selectedWorkspaceID !== personalWorkspaceIdentity(projectID, selected.ownerID).workspaceID
         )
-      `;
-          await lock`COMMIT`;
-        } catch (cause) {
-          await lock`ROLLBACK`;
-          throw cause;
-        }
-        await artifactsFor(identity.attemptID, lock);
-        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
-        hub.allow(identity.attemptID, generation, tokenHash, childTokenHash);
-        try {
-          if (project.repositoryUrl.startsWith("file://")) {
-            await prepareRuntimeRepository(identity.attemptID, project.repositoryUrl, revision);
-          }
-          const canonicalSource = await sources.prepareExecution(identity.attemptID);
-          const artifacts = await artifactsFor(identity.attemptID, lock);
-          const resources = renderAttemptResources(
-            {
-              ...identity,
-              generation,
-              projectID,
-              runtimeOwnerID: workspace.id,
-              repositoryURL,
-              repositoryIdentity: projectID,
-              preserveWorkspace: true,
-              storageNode: canonicalSource.storageNode,
-              revision,
-              devcontainerPath: project.devcontainerPath,
-              connectorToken: token,
-              childConnectorToken: childToken,
-              controlURL,
-              registryCA: await readRegistryCA(),
-              systemContract,
-            },
-            artifacts,
+          throw new CommandError(
+            "conflict",
+            "Personal Workspace identity differs from its retained owner",
           );
-          await launchAttempt(
-            identity.attemptID,
-            {
-              resources,
-              namespace: identity.namespace,
-              podName: identity.podName,
-              missingPodMessage: "Runtime Pod was not observed after create",
-              runtimeHostImage: artifacts.runtimeHostImage,
-              factoryboxProfile: artifacts.factoryboxProfile,
-              expectedNamespace: { ownerID: workspace.id, uid: canonicalSource.namespaceUID },
-            },
-            {
-              observe: () =>
-                observeStartup(
-                  identity.attemptID,
-                  workspace.id,
-                  identity.namespace,
-                  identity.podName,
-                  resources,
-                ),
-              fail: async (phase, cause) => {
-                if (phase === "observe") {
-                  await updateStatus(
-                    identity.attemptID,
-                    "failed",
-                    `startup observer failed: ${cause instanceof Error ? cause.message : "unknown error"}`,
-                  );
-                }
-              },
-            },
-            lock,
-          );
-        } catch (cause) {
-          const failure = cause instanceof Error ? cause.message : "runtime create failed";
-          await lock`
-          UPDATE factory.runtime_attempt SET state = 'stopping', failure = ${failure},
-            updated_at = now() WHERE id = ${identity.attemptID}
-        `;
-          hub.revoke(identity.attemptID);
-          retryCleanup(identity.attemptID);
-          throw cause;
-        }
-        return this.get(identity.attemptID);
-      } finally {
-        try {
-          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
       }
+      return this.get(
+        await project(projectID).workspaces.start(userID, undefined, selectedWorkspaceID),
+      );
+    },
+    async startPersisted(changeID: string, userID: string) {
+      const [change] = await database.client<{ projectID: string }[]>`
+        SELECT project_id AS "projectID" FROM factory.change WHERE id=${changeID}`;
+      if (!change) throw new CommandError("not-found", "Change not found");
+      await requireSetupReady(database.client, change.projectID);
+      return this.get(await project(change.projectID).workspaces.start(userID, changeID));
     },
     async ensureStaging(projectID: string, userID: string) {
       await requireSetupReady(database.client, projectID);
-      const lock = database.coordination();
-      try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`staging:${projectID}`}))`;
-        const projects = await lock<
-          Array<{ repositoryURL: string; defaultBranch: string; devcontainerPath: string }>
-        >`
-          SELECT repository_url AS "repositoryURL", default_branch AS "defaultBranch",
-            devcontainer_path AS "devcontainerPath"
-          FROM factory.project WHERE id = ${projectID}
-        `;
-        const project = projects[0];
-        if (!project) throw new Error("Project not found");
-        let previews = await lock<Array<{ revision: string; attemptID: string | null }>>`
-          SELECT revision, runtime_attempt_id AS "attemptID"
-          FROM factory.staging_preview WHERE project_id = ${projectID}
-        `;
-        let configured: SystemContract | undefined;
-        if (!previews[0]?.attemptID) {
-          requireIsolatedOwner(projectID, "Staging");
-          const revision = await resolveRepositoryRevision(
-            project.repositoryURL,
-            project.defaultBranch,
-          );
-          // A branch observation is not a promoted Preview. Validate its Apps
-          // before retaining an initial pointer; no Runtime Attempt exists yet.
-          configured = await resolveSystemContract(project.repositoryURL, revision);
-          previews = await lock<Array<{ revision: string; attemptID: string | null }>>`
-            INSERT INTO factory.staging_preview(project_id, revision)
-            VALUES (${projectID}, ${revision})
-            ON CONFLICT(project_id) DO UPDATE SET revision=EXCLUDED.revision,updated_at=now()
-              WHERE factory.staging_preview.runtime_attempt_id IS NULL
-            RETURNING revision, runtime_attempt_id AS "attemptID"
-          `;
-        }
-        const preview = previews[0];
-        if (!preview) throw new Error("Staging Preview was not created");
-        if (preview.attemptID) {
-          const current = await this.get(preview.attemptID);
-          if (
-            current &&
-            [
-              "create-intended",
-              "starting",
-              "ready",
-              "stop-intended",
-              "stopping",
-              "cleanup-failed",
-            ].includes(current.state)
-          ) {
-            return current;
-          }
-        }
-        requireIsolatedOwner(projectID, "Staging");
-        const systemContract =
-          configured ?? (await resolveSystemContract(project.repositoryURL, preview.revision));
-        const generations = await lock<Array<{ generation: string }>>`
-          SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-          FROM factory.runtime_attempt
-          WHERE project_id = ${projectID} AND change_id IS NULL AND workspace_id IS NULL
-        `;
-        const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(`staging:${projectID}`, generation, lock, userID);
-        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
-        await lock`BEGIN`;
-        try {
-          await admitOrWait(lock, identity.attemptID, projectID, "staging", "staging");
-          await lock`
-            INSERT INTO factory.runtime_attempt(
-              id, project_id, isolated_kind, generation, revision, state,
-              parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, declared_apps, factorybox_admission_id
-            ) VALUES (
-              ${identity.attemptID}, ${projectID}, 'staging', ${generation}, ${preview.revision},
-              'create-intended',
-              ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
-              ${userID},
-              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
-              ${identity.admissionID}
-            )
-          `;
-          await artifactsFor(identity.attemptID, lock);
-          await lock`
-            UPDATE factory.staging_preview SET runtime_attempt_id = ${identity.attemptID},
-              updated_at = now() WHERE project_id = ${projectID}
-          `;
-          await lock`COMMIT`;
-        } catch (cause) {
-          await lock`ROLLBACK`;
-          throw cause;
-        }
-        await artifactsFor(identity.attemptID, lock);
-        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
-        hub.allow(
-          identity.attemptID,
-          generation,
-          hashConnectorToken(tokens.parent),
-          hashConnectorToken(tokens.child),
-        );
-        const repositoryURL = runtimeRepositoryURL(project.repositoryURL, identity.attemptID);
-        try {
-          if (project.repositoryURL.startsWith("file://")) {
-            await prepareRuntimeRepository(
-              identity.attemptID,
-              project.repositoryURL,
-              preview.revision,
-            );
-          }
-          const artifacts = await artifactsFor(identity.attemptID, lock);
-          const resources = renderAttemptResources(
-            {
-              ...identity,
-              generation,
-              projectID,
-              repositoryURL,
-              revision: preview.revision,
-              devcontainerPath: project.devcontainerPath,
-              connectorToken: tokens.parent,
-              childConnectorToken: tokens.child,
-              controlURL,
-              registryCA: await readRegistryCA(),
-              mode: "staging",
-              systemContract,
-            },
-            artifacts,
-          );
-          await launchAttempt(
-            identity.attemptID,
-            {
-              resources,
-              namespace: identity.namespace,
-              podName: identity.podName,
-              missingPodMessage: "Staging Pod was not observed after create",
-              runtimeHostImage: artifacts.runtimeHostImage,
-              factoryboxProfile: artifacts.factoryboxProfile,
-            },
-            {
-              observe: () =>
-                observeStartup(
-                  identity.attemptID,
-                  identity.attemptID,
-                  identity.namespace,
-                  identity.podName,
-                  resources,
-                ),
-              fail: async (phase, cause) => {
-                if (phase === "observe") {
-                  await updateStatus(
-                    identity.attemptID,
-                    "failed",
-                    `staging observer failed: ${cause instanceof Error ? cause.message : "unknown error"}`,
-                  );
-                }
-              },
-            },
-            lock,
-          );
-        } catch (cause) {
-          await lock`
-            UPDATE factory.runtime_attempt SET state = 'stopping',
-              failure = ${`Staging create failed: ${cause instanceof Error ? cause.message : "unknown error"}`},
-              updated_at = now() WHERE id = ${identity.attemptID}
-          `;
-          hub.revoke(identity.attemptID);
-          retryCleanup(identity.attemptID);
-          throw cause;
-        }
-        return this.get(identity.attemptID);
-      } finally {
-        try {
-          await lock`SELECT pg_advisory_unlock(hashtext(${`staging:${projectID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
-      }
+      return this.get(await project(projectID).isolated.stage(userID));
     },
-    async startPersisted(changeID: string, userID: string) {
-      const workspaceIdentity = ticketWorkspaceIdentity(changeID);
-      const lockRows = await database.client<Array<{ projectID: string }>>`
-        SELECT project_id AS "projectID" FROM factory.change WHERE id = ${changeID}
-      `;
-      const projectID = lockRows[0]?.projectID;
-      if (!projectID) throw new Error("Change not found");
-      await requireSetupReady(database.client, projectID);
-      if (nativeWorkspaces?.matchesProject(projectID)) {
-        const id = await nativeWorkspaces.start(userID, changeID);
-        return this.get(id);
-      }
-      const lock = database.coordination();
-      try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
-        const rows = await lock<
-          Array<{
-            changeID: string;
-            baseSHA: string;
-            executionRevision: string;
-            changeState: string;
-            runtimeAttemptID: string | null;
-            repositoryURL: string;
-            devcontainerPath: string;
-            branchState: string;
-            observedHeadSHA: string | null;
-            ticketID: string;
-            branchName: string;
-          }>
-        >`
-          SELECT change.id AS "changeID", change.base_sha AS "baseSHA",
-            COALESCE((SELECT commit_sha FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
-              change.base_sha) AS "executionRevision",
-            change.state AS "changeState", change.runtime_attempt_id AS "runtimeAttemptID",
-            change.ticket_id AS "ticketID", change.branch_name AS "branchName",
-            project.repository_url AS "repositoryURL",
-            project.devcontainer_path AS "devcontainerPath",
-            operation.state AS "branchState", operation.observed_head_sha AS "observedHeadSHA"
-          FROM factory.change change
-          JOIN factory.project project ON project.id = change.project_id
-          JOIN factory.branch_create_operation operation ON operation.change_id = change.id
-          JOIN factory.ticket ticket ON ticket.id = change.ticket_id AND ticket.trashed_at IS NULL
-          WHERE change.id = ${changeID}
-        `;
-        const row = rows[0];
-        if (!row) throw new Error("Change not found");
-        if (row.branchState !== "succeeded" || row.observedHeadSHA !== row.baseSHA) {
-          throw new Error("Change branch is not ready at the persisted revision");
-        }
-        if (!["starting", "active", "failed"].includes(row.changeState)) {
-          throw new Error("Change does not accept a Ticket Sandbox");
-        }
-        const [writing] = await lock<
-          { state: string }[]
-        >`SELECT state FROM factory.change_writer WHERE change_id=${changeID}`;
-        if (writing?.state === "handoff" || writing?.state === "agent-preparing")
-          throw new Error("Previous writer is being stopped. Compute cannot start during handoff.");
-        const existingAttempt = row.runtimeAttemptID ? await this.get(row.runtimeAttemptID) : null;
-        if (
-          existingAttempt &&
-          [
-            "create-intended",
-            "starting",
-            "ready",
-            "pausing",
-            "paused",
-            "resuming",
-            "stop-intended",
-            "stopping",
-            "cleanup-failed",
-          ].includes(existingAttempt.state)
-        ) {
-          if (["paused", "resuming"].includes(existingAttempt.state)) {
-            await resumeExisting(existingAttempt.id);
-            if (hub.ready(existingAttempt.id)) await updateStatus(existingAttempt.id, "ready");
-            return this.get(existingAttempt.id);
-          }
-          return existingAttempt;
-        }
-        let workspaces = await lock<Array<{ id: string; namespace: string; revision: string }>>`
-          SELECT id, kubernetes_namespace AS namespace, source_revision AS revision
-          FROM factory.development_workspace
-          WHERE kind = 'ticket' AND change_id = ${changeID}
-        `;
-        if (!workspaces[0]) {
-          workspaces = await lock<Array<{ id: string; namespace: string; revision: string }>>`
-            INSERT INTO factory.development_workspace(
-              id, project_id, kind, ticket_id, change_id, source_branch, source_revision,
-              created_by
-            ) VALUES (
-              ${workspaceIdentity.workspaceID}, ${projectID}, 'ticket', ${row.ticketID}, ${changeID},
-              ${row.branchName}, ${row.baseSHA}, ${userID}
-            )
-            RETURNING id, kubernetes_namespace AS namespace, source_revision AS revision
-          `;
-        }
-        const workspace = workspaces[0];
-        if (!workspace) throw new Error("Ticket Workspace was not created");
-        // Source retains its original seed identity. New execution must use the
-        // submitted commit's configuration, not that seed's old App commands.
-        const revision = row.executionRevision;
-        const systemContract = await resolveSystemContract(row.repositoryURL, revision);
-        const generations = await lock<Array<{ generation: string }>>`
-          SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-          FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
-        `;
-        const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(workspace.id, generation, lock, userID);
-        if (identity.namespace !== workspace.namespace)
-          throw new Error("Workspace belongs to another Factory");
-        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
-        const parent = tokens.parent;
-        const child = tokens.child;
-        await lock`BEGIN`;
-        try {
-          const current = await lock<Array<{ state: string; executionRevision: string }>>`
-            SELECT state, runtime_attempt_id AS "runtimeAttemptID",
-              COALESCE((SELECT commit_sha FROM factory.change_commit_operation
-                WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
-                base_sha) AS "executionRevision"
-            FROM factory.change
-            WHERE id = ${changeID} FOR UPDATE
-          `;
-          if (!["starting", "active", "failed"].includes(current[0]?.state ?? "")) {
-            throw new Error("Change does not accept a Ticket Sandbox");
-          }
-          if (current[0]?.executionRevision !== revision)
-            throw new Error("Ticket commit changed before compute admission");
-          const [writer] = await lock<
-            { state: string }[]
-          >`SELECT state FROM factory.change_writer WHERE change_id=${changeID}`;
-          if (writer?.state === "handoff" || writer?.state === "agent-preparing")
-            throw new Error("Compute cannot start during editing handoff");
-          await admitOrWait(lock, identity.attemptID, projectID, "development");
-          await lock`
-            INSERT INTO factory.runtime_attempt(
-              id, project_id, change_id, workspace_id, generation, revision, state,
-              parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, declared_apps, factorybox_admission_id
-            ) VALUES (
-              ${identity.attemptID}, ${projectID}, ${changeID}, ${workspace.id}, ${generation}, ${revision},
-              'create-intended',
-              ${hashConnectorToken(parent)}, ${hashConnectorToken(child)}, now(), ${userID},
-              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
-              ${identity.admissionID}
-            )
-          `;
-          await lock`
-            UPDATE factory.change SET runtime_attempt_id = ${identity.attemptID},
-              state = 'starting', failure = NULL, version = version + 1
-            WHERE id = ${changeID}
-          `;
-          await lock`COMMIT`;
-        } catch (cause) {
-          await lock`ROLLBACK`;
-          throw cause;
-        }
-        await artifactsFor(identity.attemptID, lock);
-        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
-        const repositoryURL = runtimeRepositoryURL(row.repositoryURL, identity.attemptID);
-        hub.allow(
-          identity.attemptID,
-          generation,
-          hashConnectorToken(parent),
-          hashConnectorToken(child),
-        );
-        try {
-          const canonicalSource = await sources.prepareExecution(identity.attemptID);
-          const artifacts = await artifactsFor(identity.attemptID, lock);
-          const resources = renderAttemptResources(
-            {
-              ...identity,
-              generation,
-              projectID,
-              runtimeOwnerID: workspace.id,
-              repositoryURL,
-              repositoryIdentity: projectID,
-              preserveWorkspace: true,
-              storageNode: canonicalSource.storageNode,
-              revision,
-              devcontainerPath: row.devcontainerPath,
-              connectorToken: parent,
-              childConnectorToken: child,
-              controlURL,
-              registryCA: await readRegistryCA(),
-              systemContract,
-              agent: await agentConfiguration(
-                database,
-                changeID,
-                connectorSecret,
-                identity.attemptID,
-                generation,
-                artifacts.browserToolsImage,
-              ),
-            },
-            artifacts,
-          );
-          await launchAttempt(
-            identity.attemptID,
-            {
-              resources,
-              namespace: identity.namespace,
-              podName: identity.podName,
-              missingPodMessage: "Change runtime Pod was not observed after create",
-              runtimeHostImage: artifacts.runtimeHostImage,
-              factoryboxProfile: artifacts.factoryboxProfile,
-              expectedNamespace: { ownerID: workspace.id, uid: canonicalSource.namespaceUID },
-            },
-            {
-              observe: () =>
-                observeStartup(
-                  identity.attemptID,
-                  workspace.id,
-                  identity.namespace,
-                  identity.podName,
-                  resources,
-                ),
-              fail: async (phase, cause) => {
-                if (phase === "observe") {
-                  await updateStatus(
-                    identity.attemptID,
-                    "failed",
-                    `startup observer failed: ${cause instanceof Error ? cause.message : "unknown error"}`,
-                  );
-                }
-              },
-            },
-            lock,
-          );
-        } catch (cause) {
-          await lock`
-            UPDATE factory.runtime_attempt SET state = 'stopping',
-              failure = ${`Change runtime create failed: ${cause instanceof Error ? cause.message : "unknown error"}`},
-              updated_at = now()
-            WHERE id = ${identity.attemptID} AND state = 'create-intended'
-          `;
-          hub.revoke(identity.attemptID);
-          retryCleanup(identity.attemptID);
-          throw cause;
-        }
-        return this.get(identity.attemptID);
-      } finally {
-        try {
-          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
-      }
+    async startProjectPrebuild(preparationID: string) {
+      const [preparation] = await database.client<{ projectID: string }[]>`
+        SELECT project_id AS "projectID" FROM factory.project_image_preparation WHERE id=${preparationID} AND state IN ('pending','running')`;
+      if (!preparation) return;
+      await project(preparation.projectID).prebuild.start(preparationID);
     },
     async startVerification(verificationID: string, userID: string) {
-      const rows = await database.client<
-        Array<{
-          projectID: string;
-          commitSHA: string;
-          attemptID: string | null;
-          runnerUUID: string | null;
-          runnerToken: string | null;
-          repositoryURL: string;
-          devcontainerPath: string;
-        }>
-      >`
-        SELECT change.project_id AS "projectID", verification.commit_sha AS "commitSHA",
-          verification.runtime_attempt_id AS "attemptID",
-          verification.runner_uuid AS "runnerUUID", verification.runner_token AS "runnerToken",
-          project.repository_url AS "repositoryURL",
-          project.devcontainer_path AS "devcontainerPath"
-        FROM factory.verification verification
-        JOIN factory.change change ON change.id = verification.change_id
-        JOIN factory.project project ON project.id = change.project_id
-        WHERE verification.id = ${verificationID}
-      `;
-      const verification = rows[0];
+      const [verification] = await database.client<{ projectID: string }[]>`
+        SELECT change.project_id AS "projectID" FROM factory.verification verification
+        JOIN factory.change change ON change.id=verification.change_id WHERE verification.id=${verificationID}`;
       if (!verification) return null;
-      if (nativeVerification?.matchesProject(verification.projectID)) {
-        const [retained] = verification.attemptID
-          ? await database.client<
-              { native: boolean }[]
-            >`SELECT substrate AS native FROM factory.runtime_attempt WHERE id=${verification.attemptID}`
-          : [];
-        if (!verification.attemptID || retained?.native) {
-          await database.client.begin((tx) =>
-            projectAuthorityIn(tx, userID, verification.projectID),
-          );
-          await verificationJob(verificationID, database.client);
-          const id = await nativeVerification.start(verificationID, userID);
-          return this.get(id);
-        }
-      }
-      if (!verification.attemptID) requireIsolatedOwner(verification.projectID, "Verification");
-      if (!verification.runnerUUID || !verification.runnerToken) {
-        throw new Error("Verification runner is not registered");
-      }
-      // A retained Attempt never goes through node selection again. For new
-      // work, pin placement before either remote creation or same-worker Stop.
-      const [retainedBinding] = verification.attemptID
-        ? await database.client<Array<{ workerID: string; admissionID: string }>>`
-            SELECT factorybox_worker_id AS "workerID",factorybox_admission_id AS "admissionID"
-            FROM factory.runtime_attempt WHERE id=${verification.attemptID}`
-        : [];
-      const placement = retainedBinding
-        ? {
-            allocation: await factoryboxAllocation(
-              database.client,
-              undefined,
-              retainedBinding.workerID,
-              retainedBinding.admissionID,
-            ),
-            refused: [],
-          }
-        : await database.client.begin(async (sql) => {
-            await sql`SELECT id FROM factory.verification WHERE id=${verificationID} FOR UPDATE`;
-            return selectVerificationPlacement(
-              sql,
-              configuredFactoryboxRuntimeProfile(),
-              pinnedRuntimeHostImage,
-              observeWorkers,
-              verificationID,
-            );
-          });
-      const handoff = await prepareVerificationHandoff(
-        database,
-        hub,
-        verificationID,
-        placement.allocation.id,
+      await database.client.begin((sql) => projectAuthorityIn(sql, userID, verification.projectID));
+      await verificationJob(verificationID);
+      return this.get(
+        await project(verification.projectID).verification.start(verificationID, userID),
       );
-      if (placement.refused.length)
-        console.info("[factory] Verification node refusal", {
-          verificationID,
-          nodes: placement.refused,
-        });
-      if (handoff.stopAttemptID) await this.stop(handoff.stopAttemptID);
-      // Continuation never replaces an existing execution, including a failed
-      // or stopped one. Only the explicit verified bootstrap retry can clear
-      // that association after its exact cleanup is confirmed.
-      if (verification.attemptID) return this.get(verification.attemptID);
-      if (!handoff.ready) return null;
-      const lock = database.coordination();
-      try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
-        const current = await lock<Array<{ attemptID: string | null }>>`
-          SELECT verification.runtime_attempt_id AS "attemptID"
-          FROM factory.verification verification
-          WHERE verification.id = ${verificationID} FOR UPDATE OF verification
-        `;
-        if (current[0]?.attemptID) return this.get(current[0].attemptID);
-        const generations = await lock<Array<{ generation: string }>>`
-          SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-          FROM factory.runtime_attempt
-          WHERE project_id = ${verification.projectID} AND isolated_kind IS NOT NULL
-        `;
-        const generation = Number(generations[0]?.generation ?? 1);
-        const identity = {
-          ...runtimeIdentity(verificationID, generation),
-          workerID: placement.allocation.id,
-          namespace: placement.allocation.namespace,
-          podName: placement.allocation.podName,
-          admissionID: placement.allocation.admissionID,
-        };
-        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
-        const jobHandle = await verificationJob(verificationID, lock);
-        await lock`BEGIN`;
-        try {
-          const active = await lock<Array<{ id: string }>>`
-            SELECT verification.id FROM factory.verification verification
-            JOIN factory.change change ON change.id = verification.change_id
-            JOIN factory.ticket ticket ON ticket.id = change.ticket_id
-            WHERE verification.id = ${verificationID}
-              AND verification.state IN ('pending', 'runner-starting', 'running')
-              AND change.state = 'active' AND change.cancel_requested_at IS NULL
-              AND ticket.trashed_at IS NULL
-              AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id = change.id AND (session.state = 'stopped' OR session.stop_pending))
-            FOR UPDATE OF change, ticket, verification
-          `;
-          if (!active[0]) {
-            await lock`ROLLBACK`;
-            return null;
-          }
-          await admitOrWait(
-            lock,
-            identity.attemptID,
-            verification.projectID,
-            "verification",
-            placement.allocation.singleton ? "verification" : undefined,
-          );
-          await lock`
-            INSERT INTO factory.runtime_attempt(
-              id, project_id, verification_id, isolated_kind, generation, revision, state,
-              parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, factorybox_worker_id, factorybox_admission_id
-            ) VALUES (
-              ${identity.attemptID}, ${verification.projectID}, ${verificationID}, 'verification',
-              ${generation}, ${verification.commitSHA}, 'create-intended', ${hashConnectorToken(tokens.parent)},
-              ${hashConnectorToken(tokens.child)}, now(), ${userID}, ${identity.workerID}, ${identity.admissionID}
-            )
-          `;
-          await artifactsFor(identity.attemptID, lock);
-          await lock`
-            UPDATE factory.verification SET runtime_attempt_id = ${identity.attemptID},
-              state = 'runner-starting', updated_at = now()
-            WHERE id = ${verificationID}
-              AND state IN ('pending', 'runner-starting', 'running')
-          `;
-          await lock`COMMIT`;
-        } catch (cause) {
-          await lock`ROLLBACK`;
-          throw cause;
-        }
-        await artifactsFor(identity.attemptID, lock);
-        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
-        hub.allow(
-          identity.attemptID,
-          generation,
-          hashConnectorToken(tokens.parent),
-          hashConnectorToken(tokens.child),
-        );
-        await launchIsolated(
-          {
-            identity,
-            generation,
-            projectID: verification.projectID,
-            repositoryURL: verification.repositoryURL,
-            revision: verification.commitSHA,
-            devcontainerPath: verification.devcontainerPath,
-            kind: "verification",
-            parentToken: tokens.parent,
-            childToken: tokens.child,
-            verification: {
-              runnerUUID: verification.runnerUUID,
-              runnerToken: verification.runnerToken,
-              ...(jobHandle ? { jobHandle } : {}),
-            },
-          },
-          lock,
-        );
-        return this.get(identity.attemptID);
-      } finally {
-        try {
-          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
-      }
     },
     async startPublication(publicationID: string, userID: string) {
-      const lock = database.coordination();
-      let projectLock: string | undefined;
-      try {
-        await lock`SELECT pg_advisory_lock(hashtextextended(${`publication-runtime:${publicationID}`},0))`;
-        const [row] = await lock<
-          {
-            projectID: string;
-            revision: string;
-            version: string;
-            runnerUUID: string;
-            runnerToken: string;
-            jobHandle: string;
-            attemptID: string | null;
-            repositoryURL: string;
-            devcontainerPath: string;
-          }[]
-        >`SELECT release.project_id AS "projectID",release.commit_sha AS revision,release.version,
-          publication.runner_uuid AS "runnerUUID",publication.runner_token AS "runnerToken",
-          publication.job_handle AS "jobHandle",publication.runtime_attempt_id AS "attemptID",
-          project.repository_url AS "repositoryURL",project.devcontainer_path AS "devcontainerPath"
-          FROM factory.release_attempt publication JOIN factory.project_release release ON release.id=publication.release_id
-          JOIN factory.project project ON project.id=release.project_id
-          WHERE publication.id=${publicationID} AND publication.state='running' AND release.state='running'
-            AND publication.id=(SELECT id FROM factory.release_attempt WHERE release_id=release.id ORDER BY ordinal DESC LIMIT 1)`;
-        if (!row) throw new Error("Active publication intent is required");
-        if (row.attemptID) return this.get(row.attemptID);
-        if (!row.runnerUUID || !row.runnerToken || !row.jobHandle)
-          throw new Error("Bound publication runner is required");
-        await createAccessController(database).requireDevelopment(userID, row.projectID);
-        requireIsolatedOwner(row.projectID, "publication");
-        projectLock = `runtime:isolated:${row.projectID}`;
-        await lock`SELECT pg_advisory_lock(hashtext(${projectLock}))`;
-        const [sequence] = await lock<{ generation: number }[]>`
-          SELECT (COALESCE(MAX(generation),0)+1)::float8 AS generation FROM factory.runtime_attempt
-          WHERE project_id=${row.projectID} AND isolated_kind IS NOT NULL`;
-        if (!sequence) throw new Error("Publication generation observation is missing");
-        const generation = sequence.generation;
-        const identity = await executionIdentity(publicationID, generation, lock);
-        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
-        await lock.begin(async (tx) => {
-          await tx`SELECT pg_advisory_xact_lock(hashtext(${`runtime:isolated:${row.projectID}`}))`;
-          await admitOrWait(
-            tx as unknown as Database["client"],
-            identity.attemptID,
-            row.projectID,
-            "publication",
-          );
-          await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,
-            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,factorybox_admission_id)
-            VALUES(${identity.attemptID},${row.projectID},'publication',${generation},${row.revision},'create-intended',
-            ${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID},${identity.admissionID})`;
-          await tx`UPDATE factory.release_attempt SET runtime_attempt_id=${identity.attemptID} WHERE id=${publicationID}`;
-          await artifactsFor(identity.attemptID, tx as unknown as Database["client"]);
-        });
-        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
-        hub.allow(
-          identity.attemptID,
-          generation,
-          hashConnectorToken(tokens.parent),
-          hashConnectorToken(tokens.child),
-        );
-        await launchIsolated(
-          {
-            identity,
-            generation,
-            projectID: row.projectID,
-            repositoryURL: row.repositoryURL,
-            revision: row.revision,
-            devcontainerPath: row.devcontainerPath,
-            kind: "publication",
-            parentToken: tokens.parent,
-            childToken: tokens.child,
-            verification: {
-              runnerUUID: row.runnerUUID,
-              runnerToken: row.runnerToken,
-              jobHandle: row.jobHandle,
-              publicationID,
-              version: row.version,
-            },
-          },
-          lock,
-        );
-        return this.get(identity.attemptID);
-      } finally {
-        try {
-          if (projectLock) await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
-          await lock`SELECT pg_advisory_unlock(hashtextextended(${`publication-runtime:${publicationID}`},0))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
-      }
+      const [publication] = await database.client<{ projectID: string }[]>`
+        SELECT release.project_id AS "projectID" FROM factory.release_attempt publication
+        JOIN factory.project_release release ON release.id=publication.release_id WHERE publication.id=${publicationID}`;
+      if (!publication) throw new CommandError("not-found", "Publication not found");
+      return this.get(await project(publication.projectID).isolated.publish(publicationID, userID));
     },
     async startStagingReplacement(promotionID: string, userID: string) {
-      const rows = await database.client<
-        Array<{
-          projectID: string;
-          commitSHA: string;
-          attemptID: string | null;
-          repositoryURL: string;
-          devcontainerPath: string;
-        }>
-      >`
-        SELECT promotion.project_id AS "projectID", promotion.commit_sha AS "commitSHA",
-          promotion.replacement_runtime_attempt_id AS "attemptID",
-          project.repository_url AS "repositoryURL",
-          project.devcontainer_path AS "devcontainerPath"
-        FROM factory.promotion_operation promotion
-        JOIN factory.project project ON project.id = promotion.project_id
-        WHERE promotion.id = ${promotionID}
-      `;
-      const promotion = rows[0];
-      if (!promotion) throw new Error("Promotion was not found");
-      if (promotion.attemptID) return this.get(promotion.attemptID);
-      requireIsolatedOwner(promotion.projectID, "Staging replacement");
-      const lock = database.coordination();
+      const [promotion] = await database.client<{ projectID: string }[]>`
+        SELECT project_id AS "projectID" FROM factory.promotion_operation WHERE id=${promotionID}`;
+      if (!promotion) throw new CommandError("not-found", "Promotion not found");
+      return this.get(await project(promotion.projectID).isolated.stage(userID, promotionID));
+    },
+    async resumeForApp(attemptID: string, userID: string) {
+      await createAccessController(database).requireRuntime(userID, attemptID, "app");
+      await (await execution(attemptID)).resume(userID);
+      return this.get(attemptID);
+    },
+    async pause(attemptID: string) {
       try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
-        const current = await lock<Array<{ attemptID: string | null }>>`
-          SELECT replacement_runtime_attempt_id AS "attemptID"
-          FROM factory.promotion_operation WHERE id = ${promotionID} FOR UPDATE
-        `;
-        if (current[0]?.attemptID) return this.get(current[0].attemptID);
-        const generations = await lock<Array<{ generation: string }>>`
-          SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-          FROM factory.runtime_attempt
-          WHERE project_id = ${promotion.projectID} AND isolated_kind IS NOT NULL
-        `;
-        const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(
-          `staging:${promotion.projectID}`,
-          generation,
-          lock,
-        );
-        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
-        await lock`BEGIN`;
-        try {
-          await admitOrWait(lock, identity.attemptID, promotion.projectID, "staging", "staging");
-          await lock`
-            INSERT INTO factory.runtime_attempt(
-              id, project_id, isolated_kind, generation, revision, state,
-              parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, factorybox_admission_id
-            ) VALUES (
-              ${identity.attemptID}, ${promotion.projectID}, 'staging', ${generation},
-              ${promotion.commitSHA}, 'create-intended',
-              ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
-              ${userID}, ${identity.admissionID}
-            )
-          `;
-          await artifactsFor(identity.attemptID, lock);
-          await lock`
-            UPDATE factory.promotion_operation
-            SET replacement_runtime_attempt_id = ${identity.attemptID}, state = 'starting',
-              updated_at = now()
-            WHERE id = ${promotionID} AND state = 'pending'
-          `;
-          await lock`COMMIT`;
-        } catch (cause) {
-          await lock`ROLLBACK`;
-          throw cause;
-        }
-        await artifactsFor(identity.attemptID, lock);
-        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
-        hub.allow(
-          identity.attemptID,
-          generation,
-          hashConnectorToken(tokens.parent),
-          hashConnectorToken(tokens.child),
-        );
-        await launchIsolated(
-          {
-            identity,
-            generation,
-            projectID: promotion.projectID,
-            repositoryURL: promotion.repositoryURL,
-            revision: promotion.commitSHA,
-            devcontainerPath: promotion.devcontainerPath,
-            kind: "staging",
-            parentToken: tokens.parent,
-            childToken: tokens.child,
-          },
-          lock,
-        );
-        return this.get(identity.attemptID);
-      } finally {
-        try {
-          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
+        await (await execution(attemptID)).suspend();
+      } catch (cause) {
+        const detail = stripVTControlCharacters(
+          cause instanceof Error ? cause.message : "Native Pause is unconfirmed",
+        )
+          // biome-ignore lint/suspicious/noControlCharactersInRegex: Native errors must be persistable PostgreSQL text.
+          .replace(/[\u0000-\u001f\u007f]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 2_000);
+        const message = detail || "Native Pause is unconfirmed";
+        await database.client`UPDATE factory.runtime_attempt SET failure=COALESCE(failure,${message}),updated_at=now()
+          WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+        throw cause;
+      }
+      return this.get(attemptID);
+    },
+    async stop(attemptID: string) {
+      clearReconnect(attemptID);
+      const [coding] = await database.client<{ changeID: string }[]>`
+        SELECT change.id AS "changeID" FROM factory.runtime_attempt attempt
+        JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
+        LEFT JOIN factory.change_agent_session session ON session.change_id=change.id AND session.runtime_attempt_id=attempt.id
+        WHERE attempt.id=${attemptID}
+          AND (session.stop_pending OR session.state NOT IN ('committed','stopped')
+            OR EXISTS(SELECT 1 FROM factory.agent_turn turn WHERE turn.change_id=change.id
+              AND turn.state IN ('pending','dispatching','running','uncertain')))`;
+      const codingStop = coding
+        ? createChangeAgentStop(database, hub, undefined, (id) => this.get(id))
+        : undefined;
+      if (coding && codingStop) {
+        if (options.stopCoding) await options.stopCoding(coding.changeID);
+        else {
+          await codingStop.persist(coding.changeID);
+          await codingStop.confirm(coding.changeID);
         }
       }
+      // Do not hold the native Workspace lock while taking Turn locks or
+      // waiting for ordered engine HTTP. The adapter checks this barrier again
+      // under its own lifecycle lock before snapshot or deletion.
+      await requireStoppedAgentInputsIn(database.client, attemptID);
+      await (await execution(attemptID)).stop();
+      if (coding && codingStop && !(await codingStop.confirm(coding.changeID)))
+        throw new CommandError("unavailable", "Compute stopped but Coding Stop is not confirmed");
+      return this.get(attemptID);
+    },
+    async startFresh(attemptID: string, userID: string) {
+      const [attempt] = await database.client<
+        {
+          projectID: string;
+          changeID: string | null;
+          workspaceID: string | null;
+          confirmed: boolean;
+        }[]
+      >`
+        SELECT project_id AS "projectID",change_id AS "changeID",workspace_id AS "workspaceID",resume_failed_at IS NOT NULL AS confirmed
+        FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt?.workspaceID) throw new CommandError("not-found", "Workspace not found");
+      await database.client.begin((sql) =>
+        workspaceWriteAuthorityIn(sql, attempt.workspaceID ?? "", userID),
+      );
+      if (!attempt.confirmed)
+        throw new CommandError("conflict", "Factory has not confirmed that the restore failed");
+      const stopped = await this.stop(attemptID);
+      if (stopped?.state !== "stopped")
+        throw new CommandError(
+          "unavailable",
+          "Original runtime cleanup is not confirmed; nothing new was started",
+        );
+      return attempt.changeID
+        ? this.startPersisted(attempt.changeID, userID)
+        : this.start(attempt.projectID, userID, attempt.workspaceID);
     },
     async get(attemptID: string) {
-      const attempts = await database.client<RuntimeAttemptView[]>`
-        SELECT attempt.id, attempt.project_id AS "projectId", attempt.change_id AS "changeId",
-          attempt.workspace_id AS "workspaceId", workspace.kind AS "workspaceKind",
-          workspace.owner_user_id AS "ownerUserId", attempt.generation, attempt.revision,
-          COALESCE(attempt.isolated_kind::text, workspace.kind::text) AS "runtimeKind",
-          COALESCE(staging.runtime_attempt_id = attempt.id, false) AS "currentStaging",
-          attempt.state, (SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS "computeWait", attempt.kubernetes_namespace AS "kubernetesNamespace",
-          attempt.kubernetes_pod_name AS "kubernetesPodName", attempt.failure,
-          attempt.created_at AS "createdAt", attempt.updated_at AS "updatedAt",
-          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt",
+      const [attempt] = await database.client<RuntimeAttemptView[]>`
+        SELECT attempt.id,attempt.project_id AS "projectId",attempt.change_id AS "changeId",
+          attempt.workspace_id AS "workspaceId",workspace.kind AS "workspaceKind",workspace.owner_user_id AS "ownerUserId",
+          attempt.generation,attempt.revision,COALESCE(attempt.isolated_kind::text,workspace.kind::text) AS "runtimeKind",
+          COALESCE(staging.runtime_attempt_id=attempt.id,false) AS "currentStaging",attempt.state,attempt.failure,
+          attempt.created_at AS "createdAt",attempt.updated_at AS "updatedAt",attempt.ready_at AS "readyAt",attempt.app_ready_at AS "appReadyAt",
           (attempt.state IN ('resuming','cleanup-failed') AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
-        FROM factory.runtime_attempt attempt
-        LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
-        LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
-        WHERE attempt.id = ${attemptID}
-      `;
-      const attempt = attempts[0];
-      if (!attempt) return null;
-      return observeNativeAttempt(attempt);
+        FROM factory.runtime_attempt attempt LEFT JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+        LEFT JOIN factory.staging_preview staging ON staging.project_id=attempt.project_id WHERE attempt.id=${attemptID}`;
+      return attempt ? observe(attempt) : null;
+    },
+    async list(projectID: string | undefined, userID: string) {
+      const attempts = await database.client<RuntimeAttemptView[]>`
+        SELECT attempt.id,attempt.project_id AS "projectId",attempt.change_id AS "changeId",
+          attempt.workspace_id AS "workspaceId",workspace.kind AS "workspaceKind",workspace.owner_user_id AS "ownerUserId",
+          attempt.generation,attempt.revision,COALESCE(attempt.isolated_kind::text,workspace.kind::text) AS "runtimeKind",
+          COALESCE(staging.runtime_attempt_id=attempt.id,false) AS "currentStaging",attempt.state,attempt.failure,
+          attempt.created_at AS "createdAt",attempt.updated_at AS "updatedAt",attempt.ready_at AS "readyAt",attempt.app_ready_at AS "appReadyAt",
+          (attempt.state IN ('resuming','cleanup-failed') AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
+        FROM factory.runtime_attempt attempt LEFT JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+        LEFT JOIN factory.staging_preview staging ON staging.project_id=attempt.project_id
+        WHERE (${projectID ?? null}::uuid IS NULL OR attempt.project_id=${projectID ?? null})
+          AND attempt.isolated_kind IS DISTINCT FROM 'prebuild'
+          AND (workspace.kind IS DISTINCT FROM 'personal' OR workspace.owner_user_id=${userID}
+            OR EXISTS(SELECT 1 FROM factory.workspace_share member WHERE member.workspace_id=workspace.id AND member.user_id=${userID}
+              AND member.revoked_at IS NULL AND EXISTS(SELECT 1 FROM factory.project_membership developer
+                WHERE developer.project_id=attempt.project_id AND developer.user_id=${userID} AND developer.role='developer')))
+          AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID})
+            OR EXISTS(SELECT 1 FROM factory.project_membership WHERE project_id=attempt.project_id AND user_id=${userID}))
+          AND (${projectID ?? null}::uuid IS NULL OR attempt.state NOT IN ('stopped','failed') OR staging.runtime_attempt_id=attempt.id
+            OR attempt.id IN (SELECT DISTINCT ON (COALESCE(workspace_id::text,isolated_kind::text||':'||COALESCE(change_id::text,project_id::text))) id
+              FROM factory.runtime_attempt WHERE project_id=${projectID ?? null}
+              ORDER BY COALESCE(workspace_id::text,isolated_kind::text||':'||COALESCE(change_id::text,project_id::text)),generation DESC,created_at DESC))
+        ORDER BY attempt.created_at DESC`;
+      // Inventory reports saved Factory state, not current Actor liveness.
+      // Keep it readable while the native API is unavailable. Explicit get()
+      // and lifecycle commands still require the original native owner and
+      // its live observation; recorded ready never supplies that authority.
+      return [...attempts];
     },
     async processOutput(attemptID: string) {
-      const attempts = await database.client<Array<{ state: string }>>`
-        SELECT state FROM factory.runtime_attempt WHERE id = ${attemptID}
-      `;
-      const attempt = attempts[0];
-      if (!attempt) throw new Error("Runtime Attempt does not exist");
-      if (!["starting", "ready"].includes(attempt.state)) {
+      const [attempt] = await database.client<
+        { state: string }[]
+      >`SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt) throw new CommandError("not-found", "Runtime Attempt not found");
+      if (!["starting", "ready"].includes(attempt.state))
         return { processes: [{ name: "app", state: attempt.state, output: "" }] };
-      }
       const processes = hub.processes(attemptID);
       return {
         processes: processes.length
@@ -2999,18 +501,12 @@ export function createRuntimeController(
       };
     },
     async processAction(attemptID: string, process: string, action: "start" | "stop" | "restart") {
-      const attempts = await database.client<Array<{ ready: boolean; development: boolean }>>`
-        SELECT state = 'ready' AS ready, workspace_id IS NOT NULL AS development
-        FROM factory.runtime_attempt
-        WHERE id = ${attemptID}
-      `;
-      const attempt = attempts[0];
-      if (!attempt?.ready || !attempt.development) {
+      const [attempt] = await database.client<{ ready: boolean; development: boolean }[]>`
+        SELECT state='ready' AS ready,workspace_id IS NOT NULL AS development FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt?.ready || !attempt.development)
         throw new Error("Development Workspace is not ready");
-      }
-      if (!hub.hasAppChannel(attemptID, process)) {
+      if (!hub.hasAppChannel(attemptID, process))
         throw new Error("Declared App process does not exist");
-      }
       await hub.childOperation(attemptID, {
         operationId: crypto.randomUUID(),
         action: `process-${action}`,
@@ -3019,18 +515,11 @@ export function createRuntimeController(
       return this.processOutput(attemptID);
     },
     async closeTerminal(attemptID: string, terminalID: string) {
-      const attempts = await database.client<Array<{ ready: boolean; development: boolean }>>`
-        SELECT state = 'ready' AS ready, workspace_id IS NOT NULL AS development
-        FROM factory.runtime_attempt
-        WHERE id = ${attemptID}
-      `;
-      const attempt = attempts[0];
-      if (!attempt?.ready || !attempt.development) {
+      const [attempt] = await database.client<{ ready: boolean; development: boolean }[]>`
+        SELECT state='ready' AS ready,workspace_id IS NOT NULL AS development FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt?.ready || !attempt.development)
         throw new Error("Development Workspace is not ready");
-      }
-      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(terminalID)) {
-        throw new Error("Terminal session is invalid");
-      }
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(terminalID)) throw new Error("Terminal session is invalid");
       await hub.childOperation(attemptID, {
         operationId: crypto.randomUUID(),
         action: "terminal-close",
@@ -3038,175 +527,6 @@ export function createRuntimeController(
       });
       return { closed: true };
     },
-    async list(projectID: string | undefined, userID: string) {
-      const attempts = await database.client<RuntimeAttemptView[]>`
-        SELECT attempt.id, attempt.project_id AS "projectId", attempt.change_id AS "changeId",
-          attempt.workspace_id AS "workspaceId", workspace.kind AS "workspaceKind",
-          workspace.owner_user_id AS "ownerUserId", attempt.generation, attempt.revision,
-          COALESCE(attempt.isolated_kind::text, workspace.kind::text) AS "runtimeKind",
-          attempt.state, (SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS "computeWait", attempt.failure, attempt.created_at AS "createdAt",
-          COALESCE(staging.runtime_attempt_id = attempt.id, false) AS "currentStaging",
-          attempt.updated_at AS "updatedAt",
-          attempt.ready_at AS "readyAt", attempt.app_ready_at AS "appReadyAt",
-          (attempt.state IN ('resuming','cleanup-failed') AND attempt.resume_failed_at IS NOT NULL) AS "restoreFailed"
-        FROM factory.runtime_attempt attempt
-        LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
-        LEFT JOIN factory.staging_preview staging ON staging.project_id = attempt.project_id
-        WHERE (${projectID ?? null}::uuid IS NULL OR attempt.project_id = ${projectID ?? null})
-          AND attempt.isolated_kind IS DISTINCT FROM 'prebuild'
-          AND (workspace.kind IS DISTINCT FROM 'personal' OR workspace.owner_user_id = ${userID})
-          AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id = ${userID})
-            OR EXISTS(SELECT 1 FROM factory.project_membership
-              WHERE project_id = attempt.project_id AND user_id = ${userID}))
-          AND (${projectID ?? null}::uuid IS NULL OR attempt.state NOT IN ('stopped', 'failed') OR staging.runtime_attempt_id = attempt.id OR attempt.id IN (
-            SELECT DISTINCT ON (COALESCE(workspace_id::text, isolated_kind::text || ':' || COALESCE(change_id::text, project_id::text))) id
-            FROM factory.runtime_attempt WHERE project_id = ${projectID ?? null}
-            ORDER BY COALESCE(workspace_id::text, isolated_kind::text || ':' || COALESCE(change_id::text, project_id::text)), generation DESC, created_at DESC
-          ))
-        ORDER BY attempt.created_at DESC
-      `;
-      return Promise.all(attempts.map(observeNativeAttempt));
-    },
-    status: updateStatus,
-    // Discards a paused Sandbox whose Resume positively failed (the native record
-    // proves it), then starts a normal new Attempt for the same Workspace. Workspace
-    // source is untouched; only the paused memory and private container data go.
-    // The command is idempotent: a repeat continues the Stop already in progress,
-    // and a Stop that finished earlier goes straight to Start, which returns an
-    // already active Attempt instead of creating another.
-    async startFresh(attemptID: string, userID: string) {
-      const [row] = await database.client<
-        Array<{
-          projectID: string;
-          changeID: string | null;
-          workspaceID: string | null;
-          kind: string | null;
-          state: string;
-          confirmed: boolean;
-        }>
-      >`SELECT attempt.project_id AS "projectID",attempt.change_id AS "changeID",
-          attempt.workspace_id AS "workspaceID",workspace.kind::text AS kind,attempt.state,
-          attempt.resume_failed_at IS NOT NULL AS confirmed
-        FROM factory.runtime_attempt attempt
-        LEFT JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
-        WHERE attempt.id=${attemptID}`;
-      if (!row?.workspaceID || !row.kind) throw new Error("Runtime Attempt is not a Workspace");
-      if (!row.confirmed)
-        throw new CommandError(
-          "conflict",
-          "Factory has not confirmed that the restore failed. It keeps the paused Sandbox untouched until its state is known.",
-        );
-      // Stop from cleanup-failed is the designed retry of the same discard.
-      if (["resuming", "cleanup-failed"].includes(row.state)) await this.stop(attemptID);
-      else if (!["stop-intended", "stopping", "stopped"].includes(row.state))
-        throw new CommandError("conflict", "This Sandbox is not waiting to be restored.");
-      const deadline = performance.now() + 100_000;
-      for (;;) {
-        const [current] = await database.client<Array<{ state: string }>>`
-          SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
-        if (current?.state === "stopped") break;
-        if (!current || ["cleanup-failed", "failed"].includes(current.state))
-          throw new CommandError(
-            "unavailable",
-            "Discarding the paused Sandbox could not be confirmed. Nothing new was started; try again.",
-          );
-        if (performance.now() > deadline)
-          throw new CommandError(
-            "unavailable",
-            "Discarding the paused Sandbox is still in progress. Start fresh again to continue.",
-          );
-        await Bun.sleep(500);
-      }
-      return row.kind === "ticket" && row.changeID
-        ? this.startPersisted(row.changeID, userID)
-        : this.start(row.projectID, userID);
-    },
-    async stop(attemptID: string) {
-      const native = await nativeFor(attemptID);
-      if (native) {
-        await native.stop();
-        return this.get(attemptID);
-      }
-      clearReconnectObservation(attemptID);
-      const projects = await database.client<Array<{ projectID: string }>>`
-        SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id = ${attemptID}
-      `;
-      const projectID = projects[0]?.projectID;
-      if (!projectID) throw new Error("Runtime Attempt is not active");
-      const lock = database.coordination();
-      try {
-        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
-        const [failed] = await lock<{ id: string }[]>`
-          UPDATE factory.runtime_attempt SET stop_intended_at=COALESCE(stop_intended_at,now()),cleanup_attempts=0,updated_at=now()
-          WHERE id=${attemptID} AND state='failed' RETURNING id`;
-        if (failed) {
-          // Do not move a terminal old generation back into the unique active
-          // allocation. Persist Stop first, then confirm generation/UID-bound cleanup.
-          hub.suspend(attemptID);
-          try {
-            await withResourceLock(attemptID, (sql) => cleanupResources(sql, attemptID), lock);
-          } catch (cause) {
-            if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
-            // This failed generation must not re-enter active allocation. Retain
-            // Stop and reconcile its exact resources without another user action.
-            retryCleanup(attemptID);
-            return this.get(attemptID);
-          }
-          await lock`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now(),failure=NULL,updated_at=now()
-            WHERE id=${attemptID} AND state='failed' AND stop_intended_at IS NOT NULL`;
-          return this.get(attemptID);
-        }
-        const attempts = await database.client<
-          Array<{
-            namespace: string;
-            namespaceUID: string;
-            podName: string;
-            generation: string;
-            uid: string | null;
-          }>
-        >`
-        UPDATE factory.runtime_attempt SET
-          state = CASE WHEN state = 'stopping'
-            THEN 'stopping'::factory.runtime_attempt_state
-            ELSE 'stop-intended'::factory.runtime_attempt_state END,
-          cleanup_attempts = CASE WHEN state = 'cleanup-failed' THEN 0 ELSE cleanup_attempts END,
-          stop_intended_at = now(), updated_at = now()
-        WHERE id = ${attemptID}
-          AND state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
-        RETURNING kubernetes_namespace AS namespace,
-          kubernetes_namespace_uid AS "namespaceUID", kubernetes_pod_name AS "podName",
-          generation, kubernetes_uid AS uid
-        `;
-        const attempt = attempts[0];
-        if (!attempt) return this.get(attemptID);
-        hub.suspend(attemptID);
-        if (!hub.stop(attemptID)) {
-          await database.client`
-            UPDATE factory.runtime_attempt SET state = 'stopping', updated_at = now()
-            WHERE id = ${attemptID} AND state = 'stop-intended'
-          `;
-          retryCleanup(attemptID);
-        } else {
-          setTimeout(async () => {
-            const current = await database.client<Array<{ state: string }>>`
-            SELECT state FROM factory.runtime_attempt WHERE id = ${attemptID}
-          `;
-            if (!["stop-intended", "stopping"].includes(current[0]?.state ?? "")) return;
-            await database.client`
-              UPDATE factory.runtime_attempt SET state = 'stopping', updated_at = now()
-              WHERE id = ${attemptID} AND state = 'stop-intended'
-            `;
-            retryCleanup(attemptID);
-          }, 30_000);
-        }
-        return this.get(attemptID);
-      } finally {
-        try {
-          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
-        } finally {
-          await lock.end({ timeout: 1 });
-        }
-      }
-    },
+    status,
   };
 }

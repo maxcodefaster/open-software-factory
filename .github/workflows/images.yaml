@@ -71,10 +71,11 @@ jobs:
             --output "$RUNNER_TEMP/local-gate.json"
           jq -e --arg revision "$revision" '
             .schema == 1 and .commit == $revision and .passed == true and
-            (.steps | length) == 11 and
+            .scope == "source-controller-ui" and .nativeProductAcceptance == false and
+            (.steps | length) == 12 and
             ([.steps[] | select(.passed == true) | .name] | sort) ==
             (["clean-tree", "forbidden-terms", "secrets", "docs", "format", "lint",
-              "typecheck", "unit", "connector", "controllers", "browser"] | sort)
+              "typecheck", "unit", "connector", "substrate", "controllers", "browser"] | sort)
           ' "$RUNNER_TEMP/local-gate.json"
           printf 'passed=true\n' >> "$GITHUB_OUTPUT"
   verify:
@@ -148,7 +149,7 @@ jobs:
             exit 1
           fi
           docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
-          for role in runtime-host developer-ide browser-tools workspace-files; do
+          for role in runtime-host developer-ide browser-tools substrate-bootstrap substrate-runtime; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
             reuse=false
             if release_exists "$image"; then
@@ -168,40 +169,58 @@ jobs:
             else
               dockerfile=deploy/runtime-host/Dockerfile
               target=(--target "$role")
-              if [[ "$role" == browser-tools || "$role" == workspace-files ]]; then
+              build_args=()
+              if [[ "$role" == browser-tools ]]; then
                 dockerfile="deploy/$role/Dockerfile"
                 target=()
+              elif [[ "$role" == substrate-bootstrap ]]; then
+                dockerfile=deploy/substrate/rootless/Dockerfile
+                target=()
+              elif [[ "$role" == substrate-runtime ]]; then
+                dockerfile=deploy/substrate/Runtime.Dockerfile
+                target=()
+                tools="$IMAGE_ROOT/runtime-host:$RELEASE-$ARCH"
+                bootstrap="$IMAGE_ROOT/substrate-bootstrap:$RELEASE-$ARCH"
+                release_require_revision "$tools" "$REVISION"
+                release_require_revision "$bootstrap" "$REVISION"
+                build_args=(
+                  --build-arg "FACTORY_RUNTIME_HOST_IMAGE=$IMAGE_ROOT/runtime-host@$(release_digest "$tools")"
+                  --build-arg "FACTORY_SUBSTRATE_BOOTSTRAP_IMAGE=$IMAGE_ROOT/substrate-bootstrap@$(release_digest "$bootstrap")")
               fi
               build=(docker buildx build --platform "linux/$ARCH"
                 --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
                 --label "org.opencontainers.image.revision=$REVISION"
                 --label "org.opencontainers.image.version=$RELEASE"
-                --file "$dockerfile" "${target[@]}" --tag "$image")
+                --file "$dockerfile" "${target[@]}" "${build_args[@]}" --tag "$image")
               attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")
-              if [[ "$role" == runtime-host ]]; then
+              if [[ "$role" == runtime-host || "$role" == substrate-runtime ]]; then
                 "${build[@]}" --provenance=false --sbom=false --load \
-                  --metadata-file "$RUNNER_TEMP/runtime-host-proven.json" .
+                  --metadata-file "$RUNNER_TEMP/$role-proven.json" .
                 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
                 # Export metadata can omit the config digest. Hash the actual config
                 # of the loaded image that the native proofs will execute instead.
-                proof_archive="$RUNNER_TEMP/runtime-host-proven.tar"
+                proof_archive="$RUNNER_TEMP/$role-proven.tar"
                 docker image save --output "$proof_archive" "$image_id"
                 config_file="$(tar -xOf "$proof_archive" manifest.json | jq -er 'if length == 1 then .[0].Config else error("unexpected proof image count") end')"
                 proven_config="sha256:$(tar -xOf "$proof_archive" -- "$config_file" | sha256sum | awk '{print $1}')"
                 rm -- "$proof_archive"
                 [[ "$proven_config" =~ ^sha256:[a-f0-9]{64}$ ]]
-                bash scripts/runtime/compose-inputs-proof.sh "$image_id"
-                registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
-                bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
+                if [[ "$role" == runtime-host ]]; then
+                  bash scripts/runtime/compose-inputs-proof.sh "$image_id"
+                  registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
+                  bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
+                else
+                  bash scripts/runtime/substrate-image-proof.sh "$image_id"
+                fi
                 test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
                 # The proven layers come from the build cache. Publish them with attestations
                 # and refuse any result whose image configuration is not the proven one.
-                "${build[@]}" "${attest[@]}" --push --metadata-file "$RUNNER_TEMP/runtime-host.json" .
+                "${build[@]}" "${attest[@]}" --push --metadata-file "$RUNNER_TEMP/$role.json" .
                 # Attestations wrap the native image in an index. Resolve its native
                 # child and compare the real OCI config descriptor, not optional metadata.
                 native_child="$(docker buildx imagetools inspect "$image" --raw | jq -er --arg arch "$ARCH" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)] | if length == 1 then .[0].digest else error("unexpected published platform count") end')"
                 published_config="$(docker buildx imagetools inspect "$image@$native_child" --raw | jq -er '.config.digest')"
-                printf 'proven-config=%s published-config=%s\n' "$proven_config" "$published_config"
+                printf 'role=%s proven-config=%s published-config=%s\n' "$role" "$proven_config" "$published_config"
                 test "$published_config" = "$proven_config"
               else
                 "${build[@]}" "${attest[@]}" --push .
@@ -239,8 +258,11 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           artifacts='{}'
-          for role in runtime-host developer-ide browser-tools workspace-files; do
+          for role in runtime-host developer-ide browser-tools substrate-runtime; do
             image="$IMAGE_ROOT/$role:$RELEASE"
+            for arch in arm64 amd64; do
+              release_require_revision "$image-$arch" "$(git rev-parse HEAD)"
+            done
             digest="$(release_combine "$image" "$image-arm64" "$image-amd64")"
             release_sign "$IMAGE_ROOT/$role@$digest"
             artifacts="$(jq -c --arg role "$role" --arg ref "$IMAGE_ROOT/$role@$digest" '. + {($role): $ref}' <<< "$artifacts")"
@@ -419,8 +441,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
   chart:
-    needs: [release, distribution]
-    if: ${{ !cancelled() && needs.release.result == 'success' && needs.distribution.result == 'success' }}
+    needs: [release, distribution, manifests]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.distribution.result == 'success' && needs.manifests.result == 'success' }}
     permissions:
       contents: write
       packages: write
@@ -429,6 +451,7 @@ jobs:
     env:
       RELEASE: ${{ needs.release.outputs.version }}
       FACTORY_IMAGE: ${{ needs.distribution.outputs.factory }}
+      RUNTIME_ARTIFACTS: ${{ needs.manifests.outputs.artifacts }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -443,15 +466,13 @@ jobs:
           set -euo pipefail
           mise exec -- bun install --frozen-lockfile
           mkdir dist
+          printf '%s\n' "$RUNTIME_ARTIFACTS" > "$RUNNER_TEMP/runtime-artifacts.json"
           mise exec -- bun scripts/release/package-chart.ts --version "$RELEASE" \
-            --factory-image "$FACTORY_IMAGE" --output dist
-          mise exec -- helm lint "dist/factory-$RELEASE.tgz" --set "factorybox.nodeName=lint-node" \
-            --set publicURL=http://127.0.0.1:3000 --set forgejoPublicURL=http://127.0.0.1:3001 \
-            --set development=true --set developmentZeroURL=http://127.0.0.1:3002
-          mise exec -- helm lint "dist/factory-$RELEASE.tgz" --values "dist/factory-amd64-$RELEASE.yaml" \
-            --set factorybox.nodeName=lint-node --set publicURL=http://127.0.0.1:3000 \
-            --set forgejoPublicURL=http://127.0.0.1:3001 --set development=true \
-            --set developmentZeroURL=http://127.0.0.1:3002
+            --factory-image "$FACTORY_IMAGE" --artifacts "$RUNNER_TEMP/runtime-artifacts.json" --output dist
+          mise exec -- helm lint "dist/factory-$RELEASE.tgz" \
+            --set publicURL=https://factory.example --set forgejoPublicURL=https://git.factory.example \
+            --set substrate.workspaceConfigurationSecret=native-workspaces \
+            --set substrate.provisionerTokenSecret=native-provisioner
       - name: Publish and sign the chart
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -468,5 +489,5 @@ jobs:
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           cosign sign --yes "ghcr.io/$owner/charts/factory@$digest"
           gh release upload "$TAG" "dist/factory-$RELEASE.tgz" \
-            "dist/factory-arm64-$RELEASE.yaml" "dist/factory-amd64-$RELEASE.yaml" \
+            "dist/factory-runtime-artifacts-$RELEASE.json" \
             --clobber --repo "$GITHUB_REPOSITORY"

@@ -6,10 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
 import { z } from "zod";
-import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { localOpenBao } from "../../scripts/factory/openbao";
-import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
 import { starterDelivery } from "../fixtures/starter-delivery";
@@ -392,21 +391,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
                 150_000,
               );
             }
-          const sources = createWorkspaceSourceController(
-            database,
-            "owned-process-auth-secret-not-a-production-credential",
-          );
-          try {
-            await removeOwnedProjectSources(database, projectID, async (id) => {
-              const [workspace] = await database.client<{ ownerID: string | null }[]>`
-                SELECT owner_user_id AS "ownerID" FROM factory.development_workspace WHERE id=${id} AND project_id=${projectID}`;
-              if (!workspace) throw new Error("Owned Starter cleanup target disappeared");
-              // Personal source Stop retains its real owner, not the bootstrap admin session.
-              return sources.stop(id, workspace.ownerID ?? "01994a7d-0000-7000-8000-000000000001");
-            });
-          } finally {
-            await sources.close();
-          }
+          await requireOwnedProjectSourceRetention(database, projectID);
         }
         if (
           setupID &&

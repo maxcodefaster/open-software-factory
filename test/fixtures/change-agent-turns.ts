@@ -7,6 +7,8 @@ import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/ru
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import type { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "./factory-process";
 import { fixtureValue } from "./value";
 
@@ -22,7 +24,7 @@ export async function fixture(
   }),
   baseSHA = "a".repeat(40),
   externalDatabase?: ReturnType<typeof createDatabase>,
-  connectorToken?: string,
+  connector?: string | { runtime: "deferred-native" },
   approvalSetup?: (
     sql: AgentTurnTransaction,
     context: { userID: string; projectID: string; ticketID: string },
@@ -40,12 +42,31 @@ export async function fixture(
   const revisionID = crypto.randomUUID();
   const approvalID = crypto.randomUUID();
   const changeID = crypto.randomUUID();
-  const attemptID = crypto.randomUUID();
-  const workspaceID = crypto.randomUUID();
+  const workspaceID = ticketWorkspaceIdentity(changeID).workspaceID;
+  const attemptID = runtimeIdentity(workspaceID, 1).attemptID;
   const suffix = projectID.replaceAll("-", "").slice(0, 12);
-  const connectorHash = connectorToken
-    ? createHash("sha256").update(connectorToken).digest("hex")
-    : undefined;
+  const deferredRuntime = typeof connector === "object";
+  const sessionID = deferredRuntime
+    ? `ses_factory_${changeID.replaceAll("-", "")}`
+    : `ses_owned_${suffix}`;
+  const connectorHash =
+    typeof connector === "string"
+      ? createHash("sha256").update(connector).digest("hex")
+      : undefined;
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries({
+    FACTORY_FORGEJO_API_URL: "https://owned-build.factory.invalid/api/v1/",
+    FACTORY_FORGEJO_PUBLIC_URL: "https://owned-build.factory.invalid",
+  })) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  function restoreEnvironment() {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   await database.client
     .begin(async (sql) => {
       if (host) {
@@ -58,7 +79,7 @@ export async function fixture(
       VALUES (${userID}, 'Owned Build Admission', ${`build-turn-${suffix}@factory.local`}, true)`;
       await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${projectID}, ${`build-turn-${suffix}`}, 'Owned Build Admission',
-        'https://example.invalid/owned-build.git', 'main', '.devcontainer/devcontainer.json', ${userID})`;
+        'https://owned-build.factory.invalid/owned/owned-build.git', 'main', '.devcontainer/devcontainer.json', ${userID})`;
       await sql`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
         VALUES (${projectID}, ${userID}, 'developer', ${userID})`;
       await sql`INSERT INTO factory.ticket(id, project_id, title, created_by)
@@ -76,21 +97,37 @@ export async function fixture(
       source_branch, source_revision, created_by)
       VALUES (${workspaceID}, ${projectID}, 'ticket', ${ticketID}, ${changeID}, ${`factory/change-${suffix}`},
         ${baseSHA}, ${userID})`;
+      if (deferredRuntime) {
+        await sql`INSERT INTO factory.branch_create_operation(
+          id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
+          VALUES(${crypto.randomUUID()},${changeID},'owned','owned-build',${`factory/change-${suffix}`},
+            ${baseSHA},${`owned-native-branch:${changeID}`},'succeeded',${baseSHA},now())`;
+        return;
+      }
       await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
         VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'create-intended', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
+      // Controlled ready state only. No native Create has been dispatched.
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+        VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},
+          '{"connectorURL":"wss://owned-build.factory.invalid/internal/runtime-connect","egressHosts":[]}')`;
       await freezeRuntimeEnvironment(sql, attemptID);
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptID} WHERE id = ${changeID}`;
       await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id, state, native_session_confirmed_at, created_by)
-      VALUES (${changeID}, ${attemptID}, ${`ses_owned_${suffix}`}, 'committed', now(), ${userID})`;
+      VALUES (${changeID}, ${attemptID}, ${sessionID}, 'committed', now(), ${userID})`;
     })
     .catch(async (cause: unknown) => {
-      await database.client.end();
-      await host?.dispose();
+      try {
+        await database.client.end();
+        await host?.dispose();
+      } finally {
+        restoreEnvironment();
+      }
       throw cause;
     });
-  const requested = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
+  let requested = Promise.withResolvers<void>();
+  let release = Promise.withResolvers<void>();
+  let payloadStart = 0;
   let acceptedPrompts = 0;
   let loseResponse = true;
   let statusReads = 0;
@@ -235,7 +272,7 @@ export async function fixture(
       return new Response(null, { status: 204 });
     }
     if (path.endsWith("/inbox")) {
-      const body = payloads.at(-1) as
+      const body = (payloads.length > payloadStart ? payloads.at(-1) : undefined) as
         | { id: string; text: string; skills?: { id: string }[] }
         | undefined;
       return Response.json({
@@ -264,7 +301,7 @@ export async function fixture(
         ],
       });
     if (
-      path.endsWith(`/ses_owned_${suffix}`) ||
+      path.endsWith(`/${sessionID}`) ||
       /^\/api\/session\/ses_factory_review_[a-f0-9]+$/.test(path)
     )
       return Response.json({
@@ -344,6 +381,14 @@ export async function fixture(
     return { commitSHA: "d".repeat(40), remoteSHA: "d".repeat(40) };
   };
   const controllers = new Set<ReturnType<typeof createAgentController>>();
+  async function shutdown() {
+    release.resolve();
+    const joined = await Promise.allSettled(
+      [...controllers].map((controller) => controller.shutdown()),
+    );
+    const failed = joined.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+  }
   const controller = (startPersisted: () => Promise<null> = async () => null) => {
     const writers = createChangeWriterController({
       database,
@@ -369,12 +414,27 @@ export async function fixture(
     changeID,
     attemptID,
     workspaceID,
-    sessionID: `ses_owned_${suffix}`,
+    sessionID,
     controller,
     payloads,
     completionText,
     hub,
     publishActivity,
+    restoreEnvironment,
+    shutdown,
+    // Reset only the controlled peer's transient input state between complete
+    // scenarios. Product turns, Sessions, runtime identities and usage remain.
+    async nextInput() {
+      const active =
+        await database.client`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
+        AND state IN ('pending','dispatching','running','uncertain') LIMIT 1`;
+      if (active.length) throw Error("Controlled peer cannot reset an unsettled input");
+      requested = Promise.withResolvers<void>();
+      release = Promise.withResolvers<void>();
+      payloadStart = payloads.length;
+      finished = false;
+      loseResponse = true;
+    },
     writers: createChangeWriterController({
       database,
       agentUsername: "owned-control",
@@ -393,7 +453,9 @@ export async function fixture(
       publishActivity();
     },
     commitCalls,
-    requested: requested.promise,
+    get requested() {
+      return requested.promise;
+    },
     release: () => release.resolve(),
     requests: () => acceptedPrompts,
     interrupts: () => interruptRequests,
@@ -413,12 +475,8 @@ export async function fixture(
         } catch (cause) {
           stopFailure = cause;
         }
-        const joined = await Promise.allSettled(
-          [...controllers].map((controller) => controller.shutdown()),
-        );
-        const failed = joined.find((result) => result.status === "rejected");
         // Do not remove records while an unjoined observer may still use them.
-        if (failed?.status === "rejected") throw failed.reason;
+        await shutdown();
         await database.client.begin(async (sql) => {
           // The live reconciler may still be preparing grants for this owned user.
           await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`forge-account:${userID}`},0))`;
@@ -426,8 +484,14 @@ export async function fixture(
             Array<{ id: string }>
           >`SELECT project.id FROM factory.project project
             WHERE project.id = ${projectID} AND project.created_by = ${userID} AND project.slug = ${`build-turn-${suffix}`}
-              AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE project_id = project.id
-                AND (kubernetes_uid IS NOT NULL OR kubernetes_namespace_uid IS NOT NULL)) FOR UPDATE`;
+              AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt attempt
+                JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+                WHERE attempt.project_id=project.id
+                  AND (binding.create_attempted_at IS NOT NULL OR binding.actor_uid IS NOT NULL))
+              AND NOT EXISTS(SELECT 1 FROM factory.development_workspace workspace
+                JOIN factory.substrate_workspace provision ON provision.workspace_id=workspace.id
+                WHERE workspace.project_id=project.id AND (provision.atespace_attempted_at IS NOT NULL
+                  OR provision.policy_attempted_at IS NOT NULL OR provision.template_attempted_at IS NOT NULL)) FOR UPDATE`;
           if (!safe[0]) throw new Error("Owned non-created Build fixture cleanup refused");
           await sql`DELETE FROM factory.execution_policy_command
             WHERE scope=${`checks-resume:${changeID}`} AND actor_id=${userID}`;
@@ -461,7 +525,7 @@ export async function fixture(
           await sql`DELETE FROM factory.pull_request_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_agent_session WHERE change_id = ${changeID}`;
           await sql`DELETE FROM factory.candidate_review WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.verification_compute_placement WHERE verification_id IN
+          await sql`DELETE FROM factory.substrate_verification WHERE verification_id IN
             (SELECT id FROM factory.verification WHERE change_id=${changeID})`;
           await sql`DELETE FROM factory.verification WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.mcp_observation WHERE turn_id IN
@@ -490,13 +554,15 @@ export async function fixture(
           await sql`DELETE FROM factory.change_commit_operation WHERE change_id = ${changeID}`;
           // Recovery may create another immutable attempt in this exact owned
           // Project. The guard above rejects every actually created runtime.
-          await sql`DELETE FROM factory.runtime_artifact_intent WHERE runtime_attempt_id IN
+          await sql`DELETE FROM factory.substrate_binding WHERE runtime_attempt_id IN
             (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.runtime_environment_intent WHERE runtime_attempt_id IN
             (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
           await sql`DELETE FROM factory.project_environment WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.environment_write WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.substrate_source WHERE workspace_id=${workspaceID}`;
+          await sql`DELETE FROM factory.substrate_workspace WHERE workspace_id=${workspaceID}`;
           await sql`DELETE FROM factory.development_workspace WHERE id = ${workspaceID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.change WHERE id = ${changeID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.requirement_approval WHERE id = ${approvalID} AND approved_by = ${userID}`;
@@ -521,8 +587,12 @@ export async function fixture(
         });
         if (stopFailure) throw stopFailure;
       } finally {
-        await database.client.end();
-        await host?.dispose();
+        try {
+          await database.client.end();
+          await host?.dispose();
+        } finally {
+          restoreEnvironment();
+        }
       }
     },
   };

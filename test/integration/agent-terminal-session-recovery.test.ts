@@ -3,14 +3,11 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { nativeBuildProcessFixture } from "../fixtures/native-build-process";
+import { nativeProcessProtocol } from "../fixtures/native-process-protocol";
 import { fixtureValue } from "../fixtures/value";
-
-const ConnectorSocket = WebSocket as typeof WebSocket & {
-  new (url: string, options: Bun.WebSocketOptions): WebSocket;
-};
 
 test.each(["failed", "pre-dispatch failed"] as const)(
   "Factory SIGKILL after %s Turn settlement recovers its exact Session without execution replay",
@@ -36,15 +33,23 @@ test.each(["failed", "pre-dispatch failed"] as const)(
     const process = await factoryProcess(undefined, {
       FACTORY_FORGEJO_ADMIN_TOKEN: "owned-forge-control-not-a-secret",
       FACTORY_FORGEJO_API_URL: `http://127.0.0.1:${forge.port}/api/v1/`,
+      FACTORY_FORGEJO_PUBLIC_URL: "https://owned-build.factory.invalid",
     });
     const database = process.connect();
     const sockets: WebSocket[] = [];
     const latch = await database.client.reserve();
     let creating: ReturnType<typeof callFactoryFunction<"sendCodingPrompt">> | undefined;
     let latchHeld = false;
+    let native: Awaited<ReturnType<typeof nativeProcessProtocol>> | undefined;
+    let ownedFixture: Awaited<ReturnType<typeof nativeBuildProcessFixture>> | undefined;
     try {
-      const token = crypto.randomUUID();
-      const owned = await fixture(undefined, undefined, database, token);
+      native = await nativeProcessProtocol(process, database);
+      const peer = native;
+      const initialized = await process.start();
+      await process.kill(initialized);
+      const owned = await nativeBuildProcessFixture(database, peer);
+      ownedFixture = owned;
+      const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
       const first = await process.start();
       const cookie = await process.signIn();
       const headers = { cookie, origin: process.base, "content-type": "application/json" };
@@ -56,206 +61,194 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       let promptCalls = 0;
       let externalMutations = 0;
       async function connect(role: "parent" | "child") {
-        const socket = new ConnectorSocket(
-          `${process.base.replace("http:", "ws:")}/internal/runtime-connect`,
-          {
-            protocols: [RuntimeHub.protocol()],
-            headers: {
-              authorization: `Bearer ${token}`,
-              "x-factory-connector-role": role,
-              "x-factory-runtime-attempt": owned.attemptID,
-              "x-factory-runtime-generation": "1",
-            },
-          },
-        );
-        sockets.push(socket);
-        socket.addEventListener("message", (event) => {
-          const frame = JSON.parse(String(event.data)) as {
-            type: string;
-            operationId: string;
-            action: string;
-            streamId: string;
-            path: string;
-            method: string;
-            data: string;
-          };
-          if (frame.type === "operation-request") {
-            externalMutations += 1;
-            if (frame.action === "skills-install") {
-              const manifest = JSON.parse(frame.data) as { files: { path: string }[] };
-              installedSkills = [
-                ...new Set(
-                  manifest.files.map((file) =>
-                    fixtureValue(file.path.split("/")[0], 'file.path.split("/")[0]'),
+        return peer.connect(owned.attemptID, role, (socket) => {
+          sockets.push(socket);
+          socket.addEventListener("message", async (event) => {
+            const frame = JSON.parse(String(event.data)) as {
+              type: string;
+              operationId: string;
+              action: string;
+              streamId: string;
+              path: string;
+              method: string;
+              data: string;
+              channel: string;
+            };
+            if (frame.channel === "source") {
+              await peer.sourceFence(socket, frame);
+              return;
+            }
+            if (frame.type === "operation-request") {
+              externalMutations += 1;
+              if (frame.action === "skills-install") {
+                const manifest = JSON.parse(frame.data) as { files: { path: string }[] };
+                installedSkills = [
+                  ...new Set(
+                    manifest.files.map((file) =>
+                      fixtureValue(file.path.split("/")[0], 'file.path.split("/")[0]'),
+                    ),
                   ),
-                ),
-              ];
+                ];
+                socket.send(
+                  JSON.stringify({
+                    type: "operation-response",
+                    operationId: frame.operationId,
+                    action: frame.action,
+                  }),
+                );
+              }
+              return;
+            }
+            if (frame.type !== "http-request") return;
+            const request = {
+              path: new URL(frame.path, "http://owned.invalid").pathname,
+              method: frame.method,
+              body: Buffer.from(frame.data, "base64").toString(),
+            };
+            if (request.path.endsWith("/log")) {
               socket.send(
                 JSON.stringify({
-                  type: "operation-response",
-                  operationId: frame.operationId,
-                  action: frame.action,
+                  type: "http-response",
+                  streamId: frame.streamId,
+                  status: 200,
+                  headers: { "content-type": "text/event-stream" },
                 }),
               );
+              socket.send(
+                JSON.stringify({
+                  type: "stream-data",
+                  streamId: frame.streamId,
+                  data: Buffer.from(
+                    `data: ${JSON.stringify({ type: "log.synced", aggregateID: owned.sessionID, seq: 1 })}\n\n`,
+                  ).toString("base64"),
+                }),
+              );
+              socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
+              return;
             }
-            return;
-          }
-          if (frame.type !== "http-request") return;
-          const request = {
-            path: new URL(frame.path, "http://owned.invalid").pathname,
-            method: frame.method,
-            body: Buffer.from(frame.data, "base64").toString(),
-          };
-          if (request.path.endsWith("/log")) {
+            let status = 200;
+            let data: unknown = [];
+            if (request.method !== "GET" && request.method !== "HEAD") externalMutations += 1;
+            if (request.path.includes("/instructions/entries")) {
+              if (request.method === "GET")
+                data = [...instructions].map(([key, value]) => ({ key, value }));
+              else {
+                status = 204;
+                const key = decodeURIComponent(
+                  fixtureValue(request.path.split("/").at(-1), 'request.path.split("/").at(-1)'),
+                );
+                if (request.method === "PUT")
+                  instructions.set(key, (JSON.parse(request.body) as { value: unknown }).value);
+                else instructions.delete(key);
+              }
+            } else if (
+              [
+                "/api/experimental/mcp/factory_browser",
+                "/api/experimental/mcp/factory_sources",
+              ].includes(request.path) &&
+              request.method === "PUT"
+            ) {
+              mcpServers.add(
+                fixtureValue(request.path.split("/").at(-1), 'request.path.split("/").at(-1)'),
+              );
+              status = 204;
+            } else if (request.path === "/api/mcp") {
+              // OpenCode's native protocol remains unchanged by the UI migration.
+              data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
+            } else if (request.path === "/api/skill" && outcome === "pre-dispatch failed") {
+              status = 503;
+              data = { message: "Owned skill discovery failed before dispatch" };
+            } else if (request.path === "/api/info") {
+              data = { version: "2.0.27" };
+            } else if (request.path === "/api/skill") {
+              data = installedSkills.map((id) => ({
+                id,
+                name: id,
+                path: `/opt/factory/admitted-skills/${id}/SKILL.md`,
+                content: "",
+              }));
+            } else if (request.path === "/api/session") {
+              data = [];
+            } else if (request.path === "/api/model") {
+              data = [{ providerID: "factory", id: buildModelID }];
+            } else if (request.path.endsWith("/agent")) {
+              status = 204;
+            } else if (request.path.endsWith(`/${owned.sessionID}`)) {
+              data = {
+                id: owned.sessionID,
+                location: { directory: "/workspace/project" },
+                model: { providerID: "factory", id: buildModelID },
+              };
+            } else if (request.path.endsWith("/active")) {
+              data = {};
+            } else if (request.path.endsWith("/prompt")) {
+              promptCalls += 1;
+              const input = JSON.parse(request.body) as {
+                id: string;
+                text: string;
+                skills?: { id: string }[];
+                metadata?: Record<string, unknown>;
+              };
+              promptID = input.id;
+              promptText = input.text;
+              data = {
+                id: input.id,
+                sessionID: owned.sessionID,
+                type: "user",
+                time: { created: 1 },
+                delivery: "queue",
+                payload: {
+                  text: input.text,
+                  ...(input.skills ? { skills: input.skills } : {}),
+                  ...(input.metadata ? { metadata: input.metadata } : {}),
+                },
+              };
+            } else if (request.path.endsWith("/message")) {
+              data = promptID
+                ? [
+                    {
+                      id: `${promptID}_assistant`,
+                      type: "assistant",
+                      time: { created: 2, completed: 3 },
+                      finish: "error",
+                      error: { message: "Owned completed model error" },
+                      content: [],
+                    },
+                    {
+                      id: promptID,
+                      type: "user",
+                      time: { created: 1 },
+                      text: promptText,
+                    },
+                  ]
+                : [
+                    {
+                      id: "msg_owned_boundary",
+                      type: "agent-selected",
+                      agent: "build",
+                      time: { created: 0 },
+                    },
+                  ];
+            }
             socket.send(
               JSON.stringify({
                 type: "http-response",
                 streamId: frame.streamId,
-                status: 200,
-                headers: { "content-type": "text/event-stream" },
+                status,
+                headers: { "content-type": "application/json" },
               }),
             );
-            socket.send(
-              JSON.stringify({
-                type: "stream-data",
-                streamId: frame.streamId,
-                data: Buffer.from(
-                  `data: ${JSON.stringify({ type: "log.synced", aggregateID: owned.sessionID, seq: 1 })}\n\n`,
-                ).toString("base64"),
-              }),
-            );
-            socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
-            return;
-          }
-          let status = 200;
-          let data: unknown = [];
-          if (request.method !== "GET" && request.method !== "HEAD") externalMutations += 1;
-          if (request.path.includes("/instructions/entries")) {
-            if (request.method === "GET")
-              data = [...instructions].map(([key, value]) => ({ key, value }));
-            else {
-              status = 204;
-              const key = decodeURIComponent(
-                fixtureValue(request.path.split("/").at(-1), 'request.path.split("/").at(-1)'),
+            if (status !== 204)
+              socket.send(
+                JSON.stringify({
+                  type: "stream-data",
+                  streamId: frame.streamId,
+                  data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
+                }),
               );
-              if (request.method === "PUT")
-                instructions.set(key, (JSON.parse(request.body) as { value: unknown }).value);
-              else instructions.delete(key);
-            }
-          } else if (
-            [
-              "/api/experimental/mcp/factory_browser",
-              "/api/experimental/mcp/factory_sources",
-            ].includes(request.path) &&
-            request.method === "PUT"
-          ) {
-            mcpServers.add(
-              fixtureValue(request.path.split("/").at(-1), 'request.path.split("/").at(-1)'),
-            );
-            status = 204;
-          } else if (request.path === "/api/mcp") {
-            // OpenCode's native protocol remains unchanged by the UI migration.
-            data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
-          } else if (request.path === "/api/skill" && outcome === "pre-dispatch failed") {
-            status = 503;
-            data = { message: "Owned skill discovery failed before dispatch" };
-          } else if (request.path === "/api/info") {
-            data = { version: "2.0.27" };
-          } else if (request.path === "/api/skill") {
-            data = installedSkills.map((id) => ({
-              id,
-              name: id,
-              path: `/opt/factory/admitted-skills/${id}/SKILL.md`,
-              content: "",
-            }));
-          } else if (request.path === "/api/session") {
-            data = [];
-          } else if (request.path === "/api/model") {
-            data = [{ providerID: "factory", id: buildModelID }];
-          } else if (request.path.endsWith("/agent")) {
-            status = 204;
-          } else if (request.path.endsWith(`/${owned.sessionID}`)) {
-            data = {
-              id: owned.sessionID,
-              location: { directory: "/workspace/project" },
-              model: { providerID: "factory", id: buildModelID },
-            };
-          } else if (request.path.endsWith("/active")) {
-            data = {};
-          } else if (request.path.endsWith("/prompt")) {
-            promptCalls += 1;
-            const input = JSON.parse(request.body) as {
-              id: string;
-              text: string;
-              skills?: { id: string }[];
-              metadata?: Record<string, unknown>;
-            };
-            promptID = input.id;
-            promptText = input.text;
-            data = {
-              id: input.id,
-              sessionID: owned.sessionID,
-              type: "user",
-              time: { created: 1 },
-              delivery: "queue",
-              payload: {
-                text: input.text,
-                ...(input.skills ? { skills: input.skills } : {}),
-                ...(input.metadata ? { metadata: input.metadata } : {}),
-              },
-            };
-          } else if (request.path.endsWith("/message")) {
-            data = promptID
-              ? [
-                  {
-                    id: `${promptID}_assistant`,
-                    type: "assistant",
-                    time: { created: 2, completed: 3 },
-                    finish: "error",
-                    error: { message: "Owned completed model error" },
-                    content: [],
-                  },
-                  {
-                    id: promptID,
-                    type: "user",
-                    time: { created: 1 },
-                    text: promptText,
-                  },
-                ]
-              : [
-                  {
-                    id: "msg_owned_boundary",
-                    type: "agent-selected",
-                    agent: "build",
-                    time: { created: 0 },
-                  },
-                ];
-          }
-          socket.send(
-            JSON.stringify({
-              type: "http-response",
-              streamId: frame.streamId,
-              status,
-              headers: { "content-type": "application/json" },
-            }),
-          );
-          if (status !== 204)
-            socket.send(
-              JSON.stringify({
-                type: "stream-data",
-                streamId: frame.streamId,
-                data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
-              }),
-            );
-          socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
-        });
-        await new Promise<void>((resolve, reject) => {
-          socket.addEventListener("open", () => resolve(), { once: true });
-          socket.addEventListener("error", () => reject(new Error("Owned Connector failed")), {
-            once: true,
+            socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
           });
         });
-        socket.send(JSON.stringify({ type: "hello", role, channels: [] }));
       }
       await connect("parent");
       await connect("child");
@@ -373,12 +366,16 @@ test.each(["failed", "pre-dispatch failed"] as const)(
         SELECT fence_required AS fence FROM factory.change_writer WHERE change_id=${owned.changeID}`;
       expect(writer?.fence).toBe(true);
       expect(promptCalls).toBe(outcome === "pre-dispatch failed" ? 0 : 1);
+      expect(peer.calls.filter((call) => !call.method.startsWith("Get"))).toEqual(lifecycleBefore);
     } finally {
       for (const socket of sockets) socket.close();
       await process.shutdown();
       await creating?.catch(() => undefined);
       if (latchHeld) await latch`SELECT pg_advisory_unlock(hashtext('owned-terminal-projection'))`;
       latch.release();
+      await ownedFixture?.shutdown();
+      ownedFixture?.restoreEnvironment();
+      await native?.close();
       await database.client.end({ timeout: 0 });
       await process.dispose();
       await forge.stop(true);

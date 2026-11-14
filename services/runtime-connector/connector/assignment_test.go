@@ -1,6 +1,12 @@
 package connector
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func validAssignment() Assignment {
 	return Assignment{
@@ -21,6 +27,33 @@ func validAssignment() Assignment {
 			Target:     "http://127.0.0.1:4300",
 			HealthPath: "/health",
 		}},
+	}
+}
+
+func TestAssignmentRejectsRetiredPreparationWireFields(t *testing.T) {
+	for _, field := range []string{"preparedImage", "deferRuntimeProcesses"} {
+		t.Run(field, func(t *testing.T) {
+			encoded, err := json.Marshal(validAssignment())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			document[field] = nil
+			encoded, err = json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "assignment.json")
+			if err := os.WriteFile(path, encoded, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadAssignment(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("retired preparation field still belongs to the assignment contract: %v", err)
+			}
+		})
 	}
 }
 
@@ -123,17 +156,12 @@ func TestAssignmentControlURLRequiresTLSOutsideLocalEndpoints(t *testing.T) {
 		"ws://203.0.113.10:3000/internal/runtime-connect",
 		"ws://unassigned.invalid:8080/",
 		"ws://unassigned.invalid/other",
+		"ws://unassigned.invalid/",
 	} {
 		assignment := validAssignment()
 		assignment.ControlURL = rejected
 		if err := assignment.Validate(); err == nil {
 			t.Fatalf("%s would send the Bearer capability over plain HTTP", rejected)
 		}
-	}
-	// The unassigned Project preparation placeholder never dials.
-	assignment := validAssignment()
-	assignment.ControlURL = unassignedControlURL
-	if err := assignment.Validate(); err != nil {
-		t.Fatalf("placeholder control URL was rejected: %v", err)
 	}
 }

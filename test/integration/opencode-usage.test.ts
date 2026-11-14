@@ -1,18 +1,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createUsageJournal, type UsageEntry } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage, openCodeUsageEntry } from "../../apps/factory/src/usage/opencode";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import upstream from "../../upstream.json";
 import { buildModelID, fixture as changeFixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
-// Kubernetes is injected in the cleanup case; these artifacts are never
-// launched, and no fixture may inherit the retained installation's forge token.
+// No fixture may inherit the retained installation's forge token or artifacts.
 const runtimeConfiguration = {
   FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
   FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
@@ -527,6 +524,12 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
       await database.client`SELECT id FROM factory.agent_turn WHERE change_id=${owned.changeID}`,
     ).toHaveLength(2);
     const resumed = await owned.turn(resumeID);
+    await observe(
+      async () =>
+        database.client`SELECT settled_at FROM factory.usage_operation WHERE id=${`turn:${resumed?.id}`}`,
+      (operations) => Boolean(operations[0]?.["settled_at"]),
+      "Resumed native usage did not finish settlement",
+    );
     const resumedEntries = await observe(
       async () =>
         database.client`SELECT event_id FROM factory.usage_entry WHERE operation_id=${`turn:${resumed?.id}`}`,
@@ -568,49 +571,14 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
         JOIN factory.usage_operation operation ON operation.id=entry.operation_id
         WHERE operation.project_id=${owned.projectID} ORDER BY entry.event_id`),
     ];
-    let deletes = 0;
-    let entriesAtDeletion: Awaited<ReturnType<typeof consumption>> = [];
-    await database.client`UPDATE factory.runtime_attempt SET kubernetes_uid='owned-native-pod'
-      WHERE id=${owned.attemptID}`;
-    const runtime = createRuntimeController(
-      database,
-      owned.hub,
-      "owned-native-cleanup",
-      {
-        prepareExecution: async () => {
-          throw new Error("Cleanup must not prepare source");
-        },
-      },
-      {
-        ...createKubernetesClient(),
-        getNamespace: async () => ({ uid: "owned-native-namespace", labels: {} }),
-        getPod: async () => ({
-          uid: "owned-native-pod",
-          phase: "Running",
-          labels: {},
-          factoryboxImage: process.env["FACTORY_FACTORYBOX_WORKER_IMAGE"] ?? "owned-worker",
-          runtimeHostImage: process.env["FACTORY_RUNTIME_HOST_IMAGE"] ?? "owned",
-        }),
-        deletePod: async () => {
-          entriesAtDeletion = await consumption();
-          deletes++;
-        },
-        deleteNamespace: async () => {
-          throw new Error("Source must survive cleanup");
-        },
-      },
-      async () => "",
-    );
-    await runtime.stop(owned.attemptID);
-    await observe(
-      async () => (await runtime.get(owned.attemptID))?.state,
-      (state) => state === "stopped",
-      "Native consumption did not drain before owned compute cleanup",
-    );
-    expect(deletes).toBe(1);
-    expect(entriesAtDeletion.some((entry) => entry["source"] === "compaction")).toBe(true);
+    // The pinned engine proves actual replay, auxiliary events and attribution.
+    // usage-cleanup.test.ts separately proves this recorder is called before
+    // original-UID native Delete through the real Runtime controller.
+    await createRecordedOpenCodeUsage(database).drainAttempt(owned.attemptID, native.client);
+    const entriesAfterDrain = await consumption();
+    expect(entriesAfterDrain.some((entry) => entry["source"] === "compaction")).toBe(true);
     // One exact local 403 denied inference before reaching a paid provider.
-    expect(entriesAtDeletion.reduce((sum, entry) => sum + entry["counters"].input, 0)).toBe(
+    expect(entriesAfterDrain.reduce((sum, entry) => sum + entry["counters"].input, 0)).toBe(
       (nativeCalls - 1) * 70,
     );
     const drained = await consumption();
@@ -622,8 +590,12 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
     const recorded = createRecordedOpenCodeUsage(database);
     await recorded.markUnavailable(owned.attemptID);
     const unavailable = await consumption();
-    expect(unavailable.filter((entry) => entry["source"] === "unobserved")).toHaveLength(2);
-    expect(unavailable.filter((entry) => entry["source"] !== "unobserved")).toEqual(drained);
+    expect(unavailable.filter((entry) => entry["event_id"] === "storage-unavailable")).toHaveLength(
+      2,
+    );
+    expect(unavailable.filter((entry) => entry["event_id"] !== "storage-unavailable")).toEqual(
+      drained,
+    );
     await recorded.markUnavailable(owned.attemptID);
     expect(await consumption()).toEqual(unavailable);
   } finally {

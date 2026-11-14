@@ -32,6 +32,12 @@ test("application build tools match the upstream artifact pins", async () => {
   expect(dockerfile).not.toContain("COPY deploy/local");
   expect(dockerfile).toContain('"/var/lib/factory/bootstrap.lock"');
   expect(dockerfile).toContain('"scripts/kubernetes/start.ts"');
+  expect(dockerfile).toContain("scripts/factory/native-installation.ts");
+  const smoke = await readFile(new URL("./image-smoke.ts", import.meta.url), "utf8");
+  expect(smoke).toContain('await import(resolve(root, "scripts/factory/native-installation.ts"))');
+  expect(smoke).toContain('await import(resolve(root, "scripts/kubernetes/preflight.ts"))');
+  expect(smoke).toContain('Bun.spawn([process.execPath, "scripts/kubernetes/start.ts"]');
+  expect(smoke).toContain("Configure FACTORY_STATE_DIRECTORY before Kubernetes startup");
 });
 
 test("only published releases build and publish arm64 and amd64 natively", async () => {
@@ -100,6 +106,11 @@ test("release images require full source checks or a validated exact-commit loca
   expect(verify.strategy.matrix.include).toEqual([{ arch: "arm64", runner: "ubuntu-24.04-arm" }]);
   expect(verify["runs-on"]).toBe(`\${{ matrix.runner }}`);
   expect(verify["continue-on-error"]).not.toBe(true);
+  const chartCheck = verify.steps.find((step: { run?: string }) => step.run?.includes("helm lint"));
+  expect(chartCheck.run).toContain("substrate.workspaceConfigurationSecret=native-workspaces");
+  expect(chartCheck.run).toContain("substrate.provisionerTokenSecret=native-provisioner");
+  expect(chartCheck.run).toContain("forgejoPublicURL=https://git.factory.test");
+  expect(chartCheck.run).not.toContain("factorybox.");
   const steps = verify.steps as {
     uses?: string;
     run?: string;
@@ -155,6 +166,8 @@ test("local gate reuse rejects another commit, incomplete checks and failed rece
   const revision = "a".repeat(40);
   const complete = {
     schema: 1,
+    scope: "source-controller-ui",
+    nativeProductAcceptance: false,
     commit: revision,
     passed: true,
     steps: [
@@ -167,12 +180,17 @@ test("local gate reuse rejects another commit, incomplete checks and failed rece
       "typecheck",
       "unit",
       "connector",
+      "substrate",
       "controllers",
       "browser",
     ].map((name) => ({ name, passed: true })),
   };
   const incomplete = structuredClone(complete);
   incomplete.steps.pop();
+  const missingSubstrate = {
+    ...complete,
+    steps: complete.steps.filter((step) => step.name !== "substrate"),
+  };
   const failed = structuredClone(complete);
   failed.steps[0]!.passed = false;
   const duplicate = structuredClone(complete);
@@ -184,7 +202,10 @@ test("local gate reuse rejects another commit, incomplete checks and failed rece
       [{ ...complete, commit: "b".repeat(40) }, "true", 1],
       [{ ...complete, passed: false }, "true", 1],
       [{ ...complete, schema: 2 }, "true", 1],
+      [{ ...complete, scope: "native-product-acceptance" }, "true", 1],
+      [{ ...complete, nativeProductAcceptance: true }, "true", 1],
       [incomplete, "true", 1],
+      [missingSubstrate, "true", 1],
       [failed, "true", 1],
       [duplicate, "true", 1],
       [complete, "false", 0],
@@ -233,7 +254,7 @@ test("runtime publication compares config digests, not Docker's manifest ID", as
   const command: string = workflow.jobs.roles.steps.find((step: { run?: string }) =>
     step.run?.includes("docker buildx build"),
   ).run;
-  expect(command).toContain('--metadata-file "$RUNNER_TEMP/runtime-host-proven.json"');
+  expect(command).toContain('--metadata-file "$RUNNER_TEMP/$role-proven.json"');
   expect(command).toContain('docker image save --output "$proof_archive" "$image_id"');
   expect(command).toContain('tar -xOf "$proof_archive" -- "$config_file" | sha256sum');
   expect(command).not.toContain("containerimage.config.digest");
@@ -261,6 +282,88 @@ test("runtime publication compares config digests, not Docker's manifest ID", as
     });
     expect(await child.exited).toBe(expected);
   }
+});
+
+test("native Actor publication builds same-architecture bootstrap and tools, proves each natively and combines the artifact", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const build: string = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  ).run;
+  expect(build).toContain(
+    "for role in runtime-host developer-ide browser-tools substrate-bootstrap substrate-runtime",
+  );
+  expect(build).not.toContain("workspace-files");
+  expect(build).not.toContain('[[ "$role" == substrate-* && "$ARCH" != amd64 ]]');
+  expect(build).toContain("dockerfile=deploy/substrate/rootless/Dockerfile");
+  expect(build).toContain("dockerfile=deploy/substrate/Runtime.Dockerfile");
+  expect(build).toContain('release_require_revision "$tools" "$REVISION"');
+  expect(build).toContain('release_require_revision "$bootstrap" "$REVISION"');
+  expect(build).toContain('tools="$IMAGE_ROOT/runtime-host:$RELEASE-$ARCH"');
+  expect(build).toContain('bootstrap="$IMAGE_ROOT/substrate-bootstrap:$RELEASE-$ARCH"');
+  expect(build).toContain(
+    'FACTORY_RUNTIME_HOST_IMAGE=$IMAGE_ROOT/runtime-host@$(release_digest "$tools")',
+  );
+  expect(build).toContain(
+    'FACTORY_SUBSTRATE_BOOTSTRAP_IMAGE=$IMAGE_ROOT/substrate-bootstrap@$(release_digest "$bootstrap")',
+  );
+  expect(build).toContain('bash scripts/runtime/substrate-image-proof.sh "$image_id"');
+  const manifest: string = workflow.jobs.manifests.steps.find(
+    (step: { id?: string }) => step.id === "publish",
+  ).run;
+  expect(manifest).toContain(
+    "for role in runtime-host developer-ide browser-tools substrate-runtime",
+  );
+  expect(manifest).toContain('release_combine "$image" "$image-arm64" "$image-amd64"');
+  expect(manifest).toContain('release_require_revision "$image-$arch" "$(git rev-parse HEAD)"');
+  expect(manifest).not.toContain('image="$IMAGE_ROOT/substrate-runtime:$RELEASE-amd64"');
+  expect(manifest).not.toContain("workspace-files");
+  expect(workflow.jobs.chart.needs).toContain("manifests");
+  expect(workflow.jobs.chart.env.RUNTIME_ARTIFACTS).toBe(
+    `\${{ needs.manifests.outputs.artifacts }}`,
+  );
+  const packaging: string = workflow.jobs.chart.steps.find((step: { run?: string }) =>
+    step.run?.includes("package-chart.ts"),
+  ).run;
+  expect(packaging).toContain('--artifacts "$RUNNER_TEMP/runtime-artifacts.json"');
+  expect(packaging).not.toContain("factorybox");
+  expect(workflow.jobs.chart.steps.at(-1).run).toContain("factory-runtime-artifacts-$RELEASE.json");
+});
+
+test("native startup uses the same artifact environment and checks storage with tool-image shell only", async () => {
+  for (const file of ["./index.ts", "../kubernetes/start.ts"]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    expect(source).toContain("runtimeArtifactEnvironment(artifacts)");
+    expect(source).toContain('image: artifacts["runtime-host"]');
+    expect(source).not.toContain("workspace-files");
+    expect(source).not.toContain("FACTORY_WORKSPACE_FILES_IMAGE");
+  }
+  const dockerfile = await readFile(
+    new URL("../../deploy/factory/Dockerfile", import.meta.url),
+    "utf8",
+  );
+  expect(dockerfile).toContain("AS source-service");
+  expect(dockerfile).toContain("go build -mod=readonly -trimpath");
+  expect(dockerfile).toContain(
+    "COPY --from=source-service /factory-runtime-connector /usr/local/bin/factory-runtime-connector",
+  );
+  const storage = await readFile(new URL("./storage-readiness.ts", import.meta.url), "utf8");
+  expect(storage).toContain("runAsUser: 1000");
+  expect(storage).toContain('"/bin/sh"');
+  expect(storage).toContain("sync -d /data/factory-storage-check");
+  expect(storage).not.toContain("factory-workspace-files");
+  expect(
+    await Bun.file(new URL("../../deploy/workspace-files/Dockerfile", import.meta.url)).exists(),
+  ).toBe(false);
+  expect(
+    await Bun.file(
+      new URL(
+        "../../services/runtime-connector/cmd/factory-workspace-files/main_linux.go",
+        import.meta.url,
+      ),
+    ).exists(),
+  ).toBe(false);
 });
 
 test("published config lookup selects one native child and ignores attestations", async () => {
@@ -505,13 +608,16 @@ test("published image jobs survive a locally satisfied verification dependency b
     ["manifests", "roles"],
     ["factory", "manifests"],
     ["distribution", "factory"],
-    ["chart", "distribution"],
   ] as const) {
     expect(workflow.jobs[job].needs).toEqual(["release", dependency]);
     expect(workflow.jobs[job].if).toBe(
       `\${{ !cancelled() && needs.release.result == 'success' && needs.${dependency}.result == 'success' }}`,
     );
   }
+  expect(workflow.jobs.chart.needs).toEqual(["release", "distribution", "manifests"]);
+  expect(workflow.jobs.chart.if).toBe(
+    `\${{ !cancelled() && needs.release.result == 'success' && needs.distribution.result == 'success' && needs.manifests.result == 'success' }}`,
+  );
 });
 
 test("an overwrite reuses only signed runtime images from the exact release commit", async () => {
@@ -575,12 +681,13 @@ test("the native lane is a separate manual workflow that never runs for pull req
     await readFile(new URL("../../.github/workflows/native.yaml", import.meta.url), "utf8"),
   );
   expect(Object.keys(native.on)).toEqual(["workflow_dispatch"]);
-  expect(native.jobs.native["runs-on"]).toEqual(["self-hosted", "sysbox"]);
+  expect(native.jobs.native["runs-on"]).toEqual(["self-hosted", "linux", "x64", "substrate"]);
+  expect(native.name).toBe("Native Substrate lane");
   const commands = native.jobs.native.steps.flatMap((step: { run?: string }) =>
     step.run ? [step.run] : [],
   );
   expect(commands).toContain("mise exec -- bun run test:native");
-  expect(commands).toContain("mise exec -- bun run runtime:conformance");
+  expect(commands.join("\n")).not.toContain("runtime:conformance");
   const images = await readFile(
     new URL("../../.github/workflows/images.yaml", import.meta.url),
     "utf8",
@@ -626,7 +733,11 @@ test("native Compose prebuild and required hooks gate runtime publication on bot
     "utf8",
   );
   expect(proof).toContain("--network=none --cpus=3 --memory=3g");
-  expect(proof).toContain('"nativeFactoryboxProof":false');
+  expect(proof).toContain('"nativeSubstrateProof":false');
+  expect(proof).toMatch(
+    /recipes="\$\{4:-build image-only build-no-features credential-free runtime-environment cold-prebuild\}"/,
+  );
+  expect(proof).not.toMatch(/dependency-seed|prepared-rootfs|prepared-image/);
   const start = proof.indexOf("docker create");
   const create = proof.slice(start, proof.indexOf("docker cp", start));
   expect(create).toContain("--network=none");

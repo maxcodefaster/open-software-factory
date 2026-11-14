@@ -1,46 +1,35 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createHash } from "node:crypto";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { chromium, expect as visible, type BrowserContext } from "@playwright/test";
+import { type BrowserContext, chromium, expect as visible } from "@playwright/test";
 import { hashPassword } from "better-auth/crypto";
+import { z } from "zod";
 import { emergencyAdministratorID } from "../../packages/auth/src/policy";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { ownedMonitoringForge } from "../fixtures/monitoring-native";
-import { ownedMCPAuthorization } from "../fixtures/mcp-authorization";
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { openProjectMenu } from "../fixtures/project-menu";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { proveLocalOpenCodeMCP } from "../fixtures/local-opencode-mcp";
+import { ownedMCPAuthorization } from "../fixtures/mcp-authorization";
+import { ownedMonitoringForge } from "../fixtures/monitoring-native";
+import { requireNativeLiveHost } from "../fixtures/native-live-configuration";
+import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
-const proof = process.env["FACTORY_EXTERNAL_MCP_LIVE"] === "1" ? test : test.skip;
-async function removeOwnedWorkers(workers: { id: string; namespace: string }[]) {
-  for (const worker of workers) {
-    const inspect = Bun.spawn(["kubectl", "get", "namespace", worker.namespace, "-o", "json"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const metadata = (await new Response(inspect.stdout).json()) as {
-      metadata: { labels: Record<string, string> };
-    };
-    if (
-      (await inspect.exited) !== 0 ||
-      metadata.metadata.labels["factory.dev/factorybox-worker"] !== worker.id
-    )
-      throw new Error("Owned native Namespace cleanup refused");
-    const deletion = Bun.spawn(
-      ["kubectl", "delete", "namespace", worker.namespace, "--wait=true", "--timeout=420s"],
-      { stdout: "ignore", stderr: "pipe" },
-    );
-    if ((await deletion.exited) !== 0)
-      throw new Error("Owned native Namespace deletion was not confirmed");
-  }
-}
-proof(
-  "local OAuth MCP clients and browser participants use one actual Factorybox Dev Container",
+test(
+  "local OAuth MCP clients and browser participants use one actual Substrate Dev Container",
   async () => {
+    const nativeConfiguration = process.env["FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION"];
+    if (!nativeConfiguration)
+      throw Error(
+        "Explicit owned native configuration is required for the live external MCP proof",
+      );
+    const publicForgeOrigin = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
+    if (!publicForgeOrigin) throw Error("Explicit native Forge HTTPS origin is required");
+    requireNativeLiveHost();
     const retainedID = process.env["FACTORY_EXTERNAL_MCP_RETAINED_ID"];
     if (retainedID && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(retainedID))
       throw new Error("Invalid owned proof identity");
@@ -60,25 +49,31 @@ proof(
       documentPath = `collaboration-${runID}.txt`;
     const directory = resolve(".factory/test-results/external-mcp/live", id);
     await mkdir(directory, { recursive: true });
-    const forge = await ownedMonitoringForge(directory, id);
+    const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
+    const forge = await ownedMonitoringForge(directory, id, undefined, publicForgeOrigin);
     const api = createForgejoClient({ apiURL: `${forge.origin}/api/v1/`, token: forge.token });
     const repository = { owner: forge.owner, name: `external-mcp-${id.slice(0, 8)}` };
-    const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
     const fixture = await factoryProcess(
       { runtimeHostImage, forgejoToken: forge.token },
       {
         FACTORY_FORGEJO_API_URL: `${forge.origin}/api/v1/`,
-        FACTORY_FORGEJO_PUBLIC_URL: forge.origin,
+        FACTORY_FORGEJO_PUBLIC_URL: publicForgeOrigin,
         FACTORY_FORGEJO_OWNER: forge.owner,
         FACTORY_REGISTRY_CA_FILE: process.env["FACTORY_REGISTRY_CA_FILE"],
+        FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION: nativeConfiguration,
       } as Parameters<typeof factoryProcess>[1],
       retained ? { id: retained.factoryID, base: retained.base } : undefined,
-    );
+    ).catch(async (cause) => {
+      if (!retained) await forge.dispose();
+      throw cause;
+    });
     const database = fixture.connect();
     const clients: Client[] = [];
     let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
     const actorCookies = new Map<string, string>();
     let success = false;
+    let stopConfirmed = false;
+    let workFailure: unknown;
     const projectID = retained?.projectID ?? crypto.randomUUID();
     const owner = emergencyAdministratorID;
     let guest = crypto.randomUUID() as string;
@@ -114,12 +109,7 @@ proof(
       );
     }
     async function fn<T>(
-      name:
-        | "ensureDeveloperIDE"
-        | "getDeveloperIDE"
-        | "stopDeveloperIDE"
-        | "stopRuntimeAttempt"
-        | "stopWorkspaceSource",
+      name: "ensureDeveloperIDE" | "getDeveloperIDE" | "stopDeveloperIDE" | "stopRuntimeAttempt",
       args: [] | [string],
       cookie: string,
     ): Promise<T> {
@@ -166,7 +156,7 @@ proof(
         await database.client`SELECT id FROM auth.account WHERE user_id=${guest} AND provider_id='credential'`;
       if (!credential)
         await database.client`INSERT INTO auth.account(id,user_id,account_id,provider_id,password)VALUES(${crypto.randomUUID()},${guest},${guest},'credential',${await hashPassword(password)})`;
-      const nativeOrigin = forge.origin;
+      const nativeOrigin = publicForgeOrigin;
       await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
        VALUES(${projectID},${repository.name},'External MCP live proof',${`${nativeOrigin}/${repository.owner}/${repository.name}.git`},'main','.devcontainer/devcontainer.json',${owner}) ON CONFLICT(id) DO NOTHING`;
       const [ownedProject] =
@@ -212,6 +202,14 @@ proof(
       expect(output.stdout).toContain("native-uid=1000");
       expect(output.stdout).toContain("detached-done");
       expect(output.exitCode).toBe(0);
+      const currentWorkspace = await call(ownerClient, "getWorkspace", { workspaceID });
+      const originalActorUID = z.uuid().parse(currentWorkspace.runtime.native?.actorUID);
+      const native = await readNativeWorkspaceObservation(database, {
+        attemptID,
+        workspaceID,
+        projectID,
+        actorUID: originalActorUID,
+      });
       const terminalID = crypto.randomUUID();
       await call(ownerClient, "openTerminal", { workspaceID, requestID: terminalID });
       await call(ownerClient, "writeTerminal", {
@@ -444,8 +442,11 @@ proof(
         (await call(ownerClient, "readCommandOutput", { commandID: resumedID })).stdout,
       ).toContain("resumed");
       expect((await call(ownerClient, "getWorkspace", { workspaceID })).runtime.id).toBe(attemptID);
+      expect(
+        (await call(ownerClient, "getWorkspace", { workspaceID })).runtime.native?.actorUID,
+      ).toBe(originalActorUID);
       await writeFile(
-        resolve(directory, "receipt.json"),
+        resolve(directory, "journey.json"),
         JSON.stringify(
           {
             id,
@@ -459,15 +460,30 @@ proof(
             kickPreservedCompute: true,
             pauseResume: true,
             localOpenCode,
+            native,
+            scope: "journey-assertions-before-native-stop",
           },
           null,
           2,
         ),
       );
       success = true;
-    } finally {
-      await browser?.close();
-      for (const client of clients) await client.close();
+    } catch (cause) {
+      workFailure = cause;
+    }
+    const cleanupFailures: unknown[] = [];
+    const cleanup = async (action: () => unknown) => {
+      try {
+        await action();
+      } catch (cause) {
+        cleanupFailures.push(cause);
+      }
+    };
+    // Transport failures must not bypass native Stop, control-plane shutdown
+    // or the retained inventory receipt.
+    await cleanup(() => browser?.close());
+    for (const client of clients) await cleanup(() => client.close());
+    try {
       if (success) {
         const ownerCookie = await fixture.signIn();
         const attempts = await database.client<
@@ -484,43 +500,35 @@ proof(
           "Owned runtime Stop was not confirmed",
           nativeLifecycleWindowMS,
         );
-        const workspaces = await database.client<
-          { id: string }[]
-        >`SELECT id FROM factory.development_workspace WHERE project_id=${projectID}`;
-        for (const workspace of workspaces)
-          await fn("stopWorkspaceSource", [workspace.id], ownerCookie);
+        await requireOwnedProjectSourceRetention(database, projectID);
         for (const cookie of actorCookies.values()) await fn("stopDeveloperIDE", [], cookie);
         await eventually(
           async () => {
             const [row] = await database.client<
               { count: number }[]
-            >`SELECT ((SELECT count(*) FROM factory.workspace_source source JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id WHERE workspace.project_id=${projectID} AND source.state<>'stopped')+(SELECT count(*) FROM factory.developer_ide WHERE user_id IN (${owner},${guest}) AND state<>'stopped'))::int AS count`;
+            >`SELECT count(*)::int AS count FROM factory.developer_ide WHERE user_id IN (${owner},${guest}) AND state<>'stopped'`;
             return row?.count ?? -1;
           },
           (count) => count === 0,
-          "Owned source/editor Stop was not confirmed",
+          "Owned editor Stop was not confirmed",
           nativeLifecycleWindowMS,
         );
-        const workers = await database.client<
-          { id: string; namespace: string }[]
-        >`SELECT DISTINCT factorybox_worker_id AS id,kubernetes_namespace AS namespace FROM factory.development_workspace WHERE project_id=${projectID}`;
-        await fixture.pause();
-        await removeOwnedWorkers(workers);
-        await fixture.dispose();
-        await forge.dispose();
+        stopConfirmed = true;
         await writeFile(
-          resolve(directory, "cleanup.json"),
+          resolve(directory, "retained.json"),
           JSON.stringify(
             {
               id,
+              factoryID: fixture.id,
+              base: fixture.base,
               projectID,
-              workers,
               computeStopped: true,
-              sourceStopped: true,
+              sourceRetained: true,
               editorsStopped: true,
-              ownedWorkersDeleted: true,
-              ownedControlPlaneDeleted: true,
-              ownedForgeDeleted: true,
+              nativeResourceInventoryRetained: true,
+              ownedControlPlaneRetained: true,
+              forgeContainer: forge.container,
+              ownedForgeRetained: true,
             },
             null,
             2,
@@ -541,11 +549,54 @@ proof(
             2,
           ),
         );
-        await fixture.pause();
         console.log(`Owned failed native proof retained at ${directory}`);
       }
-      await database.client.end({ timeout: 2 });
+    } catch (cause) {
+      cleanupFailures.push(cause);
+    } finally {
+      let controlPlanePaused = false;
+      await cleanup(async () => {
+        await fixture.pause();
+        controlPlanePaused = true;
+      });
+      await cleanup(() => database.client.end({ timeout: 2 }));
+      await cleanup(async () => {
+        await writeFile(
+          resolve(directory, `run-state-${runID}.json`),
+          JSON.stringify({
+            id,
+            factoryID: fixture.id,
+            base: fixture.base,
+            projectID,
+            forgeContainer: forge.container,
+            journeyAssertionsPassed: success,
+            stopConfirmed,
+            controlPlanePaused,
+            cleanupConfirmed: cleanupFailures.length === 0,
+            nativeResourceInventoryRetained: true,
+          }),
+          { flag: "wx", mode: 0o600 },
+        );
+      });
     }
+    if (cleanupFailures.length)
+      throw new AggregateError(
+        [...(success ? [] : [workFailure]), ...cleanupFailures],
+        "External MCP proof or owned native fixture shutdown failed",
+      );
+    if (!success) throw workFailure;
+    if (success && stopConfirmed)
+      await writeFile(
+        resolve(directory, `result-${runID}.json`),
+        JSON.stringify({
+          passed: true,
+          journey: "journey.json",
+          state: `run-state-${runID}.json`,
+          nativeResourceInventoryRetained: true,
+          fullFactoryE2E: false,
+        }),
+        { flag: "wx", mode: 0o600 },
+      );
   },
   nativeLifecycleWindowMS * 6,
 );

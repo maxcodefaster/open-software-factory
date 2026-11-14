@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { substrateVerificationSourceIn } from "../../apps/factory/src/runtime/substrate-verification-grant";
-import type { SubstrateWorkspaceConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import {
   nativeActor,
@@ -26,10 +26,9 @@ test("native Verification uses a separate exact-job Actor and retained create ou
   process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.native.test";
   let verificationID = crypto.randomUUID();
   const attemptID = runtimeIdentity(verificationID, 1).attemptID;
-  const configuration: SubstrateWorkspaceConfiguration = {
+  const configuration: SubstrateInstallationConfiguration = {
     deployment: "owned-test",
     database: f.config.database,
-    projectID: f.projectID,
     connection: f.config.connection,
     provisioner: { ...f.config.connection, tokenFile: "/owner-token" },
     editorPrincipal: "user:system:serviceaccount:owned:factory-control",
@@ -63,6 +62,8 @@ test("native Verification uses a separate exact-job Actor and retained create ou
       request["actor"]?.["atespace"] ??
       (request["actor"]?.["metadata"] as { atespace?: string } | undefined)?.atespace;
     if (typeof name !== "string") throw new Error("Owned native namespace is missing");
+    // Verification may never suspend, resume, inspect or delete Coding's Actor.
+    expect(name).not.toBe(f.atespace);
     let activeObjects = spaces.get(name);
     if (!activeObjects) {
       activeObjects = new Map();
@@ -148,35 +149,88 @@ test("native Verification uses a separate exact-job Actor and retained create ou
     return call(method, request);
   };
   const controller = (
-    selected: SubstrateWorkspaceConfiguration,
+    selected: SubstrateInstallationConfiguration,
     provisioner: SubstrateCall = owner,
   ) =>
-    createRuntimeController(
-      f.database,
-      f.hub,
-      "owned-native-secret",
-      {
-        async prepareExecution() {
-          throw new Error("Verification cannot allocate canonical Source");
-        },
-      },
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      editor,
-      selected,
-      provisioner,
-    );
+    createRuntimeController(f.database, f.hub, "owned-native-secret", {
+      configuration: selected,
+      call: editor,
+      provisionerCall: provisioner,
+    });
   let runtime = controller(configuration);
   try {
+    await f.database.client`UPDATE factory.change_writer
+      SET state='human',user_id=${f.userID},epoch=epoch+1 WHERE change_id=${f.changeID}`;
+    let codingActor: ReturnType<typeof f.actor> | undefined;
+    await f
+      .execution(async (method) => {
+        if (method === "GetAtespace") return f.space;
+        if (method === "GetActorTemplate") return f.template;
+        if (method === "GetActorEgressPolicy")
+          return {
+            metadata: { ...f.space.metadata, name: "default", atespace: f.atespace },
+            rules: [{ tlsPassthrough: { hostnames: ["factory.test"], ports: { numbers: [443] } } }],
+          };
+        if (method === "GetActor") {
+          if (!codingActor) throw new SubstrateRPCError("NotFound", "Owned Coding Actor absent");
+          return structuredClone(codingActor);
+        }
+        if (method === "CreateActor") {
+          codingActor = f.actor();
+          return structuredClone(codingActor);
+        }
+        if (method === "ResumeActor" && codingActor) {
+          codingActor.metadata.version = "2";
+          codingActor.status = {
+            state: "ACTOR_STATE_RUNNING",
+            workerAssignment: { sandboxRuntime: f.config.runtime },
+          };
+          return { actor: structuredClone(codingActor) };
+        }
+        throw Error(`Verification touched retained Coding through ${method}`);
+      })
+      .start(f.userID);
+    if (!codingActor) throw Error("Owned Coding Actor missing");
+    const codingUID = codingActor.metadata.uid;
+    await f.database.client.begin(async (sql) => {
+      await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
+      await sql`UPDATE factory.change SET state='active' WHERE id=${f.changeID}`;
+      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${f.workspaceID},${codingUID})`;
+    });
+    const codingState = async () => ({
+      attempts: [
+        ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${f.attemptID}`),
+      ],
+      bindings: [
+        ...(await f.database
+          .client`SELECT * FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`),
+      ],
+      sources: [
+        ...(await f.database
+          .client`SELECT * FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
+      ],
+      writers: [
+        ...(await f.database
+          .client`SELECT * FROM factory.change_writer WHERE change_id=${f.changeID}`),
+      ],
+    });
+    const retainedCoding = await codingState();
     await f.database
       .client`UPDATE factory.project SET repository_url='http://forgejo.cluster.svc:3000/owned/native-verification.git' WHERE id=${f.projectID}`;
     await f.database
       .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,runner_uuid,runner_token,runner_job_handle,created_by)
       VALUES(${verificationID},${f.changeID},${"d".repeat(40)},1,1,'owned-native-verification',${crypto.randomUUID()},'owned-private-runner-token','owned-exact-job',${f.userID})`;
+    for (const query of [
+      f.database
+        .client`UPDATE factory.verification SET runner_job_handle='foreign-job' WHERE id=${verificationID}`,
+      f.database
+        .client`UPDATE factory.verification SET runner_job_handle=NULL WHERE id=${verificationID}`,
+      f.database.client`UPDATE factory.verification SET action_run_id=2 WHERE id=${verificationID}`,
+      f.database
+        .client`UPDATE factory.verification SET commit_sha=${"e".repeat(40)} WHERE id=${verificationID}`,
+    ])
+      await expect(Promise.resolve(query)).rejects.toThrow("native job binding is immutable");
     const workspaces = await f.database.client`SELECT * FROM factory.development_workspace`;
     await expect(runtime.startVerification(verificationID, crypto.randomUUID())).rejects.toThrow();
     expect(creates.size).toBe(0);
@@ -200,6 +254,7 @@ test("native Verification uses a separate exact-job Actor and retained create ou
     expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
     expect(started?.native?.portable).toBe(false);
     expect(resumes).toBe(1);
+    expect(await codingState()).toEqual(retainedCoding);
     let retainedOwnerCalls = 0;
     const scoped = controller(configuration, async () => {
       retainedOwnerCalls++;
@@ -238,9 +293,14 @@ test("native Verification uses a separate exact-job Actor and retained create ou
     expect(await f.database.client`SELECT * FROM factory.development_workspace`).toEqual(
       workspaces,
     );
-    expect(await f.database.client`SELECT * FROM factory.workspace_source`).toHaveLength(0);
-    expect(await f.database.client`SELECT * FROM factory.substrate_source`).toHaveLength(0);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source`),
+    ]).toEqual([{ source: null }]);
+    expect(await f.database.client`SELECT * FROM factory.substrate_source`).toHaveLength(1);
+    expect(await codingState()).toEqual(retainedCoding);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ worker: null }]);
     const [environment] = await f.database.client`SELECT environment,version::int AS version
       FROM factory.runtime_environment_intent WHERE runtime_attempt_id=${attemptID}`;
     expect(environment).toEqual({ environment: "development", version: 0 });
@@ -387,6 +447,8 @@ test("native Verification uses a separate exact-job Actor and retained create ou
         .client`SELECT * FROM factory.substrate_verification WHERE verification_id=${completedVerificationID} ORDER BY generation`),
     ]).toEqual(retainedGenerations);
     expect((await runtime.stop(provisioningAttemptID))?.state).toBe("stopped");
+    expect(await codingState()).toEqual(retainedCoding);
+    expect(codingActor.status.state).toBe("ACTOR_STATE_RUNNING");
   } finally {
     f.hub.revoke(attemptID);
     f.hub.revoke(provisioningAttemptID);

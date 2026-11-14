@@ -7,7 +7,7 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
-import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal as terminal } from "../fixtures/runtime-access";
 import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
@@ -653,13 +653,7 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
                   stoppedAttempts.add(attempt.id);
                 }
                 if (ownedAttempts.length) return ownedAttempts.length;
-                await removeOwnedProjectSources(database, projectID, (workspaceID) =>
-                  serverCall(
-                    callFactoryFunction(processFixture.base, "stopWorkspaceSource", [workspaceID], {
-                      cookie,
-                    }),
-                  ),
-                );
+                await requireOwnedProjectSourceRetention(database, projectID);
                 const child = Bun.spawn(
                   [
                     "kubectl",

@@ -86,15 +86,15 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 	if err != nil || !imagereference.IsNameOnly(named) || !strings.Contains(request.ImageRepository, "/") || !strings.HasSuffix(request.ImageRepository, "/"+assignment.RepositoryIdentity) {
 		return input, "", errors.New("prebuild output must be a registry repository owned by this Project")
 	}
-	owner, err := prebuildGit(ctx, assignment.WorkspaceFolder, "config", "--local", "--get", "factory.repositoryIdentity")
+	owner, err := prebuildSourceGit(ctx, assignment.WorkspaceFolder, "config", "--local", "--get", "factory.repositoryIdentity")
 	if err != nil || owner != assignment.RepositoryIdentity {
 		return input, "", errors.New("prebuild checkout belongs to a different Project")
 	}
-	commit, err := prebuildGit(ctx, assignment.WorkspaceFolder, "rev-parse", "--verify", request.Commit+"^{commit}")
+	commit, err := prebuildSourceGit(ctx, assignment.WorkspaceFolder, "rev-parse", "--verify", request.Commit+"^{commit}")
 	if err != nil || commit != request.Commit {
 		return input, "", errors.New("prebuild exact commit is unavailable")
 	}
-	tree, err := prebuildGit(ctx, assignment.WorkspaceFolder, "rev-parse", request.Commit+"^{tree}")
+	tree, err := prebuildSourceGit(ctx, assignment.WorkspaceFolder, "rev-parse", request.Commit+"^{tree}")
 	if err != nil {
 		return input, "", err
 	}

@@ -46,14 +46,6 @@ func bundleLink(name, target string) bool {
 // mappings, privileged modes, device nodes and non-user xattrs are refused,
 // never silently flattened. Docker/volumes are outside this checkout boundary.
 func bundleHeader(name string, info os.FileInfo) (*tar.Header, error) {
-	return sourceBundleHeader(name, info, false)
-}
-
-func retainedRootLockfile(name string, uid, gid int, mode int64, kind byte) bool {
-	return (name == ".devcontainer/devcontainer-lock.json" || name == ".devcontainer-lock.json") && uid == 0 && gid == 0 && mode == 0644 && kind == tar.TypeReg
-}
-
-func sourceBundleHeader(name string, info os.FileInfo, retainedLockfile bool) (*tar.Header, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Mode&07000 != 0 {
 		return nil, errors.New("unsupported Source ownership or mode")
@@ -63,9 +55,7 @@ func sourceBundleHeader(name string, info os.FileInfo, retainedLockfile bool) (*
 		return nil, errors.New("unsupported Source entry")
 	}
 	if stat.Uid != 1000 || stat.Gid != 1000 {
-		if !retainedLockfile || stat.Nlink != 1 || !retainedRootLockfile(name, int(stat.Uid), int(stat.Gid), h.Mode, h.Typeflag) {
-			return nil, errors.New("unsupported Source ownership or mode")
-		}
+		return nil, errors.New("unsupported Source ownership or mode")
 	}
 	h.Name, h.Uid, h.Gid, h.Uname, h.Gname = name, int(stat.Uid), int(stat.Gid), "", ""
 	h.Format = tar.FormatPAX
@@ -241,26 +231,6 @@ func (source *Source) verifyBundleChildren(name string, expected []string) error
 // fenced. Actor callers additionally stop/drain their private Docker containers
 // and serialize Parent Git operations before reaching this operation.
 func (source *Source) ExportBundle(output *os.File) (Bundle, error) {
-	return source.exportBundle(output, false)
-}
-
-// ExportRetainedLockfileBundle is a recovery-only archive, never a v1 Source
-// generation. Its one additional metadata case is the observed CLI-generated
-// root:root 0644 regular lockfile. It preserves ownership rather than projecting
-// it, and requires private root to read with O_NOATIME. Normal Source services
-// remain development UID 1000 and continue refusing this metadata.
-func (source *Source) ExportRetainedLockfileBundle(output *os.File) (Bundle, error) {
-	if os.Geteuid() != 0 {
-		return Bundle{}, errors.New("retained Source preservation requires private root")
-	}
-	bundle, err := source.exportBundle(output, true)
-	if err == nil {
-		bundle.Version = 2
-	}
-	return bundle, err
-}
-
-func (source *Source) exportBundle(output *os.File, retainedLockfile bool) (Bundle, error) {
 	source.life.RLock()
 	defer source.life.RUnlock()
 	source.writes.Lock()
@@ -293,7 +263,7 @@ func (source *Source) exportBundle(output *os.File, retainedLockfile bool) (Bund
 		if err != nil {
 			return err
 		}
-		h, err := sourceBundleHeader(name, info, retainedLockfile)
+		h, err := bundleHeader(name, info)
 		if err != nil {
 			return err
 		}
@@ -481,20 +451,6 @@ func InspectBundle(file *os.File) (Bundle, error) {
 // through an existing tree, follows archive links, reclones, or deletes old data.
 // The caller publishes this directory only after complete validation succeeds.
 func MaterializeBundle(input *os.File, destination string) error {
-	return materializeBundle(input, destination, false)
-}
-
-// Recovery qualification only. No existing Source owner invokes this function,
-// and it never publishes over a canonical tree. Non-root materialization cannot
-// silently flatten the archived root ownership to the development identity.
-func MaterializeRetainedLockfileBundle(input *os.File, destination string) error {
-	if os.Geteuid() != 0 {
-		return errors.New("retained Source materialization requires private root")
-	}
-	return materializeBundle(input, destination, true)
-}
-
-func materializeBundle(input *os.File, destination string, retainedLockfile bool) error {
 	if _, err := input.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -514,7 +470,7 @@ func materializeBundle(input *os.File, destination string, retainedLockfile bool
 		if !bundlePath(h.Name) || h.Mode < 0 || h.Mode & ^int64(0777) != 0 || len(items) >= maxSourceEntries {
 			return ErrPath
 		}
-		if (h.Uid != 1000 || h.Gid != 1000) && (!retainedLockfile || !retainedRootLockfile(h.Name, h.Uid, h.Gid, h.Mode, h.Typeflag)) {
+		if h.Uid != 1000 || h.Gid != 1000 {
 			return ErrPath
 		}
 		if _, exists := items[h.Name]; exists {

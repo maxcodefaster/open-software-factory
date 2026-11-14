@@ -1,11 +1,11 @@
-import { projectDevelopmentAuthorityIn } from "../../access/controller";
 import { factoryRequestURL } from "../../request-origin";
 import {
   runtimeSourcePath,
   serveRuntimeRepository,
   validRuntimeSourceCapability,
 } from "../../runtime/git-http";
-import { substrateTicketSourceIn } from "../../runtime/substrate-grant";
+import { substrateWorkspaceSourceIn } from "../../runtime/substrate-grant";
+import { substrateIsolatedSourceIn } from "../../runtime/substrate-isolated-grant";
 import { substratePrebuildSourceIn } from "../../runtime/substrate-prebuild-grant";
 import { substrateVerificationSourceIn } from "../../runtime/substrate-verification-grant";
 import { personalGitRepository } from "../../workspace/personal-git";
@@ -40,11 +40,6 @@ export function createInternalProtocol(services: InternalServices) {
   return async (request: Request): Promise<Response> => {
     try {
       const url = factoryRequestURL(request, factoryOrigin);
-      const nativePreservation = url.pathname.match(
-        /^\/internal\/substrate-source\/([0-9a-f-]{36})\/preserve$/,
-      );
-      if (nativePreservation?.[1])
-        return workspaceSources.nativePreservation(request, nativePreservation[1]);
       const nativeSource = url.pathname.match(/^\/internal\/substrate-source\/([0-9a-f-]{36})$/);
       if (nativeSource?.[1]) return workspaceSources.nativeRestore(request, nativeSource[1]);
       const publicationCredentials = new URL(request.url).pathname.match(
@@ -65,19 +60,6 @@ export function createInternalProtocol(services: InternalServices) {
       const projectImage = url.pathname.match(/^\/internal\/project-image\/([0-9a-f-]{36})$/);
       if (projectImage?.[1]) return projectPreparation.endpoint(request, projectImage[1]);
       const _sourceEvent = url.pathname.match(/^\/api\/wiki\/source-events\/([0-9a-f-]{36})$/);
-      const sourceRepository = url.pathname.match(
-        /^\/internal\/workspace-source\/([0-9a-f-]{36})\/([1-9][0-9]*)\/([0-9a-f]{64})(?:\/|$)/,
-      );
-      if (sourceRepository?.[1] && sourceRepository[2] && sourceRepository[3]) {
-        const prefix = `/internal/workspace-source/${sourceRepository[1]}/${sourceRepository[2]}/${sourceRepository[3]}`;
-        return workspaceSources.repository(
-          request,
-          sourceRepository[1],
-          sourceRepository[2],
-          sourceRepository[3],
-          prefix,
-        );
-      }
       const modelRelay = url.pathname.match(
         /^\/internal\/model\/([0-9a-f-]+)\/v1\/(chat\/completions|responses|messages)$/,
       );
@@ -120,21 +102,11 @@ export function createInternalProtocol(services: InternalServices) {
         const rows = await database.client<
           Array<{
             repositoryUrl: string;
-            substrate: boolean;
-            userID: string;
-            projectID: string;
-            nativeBound: boolean;
             verificationID: string | null;
             isolatedKind: string | null;
           }>
         >`
-        SELECT project.repository_url AS "repositoryUrl",attempt.substrate,attempt.created_by AS "userID",attempt.project_id AS "projectID",attempt.verification_id AS "verificationID",attempt.isolated_kind AS "isolatedKind",
-          EXISTS(SELECT 1 FROM factory.development_workspace w JOIN factory.substrate_binding b ON b.runtime_attempt_id=attempt.id
-            JOIN factory.substrate_workspace p ON p.workspace_id=w.id
-            WHERE w.id=attempt.workspace_id AND w.substrate AND w.kind='personal' AND w.owner_user_id=attempt.created_by
-              AND p.intent->>'repositoryURL'=project.repository_url
-              AND b.actor_uid IS NOT NULL AND NOT b.create_rejected AND b.delete_intended_at IS NULL
-              AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=w.id AND newer.generation>attempt.generation)) AS "nativeBound"
+        SELECT project.repository_url AS "repositoryUrl",attempt.verification_id AS "verificationID",attempt.isolated_kind AS "isolatedKind"
         FROM factory.runtime_attempt attempt
         JOIN factory.project project ON project.id = attempt.project_id
         WHERE attempt.id = ${attemptID}
@@ -143,28 +115,23 @@ export function createInternalProtocol(services: InternalServices) {
       `;
         const repository = rows[0];
         if (!repository) return new Response("Not found", { status: 404 });
-        if (repository.substrate) {
-          const granted = await database.client
-            .begin(async (sql) => {
-              if (repository.isolatedKind === "prebuild")
-                return (
-                  (await substratePrebuildSourceIn(sql, attemptID)) === repository.repositoryUrl
-                );
-              if (repository.verificationID)
-                return (
-                  (await substrateVerificationSourceIn(sql, attemptID)) === repository.repositoryUrl
-                );
-              if (!repository.nativeBound)
-                return (
-                  (await substrateTicketSourceIn(database, sql, attemptID)) ===
-                  repository.repositoryUrl
-                );
-              await projectDevelopmentAuthorityIn(sql, repository.userID, repository.projectID);
-              return true;
-            })
-            .catch(() => false);
-          if (!granted) return new Response("Not found", { status: 404 });
-        }
+        const granted = await database.client
+          .begin(async (sql) => {
+            if (repository.isolatedKind === "staging" || repository.isolatedKind === "publication")
+              return (await substrateIsolatedSourceIn(sql, attemptID)) === repository.repositoryUrl;
+            if (repository.isolatedKind === "prebuild")
+              return (await substratePrebuildSourceIn(sql, attemptID)) === repository.repositoryUrl;
+            if (repository.verificationID)
+              return (
+                (await substrateVerificationSourceIn(sql, attemptID)) === repository.repositoryUrl
+              );
+            return (
+              (await substrateWorkspaceSourceIn(database, sql, attemptID)) ===
+              repository.repositoryUrl
+            );
+          })
+          .catch(() => false);
+        if (!granted) return new Response("Not found", { status: 404 });
         return serveRuntimeRepository(
           request,
           repository.repositoryUrl.startsWith("file://")

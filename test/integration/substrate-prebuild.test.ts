@@ -6,7 +6,7 @@ import { createRuntimeController } from "../../apps/factory/src/runtime/controll
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { createSubstratePrebuild } from "../../apps/factory/src/runtime/substrate-prebuild";
 import { substratePrebuildSourceIn } from "../../apps/factory/src/runtime/substrate-prebuild-grant";
-import type { SubstrateWorkspaceConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import {
   runtimeConnectorTokens,
   runtimeIdentity,
@@ -16,11 +16,13 @@ import {
   type SubstrateCall,
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
+import upstream from "../../upstream.json";
 import { substrateFixture } from "../fixtures/substrate";
 
 async function publicationEnvironment(
   f: Awaited<ReturnType<typeof substrateFixture>>,
   environment: "development" | "main-preview",
+  publish = true,
 ) {
   const secretKey = `owned-native-prebuild-${crypto.randomUUID()}`;
   const manifest = {
@@ -30,6 +32,7 @@ async function publicationEnvironment(
         host: "registry.test",
         username: "owned-publisher",
         verification: false,
+        publish,
         hasPassword: true,
         hasCertificate: false,
       },
@@ -43,8 +46,13 @@ async function publicationEnvironment(
   });
 }
 
-test("native prebuild retains exact inputs, lost-create outcomes, scoped grants, publication and UID-confirmed cleanup without a Workspace or legacy capacity", async () => {
+async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
   const f = await substrateFixture();
+  const runtimeArchitecture = f.config.runtime.version.attributes.find(
+    (attribute) => attribute.key === "architecture",
+  );
+  if (!runtimeArchitecture) throw new Error("Owned runtime architecture is missing");
+  runtimeArchitecture.value = architecture;
   const directory = await mkdtemp(join(tmpdir(), "native-prebuild-"));
   const ca = join(directory, "ca.pem");
   await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test-ca\n-----END CERTIFICATE-----\n");
@@ -149,10 +157,9 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     expect(["CreateAtespace", "CreateAtespaceAccessPolicy"]).not.toContain(method);
     return call(method, request);
   };
-  const configuration: SubstrateWorkspaceConfiguration = {
+  const configuration: SubstrateInstallationConfiguration = {
     deployment: "fresh-workspaces",
     database: f.config.database,
-    projectID: f.projectID,
     connection: f.config.connection,
     provisioner: { ...f.config.connection, tokenFile: "/unused/owner" },
     editorPrincipal: "user:system:serviceaccount:factory:owned-editor",
@@ -169,36 +176,21 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     },
     egressHosts: ["registry.test"],
   };
-  const controller = (selected: SubstrateWorkspaceConfiguration, provisioner = owner) =>
-    createRuntimeController(
-      f.database,
-      f.hub,
-      secret,
-      {
-        async prepareExecution() {
-          throw new Error("Native prebuild cannot prepare legacy Source");
+  const controller = (selected: SubstrateInstallationConfiguration, provisioner = owner) =>
+    createRuntimeController(f.database, f.hub, secret, {
+      configuration: selected,
+      call: editor,
+      provisionerCall: provisioner,
+      capacity: {
+        async ensure() {
+          return { ready: [], refused: [] };
         },
-      },
-      {
-        async apply() {
-          throw new Error("Native prebuild cannot create legacy resources");
-        },
-      } as never,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      editor,
-      selected,
-      provisioner,
-      {
         async requireReady() {
           admissionChecks++;
           if (admissionBlocked) throw new Error("owned native capacity occupied");
         },
-      } as never,
-    );
+      },
+    });
   let runtime = controller(configuration);
   const preparation = createProjectPreparation({
     database: f.database,
@@ -242,7 +234,7 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     for (const kind of ["Atespace", "AtespaceAccessPolicy", "ActorTemplate", "Actor"])
       expect(creates.get(kind)).toBe(1);
     const [attempt] = await f.database
-      .client`SELECT id,state,workspace_id,change_id,isolated_kind,substrate,factorybox_worker_id,factorybox_admission_id
+      .client`SELECT id,state,workspace_id,change_id,isolated_kind,substrate
       FROM factory.runtime_attempt WHERE id=${attemptID}`;
     expect(attempt).toEqual({
       id: attemptID,
@@ -251,8 +243,6 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
       change_id: null,
       isolated_kind: "prebuild",
       substrate: true,
-      factorybox_worker_id: null,
-      factorybox_admission_id: null,
     });
     expect(await source()).toBe("https://example.invalid/fixture.git");
     await f.database
@@ -267,7 +257,7 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     const bootstrap = JSON.parse(template.containers[0]?.env[0]?.value ?? "null");
     expect(bootstrap.assignment.prebuild).toEqual({
       id: preparationID,
-      platform: "linux/amd64",
+      platform: `linux/${architecture}`,
       imageRepository: `registry.test/open-factory/prebuilds/${f.projectID}`,
     });
     expect(bootstrap.assignment.channels).toEqual([
@@ -279,6 +269,17 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     // entrypoint. Source handoff is false, so this validates/returns without
     // reading Source, starting Docker or requiring native control credentials.
     const connector = join(directory, "connector");
+    const dockerVersion = Bun.spawn(
+      ["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const platform = (await new Response(dockerVersion.stdout).text()).trim();
+    expect(await dockerVersion.exited).toBe(0);
+    if (!/^linux\/(amd64|arm64)$/.test(platform))
+      throw new Error("Bootstrap validation requires a supported Linux Docker host");
     const build = Bun.spawn(
       ["go", "build", "-trimpath", "-o", connector, "./cmd/factory-runtime-connector"],
       {
@@ -288,6 +289,8 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
           HOME: process.env["HOME"],
           TMPDIR: process.env["TMPDIR"],
           CGO_ENABLED: "0",
+          GOOS: "linux",
+          GOARCH: platform.split("/")[1],
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -299,16 +302,91 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     ]);
     expect(await build.exited, buildOutput.join("\n")).toBe(0);
     const validate = async (value: unknown) => {
-      const process = Bun.spawn([connector, "native-source-restore"], {
-        env: { FACTORY_SUBSTRATE_BOOTSTRAP: JSON.stringify(value) },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const output = await Promise.all([
-        new Response(process.stdout).text(),
-        new Response(process.stderr).text(),
-      ]);
-      return { status: await process.exited, output: output.join("\n") };
+      const owner = crypto.randomUUID();
+      const name = `factory-bootstrap-validate-${owner}`;
+      console.info(`Owned bootstrap validation intended: ${name}`);
+      const child = Bun.spawn(
+        [
+          "docker",
+          "run",
+          "--rm",
+          "--name",
+          name,
+          "--label",
+          `factory.bootstrap-validate=${owner}`,
+          "--platform",
+          platform,
+          "--network",
+          "none",
+          "--read-only",
+          "--cap-drop",
+          "ALL",
+          "--security-opt",
+          "no-new-privileges",
+          "--mount",
+          `type=bind,src=${connector},dst=/connector,readonly`,
+          "--env",
+          "FACTORY_SUBSTRATE_BOOTSTRAP",
+          "--entrypoint",
+          "/connector",
+          upstream.node.image,
+          "native-source-restore",
+        ],
+        {
+          // Only the explicitly named fixture bootstrap enters the container.
+          // No source, Docker socket or Factory/model credential is mounted.
+          env: { ...process.env, FACTORY_SUBSTRATE_BOOTSTRAP: JSON.stringify(value) },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const interrupted = () => {
+        if (child.exitCode === null) child.kill("SIGTERM");
+      };
+      process.once("SIGINT", interrupted);
+      process.once("SIGTERM", interrupted);
+      const cleanup = async () => {
+        const listing = Bun.spawn(
+          [
+            "docker",
+            "container",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--filter",
+            `name=^${name}$`,
+            "--format",
+            '{{.ID}} {{.Names}} {{.Label "factory.bootstrap-validate"}}',
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const observed = (await new Response(listing.stdout).text()).trim();
+        await new Response(listing.stderr).text();
+        if ((await listing.exited) !== 0)
+          throw new Error("Bootstrap validation cleanup observation is unavailable");
+        if (!observed) return;
+        const [id, observedName, label] = observed.split(" ");
+        if (observedName !== name || label !== owner || !id || !/^[a-f0-9]{64}$/.test(id))
+          throw new Error("Bootstrap validation ownership changed");
+        const removed = Bun.spawn(["docker", "rm", "--force", id], {
+          stdout: "ignore",
+          stderr: "pipe",
+        });
+        await new Response(removed.stderr).text();
+        if ((await removed.exited) !== 0)
+          throw new Error("Owned bootstrap validation cleanup is unconfirmed");
+      };
+      try {
+        const output = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        return { status: await child.exited, output: output.join("\n") };
+      } finally {
+        process.off("SIGINT", interrupted);
+        process.off("SIGTERM", interrupted);
+        await cleanup();
+      }
     };
     const validated = await validate(bootstrap);
     expect(validated.status, validated.output).toBe(0);
@@ -398,13 +476,11 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     expect(await f.database.client`SELECT * FROM factory.development_workspace`).toEqual(
       workspaces,
     );
-    for (const table of [
-      "workspace_source",
-      "substrate_source",
-      "factorybox_worker",
-      "runtime_artifact_intent",
-    ])
-      expect(await f.database.client.unsafe(`SELECT * FROM factory.${table}`)).toHaveLength(0);
+    expect(await f.database.client`SELECT * FROM factory.substrate_source`).toHaveLength(0);
+    for (const table of ["workspace_source", "factorybox_worker", "runtime_artifact_intent"])
+      expect([
+        ...(await f.database.client`SELECT to_regclass(${`factory.${table}`}) AS relation`),
+      ]).toEqual([{ relation: null }]);
     await expect(
       Promise.resolve(
         f.database
@@ -443,9 +519,20 @@ test("native prebuild retains exact inputs, lost-create outcomes, scoped grants,
     await f.dispose();
     await rm(directory, { recursive: true, force: true });
   }
-}, 60_000);
+}
 
-for (const outcome of ["rejected", "unknown", "missing-publication-grant"] as const)
+test.each(["amd64", "arm64"] as const)(
+  "native %s prebuild retains exact inputs, lost-create outcomes, scoped grants, publication and UID-confirmed cleanup without a Workspace or legacy capacity",
+  qualifyNativePrebuild,
+  60_000,
+);
+
+for (const outcome of [
+  "rejected",
+  "unknown",
+  "missing-publication-grant",
+  "pull-only-publication-grant",
+] as const)
   test(`native prebuild retains an ${outcome} provisioning dispatch instead of creating again or adopting a successor`, async () => {
     const f = await substrateFixture();
     const directory = await mkdtemp(join(tmpdir(), "native-prebuild-refusal-"));
@@ -491,17 +578,25 @@ for (const outcome of ["rejected", "unknown", "missing-publication-grant"] as co
       call,
     );
     try {
-      if (outcome !== "missing-publication-grant") await publicationEnvironment(f, "development");
+      if (outcome !== "missing-publication-grant")
+        await publicationEnvironment(f, "development", outcome !== "pull-only-publication-grant");
       await f.database
         .client`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version)
         VALUES(${preparationID},${f.projectID},'development',${"a".repeat(40)},${outcome === "missing-publication-grant" ? 0 : 1})`;
-      if (outcome === "missing-publication-grant") {
+      if (outcome === "missing-publication-grant" || outcome === "pull-only-publication-grant") {
         await expect(native.start(preparationID)).rejects.toThrow(
           "Project Environment registry publication grant",
         );
         expect(creates).toBe(0);
         expect(await f.database.client`SELECT * FROM factory.substrate_prebuild`).toHaveLength(0);
         expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+        const [skipped] = await f.database.client`
+          SELECT state,failure FROM factory.project_image_preparation WHERE id=${preparationID}`;
+        expect(skipped).toEqual({
+          state: "unsupported",
+          failure:
+            "Prepared image publication is not authorized in this Environment. Normal Dev Container startup remains available.",
+        });
         return;
       }
       await expect(native.start(preparationID)).rejects.toThrow("owned unsettled create");

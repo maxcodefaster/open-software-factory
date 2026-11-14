@@ -3,16 +3,34 @@
     "release": "v1.0.0",
     "commit": "b34fbee742906494b5eb4f1f36987176bf8770a4",
     "workerImage": "ghcr.io/agent-substrate/substrate/ateworker-gvisor@sha256:f8987236c6256f58c4b2625e543b43f4ae4bdded6ee6821c03d966effb7c0f17",
-    "workerSha256": "bcbe90cd52dd71f23d6449538cb2611fa865457ced36c7029be408f952b43102",
-    "cliSha256": "9f2444d8c9327cf3efa13d46468f6d83b856c5080017a29747249e1220605569"
+    "architectures": {
+      "amd64": {
+        "workerSha256": "bcbe90cd52dd71f23d6449538cb2611fa865457ced36c7029be408f952b43102",
+        "cliSha256": "9f2444d8c9327cf3efa13d46468f6d83b856c5080017a29747249e1220605569"
+      },
+      "arm64": {
+        "workerSha256": "5542aaa7673689077986bc722b2b1fa6c1eee4fb94abe690ae07f716d108e539",
+        "cliSha256": "7a475bc2592e7ad8eed15c8a27fb5c8986d6ed634b8415e07df7406259b76737"
+      }
+    }
   },
   "gvisor": {
     "version": "nightly-20261109-975fb172241c",
     "commit": "975fb172241c7946a9f67b4f52e0349d9240589a",
-    "url": "https://storage.googleapis.com/gvisor/releases/nightly/2026-11-09/x86_64/gvisor.tar.zstd",
-    "sha256": "1d9120e4aa42ff7d9653f3f265219b68bd1674a23cee389c6a935ce7357ba9b5",
-    "sha512": "02fb9b8b49fc2bdcb7ff9f2a8a4159219f416c0f670ffc54c401651e53081454d3fbce54d7783bd2c3d1bf246fd677d9ec04934e3c3f64605050b26dd433b114",
-    "runscSha256": "4b2be59adc0da986d3dbb2e081bbf73e986e943fe9c4fa1b1433c72fb18100f0"
+    "architectures": {
+      "amd64": {
+        "url": "https://storage.googleapis.com/gvisor/releases/nightly/2026-11-09/x86_64/gvisor.tar.zstd",
+        "sha256": "1d9120e4aa42ff7d9653f3f265219b68bd1674a23cee389c6a935ce7357ba9b5",
+        "sha512": "02fb9b8b49fc2bdcb7ff9f2a8a4159219f416c0f670ffc54c401651e53081454d3fbce54d7783bd2c3d1bf246fd677d9ec04934e3c3f64605050b26dd433b114",
+        "runscSha256": "4b2be59adc0da986d3dbb2e081bbf73e986e943fe9c4fa1b1433c72fb18100f0"
+      },
+      "arm64": {
+        "url": "https://storage.googleapis.com/gvisor/releases/nightly/2026-11-09/aarch64/gvisor.tar.zstd",
+        "sha256": "92bfb81fecb71248a2ccebe78652cc0219c33c8fd62b708666c66c1bbac3c22d",
+        "sha512": "a3ac3300c1fcfe143dd48d3879961116b060fca3ae8f7a3b9d4ee6d9fa58317315e85a266804410d6a11b6f36a854de1e518fb297e27f2a0aa80cab5b5bd4bfb",
+        "runscSha256": "2e6c023727e626fbb2dcb6eeb8448e438276e0506e7d45ed5479e38af4bc00e5"
+      }
+    }
   },
   "envoy": {
     "version": "1.39.5",

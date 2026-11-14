@@ -41,7 +41,12 @@ export function createChangeController(
   protectNewBranch?: (changeID: string) => Promise<void>,
   forgeOverride?: ReturnType<typeof createForgejoClient>,
 ) {
-  const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
+  const {
+    FACTORY_FORGEJO_API_URL,
+    FACTORY_FORGEJO_PUBLIC_URL,
+    FACTORY_FORGEJO_TOKEN,
+    FACTORY_FORGEJO_OWNER,
+  } = process.env;
   if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER) {
     throw new Error("Forgejo configuration is required");
   }
@@ -51,6 +56,10 @@ export function createChangeController(
       apiURL: FACTORY_FORGEJO_API_URL,
       token: FACTORY_FORGEJO_TOKEN,
     });
+  const forgeOrigins = new Set([
+    new URL(FACTORY_FORGEJO_API_URL).origin,
+    ...(FACTORY_FORGEJO_PUBLIC_URL ? [new URL(FACTORY_FORGEJO_PUBLIC_URL).origin] : []),
+  ]);
   const running = new Set<string>();
   const cancellationObservers = new Set<string>();
   const retries = new Map<string, ReturnType<typeof setTimeout>>();
@@ -517,9 +526,19 @@ export function createChangeController(
         `;
         if (!input)
           throw new CommandError("conflict", "Ticket requires an approved Requirement Revision");
-        const repository = forgeRepositoryFromURL(input.repositoryURL);
-        if (new URL(input.repositoryURL).origin !== new URL(FACTORY_FORGEJO_API_URL).origin)
+        const url = new URL(input.repositoryURL);
+        const parts = url.pathname.split("/").slice(1).map(decodeURIComponent);
+        if (
+          !forgeOrigins.has(url.origin) ||
+          url.username ||
+          url.password ||
+          url.search ||
+          url.hash ||
+          parts.length !== 2 ||
+          parts.some((part) => !part || part === "." || part === ".." || /[/\\\0]/.test(part))
+        )
           throw new Error("Project repository is not on the configured Forge");
+        const repository = forgeRepositoryFromURL(input.repositoryURL);
         if (repository.owner !== FACTORY_FORGEJO_OWNER)
           throw new Error("Project Forge owner is not allowed");
         // Resolve the current default only after waiting for the Ticket and checking delivered prerequisites.

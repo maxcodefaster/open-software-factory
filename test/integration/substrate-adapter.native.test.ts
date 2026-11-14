@@ -42,7 +42,7 @@ const liveSchema = z.object({
   runtime: nativeRuntime,
 });
 
-test("owned native Substrate gRPC through Factory Start/Connector registration/Suspend/Resume/Delete", async () => {
+test("owned native Substrate adapter gRPC/Connector registration/Suspend/Resume/Delete", async () => {
   const file = process.env["FACTORY_SUBSTRATE_NATIVE_FIXTURE"];
   if (!file)
     throw new Error("FACTORY_SUBSTRATE_NATIVE_FIXTURE must name a prepared, owned native fixture");
@@ -85,7 +85,7 @@ test("owned native Substrate gRPC through Factory Start/Connector registration/S
     channels: [{ name: "ide", kind: "ide", target: "", healthPath: "" }],
     processes: [],
   };
-  let c: ReturnType<typeof f.controller> | undefined;
+  let c: ReturnType<typeof f.execution> | undefined;
   const roles = new Set<string>();
   const connections: Array<{ role: string; id: string }> = [];
   const phases: unknown[] = [];
@@ -216,12 +216,13 @@ test("owned native Substrate gRPC through Factory Start/Connector registration/S
         actorTemplate: { atespace: f.atespace, name: "runtime" },
       }),
     ).rejects.toBeInstanceOf(SubstrateRPCError);
-    c = f.controller();
-    const started = await c.start(f.projectID, f.userID);
-    originalUID = started?.native?.actorUID;
+    c = f.execution();
+    expect(await c.start(f.userID)).toBe(f.attemptID);
+    const started = await c.get();
+    originalUID = started.actorUID;
     expect(originalUID).toBeTruthy();
     if (!originalUID) throw new Error("Factory did not retain the native Actor UID");
-    expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
+    expect(started.state).toBe("ACTOR_STATE_RUNNING");
     const actorRef = { atespace: f.atespace, name: `runtime-${f.attemptID.replaceAll("-", "")}` };
     const metadata = z
       .object({ metadata: z.object({ uid: z.uuid(), version: z.string() }) })
@@ -307,20 +308,22 @@ test("owned native Substrate gRPC through Factory Start/Connector registration/S
         (error) => writeFile(`${live.directory}/connector-network.log`, String(error)),
       );
     }
-    const paused = await c.pause(f.attemptID);
-    expect(paused?.state).toBe("paused");
-    expect(paused?.native?.portable).toBe(false);
+    await c.suspend();
+    const paused = await c.get();
+    expect(paused.state).toBe("ACTOR_STATE_SUSPENDED");
+    expect(paused.portable).toBe(false);
     const [checkpoint] = await f.database
       .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
     expect(checkpoint?.["checkpoint"].actorUID).toBe(originalUID);
-    await c.resumeForApp(f.attemptID, f.userID);
-    expect((await c.get(f.attemptID))?.native?.actorUID).toBe(originalUID);
+    await c.resume(f.userID);
+    expect((await c.get()).actorUID).toBe(originalUID);
     const reconnected = () =>
       ["parent", "child"].every((role) => connections.filter((c) => c.role === role).length >= 2);
     const reconnectDeadline = Date.now() + 30_000;
     while (!reconnected() && Date.now() < reconnectDeadline) await Bun.sleep(200);
     expect(reconnected()).toBe(true);
-    expect((await c.stop(f.attemptID))?.state).toBe("stopped");
+    await c.stop();
+    expect((await c.get()).state).toBe("deleted");
     await writeFile(
       `${live.directory}/native-result.json`,
       JSON.stringify(
@@ -349,7 +352,7 @@ test("owned native Substrate gRPC through Factory Start/Connector registration/S
   } finally {
     // Stop only this Factory-bound original. Operator metadata below is not
     // passed to Actors or to the normal editor-scoped gRPC bridge.
-    if (c && originalUID) await c.stop(f.attemptID).catch(() => undefined);
+    if (c && originalUID) await c.stop().catch(() => undefined);
     server.stop(true);
     await closeRelay();
     if (spaceCreated)

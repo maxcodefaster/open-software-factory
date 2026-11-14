@@ -2,27 +2,35 @@
 // context, proves the installation works through its public readiness, a browser sign-in, OpenBao
 // and a backup, then removes exactly what it created.
 //
-//   mise exec -- bun run release:clean-room --factory-image REF@sha256:... --node NODE
-//   mise exec -- bun run release:clean-room --chart ./factory-0.1.0-beta.1.tgz --node NODE
+//   mise exec -- bun run release:clean-room --factory-image REF@sha256:... --native-fixture FILE --node NODE
+//   mise exec -- bun run release:clean-room --chart ./factory-0.1.0-beta.1.tgz --native-fixture FILE --node NODE
 //   mise exec -- bun run release:clean-room --cleanup factory-cleanroom-<8 hex>
 //
 // The Namespace carries an owner label and its UID is recorded. Cleanup verifies both before it
-// deletes anything, and it deletes by exact name only. No retained installation, Namespace or
+// deletes anything, and every deletion requires the original resource UID. No retained installation, Namespace or
 // volume is read for its identity or touched. The admin password is read from the new
 // installation's Secret, handed to the browser and never printed or written.
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { connectLocalFactory } from "../kubernetes/connect";
 import { checkSet } from "../kubernetes/restore-check";
-import { type Cluster, cluster, pipe, run, until } from "../kubernetes/restore-rehearsal-cluster";
+import { withDockerBackupReader } from "./clean-room-backup";
 import { browserJourney } from "./clean-room-browser";
 import {
+  type Cluster,
+  cluster,
+  pipe,
+  type RunOptions,
+  removeCleanRoomContainer,
+  run,
+  testCleanRoomChart,
+  until,
+} from "./clean-room-cluster";
+import {
+  backupJobName,
   type Check,
   type CleanupState,
-  type Options,
-  backupJobName,
   capacityVerdict,
   chartName,
   classifyClaims,
@@ -40,6 +48,7 @@ import {
   listSetsScript,
   namespaceManifest,
   newestSet,
+  type Options,
   openbaoVerdict,
   ownedClusterObjects,
   ownedRuntimeNamespaces,
@@ -52,6 +61,8 @@ import {
   receiptPath,
   redact,
   releaseName,
+  requireCleanRoomNativeInventory,
+  requireNativeChart,
   runtimeNamespacesNotAttributed,
   serializeReceipt,
   totalMiB,
@@ -59,7 +70,12 @@ import {
   type Values,
   verifyOwnedNamespace,
 } from "./clean-room-model";
-import { workerRelease } from "./package-chart";
+import {
+  createNativeCleanRoomSecrets,
+  prepareNativeCleanRoom,
+  requireFreshNativeIngress,
+} from "./clean-room-native";
+import { packageFactoryChart } from "./package-chart";
 
 const root = resolve(import.meta.dir, "../..");
 const log = (message: string) =>
@@ -67,15 +83,6 @@ const log = (message: string) =>
 const name = chartName(releaseName);
 
 class StepFailed extends Error {}
-
-function freePorts(count: number) {
-  const servers = Array.from({ length: count }, () =>
-    Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }),
-  );
-  const ports = servers.map((server) => server.port);
-  for (const server of servers) server.stop(true);
-  return ports;
-}
 
 async function sha256(path: string) {
   return createHash("sha256")
@@ -88,6 +95,7 @@ async function sha256(path: string) {
 type Ownership = {
   claims: { namespace: string; name: string; uid: string }[];
   runtime: { name: string; uid: string }[];
+  cluster: { kind: "clusterrole" | "clusterrolebinding"; name: string; uid: string }[];
   unexpectedClaims: string[];
 };
 
@@ -95,20 +103,20 @@ type Items<T> = { items: T[] };
 type NamespaceItem = { metadata: { name: string; uid: string; labels?: Record<string, string> } };
 type ClaimItem = { metadata: { name: string; uid: string } };
 
-// The installation's own database records the UID of every Namespace it asked Kubernetes for. That
-// UID is the only thing that ties a Factory-created worker or editor Namespace to this run.
+// Only independent IDEs are Kubernetes Namespaces. Native execution resources
+// require a separate native cleanup proof, not a Kubernetes namespace sweep.
 async function gatherOwnership(cl: Cluster, namespace: string): Promise<Ownership> {
   const listClaims = async (target: string) => {
     const found = await cl.kubectl(["-n", target, "get", "pvc", "-o", "json"], {
       allowFailure: true,
     });
-    return found.code === 0
-      ? (JSON.parse(found.stdout) as Items<ClaimItem>).items.map((item) => ({
-          namespace: target,
-          name: item.metadata.name,
-          uid: item.metadata.uid,
-        }))
-      : [];
+    if (found.code !== 0)
+      throw Error("Owned claim inventory is unavailable; installation retained");
+    return (JSON.parse(found.stdout) as Items<ClaimItem>).items.map((item) => ({
+      namespace: target,
+      name: item.metadata.name,
+      uid: item.metadata.uid,
+    }));
   };
   const claims = await listClaims(namespace);
   const recorded = await cl.kubectl(
@@ -126,22 +134,40 @@ async function gatherOwnership(cl: Cluster, namespace: string): Promise<Ownershi
       "-X",
       "-At",
       "-c",
-      "SELECT namespace_uid FROM factory.factorybox_worker WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.workspace_source WHERE namespace_uid IS NOT NULL UNION SELECT namespace_uid FROM factory.developer_ide WHERE namespace_uid IS NOT NULL",
+      `SELECT 'native-resources-present' WHERE EXISTS(
+        SELECT 1 FROM factory.substrate_workspace UNION ALL SELECT 1 FROM factory.substrate_prebuild
+        UNION ALL SELECT 1 FROM factory.substrate_verification UNION ALL SELECT 1 FROM factory.substrate_isolated
+        UNION ALL SELECT 1 FROM factory.substrate_worker_capacity UNION ALL SELECT 1 FROM factory.substrate_binding)
+        UNION SELECT namespace_uid FROM factory.developer_ide WHERE namespace_uid IS NOT NULL`,
     ],
     { allowFailure: true },
   );
-  const uids = new Set(recorded.stdout.split("\n").filter(Boolean));
-  const namespaces = await cl.kubectl(["get", "namespaces", "-o", "json"], { allowFailure: true });
-  const runtime = uids.size
-    ? ownedRuntimeNamespaces(
-        namespaces.code === 0 ? (JSON.parse(namespaces.stdout) as Items<NamespaceItem>).items : [],
-        uids,
-      )
-    : [];
+  const uids = requireCleanRoomNativeInventory(recorded);
+  const namespaces = uids.size
+    ? ((await cl.json(["get", "namespaces"])) as Items<NamespaceItem>)
+    : { items: [] };
+  const runtime = uids.size ? ownedRuntimeNamespaces(namespaces.items, uids) : [];
   for (const item of runtime) claims.push(...(await listClaims(item.name)));
+  const id = cleanRoomIDFromNamespace(namespace);
+  if (!id) throw Error("Owned clean-room Namespace is missing");
+  const names = clusterObjectNames(id, releaseName);
+  const clusterObjects: Ownership["cluster"] = [];
+  for (const [kind, expected] of [
+    ["clusterrole", names.clusterRoles],
+    ["clusterrolebinding", names.clusterRoleBindings],
+  ] as const) {
+    const listed = (await cl.json(["get", kind])) as Items<NamespaceItem>;
+    for (const name of ownedClusterObjects(listed.items, expected, releaseName)) {
+      const item = listed.items.find((item) => item.metadata.name === name);
+      if (!item?.metadata.uid)
+        throw Error("Owned cluster object UID is unavailable; installation retained");
+      clusterObjects.push({ kind, name, uid: item.metadata.uid });
+    }
+  }
   return {
     claims,
     runtime,
+    cluster: clusterObjects,
     unexpectedClaims: classifyClaims(
       claims.filter((claim) => claim.namespace === namespace).map((claim) => claim.name),
       releaseName,
@@ -150,113 +176,106 @@ async function gatherOwnership(cl: Cluster, namespace: string): Promise<Ownershi
 }
 
 // Removes one run's resources and nothing else. The Namespace is only deleted after its name,
-// owner label and managed-by label match; every deletion is by exact name.
-async function removeRun(cl: Cluster, id: string, ownership: Ownership): Promise<CleanupState> {
+// owner label and managed-by label match; every deletion requires the original resource UID.
+async function removeRun(
+  cl: Cluster,
+  id: string,
+  ownership: Ownership,
+  namespaceUID: string,
+): Promise<CleanupState> {
+  if (!namespaceUID)
+    throw Error("Original clean-room Namespace UID is unavailable; nothing deleted");
+  if (ownership.unexpectedClaims.length)
+    throw Error("Unexpected claims are present in the owned Namespace; nothing deleted");
   const namespace = cleanRoomNamespace(id);
   const state = emptyCleanup();
-  const remove = async (label: string, args: string[]) => {
-    const result = await cl.kubectl(args, { allowFailure: true });
+  const remove = async (label: string, path: string, uid: string) => {
+    if (!uid) throw Error("Original cleanup resource UID is unavailable; nothing deleted");
+    const result = await cl.kubectl(["delete", "--raw", path, "-f", "-"], {
+      input: JSON.stringify({ apiVersion: "v1", kind: "DeleteOptions", preconditions: { uid } }),
+      allowFailure: true,
+    });
     if (result.code === 0) state.deleted.push(label);
-    else state.errors.push(`${label}: ${result.stderr.trim().split("\n").at(-1) ?? "failed"}`);
+    else state.errors.push(`${label}: deletion outcome is unconfirmed`);
     return result.code === 0;
   };
   const found = await cl.kubectl(["get", "namespace", namespace, "-o", "json"], {
     allowFailure: true,
   });
-  if (found.code === 0) {
-    // Throws, deleting nothing, unless this is exactly the Namespace the run created.
-    verifyOwnedNamespace(JSON.parse(found.stdout), id);
-    const uninstalled = await run(
-      cl.helm("uninstall", releaseName, "-n", namespace, "--wait", "--timeout", "10m"),
-      { allowFailure: true },
-    );
-    if (uninstalled.code === 0) state.deleted.push(`release/${releaseName}`);
-    else if (!/not found/i.test(uninstalled.stderr))
-      state.errors.push(`helm uninstall: ${uninstalled.stderr.trim().split("\n").at(-1)}`);
-  }
+  if (found.code !== 0)
+    throw Error("Original Namespace observation is unavailable; nothing deleted");
+  // Namespace GC removes its own release, claims and Secrets. Do not first
+  // uninstall Helm by name: a same-name replacement could otherwise be harmed
+  // before the UID-preconditioned Namespace deletion rejects it.
+  verifyOwnedNamespace(JSON.parse(found.stdout), id, namespaceUID);
   for (const item of ownership.runtime) {
     const current = await cl.kubectl(["get", "namespace", item.name, "-o", "json"], {
       allowFailure: true,
     });
-    if (current.code !== 0) continue;
+    if (current.code !== 0) throw Error("Original editor Namespace observation is unavailable");
     const parsed = JSON.parse(current.stdout) as NamespaceItem;
     if (
       parsed.metadata.uid !== item.uid ||
       parsed.metadata.labels?.["app.kubernetes.io/managed-by"] !== "open-software-factory"
     ) {
       state.errors.push(`${item.name} changed identity since it was attributed; left in place`);
-      continue;
+      state.state = "failed";
+      return state;
     }
-    await remove(`namespace/${item.name}`, [
-      "delete",
-      "namespace",
-      item.name,
-      "--wait=true",
-      "--timeout=10m",
-    ]);
+    if (!(await remove(`namespace/${item.name}`, `/api/v1/namespaces/${item.name}`, item.uid)))
+      throw Error("Original editor Namespace deletion is unconfirmed");
+    await cl.kubectl(["wait", "--for=delete", `namespace/${item.name}`, "--timeout=10m"]);
   }
-  if (found.code === 0) {
-    const claims = ownership.claims.filter((claim) => claim.namespace === namespace);
-    if (claims.length)
-      await remove(`pvc/${namespace}/*`, [
-        "-n",
-        namespace,
-        "delete",
-        "pvc",
-        ...claims.map((claim) => claim.name),
-        "--ignore-not-found",
-        "--wait=true",
-        "--timeout=5m",
-      ]);
-    await remove(`namespace/${namespace}`, [
-      "delete",
-      "namespace",
-      namespace,
-      "--wait=true",
-      "--timeout=10m",
-    ]);
-  }
+  verifyOwnedNamespace(await cl.json(["get", "namespace", namespace]), id, namespaceUID);
+  if (!(await remove(`namespace/${namespace}`, `/api/v1/namespaces/${namespace}`, namespaceUID)))
+    throw Error(
+      "Original clean-room Namespace deletion is unconfirmed; no replacement was deleted",
+    );
+  await cl.kubectl(["wait", "--for=delete", `namespace/${namespace}`, "--timeout=10m"]);
 
   const owned = [namespace, ...ownership.runtime.map((item) => item.name)];
   const claimUIDs = new Set(ownership.claims.map((claim) => claim.uid));
-  const volumes = await cl.kubectl(["get", "pv", "-o", "json"], { allowFailure: true });
-  const volumeItems = volumes.code === 0 ? (JSON.parse(volumes.stdout) as Items<never>).items : [];
-  for (const volume of ownedVolumes(volumeItems, owned, claimUIDs))
-    await remove(`pv/${volume}`, [
-      "delete",
-      "pv",
-      volume,
-      "--ignore-not-found",
-      "--wait=true",
-      "--timeout=2m",
-    ]);
+  const volumes = (await cl.json(["get", "pv"])) as Items<{
+    metadata: { name: string; uid: string };
+    spec?: { claimRef?: { namespace?: string; uid?: string } };
+  }>;
+  for (const volume of volumes.items) {
+    if (!ownedVolumes([volume], owned, claimUIDs).length) continue;
+    if (
+      !(await remove(
+        `pv/${volume.metadata.name}`,
+        `/api/v1/persistentvolumes/${volume.metadata.name}`,
+        volume.metadata.uid,
+      ))
+    )
+      throw Error("Original owned PV deletion is unconfirmed");
+    await cl.kubectl(["wait", "--for=delete", `pv/${volume.metadata.name}`, "--timeout=2m"]);
+  }
+  for (const item of ownership.cluster) {
+    const plural = item.kind === "clusterrole" ? "clusterroles" : "clusterrolebindings";
+    await remove(
+      `${item.kind}/${item.name}`,
+      `/apis/rbac.authorization.k8s.io/v1/${plural}/${item.name}`,
+      item.uid,
+    );
+  }
 
+  // Verify rather than assume.
+  const namespaceInventory = (await cl.json(["get", "namespaces"])) as Items<NamespaceItem>;
+  for (const target of owned)
+    if (namespaceInventory.items.some((item) => item.metadata.name === target))
+      state.remaining.push(`namespace/${target}`);
+  const after = (await cl.json(["get", "pv"])) as Items<never>;
+  for (const volume of after.items)
+    for (const leftover of ownedVolumes([volume], owned, claimUIDs))
+      state.remaining.push(`pv/${leftover}`);
   const names = clusterObjectNames(id, releaseName);
   for (const [kind, expected] of [
     ["clusterrole", names.clusterRoles],
     ["clusterrolebinding", names.clusterRoleBindings],
   ] as const) {
-    const listed = await cl.kubectl(["get", kind, "-o", "json"], { allowFailure: true });
-    const items = listed.code === 0 ? (JSON.parse(listed.stdout) as Items<never>).items : [];
-    for (const item of ownedClusterObjects(items, expected, releaseName))
-      await remove(`${kind}/${item}`, ["delete", kind, item, "--ignore-not-found"]);
-  }
-
-  // Verify rather than assume.
-  for (const target of owned)
-    if ((await cl.kubectl(["get", "namespace", target], { allowFailure: true })).code === 0)
-      state.remaining.push(`namespace/${target}`);
-  const after = await cl.kubectl(["get", "pv", "-o", "json"], { allowFailure: true });
-  for (const volume of after.code === 0 ? (JSON.parse(after.stdout) as Items<never>).items : [])
-    for (const leftover of ownedVolumes([volume], owned, claimUIDs))
-      state.remaining.push(`pv/${leftover}`);
-  for (const [kind, expected] of [
-    ["clusterrole", names.clusterRoles],
-    ["clusterrolebinding", names.clusterRoleBindings],
-  ] as const) {
-    const listed = await cl.kubectl(["get", kind, "-o", "json"], { allowFailure: true });
-    const items = listed.code === 0 ? (JSON.parse(listed.stdout) as Items<never>).items : [];
-    for (const item of ownedClusterObjects(items, expected, releaseName))
+    const listed = (await cl.json(["get", kind])) as Items<NamespaceItem>;
+    for (const item of ownedClusterObjects(listed.items, expected, releaseName))
       state.remaining.push(`${kind}/${item}`);
   }
   state.state = state.errors.length || state.remaining.length ? "failed" : "removed";
@@ -270,20 +289,35 @@ async function main(options: Options) {
     options.context || (await run(["kubectl", "config", "current-context"])).stdout.trim();
   if (!context) throw new Error("kubectl has no current context; pass --context NAME");
   const cl = cluster(context);
-  const { kubectl, json, helm } = cl;
+  const { helm } = cl;
+  let activeSignal: AbortSignal | undefined;
+  const kubectl = (args: string[], options: RunOptions = {}) =>
+    cl.kubectl(args, { ...options, signal: activeSignal });
+  const json = (args: string[]) => cl.json(args, { signal: activeSignal });
+  const liveRun = (args: string[], options: RunOptions = {}) =>
+    run(args, { ...options, signal: activeSignal });
   const outputDirectory = resolve(root, ".factory/test-results/clean-room");
   await mkdir(outputDirectory, { recursive: true });
 
   if (options.cleanup) {
     const id = cleanRoomIDFromNamespace(options.cleanup) ?? "";
     const file = resolve(root, receiptPath(options.cleanup));
-    const ownership = await gatherOwnership(cl, options.cleanup);
-    const cleanup = await removeRun(cl, id, ownership);
-    log(`${cleanup.state}: deleted ${cleanup.deleted.join(", ") || "nothing"}`);
     const previous = await readFile(file, "utf8").then(
       (text) => JSON.parse(text) as Record<string, unknown>,
       () => null,
     );
+    const namespaceUID = previous?.["namespaceUID"];
+    if (
+      typeof namespaceUID !== "string" ||
+      !namespaceUID ||
+      previous?.["context"] !== context ||
+      previous?.["namespace"] !== options.cleanup
+    )
+      throw Error("Original clean-room Namespace UID/context is unavailable; nothing deleted");
+    verifyOwnedNamespace(await json(["get", "namespace", options.cleanup]), id, namespaceUID);
+    const ownership = await gatherOwnership(cl, options.cleanup);
+    const cleanup = await removeRun(cl, id, ownership, namespaceUID);
+    log(`${cleanup.state}: deleted ${cleanup.deleted.join(", ") || "nothing"}`);
     await writeFile(
       file,
       `${JSON.stringify({ ...(previous ?? { schema: 1, id, namespace: options.cleanup }), cleanupRerun: cleanup }, null, 2)}\n`,
@@ -307,20 +341,23 @@ async function main(options: Options) {
   });
   const secrets: string[] = [];
   const file = resolve(root, receiptPath(namespace));
-  const persist = () => writeFile(file, serializeReceipt(receipt, secrets));
+  await writeFile(file, serializeReceipt(receipt, secrets), { flag: "wx", mode: 0o600 });
+  const persist = () => writeFile(file, serializeReceipt(receipt, secrets), { mode: 0o600 });
   const temp = await mkdtemp(join(tmpdir(), "factory-clean-room-"));
   const connection = new AbortController();
+  activeSignal = connection.signal;
   let interrupted = false;
   let created = false;
-  let ownership: Ownership = { claims: [], runtime: [], unexpectedClaims: [] };
-  let connecting: Promise<void> = Promise.resolve();
+  let ownership: Ownership = { claims: [], runtime: [], cluster: [], unexpectedClaims: [] };
   let failure = "";
+  let preserveTemp = false;
   const beforeNamespaces: string[] = [];
   const beforeRuntime: string[] = [];
   const onSignal = () => {
-    if (interrupted) process.exit(130);
+    if (interrupted) return;
     interrupted = true;
-    log("Interrupted. Cleaning up what this run created; press Ctrl+C again to stop at once.");
+    receipt.interrupted = true;
+    log("Interrupted. Waiting for owned clients and cleanup to finish.");
     connection.abort();
   };
   process.on("SIGINT", onSignal);
@@ -348,6 +385,7 @@ async function main(options: Options) {
     const begin = performance.now();
     try {
       const result = await work();
+      connection.signal.throwIfAborted();
       record_({
         name: label,
         status: typeof result === "string" ? "passed" : "skipped",
@@ -371,8 +409,7 @@ async function main(options: Options) {
 
   const chartInput: {
     image: string | undefined;
-    worker: { image: string; executableSHA256: string; architecture: string } | undefined;
-  } = { image: undefined, worker: undefined };
+  } = { image: undefined };
   let chartTarget = "";
   let versionArgs: string[] = [];
   let defaults: Values = {};
@@ -381,16 +418,25 @@ async function main(options: Options) {
   let origin = "";
   let adminPassword = "";
   let adminEmail = "admin@factory.local";
+  let native: Awaited<ReturnType<typeof prepareNativeCleanRoom>> | undefined;
 
   try {
+    await step("native-inputs", async () => {
+      native = await prepareNativeCleanRoom(options.nativeFixture, namespace, releaseName, {
+        signal: connection.signal,
+      });
+      secrets.push(...native.redactions);
+      receipt.native = native.metadata;
+      return "Fresh native identity, separate provisioner credential and TLS bundle validated; no cluster resource created";
+    });
     await step("tools", async () => {
       const helmVersion = (
-        await run(["helm", "version", "--template", "{{.Version}}"])
+        await liveRun(["helm", "version", "--template", "{{.Version}}"])
       ).stdout.trim();
       const kubectlClient = JSON.parse(
-        (await run(["kubectl", "version", "--client", "-o", "json"])).stdout,
+        (await liveRun(["kubectl", "version", "--client", "-o", "json"])).stdout,
       ).clientVersion.gitVersion as string;
-      const server = await run(["kubectl", "--context", context, "version", "-o", "json"], {
+      const server = await liveRun(["kubectl", "--context", context, "version", "-o", "json"], {
         allowFailure: true,
       });
       const serverVersion =
@@ -410,55 +456,55 @@ async function main(options: Options) {
     await persist();
     await step("chart", async () => {
       const source = parseChartArgument(options.chart);
-      const release = async () =>
-        workerRelease.parse(
-          JSON.parse(
-            await readFile(join(root, "deploy/factorybox/release.json"), "utf8").catch(() => {
-              throw new Error(
-                "deploy/factorybox/release.json is missing, so the worker pin is unknown. Pass --chart with a released chart.",
-              );
-            }),
-          ),
-        );
-      let worker: Awaited<ReturnType<typeof release>> | undefined;
       let sourceLabel: string = source.kind;
       let sum = "";
       if (source.kind === "working-tree") {
         if (!options.factoryImage)
           throw new Error("Packaging the working tree needs --factory-image");
-        worker = await release();
         const version = packageVersion(id);
         const directory = join(temp, "package");
         await mkdir(directory);
-        if (imageKind(options.factoryImage) === "digest")
-          await run(
-            [
-              "bun",
-              join(root, "scripts/release/package-chart.ts"),
-              "--version",
-              version,
-              "--factory-image",
-              options.factoryImage,
-              "--output",
-              directory,
-            ],
-            { cwd: root },
-          );
-        else
-          await run([
-            "helm",
-            "package",
-            join(root, "deploy/helm/factory"),
-            "--version",
+        if (imageKind(options.factoryImage) !== "digest")
+          throw new Error("Native chart packaging requires the immutable Factory image digest");
+        const catalogContainer = `factory-cleanroom-artifacts-${id}`;
+        receipt.images["catalogContainer"] = { name: catalogContainer, owner: id };
+        await persist();
+        const catalog = await liveRun([
+          "docker",
+          "run",
+          "--rm",
+          "--name",
+          catalogContainer,
+          "--label",
+          `factory.clean-room-owner=${id}`,
+          "--network=none",
+          "--read-only",
+          "--cap-drop=ALL",
+          "--user",
+          "1000:1000",
+          "--security-opt=no-new-privileges",
+          "--tmpfs",
+          "/tmp",
+          "--entrypoint",
+          "bun",
+          options.factoryImage,
+          "-e",
+          'process.stdout.write(await Bun.file("/opt/factory/runtime-artifacts.json").text())',
+        ]).then(
+          (output) => ({ output }),
+          (error: unknown) => ({ error }),
+        );
+        await removeCleanRoomContainer(catalogContainer, id);
+        receipt.images["catalogContainerRemoved"] = true;
+        if ("error" in catalog) throw catalog.error;
+        chartTarget = (
+          await packageFactoryChart({
             version,
-            "--app-version",
-            version,
-            "--destination",
-            directory,
-          ]);
-        const packaged = (await readdir(directory)).find((entry) => entry.endsWith(".tgz"));
-        if (!packaged) throw new Error("helm package produced no chart file");
-        chartTarget = join(directory, packaged);
+            factoryImage: options.factoryImage,
+            output: directory,
+            artifacts: JSON.parse(catalog.output.stdout),
+          })
+        ).chart;
         sum = await sha256(chartTarget);
         sourceLabel = "working-tree (packaged by this run)";
       } else if (source.kind === "package") {
@@ -476,16 +522,16 @@ async function main(options: Options) {
         versionArgs = source.version ? ["--version", source.version] : [];
       }
       const shown = Bun.YAML.parse(
-        (await run(["helm", "show", "chart", chartTarget, ...versionArgs])).stdout,
+        (await liveRun(["helm", "show", "chart", chartTarget, ...versionArgs])).stdout,
       ) as Values;
       defaults = Bun.YAML.parse(
-        (await run(["helm", "show", "values", chartTarget, ...versionArgs])).stdout,
+        (await liveRun(["helm", "show", "values", chartTarget, ...versionArgs])).stdout,
       ) as Values;
+      requireNativeChart(defaults);
       const pin = pinning(defaults);
       const overrideImage = options.factoryImage && options.factoryImage !== pin.image;
       if (!pin.imagePinned && !options.factoryImage)
         throw new Error("The chart pins no Factory image; pass --factory-image");
-      if (!pin.workerPinned && !worker) worker = await release();
       const image = overrideImage ? options.factoryImage : pin.image;
       receipt.chart = {
         source: sourceLabel,
@@ -501,23 +547,20 @@ async function main(options: Options) {
         sha256: sum || undefined,
       };
       receipt.images = {
+        ...receipt.images,
         factory: image,
         factoryKind: imageKind(image),
         factoryPinnedByChart: pin.imagePinned,
         factoryOverridden: Boolean(overrideImage && pin.imagePinned),
-        worker: pin.workerPinned
-          ? { ...pin.worker, source: "chart" }
-          : { ...worker, source: "deploy/factorybox/release.json" },
       };
       chartInput.image = overrideImage || !pin.imagePinned ? image : undefined;
-      chartInput.worker = pin.workerPinned ? undefined : worker;
       return `${shown["name"]} ${shown["version"]} (${imageKind(image)} image ${image.split("@")[0]})`;
     });
 
     await step("capacity", async () => {
       const nodes = (await json(["get", "nodes"])).items as Array<{
         metadata: { name: string };
-        status: { allocatable: { memory: string } };
+        status: { allocatable: { memory: string; cpu: string } };
       }>;
       if (!nodeName) {
         if (nodes.length !== 1)
@@ -528,13 +571,12 @@ async function main(options: Options) {
       }
       const node = nodes.find((item) => item.metadata.name === nodeName);
       if (!node) throw new Error(`Node ${nodeName} was not found`);
-      const ports = freePorts(3);
+      if (!native) throw Error("Native commissioning inputs are unavailable");
       const generated = cleanRoomValues(
         {
           node: nodeName,
-          ports: { factory: ports[0] ?? 0, forgejo: ports[1] ?? 0, zero: ports[2] ?? 0 },
+          native: native.values,
           ...(chartInput.image ? { image: chartInput.image } : {}),
-          ...(chartInput.worker ? { worker: chartInput.worker } : {}),
           ...(options.values
             ? { extra: Bun.YAML.parse(await readFile(resolve(options.values), "utf8")) }
             : {}),
@@ -553,6 +595,7 @@ async function main(options: Options) {
       const verdict = capacityVerdict({
         node: nodeName,
         allocatable: node.status.allocatable.memory,
+        allocatableCPU: node.status.allocatable.cpu,
         pods,
         needed: lines,
         smallRequests: options.smallRequests,
@@ -561,13 +604,44 @@ async function main(options: Options) {
       receipt.scheduling = {
         node: nodeName,
         allocatableMemory: node.status.allocatable.memory,
+        allocatableCPU: node.status.allocatable.cpu,
         headroomMiB: verdict.headroomMiB,
+        headroomMilliCPU: verdict.headroomMilliCPU,
         neededMiB: totalMiB(lines),
+        neededMilliCPU: verdict.neededMilliCPU,
         breakdown: lines,
         smallRequests: options.smallRequests,
       };
       if (!verdict.fits) throw new Error(verdict.detail);
       return verdict.detail;
+    });
+
+    await step("chart-configuration", async () => {
+      // Validate required native installation inputs before creating a
+      // Namespace, claims, credentials or any installed service.
+      const rendered = await liveRun(
+        helm(
+          "template",
+          releaseName,
+          chartTarget,
+          ...versionArgs,
+          "--namespace",
+          namespace,
+          "--values",
+          valuesFile,
+        ),
+        { cwd: root, allowFailure: true },
+      );
+      if (rendered.code !== 0)
+        throw new Error(
+          `Native chart configuration refused before installation: ${redact(rendered.stderr, secrets).trim().split("\n").filter(Boolean).slice(-4).join(" | ")}`,
+        );
+      if (!native) throw Error("Native commissioning inputs are unavailable");
+      requireFreshNativeIngress(
+        await json(["get", "ingresses", "--all-namespaces"]),
+        native.values,
+      );
+      return "Native chart configuration rendered; no installation resources created";
     });
 
     // Snapshots let the receipt show that nothing else disappeared and which runtime Namespaces
@@ -577,26 +651,36 @@ async function main(options: Options) {
     beforeRuntime.push(
       ...namespaces
         .map((item) => item.metadata.name)
-        .filter((item) => /^factory-(box|editor)-[a-f0-9]{32}$/.test(item)),
+        .filter((item) => /^factory-editor-[a-f0-9]{32}$/.test(item)),
     );
 
     await step("namespace", async () => {
-      if (await cl.exists(["namespace", namespace]))
+      if (await cl.exists(["namespace", namespace], { signal: connection.signal }))
         throw new Error(`${namespace} already exists; refusing to use it`);
       // Intent first: an interrupted run leaves a receipt that names what to clean up.
       await persist();
       created = true;
-      await kubectl(["create", "-f", "-"], {
+      const createdNamespace = await kubectl(["create", "-f", "-", "-o", "json"], {
         input: JSON.stringify(namespaceManifest(id, startedAt)),
       });
-      const uid = verifyOwnedNamespace(await json(["get", "namespace", namespace]), id);
+      const uid = verifyOwnedNamespace(JSON.parse(createdNamespace.stdout), id);
+      receipt.namespaceUID = uid;
+      await persist();
       return `${namespace} created with owner label ${id} (uid ${uid})`;
+    });
+
+    await step("native-secrets", async () => {
+      if (!native || !receipt.namespaceUID)
+        throw Error("Original native installation identity is unavailable");
+      await persist();
+      await createNativeCleanRoomSecrets(cl, native, receipt.namespaceUID, connection.signal);
+      return "Created only this fresh Namespace's native configuration, provisioner and Ingress Secrets";
     });
 
     await step("install", async () => {
       log("Installing the chart; this waits for every service and can take up to 20 minutes");
       const result = await timed("install-helm", () =>
-        run(
+        liveRun(
           helm(
             "install",
             releaseName,
@@ -621,62 +705,28 @@ async function main(options: Options) {
     });
 
     await step("helm-test", async () => {
-      log("Running helm test (the chart's preflight; it starts a short probe Pod, not a worker)");
-      // Helm deletes a passing hook Job, so only a failure leaves logs to read.
-      const result = await run(helm("test", releaseName, "-n", namespace, "--timeout", "25m"), {
-        cwd: root,
-        allowFailure: true,
-      });
-      if (result.code === 0) return "helm test passed (the preflight Job succeeded)";
-      const logs = await run(
-        ["kubectl", "--context", context, "-n", namespace, "logs", `job/${releaseName}-preflight`],
-        { cwd: root, allowFailure: true },
-      );
-      const lines = logs.stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => /^(WARN|FAIL)\b/.test(line));
-      // Another installation on a shared node can hold every byte a new worker would need. That
-      // is the node's state, not the chart's, so it alone does not fail the install.
-      const failed = lines.filter((line) => line.startsWith("FAIL"));
-      if (failed.length > 0 && failed.every((line) => /^FAIL\s+node\.budget\b/.test(line)))
-        return "helm test passed except node.budget: other installations hold the node's memory";
-      throw new Error(
-        `helm test failed: ${lines.slice(0, 4).join(" | ") || result.stderr.trim().split("\n").at(-1)}`,
-      );
+      log("Running helm test (read-only native preflight, not Actor or product acceptance)");
+      return testCleanRoomChart(cl, releaseName, namespace, connection.signal);
     });
 
     await step("readiness", async () => {
-      const ready = Promise.withResolvers<void>();
-      connecting = connectLocalFactory(
-        { namespace, release: releaseName, context },
-        connection.signal,
-        (message) => {
-          log(message);
-          if (message.startsWith("Local access connected")) ready.resolve();
-        },
-      );
-      connecting.catch((cause: unknown) => ready.reject(cause));
-      const timer = setTimeout(
-        () => ready.reject(new Error("Port forwards did not connect within five minutes")),
-        300_000,
-      );
-      try {
-        await ready.promise;
-      } finally {
-        clearTimeout(timer);
-      }
       let startupID = "";
-      await until("public readiness", 600_000, async () => {
-        const response = await fetch(`${origin}/health/ready?installation=complete`, {
-          signal: AbortSignal.timeout(5_000),
-          redirect: "error",
-        });
-        await response.body?.cancel();
-        const verdict = readinessVerdict(response);
-        startupID = verdict.startupID;
-        return verdict.ready;
-      });
+      await until(
+        "public readiness",
+        600_000,
+        async () => {
+          connection.signal.throwIfAborted();
+          const response = await fetch(`${origin}/health/ready?installation=complete`, {
+            signal: AbortSignal.any([connection.signal, AbortSignal.timeout(5_000)]),
+            redirect: "error",
+          });
+          await response.body?.cancel();
+          const verdict = readinessVerdict(response);
+          startupID = verdict.startupID;
+          return verdict.ready;
+        },
+        connection.signal,
+      );
       const pods = (await json(["-n", namespace, "get", "pods"])).items as Array<{
         metadata: { name: string };
         status: { containerStatuses?: Array<{ name: string; image: string; imageID: string }> };
@@ -727,6 +777,7 @@ async function main(options: Options) {
         id,
         withSandbox: options.withSandbox,
         directory: join(outputDirectory, namespace),
+        signal: connection.signal,
       });
       for (const check of journey.checks) record_(check);
       receipt.limits.push(...journey.limits);
@@ -780,31 +831,50 @@ async function main(options: Options) {
           ".",
         ),
         ["tar", "-xf", "-", "-C", directory],
+        connection.signal,
       );
       const files = await readdir(directory);
       if (!files.includes("openbao.snap"))
         throw new Error(`Set ${set} has no openbao.snap although OpenBao bootstrapped`);
-      let pgRestore = process.env["PG_RESTORE"];
-      if (!pgRestore) {
-        const local = await run(["pg_restore", "--version"], { allowFailure: true }).catch(
-          () => null,
-        );
-        if (local && local.code === 0 && usablePgRestore(local.stdout)) pgRestore = "pg_restore";
-        else if (
-          (await run(["docker", "version"], { allowFailure: true }).catch(() => null))?.code === 0
-        ) {
-          pgRestore = join(temp, "pg_restore");
-          await writeFile(
-            pgRestore,
-            `#!/bin/sh\nexec docker run --rm -i --network none -v "${directory}:${directory}:ro" postgres:16.14-bookworm pg_restore "$@"\n`,
-            { mode: 0o755 },
-          );
-        } else
-          return {
-            skipped: `Set ${set} was copied and has openbao.snap, but restore-check needs pg_restore 16 or Docker, and neither is available`,
-          };
-      }
-      const checks = await checkSet(directory, pgRestore);
+      const optionalClient = (args: string[]) =>
+        liveRun(args, { allowFailure: true }).catch(() => {
+          connection.signal.throwIfAborted();
+          return null;
+        });
+      const pgRestore = process.env["PG_RESTORE"] ?? "pg_restore";
+      const local = await optionalClient([pgRestore, "--version"]);
+      let checks: Awaited<ReturnType<typeof checkSet>>;
+      if (local?.code === 0 && usablePgRestore(local.stdout))
+        checks = await checkSet(directory, pgRestore, connection.signal);
+      else if (process.env["PG_RESTORE"])
+        throw Error("The selected PG_RESTORE must be a working PostgreSQL 16 executable");
+      else if ((await optionalClient(["docker", "version"]))?.code === 0) {
+        const postgres = await json(["-n", namespace, "get", "pod", `${name}-postgres-0`]);
+        const image = postgres.spec?.containers?.find(
+          (container: { name: string; image: string }) => container.name === "postgres",
+        )?.image;
+        checks = await withDockerBackupReader(
+          {
+            id,
+            directory,
+            temporaryDirectory: temp,
+            image: typeof image === "string" ? image : "",
+            signal: connection.signal,
+            async record(resource) {
+              receipt.images["backupReader"] = resource;
+              preserveTemp = resource.state === "unconfirmed";
+              await persist();
+            },
+          },
+          (command) => checkSet(directory, command, connection.signal),
+        ).catch((cause: unknown) => {
+          if (cause instanceof AggregateError) preserveTemp = true;
+          throw cause;
+        });
+      } else
+        return {
+          skipped: `Set ${set} was copied and has openbao.snap, but restore-check needs pg_restore 16 or Docker, and neither is available`,
+        };
       const failed = checks.filter((check) => !check.ok);
       if (failed.length)
         throw new Error(
@@ -823,17 +893,20 @@ async function main(options: Options) {
   }
 
   connection.abort();
-  await connecting.catch(() => undefined);
+  activeSignal = undefined;
   const cleanupBegin = performance.now();
   if (created && options.keep) {
     receipt.cleanup.state = "kept";
     log(
-      `--keep: ${namespace} stays. Reach it with: mise exec -- bun run factory:connect --namespace ${namespace} --release ${releaseName} --context ${context}\nRemove it with: mise exec -- bun run release:clean-room --cleanup ${namespace}`,
+      `--keep: ${namespace} stays at ${origin}. Native inventory is retained.\nCleanup may be requested with: mise exec -- bun run release:clean-room --cleanup ${namespace} --context ${context}`,
     );
   } else if (created) {
     try {
+      if (!receipt.namespaceUID)
+        throw Error("Original Namespace create outcome is unconfirmed; nothing deleted");
+      verifyOwnedNamespace(await json(["get", "namespace", namespace]), id, receipt.namespaceUID);
       ownership = await gatherOwnership(cl, namespace);
-      const done = await removeRun(cl, id, ownership);
+      const done = await removeRun(cl, id, ownership, receipt.namespaceUID);
       const after = (await json(["get", "namespaces"]).catch(() => ({
         items: [],
       }))) as Items<NamespaceItem>;
@@ -861,7 +934,12 @@ async function main(options: Options) {
     }
   }
   receipt.timingsMs["cleanup"] = Math.round(performance.now() - cleanupBegin);
-  await rm(temp, { recursive: true, force: true });
+  if (preserveTemp) {
+    receipt.limits.push(
+      `Backup reader cleanup or recording is unconfirmed; private copied files kept at ${temp}`,
+    );
+    log("Backup reader cleanup or recording is unconfirmed; private files and intent are retained");
+  } else await rm(temp, { recursive: true, force: true });
   process.off("SIGINT", onSignal);
   process.off("SIGTERM", onSignal);
 

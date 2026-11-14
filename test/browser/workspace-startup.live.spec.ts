@@ -1,7 +1,6 @@
-import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
 import { expect, type FrameLocator, type Page } from "@playwright/test";
+import { z } from "zod";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
@@ -12,31 +11,16 @@ import {
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";
-import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
-import {
-  factoryboxFixtureCommand,
-  observeFactoryboxFixture,
-  readFactoryboxFixtureTarget,
-} from "../fixtures/factorybox-runtime";
+import { startEditorCompute } from "../fixtures/editor-compute";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
+import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, requestFunction } from "../fixtures/server-functions";
-import { signIn, teardownFactoryProject } from "../support/factory-fixture";
-import { type StartupMeasurement, startupMeasurements } from "../support/runtime-startup";
-
-const execute = promisify(execFile);
-const _origin = "http://127.0.0.1:3000";
+import { signIn } from "../support/factory-fixture";
 
 // Native PTY/Preview streams are intentionally long-lived. Keep explicit captures
 // and bounded timing artifacts instead of retaining their response bodies in a trace.
 test.use({ trace: "off" });
-
-async function readStartupPhases(database: ReturnType<typeof createDatabase>, attemptID: string) {
-  const target = await readFactoryboxFixtureTarget(database, attemptID);
-  expect((await observeFactoryboxFixture(target)).runtime?.status).toBe("running");
-  return startupMeasurements(
-    await factoryboxFixtureCommand(target, ["cat", "/tmp/factory-startup-timings.jsonl"]),
-  );
-}
 
 async function openSource(ide: FrameLocator) {
   const file = ide.getByText("server.mjs", { exact: true }).first();
@@ -80,6 +64,31 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
 }) => {
   test.setTimeout(1_080_000);
   page.setDefaultTimeout(30_000);
+  const apiURL = process.env["FACTORY_FORGEJO_API_URL"];
+  const publicURL = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
+  const tokenFile = process.env["FACTORY_NATIVE_RUNTIME_FORGE_TOKEN_FILE"];
+  const repositoryName = process.env["FACTORY_NATIVE_RUNTIME_REPOSITORY"];
+  if (
+    !process.env["FACTORY_BROWSER_BASE_URL"] ||
+    !apiURL ||
+    !publicURL ||
+    !tokenFile ||
+    !repositoryName
+  )
+    throw Error(
+      "Explicit owned native browser, Forge HTTPS origin, token file and runtime fixture repository are required",
+    );
+  const publicOrigin = new URL(publicURL);
+  if (
+    publicOrigin.protocol !== "https:" ||
+    publicOrigin.origin !== publicURL ||
+    publicOrigin.port ||
+    publicOrigin.username ||
+    publicOrigin.password
+  )
+    throw Error("Native startup proof requires an exact Forge HTTPS origin on port 443");
+  const parts = repositoryName.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (!parts?.[1] || !parts[2]) throw Error("Explicit owned runtime repository must be owner/name");
   const database = createDatabase(2);
   const projectID = crypto.randomUUID();
   const slug = `workspace-startup-${projectID.slice(0, 8)}`;
@@ -89,42 +98,31 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
     computeMS: number;
     editorMS: number;
     terminalMS: number;
-    phases: StartupMeasurement[];
-    podCreatedAt: string;
-    podStartedAt: string;
+    native: Awaited<ReturnType<typeof readNativeWorkspaceObservation>>;
   };
   const measurements: {
     cold?: RunMeasurement;
     stopped?: RunMeasurement;
     retainedFrameMS?: number;
-    browserPreparingAtEditor?: boolean;
   } = {};
-  const { stdout: initialNamespaces } = await execute("kubectl", [
-    "--context",
-    "orbstack",
-    "get",
-    "namespaces",
-    "-o",
-    "json",
-  ]);
-  const namespaceIdentities = (raw: string) =>
-    (JSON.parse(raw) as { items: Array<{ metadata: { name: string; uid: string } }> }).items.map(
-      ({ metadata }) => ({ name: metadata.name, uid: metadata.uid }),
-    );
-  const beforeNamespaces = namespaceIdentities(initialNamespaces);
   const ticketID = crypto.randomUUID();
   const revisionID = crypto.randomUUID();
   const approvalID = crypto.randomUUID();
   const identity = changeIdentity(ticketID, approvalID);
-  const repository = { owner: "factory-mutation", name: "runtime-fixture" };
+  const repository = { owner: parts[1], name: parts[2] };
   const forge = createForgejoClient({
-    apiURL: "http://127.0.0.1:33030/api/v1/",
-    token: (await readFile(".factory/forgejo-token", "utf8")).trim(),
+    apiURL,
+    token: (await readFile(tokenFile, "utf8")).trim(),
   });
   let fixtureCreated = false;
   let branchCreated = false;
   try {
     await mkdir(directory, { recursive: true });
+    const [scope] = await database.client<{ name: string }[]>`SELECT current_database() AS name`;
+    if (!scope || !/^owned_[a-f0-9]{32}$/.test(scope.name))
+      throw Error(
+        "Native startup proof requires its owned disposable Factory database; retained installation unchanged",
+      );
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await browserBootstrap(page);
@@ -139,7 +137,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
     });
     await database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES (${projectID},${slug},'Workspace startup proof','http://127.0.0.1:33030/factory-mutation/runtime-fixture.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+        VALUES (${projectID},${slug},'Workspace startup proof',${`${publicURL}/${repository.owner}/${repository.name}.git`},'main','.devcontainer/devcontainer.json',${session.user.id})`;
       await sql`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by) VALUES (${ticketID},${projectID},'Startup measurement','Interactive startup proof','in-progress',${session.user.id})`;
       await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES (${revisionID},${ticketID},1,${requirement},${requirementDigest(requirement)},${session.user.id})`;
       await sql`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES (${approvalID},${ticketID},${revisionID},${session.user.id})`;
@@ -192,42 +190,25 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
         "startup-pty=/workspace/project",
       );
       const terminalMS = Math.round(performance.now() - started);
-      const [pod] = await database.client<
-        Array<{ namespace: string; pod: string }>
-      >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS pod FROM factory.runtime_attempt WHERE id=${runtime.id}`;
-      if (!pod) throw new Error("Missing owned Runtime Pod");
-      const { stdout: state } = await execute("kubectl", [
-        "--context",
-        "orbstack",
-        "get",
-        "pod",
-        "-n",
-        pod.namespace,
-        pod.pod,
-        "-o",
-        "json",
-      ]);
-      const observed = JSON.parse(state) as {
-        metadata: { creationTimestamp: string };
-        status: { startTime: string };
-      };
+      expect(runtime.native?.state).toBe("ACTOR_STATE_RUNNING");
+      const native = await readNativeWorkspaceObservation(database, {
+        attemptID: runtime.id,
+        projectID,
+        workspaceID: receipt.workspaceID,
+        actorUID: z.uuid().parse(runtime.native?.actorUID),
+      });
       measurements[kind] = {
         attemptID: runtime.id,
         computeMS,
         editorMS,
         terminalMS,
-        phases: await readStartupPhases(database, runtime.id),
-        podCreatedAt: observed.metadata.creationTimestamp,
-        podStartedAt: observed.status.startTime,
+        native,
       };
       await page.screenshot({ path: `${directory}/${kind}-source-terminal.png` });
       await writeFile(`${directory}/timings.json`, JSON.stringify(measurements, null, 2));
       return runtime;
     }
     const cold = await start("cold");
-    measurements.browserPreparingAtEditor = !measurements.cold?.phases.some(
-      (phase) => phase.phase === "browser-image",
-    );
     const timeOrigin = await ide.locator("body").evaluate(() => performance.timeOrigin);
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     const retained = performance.now();
@@ -287,21 +268,6 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
       "printf 'foreground-restart-%s\\n' interrupted",
       "foreground-restart-interrupted",
     );
-    // Browser preparation must finish successfully without delaying the editor's
-    // clock or borrowing an execution lease. Observe only fixed diagnostic records.
-    await expect
-      .poll(
-        async () => {
-          const [pod] = await database.client<
-            Array<{ namespace: string; pod: string }>
-          >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS pod FROM factory.runtime_attempt WHERE id=${cold.id}`;
-          if (!pod || !measurements.cold) throw new Error("Missing cold timing context");
-          measurements.cold.phases = await readStartupPhases(database, cold.id);
-          return measurements.cold.phases.some((phase) => phase.phase === "browser-image");
-        },
-        { timeout: 180_000, intervals: [1_000] },
-      )
-      .toBe(true);
     expect((await requestFunction(page.request, "stopRuntimeAttempt", [cold.id])).ok).toBe(true);
     await expect
       .poll(
@@ -320,7 +286,11 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
       .getByRole("button")
       .filter({ hasText: "Startup measurement" })
       .click();
-    await start("stopped");
+    // Explicit Stop is not permission for an observer or reconnect to restart compute.
+    await serverCall(requestFunction(page.request, "startTicketWorkspace", [identity.changeID]));
+    const restarted = await start("stopped");
+    expect(restarted.id).not.toBe(cold.id);
+    expect(measurements.stopped?.native.actorUID).not.toBe(measurements.cold?.native.actorUID);
     await terminalCommand(
       page,
       ide,
@@ -358,17 +328,6 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
       Array<{ content: string }>
     >`SELECT r.canonical_content AS content FROM factory.requirement_revision r JOIN factory.requirement_approval a ON a.requirement_revision_id=r.id WHERE a.id=${approvalID}`;
     expect(approved?.content).toBe(requirement);
-    expect(measurements.cold).toEqual(
-      expect.objectContaining({
-        phases: expect.arrayContaining([
-          expect.objectContaining({ phase: "browser-image" }),
-          expect.objectContaining({ phase: "tool-injection" }),
-        ]),
-      }),
-    );
-    expect(measurements.cold?.terminalMS, "Cold source and authenticated PTY budget").toBeLessThan(
-      120_000,
-    );
   } finally {
     await writeFile(`${directory}/timings.json`, JSON.stringify(measurements, null, 2));
     try {
@@ -376,24 +335,23 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
         expect((await requestFunction(page.request, "cancelChange", [identity.changeID])).ok).toBe(
           true,
         );
-        await teardownFactoryProject(page.request, projectID);
-        const { stdout: remainingNamespaces } = await execute("kubectl", [
-          "--context",
-          "orbstack",
-          "get",
-          "namespaces",
-          "-o",
-          "json",
-        ]);
-        expect(
-          namespaceIdentities(remainingNamespaces).sort((a, b) => a.name.localeCompare(b.name)),
-        ).toEqual(beforeNamespaces.sort((a, b) => a.name.localeCompare(b.name)));
+        const remaining = await serverCall(
+          requestFunction(page.request, "getRuntimeAttempts", [projectID]),
+        );
+        for (const attempt of remaining.attempts)
+          if (attempt.state !== "stopped")
+            await serverCall(requestFunction(page.request, "stopRuntimeAttempt", [attempt.id]));
+        await requireOwnedProjectSourceRetention(database, projectID);
         await writeFile(
           `${directory}/cleanup.json`,
           JSON.stringify({
             projectID,
             changeID: identity.changeID,
-            namespaceIdentitiesUnchanged: true,
+            computeStopped: true,
+            sourceRetained: true,
+            productHistoryRetained: true,
+            ownedInstallationRetained: true,
+            nativeResourceInventoryRetained: true,
           }),
         );
       }

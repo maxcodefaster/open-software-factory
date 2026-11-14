@@ -4,6 +4,5 @@ package connector
 
 import "context"
 
-// The admitted Source and its UID mapping run on Linux. Host-only Git fixtures
-// do not operate on a Factorybox canonical checkout.
+// The admitted Source runs on Linux. Host-only Git fixtures never own a native checkout.
 func ensureTrackedWorkspaceOwnership(context.Context, string) error { return nil }

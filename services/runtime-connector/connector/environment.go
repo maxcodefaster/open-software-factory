@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -172,6 +174,11 @@ func readRuntimeEnvironment(ctx context.Context, assignment Assignment, token st
 	if assignment.EnvironmentVersion == nil {
 		return runtimeEnvironment{}, nil
 	}
+	// This is an authenticated GET, before any hook or container work. Retry
+	// transient transport loss within the original read budget, not by
+	// restarting the Parent or dispatching another native lifecycle operation.
+	ctx, cancel := context.WithTimeout(ctx, runtimeEnvironmentReadTimeout)
+	defer cancel()
 	endpoint, err := url.Parse(assignment.ControlURL)
 	if err != nil {
 		return runtimeEnvironment{}, errors.New("Invalid Factory endpoint")
@@ -190,10 +197,32 @@ func readRuntimeEnvironment(ctx context.Context, assignment Assignment, token st
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-Factory-Runtime-Generation", fmt.Sprint(assignment.Generation))
-	client := http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request)
-	if err != nil {
-		return runtimeEnvironment{}, errors.New("Runtime environment is unavailable")
+	client := http.Client{Timeout: runtimeEnvironmentReadTimeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	delay := runtimeEnvironmentRetryDelay
+	var response *http.Response
+	for {
+		response, err = client.Do(request.Clone(ctx))
+		if err == nil && response.StatusCode != http.StatusBadGateway &&
+			response.StatusCode != http.StatusServiceUnavailable && response.StatusCode != http.StatusGatewayTimeout {
+			break
+		}
+		if response != nil {
+			// Never retain or disclose an error body. A small completed body
+			// permits connection reuse; a stalled body shares this same budget.
+			io.CopyN(io.Discard, response.Body, 4096)
+			response.Body.Close()
+		}
+		if ctx.Err() != nil || (err != nil && !retryRuntimeEnvironmentRead(err)) {
+			return runtimeEnvironment{}, errors.New("Runtime environment is unavailable")
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return runtimeEnvironment{}, errors.New("Runtime environment is unavailable")
+		case <-timer.C:
+		}
+		delay = min(delay*2, time.Second)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
@@ -213,6 +242,36 @@ func readRuntimeEnvironment(ctx context.Context, assignment Assignment, token st
 		return environment, errors.New("Runtime environment response is invalid")
 	}
 	return environment, environment.validate(*assignment.EnvironmentVersion)
+}
+
+func retryRuntimeEnvironmentRead(err error) bool {
+	var untrusted x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var certificate x509.CertificateInvalidError
+	if errors.As(err, &untrusted) || errors.As(err, &hostname) || errors.As(err, &certificate) {
+		return false
+	}
+	var lookup *net.DNSError
+	if errors.As(err, &lookup) {
+		// Native egress denial is NXDOMAIN, not permission to try another host.
+		return !lookup.IsNotFound && (lookup.IsTemporary || lookup.IsTimeout)
+	}
+	var request *url.Error
+	if errors.As(err, &request) {
+		// net/http returns the CONNECT reason phrase as a transport error.
+		// Tinyproxy 1.11.2 uses "500 Unable to connect" for temporary DNS
+		// failures before TLS is established, not the standard 500 phrase.
+		switch request.Err.Error() {
+		case "Unable to connect", http.StatusText(http.StatusInternalServerError), http.StatusText(http.StatusBadGateway),
+			http.StatusText(http.StatusServiceUnavailable), http.StatusText(http.StatusGatewayTimeout):
+			return true
+		}
+	}
+	var transient net.Error
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		(errors.As(err, &transient) && (transient.Timeout() || transient.Temporary()))
 }
 
 type environmentFiles struct {

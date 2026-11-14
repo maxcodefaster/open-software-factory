@@ -12,10 +12,10 @@ import { createChangeIntegration } from "../../apps/factory/src/delivery/integra
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { removeRuntimeRepository } from "../../apps/factory/src/runtime/git-http";
 import {
-  substrateTicketSourceIn,
   substrateWorkspaceGrantIn,
+  substrateWorkspaceSourceIn,
 } from "../../apps/factory/src/runtime/substrate-grant";
-import type { SubstrateWorkspaceConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import type { RuntimeAttemptView } from "../../apps/factory/src/runtime/types";
 import { computeAllocationIn } from "../../apps/factory/src/usage/compute";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
@@ -35,10 +35,9 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
   const ca = join(directory, "ca.pem");
   await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
   await f.database.client`DELETE FROM factory.development_workspace WHERE id=${f.workspaceID}`;
-  const config: SubstrateWorkspaceConfiguration = {
+  const config: SubstrateInstallationConfiguration = {
     deployment: "fresh-workspaces",
     database: f.config.database,
-    projectID: f.projectID,
     connection: f.config.connection,
     provisioner: { ...f.config.connection, tokenFile: "/owner-token" },
     editorPrincipal: "user:system:serviceaccount:owned:factory-control",
@@ -135,25 +134,11 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
     throw new Error(`Unexpected ${method}`);
   };
   const controller = (provisioner: SubstrateCall = call) =>
-    createRuntimeController(
-      f.database,
-      f.hub,
-      "owned-native-secret",
-      {
-        async prepareExecution() {
-          throw new Error("must not create legacy Source");
-        },
-      },
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+    createRuntimeController(f.database, f.hub, "owned-native-secret", {
+      configuration: config,
       call,
-      config,
-      provisioner,
-    );
+      provisionerCall: provisioner,
+    });
   try {
     const c = controller();
     await expect(c.start(f.projectID, crypto.randomUUID())).rejects.toThrow();
@@ -171,10 +156,37 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
     expect(creates.get("AtespaceAccessPolicy")).toBe(1);
     expect(creates.get("ActorTemplate")).toBe(1);
     expect(creates.get("Actor")).toBe(1);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
-    expect(await f.database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
+    const collaborator = crypto.randomUUID();
+    await f.database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${collaborator},'Native collaborator',${`${collaborator}@factory.local`})`;
+    await f.database
+      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${f.projectID},${collaborator},'developer',${f.userID})`;
+    await f.database
+      .client`INSERT INTO factory.workspace_share(workspace_id,user_id,permission,granted_by)
+      VALUES(${f.workspaceID},${collaborator},'observe',${f.userID})`;
+    await expect(controller().start(f.projectID, collaborator, f.workspaceID)).rejects.toThrow(
+      "observation",
     );
+    await f.database
+      .client`UPDATE factory.workspace_share SET permission='collaborate',version=version+1
+      WHERE workspace_id=${f.workspaceID} AND user_id=${collaborator}`;
+    expect((await controller().start(f.projectID, collaborator, f.workspaceID))?.id).toBe(
+      f.attemptID,
+    );
+    expect(creates.get("Actor")).toBe(1);
+    const [shared] = await f.database
+      .client`SELECT workspace.owner_user_id AS owner,attempt.created_by AS creator
+      FROM factory.development_workspace workspace JOIN factory.runtime_attempt attempt ON attempt.workspace_id=workspace.id
+      WHERE attempt.id=${f.attemptID}`;
+    expect(shared).toEqual({ owner: f.userID, creator: f.userID });
+    await f.database.client`UPDATE factory.workspace_share SET revoked_at=now(),version=version+1
+      WHERE workspace_id=${f.workspaceID} AND user_id=${collaborator}`;
+    await expect(controller().start(f.projectID, collaborator, f.workspaceID)).rejects.toThrow();
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
+        to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ source: null, worker: null }]);
     const [saved] = await f.database
       .client`SELECT intent,template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
     expect(JSON.stringify(saved)).not.toContain("parentToken");
@@ -241,15 +253,19 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
           .client`SELECT intent#>>'{configuration,workloadImage}' AS image FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`
       )[0]?.["image"],
     ).toBe(originalImage);
-    // The same installation can use the new pin for another fresh Workspace,
-    // without replacing the original Actor or rewriting its retained intent.
+    // Every fresh Project uses this installation's native runtime. A new image
+    // never replaces the original Actor or rewrites its retained Project binding.
     const originalObjects = new Map(objects);
     objects.clear();
     const other = crypto.randomUUID();
+    const otherProjectID = crypto.randomUUID();
     await f.database
       .client`INSERT INTO auth."user"(id,name,email) VALUES(${other},'Fresh image developer',${`${other}@factory.local`})`;
     await f.database
-      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${f.projectID},${other},'developer',${f.userID})`;
+      .client`INSERT INTO factory.project(id,name,slug,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${otherProjectID},'Second native Project',${`second-native-${otherProjectID}`},${`file://${repo}`},'main','.devcontainer/devcontainer.json',${other})`;
+    await f.database
+      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${otherProjectID},${other},'developer',${other})`;
     for (const [cpuMilli, memoryMiB] of [
       [3500, 5119],
       [3499, 5120],
@@ -257,14 +273,15 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
       await f.database.client`INSERT INTO factory.execution_policy(scope,version,policy,updated_by)
         VALUES('factory',1,${JSON.stringify({ ...defaultExecutionPolicy(), cpuMilli, memoryMiB })}::jsonb,${f.userID})
         ON CONFLICT(scope) DO UPDATE SET policy=EXCLUDED.policy`;
-      await expect(controller().start(f.projectID, other)).rejects.toMatchObject({
+      await expect(controller().start(otherProjectID, other)).rejects.toMatchObject({
         code: "conflict",
       });
       expect(creates.get("Actor")).toBe(1);
     }
     await f.database
       .client`UPDATE factory.execution_policy SET policy=${JSON.stringify({ ...defaultExecutionPolicy(), cpuMilli: 3500, memoryMiB: 5120 })}::jsonb WHERE scope='factory'`;
-    extraAttemptID = (await controller().start(f.projectID, other))?.id;
+    const installation = controller();
+    extraAttemptID = (await installation.start(otherProjectID, other))?.id;
     expect(extraAttemptID).toBeDefined();
     expect(extraAttemptID).not.toBe(f.attemptID);
     expect(objects.get("ActorTemplate")).toMatchObject({
@@ -277,9 +294,14 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
       memoryMiB: 5120,
     });
     expect(creates.get("Actor")).toBe(2);
+    const [second] = await f.database.client`
+      SELECT w.project_id AS "projectID",p.intent#>>'{configuration,projectID}' AS binding
+      FROM factory.runtime_attempt a JOIN factory.development_workspace w ON w.id=a.workspace_id
+      JOIN factory.substrate_workspace p ON p.workspace_id=w.id WHERE a.id=${extraAttemptID ?? ""}`;
+    expect(second).toEqual({ projectID: otherProjectID, binding: otherProjectID });
     objects.clear();
     for (const [kind, value] of originalObjects) objects.set(kind, value);
-    expect((await controller().get(f.attemptID))?.native?.actorUID).toBe(
+    expect((await installation.get(f.attemptID))?.native?.actorUID).toBe(
       nativeActor.parse(originalObjects.get("Actor")).metadata.uid,
     );
     expect(objects.get("ActorTemplate")).toMatchObject({ containers: [{ image: originalImage }] });
@@ -325,10 +347,9 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
   const f = await substrateFixture(revision, "ticket");
   const ca = join(directory, "ca.pem");
   await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
-  const config: SubstrateWorkspaceConfiguration = {
+  const config: SubstrateInstallationConfiguration = {
     deployment: "owned-test",
     database: f.config.database,
-    projectID: f.projectID,
     connection: f.config.connection,
     provisioner: { ...f.config.connection, tokenFile: "/owner-token" },
     editorPrincipal: "user:system:serviceaccount:owned:factory-control",
@@ -395,26 +416,12 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
     throw new Error(`Unexpected ${method}`);
   };
   const sources = createSubstrateSources(f.database, f.hub);
-  const runtime = createRuntimeController(
-    f.database,
-    f.hub,
-    "owned-native-secret",
-    {
-      substrate: sources,
-      async prepareExecution() {
-        throw new Error("Native Ticket must not prepare legacy Source");
-      },
-    },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
+  const runtime = createRuntimeController(f.database, f.hub, "owned-native-secret", {
+    configuration: config,
+    sources,
     call,
-    config,
-    call,
-  );
+    provisionerCall: call,
+  });
   try {
     await f.database
       .client`UPDATE factory.project SET repository_url=${`file://${repo}`} WHERE id=${f.projectID}`;
@@ -480,7 +487,7 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
     expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
     expect(creates.get("Actor")).toBe(1);
     const readTicketSource = () =>
-      f.database.client.begin((sql) => substrateTicketSourceIn(f.database, sql, f.attemptID));
+      f.database.client.begin((sql) => substrateWorkspaceSourceIn(f.database, sql, f.attemptID));
     expect(await readTicketSource()).toBe(`file://${repo}`);
     const [binding] = await f.database
       .client`SELECT w.kind,w.owner_user_id,a.change_id,w.substrate FROM factory.development_workspace w JOIN factory.runtime_attempt a ON a.workspace_id=w.id WHERE a.id=${f.attemptID}`;
@@ -490,10 +497,10 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
       change_id: f.changeID,
       substrate: true,
     });
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
-    expect(await f.database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
-    );
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
+        to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ source: null, worker: null }]);
     const template = objects.get("ActorTemplate") as { containers: { env: { value: string }[] }[] };
     const bootstrap = JSON.parse(template.containers[0]?.env[0]?.value ?? "null");
     expect(bootstrap.assignment.channels).toContainEqual({
@@ -553,7 +560,7 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
     const [active] = await f.database.client<{ state: string }[]>`
       SELECT state FROM factory.change WHERE id=${f.changeID}`;
     expect(active?.state).toBe("active");
-    await expect(readTicketSource()).rejects.toThrow("Ticket Source grant required");
+    await expect(readTicketSource()).rejects.toThrow("Workspace Source grant required");
     const sessionID = `ses_owned_${turn.id.replaceAll("-", "")}`;
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.change_agent_turn_intent(turn_id,change_id,session_id,prompt_id,prompt_text,bootstrap,session_title,runtime_attempt_id) VALUES(${turn.id},${f.changeID},${sessionID},${`msg_owned_${turn.id.replaceAll("-", "")}`},'Owned Build',true,'Owned native Build',${f.attemptID})`;
@@ -685,20 +692,18 @@ test("independent Source command cannot create a legacy Workspace in an explicit
   await f.database.client`DELETE FROM factory.development_workspace WHERE id=${f.workspaceID}`;
   const source = createWorkspaceSourceController(
     f.database,
-    "owned-native-secret",
-    undefined,
-    undefined,
-    f.projectID,
+    f.hub,
+    createSubstrateSources(f.database, f.hub),
   );
   try {
     await expect(source.ensurePersonal(f.projectID, f.userID)).rejects.toThrow(
       "No compute or legacy Workspace was created",
     );
     expect(await f.database.client`SELECT id FROM factory.development_workspace`).toHaveLength(0);
-    expect(await f.database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
-    );
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
+        to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ source: null, worker: null }]);
   } finally {
     await source.close();
     await f.dispose();
@@ -756,7 +761,7 @@ test.each([
       const actorUID = crypto.randomUUID();
       await f.database.client.begin(async (sql) => {
         await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-        await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,substrate,factorybox_worker_id,factorybox_admission_id) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID},true,NULL,NULL)`;
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
         await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
         await sql`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
         await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
@@ -875,7 +880,7 @@ test("native Build push and Delivery integration validate their admitted TLS des
     await f.database.client.begin(async (sql) => {
       await sql`UPDATE factory.project SET repository_url=${repository} WHERE id=${f.projectID}`;
       await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,substrate,factorybox_worker_id,factorybox_admission_id) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID},true,NULL,NULL)`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(nativeIntent)}::jsonb,${crypto.randomUUID()},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
@@ -912,7 +917,9 @@ test("native Build push and Delivery integration validate their admitted TLS des
       }),
     ).rejects.toThrow("admitted Forge TLS origin");
     expect(frames).toHaveLength(1);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ worker: null }]);
     process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.example";
     await f.database.client.begin(async (sql) => {
       await sql`UPDATE factory.change_commit_operation SET state='succeeded',observed_remote_sha=commit_sha,completed_at=now() WHERE id=${turn.id}`;
@@ -964,58 +971,12 @@ test("native Build push and Delivery integration validate their admitted TLS des
   }
 }, 60_000);
 
-test("fresh isolated work in an explicitly native Project never falls through to legacy capacity or creation", async () => {
-  const f = await substrateFixture("a".repeat(40), "ticket");
-  let nativeCalls = 0;
-  const runtime = f.controller(async () => {
-    nativeCalls++;
-    throw new Error("Unavailable isolated ownership cannot dispatch native work");
-  });
-  const verificationID = crypto.randomUUID();
-  const preparationID = crypto.randomUUID();
-  try {
-    await f.database
-      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,runner_uuid,runner_token,created_by)
-      VALUES(${verificationID},${f.changeID},${"d".repeat(40)},1,'owned-native-isolation',${crypto.randomUUID()},'owned-native-runner-token',${f.userID})`;
-    await f.database
-      .client`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version)
-      VALUES(${preparationID},${f.projectID},'development',${"a".repeat(40)},0)`;
-    for (const start of [
-      () => runtime.ensureStaging(f.projectID, f.userID),
-      () => runtime.startVerification(verificationID, f.userID),
-      () => runtime.startProjectPrebuild(preparationID),
-    ])
-      await expect(start()).rejects.toThrow("No legacy runtime was created");
-    expect(nativeCalls).toBe(0);
-    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
-    expect(
-      await f.database.client`SELECT id FROM factory.factorybox_worker_admission`,
-    ).toHaveLength(0);
-    expect(
-      await f.database.client`SELECT attempt_id FROM factory.runtime_compute_wait`,
-    ).toHaveLength(0);
-    expect(
-      await f.database.client`SELECT * FROM factory.verification_compute_placement`,
-    ).toHaveLength(0);
-    expect(await f.database.client`SELECT * FROM factory.staging_preview`).toHaveLength(0);
-    const [verification] = await f.database
-      .client`SELECT state,runtime_attempt_id FROM factory.verification WHERE id=${verificationID}`;
-    expect(verification).toMatchObject({ state: "pending", runtime_attempt_id: null });
-    const [preparation] = await f.database
-      .client`SELECT state,runtime_attempt_id FROM factory.project_image_preparation WHERE id=${preparationID}`;
-    expect(preparation).toMatchObject({ state: "pending", runtime_attempt_id: null });
-  } finally {
-    await f.dispose();
-  }
-}, 60_000);
-
-test("product Stop retains native Source through verified ROOTFS instead of deleting the Actor before handoff", async () => {
+test("product Stop without independent Source refuses deletion rather than reporting a Pause as Stop", async () => {
   const f = await substrateFixture();
   f.config.deployment = "fresh-workspaces";
   let actor: ReturnType<typeof f.actor> | undefined;
   let deletes = 0;
-  const c = f.controller(async (method) => {
+  const c = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -1068,13 +1029,13 @@ test("product Stop retains native Source through verified ROOTFS instead of dele
     await c.start(f.projectID, f.userID);
     await c.status(f.attemptID, "failed", "owned parent preparation failure");
     expect((await c.get(f.attemptID))?.state).toBe("failed");
-    expect((await c.stop(f.attemptID))?.state).toBe("paused");
+    await expect(c.stop(f.attemptID)).rejects.toThrow("confirmed Source owner");
     expect(deletes).toBe(0);
     const [saved] = await f.database
       .client`SELECT deleted_at,checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
     expect(saved?.["deleted_at"]).toBeNull();
-    expect(saved?.["checkpoint"].fidelity).toBe("SNAPSHOT_FIDELITY_ROOTFS");
-    expect((await c.start(f.projectID, f.userID))?.state).toBe("starting");
+    expect(saved?.["checkpoint"]).toBeNull();
+    await expect(c.start(f.projectID, f.userID)).rejects.toThrow("Reconcile the startup outcome");
     expect(deletes).toBe(0);
   } finally {
     await f.dispose();

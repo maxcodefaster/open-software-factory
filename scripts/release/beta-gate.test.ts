@@ -16,7 +16,7 @@ test("a term is a whole word, so longer words that contain it do not match", () 
   expect(forbiddenTermPattern(["a.c"]).test("abc")).toBe(false);
 });
 
-test("the gate runs every lane, ending with the owned browser lane", () => {
+test("the source gate includes both Connector and native control bridge checks before owned UI", () => {
   const names = gateSteps().map((step) => step.name);
   expect(names).toEqual([
     "docs",
@@ -25,7 +25,13 @@ test("the gate runs every lane, ending with the owned browser lane", () => {
     "typecheck",
     "unit",
     "connector",
+    "substrate",
     "controllers",
     "browser",
+  ]);
+  expect(gateSteps().find((step) => step.name === "substrate")?.command).toEqual([
+    "bun",
+    "run",
+    "substrate:check",
   ]);
 });

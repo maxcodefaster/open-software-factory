@@ -5,16 +5,39 @@ import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { nativeJobsFixture } from "../fixtures/native-jobs";
 
 test("Trash fences admission before Stop, retains workspace and approval, and Restore dispatches nothing", async () => {
   const process = await factoryProcess();
   const db = process.connect();
   let controller: ReturnType<typeof createTicketTrashController> | undefined;
+  let scope: Awaited<ReturnType<typeof fixture>> | undefined;
+  let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
   const release = Promise.withResolvers<void>();
   try {
     const owned = await fixture(undefined, undefined, db);
-    const [originalWorkspace] = await db.client<Array<{ volume: string }>>`
-      SELECT volume_name AS volume FROM factory.development_workspace WHERE id=${owned.workspaceID}`;
+    scope = owned;
+    async function readSource() {
+      return (
+        await db.client<
+          Array<{
+            id: string;
+            branch: string;
+            revision: string;
+            native: boolean;
+            atespace: string;
+            actor: string;
+            intent: unknown;
+          }>
+        >`SELECT workspace.id,workspace.source_branch AS branch,workspace.source_revision AS revision,
+        workspace.substrate AS native,binding.atespace,binding.actor_name AS actor,binding.intent
+        FROM factory.development_workspace workspace
+        JOIN factory.runtime_attempt attempt ON attempt.workspace_id=workspace.id AND attempt.id=${owned.attemptID}
+        JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+        WHERE workspace.id=${owned.workspaceID}`
+      )[0];
+    }
+    const originalWorkspace = await readSource();
     if (!originalWorkspace) throw new Error("Owned Workspace is missing");
     const admission = createChangeAdmission(db, buildModelID);
     const admitted = await admission.admit(owned.changeID, owned.userID, {
@@ -23,12 +46,14 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
       text: "A bounded correction",
     });
     const verificationID = crypto.randomUUID();
-    const verificationAttemptID = crypto.randomUUID();
-    await db.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number, runner_name, runner_token, created_by)
-      VALUES (${verificationID}, ${owned.changeID}, ${"d".repeat(40)}, 1, 'owned-trash-verification', 'owned-token', ${owned.userID})`;
-    await db.client`INSERT INTO factory.runtime_attempt(id, project_id, verification_id, isolated_kind, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${verificationAttemptID}, project_id, ${verificationID}, 'verification', 2, ${"d".repeat(40)}, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
-      FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
+    await db.client`INSERT INTO factory.verification(
+      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,runner_uuid,
+      runner_token,runner_job_handle,created_by)
+      VALUES(${verificationID},${owned.changeID},${"d".repeat(40)},1,'owned-trash-verification',
+        1,${crypto.randomUUID()},'owned-token','owned-trash-job',${owned.userID})`;
+    native = await nativeJobsFixture(db, owned.projectID);
+    const jobs = native;
+    const verificationAttemptID = await jobs.startVerification(verificationID, owned.userID);
     const stop = createChangeAgentStop(db, owned.hub);
     const stopped: string[] = [];
     const reached = Promise.withResolvers<void>();
@@ -37,7 +62,12 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
       {
         async stop(id) {
           stopped.push(id);
-          await db.client`UPDATE factory.runtime_attempt SET state = 'stopped' WHERE id = ${id}`;
+          if (id === verificationAttemptID) await jobs.stop(id);
+          else {
+            expect(id).toBe(owned.attemptID);
+            // This Development observation has no dispatched Create or Actor.
+            await db.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${id}`;
+          }
         },
       },
       {
@@ -81,6 +111,10 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
       "Trash stop did not finish",
     );
     expect(stopped.toSorted()).toEqual([owned.attemptID, verificationAttemptID].toSorted());
+    const [deleted] = await db.client`SELECT deleted_at IS NOT NULL AS confirmed
+      FROM factory.substrate_binding WHERE runtime_attempt_id=${verificationAttemptID}`;
+    expect(deleted).toEqual({ confirmed: true });
+    const afterStop = jobs.calls.length;
     await controller.restore(owned.ticketID, owned.userID, 2);
     await controller.trash(owned.ticketID, owned.userID);
     await expect(controller.restore(owned.ticketID, owned.userID, 2)).rejects.toThrow(
@@ -99,12 +133,12 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
       Array<{
         trashed: boolean;
         attemptState: string;
-        volume: string;
+        workspaceID: string;
         revisionID: string;
         turnCount: number;
       }>
     >`
-      SELECT ticket.trashed_at IS NOT NULL AS trashed, attempt.state AS "attemptState", workspace.volume_name AS volume,
+      SELECT ticket.trashed_at IS NOT NULL AS trashed, attempt.state AS "attemptState", workspace.id AS "workspaceID",
         approval.requirement_revision_id AS "revisionID", (SELECT count(*)::integer FROM factory.agent_turn WHERE change_id = ${owned.changeID}) AS "turnCount"
       FROM factory.ticket ticket JOIN factory.requirement_approval approval ON approval.ticket_id = ticket.id
       JOIN factory.development_workspace workspace ON workspace.ticket_id = ticket.id
@@ -112,10 +146,16 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
     expect(retained).toEqual({
       trashed: false,
       attemptState: "stopped",
-      volume: originalWorkspace.volume,
+      workspaceID: originalWorkspace.id,
       revisionID: owned.revisionID,
       turnCount: 1,
     });
+    expect(await readSource()).toEqual(originalWorkspace);
+    expect(originalWorkspace.native).toBe(true);
+    expect(jobs.calls).toHaveLength(afterStop);
+    expect(jobs.calls.filter((call) => call.method === "CreateActor")).toHaveLength(1);
+    expect(jobs.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
+    expect(owned.requests()).toBe(0);
     // Pending OpenCode input remains an explicit Stop-recovery barrier after Restore.
     await expect(
       admission.admit(owned.changeID, owned.userID, {
@@ -129,8 +169,13 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
   } finally {
     release.resolve();
     controller?.close();
-    await db.client.end();
-    await process.dispose();
+    try {
+      await native?.close();
+      await db.client.end();
+      await process.dispose();
+    } finally {
+      scope?.restoreEnvironment();
+    }
   }
 }, 60_000);
 
@@ -138,8 +183,10 @@ test("Trash prevents an already dispatched Interview from publishing or retainin
   const process = await factoryProcess();
   const db = process.connect();
   let controller: ReturnType<typeof createTicketTrashController> | undefined;
+  let scope: Awaited<ReturnType<typeof fixture>> | undefined;
   try {
     const owned = await fixture(undefined, undefined, db);
+    scope = owned;
     const ticketID = crypto.randomUUID();
     const conversationID = crypto.randomUUID();
     await db.client`INSERT INTO factory.ticket(id, project_id, title, created_by)
@@ -191,7 +238,11 @@ test("Trash prevents an already dispatched Interview from publishing or retainin
     expect(published).toBe(false);
   } finally {
     controller?.close();
-    await db.client.end();
-    await process.dispose();
+    try {
+      await db.client.end();
+      await process.dispose();
+    } finally {
+      scope?.restoreEnvironment();
+    }
   }
 }, 60_000);

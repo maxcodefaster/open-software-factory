@@ -1,127 +1,86 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
-import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
-import { buildModelID, fixture } from "../fixtures/change-agent-turns";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
-import { fixtureValue } from "../fixtures/value";
-
-let restoreConfiguration: () => void;
-beforeAll(() => {
-  restoreConfiguration = installOwnedRuntimeConfiguration();
-});
-afterAll(() => {
-  restoreConfiguration();
-});
-
-test("retained cleanup recovery leaves database capacity for startup and usage", async () => {
-  const processFixture = await factoryProcess();
-  const database = processFixture.connect(2);
-  const inspection = processFixture.connect(1);
-  try {
-    const attempts = [];
-    for (let index = 0; index < 4; index++)
-      attempts.push(await fixture(undefined, undefined, database));
-    const hub = fixtureValue(attempts[0], "attempts[0]").hub;
-    hub.connected = () => false;
-    const runtime = createRuntimeController(
-      database,
-      hub,
-      "owned-cleanup-capacity",
-      {
-        prepareExecution: async () => {
-          throw new Error("Recovery must not create source");
-        },
-      },
-      { ...createKubernetesClient(), getNamespace: async () => null },
-      async () => "",
-    );
-    await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now()`;
-    await Promise.race([
-      runtime.recover(),
-      Bun.sleep(2000).then(() => {
-        throw new Error("Cleanup exhausted the startup connection pool");
-      }),
-    ]);
-    await eventually(
-      async () => {
-        const [count] =
-          await inspection.client`SELECT count(*)::int AS count FROM factory.runtime_attempt WHERE state<>'stopped'`;
-        return count?.["count"];
-      },
-      (remaining) => remaining === 0,
-      "Retained cleanup did not settle",
-      3000,
-    );
-    expect(await database.client`SELECT 1 AS available`).toHaveLength(1);
-  } finally {
-    await database.client.end({ timeout: 1 });
-    await inspection.client.end({ timeout: 1 });
-    await processFixture.dispose();
-  }
-}, 30000);
+import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 
 test.each([
-  [true, "completed"],
-  [false, "completed"],
-  [false, "interrupted"],
+  { connected: true, outcome: "completed", loseChildLog: false },
+  { connected: false, outcome: "completed", loseChildLog: false },
+  { connected: false, outcome: "interrupted", loseChildLog: false },
+  { connected: true, outcome: "completed", loseChildLog: true },
 ] as const)(
-  "cleanup preserves late consumption or honest lost coverage with connection=%s and outcome=%s",
-  async (connected, outcome) => {
-    const processFixture = await factoryProcess();
-    const database = processFixture.connect();
+  "native Delete retains usage with connection=$connected, outcome=$outcome and lost child log=$loseChildLog",
+  async ({ connected, outcome, loseChildLog }) => {
+    const f = await nativeRuntimeFixture("ticket");
+    const database = f.database;
     try {
-      const owned = await fixture(undefined, undefined, database);
-      const admitted = await createChangeAdmission(database, buildModelID).admit(
-        owned.changeID,
-        owned.userID,
-        {
-          kind: "change-prompt",
-          commandId: crypto.randomUUID(),
-          text: "Owned cleanup coverage",
-        },
+      const runtime = f.controller();
+      await runtime.startPersisted(f.changeID, f.userID);
+      const sessionID = `ses_owned_usage_${f.changeID.replaceAll("-", "")}`;
+      const empty = JSON.stringify({ required: [], optional: [], selected: [] });
+      await database.client.begin(async (sql) => {
+        await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
+        await sql`UPDATE factory.change SET state='active' WHERE id=${f.changeID}`;
+        await sql`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,epoch=epoch+1 WHERE change_id=${f.changeID}`;
+        await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
+          VALUES(${f.changeID},${f.attemptID},${sessionID},'committed',now(),${f.userID})`;
+        await sql`INSERT INTO factory.system_skill_settings(singleton,version,planning,build,updated_by)
+          VALUES(true,1,${empty}::jsonb,${empty}::jsonb,${f.userID})`;
+      });
+      const admitted = await createChangeAdmission(database, "factory-coding-model").admit(
+        f.changeID,
+        f.userID,
+        { kind: "change-prompt", commandId: crypto.randomUUID(), text: "Owned cleanup coverage" },
       );
       const store = createAgentTurnStore(database);
       const turn = await store.claimPending(admitted.turn.id);
-      if (!turn?.ownerToken) throw new Error("Owned cleanup turn missing");
-      await owned.writers.prepareAgent(owned.changeID, turn.id);
-      await store.beginDispatch(turn.id, turn.ownerToken);
+      if (!turn?.ownerToken) throw Error("Owned cleanup turn missing");
+      const writers = createChangeWriterController({
+        database,
+        runtime,
+        agentUsername: "owned-control",
+        stopAgent: async () => {},
+        protect: async () => {},
+      });
+      await writers.prepareAgent(f.changeID, turn.id);
+      expect(await store.beginDispatch(turn.id, turn.ownerToken)).not.toBeNull();
       await database.client`UPDATE factory.change_agent_turn_intent
-      SET runtime_attempt_id=${owned.attemptID},session_id=${owned.sessionID} WHERE turn_id=${turn.id}`;
+        SET runtime_attempt_id=${f.attemptID},session_id=${sessionID} WHERE turn_id=${turn.id}`;
       let hasLateConsumption = false;
       const occurredAt = Date.now();
-      const childID = `${owned.sessionID}_child`;
-      owned.hub.connected = () => connected;
-      owned.hub.request = async (_attempt, _channel, request, path) => {
+      const childID = `${sessionID}_child`;
+      f.hub.connected = () => connected;
+      f.hub.request = async (_attempt, _channel, request, path) => {
         const url = new URL(path ?? new URL(request.url).pathname, "http://owned.local");
         if (url.pathname === "/api/session")
           return Response.json({
             data:
-              url.searchParams.get("parentID") === owned.sessionID && hasLateConsumption
+              url.searchParams.get("parentID") === sessionID && hasLateConsumption
                 ? [
                     {
                       id: childID,
-                      parentID: owned.sessionID,
+                      parentID: sessionID,
                       location: { directory: "/workspace/project" },
                     },
                   ]
                 : [],
             cursor: {},
           });
-        const sessionID = url.pathname.includes(childID) ? childID : owned.sessionID;
+        const id = url.pathname.includes(childID) ? childID : sessionID;
+        if (hasLateConsumption && loseChildLog && id === childID)
+          throw Error("Owned late child log became unavailable");
         const sequence = hasLateConsumption ? 2 : 0;
         const event = {
-          id: `owned-consumption:${sessionID}`,
+          id: `owned-consumption:${id}`,
           created: occurredAt,
           type: "session.usage.recorded",
-          durable: { aggregateID: sessionID, seq: sequence, version: 1 },
+          durable: { aggregateID: id, seq: sequence, version: 1 },
           data: {
-            sessionID,
-            source: sessionID === childID ? "title" : "compaction",
+            sessionID: id,
+            source: id === childID ? "title" : "compaction",
             tokens: { input: 7, output: 3, reasoning: 0, cache: { read: 0, write: 0 } },
           },
         };
@@ -130,95 +89,74 @@ test.each([
             ? [event]
             : [];
         return new Response(
-          [...frames, { type: "log.synced", aggregateID: sessionID, seq: sequence }]
+          [...frames, { type: "log.synced", aggregateID: id, seq: sequence }]
             .map((frame) => `data: ${JSON.stringify(frame)}\n\n`)
             .join(""),
           { headers: { "content-type": "text/event-stream" } },
         );
       };
       const client = createOpenCodeClient((request, path) =>
-        owned.hub.request(owned.attemptID, "agent", request, path),
+        f.hub.request(f.attemptID, "agent", request, path),
       );
       const usage = createRecordedOpenCodeUsage(database);
-      await usage.prepare(turn.id, client, owned.sessionID);
+      await usage.prepare(turn.id, client, sessionID);
       await usage.settle(turn.id, outcome);
+      expect(
+        await store.settle(
+          turn.id,
+          turn.ownerToken,
+          outcome === "completed" ? "completed" : "failed",
+          "Controlled terminal Coding",
+        ),
+      ).toBe(true);
       hasLateConsumption = true;
       const read = async () => [
         ...(await database.client`
-      SELECT event_id,source,counters FROM factory.usage_entry WHERE operation_id=${`turn:${turn.id}`} ORDER BY event_id`),
+        SELECT event_id,source,counters FROM factory.usage_entry WHERE operation_id=${`turn:${turn.id}`} ORDER BY event_id`),
       ];
-      let deletes = 0;
       let entriesAtDeletion: Awaited<ReturnType<typeof read>> = [];
-      await database.client`UPDATE factory.runtime_attempt SET
-        kubernetes_uid='owned-cleanup-pod',kubernetes_namespace_uid='owned-source-namespace'
-        WHERE id=${owned.attemptID}`;
-      const runtime = createRuntimeController(
-        database,
-        owned.hub,
-        "owned-cleanup",
-        {
-          prepareExecution: async () => {
-            throw new Error("Cleanup must not create source");
-          },
-        },
-        {
-          ...createKubernetesClient(),
-          getNamespace: async () => ({ uid: "owned-source-namespace", labels: {} }),
-          getPod: async () => ({
-            uid: "owned-cleanup-pod",
-            phase: "Running",
-            labels: {},
-            factoryboxImage: process.env["FACTORY_FACTORYBOX_WORKER_IMAGE"] ?? "owned-worker",
-            runtimeHostImage: process.env["FACTORY_RUNTIME_HOST_IMAGE"] ?? "owned",
-          }),
-          // A Sandbox owns its assignment, not the shared worker Pod.
-          // Native Delete and backing retirement have separate lifecycle proofs.
-          deleteSecret: async (input) => {
-            expect(input.namespaceUID).toBe("owned-source-namespace");
-            expect(input.attemptID).toBe(owned.attemptID);
-            expect(input.ownerID).toBe(owned.workspaceID);
-            entriesAtDeletion = await read();
-            deletes++;
-          },
-          deletePod: async () => {
-            throw new Error("Sandbox cleanup must preserve the shared worker");
-          },
-          deleteNamespace: async () => {
-            throw new Error("Source must survive compute cleanup");
-          },
-        },
-        async () => "",
-      );
-      await runtime.stop(owned.attemptID);
-      await eventually(
-        async () => (await runtime.get(owned.attemptID))?.state,
-        (state) => state === "stopped",
-        "Usage did not persist before private assignment retirement",
-        15000,
-      );
-      expect(deletes).toBe(1);
-      if (connected) {
+      f.beforeCall(async (method) => {
+        if (method === "DeleteActor") entriesAtDeletion = await read();
+      });
+      expect((await runtime.stop(f.attemptID))?.state).toBe("stopped");
+      expect(f.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
+      if (connected && !loseChildLog) {
         expect(entriesAtDeletion.map((entry) => entry["source"]).sort()).toEqual([
           "compaction",
           "title",
         ]);
         expect(entriesAtDeletion.every((entry) => entry["counters"].input === 7)).toBe(true);
+      } else if (loseChildLog) {
+        expect(entriesAtDeletion.map((entry) => entry["source"]).sort()).toEqual([
+          "compaction",
+          "unobserved",
+        ]);
+        expect(
+          entriesAtDeletion.find((entry) => entry["source"] === "compaction")?.["counters"].input,
+        ).toBe(7);
+        expect(
+          entriesAtDeletion.find((entry) => entry["source"] === "unobserved")?.["counters"].input,
+        ).toBeNull();
       } else {
         expect(entriesAtDeletion).toHaveLength(outcome === "interrupted" ? 2 : 1);
         expect(entriesAtDeletion.every((entry) => entry["source"] === "unobserved")).toBe(true);
         expect(entriesAtDeletion.every((entry) => entry["counters"].input === null)).toBe(true);
       }
       const before = await read();
-      if (connected) await usage.drainAttempt(owned.attemptID, client);
-      else await usage.markUnavailable(owned.attemptID);
+      if (connected && !loseChildLog) await usage.drainAttempt(f.attemptID, client);
+      else await usage.markUnavailable(f.attemptID);
       expect(await read()).toEqual(before);
+      expect((await runtime.stop(f.attemptID))?.state).toBe("stopped");
+      expect(f.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
       expect(
-        await database.client`SELECT id FROM factory.development_workspace WHERE change_id=${owned.changeID}`,
+        await database.client`SELECT id FROM factory.development_workspace WHERE change_id=${f.changeID}`,
+      ).toHaveLength(1);
+      expect(
+        await database.client`SELECT workspace_id FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`,
       ).toHaveLength(1);
     } finally {
-      await database.client.end({ timeout: 2 });
-      await processFixture.dispose();
+      await f.dispose();
     }
   },
-  60000,
+  60_000,
 );

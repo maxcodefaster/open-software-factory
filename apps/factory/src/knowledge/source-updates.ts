@@ -25,6 +25,7 @@ export function createWikiSourceUpdates(options: {
   database: Database;
   forge: Forge;
   apiURL: string;
+  publicURL?: string;
   owner: string;
   receiverURL: string;
   signingKey: string;
@@ -46,7 +47,10 @@ export function createWikiSourceUpdates(options: {
       SELECT repository_url AS url,default_branch AS branch FROM factory.project WHERE id=${projectID}
     `;
     if (!row) throw new CommandError("not-found", "Project not found");
-    return { ...row, repository: factoryForgeSource(row.url, options.apiURL, options.owner) };
+    return {
+      ...row,
+      repository: factoryForgeSource(row.url, options.apiURL, options.owner, options.publicURL),
+    };
   }
   async function ensure(projectID: string) {
     const current = await project(projectID);

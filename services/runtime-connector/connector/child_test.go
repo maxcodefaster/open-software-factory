@@ -599,7 +599,7 @@ func TestChildBoundsFiniteResponsesWithoutTruncatingNativeEventStreams(t *testin
 			defer connection.Close()
 			runtime := childRuntime{
 				assignment: Assignment{Channels: []Channel{{Name: "owned", Kind: test.kind, Target: application.URL}}},
-				control:    &controlConnection{connection: connection},
+				control:    &controlConnection{connection: connection, done: make(chan struct{})},
 				httpClient: application.Client(),
 			}
 			runtime.handleHTTPRequest(context.Background(), Message{

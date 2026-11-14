@@ -1,159 +1,187 @@
-# Reproducible runtime measurements
+# Substrate runtime checks
 
-The lifecycle benchmark measures a fresh Factorybox Sandbox containing the maintained
-`test/fixtures/runtime-project` Dev Container: an App container, a supporting service and a named
-volume. A Node process keeps 256 MiB of random memory and a counter behind an HTTP state probe.
-This is a synthetic lifecycle workload, not an enterprise application or a provider performance ranking.
+Factory uses the pinned official Substrate API and gVisor ROOTFS profile. Factory owns product
+authority and execution intent. Substrate owns Actor lifecycle and snapshots. The previous
+Factorybox build, lifecycle, reserve and warm-memory benchmark commands have been removed.
+Existing private evidence is retained; no old worker or storage cleanup is run by this checkout.
+The source launcher also leaves cluster monitoring alone. It does not install metrics-server;
+existing monitoring owned by the operator is not removed or reconfigured.
 
-## Run
+## Operator setup
 
-Use a native Linux Kubernetes node and the same worker admission required by `runtime:conformance`.
-Set `FACTORY_FACTORYBOX_WORKER_IMAGE`, `FACTORY_FACTORYBOX_EXECUTABLE_SHA256`,
-`FACTORY_FACTORYBOX_ARCHITECTURE`, `FACTORY_FACTORYBOX_NODE` and, where necessary,
-`FACTORY_REGISTRY_CA_FILE`. All image references must include their exact digest.
-The Runtime Connector image is read from `.factory/runtime-host-image` or
-`FACTORY_RUNTIME_CONFORMANCE_IMAGE`.
+Read [the native profile](../../deploy/substrate/README.md) for the approved upstream commit,
+worker/gVisor pins, serving trust, separate Owner and Editor credentials, TLS egress, Actor image
+and installation-wide configuration. Execution uses the explicit Linux amd64 or arm64 runtime
+identity, never the control-plane host's architecture as a fallback. An artifact download,
+control-plane build or ordinary Docker component test does not qualify that profile.
+The owned ARM infrastructure proof has separately verified actual worker/runsc
+checksums, current-image private Docker, native DNS/TLS policy, synchronous durable
+ROOTFS cold restart and UID-bound Actor deletion. It is not the normal Factory
+Workspace/Source path or complete product acceptance.
+
+The profile tools are explicit operator commands:
 
 ```sh
-FACTORY_BENCHMARK_CYCLES=10 mise exec -- bun scripts/runtime/benchmark.ts
-mise exec -- bun test scripts/runtime/benchmark-model.test.ts
+mise exec -- bun scripts/runtime/substrate-profile-command.ts assets /absolute/owned/arm64-assets arm64
+mise exec -- bun scripts/runtime/substrate-profile-command.ts render /absolute/profile-input.json /absolute/owned/rendered
 ```
 
-For attribution runs with an instrumented worker, set `FACTORY_BENCHMARK_PROFILE=1`.
-This enables bounded native phase diagnostics on individual worker commands and
-saves command-category timings in `command-timings.json`. Native phase lines remain
-in each operation's stderr evidence. `resources-<cycle>.json` records raw CPU,
-throttling, memory and available I/O counters for the exact worker/Sandbox cgroups
-before pause, while paused and after resume; these probes run outside the timers.
-Labels omit command arguments, source and
-credentials. Profiling is off by default; use separate untraced runs for speed
-comparisons, since diagnostic work contributes to measured latency.
+These commands download verified official assets or render declarations. They do not install
+a private runtime or qualify a running Factory. Apply and live egress verification require the
+exact upstream checkout, explicit kubeconfig and context described in the native profile.
 
-`FACTORY_BENCHMARK_MEMORY_MIB` selects 64–1536 MiB of random App memory under the
-same 3 GiB native fixture ceiling. The default remains 256 MiB. Record memory size
-with every comparison: a larger working set is a different workload, not a slower
-result on the original fixture.
+## Native lifecycle proofs
 
-`FACTORY_BENCHMARK_READY_PROBE=1` additionally measures the first lightweight
-App-ready response as `resumeToReadyMS`, then runs the unchanged full memory-hash
-and state-preservation assertions. The original `resumeToHealthyMS` still ends
-after integrity verification; in this optional mode it also includes the earlier
-ready request. Compare matching probe modes only. A cached marker in the ready
-response is not proof of preserved memory; the subsequent full probe supplies it.
+Prepare separate, explicitly owned fixtures and set `FACTORY_SUBSTRATE_NATIVE_FIXTURE` and
+`FACTORY_SUBSTRATE_WORKSPACES_NATIVE_FIXTURE` to their private JSON files. The concrete schemas
+and ownership requirements live in the
+[adapter proof](../../test/integration/substrate-adapter.native.test.ts) and
+[Workspace proof](../../test/integration/substrate-workspaces.native.test.ts).
+Do not point these at a retained user installation.
 
-`FACTORY_BENCHMARK_BATCH_PREFLIGHT=1` evaluates the worker's optional combined
-read-only worker-status/capacity command. It applies only to consecutive pause
-preflight reads for the exact same worker and phase; mutations, native admission,
-Kubernetes identity validation and original intent boundaries remain unchanged.
-This needs an experimental worker supporting `--include-worker-status`. There is
-no silent fallback to an older binary, and no production worker is selected by
-this flag. Compare matching probe, memory, cache and resource settings.
+```sh
+mise exec -- bun run runtime:conformance
+```
 
-With a pinned experimental worker, `mise exec -- bun scripts/runtime/benchmark-comparison.ts`
-runs four serial ten-cycle trials in baseline/combined/combined/baseline order.
-All use the same worker binary, 256 MiB workload, original full-integrity probe
-and resource shape, with profiling disabled. It retains every trial and verifies
-matching inputs and confirmed cleanup. A failure stops the comparison without
-discarding the failed native evidence. Twenty samples per mode do not establish
-a stable tail latency or a platform/release qualification.
+This runs the official gRPC/Connector lifecycle proof and authenticated Factory Workspace proofs.
+Missing fixture configuration is a failure, never a skipped or successful proof. These tests cover
+their explicit assertions, not a released-image, two-Project Helm acceptance or the complete
+approved Ticket through Delivery. The operator remains responsible for the exact native fixture
+inventory the tests retain. There is no general Namespace cleanup or finalizer-removal command.
 
-For explicitly owned offline codec analysis only, `FACTORY_BENCHMARK_EXPORT_PAGES`
-can name a new private artifact file for the first pause's RAM-image tar export.
-The destination is created exclusively with mode `0600`, the immutable checkpoint
-is untouched, and export occurs outside lifecycle timers. This is a diagnostic
-mode, not a speed comparison. Treat RAM bytes as sensitive even for fixtures;
-never place these exports in public assets or use this as a project-data export.
+## Product live fixtures
 
-The existing conformance adapter creates its own Namespace, Pod and private store, retains exact
-operation identities and enforces the existing 420-second workload deadline. Passing runs clean up
-their own resources. Failed runs retain native evidence and fence the worker rather than deleting
-unresolved storage. This command is not a full conformance or production qualification.
+The Environment and external MCP proofs use a separate Factory process and an `owned_<32 hex>`
+database. Run their control plane on Linux as UID 1000. Supply
+`FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION` with the normal `fresh-workspaces` configuration,
+the observed pinned worker identity and separate Owner and Editor token files. The fixture writes a
+private copy with its new database name. It never rewrites the operator's configuration or changes
+the identity of a retained fixture.
 
-Preparation failures retain the owned Pod state and bounded worker logs before
-cleanup when available. Missing or replaced-Pod logs remain unavailable; diagnostics
-do not replace the original error or extend its deadline.
+Commission reachable TLS routing for the fixture's configured Connector and Forgejo origins.
+The API and public Forgejo addresses may differ, but native Git uses the exact public HTTPS
+origin on port 443, admitted by the frozen native egress configuration. Loopback browser
+transport is not an Actor callback route. The fixture helpers do not install DNS, an Ingress,
+a registry, native workers or the object store for you.
 
-On a desktop host, an external automounter can hold a private loop filesystem
-after Kubernetes removes its Namespace. Namespace absence is not proof of physical
-store release. The standalone Factorybox `tools/fixture_mount_release.py` observes
-and, with `--release`, normally unmounts only a completed, exactly owned local
-fixture whose UUID, loop device, node boot and Namespace closure match its receipts.
-It never changes automount policy, touches foreign storage or forces an unmount.
-This desktop test procedure is not an AKS hosting requirement or production cleanup API.
+For the Environment proof, also set:
 
-`project-benchmark.ts` pins public Fastify v5.6.2, runs dependency installation,
-lint, the original unit suite, TypeScript checks and validation build, then checks
-an independent prepared fork of the running App. The first two default-DNS native
-runs failed and remain retained. An ordinary-container control reproduced the
-custom-server failure on a bridge and passed with Node's standard `ipv4first`
-ordering. `FACTORY_PROJECT_BENCHMARK_DNS_ORDER=ipv4first` selects that explicit
-workload setting; it is not a host/kernel change, test patch or automatic product
-configuration. Dependency locks, partial command output and original skips are
-retained. Do not relabel a configured workload proof as an unconfigured platform
-qualification or compare its prepared fork with an unrelated provider cold start.
+- `FACTORY_FORGEJO_API_URL`, `FACTORY_FORGEJO_PUBLIC_URL` and `FACTORY_FORGEJO_OWNER`.
+- `FACTORY_NATIVE_RUNTIME_FORGE_TOKEN_FILE`, a private file with repository-creation authority
+  for that owned Forgejo account.
+- `FACTORY_NATIVE_REGISTRY_FIXTURE`, a private JSON file with `owner`, `deployment`, `host`,
+  `username`, `password`, `certificate`, `developmentImage` and `feature`.
+  `owner` is the fixture UUID. `deployment` matches the native WorkerPool selector. `host`
+  matches both `prebuildRegistry` and an admitted egress host, without a port or IP address.
+  The certificate contains only public PEM certificates. Both image references must be immutable
+  digests below `HOST/open-factory/native-fixtures/OWNER_UUID/`.
 
-## Integrity and gated experiments
+The private development image must provide Node.js and the `node` user. The private Feature's
+`install.sh` writes `prepared` to `/opt/owned-remote-feature`; its `postCreateCommand` writes
+`ran` to `remote-feature-hook.txt` in the Workspace. Those markers distinguish authenticated
+Feature installation from a plain successful base-image pull. The registry must reject an
+unauthenticated request for the development image's exact manifest with HTTP 401 and permit
+the commissioned credentials to pull the fixture artifacts and publish Factory prebuilds.
 
-`filesystem-integrity.ts`, `capacity-integrity.ts` and `resume-copy-integrity.ts`
-create separate, exactly owned native fixtures with the ordinary pinned admission.
-They check foreign mounts/dirty backing, bounded-store write refusal, and an
-unattempted destination-prefix corruption/continuation respectively. Known faults
-must be refused before restore or Pause dispatch. Only exact known fixture bytes,
-mounts or pressure files may be repaired/released; failed native stores remain
-retained. The copy shim belongs to one request's environment, not host PATH or a
-replacement of the pinned runtime. Workload and cleanup each keep their original
-420-second windows and Sandbox limits remain 3 CPU / 3 GiB.
+The external MCP proof starts its own Forgejo and requires
+`FACTORY_FORGEJO_PUBLIC_URL` to route to that owned server. It exercises OAuth, local OpenCode,
+browser collaboration, commands and file transfers against the same native Dev Container.
+Its browser and native service dependencies must be available before selecting the lane.
 
-`advanced-capabilities.ts` observes pinned CRIU memory-tracking/userfaultfd features
-and opens/closes worker userfaultfds without changing host policy. A local positive
-feature probe is not stock AKS availability or a lazy-restore acceptance gate.
-The separate Factorybox `tools/incremental_experiment.py` retains a selected-pin
-pre-dump failure in both ordinary/read modes. Its `--full-controls` lane measures
-full captures at explicit dirty-page regimes on a disposable process; it does not
-claim an incremental comparison, nested Sysbox restore or selected optimization.
+The publication proof uses the same explicit native configuration and Forgejo HTTPS origin
+on a Linux UID-1000 control plane. It starts an owned Forgejo and executes an admitted release
+intent through Factory's native publication owner. It checks the original Actor binding,
+downloads the actual package, verifies its exact source/release marker and digest, and confirms
+credential revocation and Actor Stop. It retains the database, native names, Forgejo and encryption
+dependencies. This execution proof does not stand in for the separate human publication admission
+or the full approved Ticket/Helm journey. The Forgejo component check no longer hides it behind
+an optional runtime flag.
 
-`pool-lookup-benchmark.ts` measures the real Factory producer/reserve SQL with a
-separate Factory database and **synthetic** native observations. Run it with
-`mise exec -- bun --no-env-file scripts/runtime/pool-lookup-benchmark.ts`.
-It performs 20 hit/20 empty-ready-pool miss decisions in alternating ABBA order
-and rolls back assignment/setup mutations. No Kubernetes worker is created and
-no model is called. These samples measure controller decision cost, not native
-prepared-slot readiness, a real pool hit rate or production template promotion.
+```sh
+mise exec -- bun run test:live project-environments.live
+mise exec -- bun run test:live external-factory-mcp.live
+mise exec -- bun run test:live native-publication.live
+```
 
-## What is measured
+These proofs require the published runtime-host, browser-tools and developer-ide artifacts.
+Missing commissioning inputs are failures, not skipped acceptance. Their assertions have not yet
+been qualified together on the pinned live amd64 profile.
 
-- **Worker admission to command-ready:** creation of a new worker, image preparation, Sandbox start
-  and a successful private Docker command. Host image caches are not cleared; call this admission,
-  not a universal cold start.
-- **App setup:** Dev Containers CLI startup and the first successful state probe. This does not
-  include a real repository's clone, dependency install, build or database migration.
-- **Pause:** request to confirmed capture, including the host's Kubernetes exec transport.
-- **Resume to healthy:** request to successful App state response. The same process PID, startup
-  timestamp, memory hash and increasing request counter must survive, as must container identities.
-- **Anonymous RAM:** the native pause receipt must report zero anonymous bytes and zero resident
-  snapshot pages after capture. This is not total worker memory, freed filesystem cache or a cloud bill.
+The startup browser journey uses an already running, separately owned Factory. Set
+`FACTORY_BROWSER_BASE_URL`, `DATABASE_URL`, the Forgejo API/public origins,
+`FACTORY_NATIVE_RUNTIME_FORGE_TOKEN_FILE` and `FACTORY_NATIVE_RUNTIME_REPOSITORY` as `owner/name`.
+The database must have the owned fixture name above; it must not be the retained installation.
+Select `workspace-startup.live.spec.ts` in `test:browser:native`. The proof records saved Actor
+bindings alongside visible Source, IDE, PTY and Preview outcomes. Saved binding evidence alone
+does not prove current liveness. No worker exec, cache inspection or warm-memory claim is involved.
 
-Raw configuration, per-cycle samples and native operation receipts live under
-`.factory/test-results/runtime-benchmark/<run-id>/`. Configuration records exact source and image
-identities, hardware architecture, kernel and cache treatment. Summaries use nearest-rank median/p95;
-the sample count and every failure must accompany any published number. A failed or short run is
-not evidence of long-term reliability, and ten samples do not establish a stable tail latency.
+Stop retains independent Source and product history. It is not permission to drop the fixture
+database: native Atespaces, templates or editor inventory may still exist. These proofs pause their
+own control plane and record retained inventory under `.factory/test-results/`. Generic live-fixture
+disposal refuses database removal while that inventory remains or cannot be confirmed absent.
+The commissioned registry and unrelated installation resources stay unchanged.
 
-## Comparisons and public evidence
+## Component checks
 
-Battleships aggregates pricing and external benchmark datasets; it is not itself the workload used
-here. StarSling's published target is 4 vCPU, 8 GiB RAM and 40 GB disk, with real repository suites
-such as Better Auth, Mastra and OpenClaw. These are not equivalent to our lifecycle fixture.
-A provider comparison needs the same pinned ComputeSDK or StarSling suite, resource shape,
-toolchain, test commands, cache treatment, timing boundaries and repeat policy on both sides.
-Preserve clone, install, typecheck, build and test timings separately, and count failed provisioning
-attempts instead of discarding them. State the provider region and the self-hosted node's hardware.
+`substrate-image-proof.sh` checks the Actor package on its matching native Linux architecture
+without starting an Actor. Emulated host/image mismatches are refused.
+`compose-inputs-proof.sh` and `project-compose-prebuild-proof.sh` exercise the shipped Compose,
+Buildx and Dev Containers components in separate, exactly owned ordinary Docker containers.
+The latter proofs deliberately use no network, host Docker socket, Project source or credentials.
+Their receipts state `nativeSubstrateProof: false`. They are publication gates for the packaged
+components, not proof of Substrate isolation, actual worker placement or ROOTFS lifecycle.
+Its `cold-prebuild` recipe stops the original prepared-image primary, removes its temporary
+override, edits application Source and reopens that same container with the pinned CLI.
+The image/input and public configuration must still match; a successful component run does
+not qualify native Source restoration or an approved Ticket journey.
+`credential-free` checks committed prebuild matching and CLI startup without Runtime
+environment or registry credentials. The reserve/template-fork, captured-process activation
+and private prepared-primary image paths have been removed, including their component recipes.
+Normal startup still validates prebuild input identity, native dependency images and required hooks.
 
-For cost comparisons include allocated node-hours, the Factory control plane, always-running Staging,
-retained disk and snapshots, storage I/O and egress. Pausing processes only saves billed compute if
-the infrastructure actually releases or reduces that billed capacity. Model and operations costs are
-separate. No live vendor accounts or model credentials are required for this lifecycle measurement.
+Controlled controller tests use real PostgreSQL and Factory owners with explicit RPC responses.
+Keep them separate from live native evidence. Cold restart is the accepted model; no check here
+promises warm memory, preserved process IDs, provider comparisons or billed compute savings.
 
-Keep private application evidence outside public repository assets. Public headline numbers must
-have sanitized raw samples, a dated setup and the limitations next to them; do not relabel this
-synthetic fixture as a large project run or compare its resume time with someone else's cold boot.
+The independent editor's Kubernetes admission and UID-bound cleanup have a separate real-API proof:
+
+```sh
+FACTORY_IDE_NATIVE_CONTEXT=your-explicit-context mise exec -- bun run test:native developer-ide-kubernetes.native
+```
+
+It creates an exactly owned Namespace and nonprivileged Node component Pod, then proves refusal
+of a changed UID, deletion and cleanup without finalizer changes. It does not qualify Theia,
+the editor browser journey or Substrate execution.
+
+## Product acceptance
+
+The old Factorybox upgrade, soak and restore-rehearsal programmes have been removed, including their
+commands, historical-table queries, worker-Pod inspection and installation-identity rewrites.
+The read-only `scripts/kubernetes/restore-check.ts` still checks backup archive readability and
+checksums. That is not restore qualification.
+
+The remaining clean-room control-plane check uses the same scheduler reservation accounting as
+native capacity admission. It includes restartable init sidecars, resize reservations, overhead
+and terminating Pods; it does not report those requests as measured usage. It rejects old chart
+contracts and missing native configuration before creating installation resources. Helm preflight
+failure cannot become a pass because a worker has no capacity. Its receipt remains explicitly
+`nativeProductAcceptance: false`, even if the limited optional Project steps run.
+The clean-room command requires `--native-fixture` with explicit fresh runtime, provisioner,
+Ingress certificate/key and public trust inputs. It derives a new installation's ServiceAccount
+principal, creates only that original Namespace's Secrets, and checks public readiness through
+normal HTTPS rather than loopback forwarding. Its `--values` option still copies only sizes and
+storage settings, never retained identities or Secrets. See
+[fresh native commissioning](../../deploy/helm/factory/README.md#owned-native-clean-room-inputs)
+for the input contract and remaining limits. Native cleanup still refuses recorded or unavailable
+native inventory. Do not substitute an older chart, disable TLS or delete retained data to get a
+passing receipt.
+
+The exact-commit `beta:gate` source receipt also includes `substrate:check` alongside the Connector,
+controller and UI checks. Release receipt reuse requires that bridge result and its declared
+`source-controller-ui` scope. It cannot turn a source receipt into native product acceptance.
+
+The replacement remains incomplete until a fresh native-only Helm installation serves two normal
+Projects and an approved Ticket passes implementation, exact-commit Verification, independent
+review and deliberate Delivery to healthy Staging. Native Starter, Source/Writer handoff, external
+MCP, shared Workspace and publication journeys also need their live evidence.
+See [installation and operation](../../deploy/helm/factory/README.md).

@@ -3,6 +3,7 @@ import { startFactoryLifecycle } from "./lifecycle";
 
 test("the process owns Delivery and Monitoring observations and drains them before shutdown", async () => {
   const finish = Promise.withResolvers<void>();
+  const finishSetup = Promise.withResolvers<void>();
   const closed: string[] = [];
   let deliveries = 0;
   let monitoring = 0;
@@ -78,6 +79,12 @@ test("the process owns Delivery and Monitoring observations and drains them befo
         closed.push("wiki");
       },
     },
+    setupReadiness: {
+      async close() {
+        closed.push("setup");
+        await finishSetup.promise;
+      },
+    },
     workspaceCommands: {
       async close() {
         closed.push("commands");
@@ -103,14 +110,19 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     expect(closed).toContain("monitoring");
     expect(closed).toContain("wiki");
     expect(closed).toContain("commands");
+    expect(closed).toContain("setup");
     expect(drained).toBe(false);
     finish.resolve();
+    await Bun.sleep(10);
+    expect(drained).toBe(false);
+    finishSetup.resolve();
     await pending;
-    expect(closed.sort()).toEqual(["commands", "delivery", "monitoring", "wiki"]);
+    expect(closed.sort()).toEqual(["commands", "delivery", "monitoring", "setup", "wiki"]);
     expect(deliveries).toBe(1);
     expect(browserCleanups).toBe(1);
   } finally {
     finish.resolve();
+    finishSetup.resolve();
     await close();
   }
 });

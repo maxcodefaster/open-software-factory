@@ -85,6 +85,8 @@ test("the running Factory observes an ambiguous repository create without a manu
     expect(finished?.id).toBe(saved.id);
     expect(finished?.projectID).toBeString();
     expect(creates).toBe(1);
+    await host.shutdown();
+    expect(host.processes.at(-1)?.exitCode).toBe(0);
   } finally {
     await host.dispose();
     await forge.stop(true);

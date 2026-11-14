@@ -1,13 +1,15 @@
 import pins from "../../deploy/substrate/pins.json";
 import { renderSubstrateProfile } from "../../scripts/runtime/substrate-profile";
+import type { NativeArchitecture } from "../../packages/runtime-kubernetes/src/substrate-profile";
 
-export function nativeCapacityFixture() {
+export function nativeCapacityFixture(architecture: NativeArchitecture = "amd64") {
   const selector = {
     "factory.runtime/profile": pins.gvisor.version,
     "factory.dev/deployment": "owned-capacity",
   };
   const image = pins.substrate.workerImage;
   const rendered = renderSubstrateProfile({
+    architecture,
     namespace: "owned-capacity",
     pool: "original-worker",
     node: "native-a",
@@ -36,11 +38,19 @@ export function nativeCapacityFixture() {
   };
   function node(name: string) {
     return {
-      metadata: { name, uid: crypto.randomUUID(), labels: { "kubernetes.io/hostname": name } },
+      metadata: {
+        name,
+        uid: crypto.randomUUID(),
+        labels: {
+          "kubernetes.io/hostname": name,
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": architecture,
+        },
+      },
       spec: {},
       status: {
         nodeInfo: {
-          architecture: "amd64",
+          architecture,
           operatingSystem: "linux",
           bootID: crypto.randomUUID(),
           kernelVersion: "6.12.0",

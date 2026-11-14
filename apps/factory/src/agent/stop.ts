@@ -1,6 +1,8 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { RuntimeHub } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
+import { CommandError } from "../command-error";
+import type { AgentTurnTransaction } from "./turn-store";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import {
   cancelQueuedOpenCodeInput,
@@ -21,6 +23,38 @@ export type RetainedStopTarget = {
   promptID: string;
   mode: "interrupt" | "observe";
 };
+
+// Substrate teardown must not turn a lost/queued OpenCode input into apparent
+// cancellation. A fresh bootstrap whose native confirmation was fenced cannot
+// have submitted input; every confirmed/reused Session needs actual settlement.
+export async function requireStoppedAgentInputsIn(
+  sql: Database["client"] | AgentTurnTransaction,
+  attemptID: string,
+) {
+  const [unsettled] = await sql`
+    SELECT attempt.id FROM factory.runtime_attempt attempt
+    WHERE attempt.id=${attemptID} AND attempt.change_id IS NOT NULL AND (
+      EXISTS(SELECT 1 FROM factory.agent_turn turn
+        WHERE turn.change_id=attempt.change_id AND turn.state IN ('pending','dispatching','running','uncertain'))
+      OR EXISTS(SELECT 1 FROM factory.change_agent_session session
+        LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
+        LEFT JOIN factory.agent_turn stopped ON stopped.id=session.stop_turn_id
+        WHERE session.change_id=attempt.change_id AND session.runtime_attempt_id=attempt.id
+          AND NOT COALESCE((
+            (session.state IN ('committed','stopped') AND NOT session.stop_pending)
+            OR (session.state='stopped' AND session.stop_pending
+              AND session.native_session_confirmed_at IS NULL
+              AND session.implementation_session_confirmed_at IS NULL
+              AND intent.bootstrap AND intent.runtime_attempt_id=attempt.id
+              AND intent.session_id=session.opencode_session_id AND stopped.state IN ('stopped','failed','completed'))
+          ),false))
+    )`;
+  if (unsettled)
+    throw new CommandError(
+      "conflict",
+      "Confirm the current Coding input and queued work before stopping compute. The original Actor and Source were retained.",
+    );
+}
 
 export function createChangeAgentStop(
   database: Database,
@@ -47,15 +81,23 @@ export function createChangeAgentStop(
       const target = await database.client.begin(async (sql) => {
         await sql`SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
           WHERE change.id = ${changeID} FOR UPDATE OF change, ticket`;
-        // A pending admission may not yet have prepared the Session.
+        // A pending admission may not yet have prepared the Session. With no
+        // active turn, retain this exact Session's last assigned input: a failed
+        // outcome does not prove that its native Inbox entry was removed.
         const turns = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
           WHERE change_id = ${changeID} AND state IN ('pending', 'dispatching', 'running', 'uncertain')
           ORDER BY created_at DESC LIMIT 1`;
         const rows = await sql<
           StopTarget[]
-        >`UPDATE factory.change_agent_session SET state = 'stopped',
+        >`UPDATE factory.change_agent_session session SET state = 'stopped',
           stop_id = CASE WHEN stop_pending THEN stop_id ELSE ${crypto.randomUUID()}::uuid END,
-          stop_turn_id = CASE WHEN stop_pending THEN stop_turn_id ELSE ${turns[0]?.id ?? null}::uuid END,
+          stop_turn_id = CASE WHEN stop_pending THEN stop_turn_id ELSE COALESCE(
+            ${turns[0]?.id ?? null}::uuid,
+            (SELECT intent.turn_id FROM factory.change_agent_turn_intent intent
+              WHERE intent.turn_id=session.active_turn_id AND intent.change_id=session.change_id
+                AND intent.session_id=session.opencode_session_id
+                AND (intent.runtime_attempt_id IS NULL OR intent.runtime_attempt_id=session.runtime_attempt_id))
+          ) END,
           stop_pending = true, active_inbox_id = NULL, updated_at = now()
           WHERE change_id = ${changeID} AND (stop_pending OR state <> 'stopped' OR ${turns[0]?.id ?? null}::uuid IS NOT NULL)
           RETURNING stop_id AS "stopID", stop_turn_id AS "turnID"`;
@@ -116,6 +158,7 @@ export function createChangeAgentStop(
             intendedSessionID: string | null;
             sessionConfirmed: boolean;
             implementationConfirmed: boolean;
+            turnState: string | null;
           }
         >
       >`SELECT session.runtime_attempt_id AS "attemptID", session.opencode_session_id AS "sessionID",
@@ -125,11 +168,13 @@ export function createChangeAgentStop(
         change.runtime_attempt_id AS "currentAttemptID",intent.bootstrap,
         intent.session_id AS "intendedSessionID",
         session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed",
-        session.implementation_session_confirmed_at IS NOT NULL AS "implementationConfirmed"
+        session.implementation_session_confirmed_at IS NOT NULL AS "implementationConfirmed",
+        stopped_turn.state AS "turnState"
         FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id = session.runtime_attempt_id
         JOIN factory.change change ON change.id = session.change_id
         LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id = session.stop_turn_id
+        LEFT JOIN factory.agent_turn stopped_turn ON stopped_turn.id = session.stop_turn_id
         WHERE session.change_id = ${changeID} AND session.state = 'stopped' AND session.stop_pending
           AND (${expectedStopID ?? null}::uuid IS NULL OR session.stop_id = ${expectedStopID ?? null})`;
       const current = rows[0];
@@ -172,7 +217,9 @@ export function createChangeAgentStop(
         current.promptID &&
         current.intentAttemptID === current.attemptID &&
         !hub.connected(current.attemptID) &&
-        ["failed", "cleanup-failed", "stopped"].includes(current.runtimeState) &&
+        ["failed", "cleanup-failed", "stopped", "paused", "starting", "pausing"].includes(
+          current.runtimeState,
+        ) &&
         Boolean(
           await settleRetained?.({
             changeID,
@@ -238,13 +285,18 @@ export function createChangeAgentStop(
             if (!(await cancelQueuedOpenCodeInput(client, current.sessionID, current.promptID)))
               return false;
           }
+          if (
+            !absent &&
+            !(await confirmSettledOpenCodeInput(client, current.sessionID, current.promptID ?? ""))
+          )
+            return false;
         }
-        if (current.turnID) {
+        if (current.turnID && current.turnState === "stopped") {
           if (!absent) await usage.drain(current.turnID, client, current.sessionID);
           await usage.settle(current.turnID, "interrupted");
         }
       }
-      if (retainedSettled && current.turnID) {
+      if (retainedSettled && current.turnID && current.turnState === "stopped") {
         // Native work is settled, not its unobserved consumption. Preserve the
         // existing journal and mark any missing usage unknown, never zero.
         await usage.settle(current.turnID, "interrupted");
@@ -262,7 +314,7 @@ export function createChangeAgentStop(
         }
         if (retainedSettled) {
           const [stopped] = await sql`SELECT id FROM factory.runtime_attempt
-            WHERE id=${current.attemptID} AND state='stopped'`;
+            WHERE id=${current.attemptID} AND state IN ('stopped','paused')`;
           if (!stopped) return false;
         }
         const confirmed = await sql<Array<{ id: string }>>`

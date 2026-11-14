@@ -1,53 +1,9 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { drainNativeOperations, needsNativeController, trackNativeOperation } from "./native-lock";
+import { drainNativeOperations, trackNativeOperation } from "./native-lock";
 
-const controller = (action: string) => [
-  "exec",
-  "worker-pod",
-  "-n",
-  "factory",
-  "-c",
-  "worker",
-  "--",
-  "/opt/factorybox/factorybox",
-  "--worker-run-root",
-  "/run/factorybox",
-  "--worker-store-id",
-  "store",
-  "--worker-epoch",
-  "epoch",
-  action,
-];
-const python = ["exec", "-i", "worker-pod", "-n", "factory", "-c", "worker", "--", "python3", "-c"];
-
-test("only native controller commands need the cross-process lock", () => {
-  const consumer = readFileSync(
-    new URL("../../../../packages/runtime-kubernetes/src/factorybox/consumer.py", import.meta.url),
-    "utf8",
-  );
-  expect(needsNativeController(["get", "pod", "worker"])).toBe(false);
-  expect(needsNativeController(["create", "-f", "-"])).toBe(false);
-  expect(
-    needsNativeController([
-      "exec",
-      "p",
-      "-c",
-      "worker",
-      "--",
-      "/opt/factorybox/factorybox",
-      "worker-status",
-    ]),
-  ).toBe(false);
-  expect(needsNativeController([...python, consumer])).toBe(false);
-  expect(needsNativeController([...python, "print('prepare')"])).toBe(true);
-  for (const action of ["start", "pause", "resume", "delete", "fork", "state", "capacity"])
-    expect(needsNativeController(controller(action))).toBe(true);
-});
-
-test("shutdown waits for a running native operation and gives up at its deadline", async () => {
+test("shutdown waits for an admitted native operation and leaves an expired wait unconfirmed", async () => {
   const finish = Promise.withResolvers<void>();
-  trackNativeOperation(finish.promise);
+  expect(trackNativeOperation(finish.promise)).toBe(finish.promise);
   const waiting = drainNativeOperations(5_000);
   let settled = false;
   void waiting.then(() => {
@@ -62,5 +18,13 @@ test("shutdown waits for a running native operation and gives up at its deadline
   trackNativeOperation(stuck.promise);
   expect(await drainNativeOperations(40)).toBe(1);
   stuck.resolve();
+  expect(await drainNativeOperations(1_000)).toBe(0);
+});
+
+test("a rejected native operation keeps its original error and releases its shutdown registration", async () => {
+  const failure = Promise.withResolvers<void>();
+  const operation = trackNativeOperation(failure.promise);
+  failure.reject(new Error("Original native outcome is unavailable"));
+  await expect(operation).rejects.toThrow("Original native outcome is unavailable");
   expect(await drainNativeOperations(1_000)).toBe(0);
 });

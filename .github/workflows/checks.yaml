@@ -52,10 +52,9 @@ jobs:
           chart=(deploy/helm/factory --namespace factory
             --values deploy/helm/factory/values.local.yaml
             --set "image=ghcr.io/example/factory@sha256:$zeros"
-            --set "factorybox.image=registry.invalid/worker@sha256:$zeros"
-            --set "factorybox.executableSHA256=$zeros"
-            --set factorybox.nodeName=ci-node
-            --set factorybox.architecture=arm64)
+            --set forgejoPublicURL=https://git.factory.test
+            --set substrate.workspaceConfigurationSecret=native-workspaces
+            --set substrate.provisionerTokenSecret=native-provisioner)
           mise exec -- helm lint "${chart[@]}"
           mise exec -- helm template factory "${chart[@]}" \
             | mise exec -- kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.35.0

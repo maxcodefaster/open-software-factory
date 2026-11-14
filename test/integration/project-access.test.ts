@@ -11,6 +11,7 @@ import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 
@@ -182,6 +183,7 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
   const process = await factoryProcess();
   const database = process.connect();
   const fixtureDatabases: Array<ReturnType<typeof process.connect>> = [];
+  const fixtures: Array<Awaited<ReturnType<typeof fixture>>> = [];
   try {
     await process.start();
     const adminCookie = await process.signIn();
@@ -197,7 +199,9 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     const secondDatabase = process.connect();
     fixtureDatabases.push(firstDatabase, secondDatabase);
     const first = await fixture(undefined, undefined, firstDatabase);
+    fixtures.push(first);
     const second = await fixture(undefined, undefined, secondDatabase);
+    fixtures.push(second);
     const email = `manager-${crypto.randomUUID()}@factory.local`;
     const password = "owned-manager-password-not-a-secret";
     const user = z.object({ id: z.uuid() }).parse(
@@ -425,15 +429,17 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
       .join("; ");
     expect((await command(`/runtime/${first.attemptID}/ide/`, runtimeCookie)).status).toBe(503);
     const personalWorkspaceID = crypto.randomUUID();
-    const personalAttemptID = crypto.randomUUID();
-    const _suffix = personalWorkspaceID.replaceAll("-", "").slice(0, 12);
     await database.client`INSERT INTO factory.development_workspace(id, project_id, kind, owner_user_id,
       source_branch, source_revision, created_by)
       VALUES (${personalWorkspaceID}, ${first.projectID}, 'personal', ${administrator}, 'main', ${"a".repeat(40)}, ${administrator})`;
-    await database.client`INSERT INTO factory.runtime_attempt(id, project_id, workspace_id, generation,
-      revision, state, parent_connector_token_hash,
-      child_connector_token_hash, create_intended_at, created_by)
-      VALUES (${personalAttemptID}, ${first.projectID}, ${personalWorkspaceID}, 1, ${"a".repeat(40)}, 'ready', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), ${administrator})`;
+    const personalAttemptID = await recordUncreatedWorkspaceAttempt(database, {
+      workspaceID: personalWorkspaceID,
+      generation: 1,
+      createdBy: administrator,
+      parentHash: "b".repeat(64),
+      childHash: "c".repeat(64),
+      connectorURL: "wss://owned-build.factory.invalid/internal/runtime-connect",
+    });
     expect(
       (await command(`/api/runtime-access?path=/runtime/${personalAttemptID}/ide/`, cookie)).status,
     ).toBe(404);
@@ -489,8 +495,12 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
       ),
     ).rejects.toThrow("Project not found");
   } finally {
-    for (const fixtureDatabase of fixtureDatabases) await fixtureDatabase.client.end();
-    await database.client.end();
-    await process.dispose();
+    try {
+      for (const fixtureDatabase of fixtureDatabases) await fixtureDatabase.client.end();
+      await database.client.end();
+      await process.dispose();
+    } finally {
+      for (const owned of fixtures.toReversed()) owned.restoreEnvironment();
+    }
   }
 }, 60_000);

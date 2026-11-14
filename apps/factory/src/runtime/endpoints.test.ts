@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  runtimeFactoryURL,
-  runtimeForgeURL,
-  runtimeRepositoryCloneURL,
-  substrateRepositoryCloneURL,
-} from "./endpoints";
+import { runtimeFactoryURL, runtimeForgeURL, substrateRepositoryCloneURL } from "./endpoints";
 
 describe("runtime Factory endpoints", () => {
   test("native Git uses the admitted Forge TLS origin, never legacy internal host rewriting", () => {
@@ -78,7 +73,7 @@ describe("runtime Factory endpoints", () => {
       }
     }
   });
-  test("cluster callbacks and same-installation clones use internal Services, not the browser address", () => {
+  test("control-plane callbacks use their configured internal Service", () => {
     const keys = [
       "FACTORY_INTERNAL_URL",
       "FACTORY_BASE_URL",
@@ -98,12 +93,6 @@ describe("runtime Factory endpoints", () => {
         "http://factory.portable.svc:3000/internal/model/attempt/v1",
       );
       expect(runtimeForgeURL()).toBe("http://forgejo.portable.svc:3000/");
-      expect(runtimeRepositoryCloneURL("https://forge.example/team/project.git")).toBe(
-        "http://forgejo.portable.svc:3000/team/project.git",
-      );
-      expect(runtimeRepositoryCloneURL("https://unrelated.example/team/project.git")).toBe(
-        "https://unrelated.example/team/project.git",
-      );
       for (const invalid of [
         "file:///tmp/factory",
         "http://user:secret@factory.portable.svc",
@@ -122,7 +111,7 @@ describe("runtime Factory endpoints", () => {
       }
     }
   });
-  test("Linux callbacks and clone URLs use the installation's reachable host", () => {
+  test("control-plane callbacks use the installation's reachable host", () => {
     const prior = process.env["FACTORY_RUNTIME_HOST"];
     try {
       process.env["FACTORY_RUNTIME_HOST"] = "192.0.2.10";
@@ -132,26 +121,13 @@ describe("runtime Factory endpoints", () => {
       else process.env["FACTORY_RUNTIME_HOST"] = prior;
     }
   });
-  test("resolves the configured isolated Forge for clone and Verification without changing other origins", () => {
+  test("resolves the configured control-plane Forge helper", () => {
     const previous = process.env["FACTORY_FORGEJO_API_URL"];
     try {
       process.env["FACTORY_FORGEJO_API_URL"] = "http://127.0.0.1:63653/api/v1/";
-      expect(runtimeRepositoryCloneURL("http://127.0.0.1:63653/team/project.git")).toBe(
-        "http://host.orb.internal:63653/team/project.git",
-      );
       expect(runtimeForgeURL()).toBe("http://host.orb.internal:63653/");
-      expect(runtimeRepositoryCloneURL("https://example.com/team/project.git")).toBe(
-        "https://example.com/team/project.git",
-      );
-      expect(runtimeRepositoryCloneURL("http://127.0.0.1:33030/team/project.git")).toBe(
-        "http://127.0.0.1:33030/team/project.git",
-      );
       process.env["FACTORY_FORGEJO_API_URL"] = "https://forge.example/api/v1/";
       expect(runtimeForgeURL()).toBe("https://forge.example/");
-      delete process.env["FACTORY_FORGEJO_API_URL"];
-      expect(runtimeRepositoryCloneURL("https://example.invalid/owned-build.git")).toBe(
-        "https://example.invalid/owned-build.git",
-      );
     } finally {
       if (previous === undefined) delete process.env["FACTORY_FORGEJO_API_URL"];
       else process.env["FACTORY_FORGEJO_API_URL"] = previous;

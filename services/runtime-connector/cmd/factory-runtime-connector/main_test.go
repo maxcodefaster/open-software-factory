@@ -23,3 +23,26 @@ func TestConnectorTokenIsRemovedFromChildEnvironments(t *testing.T) {
 		t.Fatal("a child process inherited the token")
 	}
 }
+
+func TestConnectorRejectsRetiredExecutionModesBeforeReadingAssignments(t *testing.T) {
+	for _, mode := range []string{"reserve", "prepared-child", "prepared-control", "native-source-preserve", "native-source-preserve-reconcile", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			child := exec.Command(os.Args[0], "-test.run=^TestRetiredConnectorModeSubprocess$")
+			child.Env = append(os.Environ(), "FACTORY_RETIRED_MODE_TEST="+mode)
+			output, err := child.CombinedOutput()
+			exit, ok := err.(*exec.ExitError)
+			if !ok || exit.ExitCode() != 1 || strings.TrimSpace(string(output)) != "mode must be parent or child" {
+				t.Fatalf("retired mode reached assignment, token or preparation handling: %v: %s", err, output)
+			}
+		})
+	}
+}
+
+func TestRetiredConnectorModeSubprocess(t *testing.T) {
+	mode := os.Getenv("FACTORY_RETIRED_MODE_TEST")
+	if mode == "" {
+		t.Skip("owned CLI subprocess")
+	}
+	os.Args = []string{os.Args[0], mode, "--assignment", "/owned-test-assignment-does-not-exist"}
+	main()
+}

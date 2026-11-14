@@ -1,7 +1,7 @@
 {{- /*
 Derived from the kubectl calls in packages/runtime-kubernetes, scripts/kubernetes/start.ts and
-scripts/factory/storage-readiness.ts. Factory creates a Namespace per Factorybox worker, Source and
-editor, with names that are unknown until runtime, and its Namespace-scoped objects cannot be
+scripts/factory/storage-readiness.ts. Factory creates developer-editor and exactly owned
+storage-check Namespaces, with names that are unknown until runtime, and its Namespace-scoped objects cannot be
 granted by a Role. It cannot create RoleBindings (no RBAC administration is granted), so a
 ClusterRole bound cluster-wide is the only available shape. That binding also covers this release's
 own Namespace: the Factory ServiceAccount can read its Secrets and exec into its Pods. Consequently
@@ -9,8 +9,8 @@ no Role for Factory itself is rendered; it would add nothing. (backup.yaml rende
 for the backup ServiceAccount.) Treat the ServiceAccount as trusted infrastructure and restrict who
 can run the Factory image. There is no namespace-scoped alternative: it would need RoleBindings,
 which needs the RBAC administration this role deliberately lacks.
-resourceNames cannot narrow any rule below because the targeted objects are created with generated
-names (worker-<uuid>, assignment-<uuid>, store-<uuid>) and create cannot be limited by name.
+resourceNames cannot narrow create because the targeted editor and probe objects
+have generated names. Native execution uses the Substrate API, not Kubernetes worker Pods.
 No watch, update (except namespaces/finalize), wildcard, escalate, bind or impersonate verbs.
 */ -}}
 apiVersion: v1
@@ -27,7 +27,7 @@ metadata:
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 rules:
-  # One Namespace per worker/Source/editor, deleted with a UID precondition. The finalize
+  # Editor and storage-check Namespaces, deleted with a UID precondition. The finalize
   # subresource clears a Namespace left terminating after its owned resources are gone.
   - apiGroups: [""]
     resources: [namespaces]
@@ -35,25 +35,25 @@ rules:
   - apiGroups: [""]
     resources: [namespaces/finalize]
     verbs: [update]
-  # Worker, Source, editor and retained-stop Pods. patch is server-side apply, list is the
-  # node-wide Pod scan for worker admission and the storage check's provisioner-helper search.
+  # Editor and storage-check Pods. list also supplies native joined-node
+  # capacity admission and the storage check's provisioner-helper search.
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, create, patch, delete]
   # Needs get and create: kubectl's WebSocket exec and port-forward start with an upgrade GET.
-  # Used for worker native operations, the Forgejo bootstrap exec and Source/editor forwards.
+  # Used for Forgejo bootstrap and developer-editor forwards, never Actor lifecycle.
   - apiGroups: [""]
     resources: [pods/exec, pods/portforward]
     verbs: [get, create]
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]
-  # Runtime claims. list is the storage check's emptiness listing of its own Namespace.
+  # Editor and storage-check claims. list checks exact probe namespace emptiness.
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [get, list, create, patch, delete]
   # Cluster-wide secrets access cannot be narrowed (see above). It carries the per-Sandbox
-  # assignment, the registry CA and the worker's private tokens. list is the same emptiness check.
+  # editor connection and installation bootstrap projections. list is the same emptiness check.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, create, patch, delete]
@@ -61,14 +61,10 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumes]
     verbs: [get, patch]
-  # Verification discovers joined nodes; admission and retained Stop read the exact selected node.
+  # Native capacity observes joined nodes and their current admission facts.
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: [pods]
-    verbs: [get]
-  {{- if .Values.substrate.workspaceConfigurationSecret }}
   # Native capacity observes the admitted profile and creates distinct pools for
   # joined suitable nodes. It cannot patch/delete the original retained pools.
   - apiGroups: ["ate.dev"]
@@ -77,7 +73,6 @@ rules:
   - apiGroups: ["ate.dev"]
     resources: [sandboxconfigs]
     verbs: [get]
-  {{- end }}
   # The storage check lists these in its disposable Namespace to prove it is empty before delete.
   - apiGroups: [""]
     resources: [services, serviceaccounts, configmaps, replicationcontrollers]

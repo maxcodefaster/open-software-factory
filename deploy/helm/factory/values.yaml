@@ -10,33 +10,10 @@ development: false
 developmentZeroURL: ""
 adminEmail: admin@factory.local
 
-# Exact private image and node tuple admitted with Factorybox native acceptance.
-factorybox:
-  image: ""
-  executableSHA256: ""
-  architecture: ""
-  nodeName: ""
-  # Optional. Empty or "*" admits any node kernel; the worker's own capability gate and the
-  # node boot ID decide. To restrict nodes, list releases separated by commas, with `*` as a
-  # wildcard, for example "5.15.0-*-azure,6.8.0-*-azure". It only gates Factory's admission.
-  kernel: ""
-  # Scheduling reserve, not a fixed CPU allocation. Fresh workers select their
-  # aggregate ceiling from the admitted node; retained profiles are not resized.
-  cpuRequestMilli: 100
-  # Subtract other Pods' scheduling reservations and leave this additional
-  # memory for helpers and future Source/IDE startup before admitting a worker.
-  memoryHeadroomMiB: 2048
-  # A fresh worker selects within these bounds from actual backing capacity.
-  # The admitted size and existing worker profiles remain immutable.
-  storeGiB: 64
-  minimumStoreGiB: 8
-  # Includes the bounded image, 16 GiB admission floor and metadata headroom.
-  claimGiB: 128
-executionReserveTarget: 2
-
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.
 storageClass: ""
-stateSize: 1Gi
+# Also holds independently served Source trees while native compute is paused.
+stateSize: 8Gi
 databaseSize: 8Gi
 forgejoSize: 8Gi
 openbaoSize: 1Gi
@@ -65,10 +42,6 @@ openbao:
   resources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
-  # Only for an installation created before Factory's `factory-admin` OpenBao identity existed.
-  # Enable for the one upgrade that adopts it, then set back to false. See the chart README.
-  recovery:
-    enabled: false
 
 zero:
   resources:
@@ -161,7 +134,8 @@ maintenance:
       cpu: "1"
       memory: 256Mi
 substrate:
-  # Explicit fresh-Workspace opt-in only. No retained Workspace is converted.
+  # Required. Installation-wide native configuration (configuration.json) and
+  # the public Factory trust bundle (factory-ca.pem). No execution fallback.
   workspaceConfigurationSecret: ""
   # Separately rotated, short-lived native global-owner credential (key: token).
   # Actor calls use the application's projected editor token, never this one.

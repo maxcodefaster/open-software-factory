@@ -6,6 +6,7 @@ import {
   nativeCapacityCandidates,
   nativeCapacityNodeReady,
   nativeCapacityOwner,
+  nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
   requireNativeCapacityPool,
@@ -13,8 +14,9 @@ import {
   runNativeCapacityKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/substrate-capacity";
 import { CommandError } from "../command-error";
+import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
 import { installationInMaintenance } from "../installation/maintenance";
-import type { SubstrateWorkspaceConfiguration } from "./substrate-workspaces";
+import type { SubstrateInstallationConfiguration } from "./substrate-workspaces";
 
 type Database = ReturnType<typeof createDatabase>;
 type Intent = {
@@ -37,10 +39,11 @@ type Fact = {
 // the normal Substrate allocator still places Actors and enforces their budgets.
 export function createSubstrateCapacity(
   database: Database,
-  config: SubstrateWorkspaceConfiguration,
+  config: SubstrateInstallationConfiguration,
   run = runNativeCapacityKubernetes,
 ) {
   const selector = config.workerSelector;
+  const architecture = nativeRuntimeArchitecture(config.runtime);
   const owner = nativeCapacityOwner(selector);
   const labelSelector = Object.entries(selector)
     .map(([key, value]) => `${key}=${value}`)
@@ -81,7 +84,7 @@ export function createSubstrateCapacity(
       // requests also reserve the full selected budget while a pool is pending.
       const [lock] = await sql<
         { acquired: boolean }[]
-      >`SELECT pg_try_advisory_lock(hashtext('factorybox-worker-create')) AS acquired`;
+      >`SELECT pg_try_advisory_lock(hashtext('factory-substrate-capacity')) AS acquired`;
       if (!lock?.acquired) return { ready: [], refused: [] };
       locked = true;
       const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
@@ -93,16 +96,19 @@ export function createSubstrateCapacity(
         json(["get", "pods", "--all-namespaces", "-o", "json"]),
         json(["get", "sandboxconfig", config.profile, "-o", "json"]),
       ]);
-      const base = requireNativeCapacityBase(poolsInput, selector);
+      const base = requireNativeCapacityBase(poolsInput, selector, architecture);
       const sandboxUID = requireNativeCapacitySandbox(sandboxInput);
       const saved = await facts(sql);
       const ready: Array<{ cpuMilli: number; memoryMiB: number }> = [];
+      const confirmedNodes: NativeCapacityNode[] = [];
       for (const row of saved) {
         if (
           row.intent.database !== config.database ||
           !isDeepStrictEqual(row.intent.selector, selector) ||
           row.intent.baseUID !== base.metadata.uid ||
-          row.intent.sandboxUID !== sandboxUID
+          row.intent.pool.spec.workerImage !== base.spec.workerImage ||
+          row.intent.sandboxUID !== sandboxUID ||
+          row.intent.node.architecture !== architecture
         )
           throw new Error(
             "Native worker capacity profile or original installation identity changed",
@@ -123,6 +129,7 @@ export function createSubstrateCapacity(
         );
         if (!row.pool)
           await sql`UPDATE factory.substrate_worker_capacity SET pool=${JSON.stringify({ uid: observed.metadata.uid })}::text::jsonb WHERE owner=${owner} AND node_uid=${row.nodeUID}`;
+        confirmedNodes.push(row.intent.node);
         if (
           observed.status?.readyReplicas === 1 &&
           nativeCapacityNodeReady(nodesInput, row.intent.node)
@@ -145,6 +152,7 @@ export function createSubstrateCapacity(
           ),
         },
         podsInput,
+        architecture,
       );
       for (const node of discovered.candidates) {
         let row = saved.find((value) => value.nodeUID === node.uid);
@@ -227,12 +235,28 @@ export function createSubstrateCapacity(
         );
         if (!row.pool)
           await sql`UPDATE factory.substrate_worker_capacity SET pool=${JSON.stringify({ uid: observed.metadata.uid })}::text::jsonb WHERE owner=${owner} AND node_uid=${node.uid}`;
+        confirmedNodes.push(row.intent.node);
         if (observed.status?.readyReplicas === 1) ready.push(row.intent.node.resources);
+      }
+      // The Actor selector already admits the original pool. Its reserved
+      // capacity must not disappear behind a smaller additional pool. Reuse
+      // only the UID/profile pinned by confirmed installation facts and the
+      // same ready node/boot; never adopt a matching label or resize a worker.
+      if (
+        base.status?.readyReplicas === 1 &&
+        confirmedNodes.some(
+          (node) =>
+            node.hostname === base.spec.template.nodeSelector["kubernetes.io/hostname"] &&
+            nativeCapacityNodeReady(nodesInput, node),
+        )
+      ) {
+        const resources = nativeCapacityReservedPoolResources(base);
+        if (resources) ready.push(resources);
       }
       return { ready, refused: discovered.refused };
     } finally {
       try {
-        if (locked) await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-create'))`;
+        if (locked) await sql`SELECT pg_advisory_unlock(hashtext('factory-substrate-capacity'))`;
       } finally {
         await sql.end({ timeout: 1 });
       }

@@ -1,8 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { checkDump, checkSet, checkSnapshot } from "./restore-check";
 
 async function tar(directory: string, name: string, files: Record<string, string>) {
@@ -42,6 +42,46 @@ async function fakePgRestore(directory: string) {
   );
   await chmod(file, 0o755);
   return file;
+}
+
+async function waitingPgRestore(directory: string) {
+  const ready = join(directory, "ready"),
+    joined = join(directory, "joined"),
+    pgRestore = join(directory, "pg_restore");
+  await writeFile(
+    pgRestore,
+    `#!${process.execPath}
+    const parent = process.ppid;
+    let stopping = false;
+    async function finish(mode, code) {
+      if (stopping) return;
+      stopping = true;
+      await Bun.write(${JSON.stringify(joined)}, mode);
+      process.stdout.write("215; TABLE public owned factory\\n");
+      process.exit(code);
+    }
+    process.once("SIGTERM", () => { void finish("joined", 0); });
+    await Bun.write(${JSON.stringify(ready)}, "ready");
+    setInterval(() => {
+      try { process.kill(parent, 0); }
+      catch { void finish("orphaned", 1); }
+    }, 20);
+    `,
+    { mode: 0o700 },
+  );
+  return { ready, joined, pgRestore };
+}
+
+async function waitForFile(file: string) {
+  const deadline = Date.now() + 5000;
+  while (!(await Bun.file(file).exists()) && Date.now() < deadline) await Bun.sleep(5);
+  expect(await Bun.file(file).exists()).toBe(true);
+}
+
+async function waitForCalls(spawn: { mock: { calls: unknown[] } }, count: number) {
+  const deadline = Date.now() + 5000;
+  while (spawn.mock.calls.length < count && Date.now() < deadline) await Bun.sleep(5);
+  expect(spawn.mock.calls).toHaveLength(count);
 }
 
 test("a readable pg_dump archive passes and a truncated one fails", async () => {
@@ -94,6 +134,156 @@ test("a backup set is complete only with every part and the completion marker", 
     ).toEqual(["forgejo.tar.gz"]);
   } finally {
     await rm(directory, { recursive: true });
+  }
+});
+
+test("backup cancellation joins pg_restore even when its signal handler exits successfully", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "restore-check-cancel-"));
+  const { ready, joined, pgRestore } = await waitingPgRestore(directory);
+  const dump = join(directory, "postgres.dump");
+  await writeFile(dump, "PGDMP-owned-archive");
+  const child = Bun.spawn([pgRestore, "--list", dump], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const controller = new AbortController();
+  const reason = new Error("Owned backup check interrupted");
+  let spawn: ReturnType<typeof spyOn> | undefined;
+  let completion: Promise<unknown> | undefined;
+  try {
+    await waitForFile(ready);
+    spawn = spyOn(Bun, "spawn").mockImplementationOnce(() => child);
+    completion = checkSet(directory, pgRestore, controller.signal).then(
+      () => ({ status: "resolved" }),
+      (error: unknown) => ({ status: "rejected", error }),
+    );
+    // Let checkSet enter its actual subprocess boundary before cancellation.
+    await waitForCalls(spawn, 1);
+    controller.abort(reason);
+    expect(
+      await Promise.race([completion, Bun.sleep(2000).then(() => ({ status: "pending" }))]),
+    ).toEqual({ status: "rejected", error: reason });
+    expect(await Bun.file(joined).text()).toBe("joined");
+    expect(child.exitCode).toBe(0);
+    expect(spawn.mock.calls).toHaveLength(1);
+  } finally {
+    controller.abort(reason);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await child.exited;
+    await completion;
+    spawn?.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(["SIGINT", "SIGTERM"] as const)(
+  "the real backup CLI joins its validation client on %s and never exits successfully",
+  async (signal) => {
+    const directory = await mkdtemp(join(tmpdir(), "restore-check-cli-"));
+    const { ready, joined, pgRestore } = await waitingPgRestore(directory);
+    const dump = join(directory, "postgres.dump");
+    await writeFile(dump, "PGDMP-owned-archive");
+    const checker = Bun.spawn(
+      [process.execPath, "--no-env-file", resolve(import.meta.dir, "restore-check.ts"), dump],
+      {
+        env: { ...process.env, PG_RESTORE: pgRestore },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const result = Promise.all([
+      new Response(checker.stdout).text(),
+      new Response(checker.stderr).text(),
+      checker.exited,
+    ]);
+    try {
+      await waitForFile(ready);
+      checker.kill(signal);
+      const completed = await Promise.race([result, Bun.sleep(2000).then(() => null)]);
+      expect(completed).not.toBeNull();
+      expect(completed?.[2]).toBe(signal === "SIGINT" ? 130 : 143);
+      expect(completed?.[1]).toContain("Backup validation interrupted");
+      expect(await Bun.file(joined).text()).toBe("joined");
+      expect(completed?.[0]).not.toContain("ok  ");
+    } finally {
+      if (checker.exitCode === null && checker.signalCode === null) checker.kill("SIGKILL");
+      await result;
+      // The fixture also self-terminates if a broken CLI orphaned it.
+      if (await Bun.file(ready).exists()) await waitForFile(joined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(["list", "extract"] as const)(
+  "snapshot cancellation joins the actual %s client before returning",
+  async (phase) => {
+    const directory = await mkdtemp(join(tmpdir(), "restore-check-cancel-"));
+    const { ready, joined, pgRestore } = await waitingPgRestore(directory);
+    const snapshot = join(directory, "openbao.snap");
+    await tar(directory, "openbao.snap", snapshotFiles());
+    const waiting = Bun.spawn([pgRestore], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const children = [
+      ...(phase === "extract"
+        ? [
+            Bun.spawn(["tar", "-tzf", snapshot], {
+              stdin: "ignore",
+              stdout: "pipe",
+              stderr: "pipe",
+            }),
+          ]
+        : []),
+      waiting,
+    ];
+    const controller = new AbortController();
+    const reason = new Error("Owned snapshot validation interrupted");
+    let spawn: ReturnType<typeof spyOn> | undefined;
+    let completion: Promise<unknown> | undefined;
+    try {
+      await waitForFile(ready);
+      spawn = spyOn(Bun, "spawn");
+      for (const child of children) spawn.mockImplementationOnce(() => child);
+      completion = checkSnapshot(snapshot, controller.signal).then(
+        () => ({ status: "resolved" }),
+        (error: unknown) => ({ status: "rejected", error }),
+      );
+      await waitForCalls(spawn, children.length);
+      controller.abort(reason);
+      expect(
+        await Promise.race([completion, Bun.sleep(2000).then(() => ({ status: "pending" }))]),
+      ).toEqual({ status: "rejected", error: reason });
+      expect(await Bun.file(joined).text()).toBe("joined");
+      expect(waiting.exitCode).toBe(0);
+      expect(spawn.mock.calls).toHaveLength(children.length);
+    } finally {
+      controller.abort(reason);
+      for (const child of children)
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await Promise.all(children.map((child) => child.exited));
+      await completion;
+      spawn?.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("an already cancelled backup check performs no external validation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "restore-check-cancel-"));
+  const controller = new AbortController();
+  const reason = new Error("Already interrupted");
+  controller.abort(reason);
+  try {
+    await expect(checkSet(directory, "missing-pg-restore", controller.signal)).rejects.toBe(reason);
+    await expect(
+      checkDump(join(directory, "missing.dump"), undefined, controller.signal),
+    ).rejects.toBe(reason);
+    await expect(checkSnapshot(join(directory, "missing.snap"), controller.signal)).rejects.toBe(
+      reason,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

@@ -1,35 +1,11 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createForgejoClient } from "../../packages/forge/src/forge";
-import type { KubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
-
-// Kubernetes is injected below. These pinned fixture identities are never launched.
-const configuration = {
-  FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-  FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
-  FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
-  FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
-  FACTORY_FORGEJO_OWNER: "owned-cancellation-fixture",
-};
-const previous = new Map<string, string | undefined>();
-beforeAll(() => {
-  for (const [key, value] of Object.entries(configuration)) {
-    previous.set(key, process.env[key]);
-    process.env[key] = value;
-  }
-});
-afterAll(() => {
-  for (const [key, value] of previous) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-});
+import { eventually } from "../fixtures/factory-process";
+import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 
 test.each([
   ...[
@@ -46,8 +22,8 @@ test.each([
 ])(
   "cancellation during $boundary, failed revocation=$failedRevocation, trash=$trash",
   async ({ boundary, failedRevocation, trash }) => {
-    const process = await factoryProcess();
-    const database = process.connect();
+    const owned = await nativeRuntimeFixture("ticket");
+    const database = owned.database;
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let held = false;
@@ -64,26 +40,21 @@ test.each([
     let reconciliation: Promise<void> | undefined;
     let trashController: ReturnType<typeof createTicketTrashController> | undefined;
     try {
-      const owned = await fixture(undefined, undefined, database);
       const other = await fixture(undefined, undefined, database);
-      const personalWorkspaceID = crypto.randomUUID();
-      const personalAttemptID = crypto.randomUUID();
-      const stagingAttemptID = crypto.randomUUID();
-      await database.client`INSERT INTO factory.development_workspace(id, project_id, kind, owner_user_id,
-        source_branch, source_revision, created_by)
-        VALUES (${personalWorkspaceID}, ${owned.projectID}, 'personal', ${owned.userID}, 'main', ${"a".repeat(40)}, ${owned.userID})`;
-      await database.client`INSERT INTO factory.runtime_attempt(id, project_id, workspace_id, generation,
-        revision, state,
-        parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        SELECT ${personalAttemptID}, project_id, ${personalWorkspaceID}, 1, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
-        FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
-      await database.client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind, generation,
-        revision, state,
-        parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        SELECT ${stagingAttemptID}, project_id, 'staging', 1, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
-        FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
-      await database.client`INSERT INTO factory.staging_preview(project_id, revision, runtime_attempt_id)
-        VALUES (${owned.projectID}, ${"a".repeat(40)}, ${stagingAttemptID})`;
+      const native = owned.controller();
+      const coding = await native.startPersisted(owned.changeID, owned.userID);
+      const personal = await native.start(owned.projectID, owned.userID);
+      const staging = await native.ensureStaging(owned.projectID, owned.userID);
+      if (!coding || !personal || !staging)
+        throw Error("Owned native cancellation controls missing");
+      const personalAttemptID = personal.id;
+      const stagingAttemptID = staging.id;
+      await database.client`UPDATE factory.runtime_attempt SET state='ready'
+        WHERE id IN (${coding.id},${personalAttemptID},${stagingAttemptID})`;
+      await database.client`UPDATE factory.change SET state='active' WHERE id=${owned.changeID}`;
+      await database.client`INSERT INTO factory.change_agent_session(
+        change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
+        VALUES(${owned.changeID},${coding.id},'ses_owned_cancellation','committed',now(),${owned.userID})`;
       const commitSHA = "d".repeat(40);
       await database.client`INSERT INTO factory.change_commit_operation(
         id, change_id, runtime_attempt_id, sequence, branch_name, expected_parent_sha,
@@ -109,7 +80,7 @@ test.each([
           merged: false,
           state: "open",
           baseBranch: "main",
-          baseSha: "a".repeat(40),
+          baseSha: owned.revision,
           headBranch: "factory/owned",
         }),
         getFile: async () => {
@@ -163,7 +134,14 @@ test.each([
         { client: forge, owner: "owned" },
       );
       reconciliation = delivery.reconcile(owned.changeID);
-      await entered.promise;
+      await Promise.race([
+        entered.promise,
+        reconciliation.then(() => {
+          throw Error(
+            `Verification completed without reaching the controlled ${boundary} boundary`,
+          );
+        }),
+      ]);
       if (trash) {
         trashController = createTicketTrashController(
           database,
@@ -230,8 +208,7 @@ test.each([
       release.resolve();
       trashController?.close();
       await reconciliation?.catch(() => undefined);
-      await database.client.end({ timeout: 0 });
-      await process.dispose();
+      await owned.dispose();
     }
   },
   60_000,
@@ -240,32 +217,23 @@ test.each([
 test.each(["verification", "change", "trashed", "restored-stop"] as const)(
   "runtime admission rejects cancelled %s before creating resources",
   async (cancelled) => {
-    const process = await factoryProcess();
-    const database = process.connect();
-    let prepares = 0;
-    let applies = 0;
-    const kubernetes: KubernetesClient = {
-      apply: async () => {
-        applies += 1;
-        throw new Error("Cancelled resource create");
-      },
-      getPod: async () => null,
-      getNamespace: async () => null,
-      getPodLogs: async () => "",
-      readSecret: async () => {
-        throw new Error("Unexpected Secret read");
-      },
-      deleteSecret: async () => {},
-      deletePod: async () => {},
-      deleteNamespace: async () => {},
-    };
+    const owned = await nativeRuntimeFixture("ticket");
+    const database = owned.database;
     try {
-      const owned = await fixture(undefined, undefined, database);
+      const runtime = owned.controller();
+      await runtime.startPersisted(owned.changeID, owned.userID);
+      await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
+      await database.client`UPDATE factory.change SET state='active' WHERE id=${owned.changeID}`;
+      await database.client`INSERT INTO factory.change_agent_session(
+        change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
+        VALUES(${owned.changeID},${owned.attemptID},'ses_owned_cancelled_admission','committed',now(),${owned.userID})`;
+      const sources = [...(await database.client`SELECT * FROM factory.substrate_source`)];
+      owned.calls.splice(0);
       const verificationID = crypto.randomUUID();
       await database.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number,
-        runner_name, runner_uuid, runner_token, created_by)
+        runner_name, runner_uuid, runner_token, action_run_id, runner_job_handle, created_by)
         VALUES (${verificationID}, ${owned.changeID}, ${"d".repeat(40)}, 1, 'owned-cancelled',
-          ${crypto.randomUUID()}, 'owned-token', ${owned.userID})`;
+          ${crypto.randomUUID()}, 'owned-token', 1, 'owned-exact-job', ${owned.userID})`;
       if (cancelled === "verification")
         await database.client`UPDATE factory.verification SET state = 'cancelled', completed_at = now()
           WHERE id = ${verificationID}`;
@@ -275,30 +243,21 @@ test.each(["verification", "change", "trashed", "restored-stop"] as const)(
       else if (cancelled === "trashed")
         await database.client`UPDATE factory.ticket SET trashed_at = now(), trashed_by = ${owned.userID} WHERE id = ${owned.ticketID}`;
       else await createChangeAgentStop(database, owned.hub).persist(owned.changeID);
-      const runtime = createRuntimeController(
-        database,
-        new RuntimeHub(async () => {}),
-        "owned-secret",
-        {
-          async prepareExecution() {
-            throw new Error("Verification must never prepare development source");
-          },
-        },
-        kubernetes,
-        async () => {
-          prepares += 1;
-          return "";
-        },
+      await expect(runtime.startVerification(verificationID, owned.userID)).rejects.toThrow(
+        "Verification authority",
       );
-      expect(await runtime.startVerification(verificationID, owned.userID)).toBeNull();
       const attempts =
         await database.client`SELECT id FROM factory.runtime_attempt WHERE verification_id = ${verificationID}`;
       expect(attempts).toHaveLength(0);
-      expect(prepares).toBe(0);
-      expect(applies).toBe(0);
+      expect(owned.calls).toHaveLength(0);
+      expect([...(await database.client`SELECT * FROM factory.substrate_source`)]).toEqual(sources);
+      expect(
+        (
+          await database.client`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`
+        )[0]?.["state"],
+      ).toBe("ready");
     } finally {
-      await database.client.end({ timeout: 0 });
-      await process.dispose();
+      await owned.dispose();
     }
   },
   60_000,

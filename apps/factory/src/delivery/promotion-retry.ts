@@ -53,8 +53,8 @@ export async function retryPromotion(
       promotion.previous_runtime_attempt_id AS "previousAttemptID",
       promotion.replacement_runtime_attempt_id AS "replacementAttemptID",
       runtime.state AS "replacementState",
-      NOT EXISTS(SELECT 1 FROM factory.factorybox_runtime native
-        WHERE native.runtime_attempt_id=runtime.id AND native.inputs_released_at IS NULL) AS released,
+      (runtime.id IS NULL OR EXISTS(SELECT 1 FROM factory.substrate_binding binding
+        WHERE binding.runtime_attempt_id=runtime.id AND binding.deleted_at IS NOT NULL)) AS released,
       EXISTS(SELECT 1 FROM factory.merge_operation merge
         WHERE merge.change_id=promotion.change_id AND merge.state='succeeded'
           AND merge.commit_sha=promotion.commit_sha AND merge.observed_default_sha=promotion.commit_sha) AS merged

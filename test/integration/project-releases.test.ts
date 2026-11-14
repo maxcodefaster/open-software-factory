@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { createReleaseController } from "../../apps/factory/src/releases/controller";
 import type { ReleaseCredential } from "../../apps/factory/src/releases/secrets";
+import { factorySigningSecret } from "../../packages/auth/src/signing-secret";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import type { createForgejoReleases } from "../../packages/forge/src/releases";
 import { releaseContract, releasePackageOwner } from "../../packages/project-domain/src/release";
@@ -10,6 +11,7 @@ import {
   runtimePublicationToken,
 } from "../../packages/runtime-domain/src/identity";
 import { factoryProcess } from "../fixtures/factory-process";
+import { nativeJobsFixture } from "../fixtures/native-jobs";
 
 test("release recovery retains immutable intent, never depends on a consumer and never replays dispatch", async () => {
   const fixture = await factoryProcess();
@@ -19,6 +21,17 @@ test("release recovery retains immutable intent, never depends on a consumer and
     projectID = crypto.randomUUID(),
     releaseID = crypto.randomUUID();
   const sha = "a".repeat(40);
+  const signingKey = factorySigningSecret();
+  const configuration = {
+    FACTORY_FORGEJO_API_URL: "http://forgejo.internal:3000/api/v1/",
+    FACTORY_FORGEJO_PUBLIC_URL: "https://forge.example",
+    FACTORY_FORGEJO_OWNER: "factory",
+  };
+  const previous = new Map(Object.keys(configuration).map((key) => [key, process.env[key]]));
+  let jobs: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
+  let unblock = () => {};
+  let pendingCredentials: Promise<Response> | undefined;
+  let pendingEnd: Promise<void> | undefined;
   let creates = 0,
     dispatches = 0,
     delivered = false;
@@ -72,6 +85,7 @@ test("release recovery retains immutable intent, never depends on a consumer and
     owner: "factory",
   });
   try {
+    Object.assign(process.env, configuration);
     for (const [id, role] of [
       [userID, "developer"],
       [viewerID, "product-contributor"],
@@ -146,17 +160,38 @@ test("release recovery retains immutable intent, never depends on a consumer and
     const contract = releaseContract.parse({ schemaVersion: 1, images: ["web"] });
     await database.client`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,workflow,contract,notes,state,created_by)
       VALUES(${publicationID},${projectID},${publicationID},'1.2.4',${sha},'.forgejo/workflows/factory-release.yml',${JSON.stringify(contract)}::text::jsonb,'admitted fixture','running',${userID})`;
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${identity.attemptID},${projectID},'publication',1,${sha},'create-intended',${"c".repeat(64)},${"d".repeat(64)},now(),${userID})`;
     await database.client`INSERT INTO factory.project_environment(project_id,environment,version,secret_key)
       VALUES(${projectID},'development',1,'synthetic-development-secrets')`;
+    await database.client`INSERT INTO factory.release_attempt(
+      id,release_id,command_id,ordinal,state,run_id,job_handle,runner_uuid,runner_token,dispatch_intended_at)
+      VALUES(${publicationID},${publicationID},${publicationID},1,'running',71,
+        'owned-job-handle',${crypto.randomUUID()},'owned-publication-runner-token',now())`;
+    jobs = await nativeJobsFixture(database, projectID);
+    const execution = jobs;
+    expect(await execution.startPublication(publicationID, userID)).toBe(identity.attemptID);
+    const [bound] = await database.client`
+      SELECT provision.owner_id,provision.intent->'environment' AS environment,
+        provision.intent->>'jobHandle' AS job, binding.actor_uid IS NOT NULL AS actor
+      FROM factory.substrate_isolated provision
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=provision.runtime_attempt_id
+      WHERE provision.runtime_attempt_id=${identity.attemptID}`;
+    expect(bound).toEqual({
+      owner_id: publicationID,
+      environment: { environment: "development", version: 0, secretKey: null },
+      job: "owned-job-handle",
+      actor: true,
+    });
     await expect(
       (async () => {
         await database.client`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key)
         VALUES(${identity.attemptID},'development',1,'synthetic-development-secrets')`;
       })(),
-    ).rejects.toThrow("Publication cannot inherit");
+    ).rejects.toThrow("matching active create intent");
+    await expect(
+      database.client`UPDATE factory.runtime_environment_intent
+        SET version=1,secret_key='synthetic-development-secrets'
+        WHERE runtime_attempt_id=${identity.attemptID}`.execute(),
+    ).rejects.toThrow("immutable");
     expect(
       await database.client.begin((sql) => freezeRuntimeEnvironment(sql, identity.attemptID)),
     ).toEqual({
@@ -164,11 +199,7 @@ test("release recovery retains immutable intent, never depends on a consumer and
       version: 0,
       secretKey: null,
     });
-    await database.client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${identity.attemptID}`;
-    await database.client`INSERT INTO factory.release_attempt(id,release_id,command_id,ordinal,state,run_id,job_handle,runtime_attempt_id,dispatch_intended_at)
-      VALUES(${publicationID},${publicationID},${publicationID},1,'running',71,'owned-job-handle',${identity.attemptID},now())`;
     let entered = () => {};
-    let unblock = () => {};
     const atGate = new Promise<void>((resolve) => {
       entered = resolve;
     });
@@ -176,11 +207,12 @@ test("release recovery retains immutable intent, never depends on a consumer and
       unblock = resolve;
     });
     let issued = 0,
-      revoked = 0;
+      revoked = 0,
+      cleanupAvailable = false;
     const store = new Map<string, ReleaseCredential>();
     const controlled = createReleaseController({
       database,
-      signingKey: "owned-publication-key",
+      signingKey,
       secrets: {
         configured: true,
         async read(key) {
@@ -191,7 +223,15 @@ test("release recovery retains immutable intent, never depends on a consumer and
           store.set(key, value);
         },
       },
-      runtime: { async startPublication() {}, async stop() {} },
+      runtime: {
+        async startPublication() {
+          throw Error("Credential vending and End cannot commission another native publication");
+        },
+        async stop(id) {
+          if (!cleanupAvailable) throw Error("Owned native publication cleanup is unavailable");
+          await execution.stop(id);
+        },
+      },
       forge: {} as ReturnType<typeof createForgejoClient>,
       publication: {
         configuredAccess: true,
@@ -242,12 +282,14 @@ test("release recovery retains immutable intent, never depends on a consumer and
       new Request(`https://factory.example/internal/releases/${publicationID}/credentials`, {
         method: "POST",
         headers: {
-          authorization: `Bearer ${runtimePublicationToken("owned-publication-key", publicationID)}`,
+          authorization: `Bearer ${runtimePublicationToken(signingKey, publicationID)}`,
         },
       });
     const vending = controlled.credentials(request(), publicationID);
+    pendingCredentials = vending;
     await atGate;
     const ending = controlled.end(userID, projectID, publicationID);
+    pendingEnd = ending;
     await Bun.sleep(25);
     expect(
       (
@@ -258,8 +300,17 @@ test("release recovery retains immutable intent, never depends on a consumer and
     const response = await vending;
     expect(response.status).toBe(200);
     expect(await response.json()).not.toHaveProperty("password");
-    await ending;
+    await expect(ending).rejects.toThrow("Owned native publication cleanup is unavailable");
     expect(issued).toBe(1);
+    // End and credential revocation are retained even when native cleanup is
+    // unavailable. Do not mark the Actor cleaned or commission another job.
+    const [unsettled] = await database.client`SELECT release.ended_at IS NOT NULL AS ended,
+      attempt.cleaned_at IS NOT NULL AS cleaned,binding.deleted_at IS NOT NULL AS deleted
+      FROM factory.project_release release
+      JOIN factory.release_attempt attempt ON attempt.release_id=release.id
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.runtime_attempt_id
+      WHERE release.id=${publicationID}`;
+    expect(unsettled).toEqual({ ended: true, cleaned: false, deleted: false });
     expect(
       (
         await controlled.credentials(
@@ -271,6 +322,18 @@ test("release recovery retains immutable intent, never depends on a consumer and
     expect(revoked).toBe(1);
     expect((await controlled.credentials(request(), publicationID)).status).toBe(409);
     expect(issued).toBe(1);
+    cleanupAvailable = true;
+    await controlled.recover();
+    expect(revoked).toBe(1);
+    const [deleted] = await database.client`SELECT deleted_at IS NOT NULL AS confirmed
+      FROM factory.substrate_binding WHERE runtime_attempt_id=${identity.attemptID}`;
+    expect(deleted).toEqual({ confirmed: true });
+    expect(
+      await database.client`SELECT id FROM factory.release_attempt
+      WHERE id=${publicationID} AND cleaned_at IS NOT NULL`,
+    ).toHaveLength(1);
+    expect(execution.calls.filter((call) => call.method === "CreateActor")).toHaveLength(1);
+    expect(execution.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
 
     const artifactID = crypto.randomUUID(),
       grantID = crypto.randomUUID();
@@ -461,7 +524,17 @@ test("release recovery retains immutable intent, never depends on a consumer and
     expect(readTokens).toBe(2);
     expect(removed).toHaveLength(2);
   } finally {
-    await database.client.end();
-    await fixture.dispose();
+    unblock();
+    await pendingCredentials?.catch(() => {});
+    await pendingEnd?.catch(() => {});
+    try {
+      await jobs?.close();
+      await database.client.end();
+      await fixture.dispose();
+    } finally {
+      for (const [key, value] of previous)
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
   }
 }, 60_000);

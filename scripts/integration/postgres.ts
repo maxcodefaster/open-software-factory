@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { readdir } from "node:fs/promises";
 import type postgres from "postgres";
 import { createDatabase } from "../../packages/db/src/client";
+import { baselineDigest, readMigration, shippedMigrations } from "../../packages/db/src/migrations";
 import { ownedPostgresServer } from "../../test/fixtures/postgres-server";
 
 const owned = await ownedPostgresServer();
@@ -44,16 +44,15 @@ async function expectRejected(
 }
 
 try {
-  const migrations = await client<Array<{ version: number }>>`
-    SELECT version FROM factory.schema_migration ORDER BY version
-  `;
-  const expectedVersions = (
-    await readdir(new URL("../../packages/db/migrations/", import.meta.url))
-  )
-    .filter((file) => /^\d{4}_.+\.sql$/.test(file))
-    .map((file) => Number(file.slice(0, 4)))
-    .sort((a, b) => a - b);
-  if (migrations.map(({ version }) => version).join(",") !== expectedVersions.join(",")) {
+  const migrations = await client<Array<{ version: number; digest: string }>>`
+    SELECT version,source_digest AS digest FROM factory.schema_migration ORDER BY version`;
+  const file = (await shippedMigrations())[0];
+  if (
+    !file ||
+    migrations.length !== 1 ||
+    migrations[0]?.version !== 1 ||
+    migrations[0]?.digest !== baselineDigest(await readMigration(file))
+  ) {
     throw new Error("PostgreSQL clean baseline is not applied exactly once");
   }
   await client`INSERT INTO auth."user"(id, name, email, email_verified)
@@ -136,6 +135,19 @@ try {
       (cause) => cause.code === "23505",
       "PostgreSQL allowed two Personal Development Workspaces for one developer and Project",
     );
+    await expectRejected(
+      transaction,
+      async (savepoint) => {
+        await savepoint`
+          INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
+            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${crypto.randomUUID()},${projectID},${personalWorkspaceID},1,${"9".repeat(40)},
+            'create-intended',${"a".repeat(64)},${"c".repeat(64)},now(),${userID})`;
+        await savepoint`SET CONSTRAINTS ALL IMMEDIATE`;
+      },
+      (cause) => cause.message.includes("persisted matching owner binding"),
+      "PostgreSQL allowed a native Runtime Attempt without persisted owner binding",
+    );
     await transaction`
       INSERT INTO factory.runtime_attempt(
         id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
@@ -145,6 +157,16 @@ try {
         now(), ${userID}
       )
     `;
+    await transaction`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+      VALUES(${firstAttempt},${`fa-${firstAttempt.replaceAll("-", "")}`},${`runtime-${firstAttempt.replaceAll("-", "")}`},'{}')`;
+    await expectRejected(
+      transaction,
+      async (savepoint) => {
+        await savepoint`UPDATE factory.runtime_attempt SET substrate=false WHERE id=${firstAttempt}`;
+      },
+      (cause) => cause.code === "23514" || cause.message.includes("engine identity is immutable"),
+      "PostgreSQL allowed a non-native execution owner",
+    );
     await transaction`
       UPDATE factory.runtime_attempt SET state = 'cleanup-failed' WHERE id = ${firstAttempt}
     `;
@@ -201,6 +223,8 @@ try {
       )
     `;
 
+    await transaction`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+      VALUES(${otherPersonalAttempt},${`fa-${otherPersonalAttempt.replaceAll("-", "")}`},${`runtime-${otherPersonalAttempt.replaceAll("-", "")}`},'{}')`;
     const secondProjectID = crypto.randomUUID();
     const ticketID = crypto.randomUUID();
     const otherTicketID = crypto.randomUUID();
@@ -464,6 +488,8 @@ try {
         now(), ${userID}
       )
     `;
+    await transaction`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+      VALUES(${changeAttemptID},${`fa-${changeAttemptID.replaceAll("-", "")}`},${`runtime-${changeAttemptID.replaceAll("-", "")}`},'{}')`;
     await expectRejected(
       transaction,
       async (savepoint) => {
@@ -660,6 +686,7 @@ try {
     if (deletedEntries[0]?.count !== 0) {
       throw new Error("PostgreSQL did not cascade Project Conversation cleanup");
     }
+    await transaction`SET CONSTRAINTS ALL IMMEDIATE`;
     throw new Error("ROLLBACK_INTEGRATION_PROBE");
   });
 } catch (cause) {

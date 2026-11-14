@@ -29,7 +29,9 @@ import {
   receiptPath,
   receiptVerdict,
   redact,
+  requireCleanRoomNativeInventory,
   requiredChecks,
+  requireNativeChart,
   runtimeNamespacesNotAttributed,
   serializeReceipt,
   serverErrors,
@@ -38,8 +40,39 @@ import {
   verifyOwnedNamespace,
 } from "./clean-room-model";
 
+test("the native clean-room Namespace explicitly admits trusted control-plane API clients", () => {
+  const manifest = namespaceManifest("0a1b2c3d", new Date("2026-11-13T11:50:00Z"));
+  expect(manifest.metadata.labels["ate.dev/api-access"]).toBe("true");
+});
+
 const digest = `ghcr.io/example/factory@sha256:${"1".repeat(64)}`;
-const ports = { factory: 58110, forgejo: 58111, zero: 58112 };
+const nativeValues = {
+  factoryOrigin: "https://factory.owned-cleanroom.invalid",
+  forgejoOrigin: "https://git.owned-cleanroom.invalid",
+  ingressClass: "owned-ingress",
+  ingressNamespaceLabels: { "kubernetes.io/metadata.name": "owned-ingress" },
+  configurationSecret: "factory-native-configuration",
+  provisionerSecret: "factory-native-provisioner",
+  tlsSecret: "factory-ingress-tls",
+};
+
+test("native clean-room values carry their explicit HTTPS and fresh Secret inputs", () => {
+  const input = { node: "owned-node", native: nativeValues };
+  const { values } = cleanRoomValues(input);
+  expect(values["development"]).toBe(false);
+  expect(values["publicURL"]).toBe(nativeValues.factoryOrigin);
+  expect(values["forgejoPublicURL"]).toBe(nativeValues.forgejoOrigin);
+  expect(values["substrate"]).toEqual({
+    workspaceConfigurationSecret: nativeValues.configurationSecret,
+    provisionerTokenSecret: nativeValues.provisionerSecret,
+  });
+  expect(values["developmentZeroURL"]).toBeUndefined();
+  expect(values["ingress"]).toMatchObject({ enabled: true, tlsSecret: nativeValues.tlsSecret });
+});
+
+test("native commissioning is required before a clean-room creation can start", () => {
+  expect(() => parseOptions(["--factory-image", digest])).toThrow("--native-fixture");
+});
 
 test("a clean-room Namespace round-trips its id and nothing else matches", () => {
   expect(cleanRoomNamespace("0a1b2c3d")).toBe("factory-cleanroom-0a1b2c3d");
@@ -63,6 +96,7 @@ test("the Namespace is created with the owner labels the cleanup later demands",
   expect(manifest.metadata.labels).toEqual({
     "factory.dev/clean-room-owner": "0a1b2c3d",
     "app.kubernetes.io/managed-by": "factory-clean-room",
+    "ate.dev/api-access": "true",
   });
   expect(verifyOwnedNamespace({ metadata: { ...manifest.metadata, uid: "u-1" } }, "0a1b2c3d")).toBe(
     "u-1",
@@ -112,6 +146,9 @@ test("cleanup refuses a Namespace without this run's exact name and labels", () 
   expect(() =>
     verifyOwnedNamespace({ metadata: { name: owned.name, labels: owned.labels } }, "0a1b2c3d"),
   ).toThrow("no UID");
+  expect(() =>
+    verifyOwnedNamespace({ metadata: { ...owned, uid: "replaced" } }, "0a1b2c3d", "u-1"),
+  ).toThrow("original Namespace UID");
 });
 
 test("only exactly named, chart-labelled cluster objects are ours", () => {
@@ -165,28 +202,35 @@ test("a volume is ours only through our Namespace and a recorded claim UID", () 
   ]);
 });
 
-test("runtime Namespaces count as ours only by a UID the installation database recorded", () => {
-  const box = (suffix: string, uid: string, managed = "open-software-factory") => ({
+test("only editor Namespaces with recorded UIDs can belong to Kubernetes-only cleanup", () => {
+  const editor = (suffix: string, uid: string, managed = "open-software-factory") => ({
     metadata: {
-      name: `factory-box-${suffix.repeat(32)}`,
+      name: `factory-editor-${suffix.repeat(32)}`,
       uid,
       labels: { "app.kubernetes.io/managed-by": managed },
     },
   });
   const namespaces = [
-    box("a", "uid-ours"),
-    box("b", "uid-retained"),
-    box("c", "uid-ours", "other"),
+    editor("a", "uid-ours"),
+    editor("b", "uid-retained"),
+    editor("c", "uid-ours", "other"),
+    {
+      metadata: {
+        name: `factory-box-${"d".repeat(32)}`,
+        uid: "uid-ours",
+        labels: { "app.kubernetes.io/managed-by": "open-software-factory" },
+      },
+    },
     { metadata: { name: "factory-acme-sized-20261103", uid: "uid-ours", labels: {} } },
   ];
   expect(
     ownedRuntimeNamespaces(namespaces, new Set(["uid-ours"])).map((item) => item.name),
-  ).toEqual([`factory-box-${"a".repeat(32)}`]);
+  ).toEqual([`factory-editor-${"a".repeat(32)}`]);
   expect(
-    runtimeNamespacesNotAttributed([`factory-box-${"b".repeat(32)}`], namespaces, [
-      `factory-box-${"a".repeat(32)}`,
+    runtimeNamespacesNotAttributed([`factory-editor-${"b".repeat(32)}`], namespaces, [
+      `factory-editor-${"a".repeat(32)}`,
     ]),
-  ).toEqual([`factory-box-${"c".repeat(32)}`]);
+  ).toEqual([`factory-editor-${"c".repeat(32)}`]);
   expect(disappeared(["a", "b", "c"], ["a"], ["b"])).toEqual(["c"]);
 });
 
@@ -228,6 +272,8 @@ test("options need a chart or an image, reject unknown flags and accept cleanup 
     digest,
     "--node",
     "orbstack",
+    "--native-fixture",
+    "/owned/native.json",
     "--keep",
     "--with-sandbox",
     "--small-requests",
@@ -239,28 +285,60 @@ test("options need a chart or an image, reject unknown flags and accept cleanup 
     withSandbox: true,
     smallRequests: true,
   });
-  expect(parseOptions(["--chart", "oci://ghcr.io/x/factory:0.1.0"]).chart).toContain("oci://");
+  expect(
+    parseOptions([
+      "--chart",
+      "oci://ghcr.io/x/factory:0.1.0",
+      "--native-fixture",
+      "/owned/native.json",
+    ]).chart,
+  ).toContain("oci://");
+  expect(() =>
+    parseOptions(["--factory-image", "factory:local", "--native-fixture", "/owned/native.json"]),
+  ).toThrow("immutable Factory image digest");
   expect(parseOptions(["--cleanup", "factory-cleanroom-0a1b2c3d"]).cleanup).toBe(
     "factory-cleanroom-0a1b2c3d",
   );
+  expect(() =>
+    parseOptions([
+      "--cleanup",
+      "factory-cleanroom-0a1b2c3d",
+      "--native-fixture",
+      "/owned/native.json",
+    ]),
+  ).toThrow("accepts only");
+  expect(() =>
+    parseOptions([
+      "--factory-image",
+      digest,
+      "--native-fixture",
+      "/owned/one.json",
+      "--native-fixture",
+      "/owned/two.json",
+    ]),
+  ).toThrow("unambiguous");
 });
 
-test("a chart pins the image and worker or leaves them to the caller", () => {
-  expect(pinning({ image: "", factorybox: { image: "" } })).toMatchObject({
-    imagePinned: false,
-    workerPinned: false,
-  });
-  expect(
-    pinning({
-      image: digest,
-      factorybox: {
-        image: `ghcr.io/example/worker@sha256:${"2".repeat(64)}`,
-        executableSHA256: "3".repeat(64),
-        architecture: "arm64",
-      },
-    }),
-  ).toMatchObject({ imagePinned: true, workerPinned: true });
+test("a native chart pins only the control-plane image, never a Factorybox worker", () => {
+  expect(pinning({ image: "" })).toEqual({ image: "", imagePinned: false });
+  expect(pinning({ image: digest })).toEqual({ image: digest, imagePinned: true });
   expect(packageVersion("0a1b2c3d")).toBe("0.0.0-cleanroom.0a1b2c3d");
+});
+
+test("clean-room refuses old chart contracts instead of supplying compatibility values", () => {
+  const native = {
+    image: digest,
+    substrate: { workspaceConfigurationSecret: "", provisionerTokenSecret: "" },
+  };
+  expect(() => requireNativeChart(native)).not.toThrow();
+  for (const old of [
+    {},
+    { image: digest },
+    { ...native, substrate: { workspaceConfigurationSecret: "" } },
+    { ...native, factorybox: {} },
+    { ...native, executionReserveTarget: 0 },
+  ])
+    expect(() => requireNativeChart(old)).toThrow("native-only Factory chart");
 });
 
 // The shape of a retained installation's values file, with invented identity.
@@ -296,22 +374,20 @@ const retained = {
 test("generated values take sizes and storage from an extra file and nothing that names an installation", () => {
   const { values, ignored } = cleanRoomValues({
     node: "orbstack",
-    ports,
+    native: nativeValues,
     extra: retained,
   });
   expect(values).toMatchObject({
-    development: true,
-    publicURL: "http://127.0.0.1:58110",
-    forgejoPublicURL: "http://127.0.0.1:58111",
-    developmentZeroURL: "http://127.0.0.1:58112",
+    development: false,
+    publicURL: nativeValues.factoryOrigin,
+    forgejoPublicURL: nativeValues.forgejoOrigin,
     storageClass: "local-path",
     stateSize: "2Gi",
     databaseSize: "10Gi",
-    ingress: { enabled: false },
+    ingress: { enabled: true },
     backup: { enabled: true, size: "10Gi" },
     objectStorage: { size: "4Gi" },
     postgres: { resources: { requests: { memory: "96Mi" } } },
-    factorybox: { nodeName: "orbstack", memoryHeadroomMiB: 1024, claimGiB: 48 },
   });
   const text = JSON.stringify(values);
   for (const identity of [
@@ -333,36 +409,41 @@ test("generated values take sizes and storage from an extra file and nothing tha
 });
 
 test("the retained installation's own file can never reproduce its identity", () => {
-  const { values } = cleanRoomValues({ node: "n1", ports, extra: retained });
+  const { values } = cleanRoomValues({ node: "n1", native: nativeValues, extra: retained });
   expect(values["existingSecrets"]).toBeUndefined();
   expect(values["adminEmail"]).toBeUndefined();
   expect(values["image"]).toBeUndefined();
-  expect((values["factorybox"] as Record<string, unknown>)["image"]).toBeUndefined();
+  expect(values["factorybox"]).toBeUndefined();
   expect(genericSettings({ unknown: { nested: 1 } }).ignored).toEqual(["unknown.nested"]);
 });
 
-test("an image and worker override are set, with IfNotPresent for local tags", () => {
+test("a control-plane image override cannot supply a legacy worker", () => {
   const { values } = cleanRoomValues({
     node: "n1",
-    ports,
-    image: "open-software-factory:release-0a1b2c3",
-    worker: {
-      image: `w@sha256:${"2".repeat(64)}`,
-      executableSHA256: "3".repeat(64),
-      architecture: "arm64",
-    },
+    native: nativeValues,
+    image: digest,
   });
   expect(values).toMatchObject({
-    image: "open-software-factory:release-0a1b2c3",
+    image: digest,
     imagePullPolicy: "IfNotPresent",
-    factorybox: { nodeName: "n1", architecture: "arm64", executableSHA256: "3".repeat(64) },
   });
+  expect(values["factorybox"]).toBeUndefined();
 });
 
-test("bad ports and a missing node are refused", () => {
-  expect(() => cleanRoomValues({ node: "n", ports: { ...ports, zero: ports.factory } })).toThrow();
-  expect(() => cleanRoomValues({ node: "n", ports: { ...ports, zero: 80 } })).toThrow();
-  expect(() => cleanRoomValues({ node: "", ports })).toThrow();
+test("unobserved or native resources refuse destructive Kubernetes-only cleanup", () => {
+  const uid = crypto.randomUUID();
+  expect([...requireCleanRoomNativeInventory({ code: 0, stdout: `${uid}\n` })]).toEqual([uid]);
+  expect(() => requireCleanRoomNativeInventory({ code: 1, stdout: "" })).toThrow("unavailable");
+  expect(() =>
+    requireCleanRoomNativeInventory({ code: 0, stdout: "native-resources-present\n" }),
+  ).toThrow("not yet qualified");
+  expect(() => requireCleanRoomNativeInventory({ code: 0, stdout: "garbled\n" })).toThrow(
+    "invalid",
+  );
+});
+
+test("a missing capacity observation node is refused", () => {
+  expect(() => cleanRoomValues({ node: "", native: nativeValues })).toThrow();
 });
 
 const defaults = {
@@ -379,7 +460,7 @@ test("small requests lower the control plane's scheduling memory and keep limits
   const full = totalMiB(controlPlaneRequests(defaults));
   expect(full).toBe(512 + 128 + 256 + 128 + 256 + 128 + 8 + 128 + 128);
   const { values } = cleanRoomValues(
-    { node: "n", ports, smallRequests: true },
+    { node: "n", native: nativeValues, smallRequests: true },
     {
       ...defaults,
       postgres: { resources: { requests: { memory: "128Mi" }, limits: { memory: "512Mi" } } },
@@ -398,7 +479,7 @@ function pod(namespace: string, name: string, memory: string) {
   return {
     metadata: { namespace, name },
     status: { phase: "Running" },
-    spec: { containers: [{ resources: { requests: { memory } } }] },
+    spec: { containers: [{ name: "app", resources: { requests: { memory } } }] },
   };
 }
 
@@ -408,6 +489,7 @@ test("capacity names what to stop when the control plane does not fit", () => {
   const tight = capacityVerdict({
     node: "orbstack",
     allocatable: "29Gi",
+    allocatableCPU: "8",
     pods: crowded,
     needed,
     smallRequests: false,
@@ -419,15 +501,162 @@ test("capacity names what to stop when the control plane does not fit", () => {
   const roomy = capacityVerdict({
     node: "orbstack",
     allocatable: "29Gi",
+    allocatableCPU: "8",
     pods: [pod("factory", "small", "1Gi")],
     needed,
     smallRequests: false,
   });
   expect(roomy.fits).toBe(true);
   expect(
-    capacityVerdict({ node: "n", allocatable: "1Gi", pods: [], needed, smallRequests: true })
-      .detail,
+    capacityVerdict({
+      node: "n",
+      allocatable: "1Gi",
+      allocatableCPU: "8",
+      pods: [],
+      needed,
+      smallRequests: true,
+    }).detail,
   ).not.toContain("Rerun with --small-requests");
+});
+
+test("clean-room refuses exhausted CPU before installation even when memory fits", () => {
+  const busy = {
+    ...pod("owned", "cpu-reservation", "1Gi"),
+    spec: {
+      containers: [{ name: "app", resources: { requests: { cpu: "7950m", memory: "1Gi" } } }],
+    },
+  };
+  const verdict = capacityVerdict({
+    node: "owned",
+    allocatable: "20Gi",
+    allocatableCPU: "8",
+    pods: [busy],
+    needed: controlPlaneRequests(defaults),
+    smallRequests: false,
+  });
+  expect(verdict).toMatchObject({ fits: false, headroomMilliCPU: 50, neededMilliCPU: 315 });
+  expect(verdict.detail).toContain("50 millicores");
+  expect(verdict.detail).toContain("315 millicores");
+  expect(verdict.detail).toContain("this script stops nothing");
+});
+
+test("clean-room counts CPU resize, init peaks, overhead and terminating reservations", () => {
+  const active = {
+    metadata: { name: "resizing", namespace: "owned", deletionTimestamp: "2026-11-14T00:00:00Z" },
+    spec: {
+      containers: [{ name: "app", resources: { requests: { cpu: "1", memory: "1Gi" } } }],
+      initContainers: [
+        { name: "sidecar", restartPolicy: "Always", resources: { requests: { cpu: "250m" } } },
+        { name: "init", resources: { requests: { cpu: "2" } } },
+      ],
+      overhead: { cpu: "125m" },
+    },
+    status: {
+      phase: "Running",
+      containerStatuses: [{ name: "app", allocatedResources: { cpu: "3" } }],
+    },
+  };
+  const observation = structuredClone(active);
+  const input = {
+    node: "owned",
+    allocatable: "20Gi",
+    allocatableCPU: "4",
+    pods: [active, { ...active, status: { phase: "Succeeded" } }],
+    needed: [{ name: "control plane", mib: 128, cpuMilli: 626 }],
+    smallRequests: true,
+  };
+  expect(capacityVerdict(input)).toMatchObject({ fits: false, headroomMilliCPU: 625 });
+  expect(
+    capacityVerdict({ ...input, needed: [{ name: "control plane", mib: 128, cpuMilli: 625 }] }),
+  ).toMatchObject({ fits: true, headroomMilliCPU: 625 });
+  expect(active).toEqual(observation);
+});
+
+test("control-plane CPU quantities include limit defaults and the backup init peak", () => {
+  const lines = controlPlaneRequests({
+    resources: { requests: { cpu: "0.0001" } },
+    postgres: { resources: { limits: { cpu: "0.125", memory: "128Mi" } } },
+  });
+  expect(lines.find((line) => line.name === "factory")?.cpuMilli).toBe(1);
+  expect(lines.find((line) => line.name === "postgres")).toMatchObject({
+    cpuMilli: 125,
+    mib: 128,
+  });
+  expect(lines.find((line) => line.name === "backup job")).toMatchObject({
+    cpuMilli: 10,
+    mib: 16,
+  });
+  for (const cpu of ["unknown", "-1", { invalid: true }])
+    expect(() => controlPlaneRequests({ resources: { requests: { cpu } } })).toThrow();
+});
+
+test("clean-install headroom uses native admission accounting for restartable init sidecars, resize, overhead and terminating Pods", () => {
+  const active = {
+    ...pod("owned", "resizing", "1Gi"),
+    metadata: {
+      namespace: "owned",
+      name: "resizing",
+      deletionTimestamp: "2026-11-13T00:00:00Z",
+    },
+    spec: {
+      containers: [{ name: "app", resources: { requests: { memory: "1Gi" } } }],
+      initContainers: [
+        {
+          name: "sidecar",
+          restartPolicy: "Always",
+          resources: { requests: { memory: "256Mi" } },
+        },
+        { name: "init", resources: { requests: { memory: "2Gi" } } },
+      ],
+      overhead: { memory: "128Mi" },
+    },
+    status: {
+      phase: "Running",
+      containerStatuses: [{ name: "app", allocatedResources: { memory: "3Gi" } }],
+    },
+  };
+  const observation = structuredClone(active);
+  const verdict = capacityVerdict({
+    node: "owned",
+    allocatable: "4Gi",
+    allocatableCPU: "8",
+    pods: [active, { ...pod("owned", "done", "4Gi"), status: { phase: "Succeeded" } }],
+    needed: [{ name: "control plane", mib: 768, cpuMilli: 0 }],
+    smallRequests: false,
+  });
+  expect(verdict.headroomMiB).toBe(640);
+  expect(verdict.fits).toBe(false);
+  expect(verdict.detail).toContain("owned/resizing (3456 MiB)");
+  expect(active).toEqual(observation);
+});
+
+test("fractional or invalid reservations never become free control-plane capacity", () => {
+  expect(totalMiB([{ name: "small", mib: 0.001 }])).toBe(1);
+  expect(
+    capacityVerdict({
+      node: "owned",
+      allocatable: "1048576",
+      allocatableCPU: "8",
+      pods: [pod("owned", "small", "0.001")],
+      needed: [{ name: "control plane", mib: 1, cpuMilli: 0 }],
+      smallRequests: false,
+    }),
+  ).toMatchObject({ fits: false, headroomMiB: 0 });
+  for (const memory of ["unknown", "-1Gi"])
+    expect(() =>
+      capacityVerdict({
+        node: "owned",
+        allocatable: "4Gi",
+        allocatableCPU: "8",
+        pods: [pod("owned", "invalid", memory)],
+        needed: [],
+        smallRequests: false,
+      }),
+    ).toThrow();
+  expect(() =>
+    controlPlaneRequests({ resources: { requests: { memory: { unknown: true } } } }),
+  ).toThrow("Kubernetes quantity");
+  expect(controlPlaneRequests({ resources: { requests: { memory: 1048576 } } })[0]?.mib).toBe(1);
 });
 
 test("readiness needs a 200, the ready header and a startup id", () => {
@@ -482,6 +711,8 @@ test("the newest complete backup set is found and the job name is derived from t
     "20261105T020000Z",
   );
   expect(newestSet("20261105T030000Z 0\n")).toBeNull();
+  expect(newestSet("objects 1\n../20261105T030000Z 1\n20261105T030000Z 1 extra\n")).toBeNull();
+  expect(newestSet("")).toBeNull();
   expect(listSetsScript()).toContain("COMPLETE");
   expect(backupJobName("0a1b2c3d")).toBe("backup-cleanroom-0a1b2c3d");
 });
@@ -506,6 +737,7 @@ function passing(withSandbox = false) {
     durationMs: 1,
   }));
   receipt.cleanup = { ...receipt.cleanup, state: "removed" };
+  receipt.namespaceUID = "owned-original-namespace";
   return receipt;
 }
 
@@ -518,7 +750,10 @@ test("a receipt starts as a running record naming its Namespace", () => {
   });
   expect(receipt).toMatchObject({
     schema: 1,
+    scope: "control-plane-check",
+    nativeProductAcceptance: false,
     namespace: "factory-cleanroom-0a1b2c3d",
+    namespaceUID: null,
     release: "factory",
     state: "running",
     passed: false,
@@ -535,6 +770,9 @@ test("a run passes only with every check recorded and the cleanup complete", () 
   const done = finishReceipt(passing(), new Date("2026-11-05T10:30:00Z"));
   expect(done).toMatchObject({ state: "finished", passed: true, durationMs: 30 * 60_000 });
   expect(done.failure).toBeUndefined();
+  expect(done.scope).toBe("control-plane-check");
+  expect(done.nativeProductAcceptance).toBe(false);
+  expect(finishReceipt(passing(true), new Date()).nativeProductAcceptance).toBe(false);
 
   const missing = passing();
   missing.checks = missing.checks.filter((check) => check.name !== "helm-test");
@@ -553,6 +791,20 @@ test("a run passes only with every check recorded and the cleanup complete", () 
   const notRemoved = passing();
   notRemoved.cleanup = { ...notRemoved.cleanup, state: "failed" };
   expect(finishReceipt(notRemoved, new Date()).passed).toBe(false);
+});
+
+test("an interrupt during the last step or cleanup cannot turn green checks into a passed run", () => {
+  for (const keep of [false, true]) {
+    const receipt = { ...passing(), interrupted: true };
+    if (keep) {
+      receipt.options.keep = true;
+      receipt.cleanup.state = "kept";
+    }
+    expect(receiptVerdict(receipt).passed).toBe(false);
+    const done = finishReceipt(receipt, new Date());
+    expect(done.passed).toBe(false);
+    expect(done.failure).toContain("interrupted");
+  }
 });
 
 test("skips are accepted only where the limit is documented", () => {

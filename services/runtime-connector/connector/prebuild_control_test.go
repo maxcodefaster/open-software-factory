@@ -120,6 +120,9 @@ func TestPrebuildReportsFailureAfterTheProducerFinishesOnADisconnectedSocket(t *
 	assignment := validAssignment()
 	var calls, sockets atomic.Int32
 	reported := make(chan Message, 1)
+	producerFinished := make(chan struct{})
+	var finishOnce sync.Once
+	allowReport := func() { finishOnce.Do(func() { close(producerFinished) }) }
 	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		connection, err := upgrader.Upgrade(w, r, nil)
@@ -127,6 +130,11 @@ func TestPrebuildReportsFailureAfterTheProducerFinishesOnADisconnectedSocket(t *
 			return
 		}
 		defer connection.Close()
+		if sockets.Load() == 1 {
+			// A successful client write is not a server receipt. Delay this
+			// handler until the completed producer has returned to its caller.
+			<-producerFinished
+		}
 		if sockets.Add(1) == 1 {
 			return
 		}
@@ -139,6 +147,7 @@ func TestPrebuildReportsFailureAfterTheProducerFinishesOnADisconnectedSocket(t *
 		}
 	}))
 	defer server.Close()
+	defer allowReport()
 	assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -156,9 +165,7 @@ func TestPrebuildReportsFailureAfterTheProducerFinishesOnADisconnectedSocket(t *
 			return ctx.Err()
 		}
 	})
-	if !errors.Is(err, want) || calls.Load() != 1 || sockets.Load() != 2 {
-		t.Fatalf("terminal reporting changed the result or repeated the producer: %v calls=%d sockets=%d", err, calls.Load(), sockets.Load())
-	}
+	allowReport()
 	select {
 	case status := <-reported:
 		if status.Type != "status" || status.Phase != "failed" || status.Error != want.Error() {
@@ -166,5 +173,8 @@ func TestPrebuildReportsFailureAfterTheProducerFinishesOnADisconnectedSocket(t *
 		}
 	case <-ctx.Done():
 		t.Fatal("terminal failure was not reported over the replacement transport")
+	}
+	if !errors.Is(err, want) || calls.Load() != 1 || sockets.Load() != 2 {
+		t.Fatalf("terminal reporting changed the result or repeated the producer: %v calls=%d sockets=%d", err, calls.Load(), sockets.Load())
 	}
 }

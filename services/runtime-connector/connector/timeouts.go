@@ -21,8 +21,10 @@ const (
 
 	// browserImagePullTimeout bounds acquisition of the pinned browser tools image.
 	browserImagePullTimeout = 180 * time.Second
-	// projectImagePullTimeout bounds acquisition of all Project registry images.
-	projectImagePullTimeout = 180 * time.Second
+	// projectImagePullTimeout includes cold downloads and VFS extraction, which
+	// exceeded three minutes in the native ARM64 Starter proof. All images and
+	// transport retries share this deadline; a shorter caller still wins.
+	projectImagePullTimeout = 10 * time.Minute
 
 	// channelReadinessTimeout is one shared window for every declared channel to
 	// answer its health path after the child starts its processes.
@@ -50,11 +52,19 @@ const (
 	controlHandshakeTimeout = 15 * time.Second
 	// controlWriteTimeout bounds each control frame write.
 	controlWriteTimeout = 15 * time.Second
-	// controlPingInterval is how often the Connector pings Factory. A pong, ping
-	// or message resets the read deadline, controlReadTimeout, so a half-open
-	// socket fails after three missed intervals instead of blocking forever.
-	controlPingInterval = 30 * time.Second
-	controlReadTimeout  = 3 * controlPingInterval
+	// Keep pings well inside the native private proxy's 30-second idle window,
+	// leaving room for handshakes and scheduling delays. A pong, ping or message
+	// still resets the original 90-second half-open read deadline.
+	controlPingInterval = 10 * time.Second
+	controlReadTimeout  = 90 * time.Second
+	// controlReadQueueLimit bounds received application frames while Parent
+	// prepares the Dev Container. A full queue applies socket backpressure.
+	controlReadQueueLimit = 8
+
+	// Read-only environment retries share the original fifteen-second budget.
+	// Authentication, TLS validation and the pinned version remain authoritative.
+	runtimeEnvironmentReadTimeout = 15 * time.Second
+	runtimeEnvironmentRetryDelay  = 250 * time.Millisecond
 
 	// controlReconnectMin and controlReconnectMax bound the exponential backoff
 	// between control reconnect attempts. Each delay gets up to 50% jitter.

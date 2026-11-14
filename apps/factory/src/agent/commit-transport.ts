@@ -1,6 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
-import { runtimeRepositoryCloneURL, substrateRepositoryCloneURL } from "../runtime/endpoints";
+import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
 import { createAgentTurnStore } from "./turn-store";
 
@@ -24,9 +24,9 @@ export function createAgentCommitTransport(
     hub.parentOperation(attemptID, operation, async (send) => {
       const allowed = await turns.validateCommit(operation.operationId, async (sql) => {
         const current = await sql<
-          Array<{ id: string; repositoryURL: string; native: boolean; nativeIntent: unknown }>
+          Array<{ id: string; repositoryURL: string; nativeIntent: unknown }>
         >`
-          SELECT operation.id,project.repository_url AS "repositoryURL",attempt.substrate AS native,
+          SELECT operation.id,project.repository_url AS "repositoryURL",
             binding.intent AS "nativeIntent" FROM factory.change_commit_operation operation
           JOIN factory.change change ON change.id = operation.change_id
           JOIN factory.project project ON project.id=change.project_id
@@ -34,17 +34,19 @@ export function createAgentCommitTransport(
           JOIN factory.change_agent_session session ON session.change_id = change.id
           JOIN factory.change_agent_turn_intent intent ON intent.turn_id = operation.id
           JOIN factory.runtime_attempt attempt ON attempt.id = operation.runtime_attempt_id
-          LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
           WHERE operation.id = ${operation.operationId} AND operation.source = 'agent'
             AND operation.runtime_attempt_id = ${attemptID} AND change.runtime_attempt_id = ${attemptID}
-            AND attempt.state = 'ready' AND intent.runtime_attempt_id = ${attemptID}
+            AND attempt.state = 'ready' AND attempt.stop_intended_at IS NULL AND intent.runtime_attempt_id = ${attemptID}
+            AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
             AND session.runtime_attempt_id = ${attemptID} AND session.active_turn_id = operation.id
             AND session.opencode_session_id = intent.session_id AND session.state = 'waiting'
             AND NOT session.stop_pending AND operation.expected_parent_sha = ${operation.expectedSha ?? ""}
             AND COALESCE(operation.merge_parent_sha,'') = ${operation["mergeParentSha"] ?? ""}
             AND operation.state = ${operation.action !== "git-push" ? "commit-intended" : "push-intended"}
             AND (${operation.action !== "git-push"} OR
-              (operation.commit_sha = ${operation.commitSha ?? ""} AND operation.branch_name = ${operation.branch ?? ""}))`;
+              (operation.commit_sha = ${operation.commitSha ?? ""} AND operation.branch_name = ${operation.branch ?? ""}))
+          FOR SHARE OF attempt,project`;
         if (!current[0])
           throw new CommandError(
             "conflict",
@@ -52,11 +54,7 @@ export function createAgentCommitTransport(
           );
         if (operation.action === "git-push") {
           const repository = current[0].repositoryURL;
-          const destination = current[0].native
-            ? substrateRepositoryCloneURL(repository, current[0].nativeIntent)
-            : repository.startsWith("file://")
-              ? repository
-              : runtimeRepositoryCloneURL(repository);
+          const destination = substrateRepositoryCloneURL(repository, current[0].nativeIntent);
           if (operation["repositoryURL"] !== destination)
             throw new CommandError(
               "conflict",

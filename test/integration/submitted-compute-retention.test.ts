@@ -11,10 +11,9 @@ async function setup(reviewMS = 0) {
   try {
     const f = await candidateReviewFixture(undefined, database);
     const paused: string[] = [];
-    const stopped: string[] = [];
     const claims: string[] = [];
     let releases = 0;
-    let rejectStop = false;
+    let rejectPause = false;
     let activeUse = false;
     const idle = createIdleCompute(
       database,
@@ -29,14 +28,11 @@ async function setup(reviewMS = 0) {
       },
       {
         async pause(id) {
-          paused.push(id);
-        },
-        async stop(id) {
           const [intent] = await database.client<{ state: string; stopping: boolean }[]>`
             SELECT state,stop_intended_at IS NOT NULL AS stopping FROM factory.runtime_attempt WHERE id=${id}`;
-          expect(intent).toEqual({ state: "stop-intended", stopping: true });
-          stopped.push(id);
-          if (rejectStop) throw new Error("Owned Stop dispatch response unavailable");
+          expect(intent).toEqual({ state: "pausing", stopping: false });
+          paused.push(id);
+          if (rejectPause) throw new Error("Owned Pause dispatch response unavailable");
         },
       },
       1,
@@ -59,15 +55,14 @@ async function setup(reviewMS = 0) {
       ...f,
       idle,
       paused,
-      stopped,
       claims,
       retained,
       setActiveUse(value: boolean) {
         activeUse = value;
       },
       releases: () => releases,
-      setRejectStop(value: boolean) {
-        rejectStop = value;
+      setRejectPause(value: boolean) {
+        rejectPause = value;
       },
       async close() {
         await idle.close();
@@ -83,7 +78,7 @@ async function setup(reviewMS = 0) {
 }
 
 test.each(["Coding", "completed Review"])(
-  "idle submitted %s records Stop instead of another RAM/filesystem snapshot",
+  "idle submitted %s records Pause and retains its exact Session, commit and approvals",
   async (phase) => {
     const f = await setup();
     try {
@@ -111,8 +106,7 @@ test.each(["Coding", "completed Review"])(
       }
       const before = await f.retained();
       await Promise.all([f.idle.sweep(), f.idle.sweep()]);
-      expect(f.stopped).toEqual([f.attemptID]);
-      expect(f.paused).toEqual([]);
+      expect(f.paused).toEqual([f.attemptID]);
       expect(await f.retained()).toEqual(before);
     } finally {
       await f.close();
@@ -120,15 +114,14 @@ test.each(["Coding", "completed Review"])(
   },
 );
 
-test("failed submitted-compute Stop intent rolls back without dispatching cleanup", async () => {
+test("failed submitted-compute Pause intent rolls back without dispatching native work", async () => {
   const f = await setup();
   try {
     await f.database.client.unsafe(
-      "CREATE FUNCTION factory.owned_stop_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned Stop intent failure'; END $$; CREATE TRIGGER owned_stop_failure BEFORE UPDATE OF state ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.owned_stop_failure()",
+      "CREATE FUNCTION factory.owned_pause_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned Pause intent failure'; END $$; CREATE TRIGGER owned_pause_failure BEFORE UPDATE OF state ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.owned_pause_failure()",
     );
     const before = await f.retained();
-    await expect(f.idle.sweep()).rejects.toThrow("Owned Stop intent failure");
-    expect(f.stopped).toEqual([]);
+    await expect(f.idle.sweep()).rejects.toThrow("Owned Pause intent failure");
     expect(f.paused).toEqual([]);
     expect(f.releases()).toBe(1);
     expect(await f.retained()).toEqual(before);
@@ -140,17 +133,17 @@ test("failed submitted-compute Stop intent rolls back without dispatching cleanu
   }
 });
 
-test("a lost idle Stop response retains intent without repeating dispatch or resetting cleanup", async () => {
+test("a lost idle Pause response retains intent without repeating native dispatch", async () => {
   const f = await setup();
   try {
     const before = await f.retained();
-    f.setRejectStop(true);
-    await expect(f.idle.sweep()).rejects.toThrow("Owned Stop dispatch response unavailable");
+    f.setRejectPause(true);
+    await expect(f.idle.sweep()).rejects.toThrow("Owned Pause dispatch response unavailable");
     const [intent] = await f.database.client<{ state: string; stopping: boolean }[]>`
       SELECT state,stop_intended_at IS NOT NULL AS stopping FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
-    expect(intent).toEqual({ state: "stop-intended", stopping: true });
+    expect(intent).toEqual({ state: "pausing", stopping: false });
     await f.idle.sweep();
-    expect(f.stopped).toEqual([f.attemptID]);
+    expect(f.paused).toEqual([f.attemptID]);
     expect(f.releases()).toBe(0);
     expect(await f.retained()).toEqual(before);
   } finally {
@@ -167,7 +160,7 @@ test.each([
   "uncertain",
   "unfinished",
 ] as const)(
-  "known failed Coding releases only exact settled idle execution: %s",
+  "known failed Coding pauses idle execution without discarding its Session: %s",
   async (condition) => {
     const f = await setup();
     try {
@@ -215,9 +208,8 @@ test.each([
       const before = await f.retained();
       await f.idle.sweep();
       expect(f.paused).toEqual(
-        ["human", "unknown-session"].includes(condition) ? [f.attemptID] : [],
+        ["settled", "human", "unknown-session"].includes(condition) ? [f.attemptID] : [],
       );
-      expect(f.stopped).toEqual(condition === "settled" ? [f.attemptID] : []);
       expect(await f.retained()).toEqual(before);
     } finally {
       await f.close();
@@ -234,7 +226,7 @@ test.each([
   "active-use",
   "new-work",
   "uncertain",
-] as const)("idle submission retirement preserves %s", async (condition) => {
+] as const)("idle submission Pause preserves %s", async (condition) => {
   const f = await setup();
   try {
     let expectedAttemptID = f.attemptID;
@@ -248,12 +240,16 @@ test.each([
       expectedAttemptID = crypto.randomUUID();
       await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',
           stop_intended_at=now(),stopped_at=now() WHERE id=${f.attemptID}`;
-      await f.database.client`INSERT INTO factory.runtime_attempt(
+      await f.database.client`WITH attempt AS (INSERT INTO factory.runtime_attempt(
           id,project_id,change_id,workspace_id,generation,revision,state,
           parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          SELECT ${expectedAttemptID},project_id,change_id,workspace_id,generation+1,${f.commit},'ready',
+          SELECT ${expectedAttemptID},project_id,change_id,workspace_id,generation+1,${f.commit},'create-intended',
             parent_connector_token_hash,child_connector_token_hash,now(),created_by
-          FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+          FROM factory.runtime_attempt WHERE id=${f.attemptID} RETURNING id)
+          INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+            SELECT id,'fa-' || replace(id::text,'-',''),'runtime-' || replace(id::text,'-',''),'{}'::jsonb FROM attempt`;
+      await f.database.client`UPDATE factory.runtime_attempt SET state='ready'
+        WHERE id=${expectedAttemptID}`;
       await f.database
         .client`UPDATE factory.change SET runtime_attempt_id=${expectedAttemptID} WHERE id=${f.changeID}`;
       const [association] = await f.database.client<
@@ -290,7 +286,6 @@ test.each([
     }
     const before = await f.retained();
     await f.idle.sweep();
-    expect(f.stopped).toEqual([]);
     expect(await f.retained()).toEqual(before);
     expect(f.paused).toEqual(
       ["human-writer", "unsubmitted", "unknown-source-runtime", "waiting"].includes(condition)
@@ -306,7 +301,6 @@ test("a submitted Change stays warm for its review window and while Verification
   const f = await setup(30 * 60_000);
   try {
     await f.idle.sweep();
-    expect(f.stopped).toEqual([]);
     expect(f.paused).toEqual([]);
     expect(f.claims).toEqual([]);
     await f.database
@@ -318,12 +312,11 @@ test("a submitted Change stays warm for its review window and while Verification
       SELECT ${crypto.randomUUID()},${f.changeID},${"a".repeat(40)},1,'owned-runner',created_by,'pending'
       FROM factory.change WHERE id=${f.changeID}`;
     await f.idle.sweep();
-    expect(f.stopped).toEqual([]);
     expect(f.claims).toEqual([]);
     await f.database.client`UPDATE factory.verification SET state='cancelled',completed_at=now(),
       updated_at=now()-interval '31 minutes' WHERE change_id=${f.changeID}`;
     await f.idle.sweep();
-    expect(f.stopped).toEqual([f.attemptID]);
+    expect(f.paused).toEqual([f.attemptID]);
   } finally {
     await f.close();
   }

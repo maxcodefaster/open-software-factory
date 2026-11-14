@@ -5,13 +5,12 @@ import { expect as browserExpect, chromium } from "@playwright/test";
 import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import type { ProjectSetupView } from "../../packages/project-domain/src/setup";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
 import { verifyCodingSource } from "../fixtures/coding-source";
-import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
@@ -743,31 +742,8 @@ for (const requirementsPath of ["manual", "interview"] as const)
               180_000,
             );
             if (result["status"] === "passed") {
-              const sources = createWorkspaceSourceController(
-                database,
-                (await readFile(resolve(directory, "auth-secret"), "utf8")).trim(),
-              );
-              const previousBase = process.env["FACTORY_BASE_URL"];
-              process.env["FACTORY_BASE_URL"] = base;
-              try {
-                await removeOwnedProjectSources(database, projectID, async (workspaceID) => {
-                  const [workspace] = await database.client<Array<{ ownerID: string }>>`
-                  SELECT COALESCE(workspace.owner_user_id,project.created_by) AS "ownerID"
-                  FROM factory.development_workspace workspace
-                  JOIN factory.project project ON project.id=workspace.project_id
-                  WHERE workspace.id=${workspaceID} AND workspace.project_id=${projectID}`;
-                  if (!workspace) throw new Error("Owned coding source identity disappeared");
-                  return sources.stop(workspaceID, workspace.ownerID);
-                });
-                result["ownedSourceStorageRemoved"] = true;
-              } finally {
-                try {
-                  await sources.close();
-                } finally {
-                  if (previousBase === undefined) delete process.env["FACTORY_BASE_URL"];
-                  else process.env["FACTORY_BASE_URL"] = previousBase;
-                }
-              }
+              await requireOwnedProjectSourceRetention(database, projectID);
+              result["ownedSourceRetained"] = true;
             }
           }
           result["ownedExecutionStopped"] = !result["cleanupError"];

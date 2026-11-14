@@ -22,7 +22,7 @@ export async function publishRuntimeImage(
     input.metadata,
     ".",
   ]);
-  // Use the daemon's approved CA trust, as Starter publication does. BuildKit's
+  // Use the daemon's approved CA trust. BuildKit's
   // insecure registry exporter also permits HTTP against this HTTPS-only service.
   await command(["docker", "push", `${input.repository}:local`]);
 }

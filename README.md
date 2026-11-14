@@ -4,7 +4,8 @@ Self-hosted software development with coding agents. Import your repository and 
 write requirements, and let an agent implement them. Tests and an independent review check the exact
 commit before you approve delivery.
 
-Runs on Kubernetes. Linux arm64 and amd64. Apache-2.0. No telemetry.
+Runs on Kubernetes with Linux arm64 and amd64 artifacts. The Substrate profile pins both worker
+architectures; native product qualification is still incomplete. Apache-2.0. No telemetry.
 
 [Runtime direction](#runtime-direction) · [Install](#install) · [Develop](#developing)
 
@@ -15,9 +16,12 @@ and gVisor profile with ROOTFS cold restart, private Docker and Dev Containers. 
 product authority, approvals and execution intent; Substrate owns native lifecycle and snapshots.
 See [the Substrate integration](deploy/substrate/README.md) for the implemented path and remaining gates.
 
-The replacement is not yet a completed product cutover. The released chart still uses Factorybox;
-native release publication, Staging and the complete approved Ticket journey remain unfinished.
-Factorybox's historical warm-memory measurements below are not Substrate performance claims.
+The replacement is not yet a completed product cutover. Factorybox execution, the execution reserve
+and worker recovery have been removed from the application. The chart now requires native
+installation configuration. The distribution build now packages a separate multi-architecture Actor image;
+its native qualification and the complete launcher path remain unfinished.
+Native Staging, promotion and publication have controller integration;
+their live qualification and the complete approved Ticket journey remain unfinished.
 
 ## The workflow
 
@@ -78,6 +82,10 @@ access requires development scope and collaboration permission. Keep the returne
 when changing an existing file. Versions detect observed changes; they do not coordinate arbitrary
 concurrent shell, formatter or Git writes, or save another editor's unsaved buffer.
 
+In the IDE, **Retry file access** rechecks the same retained Source owner. It does not stop or
+replace Source, start compute or reload the editor's unsaved buffer. Workspace Stop controls
+compute separately and retains independent Source before deleting its original Actor.
+
 For binary or larger files, `beginFileTransfer` binds an upload or download to one user, Workspace
 and Runtime Attempt. Transfers support files up to 128 MiB and expire after 30 minutes. Use its
 authenticated HTTP URL for raw chunks up to 256 KiB, or the MCP chunk tools for smaller chunks.
@@ -117,34 +125,34 @@ For OpenCode V2, add the remote server with `opencode mcp add factory --url http
 then use `/mcps` to sign in. Other MCP clients use the same URL and OAuth flow. No Factory-specific
 agent plugin is required.
 
-## Released Factorybox measurements
-
-<img alt="Median pause 4.07 seconds, median resume to a healthy App 2.99 seconds, ten of ten state checks passed" src="assets/story/lifecycle.svg" width="100%">
-
-Ten warm cycles on one Ryzen 7 4800U node with k3s, a 3-CPU / 3-GiB worker, two Node containers
-and 256 MiB of random App memory. Times include Kubernetes transport. All ten restores preserved
-the process, memory and counters. These are warm restore times, not cold starts or Substrate results.
-[Samples](assets/story/lifecycle.json) · [Measurement command](scripts/runtime/README.md).
-
 ## Isolation
 
-The released [Factorybox](https://github.com/maxcodefaster/factorybox) runtime runs user-namespaced
-system containers with Sysbox and checkpoints their RAM and filesystem with CRIU. Its outer worker
-is privileged and shares the node kernel. Use separate installations and nodes for mutually
-untrusted tenants. The [chart guide](deploy/helm/factory/README.md) covers node, storage and network
-requirements; the [Substrate profile](deploy/substrate/README.md) documents the replacement's boundary.
+The pinned Substrate profile uses gVisor, an Actor-private Docker daemon and restricted TLS egress.
+ROOTFS snapshots restart processes and connections; Factory does not promise memory continuity.
+Actor-level resource limits are the enforcement boundary, not per-inner-container cgroups.
+The [Substrate profile](deploy/substrate/README.md) records trust, networking and qualification
+limits. The [chart guide](deploy/helm/factory/README.md) covers installation requirements.
+
+Runtime inventory shows saved Factory state, not current Actor health. Reading that list does
+not contact Substrate. Explicit runtime observation and lifecycle commands retain their native
+owner and live-state checks.
 
 ## Install
 
 ```sh
-helm install factory oci://ghcr.io/maxcodefaster/charts/factory --version 0.1.0-beta.1 \
+mise exec -- kubectl create namespace factory
+mise exec -- kubectl label namespace factory ate.dev/api-access=true
+mise exec -- helm install factory ./deploy/helm/factory \
   --namespace factory --create-namespace --values private-values.yaml \
   --wait=legacy --timeout 20m
 ```
 
-Set the node, public addresses and Ingress in `private-values.yaml`. The chart supplies the services
-and credentials and pins signed images. On amd64, also pass the released
-[worker values](https://github.com/maxcodefaster/open-software-factory/releases/download/v0.1.0-beta.1/factory-amd64-0.1.0-beta.1.yaml).
+Supply the exact application image, public TLS origins, installation-wide Substrate configuration
+and separately rotated native provisioner credential in `private-values.yaml`. Install and qualify
+the pinned official runtime on workers matching the selected Linux arm64 or amd64 identity first. The chart supplies the Factory data
+services and credentials; the runtime replacement is not yet qualified as a released product.
+The Namespace label admits trusted Factory clients through Substrate's API NetworkPolicy;
+it does not grant native authority. Keep execution and editor namespaces unlabelled.
 [Installation, backups and recovery](deploy/helm/factory/README.md).
 
 ## Developing
@@ -154,15 +162,32 @@ On macOS with OrbStack and [mise](https://mise.jdx.dev):
 ```sh
 mise install
 mise exec -- bun install --frozen-lockfile
+# Supply native configuration, reachable TLS origins and a released browser-tools image:
+# FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION, FACTORY_FORGEJO_PUBLIC_URL, FACTORY_BROWSER_TOOLS_IMAGE
 mise exec -- bun run factory:up
 ```
 
 Open http://127.0.0.1:3000. The launcher prints the generated administrator-password file.
 Configure model connections in Settings. Calls send context to the model provider you select.
 
+The complete `runtime-artifacts.json` contains four roles: `runtime-host`, `browser-tools`,
+`developer-ide` and `substrate-runtime`. Native `workloadImage` must match that Actor artifact exactly.
+Source-development publication consumes the supplied native Actor and browser images. It builds
+the host tools and IDE images separately. The Factory and Actor images embed the native Source
+service; there is no separate Source image. Publication does not substitute arm64 host binaries or
+the local port-5000 registry for native browser and Starter dependencies.
+
+`factory:reset` is restricted to an explicitly named disposable installation and matching
+confirmation. It refuses active runtime work or unconfirmed Coding Stop. Before removing its
+Compose data volumes, it checks that every recorded native scope, Developer IDE Namespace and
+additional native WorkerPool is absent. Unconfirmed creates refuse reset even when a read finds
+no resource. This includes incomplete provisioning intents. It does
+not delete Substrate resources for you or reset the developer installation.
+
 `bun run check` checks source and the Connector. `bun run check:integration` adds database and
-controller tests. `bun run test:browser` runs UI journeys. `bun run beta:gate` writes a release
-receipt. Native runtime and clean-install commands are in [scripts/runtime](scripts/runtime/README.md)
+controller tests. `bun run test:browser` runs UI journeys. `bun run beta:gate` writes an exact-commit
+source/controller/UI receipt, including Connector and Substrate bridge checks. It is not native
+product acceptance. Native runtime and clean-install commands are in [scripts/runtime](scripts/runtime/README.md)
 and the [chart guide](deploy/helm/factory/README.md). GitHub checks run only for releases or by request.
 
 Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode and Forgejo.

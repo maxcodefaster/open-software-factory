@@ -1,16 +1,41 @@
 # Substrate ROOTFS operator profile
 
-This is the concrete amd64 Substrate **v1.0.0** operator/bootstrap path for the
-accepted **ROOTFS cold restart** contract. It does not change the existing Factory
-deployment, default runtime, retained data or Factorybox repository. No runtime
+This is the concrete Substrate **v1.0.0** operator/bootstrap path for Linux amd64
+and arm64 and the accepted **ROOTFS cold restart** contract. Both architectures use
+the unchanged official worker and separately pinned official gVisor/CLI binaries.
+ARM artifact verification is not a native lifecycle or complete product proof.
+Factory's runtime controller now requires
+this native installation configuration and has no Factorybox execution fallback. The
+chart now requires native configuration and has a read-only native preflight; Actor-image
+publication, the full launcher path and live qualification are still unfinished. No runtime
 fork, provider framework or new controller is used. The concrete Factory Workspace,
 Connector and Source path is described below. Coding, Verification/Delivery,
-archive/manual-Continue and retained cutover still need product integration and proof. The Factory
+archive/manual-Continue and the complete Greenfield product path still need native proof. The Factory
 [gRPC/Connector adapter slice](../../services/substrate-control/README.md) is
 available without changing these profile pins or the retained runtime default.
-Fresh isolated publication and Staging starts in an explicitly native Project
-fail closed until their native owners are enabled; they never fall back to creating legacy capacity.
-Existing retained Attempts keep their original observation paths.
+Fresh Staging, promotion replacement and publication use the existing product owners and
+the shared native Actor adapter. They never fall back to creating legacy capacity.
+Native Attempts keep their original immutable observation bindings.
+
+An owned Linux arm64 infrastructure proof has exercised the unchanged official
+worker with this nightly and the current Factory Actor image: Docker 29.9.0
+created and ran an inner container, allowed HTTPS kept certificate verification,
+and an unadmitted hostname received native DNS `NXDOMAIN`. Synchronous ROOTFS
+Suspend returned a durable COMPLETED snapshot. A separate Get confirmed its
+Actor/template/runtime identity before Resume. Cold restart preserved the private
+Docker image and volume content, plus a marker outside durable-dir storage with
+its nanosecond mtime; a new boot identifier confirmed new processes. Final Delete
+used the original Actor UID and current version and was independently observed.
+That workload used no Factory Source, Project, Connector grant or inference.
+It does not qualify Dev Container hooks, normal Workspace Source handoff, the
+Starter, browser journeys or the full human-approved Ticket/Delivery path.
+
+Fresh databases use one native Greenfield baseline, with no Factorybox worker,
+execution-slot, old Source or runtime-artifact tables. The initializer records the exact
+SQL fingerprint and serializes concurrent startup. Repeated startup with the same
+fingerprint preserves accounts, Source ownership, runtime identities and approvals.
+Unknown historical schemas or a different fingerprint are refused without modifying
+their data. This is not a database upgrade or Factorybox data-transfer path.
 
 ## Fresh Factory Workspace provisioning
 
@@ -19,13 +44,57 @@ built with the pinned Go toolchain and the unchanged official v1.0.0 module.
 No operator-copied bridge binary is needed. The authenticated
 `startPersonalWorkspace` command can create a **fresh** personal Workspace and
 provision its deterministic Atespace, editor grant, immutable ActorTemplate and
-Actor. The default runtime and existing Workspaces are unchanged. Configuration
-is explicit and Project-scoped through `FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION`;
-the earlier `FACTORY_SUBSTRATE_OWNED_CONFIGURATION` prepared-binding proof remains
-separate and cannot be configured at the same time.
+Actor. Configuration
+is explicit and installation-scoped through `FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION`;
+all Projects use that selected native configuration. Each Workspace, Verification, prebuild,
+Staging and publication
+retains its own Project identity with the installation pins before provisioning.
+The owned adapter proof calls the native adapter directly; it is not a separate
+production runtime configuration or a compatibility constructor.
+
+The official API NetworkPolicy admits external control-plane Pods only from namespaces
+labelled `ate.dev/api-access=true`, excluding native WorkerPool Pods. Label the trusted
+Factory installation Namespace before its first native call. Do not put this label on
+Project execution or editor namespaces. The label enables network reachability only;
+verified serving TLS and the separate native Owner/Editor credentials remain mandatory.
+The clean-room command sets this label on its new, exactly owned Factory Namespace.
+The read-only Helm preflight refuses a missing or disabled label without modifying policy.
+
+The pinned native wakeup client has a 250ms deadline for each HTTP request. The
+Actor's wakeup server therefore runs its real Docker or Stop-mode check serially
+on demand outside the HTTP handler. It starts unready, expires a successful check after one
+second, and rechecks the current process IDs on every request. Checks stop when
+the native worker no longer requests readiness. Slow or stuck CLI
+reads cannot block the HTTP response or keep an old success alive. Native wakeup
+deadlines and the later Connector, Source and App readiness checks are unchanged.
+
+The private cold-mode watcher allows the pinned worker's five-minute wakeup window,
+including verified Source import before Docker starts. It no longer cuts that import
+off at the ordinary Docker check's 150-second limit. The worker still owns the overall
+wakeup deadline. Fixed Source lease, download and materialization timings are ephemeral
+diagnostics, not readiness or successful restoration evidence.
+
+Connector transport reads Ping/Pong frames after its first startup message, including
+while Parent prepares images, Features and hooks. One socket reader keeps complete
+application frames in receive order in a bounded eight-frame queue; a full queue applies
+backpressure. Receiving a frame does not dispatch an operation, repeat startup work
+or announce App readiness. The existing application loop still owns execution, and
+closing the connection releases a reader blocked on that queue. Ten-second pings leave
+headroom inside the private proxy's unchanged 30-second idle timeout. TLS, protocol,
+attempt/Actor authentication and the normal 90-second read deadline are unchanged.
+Prebuild reconnect publishes the replacement transport together with its startup
+reports, so a concurrently completed producer reports through that same connection
+without another build or publication.
+
+The Parent's authenticated Environment GET retries transient DNS, CONNECT and
+gateway failures inside its original fifteen-second read budget. Every read keeps
+the same Attempt, generation, token, endpoint and pinned Environment version.
+Cancellation, egress NXDOMAIN, access denial, failed certificate validation,
+redirects and invalid responses never authorize another destination or a bootstrap
+restart. This does not retry Actor lifecycle operations or Project hooks.
 
 Fresh Ticket provisioning now routes through the existing `startPersisted`
-owner, with additive migration 0022. It retains the real Ticket/Change identity,
+owner and the native Greenfield baseline. It retains the real Ticket/Change identity,
 approved branch, existing compute admission and original native provisioning
 intent. A commissioned Contributor uses the saved Agent turn and its live
 authority/lease, not a personal Owner or Developer impersonation. Human execution
@@ -34,18 +103,42 @@ still requires the current Developer writer. The native bootstrap uses the same
 This is integration in progress, not a qualified Coding, QA or Delivery journey.
 The shipped-template interview, human approvals and live model proof remain
 separate acceptance gates; controller fixtures do not satisfy them.
-Native Project prebuilds now enter the existing preparation queue with additive
-migration 0027. Each producer retains its exact revision, Environment version,
+Native Project prebuilds now enter the existing preparation queue. Each producer
+retains its exact revision, Environment version,
 private checkout, native create outcomes and publication repository; it allocates
 no Workspace, canonical Source writer or legacy worker. Set `prebuildRegistry` to
 an explicitly admitted TLS registry hostname on port 443 (the Connector's port
 must also be 443). Credentials and any registry CA come only from that frozen
 Project Environment, never the Factory/Forge administrator. Missing publication
-configuration or a missing committed Project Environment registry credential fails
-closed before provisioning. Lost replies observe the same
+configuration or a missing committed Project Environment registry publication grant fails
+closed before provisioning. Registry credentials grant image pulls by default, not pushes.
+A Project manager must explicitly enable **Allow publishing prepared images for this Project**
+and save that Environment revision before a new producer can publish. Use a push-capable token
+limited to the Project's prepared-image repository. Verification access remains a separate choice.
+Without that grant, Factory records the preparation as skipped and keeps normal Dev Container
+startup available; it creates no native producer resources.
+The publication decision stays in Factory; the Connector receives only its selected registry
+credentials, not that control-plane permission. Lost replies observe the same
 names, and a published result releases the producer only after exact-UID Delete
 is confirmed. Registry/image selection changes do not rewrite retained owners.
-Migration 0028 keeps isolated generations local to each Verification or preparation
+Native prebuild recipe checks run Git against canonical Source as development UID 1000;
+their temporary build checkout stays private. Consumer image inspection uses the same
+Actor-private Docker connection as acquisition, and still checks the exact input label and platform.
+A successful prepared-image consumer records its immutable image/input and public configuration
+fingerprint in the existing private Parent state. Same-Actor cold startup checks that original
+Attempt, generation, primary container, image metadata and configuration before recreating its
+temporary CLI override. Ordinary offline application edits do not turn continuation into a new
+cache-compatibility decision. Missing ownership, a changed configuration or an unavailable original
+image fails without silently selecting another image or rebuilding the container. Runtime grants
+and generated overrides are not saved in that state. Real-CLI component checks remain separate
+from the native Workspace lifecycle proof.
+The Connector has no reserve, template-fork activation, prepared Child or private
+primary-container capture mode. Parent authenticates the current Runtime environment,
+selects the confirmed prebuild or native dependencies and starts the assigned Child.
+Registry-digest prebuilds and same-Actor continuation remain separate from the removed
+captured-process path. Source initialization and service subprocesses use development
+UID 1000, without the former shifted host UID.
+The baseline keeps isolated generations local to each Verification or preparation
 owner, without a shared Project counter.
 These are controller regressions, not live native prebuild qualification. Runtime-only
 Compose service environments are omitted from the private producer snapshot without
@@ -59,19 +152,126 @@ Native producers use only the verified Actor-private Docker socket and proxy.
 Image-only Compose primaries reuse the bundled networkless HTTPS/CA preparation
 before Features build. Public transport is hashed into the recipe; local image and
 Actor identities stay private and are not needed to match a cached artifact.
+Native prebuilds hash and embed a canonical public certificate set. PEM ordering,
+whitespace and duplicates cannot separate otherwise identical producer/consumer inputs.
+Different certificates or transport code still produce a different identity. Existing
+results are not rewritten to match the new transport contract; fresh native
+producer/consumer qualification remains required.
 
 Native model and browser callbacks use the exact Connector HTTPS origin, with
 their existing attempt-scoped tokens. Legacy internal-host URL settings do not
 redirect these capabilities outside the pinned native TLS/egress boundary.
+App processes also receive `FACTORY_APP_ORIGINS` from that pinned TLS origin.
+Factory freezes these values with the Actor template; changing the browser base
+URL cannot change a retained Workspace's startup inputs.
 
-Fresh native Verification now enters the existing `startVerification` owner with
-additive migration 0023. It provisions an independent exact-commit checkout and
+Native Staging records a pinned Preview revision before provisioning. It runs only the declared
+Apps with the frozen `main-preview` Environment, without a development Workspace or Source writer.
+An explicitly stopped initial Staging can select its next generation only after the original
+Actor's UID-bound Delete is independently confirmed. A lost Create or unconfirmed cleanup retains
+the original generation and names.
+Native promotion replacement additionally requires the existing current promotion, successful
+exact-commit merge, Delivery approval, Verification and independent review. Substrate RUNNING is
+not Connector/App readiness. The normal Delivery owner switches the Preview only after readiness,
+then removes the original runtime through the same native Delete path.
+Native publication uses the existing latest release attempt and its original one-job Forgejo
+runner. Git, registry and release-credential traffic use admitted HTTPS destinations. Publication
+receives an empty Project Environment and no canonical Source grant. Runner tokens and bootstrap
+capabilities remain outside the public Staging declaration and compact provisioning intent.
+These paths use the Greenfield baseline's `substrate_isolated` provisioning facts. Their controller
+tests prove authority, original creates, scope, readiness gating and cleanup against controlled
+native responses, not live runtime or human-approved release qualification.
+
+Workspace Stop now keeps the existing Workspace lock throughout synchronous Suspend,
+confirmed independent Source handoff and UID-bound Delete. A durable ROOTFS without a usable
+independent checkout cannot authorize deletion. Lost Delete replies retain the original intent
+until the same Actor is independently absent; concurrent Start cannot wake it.
+
+An explicit Workspace Start after confirmed Stop selects the next generation only after
+re-observing the original Actor's absence and independent Source. Every generation keeps its own
+Atespace, grant, template, Actor binding and creation attribution. New compute consumes the latest
+confirmed service-owned Source export, including saved offline edits, without reusing an old runtime
+identity. Source transfer freezes the service, confirms its complete export and stops its process
+before assigning the new writer. The authenticated restore response identifies both the new Actor
+and the checkpoint's original producer; the Connector rechecks the complete lease before publishing.
+Ticket Start rechecks pending Agent Stop under the existing Change lock. Source durability cannot
+authorize replay of unsettled OpenCode input.
+
+The Source controller has no Factorybox allocation, Kubernetes Source creation or legacy Git
+bootstrap route. Source materialization uses the separate coordination connection, not the
+application query pool. Native controller and Connector tests cover these boundaries; full native
+Workspace Stop/Start and shipped-template qualification remain open.
+
+The application no longer has a Factorybox executor, prepared execution reserve or worker-recovery
+path. Idle compute records Pause under the Workspace lock and never applies the removed Factorybox
+pause-count limit or an implicit Stop. Shutdown tracks the actual native Actor operations without
+a second worker dispatch scheduler.
+
+Compute allowance reads the immutable Substrate resource intent. An unconfirmed failure does not
+release that allowance; a recorded native crash with no worker assignment or confirmed Delete does.
+Current consumption remains unavailable until an Actor-specific measurement exists. Factory
+does not substitute a shared Worker's Pod totals or display missing measurements as zero.
+Before native Stop revokes the live Connector or captures ROOTFS, Factory drains
+admitted Coding turns' durable usage logs, including child Sessions and late
+auxiliary consumption. A missing connection or failed replay records unknown
+coverage before Delete and preserves any consumption already observed. Replaying
+the same native events or repeating Stop does not add another charge.
+
+The old Kubernetes-only offline OpenCode Stop runner has also been removed. A confirmed or reused
+Session whose queued input cannot be observed still keeps Stop pending. Source durability and Actor
+deletion alone do not confirm input cancellation. Its native-only offline settlement and the full
+manual-Continue journey remain required work, not a completed recovery feature.
+
+The Actor tool bundle includes `input-stop.mjs`, a fixed metadata executor rather
+than a runtime controller. It opens only the private native Session database,
+uses the pinned SDK/server at an empty Session location, receives no Factory or
+provider configuration, and confirms engine exit before returning a result.
+It refuses a changed model/version, linked database sidecars and any unrelated
+root Inbox work. Networkless, read-only-container checks cover queued descendants,
+a previously running input, retained Source and the negative cases.
+The Connector's fixed `native-input-stop-worker` child runs as UID 1000 in private
+Linux process, mount and network namespaces. Its private root contains the exact
+packaged SDK/server, Bun, their libraries and libc-detection tools, Git metadata,
+temporary storage and loopback. It contains no Project checkout, Docker socket,
+Connector state or inherited Factory/provider environment. The trusted caller joins
+namespace PID 1 before accepting the exact bounded result, including after
+cancellation or detached children. Explicit local Linux checks exercise this
+boundary and the packaged SDK; they do not qualify the amd64 gVisor Actor profile.
+Fresh Workspace templates declare the exact Stop-only bootstrap capability.
+Factory records the pending input, original Actor and durable checkpoint before
+its one Stop-only Resume. It exports the latest offline Source before transfer.
+The cold bootstrap discards its previous transient mode receipt, restores Source,
+and selects the authenticated Stop branch before Docker, Dev Containers or Project
+hooks. Its Source-only Parent accepts the bound result and checkpoint/chunk export,
+not Project commands or ordinary file access. A lost worker acknowledgement permits
+read-only SDK observation, never replay of the interruption.
+Factory keeps Stop pending until the joined SDK result confirms settlement and a
+new durable ROOTFS plus independent Source handoff are confirmed. An unconfirmed
+joined result can preserve Source without claiming cancellation. Missing bootstrap
+capability refuses wakeup; it never falls back to ordinary Resume or creates an
+Actor to rescue an already deleted fixture. These paths have controlled coordination
+and local Linux checks; the complete amd64 gVisor Stop/Continue journey remains a
+live qualification gate.
+
+For connected Coding, Compute Stop first uses the existing Agent Stop owner.
+It confirms the root input and the complete native child-Session tree before
+Source drain, ROOTFS capture or Delete. Ordered interruption also cancels queued
+work in verified descendants; an unrelated root Inbox entry is retained and keeps
+Stop unconfirmed. A final answer cannot become a completed Build while that tree
+has running or queued work. The native adapter rechecks the product barrier under
+its lifecycle lock. Only a fenced, never-confirmed fresh bootstrap may use the
+existing no-submitted-input exception. Paused/deleted compute does not supply a
+missing cancellation proof. Pinned OpenCode-process checks and controlled native
+RPC checks cover this order; they are not the complete Substrate live proof.
+
+Fresh native Verification now enters the existing `startVerification` owner.
+It provisions an independent exact-commit checkout and
 the pinned one-job runner bound to that Forgejo job, using the admitted public
 Forge HTTPS origin and existing Verification environment filtering. It allocates
 no Workspace, canonical Source writer or synthetic worker, and reuses the same
 Substrate Actor lifecycle and UID-bound cleanup. Lost create replies retain their
-original intent and are observed rather than repeated. Additive migration 0024
-retains each provisioning generation when the existing explicit queued-bootstrap
+original intent and are observed rather than repeated. The baseline retains each
+provisioning generation when the existing explicit queued-bootstrap
 retry decision has confirmed exact predecessor cleanup; a lost or still-live
 outcome cannot select a successor. These are controller regressions, not real
 native CI qualification. Live prebuild, Staging, publication and the
@@ -88,14 +288,21 @@ that repository and development-owned Source; Project config, hooks, attributes
 and filters never receive the remote credentials or privileged execution identity.
 The existing exact-parent recovery, expected remote HEAD and observed push result
 checks remain in force. Failed trust or authentication does not authorize a merge,
-and observing an already-pushed exact commit does not push it again. The owned
+and observing an already-pushed exact commit does not push it again.
+Coding, integration and shared Workspace submissions use only the native binding's
+admitted Forge HTTPS destination. There is no internal-host or `file://` execution fallback.
+Shared submissions persist their exact HTTPS repository before the first commit request,
+and retain that destination after a lost response or a later Project edit. The Parent
+dispatch fence rechecks the destination, current Project access, Workspace Stop,
+Agent Stop and native Delete intent. Confirmed original pushes are observed without replay.
+The owned
 Linux Connector lane checks this with real HTTPS Git, development-user filters,
 negative CA/credential cases and complete Source export. This does not substitute
 for the native image qualification or the live human-approved Ticket journey.
 
 The configuration shape is defined in
 [`substrate-workspaces.ts`](../../apps/factory/src/runtime/substrate-workspaces.ts).
-Set `deployment: fresh-workspaces`, the exact database name and Project UUID,
+Set `deployment: fresh-workspaces` and the exact database name,
 `profile: nightly-20261109-975fb172241c`, the **actually observed** native runtime
 version, a digest-pinned `workloadImage`, an exact WSS `connectorURL` and an
 absolute `factoryCAFile`. `workerSelector` must contain the profile label and a
@@ -117,31 +324,44 @@ Factory/Project allowances; old native bindings retain their original 1500m CPU 
 dependency hook, which Substrate killed for exceeding memory. No failed Actor is
 resized or restarted to hide that outcome. WorkerPool capacity admission still applies.
 
+Project Registry image acquisition has one ten-minute deadline for cold downloads and
+private image extraction. Both download workers and all transport retries share that
+window; a shorter caller deadline still applies. Cancellation joins the clients, and
+exact image digests must be confirmed before Dev Container hooks can run.
+Prebuild metadata and recipe matching have a separate thirty-second read window. Once those
+match, acquiring the exact prepared image uses the same ten-minute cold image budget, not the
+spent read window. The original caller's shorter deadline and cancellation still apply, and
+the consumer rechecks the saved checkout before selecting the downloaded image.
+
 For `fresh-workspaces`, installation capacity admission observes the one original
 WorkerPool selected by those installation labels and its exact pinned SandboxConfig.
 It uses the original pinned worker image for distinct, deterministic pools on joined,
-Ready, schedulable Linux amd64 nodes. Node taints, pressure, Pod requests and allocated
+Ready, schedulable Linux nodes matching the architecture in the installation's
+observed immutable runtime. Node taints, pressure, Pod requests and allocated
 resize reservations remain admission barriers. No node opt-in label or approval is
 needed. Each new pool requests its full finite budget after the existing 2048 MiB
 memory headroom and 250m CPU headroom for independent access services; original
 pools are not resized, patched, deleted or replaced.
-Additive migration 0025 retains the selected node/boot, original pool/profile,
+The native baseline retains the selected node/boot/architecture, original pool/profile,
 budget, creation intent and returned pool UID. Missing, rejected, changed or
-uncertain creates never authorize another create. These capacity changes still
+uncertain creates never authorize another create. The original node-pinned pool
+also counts once those confirmed installation facts bind its UID, worker image,
+profile and the same Ready node/boot. It must report a Ready replica and reserve
+its full finite CPU/memory limits. A smaller additional pool does not hide that
+existing capacity. This reads existing budgets without resizing a worker or
+promising a free Actor slot; Substrate still owns actual placement.
+These capacity changes still
 need controller, chart and native joined-node qualification before claiming that
 the shipped-template journey or different-node recovery has passed.
 Git uses `FACTORY_FORGEJO_PUBLIC_URL`, which must be HTTPS on that same port with
 its hostname admitted by `egressHosts` (or equal to the Connector hostname).
 Native fetch/push never use legacy internal HTTP addresses or follow redirects.
-For a new Project created through Factory setup, begin and save the normal setup
-draft first, then include its exact `setupID` alongside the reserved `projectID`
-in this configuration before Create. Only that authenticated draft receives the
-native Project identity. The repository intent persists it before Forge creation;
-restarts observe that intent without reallocating it. Another draft stays outside
-the reservation, and retained Projects or previously admitted intents cannot be
-retargeted. Native Git still uses the admitted public Forge origin, independently
-of its private API transport. No Project rows, approvals or runtime resources need
-fixture insertion.
+New Projects use normal authenticated Factory setup. The repository intent persists each
+new Project identity before Forge creation; restarts observe that intent without reallocating it.
+Installation configuration accepts neither `projectID` nor `setupID`, and cannot reserve or
+retarget a setup draft. Each runtime owner freezes its actual Project identity separately.
+Native Git still uses the admitted public Forge origin, independently of its private API
+transport. No Project rows, approvals or runtime resources need fixture insertion.
 Build and Delivery recheck the destination at the actual Parent dispatch fence.
 After a turn completes, only an already saved integration with its exact submitted
 parent and current Delivery queue may reopen that same confirmed Actor without a
@@ -190,6 +410,17 @@ above. This intentionally replaces its old Docker 29.0.0 engine with Factory's
 Dev Containers CLI **0.89.0**, Connector and the packaged OpenCode **2.0.27** tools.
 The image build checks executable versions. It does not substitute newer packages
 or qualify every Dev Container feature or Coding/Verification workflow.
+The distribution workflow builds this Actor image natively on amd64 and arm64 after
+the same-commit tools and same-architecture rootless bootstrap have been published
+by digest. Each package proof refuses an emulated host/image mismatch. It signs the
+combined image and includes it as the required `substrate-runtime` artifact in both
+control-plane image architectures and the chart catalog. Normal installation
+checks that `workloadImage` matches this exact reference. Existing native owners
+keep their immutable original image and template.
+`scripts/runtime/substrate-image-proof.sh` checks only the networkless image
+packages and explicitly reports no native lifecycle proof. Its successful result
+does not qualify gVisor, Source handoff, private Docker or the full Ticket journey.
+
 For image-only native primaries, the Connector prepares a private, networkless
 dependency layer before Features run. It supplements the image's public trust,
 keeps those roots through `ca-certificates` installation, and changes APT repository
@@ -215,6 +446,25 @@ with the official **2.4.1 static** binary (no injected glibc compatibility layer
 [`runtime-pins.json`](runtime-pins.json). It never combines the new shim API with
 the older daemon. The standalone qualified Docker 29.0 profile and its child script stay
 unchanged; only the explicitly new Factory image selects `runtime-child.sh`.
+Fresh Factory images use Docker's `overlay2` graph at
+`/home/rootless/persist/docker/graph` in the native durable directory. A separate
+root-owned 0700 parent blocks development-UID access even though Docker sets its
+own data root to 0710. Source remains the separate `project` tree; its archives
+and cold imports never include or replace Docker storage. Bootstrap refuses
+symlinks, non-directories, foreign ownership or changed private-parent permissions
+without repairing them. The Stop-only branch runs before storage creation.
+No existing graph is converted, and old Actors keep their immutable image.
+
+An owned arm64 storage proof loaded the exact shipped Node and PostgreSQL images
+into an empty Overlay graph within the existing ten-minute acquisition window,
+then ran both images. After synchronous durable ROOTFS Suspend and independent
+snapshot verification, Resume started new processes with the same image IDs,
+container IDs, Node writable-layer and volume markers, PostgreSQL volume contents
+and nanosecond rootfs marker. Initialization was not replayed, and development UID
+1000 could not open the private graph. Original-UID/version Delete was independently
+confirmed. This proves storage on that pinned same-node ARM profile, not the
+complete Starter, Source/IDE, prebuild, Verification or approved Delivery journey.
+
 The pinned gVisor virtual kernel has **no nested cgroup-namespace feature**.
 The inner daemon therefore uses its Actor-private virtual cgroups (`host` in
 Docker's inner terminology), never the node's cgroup hierarchy. The Connector
@@ -228,7 +478,7 @@ remains unchanged. There is **no qualified per-inner-container cgroup/resource
 enforcement** in this profile; Actor-level native limits remain the boundary.
 
 Factory persists provisioning intent and external dispatch/outcomes before each
-Create in additive migration 0020, using the existing Workspace lock. There is no
+Create in the native baseline, using the existing Workspace lock. There is no
 second runtime state machine. Lost replies observe only those names; preexisting,
 rejected, recreated or changed resources are never adopted or recreated. Native
 Start retains the existing admission, personal Owner, Developer and immutable
@@ -325,21 +575,27 @@ a private read-only, noatime, nosuid, nodev and noexec bind alias in the existin
 RootlessKit namespace. It changes neither canonical Source's mount nor normal
 development-UID CRUD. The service receives no mount capability; archive traversal
 stays beneath that pinned descriptor and needs no timestamp repair.
-An interrupted native pause can re-enter Substrate's own workflow only after a
-positive completed-durable observation of the exact persisted snapshot. A pending
-snapshot alone never authorizes another Suspend RPC. An already completed durable
-pause is observed without another dispatch. Pending/local-only snapshots never
-authorize Source release.
+Factory records immutable Resume/Suspend intent and dispatch facts for the original
+Actor and its preceding confirmed ROOTFS UUID. A lost reply never authorizes another
+RPC for that operation, even when Get still shows the preceding native state.
+SUSPENDING remains unsettled until Substrate itself completes finalization. A positive
+SUSPENDED observation of the exact new durable snapshot can finish Source handoff
+without another Suspend. Only that confirmed checkpoint permits the next deliberate
+Resume. Reading an already RUNNING allocation does not dispatch Resume or reset READY;
+an unresolved Pause does not reopen Connector authority. Pending/local-only snapshots
+never authorize Source release. These dispatch guards have controlled PostgreSQL and
+controller coverage, not a complete native product proof.
 
 This is a **same-node personal Workspace** proof, not different-node recovery, complete
 toolchain qualification, Coding/Delivery, retained migration or zero-RPO evidence.
 Its native receipt records `sourceHandoff: confirmed-same-node`, `coldRestart: true`,
-`portable: false` and `fullFactoryE2E: false`. No replacement Attempt is enabled.
-For `fresh-workspaces`, Stop still performs native synchronous Suspend and
-returns the actual **paused** state, retaining the Actor and verified ROOTFS.
-It does not delete dirty Source. Destructive Actor Delete is limited to the
-explicitly disposable `owned-test` database proof; a Source handoff alone does not
-authorize discarding retained private Docker data. No retained cutover is implied.
+`portable: false` and `fullFactoryE2E: false`. That earlier receipt did not qualify
+a replacement Attempt. The current Workspace controller requires independent Source
+before UID-bound Delete and supports an explicit next generation after confirmed cleanup.
+Stop is not reported as successful when only Pause completed. The complete live
+Stop/Start journey and the shipped Starter still need qualification. Pause preserves
+private Docker data in the Actor's ROOTFS; an explicit Stop removes that Actor and its
+compute state only after Source has an independent owner.
 An initial personal bootstrap without its current Source checkpoint service cannot
 dispatch a new native pause: an unavailable Parent does not prove that the workload
 is still checkpointable. An original already-completed durable pause can still be
@@ -362,32 +618,12 @@ Before a native CLI call, Factory reserves a missing Feature lockfile as develop
 UID/GID 1000. The pinned CLI writes that inode with its normal generation and
 verification behavior. Reservation never truncates, replaces or chowns an existing
 lockfile; unsupported retained ownership fails closed before CLI dispatch. This prevents a
-fresh Parent from creating root-owned Source metadata; it does not repair or qualify
-recovery of an earlier root-owned lockfile.
-For an already-fenced retained checkout, the operator-only `native-source-preserve`
-command can make a separate private recovery archive and prove its complete round
-trip. It requires the exact Actor UID projection and existing private RootlessKit
-root mapping, the caller's existing Workspace lock and confirmed writer drain.
-Only the observed root:root 0644 regular CLI lockfile is additionally supported;
-its ownership is preserved, not repaired. This version-2 recovery archive is not
-accepted by normal version-1 Source materialization or published as a generation.
-The command runs no Project processes or native lifecycle action, and neither its
-archive nor its recovery-copy proof authorizes Suspend or claims ROOTFS durability.
-If the earlier ordinary-read archive positively completed, explicit
-`native-source-preserve-reconcile` requires its exact checksum and retained
-recovery marker before making one separately named noatime-view copy. The first
-archive is kept, uncertain exports are not repeated, and the original Source
-fence remains unchanged. The command also re-exports Source to prove that all
-archived metadata and bytes stayed unchanged during preservation.
-Additive migration 0026 lets the existing frozen Source owner retain the exact
-verified private archive reference through a bounded Parent-capability endpoint.
-Only a failed initial personal bootstrap is eligible, with current Developer
-authority rechecked after object readback. The reference stays immutable and does
-not create an editor generation. Pause rechecks its complete manifest/chunks and
-the live original Source Parent before requesting synchronous native ROOTFS.
-Afterward Source remains Actor-owned and fenced, handoff stays `pending`, and
-failed-bootstrap continuation stays blocked. This is retention, not sleeping
-editing, Coding-input settlement or qualification of the Starter journey.
+fresh Parent from creating root-owned Source metadata. Source export and
+materialization accept only the development UID/GID 1000, including CLI lockfiles.
+Unsupported metadata fails without changing its owner or weakening the checkpoint
+contract. There is no operator rescue endpoint, version-2 recovery archive or
+disposable-fixture adoption path. Existing Source and its original Actor remain
+retained until normal complete Source handoff can be confirmed.
 Failed retained bootstrap cleanup does not remove inner containers or their private
 writable layers; the normal Source drain stops them before native checkpointing.
 The normal Factory image packages the Source executable alongside the gRPC bridge;
@@ -425,9 +661,10 @@ different-node recovery or full Factory Delivery proof.
 
 ## Pins and contract
 
-[pins.json](pins.json) retains the official Substrate commit/release/worker and
-CLI checksum, official gVisor nightly commit/archive SHA256/**published SHA512**/
-runsc checksum, and qualified Envoy binary/module identity. The nightly is an
+[pins.json](pins.json) retains the official Substrate commit/release/worker index,
+architecture-specific Worker/CLI checksums and official gVisor nightly
+commit/archive SHA256/**published SHA512**/runsc checksums. Its Envoy binary/module
+checksums are the earlier amd64 qualification, not ARM qualification. The nightly is an
 explicitly accepted unreleased dependency, not `v7` or a production-supported
 tag. Never overwrite an existing compatibility name with another binary.
 
@@ -450,7 +687,8 @@ This profile does not implement that later lifecycle adapter.
 ## Prepare and build
 
 Run from the Factory repository root with `mise exec --`. Prerequisites: Linux
-amd64, Docker build/push, Git, Go, GNU tar with zstd, kubectl and a separately owned
+arm64 or amd64 matching the selected worker architecture, Docker build/push, Git, Go,
+GNU tar with zstd, kubectl and a separately owned
 Kubernetes context. Use a **new output directory**, not a retained installation.
 Obtain a clean Substrate checkout at commit
 `b34fbee742906494b5eb4f1f36987176bf8770a4` (`v1.0.0`). Set `SUBSTRATE`, `OUT`,
@@ -458,16 +696,19 @@ Obtain a clean Substrate checkout at commit
 Kubernetes context is used by the profile commands.
 
 ```sh
-mise exec -- bun --no-env-file scripts/runtime/substrate-profile-command.ts assets "$OUT"
-mise exec -- bun --no-env-file scripts/runtime/substrate-profile-command.ts verify-assets "$OUT/gvisor.tar.zstd"
-docker build --platform linux/amd64 -f deploy/substrate/Worker.Dockerfile -t "$REGISTRY/worker:rootfs-ns" .
+# Set ARCH explicitly to arm64 or amd64. Do not mix the output directories.
+mise exec -- bun --no-env-file scripts/runtime/substrate-profile-command.ts assets "$OUT" "$ARCH"
+mise exec -- bun --no-env-file scripts/runtime/substrate-profile-command.ts verify-assets "$OUT/gvisor.tar.zstd" "$ARCH"
+docker build --platform "linux/$ARCH" -f deploy/substrate/Worker.Dockerfile -t "$REGISTRY/worker:rootfs-ns" .
 docker push "$REGISTRY/worker:rootfs-ns"
-docker build --platform linux/amd64 -f deploy/substrate/rootless/Dockerfile -t "$REGISTRY/rootless:bootstrap" .
+docker build --platform "linux/$ARCH" -f deploy/substrate/rootless/Dockerfile -t "$REGISTRY/rootless:bootstrap" .
 docker push "$REGISTRY/rootless:bootstrap"
 ```
 
 The asset command verifies SHA256 **and** SHA512 before saving the official
-archive, checks its extracted runsc, and checks the official release CLI. Files
+archive, checks its extracted runsc, and checks the official Linux release CLI for
+that architecture. The saved CLI is a Linux worker-host tool, not a macOS binary.
+The installer built below uses the operator host's own Go target. Files
 are created exclusively; an identical existing file is reusable, a different one
 is never overwritten. SandboxConfig uses the same content-checked official
 `gs://gvisor/...` URL through native asset synchronization; the downloaded copy is
@@ -507,11 +748,13 @@ Docker29.0/Compose2.40.3/CLI0.90 results do **not** qualify these Factory tools.
 ## Render, install and apply
 
 Create `$OUT/input.json` with the actual **pushed immutable image digests**, a
-unique owned namespace/pool/template, a suitable joined amd64 node hostname and
+unique owned namespace/pool/template, a suitable joined node of the selected
+architecture and
 an explicit workload argv. Example shape (replace angle-bracket values):
 
 ```json
 {
+  "architecture": "arm64",
   "namespace": "factory-profile-proof",
   "pool": "factory-profile-worker",
   "node": "joined-worker-hostname",
@@ -547,6 +790,80 @@ a Factory backup/HA contract. A local kind registry must also have the native
 replacement. Configure normal native Atespace grants and
 EgressPolicy separately; this profile does not grant bootstrap/global credentials
 to Actors or Factory users.
+
+Match Kubernetes capacity to the host's enforced CPU and memory budget, including
+any outer container or VM limit. Qualify the native control plane while cold images
+are being downloaded and unpacked, not only while workers are idle.
+Reserve native API scheduling capacity before Factory's WorkerPool admission.
+The small shared-node profile uses
+[`api-resources-patch.yaml`](api-resources-patch.yaml): each of the two API replicas
+requests 50m CPU and 128 MiB memory, without introducing new limits. Count the
+combined 100m CPU and 256 MiB in node reservations; do not resize a retained WorkerPool
+to make room. These are scheduling requests, not a claim that every installation
+fits that minimum. Qualify the actual recipe and control-plane load.
+Apply it with the observed-object procedure below, selecting Deployment
+`ate-api-server` and `api-resources-patch.yaml` instead of the router pair.
+
+This shared-node profile keeps the official native API and PostgreSQL health endpoints
+and probe periods, with a five-second readiness timeout and a ten-second liveness
+timeout with six consecutive failures before restart. Apply those probe settings through
+the operator's native deployment configuration before admitting Actors, and retain them
+when regenerating upstream manifests. Do not disable the checks, resize an existing
+WorkerPool or reinterpret an Actor's saved limits to obtain readiness.
+
+Apply the same shared-node tolerance to the official `atelet` DaemonSet with
+[`atelet-health-patch.yaml`](atelet-health-patch.yaml). It keeps `/readyz` and
+`/healthz`, their named `health` port and their original periods. Readiness allows
+five seconds; liveness allows ten seconds and six consecutive failures. It changes
+no image, resource request, worker identity, TLS setting or Actor lifecycle budget.
+The upstream one-second probes have caused kubelet to restart `atelet` during a
+native ROOTFS checkpoint on the owned shared-node fixture. A draining daemon can
+still report checkpoint work before its RPC returns `Canceled`; neither its logs
+nor a completed Source export establish successful native Suspend.
+
+Use the observed-object procedure below with `get daemonset atelet`, this patch
+and `rollout status daemonset/atelet`. Withhold new workload admission and account
+for in-flight native calls before rolling the daemon. The patch prevents neither
+all host stalls nor every daemon failure, and it does not repair an Actor already
+left `SUSPENDING`. Preserve that Actor and its Source fence, observe its original
+native operation, and do not replay Suspend or mark Source independent merely
+because a probe configuration changed. Live checkpoint qualification is still
+required after applying the operator configuration.
+
+The pinned router also needs
+[`router-health-patch.yaml`](router-health-patch.yaml) before admitting traffic.
+Its Go process deliberately drains Envoy during shutdown. A container-only restart
+can otherwise leave the still-running Envoy permanently `DRAINING`, with `/ready`
+returning 503. The patch gives initial xDS setup up to three minutes, then lets
+Kubernetes restart an unready Envoy after six failed ten-second liveness periods.
+Both probes use the existing allowlisted `envoy-metrics` listener. The unauthenticated
+admin interface stays loopback-only; no serving checks, TLS, routes or runtime pins
+are removed or changed.
+
+Apply this to the intentionally selected official installation while workload
+admission is withheld. Use new private output files. The observed UID and
+resourceVersion remain in the replacement, so a concurrent change or recreated
+Deployment refuses the update rather than being adopted:
+
+```sh
+(
+  set -euC
+  umask 077
+  mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n ate-system \
+    get deployment atenet-router -o json > "$OUT/router-before.json"
+  mise exec -- kubectl patch --local --type=strategic -f "$OUT/router-before.json" \
+    --patch-file deploy/substrate/router-health-patch.yaml -o json > "$OUT/router-health.json"
+  mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" \
+    replace -f "$OUT/router-health.json"
+)
+mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n ate-system \
+  rollout status deployment/atenet-router --timeout=240s
+```
+
+Inspect a refused or interrupted update before continuing; do not force replacement.
+Retain this probe patch after upstream installer regeneration. A healthy router
+does not by itself qualify native DNS/egress under image acquisition or a complete
+Factory product journey.
 
 Create the separately owned Kubernetes namespace, then apply `workerPool.json`
 with explicit kubeconfig/context. Wait for the generated Deployment to exist

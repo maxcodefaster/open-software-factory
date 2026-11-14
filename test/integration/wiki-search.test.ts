@@ -7,15 +7,15 @@ test("Wiki search combines active pages and source documents without repeating e
   const database = host.connect(1);
   const projectID = crypto.randomUUID();
   const userID = crypto.randomUUID();
-  const owner = process.env["FACTORY_FORGEJO_OWNER"] ?? "factory-mutation";
-  const previous = {
-    FACTORY_FORGEJO_OWNER: process.env["FACTORY_FORGEJO_OWNER"],
-    FACTORY_FORGEJO_API_URL: process.env["FACTORY_FORGEJO_API_URL"],
-    FACTORY_FORGEJO_TOKEN: process.env["FACTORY_FORGEJO_TOKEN"],
+  const configuration = {
+    FACTORY_FORGEJO_OWNER: "owned-wiki",
+    FACTORY_FORGEJO_API_URL: "https://forge.owned-wiki.invalid/api/v1/",
+    FACTORY_FORGEJO_PUBLIC_URL: "https://forge.owned-wiki.invalid",
+    FACTORY_FORGEJO_TOKEN: "controlled-read-only",
   };
-  process.env["FACTORY_FORGEJO_OWNER"] = owner;
-  process.env["FACTORY_FORGEJO_API_URL"] ??= "http://forge.invalid/api/v1/";
-  process.env["FACTORY_FORGEJO_TOKEN"] ??= "controlled-read-only";
+  const owner = configuration.FACTORY_FORGEJO_OWNER;
+  const previous = new Map(Object.keys(configuration).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, configuration);
   let commit = "a".repeat(40);
   const blob = "b".repeat(40);
   let treeReads = 0;
@@ -36,7 +36,7 @@ test("Wiki search combines active pages and source documents without repeating e
       VALUES(${userID},'Owned Wiki administrator',${`wiki-admin-${projectID}@factory.local`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userID})`;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`wiki-search-${projectID}`},'Wiki search',${`http://forge.invalid/${owner}/wiki.git`},'main','.devcontainer/devcontainer.json',${userID})`;
+      VALUES(${projectID},${`wiki-search-${projectID}`},'Wiki search',${`${configuration.FACTORY_FORGEJO_PUBLIC_URL}/${owner}/wiki.git`},'main','.devcontainer/devcontainer.json',${userID})`;
     for (const state of ["active", "archived"] as const) {
       await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,state,current_body,generated_body,source_commit_sha,created_by)
         VALUES(${crypto.randomUUID()},${projectID},${state},'Release overview',${state}::factory.knowledge_page_state,
@@ -79,7 +79,7 @@ test("Wiki search combines active pages and source documents without repeating e
     await database.client`DELETE FROM auth."user" WHERE id=${userID}`;
     await database.client.end();
     await host.dispose();
-    for (const [key, value] of Object.entries(previous)) {
+    for (const [key, value] of previous) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }

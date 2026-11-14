@@ -48,16 +48,25 @@ export async function freezeRuntimeEnvironment(
   return intent;
 }
 
+type RuntimeEnvironmentBundle = {
+  variables: EnvironmentBundle["variables"];
+  registries: Omit<EnvironmentBundle["registries"][number], "publish">[];
+};
+
 export function selectRuntimeEnvironment(
   bundle: EnvironmentBundle,
   verification: boolean,
-): EnvironmentBundle {
+): RuntimeEnvironmentBundle {
   return {
     variables: bundle.variables.filter(
       (variable) =>
         (!verification || variable.verification) && (variable.runtime || variable.build),
     ),
-    registries: bundle.registries.filter((registry) => !verification || registry.verification),
+    // Publication permission belongs to Factory's persisted admission. It is
+    // not part of the Connector's selected registry-credential protocol.
+    registries: bundle.registries
+      .filter((registry) => !verification || registry.verification)
+      .map(({ publish: _publish, ...registry }) => registry),
   };
 }
 

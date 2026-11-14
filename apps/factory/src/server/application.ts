@@ -23,7 +23,6 @@ import { createBuildBrowserEndpoint } from "../agent/browser-endpoint";
 import { createCandidateReviewController } from "../agent/candidate-review";
 import { createAgentController } from "../agent/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
-import { createRetainedStopSettlement } from "../agent/retained-stop";
 import { createReviewExecutionReader } from "../agent/review-execution";
 import { createAgentService } from "../agent/service";
 import { createVerificationTools } from "../agent/verification-tools";
@@ -55,11 +54,11 @@ import { createWikiSourceUpdates } from "../knowledge/source-updates";
 import { createLearningService } from "../learning/service";
 import { createLearningWorker } from "../learning/worker";
 import { createMCPConnections } from "../mcp/connections";
+import { createExternalFactoryMCP } from "../mcp/external";
 import { createMCPOAuthCallback } from "../mcp/oauth-callback";
 import { createMCPSecrets } from "../mcp/secrets";
 import { createMCPService } from "../mcp/service";
 import { createMCPSourceEndpoint } from "../mcp/sources";
-import { createExternalFactoryMCP } from "../mcp/external";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createModelRelay } from "../models/relay";
@@ -87,10 +86,9 @@ import { createRuntimeDemand } from "../runtime/demand";
 import { RuntimeHub } from "../runtime/hub";
 import { createIdleCompute } from "../runtime/idle";
 import { createProjectPreparation } from "../runtime/project-preparation";
-import { createExecutionReserve } from "../runtime/reserve-controller";
 import { createRuntimeService } from "../runtime/service";
 import { createSubstrateCapacity } from "../runtime/substrate-capacity";
-import { configuredSubstrateWorkspaces } from "../runtime/substrate-workspaces";
+import { configuredSubstrateInstallation } from "../runtime/substrate-workspaces";
 import { createServerFunctionEndpoint } from "../server-functions/endpoint";
 import { createProjectSetupController } from "../setup/controller";
 import { createSetupInspection } from "../setup/inspection";
@@ -103,19 +101,19 @@ import { createStaticAssets } from "../static-assets";
 import { usageCatalogue } from "../usage/rates";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import { createUsageService } from "../usage/service";
+import { createWorkspaceCollaboration } from "../workspace/collaboration";
+import { createWorkspaceCommands } from "../workspace/commands";
+import { createWorkspaceContainerFiles } from "../workspace/container-files";
 import { createDeveloperIDEController } from "../workspace/developer-ide-controller";
 import { createDeveloperIDEEdge } from "../workspace/developer-ide-edge";
 import { createDeveloperIDERuntime } from "../workspace/developer-ide-runtime";
 import { createWorkspaceService } from "../workspace/service";
+import { createWorkspaceSharing } from "../workspace/sharing";
 import { createWorkspaceSourceController } from "../workspace/source-controller";
 import { createWorkspaceSourceProtocol } from "../workspace/source-protocol";
-import { createSubstrateSources } from "../workspace/substrate-source";
-import { createWorkspaceSharing } from "../workspace/sharing";
-import { createWorkspaceCommands } from "../workspace/commands";
-import { createWorkspaceContainerFiles } from "../workspace/container-files";
-import { createWorkspaceTransferRoutes } from "../workspace/transfer-routes";
-import { createWorkspaceCollaboration } from "../workspace/collaboration";
 import { createWorkspaceSubmission } from "../workspace/submission";
+import { createSubstrateSources } from "../workspace/substrate-source";
+import { createWorkspaceTransferRoutes } from "../workspace/transfer-routes";
 import { createPageHint } from "./page-hints";
 
 export async function createFactoryApplication() {
@@ -270,10 +268,6 @@ export async function createFactoryApplication() {
   const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
   const workspaceSources = createWorkspaceSourceController(
     database,
-    runtimeSecret,
-    undefined,
-    undefined,
-    undefined,
     runtimeHub,
     createSubstrateSources(database, runtimeHub),
   );
@@ -284,37 +278,22 @@ export async function createFactoryApplication() {
     await runtimeAccess.revokeWorkspaceMember(workspaceID, userID);
   });
   await workspaceSharing.recover().catch(reportFailure("Workspace access recovery is unavailable"));
-  const reserveImages = {
-    staging: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
-    verification: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
-  };
-  if (!reserveImages.staging || !reserveImages.verification)
-    throw new Error("An exact runtime image is required before execution reserve admission");
-  const executionReserve = createExecutionReserve(database, {
-    staging: reserveImages.staging,
-    verification: reserveImages.verification,
-  });
-  const nativeSetup = configuredSubstrateWorkspaces();
+  const nativeSetup = configuredSubstrateInstallation();
+  if (!nativeSetup) throw new Error("Factory requires its Substrate installation configuration");
   const nativeCapacity =
     nativeSetup?.deployment === "fresh-workspaces"
       ? createSubstrateCapacity(database, nativeSetup)
       : undefined;
-  runtimeController = createRuntimeController(
-    database,
-    runtimeHub,
-    runtimeSecret,
-    workspaceSources,
-    undefined,
-    undefined,
-    executionReserve,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    nativeSetup,
-    undefined,
-    nativeCapacity,
-  );
+  runtimeController = createRuntimeController(database, runtimeHub, runtimeSecret, {
+    configuration: nativeSetup,
+    stopCoding: async (changeID) => {
+      if (!agentController)
+        throw new CommandError("unavailable", "Coding Stop is not ready; compute was retained");
+      await agentController.stop(changeID);
+    },
+    ...(workspaceSources.substrate ? { sources: workspaceSources.substrate } : {}),
+    ...(nativeCapacity ? { capacity: nativeCapacity } : {}),
+  });
   const workspaceCommands = createWorkspaceCommands(
     database,
     runtimeHub,
@@ -460,7 +439,7 @@ export async function createFactoryApplication() {
     runtimeController,
     buildBrowserController,
     changeWriters,
-    createRetainedStopSettlement(database, runtimeController, runtimeHub),
+    (target, signal) => runtimeController.settleRetainedInputStop(target, signal),
   );
   await agentController.recover();
   const implementationOrders = createImplementationOrders(
@@ -557,7 +536,12 @@ export async function createFactoryApplication() {
         Array<{ url: string }>
       >`SELECT repository_url AS url FROM factory.project WHERE id=${projectID}`;
       if (!project) throw new Error("Project not found");
-      const repository = factoryForgeSource(project.url, forgeAPIURL, forgeOwner);
+      const repository = factoryForgeSource(
+        project.url,
+        forgeAPIURL,
+        forgeOwner,
+        forgePublicOrigin,
+      );
       return (await preparationForge.getDefaultBranch(repository)).headSha;
     },
   });
@@ -568,6 +552,7 @@ export async function createFactoryApplication() {
       token: forgeToken,
     }),
     apiURL: forgeAPIURL,
+    publicURL: forgePublicOrigin,
     owner: forgeOwner,
     receiverURL:
       process.env["FACTORY_WIKI_WEBHOOK_URL"] ??
@@ -580,6 +565,7 @@ export async function createFactoryApplication() {
   const projectService = createProjectService({
     database,
     localRepositoryOrigin: new URL(process.env["FACTORY_FORGEJO_API_URL"] ?? "").origin,
+    publicRepositoryOrigin: forgePublicOrigin,
     onRegistered: async (projectID, userID, recovering) => {
       await setupReadiness.start(projectID, userID, false, recovering);
       await setupInspection.start(projectID, userID, projectID);
@@ -661,9 +647,6 @@ export async function createFactoryApplication() {
     secrets: createImportSecrets(),
     signingKey: runtimeSecret,
     importOrigins: projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"]),
-    ...(nativeSetup?.setupID
-      ? { projectIdentity: { setupID: nativeSetup.setupID, projectID: nativeSetup.projectID } }
-      : {}),
     onCreated: async (projectID, userID) => {
       // Configuration confirmation owns runtime readiness. Creation itself keeps
       // planning available without starting arbitrary imported Project code.
@@ -682,6 +665,7 @@ export async function createFactoryApplication() {
     database,
     forge: preparationForge,
     forgeURL: forgeAPIURL,
+    forgePublicURL: forgePublicOrigin,
     forgeOwner: forgeOwner,
     model: async (projectID, userID, sql) => {
       const modelID = await modelSettingsController.resolve("planning", sql, { projectID, userID });
@@ -862,7 +846,6 @@ export async function createFactoryApplication() {
     deliveryController,
     environmentController,
     environmentSecrets,
-    executionReserve,
     factoryAuth,
     factoryHost,
     factoryOrigin,
@@ -883,6 +866,7 @@ export async function createFactoryApplication() {
     projectPreparation,
     projectAgentController,
     projectSetup,
+    setupReadiness,
     relayModel,
     releaseController,
     requireSession,

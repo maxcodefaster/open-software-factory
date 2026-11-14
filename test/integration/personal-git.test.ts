@@ -5,27 +5,32 @@ import {
   personalGitRepository,
 } from "../../apps/factory/src/workspace/personal-git";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
+import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 test("personal Git retains intent before dispatch, rechecks authority and never replays uncertain writes", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
   try {
     const owned = await fixture(undefined, undefined, database);
-    const workspaceID = crypto.randomUUID();
-    const attemptID = crypto.randomUUID();
+    const workspaceID = personalWorkspaceIdentity(owned.projectID, owned.userID).workspaceID;
     const head = "a".repeat(40);
     const next = "b".repeat(40);
     await database.client`
       INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,
         source_revision,created_by)
       VALUES(${workspaceID},${owned.projectID},'personal',${owned.userID},'main',${head},${owned.userID})`;
-    await database.client`
-      INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
-        create_intended_at,created_by)
-      VALUES(${attemptID},${owned.projectID},${workspaceID},1,${head},'ready',${"c".repeat(64)},${"d".repeat(64)},now(),${owned.userID})`;
+    const attemptID = await recordUncreatedWorkspaceAttempt(database, {
+      workspaceID,
+      generation: 1,
+      createdBy: owned.userID,
+      parentHash: "c".repeat(64),
+      childHash: "d".repeat(64),
+      connectorURL: "wss://owned-build.factory.invalid/internal/runtime-connect",
+    });
     let mode: "success" | "lost" | "rejected" | "revoked" = "success";
     let sends = 0;
     let remoteHead = head;
@@ -47,7 +52,7 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
           expect(intent?.state).toBe("attempted");
           if (input.action === "fetch" || input.action === "pull")
             expect(await personalGitRepository(database, operation.operationId)).toBe(
-              "https://example.invalid/owned-build.git",
+              "https://owned-build.factory.invalid/owned/owned-build.git",
             );
         }
         if (mode === "lost") throw new Error("Owned response lost");

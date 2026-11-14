@@ -297,13 +297,45 @@ export async function confirmEmptyOpenCodeSession(
       { sessionID, limit: 1 },
       { signal: AbortSignal.timeout(5_000) },
     );
-    const work = await observeOpenCodeWork(client, sessionID);
-    return inbox.length === 0 && messages.data.length === 0 && !work.running;
+    return (
+      inbox.length === 0 &&
+      messages.data.length === 0 &&
+      (await confirmQuiescentOpenCodeTree(client, sessionID))
+    );
   } catch (cause) {
     const absent = missingSession.safeParse(cause);
     // A failed or malformed read leaves the persisted barrier in place.
     return absent.success && absent.data.sessionID === sessionID;
   }
+}
+
+// Inactive execution alone is not settlement: a child can retain unpromoted
+// Inbox work across a cold restart. Observe the complete owned tree, then
+// recheck its ancestry and liveness after the Inbox reads.
+async function confirmQuiescentOpenCodeTree(
+  client: ReturnType<typeof createOpenCodeClient>,
+  sessionID: string,
+) {
+  const before = await observeOpenCodeWork(client, sessionID);
+  if (before.running) return false;
+  for (const child of before.sessionIDs) {
+    const inbox = await client.session.inbox.list(
+      { sessionID: child },
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (!Array.isArray(inbox) || inbox.length !== 0) return false;
+    const session = await client.session.get(
+      { sessionID: child },
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (session.id !== child || session.revert) return false;
+  }
+  const after = await observeOpenCodeWork(client, sessionID);
+  return (
+    !after.running &&
+    after.sessionIDs.length === before.sessionIDs.length &&
+    after.sessionIDs.every((child) => before.sessionIDs.includes(child))
+  );
 }
 
 export async function confirmSettledOpenCodeInput(
@@ -319,7 +351,7 @@ export async function confirmSettledOpenCodeInput(
     if (!Array.isArray(inbox) || inbox.length !== 0) return false;
     const session = await client.session.get({ sessionID }, { signal: AbortSignal.timeout(5_000) });
     if (session.id !== sessionID || session.revert) return false;
-    return !(await observeOpenCodeWork(client, sessionID)).running;
+    return await confirmQuiescentOpenCodeTree(client, sessionID);
   } catch {
     return false;
   }
@@ -340,6 +372,18 @@ export async function interruptOpenCodeSession(
     for (const child of work.sessionIDs.toReversed()) {
       if (child === sessionID) continue;
       await client.session.interrupt({ sessionID: child }, { signal: AbortSignal.timeout(5_000) });
+      const inbox = await client.session.inbox.list(
+        { sessionID: child },
+        { signal: AbortSignal.timeout(5_000) },
+      );
+      // These IDs come only from the verified native ancestry tree, not a
+      // caller-supplied Session. Root cancellation stays bound to its exact
+      // admitted input; unrelated root Inbox entries are never discarded.
+      for (const input of inbox)
+        await client.session.inbox.cancel(
+          { sessionID: child, inboxID: input.id },
+          { signal: AbortSignal.timeout(5_000) },
+        );
     }
     for (const shell of work.shells)
       await client.shell.remove(

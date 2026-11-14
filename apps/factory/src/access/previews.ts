@@ -22,7 +22,12 @@ export function createProjectAppPreviews(
     const token = process.env["FACTORY_FORGEJO_TOKEN"];
     if (!apiURL || !owner || !token) throw new Error("Factory Forgejo is unavailable");
     return {
-      repository: factoryForgeSource(repositoryURL, apiURL, owner),
+      repository: factoryForgeSource(
+        repositoryURL,
+        apiURL,
+        owner,
+        process.env["FACTORY_FORGEJO_PUBLIC_URL"],
+      ),
       forge: createForgejoClient({ apiURL, token }),
     };
   }

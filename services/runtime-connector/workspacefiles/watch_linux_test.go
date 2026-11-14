@@ -140,7 +140,7 @@ func TestSourceWatchUnreadableSubtreeKeepsAccessibleFilesLive(t *testing.T) {
 		}
 		child := exec.Command(executable, "-test.run=^"+t.Name()+"$", "-test.v")
 		child.SysProcAttr = &syscall.SysProcAttr{
-			Credential: &syscall.Credential{Uid: 101000, Gid: 101000},
+			Credential: &syscall.Credential{Uid: 1000, Gid: 1000},
 		}
 		if output, err := child.CombinedOutput(); err != nil {
 			t.Fatalf("unprivileged Source watch failed: %v\n%s", err, output)

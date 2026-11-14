@@ -10,7 +10,7 @@ import {
   factoryFunctionRequest,
 } from "../fixtures/server-functions";
 
-test("compiled Workspace lifecycle uses the existing controllers, confirms Stop before another epoch and does not cancel admitted work", async () => {
+test("compiled Workspace commands retry the retained Source and only stop the independent editor", async () => {
   const origin = "https://owned-workspaces.test",
     actor = crypto.randomUUID();
   const project = crypto.randomUUID(),
@@ -19,8 +19,7 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
   let maintenance = true,
     allowed = true,
     authenticated = true;
-  let state: "failed" | "stop-intended" | "stopped" | "ready" = "failed",
-    stopReads = 0;
+  let state: "failed" | "ready" = "failed";
   const effects: unknown[][] = [];
   const admitted = Promise.withResolvers<void>(),
     released = Promise.withResolvers<void>();
@@ -28,7 +27,7 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
     workspaceID: workspace,
     label: "Owned source",
     serviceID: "owned-source",
-    epoch: state === "ready" ? 2 : 1,
+    epoch: 1,
     state,
     failure: state === "failed" ? "Owned preparation failed" : null,
   });
@@ -40,13 +39,11 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
     sources: {
       async get(...args) {
         authority();
-        if (state === "stop-intended" && ++stopReads >= 2) state = "stopped";
         effects.push(["source-read", ...args, state]);
         return source();
       },
       async ensure(...args) {
         authority();
-        if (state !== "stopped") throw new CommandError("conflict", "Stop is unconfirmed");
         effects.push(["source-ensure", ...args]);
         state = "ready";
         return source();
@@ -60,11 +57,6 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
         authority();
         effects.push(["change", ...args]);
         return source();
-      },
-      async stop(...args) {
-        authority();
-        effects.push(["source-stop", ...args]);
-        state = "stop-intended";
       },
     },
     editors: {
@@ -108,7 +100,6 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
     ["ensurePersonalSource", [project]],
     ["ensureChangeSource", [change]],
     ["ensureDeveloperIDE", [project]],
-    ["stopWorkspaceSource", [workspace]],
     ["stopDeveloperIDE", []],
   ] as Array<[string, unknown[]]>)
     await expect(call(name, args)).rejects.toMatchObject({ status: 503 });
@@ -125,7 +116,6 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
     "ensureWorkspaceSource",
     "ensurePersonalSource",
     "ensureChangeSource",
-    "stopWorkspaceSource",
     "ensureDeveloperIDE",
   ])
     await expect(call(name, ["not-an-identity"])).rejects.toMatchObject({ status: 400 });
@@ -140,18 +130,12 @@ test("compiled Workspace lifecycle uses the existing controllers, confirms Stop 
   ]);
   effects.length = 0;
   const cancellation = new AbortController();
-  await recoverWorkspaceSource(workspace, true, cancellation.signal, {
-    stop: (id, signal) => call("stopWorkspaceSource", [id], signal),
-    read: (id, signal) => call<ReturnType<typeof source>>("getWorkspaceSource", [id], signal),
+  await recoverWorkspaceSource(workspace, cancellation.signal, {
     ensure: (id, signal) => call("ensureWorkspaceSource", [id], signal),
-    wait: async () => {},
   });
-  expect(effects).toEqual([
-    ["source-stop", workspace, actor],
-    ["source-read", workspace, actor, "stop-intended"],
-    ["source-read", workspace, actor, "stopped"],
-    ["source-ensure", workspace, actor],
-  ]);
+  expect(effects).toEqual([["source-ensure", workspace, actor]]);
+  expect(await call("getWorkspaceSource", [workspace])).toMatchObject({ epoch: 1, state: "ready" });
+  expect("stopSource" in service).toBe(false);
   allowed = false;
   await expect(call("ensureDeveloperIDE", [project])).rejects.toMatchObject({ status: 403 });
   const stop = new AbortController();

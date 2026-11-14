@@ -2,20 +2,36 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { requirePinnedImage } from "./preflight";
-import { factoryboxRuntimeImage } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 
 export const runtimeArtifactNames = [
   "runtime-host",
   "browser-tools",
-  "workspace-files",
   "developer-ide",
+  "substrate-runtime",
 ] as const;
 
-export const runtimeArtifactsSchema = z.record(
-  z.enum(runtimeArtifactNames),
-  factoryboxRuntimeImage,
-);
+export const runtimeImageReference = z
+  .string()
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9.:-]*\/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/)
+  .refine(
+    (value) =>
+      value
+        .slice(0, value.indexOf("@"))
+        .split("/")
+        .slice(1)
+        .every((part) => part !== "" && part !== "." && part !== ".."),
+    "Runtime images need a qualified registry and canonical repository path",
+  );
+export const runtimeArtifactsSchema = z.record(z.enum(runtimeArtifactNames), runtimeImageReference);
 export type RuntimeArtifacts = z.infer<typeof runtimeArtifactsSchema>;
+
+export function runtimeArtifactEnvironment(artifacts: RuntimeArtifacts) {
+  return {
+    FACTORY_RUNTIME_HOST_IMAGE: artifacts["runtime-host"],
+    FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
+    FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],
+  };
+}
 
 export function localRuntimeDefaults(
   published: RuntimeArtifacts | null,

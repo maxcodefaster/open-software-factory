@@ -27,6 +27,12 @@ Resume and synchronous Suspend keep caller cancellation but add no Factory
 wall-clock deadline. Substrate's own checkpoint, transfer and wakeup budgets apply;
 a shorter client deadline can interrupt finalization after a checkpoint commits.
 Other RPCs retain the existing finite lookup/create bound. No RPC is retried.
+The Factory adapter also saves immutable Resume/Suspend dispatch facts under its
+existing runtime lock, bound to the original Actor and preceding confirmed ROOTFS
+UUID. Lost replies are observed, not replayed. Native SUSPENDING finalization cannot
+be driven by a second Suspend. A new confirmed checkpoint permits a later deliberate
+Resume; an unresolved Pause never reopens Connector authority. These are execution
+facts, not a second lifecycle controller.
 
 The normal Factory image packages this executable at
 `/usr/local/bin/factory-substrate-control`. The
@@ -35,13 +41,15 @@ uses authenticated Factory commands rather than operator-prepared Workspaces or
 templates. It documents the unavoidable native global-Owner provisioning grant,
 separate rotating credentials and the initial active-Actor Source boundary.
 
-## Earlier explicit prepared-binding proof
+## Explicit adapter proof
 
-The retained installation and default Factorybox route do not change. The
-concrete implementation in
-[substrate.ts](../../apps/factory/src/runtime/substrate.ts) is selected only by
-`FACTORY_SUBSTRATE_OWNED_CONFIGURATION`, an absolute JSON configuration file.
-It requires `deployment: "owned-test"`, an exact `database` named
+The owned native test exercises
+[`createSubstrateExecution`](../../apps/factory/src/runtime/substrate.ts) directly.
+It is not an alternate Factory installation mode or a prepared-binding production
+constructor. The normal runtime controller requires installation-wide Substrate
+configuration and the persisted native provisioning owner.
+
+The direct proof requires `deployment: "owned-test"`, an exact `database` named
 `owned_<32 lowercase hex>`, `projectID`, the deterministic personal `workspaceID`,
 `generation`, and these immutable native inputs:
 
@@ -56,20 +64,12 @@ It requires `deployment: "owned-test"`, an exact `database` named
   `sandboxClass: "gvisor"` and complete `version`/attributes from the qualified
   native worker. Running assignment and snapshot compatibility must match exactly.
 
-The owned personal Workspace must already exist as an explicitly native,
-workerless Workspace, with no Source allocation and no earlier Attempt. This
-deliberately refuses retained Workspace migration. The
-native Actor receives no synthetic Factorybox worker, Kubernetes Pod UID or
-reinterpreted legacy ID. Migration **0019**, after unchanged 0016–0018, adds one
-binding table and allows only explicitly native Workspaces/Attempts to omit worker fields.
-Existing rows retain their generated legacy identities.
-The existing Source controller and a database gate reject legacy Source
-preparation for native Workspaces until the Source-handoff phase is implemented.
-
-The normal Factory Start command persists Attempt, unique names, exact native
+The proof owns a fresh personal Workspace with no earlier Attempt. Its native
+Actor receives no synthetic worker or Kubernetes Pod identity. Factory persists
+Attempt, unique names, exact native
 inputs and a secret-derived Actor selector before CreateActor. Atespace is
 `fa-<Attempt UUID without hyphens>`, Actor is `runtime-<same suffix>` and template
-is `runtime` in that never-reused Atespace. The operator must prepare that exact
+is `runtime` in that never-reused Atespace. The adapter fixture prepares that exact
 template and an owned WorkerPool with the label returned by
 `substrateActorSelector(Factory connector signing secret, Attempt ID)`.
 This selector, unique template/scope, dispatch time and returned UID prevent
@@ -133,20 +133,26 @@ Factory requests SYNCHRONOUS Suspend, validates the returned ROOTFS snapshot,
 then independently Gets the Actor and requires the same UUID/generation,
 ActorUID in the storage URI, template UID, exact runtime and durable COMPLETED.
 Local-only, PENDING, VOLUMES, another generation, and merely SUSPENDED are rejected.
-Failures retain the previous good checkpoint. There is no fallback/revert,
+Failures retain the previous good checkpoint. Workspace Stop confirms the
+independent editable Source owner under the same Workspace lock before UID-bound
+Actor Delete. Missing Source or its failed materialization prevents deletion.
+Failed initial preservation may support Pause, but cannot masquerade as independent
+Source or a completed Stop. A lost Delete reply reconciles the original Actor's
+absence without recreating it.
+
+There is no fallback/revert,
 checkpoint garbage collector, model/tool replay or Source-node data release.
 
-The actual Factory API exposes native observed status and explicitly
-`coldRestart: true`, `portable: false`, `sourceHandoff: "pending"`. This is an
-owned runtime-adapter slice, **not production runtime cutover**. Portable Source,
+The Factory API exposes native observed status and explicitly
+`coldRestart: true`, `portable: false`, and the recorded Source-handoff result.
+The direct adapter proof is **not production runtime cutover**. Portable Source,
 full Factory toolchain feature qualification, independent editor/Coding/Verification/Delivery and
 different-node recovery remain separate gates. The native integration test is
 explicitly classified in the native lane and errors if its owned fixture is
 missing; it must not be reported as a complete Factory E2E.
 
 ```sh
-mise exec -- bun --no-env-file test apps/factory/src/runtime/substrate.test.ts \
-  test/integration/substrate-adapter.test.ts test/integration/substrate-upgrade.test.ts --timeout 60000
+mise exec -- bun run test:controllers substrate-adapter.test substrate-lifecycle-facts
 FACTORY_SUBSTRATE_NATIVE_FIXTURE="$OUT/native-fixture.json" mise exec -- bun --no-env-file \
   test test/integration/substrate-adapter.native.test.ts --timeout 300000
 ```

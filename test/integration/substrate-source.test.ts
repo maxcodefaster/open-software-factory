@@ -24,21 +24,13 @@ test("native Ticket Source uses the Change writer fence, not storage ownership, 
     return Response.json({ confirmed: true });
   };
   const native = createSubstrateSources(f.database, f.hub);
-  const source = createWorkspaceSourceController(
-    f.database,
-    "owned-native-secret",
-    undefined,
-    undefined,
-    f.projectID,
-    f.hub,
-    native,
-  );
+  const source = createWorkspaceSourceController(f.database, f.hub, native);
   const lifecycle = f.database.coordination();
   let held = false;
   try {
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,substrate,factorybox_worker_id,factorybox_admission_id) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID},true,NULL,NULL)`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
@@ -82,10 +74,10 @@ test("native Ticket Source uses the Change writer fence, not storage ownership, 
     await expect(source.forward(f.workspaceID, f.userID, "read", request())).rejects.toThrow(
       "frozen or unavailable",
     );
-    expect(await f.database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
-    );
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
+        to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ source: null, worker: null }]);
   } finally {
     if (held) await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
     await lifecycle.end({ timeout: 1 });
@@ -115,15 +107,7 @@ test("native editor metadata queues brief contention under the existing exclusiv
     return Response.json({ content: "eA==", version: "owned-current-version" });
   };
   const native = createSubstrateSources(f.database, f.hub);
-  const source = createWorkspaceSourceController(
-    f.database,
-    "owned-native-secret",
-    undefined,
-    undefined,
-    f.projectID,
-    f.hub,
-    native,
-  );
+  const source = createWorkspaceSourceController(f.database, f.hub, native);
   const lifecycle = f.database.coordination();
   let held = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -136,7 +120,7 @@ test("native editor metadata queues brief contention under the existing exclusiv
   try {
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,substrate,factorybox_worker_id,factorybox_admission_id) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID},true,NULL,NULL)`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
     });
@@ -175,10 +159,8 @@ test("native editor metadata queues brief contention under the existing exclusiv
 
 test("Source lease/confirmed generation survives lost upload reply, rejects stale transfer and retains the original writer until durable ROOTFS", async () => {
   const f = await substrateFixture();
-  await f.database
-    .client`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
   let actor: ReturnType<typeof f.actor> | null = null;
-  const controller = f.controller(async (method) => {
+  const controller = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -484,20 +466,12 @@ test("native Ticket Source forwards Change writer epochs and handoff fences, nev
     );
   };
   const native = createSubstrateSources(f.database, f.hub);
-  const source = createWorkspaceSourceController(
-    f.database,
-    "owned-native-secret",
-    undefined,
-    undefined,
-    f.projectID,
-    f.hub,
-    native,
-  );
+  const source = createWorkspaceSourceController(f.database, f.hub, native);
   const lifecycle = f.database.coordination();
   try {
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,substrate,factorybox_worker_id,factorybox_admission_id) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID},true,NULL,NULL)`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${uid},now())`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
@@ -544,9 +518,9 @@ test("native Ticket Source forwards Change writer epochs and handoff fences, nev
     );
     expect(calls).toHaveLength(count);
     expect((await source.forward(f.workspaceID, f.userID, "read", request())).status).toBe(200);
-    expect(await f.database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
-    );
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source`),
+    ]).toEqual([{ source: null }]);
   } finally {
     await lifecycle.end({ timeout: 1 });
     await source.close();

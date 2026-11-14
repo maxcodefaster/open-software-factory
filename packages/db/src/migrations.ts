@@ -1,4 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 export type MigrationFile = { version: number; name: string };
@@ -11,24 +12,38 @@ export function migrationFiles(names: string[]): MigrationFile[] {
     .filter((file) => file.match)
     .map((file) => ({ name: file.name, version: Number(file.match?.[1]) }))
     .sort((a, b) => a.version - b.version);
-  files.forEach((file, index) => {
-    if (file.version !== index + 1)
-      throw new Error(`Migration ${file.name} breaks the contiguous version sequence`);
-  });
+  if (files.length !== 1 || files[0]?.name !== "0001_baseline.sql")
+    throw new Error("Factory ships one Greenfield baseline, not a historical migration sequence");
   return files;
 }
 
-/** Applied versions must be exactly 1..n with n no newer than the shipped files. */
+/** A retained installation must match the sole native baseline exactly. */
 export function pendingMigrations(files: MigrationFile[], applied: number[]) {
-  if (applied[0] !== 1 || applied.some((version, index) => version !== index + 1))
+  if (
+    files.length !== 1 ||
+    files[0]?.name !== "0001_baseline.sql" ||
+    files[0]?.version !== 1 ||
+    applied.length !== 1 ||
+    applied[0] !== 1
+  )
     throw new Error(
       "Factory requires its Greenfield baseline in a fresh database; historical migration state was not changed",
     );
-  if (applied.length > files.length)
-    throw new Error(
-      `The database is at migration ${applied.length}, newer than this Factory (${files.length}); refusing to downgrade`,
-    );
-  return files.slice(applied.length);
+  return [];
+}
+
+export function baselineDigest(source: string) {
+  const marker = "-- Baseline registration.\n";
+  const parts = source.split(marker);
+  const digest = createHash("sha256")
+    .update(parts[0] ?? "")
+    .digest("hex");
+  const registered = parts[1]?.match(
+    /^INSERT INTO factory\.schema_migration\(version,source_digest\) VALUES\(1,'([a-f0-9]{64})'\);\nCOMMIT;\n$/,
+  );
+  if (parts.length !== 2 || registered?.[1] !== digest)
+    throw new Error("Factory native baseline registration differs from its exact SQL source");
+  return digest;
 }
 
 export async function readMigration(file: MigrationFile) {

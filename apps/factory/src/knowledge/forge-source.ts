@@ -5,27 +5,29 @@ export function factoryForgeSource(
   value: string,
   apiURL: string,
   allowedOwner: string,
+  publicURL?: string,
 ): ForgeRepository {
   const url = new URL(value);
-  const forge = new URL(apiURL);
-  const parts = url.pathname
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
+  const origins = new Set([
+    new URL(apiURL).origin,
+    ...(publicURL ? [new URL(publicURL).origin] : []),
+  ]);
+  const path = /^\/([\w.-]+)\/([\w.-]+)$/.exec(url.pathname);
+  const owner = path?.[1];
+  const name = path?.[2]?.replace(/\.git$/, "");
   if (
-    url.origin !== forge.origin ||
+    !["http:", "https:"].includes(url.protocol) ||
+    !origins.has(url.origin) ||
     url.username ||
     url.password ||
     url.search ||
     url.hash ||
-    parts.length !== 2 ||
-    parts[0] !== allowedOwner ||
-    !parts[1] ||
-    !/^[\w.-]+$/.test(parts[1])
+    owner !== allowedOwner ||
+    !name
   )
     throw new CommandError(
       "forbidden",
       "Project source must belong to the configured Factory Forgejo.",
     );
-  return { owner: allowedOwner, name: parts[1] };
+  return { owner: allowedOwner, name };
 }

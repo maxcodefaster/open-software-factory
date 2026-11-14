@@ -13,7 +13,7 @@ import { reportFailure } from "../failure-log";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createOpenBaoModelSecrets } from "../models/secrets";
-import { runtimeRepositoryCloneURL, substrateRepositoryCloneURL } from "../runtime/endpoints";
+import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/native";
@@ -826,7 +826,6 @@ export function createAgentController(
         state: string;
         lastError: string | null;
         repositoryURL: string;
-        native: boolean;
         nativeIntent: unknown;
       }>
     >`
@@ -834,13 +833,13 @@ export function createAgentController(
         operation.branch_name AS "branchName", operation.expected_parent_sha AS "expectedParentSHA",
         operation.merge_parent_sha AS "mergeParentSHA",
         operation.commit_sha AS "commitSHA", operation.commit_message AS "commitMessage", operation.state, operation.last_error AS "lastError",
-        project.repository_url AS "repositoryURL",COALESCE(attempt.substrate,false) AS native,
+        project.repository_url AS "repositoryURL",
         binding.intent AS "nativeIntent"
       FROM factory.change_commit_operation operation
       JOIN factory.change change ON change.id=operation.change_id
       JOIN factory.project project ON project.id=change.project_id
-      LEFT JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
-      LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+      JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
       WHERE operation.id = ${operationID}
     `;
     const operation = operations[0];
@@ -881,11 +880,7 @@ export function createAgentController(
         expectedSha: operation.expectedParentSHA,
         mergeParentSha: operation.mergeParentSHA ?? "",
         commitSha: commitSHA,
-        repositoryURL: operation.native
-          ? substrateRepositoryCloneURL(operation.repositoryURL, operation.nativeIntent)
-          : operation.repositoryURL.startsWith("file://")
-            ? operation.repositoryURL
-            : runtimeRepositoryCloneURL(operation.repositoryURL),
+        repositoryURL: substrateRepositoryCloneURL(operation.repositoryURL, operation.nativeIntent),
         username:
           process.env["FACTORY_FORGEJO_USERNAME"] ??
           process.env["FACTORY_FORGEJO_OWNER"] ??
@@ -1174,6 +1169,10 @@ export function createAgentController(
             return;
           }
           if (outcome.state === "succeeded") {
+            if (!(await confirmSettledOpenCodeInput(client, session.sessionID, intent.promptID)))
+              throw new Error(
+                "OpenCode reported a final answer but its execution tree or queued input is not settled",
+              );
             await usageJournal.settle(turnID, "completed");
             const reviewTurn = await turns.get(turnID);
             if (reviewTurn?.authority.mode === "build" && reviewTurn.authority.review) {
@@ -1414,6 +1413,7 @@ export function createAgentController(
         SELECT session.change_id AS "changeID" FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
         WHERE session.stop_pending AND (attempt.state IN ('failed','cleanup-failed','stopped')
+          OR (${Boolean(settleRetainedStop)} AND attempt.substrate AND attempt.state IN ('paused','starting','pausing'))
           OR (${Boolean(runtime.get)} AND attempt.substrate AND attempt.state='paused'
             AND session.native_session_confirmed_at IS NULL
             AND session.implementation_session_confirmed_at IS NULL

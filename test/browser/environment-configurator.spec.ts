@@ -75,6 +75,7 @@ function initialBundle(): EnvironmentBundle {
         password: "saved-registry-secret",
         certificate: "",
         verification: true,
+        publish: false,
       },
     ],
   };
@@ -310,6 +311,11 @@ test("variable rows support search, filters, sorting, focused editing, imports a
     area.getByRole("textbox", { name: "Replace password or token", exact: true }),
   ).toHaveValue("");
   const imageAccess = area.locator(".environment-registry details > summary");
+  const publication = area.getByRole("checkbox", {
+    name: "Allow publishing prepared images for this Project",
+    exact: true,
+  });
+  await expect(publication).not.toBeChecked();
   await imageAccess.focus();
   await imageAccess.press("Enter");
   await expect(
@@ -327,8 +333,28 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   expect(bundles.get("development")?.registries[0]?.username).toBe("image-reader");
   expect(bundles.get("development")?.registries[0]?.password).toBe("saved-registry-secret");
   expect(bundles.get("development")?.registries[0]?.verification).toBe(true);
+  expect(bundles.get("development")?.registries[0]?.publish).toBe(false);
   await expect(registry).toBeHidden();
   await expect(privateImages.getByText("image-reader", { exact: true })).toBeVisible();
+
+  // Grant changes alone must enable Save, without replacing the stored token.
+  await editImage.click();
+  await publication.check();
+  await expect(save).toBeVisible();
+  expect(bundles.get("development")?.registries[0]?.publish).toBe(false);
+  await save.click();
+  await expect(save).toHaveCount(0);
+  expect(bundles.get("development")?.registries[0]?.publish).toBe(true);
+  expect(bundles.get("development")?.registries[0]?.password).toBe("saved-registry-secret");
+  await expect(privateImages.getByText("Prepared image publishing", { exact: true })).toBeVisible();
+  await editImage.click();
+  await publication.uncheck();
+  await save.click();
+  await expect(save).toHaveCount(0);
+  expect(bundles.get("development")?.registries[0]?.publish).toBe(false);
+  await expect(privateImages.getByText("Prepared image publishing", { exact: true })).toHaveCount(
+    0,
+  );
 
   await search.fill("hugo");
   await expect(names).toHaveText(["HUGO_VERSION"]);
@@ -457,6 +483,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await expect(
     area.getByRole("checkbox", { name: "Allow image pulls during Verification", exact: true }),
   ).not.toBeChecked();
+  await expect(publication).not.toBeChecked();
   await area
     .getByRole("button", { name: "Remove registry preview-registry.example.invalid" })
     .click();
@@ -516,7 +543,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await area.getByRole("button", { name: /^Filter & sort/ }).click();
   await editImage.click();
   await expect(registry).toBeVisible();
-  await registry.scrollIntoViewIfNeeded();
+  await publication.scrollIntoViewIfNeeded();
   expect(
     await area.evaluate((element) => element.scrollWidth - element.clientWidth),
   ).toBeLessThanOrEqual(1);
@@ -604,6 +631,12 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
     area.getByRole("button", { name: "Actions for API_KEY", exact: true }),
   ).toBeDisabled();
   await expect(area.getByRole("textbox", { name: "Registry 1 host" })).toBeDisabled();
+  await expect(
+    area.getByRole("checkbox", {
+      name: "Allow publishing prepared images for this Project",
+      exact: true,
+    }),
+  ).toBeDisabled();
   await expect(area.getByRole("button", { name: "Add credentials", exact: true })).toBeDisabled();
   await expect(area.getByRole("button", { name: "Import .env", exact: true })).toBeDisabled();
   await page.screenshot({ path: `${evidence}/pending-save.png` });
@@ -678,5 +711,21 @@ test.describe("touch environments", () => {
     for (const choice of await choices.all())
       expect((await choice.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(43.5);
     await page.screenshot({ path: `${evidence}/touch-targets.png` });
+    await area
+      .getByRole("button", { name: "Edit image credentials for registry.example.invalid" })
+      .tap();
+    const publication = area.getByRole("checkbox", {
+      name: "Allow publishing prepared images for this Project",
+      exact: true,
+    });
+    await publication.scrollIntoViewIfNeeded();
+    await expect(publication).not.toBeChecked();
+    const publicationLabel = await publication.locator("..").boundingBox();
+    expect(publicationLabel?.height ?? 0).toBeGreaterThanOrEqual(43.5);
+    expect(publicationLabel?.x ?? -1).toBeGreaterThanOrEqual(0);
+    expect((publicationLabel?.x ?? 0) + (publicationLabel?.width ?? 0)).toBeLessThanOrEqual(390);
+    await publication.tap();
+    await expect(publication).toBeChecked();
+    await page.screenshot({ path: `${evidence}/touch-publication-permission.png` });
   });
 });

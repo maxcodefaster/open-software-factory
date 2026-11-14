@@ -34,7 +34,7 @@ async function cleanupDeadline(work: Promise<unknown>, stage: string) {
 // a held local HTTP hop before the unmodified pinned OpenCode process admits input.
 export async function connectorBoundary(
   process: Awaited<ReturnType<typeof pinnedOpenCode>>,
-  attemptID = crypto.randomUUID(),
+  attemptID: string = crypto.randomUUID(),
 ) {
   const binary = resolve(process.scratch, "owned-connector");
   const build = Bun.spawn(["go", "build", "-o", binary, "./cmd/factory-runtime-connector"], {

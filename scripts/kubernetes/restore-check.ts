@@ -7,18 +7,10 @@
 // `docker run --rm -i postgres:16.14-bookworm pg_restore "$@"`).
 import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { run, runBytes } from "../owned-client-process";
 
 type Result = { name: string; ok: boolean; detail: string };
-
-async function run(command: string[]) {
-  const child = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { stdout, stderr, exitCode };
-}
+export type PgRestore = string | readonly string[];
 
 async function present(file: string) {
   return stat(file).then(
@@ -36,16 +28,20 @@ async function exists(file: string) {
 
 export async function checkDump(
   file: string,
-  pgRestore = process.env["PG_RESTORE"] ?? "pg_restore",
+  pgRestore: PgRestore = process.env["PG_RESTORE"] ?? "pg_restore",
+  signal?: AbortSignal,
 ): Promise<Result> {
+  signal?.throwIfAborted();
   const name = basename(file);
   if (!(await exists(file))) return { name, ok: false, detail: "missing or empty" };
-  const listed = await run([pgRestore, "--list", file]).catch((cause: unknown) => ({
-    stdout: "",
-    stderr: String(cause),
-    exitCode: 127,
-  }));
-  if (listed.exitCode !== 0)
+  const command = typeof pgRestore === "string" ? [pgRestore] : [...pgRestore];
+  const listed = await run([...command, "--list", file], { signal, allowFailure: true }).catch(
+    (cause: unknown) => {
+      signal?.throwIfAborted();
+      return { stdout: "", stderr: String(cause), code: 127 };
+    },
+  );
+  if (listed.code !== 0)
     return { name, ok: false, detail: listed.stderr.trim().split("\n")[0] ?? "pg_restore failed" };
   const entries = listed.stdout.split("\n").filter((line) => line && !line.startsWith(";")).length;
   return entries > 0
@@ -53,11 +49,17 @@ export async function checkDump(
     : { name, ok: false, detail: "archive lists no objects" };
 }
 
-async function checkArchive(file: string, member: RegExp, label: string): Promise<Result> {
+async function checkArchive(
+  file: string,
+  member: RegExp,
+  label: string,
+  signal?: AbortSignal,
+): Promise<Result> {
+  signal?.throwIfAborted();
   const name = basename(file);
   if (!(await exists(file))) return { name, ok: false, detail: "missing or empty" };
-  const listed = await run(["tar", "-tzf", file]);
-  if (listed.exitCode !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
+  const listed = await run(["tar", "-tzf", file], { signal, allowFailure: true });
+  if (listed.code !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
   return listed.stdout.split("\n").some((line) => member.test(line))
     ? { name, ok: true, detail: `contains ${label}` }
     : { name, ok: false, detail: `${label} is missing` };
@@ -67,7 +69,8 @@ const snapshotMinimumBytes = 512;
 
 // A raft snapshot is a gzip tar of meta.json, state.bin and SHA256SUMS. The sums are checked, so
 // a truncated or corrupted copy fails here instead of at restore time.
-export async function checkSnapshot(file: string): Promise<Result> {
+export async function checkSnapshot(file: string, signal?: AbortSignal): Promise<Result> {
+  signal?.throwIfAborted();
   const name = basename(file);
   const info = await stat(file).catch(() => null);
   if (!info?.isFile() || info.size === 0) return { name, ok: false, detail: "missing or empty" };
@@ -76,8 +79,8 @@ export async function checkSnapshot(file: string): Promise<Result> {
   const header = new Uint8Array(await Bun.file(file).slice(0, 2).arrayBuffer());
   if (header[0] !== 0x1f || header[1] !== 0x8b)
     return { name, ok: false, detail: "does not start with a gzip header" };
-  const listed = await run(["tar", "-tzf", file]);
-  if (listed.exitCode !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
+  const listed = await run(["tar", "-tzf", file], { signal, allowFailure: true });
+  if (listed.code !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
   // GNU tar matches the stored name exactly, so keep the "./" prefix some archives carry.
   const members = new Map(
     listed.stdout.split("\n").map((line) => [line.replace(/^\.\//, ""), line]),
@@ -85,13 +88,11 @@ export async function checkSnapshot(file: string): Promise<Result> {
   for (const member of ["meta.json", "state.bin", "SHA256SUMS"])
     if (!members.has(member)) return { name, ok: false, detail: `${member} is missing` };
   async function read(member: string) {
-    const child = Bun.spawn(["tar", "-xzOf", file, members.get(member) ?? member], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
+    const result = await runBytes(["tar", "-xzOf", file, members.get(member) ?? member], {
+      signal,
+      allowFailure: true,
     });
-    const [bytes, exitCode] = await Promise.all([new Response(child.stdout).bytes(), child.exited]);
-    return exitCode === 0 ? bytes : null;
+    return result.code === 0 ? result.stdout : null;
   }
   const sums = await read("SHA256SUMS");
   if (!sums) return { name, ok: false, detail: "SHA256SUMS is unreadable" };
@@ -113,24 +114,31 @@ export async function checkSnapshot(file: string): Promise<Result> {
   return { name, ok: true, detail: `${info.size} bytes; meta.json and state.bin match SHA256SUMS` };
 }
 
-export async function checkSet(directory: string, pgRestore?: string): Promise<Result[]> {
+export async function checkSet(
+  directory: string,
+  pgRestore?: PgRestore,
+  signal?: AbortSignal,
+): Promise<Result[]> {
+  signal?.throwIfAborted();
   const results = [
-    await checkDump(join(directory, "postgres.dump"), pgRestore),
+    await checkDump(join(directory, "postgres.dump"), pgRestore, signal),
     await checkArchive(
       join(directory, "forgejo.tar.gz"),
       /^(\.\/)?forgejo-db\.sql$/,
       "forgejo-db.sql",
+      signal,
     ),
     await checkArchive(
       join(directory, "state.tar.gz"),
       /(^|\/)openbao\/bootstrap\.json$/,
       "openbao/bootstrap.json",
+      signal,
     ),
   ];
   const snapshot = join(directory, "openbao.snap");
   results.push(
     (await exists(snapshot))
-      ? await checkSnapshot(snapshot)
+      ? await checkSnapshot(snapshot, signal)
       : {
           name: "openbao.snap",
           ok: await present(join(directory, "openbao.skipped")),
@@ -142,22 +150,49 @@ export async function checkSet(directory: string, pgRestore?: string): Promise<R
     ok: await present(join(directory, "COMPLETE")),
     detail: "marker written after every step succeeded",
   });
+  signal?.throwIfAborted();
   return results;
 }
 
-if (import.meta.main) {
+async function main(signal: AbortSignal) {
+  signal.throwIfAborted();
   const target = process.argv[2];
   if (!target) {
     console.error("Usage: restore-check.ts <backup set directory | postgres.dump>");
-    process.exit(2);
+    return 2;
   }
   const info = await stat(target).catch(() => null);
   if (!info) {
     console.error(`${target} does not exist`);
-    process.exit(2);
+    return 2;
   }
-  const results = info.isDirectory() ? await checkSet(target) : [await checkDump(target)];
+  const results = info.isDirectory()
+    ? await checkSet(target, undefined, signal)
+    : [await checkDump(target, undefined, signal)];
+  signal.throwIfAborted();
   for (const result of results)
     console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}: ${result.detail}`);
-  process.exit(results.every((result) => result.ok) ? 0 : 1);
+  return results.every((result) => result.ok) ? 0 : 1;
+}
+
+if (import.meta.main) {
+  const controller = new AbortController();
+  let interrupted: number | undefined;
+  const stop = (code: number) => {
+    interrupted ??= code;
+    controller.abort(new Error("Backup validation interrupted"));
+  };
+  const onInterrupt = () => stop(130);
+  const onTerminate = () => stop(143);
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+  try {
+    process.exitCode = await main(controller.signal);
+  } catch (cause) {
+    console.error(cause instanceof Error ? cause.message : String(cause));
+    process.exitCode = interrupted ?? 1;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+  }
 }

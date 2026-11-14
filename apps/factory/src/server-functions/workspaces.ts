@@ -115,17 +115,6 @@ export const ensureChangeSource = createServerFn({ method: "POST" })
     });
   });
 
-export const stopWorkspaceSource = createServerFn({ method: "POST" })
-  .validator((args: [workspaceID: string]) => args)
-  .handler(async ({ data: [workspaceID] }) => {
-    return factoryFunction(async () => {
-      const id = z.uuid().parse(workspaceID),
-        context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.workspaces.stopSource(context.actorID, id);
-    });
-  });
-
 export const getDeveloperIDE = createServerFn({ method: "POST" })
   .validator((args: never[]) => args)
   .handler(async () => {

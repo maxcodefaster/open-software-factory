@@ -1,8 +1,22 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
+import { runEnvironmentCommand } from "../../packages/runtime-kubernetes/src/command";
+import {
+  kubernetesCommand,
+  kubernetesConnectionEnvironment,
+} from "../../packages/runtime-kubernetes/src/config";
+import {
+  readResetResources,
+  requireResetResourcesAbsent,
+} from "../../scripts/factory/reset-resources";
 import { ownedContainerCallback } from "./container-callback";
+import { nativeLiveConfiguration, saveNativeLiveConfiguration } from "./native-live-configuration";
 import { ownedPlanningCache } from "./planning-cache";
 import { ownedTestDatabase } from "./postgres-server";
+import { fixtureRuntime } from "./substrate";
+
+export const ownedFactorySigningSecret = "owned-process-auth-secret-not-a-production-credential";
 
 export function factoryProcessCommand(entrypoint: string, args: string[] = []) {
   // Owned proofs pass their complete environment explicitly. Loading the
@@ -48,15 +62,8 @@ export async function factoryProcess(
     FACTORY_PLANNING_MODEL_BASE_URL?: string;
     FACTORY_PLANNING_MODEL_API_KEY?: string;
     FACTORY_BROWSER_TOOLS_IMAGE?: string;
-    FACTORY_WORKSPACE_FILES_IMAGE?: string;
     FACTORY_DEVELOPER_IDE_IMAGE?: string;
     FACTORY_EXECUTION_IDLE_MINUTES?: string;
-    FACTORY_EXECUTION_RESERVE_TARGET?: string;
-    FACTORY_FACTORYBOX_WORKER_IMAGE?: string;
-    FACTORY_FACTORYBOX_EXECUTABLE_SHA256?: string;
-    FACTORY_FACTORYBOX_ARCHITECTURE?: string;
-    FACTORY_FACTORYBOX_NODE?: string;
-    FACTORY_FACTORYBOX_KERNEL?: string;
     FACTORY_OPENBAO_URL?: string;
     FACTORY_OPENBAO_TOKEN_FILE?: string;
     FACTORY_OPENBAO_CA_FILE?: string;
@@ -69,6 +76,7 @@ export async function factoryProcess(
     FACTORY_FORGE_DISCOVERY_URL?: string;
     FACTORY_HOST?: string;
     FACTORY_GIT_IMPORT_ORIGINS?: string;
+    FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION?: string;
   },
   retained?: { id: string; base: string },
 ) {
@@ -77,12 +85,25 @@ export async function factoryProcess(
     (!/^[a-f0-9-]{36}$/.test(retained.id) || !/^http:\/\/127\.0\.0\.1:\d+$/.test(retained.base))
   )
     throw new Error("Invalid retained owned Factory identity");
+  const id = retained?.id ?? crypto.randomUUID();
+  const nativeFile = modelOverrides?.FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION;
+  let commissionedNative: ReturnType<typeof nativeLiveConfiguration> | undefined;
+  if (liveRuntime) {
+    if (!nativeFile)
+      throw Error(
+        "Live Factory proof requires its explicit owned Substrate installation configuration",
+      );
+    commissionedNative = nativeLiveConfiguration(
+      await Bun.file(nativeFile).json(),
+      `owned_${id.replaceAll("-", "")}`,
+      modelOverrides ?? {},
+    );
+  }
   const publishedRuntimeImages = liveRuntime
     ? Object.fromEntries(
         await Promise.all(
           [
             ["FACTORY_BROWSER_TOOLS_IMAGE", "browser-tools"],
-            ["FACTORY_WORKSPACE_FILES_IMAGE", "workspace-files"],
             ["FACTORY_DEVELOPER_IDE_IMAGE", "developer-ide"],
           ].map(async ([key, name]) => [
             key,
@@ -91,16 +112,17 @@ export async function factoryProcess(
         ),
       )
     : {};
-  const id = retained?.id ?? crypto.randomUUID();
   const container = `factory-owned-commit-process-${id}`;
   const processes: ReturnType<typeof Bun.spawn>[] = [];
   let created = false;
   let shared: Awaited<ReturnType<typeof ownedTestDatabase>> | undefined;
   let planningCache: Awaited<ReturnType<typeof ownedPlanningCache>> | undefined;
   let callback: Awaited<ReturnType<typeof ownedContainerCallback>> | undefined;
+  let ownedDatabaseURL: string | undefined;
+  let migrated = false;
   async function shutdown() {
     for (const child of processes) {
-      if (child.exitCode === null) child.kill("SIGKILL");
+      if (child.exitCode === null) child.kill("SIGTERM");
       await child.exited;
     }
   }
@@ -110,6 +132,40 @@ export async function factoryProcess(
     planningCache = undefined;
     await callback?.dispose();
     callback = undefined;
+    if (commissionedNative && ownedDatabaseURL && migrated) {
+      const previousURL = process.env["DATABASE_URL"];
+      process.env["DATABASE_URL"] = ownedDatabaseURL;
+      const database = createDatabase(1);
+      if (previousURL === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = previousURL;
+      try {
+        await requireResetResourcesAbsent(
+          await readResetResources(database),
+          async (kind, name, namespace) => {
+            const result = await runEnvironmentCommand(
+              kubernetesCommand([
+                "get",
+                kind,
+                name,
+                ...(namespace ? ["-n", namespace] : []),
+                "--ignore-not-found",
+                "-o",
+                "json",
+              ]),
+              kubernetesConnectionEnvironment(),
+              { timeoutMS: 15_000, outputBytes: 1024 * 1024 },
+            );
+            if (result.exitCode !== 0)
+              throw Error(
+                "Native fixture cleanup inventory is unavailable; owned database retained",
+              );
+            return !!result.stdout.trim();
+          },
+        );
+      } finally {
+        await database.client.end({ timeout: 1 });
+      }
+    }
     if (shared) {
       await shared.dispose();
       shared = undefined;
@@ -151,7 +207,7 @@ export async function factoryProcess(
         "--env",
         "POSTGRES_PASSWORD=owned-process-not-a-secret",
         "--env",
-        "POSTGRES_DB=factory",
+        `POSTGRES_DB=owned_${id.replaceAll("-", "")}`,
         "--tmpfs",
         "/var/lib/postgresql/data",
         "--publish",
@@ -169,7 +225,8 @@ export async function factoryProcess(
       throw new Error("Owned database port missing");
     const databaseURL =
       shared?.url ??
-      `postgresql://factory:owned-process-not-a-secret@127.0.0.1:${databasePort}/factory`;
+      `postgresql://factory:owned-process-not-a-secret@127.0.0.1:${databasePort}/owned_${id.replaceAll("-", "")}`;
+    ownedDatabaseURL = databaseURL;
     const migration = shared
       ? undefined
       : Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
@@ -182,6 +239,7 @@ export async function factoryProcess(
       migration?.exited ?? 0,
     ]);
     if (status !== 0) throw new Error(`Owned migration failed: ${error}`);
+    migrated = true;
     const reservation = retained
       ? undefined
       : Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
@@ -189,6 +247,57 @@ export async function factoryProcess(
     if (!port) throw new Error("Owned Factory listener port missing");
     await reservation?.stop(true);
     const base = `http://127.0.0.1:${port}`;
+    let nativeConfiguration = modelOverrides?.FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION;
+    if (commissionedNative) {
+      const directory = resolve(".factory/test-results/factory-process", id);
+      await mkdir(directory, { recursive: true });
+      nativeConfiguration = await saveNativeLiveConfiguration(
+        resolve(directory, "substrate-live.json"),
+        commissionedNative,
+        !!retained,
+      );
+    }
+    if (!nativeConfiguration) {
+      const directory = resolve(".factory/test-results/factory-process", id);
+      await mkdir(directory, { recursive: true });
+      const caFile = resolve(directory, "fixture-native-ca.pem");
+      await writeFile(
+        caFile,
+        "-----BEGIN CERTIFICATE-----\nowned-controller-fixture\n-----END CERTIFICATE-----\n",
+        { mode: 0o600 },
+      );
+      nativeConfiguration = resolve(directory, "substrate.json");
+      const connection = {
+        bridge: resolve(directory, "unavailable-native-control"),
+        endpoint: "127.0.0.1:1",
+        serverName: "api.ate-system.svc",
+        caFile,
+        tokenFile: resolve(directory, "unavailable-native-token"),
+      };
+      // Planning/controller fixtures have no runtime server. Any accidental
+      // native dispatch fails closed rather than contacting a retained cluster.
+      await writeFile(
+        nativeConfiguration,
+        JSON.stringify({
+          deployment: "owned-test",
+          database: new URL(databaseURL).pathname.slice(1),
+          connection,
+          provisioner: connection,
+          editorPrincipal: "user:system:serviceaccount:owned:factory-control",
+          connectorURL: "wss://owned-factory.test/internal/runtime-connect",
+          factoryCAFile: caFile,
+          workloadImage: `registry.example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
+          profile: "nightly-20261109-975fb172241c",
+          runtime: fixtureRuntime,
+          workerSelector: {
+            "factory.runtime/profile": "nightly-20261109-975fb172241c",
+            "factory.dev/deployment": id,
+          },
+          egressHosts: [],
+        }),
+        { mode: 0o600 },
+      );
+    }
     const environment = {
       ...process.env,
       DATABASE_URL: databaseURL,
@@ -198,7 +307,7 @@ export async function factoryProcess(
       FACTORY_STATE_DIRECTORY: `.factory/test-results/factory-process/${id}`,
       FACTORY_ADMIN_EMAIL: `owned-${id}@factory.local`,
       FACTORY_ADMIN_PASSWORD: "owned-process-password-not-a-secret",
-      FACTORY_AUTH_SECRET: "owned-process-auth-secret-not-a-production-credential",
+      FACTORY_AUTH_SECRET: ownedFactorySigningSecret,
       FACTORY_FORGEJO_API_URL: liveRuntime
         ? "http://127.0.0.1:33030/api/v1/"
         : "http://127.0.0.1:9/api/v1/",
@@ -207,16 +316,6 @@ export async function factoryProcess(
       FACTORY_RUNTIME_HOST_IMAGE:
         liveRuntime?.runtimeHostImage ??
         `registry.example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-      FACTORY_EXECUTION_RESERVE_TARGET: "0",
-      ...(!liveRuntime
-        ? {
-            FACTORY_FACTORYBOX_WORKER_IMAGE: `registry.example.invalid/owned-worker@sha256:${"d".repeat(64)}`,
-            FACTORY_FACTORYBOX_EXECUTABLE_SHA256: "e".repeat(64),
-            FACTORY_FACTORYBOX_ARCHITECTURE: "amd64",
-            FACTORY_FACTORYBOX_NODE: "owned-test-node",
-            FACTORY_FACTORYBOX_KERNEL: "6.12.0",
-          }
-        : {}),
       FACTORY_MODEL_BASE_URL: liveRuntime
         ? process.env["FACTORY_MODEL_BASE_URL"]
         : "http://127.0.0.1:9/v1",
@@ -232,6 +331,8 @@ export async function factoryProcess(
       FACTORY_ZERO_CACHE_URL: "",
       ...publishedRuntimeImages,
       ...modelOverrides,
+      // An operator template must not overwrite this fixture's fresh database attribution.
+      FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION: nativeConfiguration,
     };
     if (modelOverrides?.FACTORY_FORGEJO_ADMIN_TOKEN) {
       environment.FACTORY_HOST = "0.0.0.0";
@@ -243,6 +344,7 @@ export async function factoryProcess(
       base,
       id,
       databaseURL,
+      nativeConfiguration,
       processes,
       shutdown,
       async pause() {

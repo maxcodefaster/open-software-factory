@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { ServerWebSocket } from "bun";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { nativeGitHTTP } from "../fixtures/native-git-http";
 import { observe } from "../fixtures/pinned-opencode";
 
 async function command(args: string[], cwd: string) {
@@ -26,6 +26,111 @@ async function removeScratch(scratch: string, owner: string) {
   if ((await readFile(resolve(scratch, "owner"), "utf8")) !== owner)
     throw new Error("Native scratch cleanup refused");
   await rm(scratch, { recursive: true });
+}
+
+// Preserve the admitted Project HTTPS origin, SNI and certificate verification.
+// Only this fixture's exact CONNECT authority reaches its owned loopback server;
+// Git and the product transport never receive a file:// execution destination.
+async function gitTLSRemote(directory: string) {
+  const hostname = "owned-build.factory.invalid";
+  const certificate = resolve(directory, "git-cert.pem");
+  const key = resolve(directory, "git-key.pem");
+  await command(
+    ["mise", "exec", "--", "mkcert", "-cert-file", certificate, "-key-file", key, hostname],
+    resolve("."),
+  );
+  const caRoot = await command(["mise", "exec", "--", "mkcert", "-CAROOT"], resolve("."));
+  const remote = nativeGitHTTP(directory);
+  const pending = new Set<Promise<Response | null>>();
+  const tls = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { cert: Bun.file(certificate), key: Bun.file(key) },
+    fetch(request) {
+      const url = new URL(request.url);
+      const prefix = "/owned/owned-build.git";
+      if (!url.pathname.startsWith(`${prefix}/`)) return new Response(null, { status: 404 });
+      url.pathname = `${remote.prefix}/remote.git${url.pathname.slice(prefix.length)}`;
+      const response = remote.fetch(new Request(url, request));
+      pending.add(response);
+      void response.finally(() => pending.delete(response)).catch(() => {});
+      return response.then((value) => value ?? new Response(null, { status: 404 }));
+    },
+  });
+  const tlsPort = tls.port;
+  if (!tlsPort) {
+    await tls.stop(true);
+    throw new Error("Owned Git TLS listener missing");
+  }
+  const sockets = new Set<Socket>();
+  const proxy = createServer((client) => {
+    sockets.add(client);
+    client.once("close", () => sockets.delete(client));
+    client.on("error", () => client.destroy());
+    client.setTimeout(30_000, () => client.destroy());
+    let header = Buffer.alloc(0);
+    const connect = (chunk: Buffer) => {
+      header = Buffer.concat([header, chunk]);
+      const end = header.indexOf("\r\n\r\n");
+      if (header.length > 8192) return client.destroy();
+      if (end < 0) return;
+      client.off("data", connect);
+      if (
+        header.subarray(0, header.indexOf("\r\n")).toString() !== `CONNECT ${hostname}:443 HTTP/1.1`
+      )
+        return client.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      const upstream = createConnection({ host: "127.0.0.1", port: tlsPort });
+      sockets.add(upstream);
+      upstream.once("close", () => {
+        sockets.delete(upstream);
+        client.destroy();
+      });
+      client.once("close", () => upstream.destroy());
+      upstream.on("error", () => {
+        upstream.destroy();
+        client.destroy();
+      });
+      upstream.once("connect", () => {
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        const remaining = header.subarray(end + 4);
+        if (remaining.length) upstream.write(remaining);
+        client.pipe(upstream).pipe(client);
+      });
+    };
+    client.on("data", connect);
+  });
+  try {
+    await new Promise<void>((accept, reject) => {
+      proxy.once("error", reject);
+      proxy.listen(0, "127.0.0.1", accept);
+    });
+  } catch (cause) {
+    await tls.stop(true);
+    throw cause;
+  }
+  const address = proxy.address();
+  if (!address || typeof address === "string") {
+    proxy.close();
+    await tls.stop(true);
+    throw new Error("Owned Git proxy missing");
+  }
+  return {
+    ...remote,
+    proxyURL: `http://127.0.0.1:${address.port}`,
+    caFile: resolve(caRoot, "rootCA.pem"),
+    async dispose() {
+      for (const socket of sockets) socket.destroy();
+      const stopped = await Promise.allSettled([
+        new Promise<void>((accept, reject) =>
+          proxy.close((cause) => (cause ? reject(cause) : accept())),
+        ),
+        tls.stop(true),
+      ]);
+      await Promise.allSettled([...pending]);
+      const failure = stopped.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+    },
+  };
 }
 
 function listenerClosed(port: number) {
@@ -56,8 +161,19 @@ test.each(cases)(
     const marker = resolve(scratch, "owner");
     const scratchOwner = crypto.randomUUID();
     let passed = false;
+    let tlsRemote: Awaited<ReturnType<typeof gitTLSRemote>> | undefined;
+    const previousForge = new Map<string, string | undefined>();
     try {
       await writeFile(marker, scratchOwner);
+      tlsRemote = await gitTLSRemote(scratch);
+      const remoteTLS = tlsRemote;
+      for (const [name, value] of Object.entries({
+        FACTORY_FORGEJO_USERNAME: remoteTLS.username,
+        FACTORY_FORGEJO_TOKEN: remoteTLS.password,
+      })) {
+        previousForge.set(name, process.env[name]);
+        process.env[name] = value;
+      }
       await command(["git", "init", "--initial-branch=main", workspace], scratch);
       const git = (...args: string[]) => command(["git", ...args], workspace);
       await git("config", "user.name", "Owned native commit fixture");
@@ -167,11 +283,9 @@ test.each(cases)(
         if (!branch) throw new Error("Owned native Change missing");
         await command(["git", "init", "--bare", remote], scratch);
         await git("remote", "add", "origin", remote);
-        // Push authority names the Project destination, not the checkout's
-        // mutable origin. Bind this owned Project to its actual bare remote.
-        await owned.database
-          .client`UPDATE factory.project SET repository_url=${pathToFileURL(remote).href}
-          WHERE id=${owned.projectID}`;
+        // The admitted Project and immutable native binding retain their real
+        // HTTPS destination. Only fixture seeding uses the local bare path.
+        await command(["git", "-C", remote, "config", "http.receivepack", "true"], scratch);
         await git("push", "origin", `HEAD:refs/heads/${branch}`);
         const pushCount = resolve(remote, "owned-push-count");
         const hook = resolve(remote, "hooks/pre-receive");
@@ -194,6 +308,10 @@ test.each(cases)(
               env: {
                 PATH: process.env["PATH"] ?? "/usr/bin:/bin",
                 TMPDIR: tmpdir(),
+                HTTPS_PROXY: remoteTLS.proxyURL,
+                HTTP_PROXY: remoteTLS.proxyURL,
+                NO_PROXY: "localhost,127.0.0.1",
+                GIT_SSL_CAINFO: remoteTLS.caFile,
                 FACTORY_OWNED_COMMIT_TOKEN: token,
                 FACTORY_OWNED_COMMIT_ASSIGNMENT: JSON.stringify({
                   runtimeAttemptId: owned.attemptID,
@@ -295,6 +413,9 @@ test.each(cases)(
         );
         const pushes = await readFile(pushCount, "utf8").catch(() => "");
         expect(pushes).toBe(boundary === "restore" || lostAction === "git-push" ? "push\n" : "");
+        expect(remoteTLS.observations.pushes).toBe(
+          boundary === "restore" || lostAction === "git-push" ? 1 : 0,
+        );
         expect(owned.requests()).toBe(1);
         expect((await recovery.get(owned.changeID)).state).toBe(
           boundary === "restore" ? "committed" : "waiting",
@@ -331,8 +452,18 @@ test.each(cases)(
       passed = false;
       throw cause;
     } finally {
-      if (passed) await removeScratch(scratch, scratchOwner);
-      else console.error("Owned native commit failure checkout retained", scratch);
+      let disposed = false;
+      try {
+        await tlsRemote?.dispose();
+        disposed = true;
+      } finally {
+        for (const [name, value] of previousForge) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+        if (passed && disposed) await removeScratch(scratch, scratchOwner);
+        else console.error("Owned native commit failure checkout retained", scratch);
+      }
     }
   },
   60_000,

@@ -21,3 +21,34 @@ test("Wiki sources stay on the configured Forgejo origin and owner", () => {
       "configured Factory Forgejo",
     );
 });
+
+test("Factory source identity accepts only the configured public Forge or private API origin", () => {
+  const api = "http://forge-control.native.test:3000/api/v1/";
+  const publicURL = "https://git.native.test";
+  for (const source of [
+    "https://git.native.test/owned/repo.git",
+    "https://git.native.test/owned/repo",
+    "http://forge-control.native.test:3000/owned/repo.git",
+  ])
+    expect(factoryForgeSource(source, api, "owned", publicURL)).toEqual({
+      owner: "owned",
+      name: "repo",
+    });
+  for (const source of [
+    "https://foreign.native.test/owned/repo.git",
+    "http://git.native.test/owned/repo.git",
+    "https://git.native.test:444/owned/repo.git",
+    "https://git.native.test/foreign/repo.git",
+    "https://owned:credential@git.native.test/owned/repo.git",
+    "https://git.native.test/owned/repo.git?ref=main",
+    "https://git.native.test/owned/repo.git#source",
+    "https://git.native.test/nested/owned/repo.git",
+    "https://git.native.test/owned/repo%2fother.git",
+    "https://git.native.test//owned/repo.git",
+    "https://git.native.test/owned/repo.git/",
+    "file:///owned/repo.git",
+  ])
+    expect(() => factoryForgeSource(source, api, "owned", publicURL)).toThrow(
+      "configured Factory Forgejo",
+    );
+});

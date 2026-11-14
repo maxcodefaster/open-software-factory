@@ -26,7 +26,7 @@ export async function candidateReviewFixture(
     environmentSetup,
   );
   await owned.database
-    .client`UPDATE factory.project SET repository_url='https://forge.invalid/owned/review.git' WHERE id=${owned.projectID}`;
+    .client`UPDATE factory.project SET repository_url='https://owned-build.factory.invalid/owned/review.git' WHERE id=${owned.projectID}`;
   const turns = createAgentTurnStore(owned.database);
   const initial = await createChangeAdmission(owned.database, buildModelID).admit(
     owned.changeID,

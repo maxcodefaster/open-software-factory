@@ -1,12 +1,15 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -43,8 +46,11 @@ func prepareNativePrebuildBase(ctx context.Context, assignment Assignment, base 
 		return nil, err
 	}
 	trust, err := os.ReadFile(assignment.RegistryCAFile)
-	roots := x509.NewCertPool()
-	if err != nil || len(trust) > 2<<20 || strings.Contains(string(trust), "PRIVATE KEY") || !roots.AppendCertsFromPEM(trust) {
+	if err != nil {
+		return nil, errors.New("native prebuild public trust is unavailable")
+	}
+	trust, err = canonicalNativePrebuildTrust(trust)
+	if err != nil {
 		return nil, errors.New("native prebuild public trust is unavailable")
 	}
 	if _, err := projectImageKey(base); err != nil {
@@ -54,11 +60,49 @@ func prepareNativePrebuildBase(ctx context.Context, assignment Assignment, base 
 	// inputs. Actor/Attempt IDs and private local image IDs are not portable
 	// recipe inputs: another admitted Actor can consume this exact artifact.
 	sum := sha256.New()
-	sum.Write([]byte("factory-native-prebuild-transport-v1\x00"))
+	sum.Write([]byte("factory-native-prebuild-transport-v2\x00"))
 	sum.Write(trust)
 	sum.Write([]byte{0})
 	sum.Write(nativeDependencyTransport)
 	return &nativePrebuildBase{assignment: assignment, base: base, transport: hex.EncodeToString(sum.Sum(nil)), trust: trust}, nil
+}
+
+// Certificate order, PEM whitespace and repeated certificates do not change
+// TLS authority. Hash AND embed the same canonical certificate set, while a
+// different certificate or transport script still creates different inputs.
+// This applies only to portable prebuilds, not runtime/editor trust selection.
+func canonicalNativePrebuildTrust(trust []byte) ([]byte, error) {
+	denied := errors.New("native prebuild public trust is unavailable")
+	if len(trust) > 2<<20 || bytes.Contains(trust, []byte("PRIVATE KEY")) {
+		return nil, denied
+	}
+	certificates := map[string]struct{}{}
+	for len(bytes.TrimSpace(trust)) != 0 {
+		block, remaining := pem.Decode(trust)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, denied
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return nil, denied
+		}
+		certificates[string(block.Bytes)] = struct{}{}
+		trust = remaining
+	}
+	if len(certificates) == 0 {
+		return nil, denied
+	}
+	ordered := make([]string, 0, len(certificates))
+	for certificate := range certificates {
+		ordered = append(ordered, certificate)
+	}
+	sort.Strings(ordered)
+	var bundle bytes.Buffer
+	for _, certificate := range ordered {
+		if err := pem.Encode(&bundle, &pem.Block{Type: "CERTIFICATE", Bytes: []byte(certificate)}); err != nil {
+			return nil, denied
+		}
+	}
+	return bundle.Bytes(), nil
 }
 
 // Activation belongs only to a new producer's build, not recipe matching or

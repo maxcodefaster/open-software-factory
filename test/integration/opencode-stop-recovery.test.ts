@@ -373,7 +373,7 @@ test.each(["empty", "nonempty"] as const)(
   60_000,
 );
 
-test("a native queued input without messages is not an empty-Session recovery proof", async () => {
+test("read-only recovery cannot treat a native queued input without messages as empty", async () => {
   await withEmptySession(async (owned, boundary, process) => {
     const turns = await owned.database.client<Array<{ promptID: string; text: string }>>`
       SELECT intent.prompt_id AS "promptID", intent.prompt_text AS text
@@ -392,16 +392,22 @@ test("a native queued input without messages is not an empty-Session recovery pr
     expect(
       (await boundary.client.message.list({ sessionID: owned.sessionID, limit: 1 })).data,
     ).toEqual([]);
-    let interrupts = 0;
-    owned.hub.request = async (...args) => {
-      if (args[3].endsWith("/interrupt")) interrupts += 1;
-      return boundary.hub.request(...args);
-    };
     const stop = createChangeAgentStop(owned.database, owned.hub);
     await stop.persist(owned.changeID);
-    expect(await stop.confirm(owned.changeID)).toBe(false);
-    expect(await stop.confirm(owned.changeID)).toBe(false);
-    expect(interrupts).toBe(1);
+    // The ordered interrupt has finished, but Inbox cancellation has not.
+    // A read-only recovery check must observe that difference, not dispatch
+    // the missing cancellation or infer absence from the empty message page.
+    await owned.database
+      .client`UPDATE factory.change_agent_session SET stop_dispatched=true WHERE change_id=${owned.changeID}`;
+    await boundary.client.session.interrupt({ sessionID: owned.sessionID });
+    let mutations = 0;
+    owned.hub.request = async (...args) => {
+      if (!["GET", "HEAD"].includes(args[2].method)) mutations += 1;
+      return boundary.hub.request(...args);
+    };
+    expect(await stop.confirm(owned.changeID, undefined, "observe")).toBe(false);
+    expect(await stop.confirm(owned.changeID, undefined, "observe")).toBe(false);
+    expect(mutations).toBe(0);
     expect((await owned.controller().get(owned.changeID)).stopPending).toBe(true);
     await expect(
       createChangeAdmission(owned.database, buildModelID).admit(owned.changeID, owned.userID, {

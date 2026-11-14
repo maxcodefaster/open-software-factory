@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -22,10 +23,13 @@ import (
 )
 
 type sourceRestored struct {
-	ActorUID          string `json:"actorUID"`
-	WriterEpoch       uint64 `json:"writerEpoch"`
-	ChangeWriterEpoch uint64 `json:"changeWriterEpoch"`
-	ReadOnly          bool   `json:"readOnly"`
+	AttemptID         string           `json:"attemptID"`
+	Generation        uint64           `json:"generation"`
+	ActorUID          string           `json:"actorUID"`
+	WriterEpoch       uint64           `json:"writerEpoch"`
+	ChangeWriterEpoch uint64           `json:"changeWriterEpoch"`
+	ReadOnly          bool             `json:"readOnly"`
+	InputStop         *nativeInputStop `json:"inputStop,omitempty"`
 }
 type sourceRestoreCheckpoint struct {
 	ID          string                `json:"id"`
@@ -36,10 +40,46 @@ type sourceRestoreCheckpoint struct {
 	Bundle      workspacefiles.Bundle `json:"bundle"`
 }
 type sourceRestoreResponse struct {
-	WriterEpoch       uint64                   `json:"writerEpoch"`
-	ChangeWriterEpoch uint64                   `json:"changeWriterEpoch"`
-	ReadOnly          bool                     `json:"readOnly"`
-	Checkpoint        *sourceRestoreCheckpoint `json:"checkpoint"`
+	ActorUID           string                   `json:"actorUID"`
+	CheckpointActorUID string                   `json:"checkpointActorUID"`
+	WriterEpoch        uint64                   `json:"writerEpoch"`
+	ChangeWriterEpoch  uint64                   `json:"changeWriterEpoch"`
+	ReadOnly           bool                     `json:"readOnly"`
+	Checkpoint         *sourceRestoreCheckpoint `json:"checkpoint"`
+	InputStop          *nativeInputStop         `json:"inputStop,omitempty"`
+}
+
+func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorUID string) error {
+	if reply.ActorUID != actorUID || len(actorUID) != 36 || reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 {
+		return errors.New("Source restore lease invalid")
+	}
+	saved := reply.Checkpoint
+	if reply.InputStop != nil && (reply.InputStop.validate() != nil || !reply.ReadOnly ||
+		reply.InputStop.Mode != "interrupt" || saved == nil || reply.CheckpointActorUID != actorUID) {
+		return errors.New("input Stop requires the original read-only Source checkpoint")
+	}
+	if saved == nil {
+		if reply.CheckpointActorUID != "" {
+			return errors.New("Source restore checkpoint provenance invalid")
+		}
+		return nil
+	}
+	bundle := saved.Bundle
+	// Factory binds this checkpoint's producer to the current Source lease.
+	// A fresh Actor may consume its positively stopped predecessor's export;
+	// it never adopts that Actor's runtime identity or resumes its snapshot.
+	if saved.WorkspaceID != workspaceID || saved.ActorUID != reply.CheckpointActorUID ||
+		len(saved.ActorUID) != 36 || len(saved.ID) != 36 || saved.Generation == 0 ||
+		saved.WriterEpoch >= reply.WriterEpoch || bundle.Version != 1 || bundle.Bytes <= 0 ||
+		bundle.Bytes > workspacefiles.MaxSourceBundleBytes ||
+		len(bundle.Chunks) != int((bundle.Bytes+workspacefiles.SourceChunkBytes-1)/workspacefiles.SourceChunkBytes) {
+		return errors.New("Source restore identity/fidelity invalid")
+	}
+	return nil
+}
+
+func sameSourceRestoreLease(current, original sourceRestoreResponse) bool {
+	return reflect.DeepEqual(current, original)
 }
 
 // Every request is an authenticated read of the same immutable checkpoint.
@@ -143,19 +183,26 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 		}
 		return readSubstrateSourceRestore(ctx, client, r)
 	}
+	finishLease := startupPhase("source-restore-lease")
 	data, err := request("", 0)
+	finishLease()
 	if err != nil {
 		return err
 	}
 	var reply sourceRestoreResponse
-	if json.Unmarshal(data, &reply) != nil || reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 {
+	if json.Unmarshal(data, &reply) != nil {
 		return errors.New("Source restore lease invalid")
 	}
+	if err := validateSourceRestoreLease(reply, b.Source.WorkspaceID, actorUID); err != nil {
+		return err
+	}
+	if reply.InputStop != nil && (b.InputStop == nil || b.InputStop.Version != 1 ||
+		b.InputStop.OpenCodeVersion != reply.InputStop.Version || reply.InputStop.AttemptID != b.Assignment.RuntimeAttemptID) {
+		return errors.New("input Stop differs from its admitted cold bootstrap")
+	}
 	if saved := reply.Checkpoint; saved != nil {
+		finishDownload := startupPhase("source-restore-download")
 		bundle := saved.Bundle
-		if saved.WorkspaceID != b.Source.WorkspaceID || saved.ActorUID != actorUID || saved.ID == "" || saved.Generation == 0 || saved.WriterEpoch >= reply.WriterEpoch || bundle.Version != 1 || bundle.Bytes <= 0 || bundle.Bytes > workspacefiles.MaxSourceBundleBytes || len(bundle.Chunks) != int((bundle.Bytes+workspacefiles.SourceChunkBytes-1)/workspacefiles.SourceChunkBytes) {
-			return errors.New("Source restore identity/fidelity invalid")
-		}
 		staging, err := os.MkdirTemp("/home/rootless/persist", ".factory-source-restore-")
 		if err != nil {
 			return errors.New("private Source staging unavailable")
@@ -186,8 +233,12 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 		if err := file.Sync(); err != nil {
 			return err
 		}
+		finishDownload()
 		project := filepath.Join(staging, "project")
-		if err := workspacefiles.MaterializeBundle(file, project); err != nil {
+		finishMaterialize := startupPhase("source-restore-materialize")
+		err = workspacefiles.MaterializeBundle(file, project)
+		finishMaterialize()
+		if err != nil {
 			return errors.New("Source metadata/materialization rejected; old data retained")
 		}
 		git := exec.CommandContext(ctx, "git", "-c", "safe.directory="+project, "-C", project, "config", "--no-includes", "--local", "--get", "factory.repositoryIdentity")
@@ -202,7 +253,7 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 			return err
 		}
 		var current sourceRestoreResponse
-		if json.Unmarshal(latest, &current) != nil || current.WriterEpoch != reply.WriterEpoch || current.ChangeWriterEpoch != reply.ChangeWriterEpoch || current.ReadOnly != reply.ReadOnly || current.Checkpoint == nil || current.Checkpoint.ID != saved.ID {
+		if json.Unmarshal(latest, &current) != nil || !sameSourceRestoreLease(current, reply) {
 			return errors.New("Source owner changed before publication")
 		}
 		canonical := b.Assignment.WorkspaceFolder
@@ -224,7 +275,7 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 	if err := os.MkdirAll(b.Assignment.ConnectorStateDir, 0700); err != nil {
 		return err
 	}
-	marker, _ := json.Marshal(sourceRestored{ActorUID: actorUID, WriterEpoch: reply.WriterEpoch, ChangeWriterEpoch: reply.ChangeWriterEpoch, ReadOnly: reply.ReadOnly})
+	marker, _ := json.Marshal(sourceRestored{AttemptID: b.Assignment.RuntimeAttemptID, Generation: b.Assignment.Generation, ActorUID: actorUID, WriterEpoch: reply.WriterEpoch, ChangeWriterEpoch: reply.ChangeWriterEpoch, ReadOnly: reply.ReadOnly, InputStop: reply.InputStop})
 	temporary, err := os.CreateTemp(b.Assignment.ConnectorStateDir, ".source-restored-")
 	if err != nil {
 		return err

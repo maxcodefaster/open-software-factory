@@ -6,6 +6,7 @@ import {
   type EnvironmentBundle,
   type EnvironmentSettingsView,
   environmentMetadata,
+  environmentWrite,
   replaceEnvironment,
 } from "../../packages/project-domain/src/environment";
 import { test } from "../fixtures/browser-test";
@@ -82,7 +83,10 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
         expect(input.version).toBe(versions.get(environment) ?? 0);
         bundles.set(
           environment,
-          replaceEnvironment(input, bundles.get(environment) ?? { variables: [], registries: [] }),
+          replaceEnvironment(
+            environmentWrite.parse(input),
+            bundles.get(environment) ?? { variables: [], registries: [] },
+          ),
         );
         versions.set(environment, input.version + 1);
         lastSaved = environment;

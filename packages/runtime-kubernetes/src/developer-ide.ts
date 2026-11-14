@@ -1,6 +1,9 @@
 import { z } from "zod";
-import { createKubernetesClient, type KubernetesClient } from "./client";
 import { kubernetesCommand } from "./config";
+import {
+  createDeveloperIDEKubernetesClient,
+  type DeveloperIDEKubernetesClient,
+} from "./developer-ide-kubernetes";
 import { type DeveloperIDEResources, renderDeveloperIDEResources } from "./developer-ide-manifest";
 import { createOwnedServiceForwards, type OwnedServiceForward } from "./owned-service-forward";
 import { startServiceForward } from "./service-forward";
@@ -111,13 +114,9 @@ async function command(args: string[], input?: unknown) {
 }
 
 export function createDeveloperIDEClient(
-  kubernetes: KubernetesClient = createKubernetesClient(),
+  kubernetes: DeveloperIDEKubernetesClient = createDeveloperIDEKubernetesClient(),
   execute: typeof command = command,
-  forward: (
-    role: "editor",
-    namespace: string,
-    podName: string,
-  ) => OwnedServiceForward = startServiceForward,
+  forward: (namespace: string, podName: string) => OwnedServiceForward = startServiceForward,
 ): DeveloperIDEClient {
   const forwards = createOwnedServiceForwards<DeveloperIDEResources>("Developer IDE");
   async function observe(input: DeveloperIDEResources) {
@@ -171,7 +170,7 @@ export function createDeveloperIDEClient(
         async () => {
           if (!(await observe(input))?.ready) throw new Error("Developer IDE is not ready");
         },
-        () => forward("editor", input.identity.namespace, input.identity.podName),
+        () => forward(input.identity.namespace, input.identity.podName),
       );
       return connection.origin;
     },

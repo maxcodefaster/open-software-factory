@@ -11,7 +11,8 @@ import { createChangeIntegration } from "../../apps/factory/src/delivery/integra
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
-import { eventually } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { nativeJobsFixture } from "../fixtures/native-jobs";
 import { fixtureValue } from "../fixtures/value";
 
 type Fixture = Awaited<ReturnType<typeof candidateReviewFixture>>;
@@ -50,7 +51,12 @@ async function enable(f: Fixture) {
   });
   return { queue, policyId };
 }
-function delivery(f: Fixture, queued = false, beforeMerge?: () => Promise<void>) {
+function delivery(
+  f: Fixture,
+  queued = false,
+  beforeMerge?: () => Promise<void>,
+  runtime?: Parameters<typeof createDeliveryController>[1],
+) {
   let merges = 0;
   let baseReads = 0;
   const forge = {
@@ -69,7 +75,7 @@ function delivery(f: Fixture, queued = false, beforeMerge?: () => Promise<void>)
   } as unknown as ReturnType<typeof createForgejoClient>;
   const controller = createDeliveryController(
     f.database,
-    {
+    runtime ?? {
       startVerification: async () => null,
       startStagingReplacement: async () => null,
       stop: async () => null,
@@ -571,37 +577,48 @@ test("a candidate awaiting human Delivery does not reclaim the queue ahead of in
 }, 60_000);
 
 test("ordinary delegated Delivery merges the reviewed commit and keeps healthy Staging until its replacement is ready", async () => {
-  const f = await candidateReviewFixture(),
-    other = await additionalTicket(f, true);
+  const host = await factoryProcess();
+  const database = host.connect();
+  let owned: Fixture | undefined;
+  let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
+  let controller: ReturnType<typeof createDeliveryController> | undefined;
   try {
+    const f = await candidateReviewFixture(undefined, database);
+    owned = f;
+    const other = await additionalTicket(f, true);
+    const jobs = await nativeJobsFixture(database, f.projectID);
+    native = jobs;
     await passingReview(f);
     await retainedPR(f);
     const { queue } = await enable(f);
-    const previous = crypto.randomUUID(),
-      replacement = crypto.randomUUID();
-    for (const [id, generation, revision, state] of [
-      [previous, 2, "a".repeat(40), "ready"],
-      [replacement, 3, f.commit, "starting"],
-    ] as const) {
-      await f.database
-        .client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,
-        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${id},${f.projectID},'staging',${generation},${revision},${state}::factory.runtime_attempt_state,
-          ${"a".repeat(64)},${"b".repeat(64)},now(),${f.userID})`;
-    }
-    await f.database
-      .client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id)
-      VALUES(${f.projectID},${"a".repeat(40)},${previous})`;
-    const d = delivery(f, true);
+    await database.client`INSERT INTO factory.staging_preview(project_id,revision)
+      VALUES(${f.projectID},${"a".repeat(40)})`;
+    const previous = await jobs.startStaging(f.userID);
+    await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${previous}`;
+    const d = delivery(f, true, undefined, {
+      startVerification: async () => {
+        throw Error("Completed exact checks must not commission another native job");
+      },
+      startStagingReplacement: async (id, userID) => {
+        await jobs.startStaging(userID, id);
+        return null;
+      },
+      stop: async (id) => {
+        if (id !== f.attemptID) await jobs.stop(id);
+        return null;
+      },
+    });
+    controller = d.controller;
     await d.controller.reconcile(f.changeID);
     await d.controller.reconcile(f.changeID);
     expect(d.merges()).toBe(1);
     const [promotion] = await f.database.client<
-      { id: string }[]
-    >`SELECT id FROM factory.promotion_operation WHERE change_id=${f.changeID}`;
+      { id: string; replacement: string }[]
+    >`SELECT id,replacement_runtime_attempt_id AS replacement
+      FROM factory.promotion_operation WHERE change_id=${f.changeID}`;
     expect(promotion).toBeDefined();
-    await f.database
-      .client`UPDATE factory.promotion_operation SET state='starting',replacement_runtime_attempt_id=${replacement} WHERE id=${fixtureValue(promotion, "promotion").id}`;
+    const replacement = fixtureValue(promotion, "promotion").replacement;
+    expect(replacement).not.toBe(previous);
     await d.controller.reconcile(f.changeID);
     const [stillHealthy] = await f.database.client<
       { id: string }[]
@@ -617,10 +634,20 @@ test("ordinary delegated Delivery merges the reviewed commit and keeps healthy S
       FROM factory.ticket ticket JOIN factory.staging_preview preview ON preview.project_id=ticket.project_id WHERE ticket.id=${f.ticketID}`;
     expect(delivered).toEqual({ state: "done", revision: f.commit });
     expect(await queue.claim(f.projectID, other.changeID)).toBe(true);
+    expect(jobs.calls.filter((call) => call.method === "CreateActor")).toHaveLength(2);
+    expect(jobs.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
+    const [retired] = await database.client`SELECT deleted_at IS NOT NULL AS confirmed
+      FROM factory.substrate_binding WHERE runtime_attempt_id=${previous}`;
+    expect(retired).toEqual({ confirmed: true });
   } finally {
-    await f.database.client`DELETE FROM factory.staging_preview WHERE project_id=${f.projectID}`;
-    await other.dispose();
-    await f.dispose();
+    try {
+      await controller?.close();
+      await native?.close();
+      await database.client.end({ timeout: 0 });
+      await host.dispose();
+    } finally {
+      owned?.restoreEnvironment();
+    }
   }
 }, 60_000);
 

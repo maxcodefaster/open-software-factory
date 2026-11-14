@@ -86,19 +86,17 @@ func compatibleRuntimePrebuild(parent context.Context, assignment Assignment, to
 	if err != nil || json.Unmarshal(content, &result) != nil || !regexpIdentity(result.Identity) {
 		return ""
 	}
-	return compatiblePrebuild(ctx, assignment, result, readPrebuildConfiguration)
+	return compatiblePrebuild(parent, assignment, result, readPrebuildConfiguration)
 }
 
-func compatiblePreparedPrebuild(parent context.Context, assignment Assignment) string {
-	if assignment.PreparedImage == nil {
+func compatiblePrebuild(parent context.Context, assignment Assignment, result PrebuildResult, read prebuildConfigurationReader) string {
+	var err error
+	parent, err = nativePrebuildContext(parent, assignment)
+	if err != nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-	defer cancel()
-	return compatiblePrebuild(ctx, assignment, *assignment.PreparedImage, readPrebuildConfiguration)
-}
-
-func compatiblePrebuild(ctx context.Context, assignment Assignment, result PrebuildResult, read prebuildConfigurationReader) string {
+	ctx, cancelMetadata := context.WithTimeout(parent, 30*time.Second)
+	defer cancelMetadata()
 	if !regexpIdentity(result.Identity) {
 		return ""
 	}
@@ -106,7 +104,7 @@ func compatiblePrebuild(ctx context.Context, assignment Assignment, result Prebu
 	if err != nil {
 		return ""
 	}
-	status, err := prebuildGit(ctx, assignment.WorkspaceFolder, "status", "--porcelain")
+	status, err := prebuildSourceGit(ctx, assignment.WorkspaceFolder, "status", "--porcelain")
 	if err != nil || status != "" {
 		return ""
 	}
@@ -122,11 +120,29 @@ func compatiblePrebuild(ctx context.Context, assignment Assignment, result Prebu
 	if prebuildIdentity(input) != result.Identity {
 		return ""
 	}
-	if acquireProjectImage(ctx, key) != nil {
+	// Recipe observation is short, but cold download/unpack is ordinary image
+	// acquisition. Do not cancel it with the already-spent metadata deadline.
+	// Keep the original caller and native transport; no lifecycle is retried.
+	cancelMetadata()
+	acquisition, cancelAcquisition := context.WithTimeout(parent, projectImagePullTimeout)
+	defer cancelAcquisition()
+	if acquireProjectImage(acquisition, key) != nil {
 		return ""
 	}
 	operation := prebuildOperation{Identity: result.Identity, Input: input, Directory: filepath.Dir(snapshot)}
-	if _, err := inspectPrebuild(ctx, operation, key); err != nil {
+	if _, err := inspectPrebuild(acquisition, operation, key); err != nil {
+		return ""
+	}
+	// Source can change during a long pull. Never apply the old recipe to a
+	// checkout that became dirty or moved to another commit during acquisition.
+	observation, cancelObservation := context.WithTimeout(acquisition, gitOperationTimeout)
+	defer cancelObservation()
+	status, err = prebuildSourceGit(observation, assignment.WorkspaceFolder, "status", "--porcelain")
+	if err != nil || status != "" {
+		return ""
+	}
+	commit, err := prebuildSourceGit(observation, assignment.WorkspaceFolder, "rev-parse", "HEAD")
+	if err != nil || commit != assignment.Revision {
 		return ""
 	}
 	return key
@@ -168,6 +184,11 @@ func regexpIdentity(value string) bool {
 }
 
 func preparePrebuildConsumer(ctx context.Context, assignment Assignment, image string) (string, func(), error) {
+	var err error
+	ctx, err = nativePrebuildContext(ctx, assignment)
+	if err != nil {
+		return "", func() {}, err
+	}
 	source, err := readPrebuildConfigurationDocument(ctx, assignment.WorkspaceFolder, filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath))
 	var config map[string]json.RawMessage
 	if err != nil || json.Unmarshal(source, &config) != nil {

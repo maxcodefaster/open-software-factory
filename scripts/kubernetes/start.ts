@@ -6,12 +6,16 @@ import { requireObjectStorage } from "../../apps/factory/src/storage/bootstrap";
 import { createDatabase } from "../../packages/db/src/client";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
-import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
 import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
-import { runtimeArtifactsSchema } from "../factory/artifacts";
+import { runtimeArtifactsSchema, runtimeArtifactEnvironment } from "../factory/artifacts";
 import { ensureLocalForgeIdentity } from "../factory/forge-identity";
 import { installForgeBrowserLogout } from "../factory/forge-logout";
+import {
+  requireNativeForgeOrigin,
+  requireNativeInstallation,
+  requireNativeRuntimeArtifact,
+} from "../factory/native-installation";
 import { bootstrapOpenBao } from "../factory/openbao-bootstrap";
 import { waitForFactory } from "../factory/readiness";
 import { requireWritableRuntimeStorage } from "../factory/storage-readiness";
@@ -52,7 +56,14 @@ async function execute(args: readonly string[], input?: string) {
 }
 
 const directory = required("FACTORY_STATE_DIRECTORY");
-configuredFactoryboxRuntimeProfile();
+const artifacts = runtimeArtifactsSchema.parse(
+  JSON.parse(await readFile(resolve("runtime-artifacts.json"), "utf8")),
+);
+const nativeConfiguration = requireNativeInstallation(process.env, {
+  editorPrincipal: `user:system:serviceaccount:${required("FACTORY_NAMESPACE")}:${required("FACTORY_SERVICE_ACCOUNT")}`,
+});
+requireNativeForgeOrigin(process.env, nativeConfiguration);
+requireNativeRuntimeArtifact(nativeConfiguration, artifacts);
 await mkdir(directory, { recursive: true, mode: 0o700 });
 await chmod(directory, 0o700);
 if ((await realpath(directory)) !== resolve(directory))
@@ -75,6 +86,7 @@ const internalURL = required("FACTORY_INTERNAL_URL");
 const forgeURL = required("FACTORY_FORGEJO_PUBLIC_URL");
 const apiURL = required("FACTORY_FORGEJO_API_URL");
 const identity = {
+  runtime: "substrate",
   namespace,
   release,
   factoryURL,
@@ -93,26 +105,12 @@ if (previousIdentity === null)
 else if (previousIdentity !== JSON.stringify(identity))
   throw new Error("Kubernetes installation identity changed; retained state was not adopted");
 
-const artifacts = runtimeArtifactsSchema.parse(
-  JSON.parse(await readFile(resolve("runtime-artifacts.json"), "utf8")),
-);
-const roleVariables = {
-  "runtime-host": "FACTORY_RUNTIME_HOST_IMAGE",
-  "browser-tools": "FACTORY_BROWSER_TOOLS_IMAGE",
-  "workspace-files": "FACTORY_WORKSPACE_FILES_IMAGE",
-  "developer-ide": "FACTORY_DEVELOPER_IDE_IMAGE",
-} as const;
-const runtimeEnvironment = Object.fromEntries(
-  Object.entries(roleVariables).map(([role, variable]) => [
-    variable,
-    artifacts[role as keyof typeof roleVariables],
-  ]),
-);
+const runtimeEnvironment = runtimeArtifactEnvironment(artifacts);
 
 console.log("Checking the installation's actual writable runtime storage");
 await requireWritableRuntimeStorage({
   stateDirectory: directory,
-  image: artifacts["workspace-files"],
+  image: artifacts["runtime-host"],
 });
 console.log("Preparing encrypted secrets and retained data services");
 const openbaoAddress = required("FACTORY_OPENBAO_URL");
@@ -120,58 +118,10 @@ const openbaoName = new URL(openbaoAddress).hostname.split(".")[0] ?? "";
 if (!/^[a-z0-9][a-z0-9-]{0,62}-openbao$/.test(openbaoName))
   throw new Error("Invalid OpenBao Service name");
 
-// Only an installation that predates the factory-admin identity gets here. The chart's loopback
-// listener (openbao.recovery.enabled) serves the quorum-only generate-root endpoints that OpenBao
-// 2.7 disables on the Service listener. kubectl reaches it through the Pod; nothing else can.
-async function openRecovery() {
-  const forward = Bun.spawn(
-    kubernetesCommand(["port-forward", `pod/${openbaoName}-0`, "-n", namespace, ":8210"]),
-    { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
-  );
-  const close = async () => {
-    forward.kill();
-    await forward.exited;
-  };
-  try {
-    const reader = forward.stdout.getReader();
-    const decoder = new TextDecoder();
-    const deadline = Date.now() + 30_000;
-    let output = "";
-    let port: string | undefined;
-    let pending: ReturnType<typeof reader.read> | undefined;
-    while (!port && Date.now() < deadline) {
-      // A read that loses the race keeps its data, so one read stays pending until it settles.
-      pending ??= reader.read();
-      const read = await Promise.race([pending, Bun.sleep(1_000).then(() => null)]);
-      if (!read) continue;
-      pending = undefined;
-      if (read.done) break;
-      output += decoder.decode(read.value);
-      port = /127\.0\.0\.1:(\d+) ->/.exec(output)?.[1];
-    }
-    if (!port) throw new Error("kubectl could not forward to the OpenBao Pod");
-    const address = `https://127.0.0.1:${port}`;
-    const probe = await fetch(new URL("/v1/sys/generate-root/attempt", address), {
-      tls: { ca: await readFile(required("FACTORY_OPENBAO_CA_FILE"), "utf8") },
-      signal: AbortSignal.timeout(5_000),
-    }).catch(() => null);
-    await probe?.body?.cancel();
-    if (!probe?.ok)
-      throw new Error(
-        "This OpenBao predates Factory's admin identity and its recovery listener is off. Upgrade once with openbao.recovery.enabled=true, then set it back to false.",
-      );
-    return { address, close };
-  } catch (cause) {
-    await close();
-    throw cause;
-  }
-}
-
 const openbao = await bootstrapOpenBao({
   directory: resolve(directory, "openbao"),
   address: openbaoAddress,
   caFile: required("FACTORY_OPENBAO_CA_FILE"),
-  openRecovery,
 });
 // The backup Job mounts this Secret. The state claim stays the source; the Secret is a projection
 // that is rewritten on every start, so deleting it only needs a Factory restart.
@@ -211,7 +161,7 @@ const migrated = Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
   stderr: "ignore",
 });
 if ((await migrated.exited) !== 0)
-  throw new Error("Database migration failed; retained data was preserved");
+  throw new Error("Native database baseline initialization failed; existing data was preserved");
 await waitHTTP(new URL("/api/healthz", apiURL).href);
 
 async function observedForgePod() {

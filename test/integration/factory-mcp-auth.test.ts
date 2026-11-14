@@ -7,8 +7,12 @@ test("native MCP OAuth registers a public PKCE client without changing the Forge
   const fixture = await factoryProcess();
   const database = fixture.connect();
   const previous = process.env["FACTORY_BASE_URL"];
+  const previousBackchannel = process.env["FACTORY_AUTH_BACKCHANNEL_URL"];
+  const backchannel = `https://${crypto.randomUUID()}.keys.factory.invalid`;
   process.env["FACTORY_BASE_URL"] = fixture.base;
+  process.env["FACTORY_AUTH_BACKCHANNEL_URL"] = backchannel;
   const identity = createFactoryAuth(database);
+  const networkFetch = globalThis.fetch;
   let server: ReturnType<typeof Bun.serve> | undefined;
   try {
     await identity.bootstrap();
@@ -134,19 +138,47 @@ test("native MCP OAuth registers a public PKCE client without changing the Forge
     const request = new Request(factoryMCPResource(fixture.base), {
       headers: { authorization: `Bearer ${token.access_token}` },
     });
+    const keyRequests: string[] = [];
+    globalThis.fetch = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        if (url.pathname === "/api/auth/jwks") {
+          keyRequests.push(url.href);
+          if (url.origin === backchannel)
+            return identity.auth.handler(new Request(`${fixture.base}${url.pathname}`, init));
+          if (url.origin === fixture.base)
+            return Response.json({ error: "Public key transport is unavailable" }, { status: 503 });
+        }
+        return networkFetch(input, init);
+      },
+      { preconnect: networkFetch.preconnect },
+    );
     const authenticated = await identity.mcpSession(request);
+    expect(keyRequests).toEqual([`${backchannel}/api/auth/jwks`]);
     expect(authenticated.userID).toBe(user.id);
     expect(authenticated.clientID).toBe(client.client_id);
     expect(authenticated.scopes).toContain("factory:work");
+    const [header, payload, signature] = token.access_token.split(".");
+    const altered = `${header}.${payload}.${signature?.startsWith("A") ? "B" : "A"}${signature?.slice(1)}`;
+    await expect(
+      identity.mcpSession(
+        new Request(factoryMCPResource(fixture.base), {
+          headers: { authorization: `Bearer ${altered}` },
+        }),
+      ),
+    ).rejects.toThrow("invalid access token");
     await database.client`UPDATE auth."oauthConsent" SET scopes=ARRAY['factory:read']::text[] WHERE "clientId"=${client.client_id} AND "userId"=${user.id}`;
     expect((await identity.mcpSession(request)).scopes).not.toContain("factory:work");
     await database.client`DELETE FROM auth."oauthConsent" WHERE "clientId"=${client.client_id} AND "userId"=${user.id}`;
     await expect(identity.mcpSession(request)).rejects.toThrow("revoked");
   } finally {
+    globalThis.fetch = networkFetch;
     await server?.stop(true);
     await database.client.end({ timeout: 2 });
     await fixture.dispose();
     if (previous === undefined) delete process.env["FACTORY_BASE_URL"];
     else process.env["FACTORY_BASE_URL"] = previous;
+    if (previousBackchannel === undefined) delete process.env["FACTORY_AUTH_BACKCHANNEL_URL"];
+    else process.env["FACTORY_AUTH_BACKCHANNEL_URL"] = previousBackchannel;
   }
 }, 30000);

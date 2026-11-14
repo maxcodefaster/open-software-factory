@@ -14,6 +14,7 @@ type Database = ReturnType<typeof createDatabase>;
 export type ProjectServiceDependencies = {
   database: Database;
   localRepositoryOrigin: string;
+  publicRepositoryOrigin?: string;
   onRegistered(projectID: string, userID: string, recovering: boolean): Promise<void>;
   forgeOwner: string;
 };
@@ -76,6 +77,7 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
           input.repositoryUrl,
           dependencies.localRepositoryOrigin,
           dependencies.forgeOwner,
+          dependencies.publicRepositoryOrigin,
         );
       } catch {
         throw new CommandError(

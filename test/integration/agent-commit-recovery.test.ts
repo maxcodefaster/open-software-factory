@@ -5,6 +5,7 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 
@@ -13,7 +14,7 @@ test.each(["same Workspace", "Stop"])(
   async (boundary) => {
     const owned = await fixture();
     const controller = owned.controller();
-    const replacementID = crypto.randomUUID();
+    const replacementID = runtimeIdentity(owned.workspaceID, 2).attemptID;
     const actions: string[] = [];
     try {
       const accepted = await controller.prompt(
@@ -41,11 +42,20 @@ test.each(["same Workspace", "Stop"])(
       observed_remote_sha = NULL, completed_at = NULL WHERE id = ${turnID}`;
       await owned.database
         .client`UPDATE factory.runtime_attempt SET state = 'failed' WHERE id = ${owned.attemptID}`;
-      await owned.database
-        .client`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${replacementID}, project_id, change_id, ${original.workspace}::uuid,
-        2, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
-      FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
+      // Controlled successor state for the read-only commit observer. Native
+      // lifecycle and independent Source qualification have their own lane.
+      await owned.database.client.begin(async (sql) => {
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
+          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          SELECT ${replacementID},project_id,change_id,${original.workspace}::uuid,2,revision,'create-intended',
+            parent_connector_token_hash,child_connector_token_hash,now(),created_by
+          FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+          SELECT ${replacementID},${`fa-${replacementID.replaceAll("-", "")}`},
+            ${`runtime-${replacementID.replaceAll("-", "")}`},intent
+          FROM factory.substrate_binding WHERE runtime_attempt_id=${owned.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacementID}`;
+      });
       await owned.database
         .client`UPDATE factory.change SET runtime_attempt_id = ${replacementID} WHERE id = ${owned.changeID}`;
       await owned.database
@@ -98,8 +108,8 @@ test.each(["same Workspace", "Stop"])(
       await controller.shutdown();
       await owned.database
         .client`UPDATE factory.change SET runtime_attempt_id = ${owned.attemptID} WHERE id = ${owned.changeID}`;
-      await owned.database
-        .client`DELETE FROM factory.runtime_attempt WHERE id = ${replacementID} AND project_id = ${owned.projectID} AND kubernetes_uid IS NULL AND kubernetes_namespace_uid IS NULL`;
+      // The fixture's exact non-created native ownership guard handles both
+      // immutable Attempts. Never bypass native name retention here.
       await owned.dispose();
     }
   },

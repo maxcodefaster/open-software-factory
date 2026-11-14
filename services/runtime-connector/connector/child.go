@@ -43,10 +43,6 @@ type terminalControl struct {
 }
 
 func RunChild(ctx context.Context, assignment Assignment, token string) error {
-	return runChild(ctx, assignment, token, nil)
-}
-
-func runChild(ctx context.Context, assignment Assignment, token string, prepared *processManager) error {
 	ctx, cancelChild := context.WithCancel(ctx)
 	defer cancelChild()
 	if token == "" {
@@ -75,10 +71,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 	if assignment.EnvironmentVersion != nil {
 		output = io.Discard
 	}
-	processes := prepared
-	if processes == nil {
-		processes = newProcessManager(ctx, assignment, output)
-	}
+	processes := newProcessManager(ctx, assignment, output)
 	defer processes.stopAll()
 	if !processes.development {
 		// Development announces its independent Terminal immediately below.
@@ -87,13 +80,11 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		processes.connect(control)
 		defer processes.connect(nil)
 	}
-	if prepared == nil {
-		finishProcesses := startupPhase("process-start")
-		processErr := processes.startAll()
-		finishProcesses()
-		if processErr != nil {
-			return fail(processErr)
-		}
+	finishProcesses := startupPhase("process-start")
+	processErr := processes.startAll()
+	finishProcesses()
+	if processErr != nil {
+		return fail(processErr)
 	}
 	finishReadiness := startupPhase("channel-readiness")
 	readinessErr := waitForChannels(ctx, assignment, processes)

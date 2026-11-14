@@ -61,6 +61,8 @@ func TestFailedParentStartupKeepsNativePrivateLayersUntilSourceDrain(t *testing.
 }
 
 func TestFailedNativeBootstrapRetainsOnlySourceWithoutReplayingProjectWork(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	assignment := validAssignment()
 	assignment.nativeActorUID = "original-actor"
 	assignment.nativeRetainedSource = true
@@ -78,15 +80,32 @@ func TestFailedNativeBootstrapRetainsOnlySourceWithoutReplayingProjectWork(t *te
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	var connections atomic.Int32
+	var arrivals atomic.Int32
+	secondCounted := make(chan struct{})
 	observed := make(chan error, 1)
 	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrival := arrivals.Add(1)
+		// Assign the protocol role before Upgrade flushes a handshake that can
+		// let the client reconnect while this handler is still descheduled.
+		count := connections.Add(1)
 		connection, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		defer connection.Close()
-		count := connections.Add(1)
+		// Upgrade has already flushed the handshake. Exercise a first handler
+		// that is descheduled while the client closes it and reconnects.
+		if arrival == 1 {
+			select {
+			case <-secondCounted:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if arrival == 2 {
+			close(secondCounted)
+		}
 		if count == 1 {
 			_, _, _ = connection.ReadMessage()
 			return
@@ -174,8 +193,6 @@ func TestFailedNativeBootstrapRetainsOnlySourceWithoutReplayingProjectWork(t *te
 	}))
 	defer server.Close()
 	assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	control, err := dialControl(ctx, assignment, "parent", "original-capability")
 	if err != nil {
 		t.Fatal(err)

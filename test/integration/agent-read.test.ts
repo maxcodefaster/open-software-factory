@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 const readCases = (["committed", "stopped"] as const).flatMap((state) =>
@@ -52,18 +54,26 @@ test("admitted human instructions remain readable when native history is unavail
 
 test("completed history can be read from the same retained Workspace without rebinding execution", async () => {
   const owned = await fixture();
-  const replacementID = crypto.randomUUID();
+  const replacementID = runtimeIdentity(owned.workspaceID, 2).attemptID;
   const original = owned.hub.request.bind(owned.hub);
   let historyReads = 0;
   try {
     await owned.database
       .client`UPDATE factory.runtime_attempt SET state = 'failed' WHERE id = ${owned.attemptID}`;
-    await owned.database
-      .client`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${replacementID}, project_id, change_id, workspace_id, generation + 1, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
-      FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
-    await owned.database
-      .client`UPDATE factory.change SET runtime_attempt_id = ${replacementID} WHERE id = ${owned.changeID}`;
+    await owned.database.client.begin(async (sql) => {
+      // Controlled uncreated admission only. Preserve the native owner binding
+      // and environment before presenting a ready transport to the reader.
+      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
+        SELECT ${replacementID}, project_id, change_id, workspace_id, generation + 1, revision, 'create-intended', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+        FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+        SELECT ${replacementID},${`fa-${replacementID.replaceAll("-", "")}`},
+          ${`runtime-${replacementID.replaceAll("-", "")}`},intent
+        FROM factory.substrate_binding WHERE runtime_attempt_id=${owned.attemptID}`;
+      await freezeRuntimeEnvironment(sql, replacementID);
+      await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacementID}`;
+      await sql`UPDATE factory.change SET runtime_attempt_id=${replacementID} WHERE id=${owned.changeID}`;
+    });
     owned.hub.request = async (attemptID, channel, request, path) => {
       if (new URL(request.url).pathname.endsWith("/message")) {
         historyReads++;
@@ -106,8 +116,8 @@ test("completed history can be read from the same retained Workspace without reb
     owned.hub.request = original;
     await owned.database
       .client`UPDATE factory.change SET runtime_attempt_id = ${owned.attemptID} WHERE id = ${owned.changeID}`;
-    await owned.database
-      .client`DELETE FROM factory.runtime_attempt WHERE id = ${replacementID} AND kubernetes_uid IS NULL AND kubernetes_namespace_uid IS NULL`;
+    // The existing fixture owner removes only its non-created native records.
+    // Do not erase immutable binding history through a legacy Pod-null shortcut.
     await owned.dispose();
   }
 });

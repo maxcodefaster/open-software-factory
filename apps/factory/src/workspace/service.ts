@@ -13,7 +13,7 @@ import type { z } from "zod";
 export function createWorkspaceService(options: {
   sources: Pick<
     ReturnType<typeof createWorkspaceSourceController>,
-    "get" | "ensure" | "ensurePersonal" | "ensureChange" | "stop"
+    "get" | "ensure" | "ensurePersonal" | "ensureChange"
   >;
   editors: Pick<ReturnType<typeof createDeveloperIDEController>, "get" | "ensure" | "stop">;
   revokeEditor(userID: string): void | Promise<void>;
@@ -89,7 +89,6 @@ export function createWorkspaceService(options: {
       options.sources.ensurePersonal(projectID, userID),
     ensureChangeSource: (userID: string, changeID: string) =>
       options.sources.ensureChange(changeID, userID),
-    stopSource: (userID: string, workspaceID: string) => options.sources.stop(workspaceID, userID),
     getEditor: (userID: string) => options.editors.get(userID),
     ensureEditor: (userID: string, projectID: string) => options.editors.ensure(projectID, userID),
     async stopEditor(userID: string) {

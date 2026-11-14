@@ -12,6 +12,7 @@ import {
   developerIDEViewSchema,
   knowledgeGenerationSchema,
   repositoryDocumentsSchema,
+  runtimeAttemptSchema,
   sourceWorkspaceViewSchema,
   ticketDetailSchema,
 } from "../../apps/factory/src/api-contracts";
@@ -208,7 +209,7 @@ async function mockDeveloperIDE(
     ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
   );
   const stop = await Promise.all(
-    ["stopRuntimeAttempt", "stopDeveloperIDE", "stopWorkspaceSource"].map(factoryFunctionMatcher),
+    ["stopRuntimeAttempt", "stopDeveloperIDE"].map(factoryFunctionMatcher),
   );
   page.on("request", (request) => {
     if (request.method() !== "POST") return;
@@ -394,6 +395,81 @@ test("source admission failure stays visible inside the IDE and an explicit retr
   expect(fixture.documentRequests).toBe(1);
   expect(fixture.computeRequests).toEqual([]);
   expect(fixture.stopRequests).toEqual([]);
+});
+
+test.describe("fresh native Workspace entry", () => {
+  test.use({ hasTouch: true });
+  test("offers an explicit first Start before Source exists without starting on IDE access", async ({
+    page,
+  }) => {
+    const fixture = await mockDeveloperIDE(page);
+    let started = false;
+    let starts = 0;
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          if (!started)
+            throw new CommandError(
+              "unavailable",
+              "Start this fresh native Workspace once to initialize Source. No compute was created by editor access.",
+            );
+          return {
+            workspaceID: fixture.workspaceID,
+            label: "Owned source",
+            serviceID: `fixture-source-${fixture.workspaceID}`,
+            epoch: 1,
+            state: "ready",
+            failure: null,
+          };
+        },
+      },
+      runtime: {
+        startPersonal: async () => {
+          starts++;
+          started = true;
+          return runtimeAttemptSchema.parse({
+            id: crypto.randomUUID(),
+            projectId: projectID,
+            workspaceId: fixture.workspaceID,
+            workspaceKind: "personal",
+            runtimeKind: "personal",
+            ownerUserId: userID,
+            state: "starting",
+          });
+        },
+      },
+    });
+    await signIn(page);
+    await selectProject(page);
+    await page.getByRole("button", { name: "IDE", exact: true }).click();
+    const panel = page.getByRole("tabpanel", { name: "IDE · My workspace", exact: true });
+    const start = panel.getByRole("button", { name: "Start compute", exact: true });
+    const frame = page.locator('iframe[title="Factory IDE"]');
+    await expect(panel).toContainText("Start this fresh native Workspace");
+    await expect(frame).toHaveAttribute("data-editor-epoch", "1");
+    for (const width of [1440, 900, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(start).toBeVisible();
+      await start.focus();
+      await expect(start).toBeFocused();
+      const box = await start.boundingBox();
+      expect(box?.x).toBeGreaterThanOrEqual(0);
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(width);
+      await page.screenshot({
+        path: `${evidenceDirectory}/fresh-workspace-start-${width}.png`,
+        fullPage: true,
+      });
+    }
+    expect(starts).toBe(0);
+    expect(fixture.computeRequests).toEqual([]);
+    await start.tap();
+    await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+    await expect(start).toHaveCount(0);
+    expect(starts).toBe(1);
+    expect(fixture.computeRequests).toHaveLength(1);
+    expect(fixture.documentRequests).toBe(1);
+    expect(fixture.stopRequests).toEqual([]);
+  });
 });
 
 test("a brief network loss while opening the IDE heals itself without an error or a button", async ({
@@ -1063,7 +1139,6 @@ test.beforeEach(async ({ page }) => {
       getEditor: noWorkspace,
       getSource: noWorkspace,
       ensureSource: noWorkspace,
-      stopSource: noWorkspace,
       stopEditor: noWorkspace,
     },
     runtime: {
@@ -1551,8 +1626,11 @@ test("Stop confirmation endpoint authenticates and rejects missing or stale iden
     await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation,
       revision, state, parent_connector_token_hash,
       child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${attemptId}, project_id, id, ${workspaceId}, 1, base_sha, 'failed', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), created_by
+      SELECT ${attemptId}, project_id, id, ${workspaceId}, 1, base_sha, 'create-intended', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), created_by
       FROM factory.change WHERE id = ${change.id}`;
+    await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+      VALUES(${attemptId},${`fa-${attemptId.replaceAll("-", "")}`},${`runtime-${attemptId.replaceAll("-", "")}`},'{}')`;
+    await sql`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${attemptId}`;
     await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptId} WHERE id = ${change.id}`;
     await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id,
       state, stop_pending, stop_dispatched, stop_id, created_by)
@@ -1591,7 +1669,8 @@ test("Stop confirmation endpoint authenticates and rejects missing or stale iden
     lastError: expect.stringContaining("Live Workspace status is unavailable"),
   });
   const attempts = await database.client<Array<{ state: string; uid: string | null }>>`
-    SELECT state, kubernetes_uid AS uid FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
+    SELECT attempt.state,binding.actor_uid::text AS uid FROM factory.runtime_attempt attempt
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id WHERE attempt.project_id = ${projectID}`;
   expect([...attempts]).toEqual([{ state: "failed", uid: null }]);
   const turns =
     await database.client`SELECT id FROM factory.agent_turn WHERE project_id = ${projectID}`;

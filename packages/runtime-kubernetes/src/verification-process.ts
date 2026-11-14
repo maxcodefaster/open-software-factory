@@ -44,7 +44,7 @@ export interface RuntimeVerification {
   };
 }
 
-// The same pinned one-job owner is used by both concrete runtime adapters.
+// The pinned one-job owner inside the Substrate-owned Dev Container.
 export function runtimeVerificationProcess(input: RuntimeVerification) {
   const publication = input.publication;
   const publicationEnvironment = publication

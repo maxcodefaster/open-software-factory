@@ -1,37 +1,22 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
+import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceContainerFiles } from "../../apps/factory/src/workspace/container-files";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { createWorkspaceTransferRoutes } from "../../apps/factory/src/workspace/transfer-routes";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
-import { factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 const sha256 = (content: Uint8Array) => createHash("sha256").update(content).digest("hex");
 
 async function fileFixture() {
-  const restore = installOwnedRuntimeConfiguration();
-  const process = await factoryProcess();
-  const database = process.connect();
-  const owner = crypto.randomUUID(),
-    guest = crypto.randomUUID(),
-    project = crypto.randomUUID();
-  const workspaceID = personalWorkspaceIdentity(project, owner).workspaceID;
-  const attemptID = crypto.randomUUID();
-  for (const id of [owner, guest])
-    await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Files fixture',${`${id}@factory.invalid`})`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${project},${`files-${project}`},'Container files','https://github.com/example/project','main','.devcontainer/devcontainer.json',${owner})`;
-  for (const id of [owner, guest])
-    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${id},'developer',${owner})`;
-  await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
-    VALUES(${workspaceID},${project},'personal',${owner},'main',${"a".repeat(40)},${owner})`;
-  await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-    VALUES(${attemptID},${project},${workspaceID},1,${"a".repeat(40)},'ready','owned-parent','owned-child',now(),${owner})`;
-  const hub = new RuntimeHub(async () => {});
+  const fixture = await substrateFixture();
+  const { database, userID: owner, projectID: project, workspaceID, attemptID, hub } = fixture;
+  const guest = crypto.randomUUID();
+  await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${guest},'Files fixture',${`${guest}@factory.invalid`})`;
+  await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${guest},'developer',${owner})`;
+  const runtime = await startSubstrateFixtureWorkspace(fixture);
   const actions: string[] = [];
   const published = new Map<string, Buffer>();
   const native = new Map<
@@ -150,11 +135,6 @@ async function fileFixture() {
       terminalRevision: 1,
     }),
   );
-  const runtime = createRuntimeController(database, hub, "files-fixture", {
-    async prepareExecution() {
-      throw new Error("This proof must not create compute");
-    },
-  });
   const files = createWorkspaceContainerFiles(database, hub, runtime, "files-fixture");
   const sharing = createWorkspaceSharing(database, () => {});
   return {
@@ -176,9 +156,7 @@ async function fileFixture() {
     async dispose() {
       await files.close();
       hub.revoke(attemptID);
-      await database.client.end({ timeout: 2 });
-      await process.dispose();
-      restore();
+      await fixture.dispose();
     },
   };
 }
@@ -438,10 +416,19 @@ test("file mutation IDs do not replay and an old transfer cannot wake replacemen
     });
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${f.attemptID}`;
-    await f.database
-      .client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${crypto.randomUUID()},project_id,workspace_id,2,revision,'paused','replacement-parent','replacement-child',now(),created_by
-      FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+    const successorID = runtimeIdentity(f.workspaceID, 2).attemptID;
+    // Controlled state for stale-transfer fencing, not a native Stop/Start proof.
+    await f.database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        SELECT ${successorID},project_id,workspace_id,2,revision,'create-intended',
+          'replacement-parent','replacement-child',now(),created_by
+        FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+        VALUES(${successorID},${`fa-${successorID.replaceAll("-", "")}`},
+          ${`runtime-${successorID.replaceAll("-", "")}`},'{}')`;
+      await sql`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${successorID}`;
+    });
     const before = f.actions.length;
     await expect(f.files.download(f.owner, download.transferID, 0)).rejects.toThrow(
       "cannot wake replacement compute",

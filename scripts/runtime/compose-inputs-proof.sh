@@ -18,7 +18,7 @@ owner="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 name="factory-compose-inputs-$owner"
 directory=".factory/test-results/runtime-compose-inputs/$owner"
 mkdir -p "$directory"
-printf '{"owner":"%s","image":"%s","architecture":"%s","nativeFactoryboxProof":false}\n' \
+printf '{"owner":"%s","image":"%s","architecture":"%s","nativeSubstrateProof":false}\n' \
   "$owner" "$image" "$image_arch" > "$directory/intent.json"
 cleanup() {
   result=$?

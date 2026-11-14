@@ -3,6 +3,7 @@ import type { ServerWebSocket } from "bun";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
+import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import {
   hashConnectorToken,
   runtimeConnectorTokens,
@@ -18,7 +19,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
   const f = await substrateFixture();
   let actor: NativeActor | null = null;
   const calls: string[] = [];
-  const c = f.controller(async (method) => {
+  const c = await f.controller(async (method) => {
     calls.push(method);
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
@@ -39,25 +40,21 @@ test("native Source forwarding uses current personal grants and the runtime lock
     throw new Error(`Unexpected ${method}`);
   });
   const forwarded: Array<{ attemptID: string; path: string; epoch: string | null }> = [];
-  const source = createWorkspaceSourceController(
-    f.database,
-    "owned-native-secret",
-    undefined,
-    undefined,
-    f.projectID,
-    {
-      sourceConnected: () => true,
-      async request(attemptID, channel, request, path) {
-        expect(channel).toBe("source");
-        forwarded.push({ attemptID, path, epoch: request.headers.get("X-Factory-Writer-Epoch") });
-        return Response.json({ confirmed: true });
-      },
-    },
-  );
+  f.hub.sourceConnected = () => true;
+  f.hub.request = async (attemptID, channel, request, path) => {
+    expect(channel).toBe("source");
+    forwarded.push({ attemptID, path, epoch: request.headers.get("X-Factory-Writer-Epoch") });
+    return Response.json({ confirmed: true });
+  };
+  const nativeSource = createSubstrateSources(f.database, f.hub);
+  const source = createWorkspaceSourceController(f.database, f.hub, nativeSource);
   const lock = f.database.coordination();
   let held = false;
   try {
     await c.start(f.projectID, f.userID);
+    const actorUID = (await c.get(f.attemptID))?.native?.actorUID;
+    if (!actorUID) throw new Error("Native fixture Actor is missing");
+    await nativeSource.attach(f.workspaceID, actorUID, f.database.client);
     for (const role of ["parent", "child"] as const) {
       const socket = {
         data: { kind: "connector", role, attemptID: f.attemptID, generation: 1 },
@@ -83,6 +80,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
       });
     expect((await source.forward(f.workspaceID, f.userID, "write", request())).status).toBe(200);
     expect(forwarded).toEqual([
+      { attemptID: f.attemptID, path: `/v1/workspaces/${f.workspaceID}/fence`, epoch: null },
       { attemptID: f.attemptID, path: `/v1/workspaces/${f.workspaceID}/write`, epoch: "1" },
     ]);
     const other = crypto.randomUUID();
@@ -105,7 +103,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
     await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
     held = false;
     expect(await observed).not.toBe("unexpectedly admitted");
-    expect(forwarded).toHaveLength(1);
+    expect(forwarded).toHaveLength(2);
     await f.database
       .client`UPDATE factory.project_membership SET role='developer' WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
     await f.database
@@ -115,11 +113,11 @@ test("native Source forwarding uses current personal grants and the runtime lock
       "compute was not started",
     );
     expect(calls).toEqual(before);
-    expect(forwarded).toHaveLength(1);
-    expect(await f.database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
-    );
-    await expect(source.stop(f.workspaceID, f.userID)).rejects.toThrow("no data was released");
+    expect(forwarded).toHaveLength(2);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source`),
+    ]).toEqual([{ source: null }]);
+    expect("stop" in source).toBe(false);
   } finally {
     if (held) await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
     await lock.end({ timeout: 1 });
@@ -137,7 +135,7 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
     if (!actor) throw new Error("Native fixture Actor missing");
     actor.status.state = state;
   };
-  const c = f.controller(async (method, request) => {
+  const c = await f.controller(async (method, request) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -147,9 +145,8 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
     if (method === "CreateActor") {
       creates++;
       const [saved] = await f.database
-        .client`SELECT a.substrate,a.factorybox_worker_id,b.create_attempted_at FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${f.attemptID}`;
+        .client`SELECT a.substrate,b.create_attempted_at FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${f.attemptID}`;
       expect(saved?.["substrate"]).toBe(true);
-      expect(saved?.["factorybox_worker_id"]).toBeNull();
       expect(saved?.["create_attempted_at"]).not.toBeNull();
       actor = f.actor();
       throw new SubstrateRPCError("Unavailable", "lost Create reply");
@@ -174,19 +171,22 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
   });
   try {
     expect(creates).toBe(0);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
-    const sources = createWorkspaceSourceController(f.database, "owned-native-secret");
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ worker: null }]);
+    const sources = createWorkspaceSourceController(
+      f.database,
+      f.hub,
+      createSubstrateSources(f.database, f.hub),
+    );
     try {
       expect((await sources.ensure(f.workspaceID, f.userID)).state).toBe("preparing");
     } finally {
       await sources.close();
     }
-    await expect(
-      Promise.resolve(
-        f.database
-          .client`INSERT INTO factory.workspace_source(workspace_id,state,files_image,capability_hash) VALUES(${f.workspaceID},'create-intended',${`example.invalid/files@sha256:${"a".repeat(64)}`},${"b".repeat(64)})`,
-      ),
-    ).rejects.toThrow("Source handoff is not enabled");
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source`),
+    ]).toEqual([{ source: null }]);
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("lost Create reply");
     const started = await c.start(f.projectID, f.userID);
     expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
@@ -196,7 +196,9 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
       runtimeAttemptSchema.parse(JSON.parse(JSON.stringify(started))).native?.sourceHandoff,
     ).toBe("pending");
     expect(creates).toBe(1);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ worker: null }]);
     const tokens = runtimeConnectorTokens("owned-native-secret", f.attemptID, 1);
     const headers = {
       authorization: `Bearer ${tokens.parent}`,
@@ -245,7 +247,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
   let lostSuspendReply = true;
   let suspends = 0;
   let checkpoints = 0;
-  const c = f.controller(async (method, request) => {
+  const c = await f.controller(async (method, request) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -269,15 +271,6 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
         actor: { atespace: f.atespace, name: actor.metadata.name },
         options: { mode: "DURABILITY_MODE_SYNCHRONOUS" },
       });
-      if (actor.status.state === "ACTOR_STATE_SUSPENDING") {
-        actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
-        actor.status.state = "ACTOR_STATE_SUSPENDED";
-        for (const value of actor.status.snapshots ?? []) {
-          const snapshot = value as { durableSnapshot: { state: string } };
-          snapshot.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_COMPLETED";
-        }
-        return { actor: structuredClone(actor) };
-      }
       checkpoints++;
       const uuid = crypto.randomUUID();
       actor.metadata.version = String(Number(actor.metadata.version) + 1);
@@ -332,11 +325,16 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
       snapshot.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_COMPLETED";
     }
     pending.metadata.version = String(BigInt(pending.metadata.version) + 1n);
+    await expect(c.pause(f.attemptID)).rejects.toThrow("not repeated");
+    expect(suspends).toBe(1);
+    // Only Substrate completes finalization, not a second Factory Suspend.
+    pending.status.state = "ACTOR_STATE_SUSPENDED";
+    pending.metadata.version = String(BigInt(pending.metadata.version) + 1n);
     expect((await c.pause(f.attemptID))?.state).toBe("paused");
-    expect(suspends).toBe(2);
+    expect(suspends).toBe(1);
     expect(checkpoints).toBe(1);
     expect((await c.pause(f.attemptID))?.state).toBe("paused");
-    expect(suspends).toBe(2);
+    expect(suspends).toBe(1);
     const [good] = await f.database
       .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
     expect(good?.["checkpoint"].generation).toBe(1);
@@ -361,6 +359,10 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
     completed.metadata.version = String(BigInt(completed.metadata.version) + 1n);
     actor = completed;
     await c.resumeForApp(f.attemptID, f.userID);
+    const [next] = await f.database
+      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+    expect(next?.["checkpoint"].generation).toBe(2);
+    expect(suspends).toBe(2);
     mismatch = true;
     await expect(c.pause(f.attemptID)).rejects.toThrow("generation");
     expect(
@@ -368,7 +370,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
         await f.database
           .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`
       )[0]?.["checkpoint"],
-    ).toEqual(good?.["checkpoint"]);
+    ).toEqual(next?.["checkpoint"]);
   } finally {
     await f.dispose();
   }
@@ -377,7 +379,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
 test("native observation rejects stale version and recreated UID; AlreadyExists is never later adopted", async () => {
   const f = await substrateFixture();
   let actor: ReturnType<typeof f.actor> | null = null;
-  const c = f.controller(async (method) => {
+  const c = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -411,7 +413,7 @@ test("native observation rejects stale version and recreated UID; AlreadyExists 
   const rejected = await substrateFixture();
   let existing = false,
     creates = 0;
-  const refused = rejected.controller(async (method) => {
+  const refused = await rejected.controller(async (method) => {
     if (method === "GetAtespace") return rejected.space;
     if (method === "GetActorTemplate") return rejected.template;
     if (method === "GetActor") {
@@ -442,7 +444,7 @@ test("Factory refuses preexisting Actors, unauthorized users and changed templat
   const f = await substrateFixture();
   let calls = 0,
     foreign = true;
-  const c = f.controller(async (method) => {
+  const c = await f.controller(async (method) => {
     calls++;
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
@@ -455,7 +457,7 @@ test("Factory refuses preexisting Actors, unauthorized users and changed templat
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("already-existing");
     foreign = false;
     f.template.metadata.uid = crypto.randomUUID();
-    await expect(c.start(f.projectID, f.userID)).rejects.toThrow("binding changed");
+    await expect(c.start(f.projectID, f.userID)).rejects.toThrow("original identity");
     const [saved] = await f.database
       .client`SELECT create_attempted_at,actor_uid FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
     expect(saved?.["create_attempted_at"]).toBeNull();

@@ -20,10 +20,13 @@ import {
   personalWorkspaceIdentity,
   ticketWorkspaceIdentity,
 } from "../../../../packages/workspace-domain/src/workspace";
+import upstream from "../../../../upstream.json";
+import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
 import { agentConfiguration } from "./agent-configuration";
+import { runtimeAppOrigins } from "./app-origins";
 import {
   prepareRuntimeRepository,
   resolveRepositoryRevision,
@@ -45,11 +48,9 @@ import {
 import { substrateResourceReservation, substrateResources } from "./substrate-resources";
 import { renderSubstrateTemplate } from "./substrate-template";
 
-const configuration = z.strictObject({
+const installationConfiguration = z.strictObject({
   deployment: z.enum(["owned-test", "fresh-workspaces"]),
   database: z.string().regex(/^[a-z][a-z0-9_]{0,62}$/),
-  projectID: z.uuid(),
-  setupID: z.uuid().optional(),
   connection: substrateConnection,
   provisioner: substrateConnection,
   editorPrincipal: z.string().regex(/^user:system:serviceaccount:[a-z0-9-]+:[a-z0-9-]+$/),
@@ -82,7 +83,12 @@ const configuration = z.strictObject({
     ),
   egressHosts: z.array(z.string().regex(/^[a-z0-9.-]+$/)),
 });
+const configuration = installationConfiguration.extend({ projectID: z.uuid() });
+export type SubstrateInstallationConfiguration = z.infer<typeof installationConfiguration>;
 export type SubstrateWorkspaceConfiguration = z.infer<typeof configuration>;
+export function substrateInstallationConfiguration(input: unknown) {
+  return installationConfiguration.parse(input);
+}
 export function substrateWorkspaceConfiguration(input: unknown) {
   return configuration.parse(input);
 }
@@ -102,13 +108,16 @@ export function retainedSubstrateConfiguration(
     throw new Error("Native provisioning configuration differs from immutable intent");
   return retained;
 }
-export function configuredSubstrateWorkspaces() {
+export function configuredSubstrateInstallation() {
   const file = process.env["FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION"];
-  return file ? configuration.parse(JSON.parse(readFileSync(file, "utf8"))) : undefined;
+  return file
+    ? substrateInstallationConfiguration(JSON.parse(readFileSync(file, "utf8")))
+    : undefined;
 }
 const resource = z.object({ metadata: nativeMetadata }).passthrough();
 type Resource = z.infer<typeof resource>;
 type Provision = {
+  generation: number;
   intent: {
     configuration: SubstrateWorkspaceConfiguration;
     revision: string;
@@ -162,11 +171,13 @@ export function createSubstrateWorkspaces(
       throw error;
     }
   }
-  async function saved(workspaceID: string, sql = database.client) {
-    const [row] = await sql<Provision[]>`SELECT intent,atespace,policy,template,
+  async function saved(workspaceID: string, generation: number, sql = database.client) {
+    const [row] = await sql<
+      Provision[]
+    >`SELECT generation::float8 AS generation,intent,atespace,policy,template,
       atespace_attempted_at::text AS "atespaceAttempted",policy_attempted_at::text AS "policyAttempted",template_attempted_at::text AS "templateAttempted",
       atespace_rejected AS "atespaceRejected",policy_rejected AS "policyRejected",template_rejected AS "templateRejected"
-      FROM factory.substrate_workspace WHERE workspace_id=${workspaceID}`;
+      FROM factory.substrate_workspace WHERE workspace_id=${workspaceID} AND generation=${generation}`;
     if (!row) throw new Error("Native provisioning configuration differs from immutable intent");
     retainedConfiguration(row.intent.configuration);
     return row;
@@ -180,7 +191,7 @@ export function createSubstrateWorkspaces(
       database: config.database,
       projectID: config.projectID,
       workspaceID,
-      generation: 1,
+      generation: row.generation,
       connection: config.connection,
       connectorURL: config.connectorURL,
       profile: config.profile,
@@ -205,46 +216,104 @@ export function createSubstrateWorkspaces(
       const [attempt] = await database.client<
         { workspaceID: string; generation: string }[]
       >`SELECT a.workspace_id AS "workspaceID",a.generation::text AS generation
-        FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id WHERE a.id=${attemptID} AND a.project_id=${config.projectID} AND a.substrate`;
+        FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.id=${attemptID} AND a.project_id=${config.projectID} AND a.substrate`;
       if (!attempt) return undefined;
-      if (attempt.generation !== "1")
-        throw new Error("Native Source handoff/replacement is not enabled");
-      return execution(attempt.workspaceID, await saved(attempt.workspaceID));
+      return execution(
+        attempt.workspaceID,
+        await saved(attempt.workspaceID, Number(attempt.generation)),
+      );
     },
     async recover() {
       const attempts = await database.client<
         { id: string }[]
-      >`SELECT a.id FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id WHERE a.project_id=${config.projectID} AND a.substrate`;
+      >`SELECT a.id FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.project_id=${config.projectID} AND a.substrate`;
       for (const attempt of attempts) await (await this.forAttempt(attempt.id))?.recover();
     },
-    async start(userID: string, changeID?: string) {
+    async start(userID: string, changeID?: string, selectedWorkspaceID?: string) {
       if (changeID && !sources)
         throw new CommandError(
           "unavailable",
           "Native Ticket execution requires its Source writer owner",
         );
-      const workspaceID = changeID
+      let workspaceID = changeID
         ? ticketWorkspaceIdentity(changeID).workspaceID
         : personalWorkspaceIdentity(config.projectID, userID).workspaceID;
-      const attemptID = runtimeIdentity(workspaceID, 1).attemptID;
-      const atespace = `fa-${attemptID.replaceAll("-", "")}`;
+      if (selectedWorkspaceID) {
+        if (changeID)
+          throw new CommandError("conflict", "Ticket Workspace selection is fixed by its Change");
+        const selected = await database.client.begin((sql) =>
+          workspaceWriteAuthorityIn(sql, selectedWorkspaceID, userID),
+        );
+        if (
+          selected.kind !== "personal" ||
+          selected.projectID !== config.projectID ||
+          !selected.ownerID ||
+          selectedWorkspaceID !==
+            personalWorkspaceIdentity(config.projectID, selected.ownerID).workspaceID
+        )
+          throw new CommandError("not-found", "Personal Workspace not found");
+        workspaceID = selectedWorkspaceID;
+      }
+      let generation = 1;
+      let attemptID = runtimeIdentity(workspaceID, generation).attemptID;
       const sql = database.coordination();
       let row: Provision;
       try {
         await sql`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceID}`}))`;
-        const [prior] = await sql<
+        const [latest] = await sql<
           Provision[]
-        >`SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${workspaceID}`;
+        >`SELECT generation::float8 AS generation,intent FROM factory.substrate_workspace
+          WHERE workspace_id=${workspaceID} ORDER BY generation DESC LIMIT 1`;
+        const originalConfiguration = latest
+          ? retainedConfiguration(latest.intent.configuration)
+          : desiredConfiguration;
+        const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
+        if (db?.name !== originalConfiguration.database)
+          throw new Error("Native provisioning requires its explicitly owned database");
+        await sql.begin(async (tx) => {
+          if (changeID) await projectAuthorityIn(tx, userID, originalConfiguration.projectID);
+          else await projectDevelopmentAuthorityIn(tx, userID, originalConfiguration.projectID);
+        });
+        let prior = latest;
+        generation = latest?.generation ?? 1;
+        attemptID = runtimeIdentity(workspaceID, generation).attemptID;
+        if (latest && sources && originalConfiguration.deployment === "fresh-workspaces") {
+          const [predecessor] = await sql<
+            { state: string; actorUID: string | null; deleted: boolean }[]
+          >`SELECT a.state,b.actor_uid::text AS "actorUID",b.deleted_at IS NOT NULL AS deleted
+            FROM factory.runtime_attempt a LEFT JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+            WHERE a.id=${attemptID} AND a.workspace_id=${workspaceID} AND a.generation=${generation}`;
+          if (predecessor?.state === "stopped") {
+            if (!predecessor.deleted || !predecessor.actorUID)
+              throw new CommandError(
+                "unavailable",
+                "Original native cleanup is unconfirmed; no replacement was created",
+              );
+            await sql.begin((tx) =>
+              substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true),
+            );
+            await sources.requireIndependent(workspaceID, predecessor.actorUID, sql);
+            if (
+              await absent(editor, "GetActor", {
+                actor: {
+                  atespace: `fa-${attemptID.replaceAll("-", "")}`,
+                  name: `runtime-${attemptID.replaceAll("-", "")}`,
+                },
+              })
+            )
+              throw new CommandError(
+                "conflict",
+                "Original native Actor is no longer absent; no replacement was created",
+              );
+            generation++;
+            attemptID = runtimeIdentity(workspaceID, generation).attemptID;
+            prior = undefined;
+          }
+        }
         const config = prior
           ? retainedConfiguration(prior.intent.configuration)
           : desiredConfiguration;
-        const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
-        if (db?.name !== config.database)
-          throw new Error("Native provisioning requires its explicitly owned database");
-        await sql.begin(async (tx) => {
-          if (changeID) await projectAuthorityIn(tx, userID, config.projectID);
-          else await projectDevelopmentAuthorityIn(tx, userID, config.projectID);
-        });
+        const atespace = `fa-${attemptID.replaceAll("-", "")}`;
         if (!prior) await capacity?.requireReady(substrateResourceReservation(config));
         const [workspace] = await sql<
           {
@@ -257,8 +326,7 @@ export function createSubstrateWorkspaces(
         >`SELECT substrate,owner_user_id AS owner,change_id AS "changeID",source_revision AS revision,source_branch AS branch FROM factory.development_workspace WHERE id=${workspaceID}`;
         if (
           workspace &&
-          (!workspace.substrate ||
-            (changeID ? workspace.changeID !== changeID : workspace.owner !== userID))
+          (!workspace.substrate || (changeID ? workspace.changeID !== changeID : !workspace.owner))
         )
           throw new CommandError("conflict", "Retained Workspace is never converted or adopted");
         if (prior && config.deployment === "fresh-workspaces") {
@@ -266,6 +334,58 @@ export function createSubstrateWorkspaces(
           const unsettled = await substrateUnsettledBootstrapIn(sql, workspaceID, attemptID);
           if (unsettled || (retained && ["failed", "pausing", "paused"].includes(retained.state)))
             throw new CommandError("conflict", substrateBootstrapContinuationBlocked);
+        }
+        if (prior) {
+          const original = await saved(workspaceID, generation, sql);
+          if (original.atespace && original.policy && original.template) {
+            await sql.begin((tx) =>
+              substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true),
+            );
+            const [project] = await sql<
+              { repository: string }[]
+            >`SELECT repository_url AS repository FROM factory.project WHERE id=${config.projectID}`;
+            if (project?.repository !== original.intent.repositoryURL)
+              throw new Error(
+                "Native Workspace repository differs from its original provisioning intent",
+              );
+            for (const kind of ["atespace", "policy", "template"] as const) {
+              const method =
+                kind === "atespace"
+                  ? "GetAtespace"
+                  : kind === "policy"
+                    ? "GetAtespaceAccessPolicy"
+                    : "GetActorTemplate";
+              const request =
+                kind === "atespace"
+                  ? { atespace: { name: atespace } }
+                  : kind === "policy"
+                    ? { atespace: { name: atespace }, name: "default" }
+                    : { actorTemplate: { atespace, name: "runtime" } };
+              const actual = resource.parse(await editor(method, request));
+              requireOriginal(
+                actual,
+                original[kind],
+                original[`${kind}Attempted`],
+                kind === "atespace" ? atespace : kind === "policy" ? "default" : "runtime",
+                kind === "template" ? atespace : undefined,
+              );
+              if (
+                kind === "policy" &&
+                !isDeepStrictEqual(actual["bindings"], [
+                  { role: "editor", members: [config.editorPrincipal] },
+                ])
+              )
+                throw new Error("Native Editor grant differs from immutable provisioning intent");
+              if (
+                kind === "template" &&
+                substrateTemplateSHA256(actual) !== original.intent.templateSHA256
+              )
+                throw new Error(
+                  "Native ActorTemplate spec differs from immutable provisioning intent",
+                );
+            }
+            return execution(workspaceID, original).start(userID);
+          }
         }
         const [ticket] = changeID
           ? await sql<{ id: string; revision: string; branch: string }[]>`
@@ -296,9 +416,10 @@ export function createSubstrateWorkspaces(
         const environment = prior?.intent.environment ??
           currentEnvironment ?? { version: 0, secretKey: null };
         const appName = (id: string) => (id === systemContract.primaryApp ? "app" : `app-${id}`);
-        const tokens = runtimeConnectorTokens(secret, attemptID, 1);
+        const tokens = runtimeConnectorTokens(secret, attemptID, generation);
         const endpoint = new URL(config.connectorURL);
         const factoryOrigin = `https://${endpoint.host}`;
+        const origins = runtimeAppOrigins(factoryOrigin, attemptID, systemContract);
         const repositoryURL = new URL(
           `/internal/runtime-source/${attemptID}/${runtimeSourceCapability(attemptID)}`,
           factoryOrigin,
@@ -306,7 +427,7 @@ export function createSubstrateWorkspaces(
         const assignment = {
           version: 1,
           runtimeAttemptId: attemptID,
-          generation: 1,
+          generation,
           workspaceFolder: "/home/rootless/persist/project",
           remoteWorkspaceFolder: "/workspace/project",
           repositoryUrl: repositoryURL,
@@ -338,6 +459,7 @@ export function createSubstrateWorkspaces(
           name: appName(app.id),
           label: app.label,
           command: app.command,
+          ...(origins ? { env: { FACTORY_APP_ORIGINS: JSON.stringify(origins) } } : {}),
         }));
         const configuredAgent = changeID
           ? await agentConfiguration(
@@ -345,7 +467,7 @@ export function createSubstrateWorkspaces(
               changeID,
               secret,
               attemptID,
-              1,
+              generation,
               process.env["FACTORY_BROWSER_TOOLS_IMAGE"] ?? null,
             )
           : undefined;
@@ -366,10 +488,13 @@ export function createSubstrateWorkspaces(
             target: "http://127.0.0.1:4096",
             healthPath: "/api/health",
           });
-          processes.push(runtimeAgentProcess(agent, 1));
+          processes.push(runtimeAgentProcess(agent, generation));
         }
         const bootstrap = {
           sourceHandoff: Boolean(sources),
+          ...(sources
+            ? { inputStop: { version: 1, openCodeVersion: upstream.openCode.version } }
+            : {}),
           assignment: {
             ...assignment,
             processes,
@@ -400,14 +525,14 @@ export function createSubstrateWorkspaces(
         };
         await sql.begin(async (tx) => {
           if (!workspace && ticket && changeID)
-            await tx`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by,substrate,factorybox_worker_id) VALUES(${workspaceID},${config.projectID},'ticket',${ticket.id},${changeID},${branch},${revision},${userID},true,NULL)`;
+            await tx`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${config.projectID},'ticket',${ticket.id},${changeID},${branch},${revision},${userID})`;
           else if (!workspace)
-            await tx`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by,substrate,factorybox_worker_id) VALUES(${workspaceID},${config.projectID},'personal',${userID},${branch},${revision},${userID},true,NULL)`;
+            await tx`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${config.projectID},'personal',${userID},${branch},${revision},${userID})`;
           await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
           if (!prior)
-            await tx`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${workspaceID},${JSON.stringify(intent)}::text::jsonb)`;
+            await tx`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent) VALUES(${workspaceID},${generation},${JSON.stringify(intent)}::text::jsonb)`;
         });
-        row = await saved(workspaceID, sql);
+        row = await saved(workspaceID, generation, sql);
         if (!isDeepStrictEqual(row.intent, intent))
           throw new Error("Native Workspace inputs differ from immutable provisioning intent");
         if (row.atespaceRejected || row.policyRejected || row.templateRejected)
@@ -423,20 +548,20 @@ export function createSubstrateWorkspaces(
           if (await absent(owner, "GetAtespace", spaceRef))
             throw new Error("Preexisting Atespace was not adopted");
           await authorize();
-          await sql`UPDATE factory.substrate_workspace SET atespace_attempted_at=now() WHERE workspace_id=${workspaceID}`;
-          row = await saved(workspaceID, sql);
+          await sql`UPDATE factory.substrate_workspace SET atespace_attempted_at=now() WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          row = await saved(workspaceID, generation, sql);
           try {
             const created = resource.parse(
               await owner("CreateAtespace", { atespace: { metadata: { name: atespace } } }),
             );
             requireOriginal(created, null, row.atespaceAttempted, atespace);
-            await sql`UPDATE factory.substrate_workspace SET atespace=${JSON.stringify(created)}::text::jsonb WHERE workspace_id=${workspaceID}`;
+            await sql`UPDATE factory.substrate_workspace SET atespace=${JSON.stringify(created)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
           } catch (error) {
             if (rejected(error))
-              await sql`UPDATE factory.substrate_workspace SET atespace_rejected=true WHERE workspace_id=${workspaceID}`;
+              await sql`UPDATE factory.substrate_workspace SET atespace_rejected=true WHERE workspace_id=${workspaceID} AND generation=${generation}`;
             throw error;
           }
-          row = await saved(workspaceID, sql);
+          row = await saved(workspaceID, generation, sql);
         }
         // Once the original grant is confirmed, continuation uses that scoped
         // Editor identity. An expired global provisioning token must not block
@@ -444,15 +569,15 @@ export function createSubstrateWorkspaces(
         const space = resource.parse(await (row.policy ? editor : owner)("GetAtespace", spaceRef));
         requireOriginal(space, row.atespace, row.atespaceAttempted, atespace);
         if (!row.atespace)
-          await sql`UPDATE factory.substrate_workspace SET atespace=${JSON.stringify(space)}::text::jsonb WHERE workspace_id=${workspaceID}`;
+          await sql`UPDATE factory.substrate_workspace SET atespace=${JSON.stringify(space)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
         const policyRef = { ...spaceRef, name: "default" };
         const bindings = [{ role: "editor", members: [config.editorPrincipal] }];
         if (!row.policyAttempted) {
           if (await absent(owner, "GetAtespaceAccessPolicy", policyRef))
             throw new Error("Preexisting native grant was not adopted");
           await authorize();
-          await sql`UPDATE factory.substrate_workspace SET policy_attempted_at=now() WHERE workspace_id=${workspaceID}`;
-          row = await saved(workspaceID, sql);
+          await sql`UPDATE factory.substrate_workspace SET policy_attempted_at=now() WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          row = await saved(workspaceID, generation, sql);
           try {
             const created = resource.parse(
               await owner("CreateAtespaceAccessPolicy", {
@@ -463,13 +588,13 @@ export function createSubstrateWorkspaces(
             requireOriginal(created, null, row.policyAttempted, "default");
             if (!isDeepStrictEqual(created["bindings"], bindings))
               throw new Error("Native editor grant differs from its provisioning intent");
-            await sql`UPDATE factory.substrate_workspace SET policy=${JSON.stringify(created)}::text::jsonb WHERE workspace_id=${workspaceID}`;
+            await sql`UPDATE factory.substrate_workspace SET policy=${JSON.stringify(created)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
           } catch (error) {
             if (rejected(error))
-              await sql`UPDATE factory.substrate_workspace SET policy_rejected=true WHERE workspace_id=${workspaceID}`;
+              await sql`UPDATE factory.substrate_workspace SET policy_rejected=true WHERE workspace_id=${workspaceID} AND generation=${generation}`;
             throw error;
           }
-          row = await saved(workspaceID, sql);
+          row = await saved(workspaceID, generation, sql);
         }
         const policy = resource.parse(
           await (row.policy ? editor : owner)("GetAtespaceAccessPolicy", policyRef),
@@ -478,14 +603,14 @@ export function createSubstrateWorkspaces(
         if (!isDeepStrictEqual(policy["bindings"], bindings))
           throw new Error("Native editor grant differs from its provisioning intent");
         if (!row.policy)
-          await sql`UPDATE factory.substrate_workspace SET policy=${JSON.stringify(policy)}::text::jsonb WHERE workspace_id=${workspaceID}`;
+          await sql`UPDATE factory.substrate_workspace SET policy=${JSON.stringify(policy)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
         const templateRef = { actorTemplate: { atespace, name: "runtime" } };
         if (!row.templateAttempted) {
           if (await absent(editor, "GetActorTemplate", templateRef))
             throw new Error("Preexisting ActorTemplate was not adopted");
           await authorize();
-          await sql`UPDATE factory.substrate_workspace SET template_attempted_at=now() WHERE workspace_id=${workspaceID}`;
-          row = await saved(workspaceID, sql);
+          await sql`UPDATE factory.substrate_workspace SET template_attempted_at=now() WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          row = await saved(workspaceID, generation, sql);
           try {
             const created = resource.parse(
               await editor("CreateActorTemplate", { actorTemplate: template }),
@@ -495,13 +620,13 @@ export function createSubstrateWorkspaces(
               throw new Error(
                 "Native ActorTemplate spec differs from immutable provisioning intent",
               );
-            await sql`UPDATE factory.substrate_workspace SET template=${JSON.stringify({ metadata: created.metadata })}::text::jsonb WHERE workspace_id=${workspaceID}`;
+            await sql`UPDATE factory.substrate_workspace SET template=${JSON.stringify({ metadata: created.metadata })}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
           } catch (error) {
             if (rejected(error))
-              await sql`UPDATE factory.substrate_workspace SET template_rejected=true WHERE workspace_id=${workspaceID}`;
+              await sql`UPDATE factory.substrate_workspace SET template_rejected=true WHERE workspace_id=${workspaceID} AND generation=${generation}`;
             throw error;
           }
-          row = await saved(workspaceID, sql);
+          row = await saved(workspaceID, generation, sql);
         }
         const actual = resource.parse(await editor("GetActorTemplate", templateRef));
         requireOriginal(actual, row.template, row.templateAttempted, "runtime", atespace);
@@ -509,9 +634,9 @@ export function createSubstrateWorkspaces(
           throw new Error("Native ActorTemplate spec differs from immutable provisioning intent");
         if (!row.template) {
           // Store only public native metadata; never persist role capabilities or source URLs from the template env.
-          await sql`UPDATE factory.substrate_workspace SET template=${JSON.stringify({ metadata: actual.metadata })}::text::jsonb WHERE workspace_id=${workspaceID}`;
+          await sql`UPDATE factory.substrate_workspace SET template=${JSON.stringify({ metadata: actual.metadata })}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
         }
-        row = await saved(workspaceID, sql);
+        row = await saved(workspaceID, generation, sql);
         if (project.repository.startsWith("file://"))
           await prepareRuntimeRepository(attemptID, project.repository, revision);
       } finally {

@@ -89,7 +89,8 @@ test("archive failure is independent of turn/commit settlement and retries retai
       lastSaved: null,
     });
     const original = await owned.database
-      .client`SELECT id, factorybox_worker_id, factorybox_admission_id FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      .client`SELECT a.id,b.atespace,b.actor_name,b.actor_uid,b.intent FROM factory.runtime_attempt a
+        JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${owned.attemptID}`;
     fail = false;
     await owned.database
       .client`UPDATE factory.session_archive SET retry_after=now() WHERE state<>'saved'`;
@@ -120,7 +121,8 @@ test("archive failure is independent of turn/commit settlement and retries retai
     });
     expect(
       await owned.database
-        .client`SELECT id, factorybox_worker_id, factorybox_admission_id FROM factory.runtime_attempt WHERE id=${owned.attemptID}`,
+        .client`SELECT a.id,b.atespace,b.actor_name,b.actor_uid,b.intent FROM factory.runtime_attempt a
+          JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${owned.attemptID}`,
     ).toEqual(original);
     const data = await owned.database.client<
       { bytes: number }[]
@@ -174,7 +176,7 @@ test("native transcript checkpoint retains pinned recovery references without co
     };
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},${JSON.stringify({ configuration: { workloadImage: image, provisioner: { tokenFile: "/must-never-archive-owner-credential" } } })}::jsonb)`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,substrate,factorybox_worker_id,factorybox_admission_id) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID},true,NULL,NULL)`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(intent)}::jsonb,${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
@@ -264,14 +266,16 @@ test("native transcript checkpoint retains pinned recovery references without co
       manifestKey: `workspace-source/v1/${f.workspaceID}/${checkpointID}/manifest.json`,
       relationship: "last-confirmed-generation-not-turn-atomic",
     });
-    expect(saved.source["workerID"]).toBeNull();
-    expect(saved.source["admissionID"]).toBeNull();
+    expect(saved.source).not.toHaveProperty("workerID");
+    expect(saved.source).not.toHaveProperty("admissionID");
     expect(JSON.stringify(saved.source)).not.toContain("must-never-archive");
     expect(
       (await readNativeSessionArchive(objects, saved.key, saved.sha256)).manifest.source,
     ).toEqual(saved.source);
     expect(exports).toBe(1);
-    expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ worker: null }]);
     const conversationID = await f.database.client.begin(async (sql) => {
       const conversation = await ensureConversationIn(sql, f.projectID, f.ticketID, f.userID);
       await sql`UPDATE factory.ticket_conversation SET mode='build' WHERE id=${conversation.id}`;

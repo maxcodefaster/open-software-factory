@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import {
   overlaySubstrateEgress,
   parseEnvoy,
@@ -12,6 +12,7 @@ import { flags, pins, renderSubstrateProfile, verifyNightly } from "./substrate-
 import { applySubstrateEgress } from "./substrate-profile-command";
 
 const input = {
+  architecture: "amd64",
   namespace: "profile-proof",
   pool: "profile-worker",
   node: "profile-node",
@@ -78,6 +79,124 @@ function fixture() {
 }
 
 describe("Substrate concrete profile", () => {
+  test("native atelet health patch pins shared-node tolerance without changing endpoints, periods or runtime intent", async () => {
+    const patch = parse(
+      await readFile(
+        new URL("../../deploy/substrate/atelet-health-patch.yaml", import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(patch).toEqual({
+      apiVersion: "apps/v1",
+      kind: "DaemonSet",
+      metadata: { name: "atelet" },
+      spec: {
+        template: {
+          spec: {
+            containers: [
+              {
+                name: "atelet",
+                readinessProbe: {
+                  httpGet: { path: "/readyz", port: "health" },
+                  periodSeconds: 2,
+                  timeoutSeconds: 5,
+                  failureThreshold: 3,
+                },
+                livenessProbe: {
+                  httpGet: { path: "/healthz", port: "health" },
+                  periodSeconds: 10,
+                  timeoutSeconds: 10,
+                  failureThreshold: 6,
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+  });
+
+  test("shared-node native API reserves scheduling headroom without changing worker or lifecycle limits", async () => {
+    expect(
+      parse(
+        await readFile(
+          new URL("../../deploy/substrate/api-resources-patch.yaml", import.meta.url),
+          "utf8",
+        ),
+      ),
+    ).toEqual({
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: "ate-api-server" },
+      spec: {
+        template: {
+          spec: {
+            containers: [
+              {
+                name: "ate-api-server",
+                resources: { requests: { cpu: "50m", memory: "128Mi" } },
+              },
+            ],
+          },
+        },
+      },
+    });
+  });
+
+  test("native router recovers its drained Envoy through probes without exposing admin or changing runtime intent", async () => {
+    const patch = parse(
+      await readFile(
+        new URL("../../deploy/substrate/router-health-patch.yaml", import.meta.url),
+        "utf8",
+      ),
+    );
+    const ready = { httpGet: { path: "/ready", port: "envoy-metrics" } };
+    expect(patch).toEqual({
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: "atenet-router" },
+      spec: {
+        template: {
+          spec: {
+            containers: [
+              {
+                name: "envoy",
+                startupProbe: {
+                  ...ready,
+                  periodSeconds: 5,
+                  timeoutSeconds: 5,
+                  failureThreshold: 36,
+                },
+                livenessProbe: {
+                  ...ready,
+                  periodSeconds: 10,
+                  timeoutSeconds: 5,
+                  failureThreshold: 6,
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+  });
+
+  test("ARM profile uses the official ARM archive and pins worker placement without changing amd64 assets", () => {
+    const profile = renderSubstrateProfile({ ...input, architecture: "arm64" });
+    expect(profile.sandboxConfig.spec.versions[0]?.assets.arm64.gvisor).toEqual({
+      url: "gs://gvisor/releases/nightly/2026-11-09/aarch64/gvisor.tar.zstd",
+      sha256: "92bfb81fecb71248a2ccebe78652cc0219c33c8fd62b708666c66c1bbac3c22d",
+    });
+    expect(profile.sandboxConfig.spec.versions[0]?.assets.amd64.gvisor.sha256).toBe(
+      "1d9120e4aa42ff7d9653f3f265219b68bd1674a23cee389c6a935ce7357ba9b5",
+    );
+    expect(profile.workerPool.spec.template.nodeSelector).toEqual({
+      "kubernetes.io/hostname": input.node,
+      "kubernetes.io/os": "linux",
+      "kubernetes.io/arch": "arm64",
+    });
+  });
+
   test("real render command repeats safely and never overwrites different output", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-substrate-profile-"));
     try {
@@ -127,6 +246,8 @@ describe("Substrate concrete profile", () => {
     expect(profile.workerPool.spec.replicas).toBe(1);
     expect(profile.workerPool.spec.template.nodeSelector).toEqual({
       "kubernetes.io/hostname": input.node,
+      "kubernetes.io/os": "linux",
+      "kubernetes.io/arch": "amd64",
     });
     expect(profile.actorTemplate.workerSelector.matchLabels).toEqual(
       profile.workerPool.metadata.labels,
@@ -151,7 +272,8 @@ describe("Substrate concrete profile", () => {
     { node: "invalid..hostname" },
     { command: [] },
     { privileged: true },
-    { architecture: "arm64" },
+    { architecture: "riscv64" },
+    { architecture: undefined },
   ])("rejects unsupported, ambiguous or unsafe inputs %j", (change) => {
     expect(() => renderSubstrateProfile({ ...input, ...change })).toThrow();
   });
@@ -167,13 +289,14 @@ describe("Substrate concrete profile", () => {
     expect(pins.substrate.release).toBe("v1.0.0");
     expect(pins.substrate.commit).toBe("b34fbee742906494b5eb4f1f36987176bf8770a4");
     expect(pins.gvisor.commit).toBe("975fb172241c7946a9f67b4f52e0349d9240589a");
-    expect(pins.gvisor.sha512).toBe(
+    expect(pins.gvisor.architectures.amd64.sha512).toBe(
       "02fb9b8b49fc2bdcb7ff9f2a8a4159219f416c0f670ffc54c401651e53081454d3fbce54d7783bd2c3d1bf246fd677d9ec04934e3c3f64605050b26dd433b114",
     );
-    expect(pins.gvisor.runscSha256).toBe(
+    expect(pins.gvisor.architectures.amd64.runscSha256).toBe(
       "4b2be59adc0da986d3dbb2e081bbf73e986e943fe9c4fa1b1433c72fb18100f0",
     );
-    expect(() => verifyNightly(new Uint8Array([0]))).toThrow("checksums");
+    for (const architecture of ["amd64", "arm64"] as const)
+      expect(() => verifyNightly(new Uint8Array([0]), architecture)).toThrow("checksums");
     const worker = await readFile(
       new URL("../../deploy/substrate/Worker.Dockerfile", import.meta.url),
       "utf8",

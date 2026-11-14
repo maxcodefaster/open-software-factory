@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { boundedSourceBody } from "../../../../packages/runtime-kubernetes/src/workspace-source";
+import { boundedSourceBody } from "./source-body";
 import { CommandError } from "../command-error";
 import { developerIDEOrigin } from "../developer-ide-origin";
 import { json } from "../http";

@@ -6,13 +6,13 @@ import {
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
-import { workspaceSourceIdentity } from "../../packages/workspace-domain/src/source";
+import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
-test("failed file access can be explicitly restarted without discarding the editor or starting compute", async () => {
+test("unavailable native file access can be rechecked without replacing Source, discarding the editor or starting compute", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
   const database = fixture.connect();
   const browser = await chromium.launch({
@@ -21,13 +21,13 @@ test("failed file access can be explicitly restarted without discarding the edit
       ? { executablePath: process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"] }
       : {}),
   });
-  const projectID = crypto.randomUUID(),
-    workspaceID = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  let workspaceID = "";
   const slug = `source-recovery-${projectID.slice(0, 8)}`;
   const calls: string[] = [];
-  let state: "failed" | "stop-intended" | "stopped" | "ready" = "ready";
-  let epoch = 1,
-    stopReads = 0,
+  let state: "preparing" | "ready" = "ready";
+  const epoch = 1;
+  let readable = false,
     editorLoads = 0,
     editorEnsures = 0,
     computeStarts = 0;
@@ -40,8 +40,13 @@ test("failed file access can be explicitly restarted without discarding the edit
       WHERE email=${`owned-${fixture.id}@factory.local`}`;
     if (!user) throw Error("Owned source recovery actor missing");
     const userID = String(user.id);
+    workspaceID = personalWorkspaceIdentity(projectID, userID).workspaceID;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${slug},'Source recovery fixture','https://example.invalid/owned','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${projectID},${userID},'developer',${userID})`;
+    await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+      VALUES(${workspaceID},${projectID},'personal',${userID},'main',${"a".repeat(40)},${userID})`;
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     // Chromium treats the intercepted entry document as public-network content.
     // Permit only this owned fixture origin to reach its loopback planning cache.
@@ -72,11 +77,13 @@ test("failed file access can be explicitly restarted without discarding the edit
     });
     const source = () => ({
       workspaceID,
-      serviceID: workspaceSourceIdentity(workspaceID, epoch).serviceID,
+      serviceID: `source-${workspaceID.replaceAll("-", "")}`,
       epoch,
       state,
       failure:
-        state === "failed" ? "Source preparation failed. Stop and retry source access." : null,
+        state === "preparing"
+          ? "The current Source owner is unavailable. Keep your editor buffer."
+          : null,
     });
     await mockFactoryFunctions(page, {
       workspaces: {
@@ -130,25 +137,12 @@ test("failed file access can be explicitly restarted without discarding the edit
     });
     await mockFactoryFunctions(page, {
       workspaces: {
-        async stopSource() {
-          calls.push("stop");
-          state = "stop-intended";
-          stopReads = 0;
-        },
         async ensureSource() {
           calls.push(`ensure:${state}`);
-          if (state !== "failed") {
-            if (state !== "stopped") throw Error("Restart must first confirm Stop");
-            state = "ready";
-            epoch++;
-          }
+          if (readable) state = "ready";
           return { label: "Owned source", ...sourceWorkspaceViewSchema.parse(source()) };
         },
         async getSource() {
-          if (state === "stop-intended") {
-            stopReads++;
-            if (stopReads > 1) state = "stopped";
-          }
           calls.push(`read:${state}`);
           return { label: "Owned source", ...sourceWorkspaceViewSchema.parse(source()) };
         },
@@ -173,57 +167,57 @@ test("failed file access can be explicitly restarted without discarding the edit
     );
     await visible(frame).toHaveAttribute("data-workspace-id", workspaceID);
     await draft.fill("keep this unsaved buffer through source recovery");
-    state = "failed";
+    state = "preparing";
     await page.getByRole("button", { name: "Desktop", exact: true }).click();
     await page.getByRole("button", { name: "IDE", exact: true }).click();
     await visible(
       page.getByRole("button", {
-        name: /^(Restart file access|Retry editor connection)$/,
+        name: "Retry file access",
+        exact: true,
       }),
     ).toBeVisible();
     await visible(
-      page.getByRole("status").filter({ hasText: "Source preparation failed" }),
+      page.getByRole("status").filter({ hasText: "Source owner is unavailable" }),
     ).toBeVisible();
     await mkdir(".factory/test-results/source-recovery-browser", { recursive: true });
     await page.screenshot({
+      animations: "disabled",
       path: ".factory/test-results/source-recovery-browser/failed-desktop.png",
     });
     const ensuresBeforeRecovery = editorEnsures;
     await page.getByRole("button", { name: "Retry file access", exact: true }).click();
-    await visible.poll(() => calls.includes("ensure:failed")).toBe(true);
+    await visible.poll(() => calls.includes("ensure:preparing")).toBe(true);
     await visible(
       page.getByRole("button", { name: "Restart file access", exact: true }),
-    ).toBeVisible();
-    expect(state).toBe("failed");
+    ).toHaveCount(0);
+    expect(state).toBe("preparing");
     expect(epoch).toBe(1);
     expect(calls).not.toContain("stop");
-    await page
-      .getByRole("button", { name: /^(Restart file access|Retry editor connection)$/ })
-      .dblclick();
+    readable = true;
+    await page.getByRole("button", { name: "Retry file access", exact: true }).click();
     await visible.poll(() => state, { timeout: 3000 }).toBe("ready");
     await visible(frame).toHaveAttribute("data-workspace-id", workspaceID);
     await visible(draft).toHaveValue("keep this unsaved buffer through source recovery");
-    expect(calls.filter((call) => call === "stop")).toHaveLength(1);
-    expect(calls).toContain("read:stop-intended");
-    expect(calls).toContain("read:stopped");
+    expect(calls.filter((call) => call === "stop")).toHaveLength(0);
     expect(calls.filter((call) => call.startsWith("ensure:"))).toEqual([
-      "ensure:failed",
-      "ensure:stopped",
+      "ensure:preparing",
+      "ensure:preparing",
     ]);
     expect(editorLoads).toBe(1);
     expect(editorEnsures).toBe(ensuresBeforeRecovery);
     expect(computeStarts).toBe(0);
-    expect(epoch).toBe(2);
+    expect(epoch).toBe(1);
     expect(failures).toEqual([]);
     await page.screenshot({
+      animations: "disabled",
       path: ".factory/test-results/source-recovery-browser/recovered-desktop.png",
     });
     await page.setViewportSize({ width: 390, height: 844 });
-    state = "failed";
+    state = "preparing";
     await page.getByRole("button", { name: "Desktop", exact: true }).click();
     await page.getByRole("button", { name: "IDE", exact: true }).click();
-    const recovery = page.getByRole("button", { name: "Restart file access", exact: true });
-    const failure = page.getByRole("status").filter({ hasText: "Source preparation failed" });
+    const recovery = page.getByRole("button", { name: "Retry file access", exact: true });
+    const failure = page.getByRole("status").filter({ hasText: "Source owner is unavailable" });
     await visible(recovery).toBeVisible();
     const buttonBox = await recovery.boundingBox(),
       errorBox = await failure.boundingBox();
@@ -236,17 +230,19 @@ test("failed file access can be explicitly restarted without discarding the edit
       fixtureValue(errorBox, "errorBox").y + fixtureValue(errorBox, "errorBox").height,
     ).toBeLessThanOrEqual(fixtureValue(buttonBox, "buttonBox").y);
     await page.screenshot({
+      animations: "disabled",
       path: ".factory/test-results/source-recovery-browser/failed-narrow.png",
     });
     await recovery.focus();
     await page.keyboard.press("Enter");
     await visible.poll(() => state, { timeout: 3000 }).toBe("ready");
-    expect(epoch).toBe(3);
+    expect(epoch).toBe(1);
     expect(editorLoads).toBe(1);
     expect(editorEnsures).toBe(ensuresBeforeRecovery);
     expect(computeStarts).toBe(0);
     await visible(draft).toHaveValue("keep this unsaved buffer through source recovery");
     await page.screenshot({
+      animations: "disabled",
       path: ".factory/test-results/source-recovery-browser/recovered-narrow.png",
     });
   } catch (cause) {

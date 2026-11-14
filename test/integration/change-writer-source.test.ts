@@ -1,22 +1,23 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
-import { fixture } from "../fixtures/change-agent-turns";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import { eventually } from "../fixtures/factory-process";
+import { substrateFixture } from "../fixtures/substrate";
 import { fixtureValue } from "../fixtures/value";
 
 test("native source rejects timed-out human saves after Agent takeover and retains files through service restart", async () => {
   const owner = crypto.randomUUID();
   const container = `factory-owned-writer-source-${owner}`;
+  const imageTag = `factory-owned-writer-source:${owner}`;
   const temporary = await mkdtemp(join(tmpdir(), "factory-writer-source-"));
-  const databaseFixture = await factoryProcess();
-  const owned = await fixture(undefined, undefined, databaseFixture.connect());
+  const owned = await substrateFixture("a".repeat(40), "ticket");
   let sources: ReturnType<typeof createWorkspaceSourceController> | undefined;
-  const previousImage = process.env["FACTORY_WORKSPACE_FILES_IMAGE"];
   async function docker(...args: string[]) {
     const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
     const [output, error, status] = await Promise.all([
@@ -32,26 +33,36 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       { id: string }[]
     >`SELECT id FROM factory.development_workspace WHERE change_id=${owned.changeID}`;
     if (!workspace) throw new Error("Owned source Workspace missing");
-    await chmod(temporary, 0o777);
+    await mkdir(join(temporary, "project"));
     const access = {
       workspaceId: workspace.id,
       serviceId: "owned-source",
       epoch: 1,
       token: "owned-source-capability-with-thirty-two-characters",
+      ownerEpoch: 1,
+      writerEpoch: 1,
+      readOnly: false,
     };
     await writeFile(join(temporary, "access.json"), JSON.stringify(access), { mode: 0o644 });
-    const image =
-      process.env["FACTORY_WORKSPACE_FILES_TEST_IMAGE"] ??
-      (await readFile(".factory/workspace-files-image", "utf8")).trim();
-    if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(image))
-      throw new Error("Owned source proof requires an exact image digest");
+    await docker(
+      "build",
+      "--label",
+      `factory.owned-writer-source=${owner}`,
+      "--tag",
+      imageTag,
+      "--file",
+      "test/fixtures/native-source-service.Dockerfile",
+      ".",
+    );
+    const image = await docker("image", "inspect", "--format", "{{.Id}}", imageTag);
+    if (!/^sha256:[a-f0-9]{64}$/.test(image))
+      throw Error("Owned native Source image identity missing");
     const evidence = join(".factory/test-results/change-writer-source", owner);
     await mkdir(evidence, { recursive: true });
     await writeFile(
       join(evidence, "intent.json"),
       JSON.stringify({ owner, container, image, temporary }),
     );
-    process.env["FACTORY_WORKSPACE_FILES_IMAGE"] = image;
     await docker(
       "run",
       "--detach",
@@ -63,16 +74,7 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       `${temporary}:/workspace`,
       "--publish",
       "127.0.0.1::4600",
-      image.replace(
-        "registry.open-factory-envbox-smoke.svc.cluster.local:5000",
-        "registry.localhost:5443",
-      ),
-      "--root",
-      "/workspace",
-      "--assignment",
-      "/workspace/access.json",
-      "--listen",
-      "0.0.0.0:4600",
+      image,
     );
     const port = (await docker("port", container, "4600/tcp")).split(":").at(-1);
     let origin = `http://127.0.0.1:${port}`;
@@ -94,34 +96,31 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       (value) => value?.ok === true,
       "Native source did not start",
     );
-    sources = createWorkspaceSourceController(owned.database, "owned-source-secret", {
-      async executionNode() {
-        return "owned-node";
-      },
-      async prepare() {
-        return {
-          namespaceUID: "owned-namespace",
-          claimUID: "owned-claim",
-          podUID: "owned-pod",
-          storageNode: "owned-node",
-          ready: true,
-          failed: false,
-        };
-      },
-      async observe() {
-        return null;
-      },
-      async connect() {},
-      async stop() {},
-      close() {},
-      async request(_input, operation, request) {
-        return native(
-          operation,
-          await request.json(),
-          request.headers.get("X-Factory-Writer-Epoch") ?? undefined,
-        );
-      },
+    const hub = new RuntimeHub(async () => {});
+    hub.sourceConnected = () => true;
+    hub.request = async (_attempt, channel, request, path) => {
+      expect(channel).toBe("source");
+      return native(
+        path.split("/").at(-1) ?? "",
+        await request.json(),
+        request.headers.get("X-Factory-Writer-Epoch") ?? undefined,
+      );
+    };
+    const actorUID = crypto.randomUUID();
+    // Controlled original-Actor observation for this Source-service proof.
+    // No Kubernetes Source client, native Actor or model is created here.
+    await owned.database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${owned.workspaceID},'{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${owned.attemptID},${owned.projectID},${owned.workspaceID},${owned.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
+        VALUES(${owned.attemptID},${owned.atespace},${`runtime-${owned.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${owned.attemptID}`;
+      await sql`UPDATE factory.change SET runtime_attempt_id=${owned.attemptID} WHERE id=${owned.changeID}`;
     });
+    const source = createSubstrateSources(owned.database, hub);
+    await source.attach(workspace.id, actorUID, owned.database.client);
+    sources = createWorkspaceSourceController(owned.database, hub, source);
     await sources.ensure(workspace.id, owned.userID);
     await eventually(
       () => fixtureValue(sources, "sources").get(workspace.id, owned.userID),
@@ -172,6 +171,14 @@ test("native source rejects timed-out human saves after Agent takeover and retai
     await expect(
       sources.forward(workspace.id, owned.userID, "write", save("late")),
     ).rejects.toThrow("observation-only");
+    // The restarted host receives the current recorded Change fence, not its
+    // original human's access epoch. No Source epoch or filesystem is replaced.
+    const [writer] = await owned.database.client<{ epoch: number; writable: boolean }[]>`
+      SELECT epoch::float8 AS epoch,state='human' AS writable FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+    if (!writer) throw Error("Owned native Source writer disappeared");
+    access.writerEpoch = writer.epoch;
+    access.readOnly = !writer.writable;
+    await writeFile(join(temporary, "access.json"), JSON.stringify(access), { mode: 0o644 });
     const previousStart = await docker("inspect", "--format", "{{.State.StartedAt}}", container);
     const restart = Bun.spawn(["docker", "restart", "--timeout", "0", container], {
       stdout: "pipe",
@@ -233,12 +240,22 @@ test("native source rejects timed-out human saves after Agent takeover and retai
           container,
         ),
       ).toBe(owner);
+      await docker("exec", container, "chmod", "-R", "a+rwX", "/workspace/project");
       await docker("rm", "--force", container);
     }
+    if (await docker("image", "ls", "--quiet", imageTag)) {
+      expect(
+        await docker(
+          "image",
+          "inspect",
+          "--format",
+          '{{index .Config.Labels "factory.owned-writer-source"}}',
+          imageTag,
+        ),
+      ).toBe(owner);
+      await docker("image", "rm", imageTag);
+    }
     await owned.dispose();
-    await databaseFixture.dispose();
     await rm(temporary, { recursive: true, force: true });
-    if (previousImage === undefined) delete process.env["FACTORY_WORKSPACE_FILES_IMAGE"];
-    else process.env["FACTORY_WORKSPACE_FILES_IMAGE"] = previousImage;
   }
-}, 120_000);
+}, 300_000);

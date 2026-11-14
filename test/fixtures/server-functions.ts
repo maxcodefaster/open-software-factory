@@ -119,7 +119,6 @@ const serviceFunctions = {
     ensureWorkspaceSource: "ensureSource",
     ensurePersonalSource: "ensurePersonalSource",
     ensureChangeSource: "ensureChangeSource",
-    stopWorkspaceSource: "stopSource",
     getDeveloperIDE: "getEditor",
     ensureDeveloperIDE: "ensureEditor",
     stopDeveloperIDE: "stopEditor",

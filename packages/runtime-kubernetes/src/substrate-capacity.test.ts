@@ -6,12 +6,69 @@ import { nativeCapacityFixture } from "../../../test/fixtures/substrate-capacity
 import {
   nativeCapacityCandidates,
   nativeCapacityNodeReady,
+  nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
   requireNativeCapacityPool,
   requireNativeCapacitySandbox,
   runNativeCapacityKubernetes,
 } from "./substrate-capacity";
+
+test("original native capacity counts only equal finite CPU and memory reservations", () => {
+  const f = nativeCapacityFixture();
+  const pool = requireNativeCapacityBase({ items: [f.base] }, f.selector, "amd64");
+  pool.spec.template.resources = {
+    requests: { cpu: "4", memory: "8Gi" },
+    limits: { cpu: "4000m", memory: "8192Mi" },
+  };
+  expect(nativeCapacityReservedPoolResources(pool)).toEqual({ cpuMilli: 4000, memoryMiB: 8192 });
+  pool.spec.template.resources.requests["cpu"] = "250m";
+  expect(nativeCapacityReservedPoolResources(pool)).toBeNull();
+  pool.spec.template.resources.requests["cpu"] = "4";
+  pool.spec.template.resources.requests["memory"] = "4Gi";
+  expect(nativeCapacityReservedPoolResources(pool)).toBeNull();
+  pool.spec.template.resources.requests["memory"] = "8Gi";
+  delete pool.spec.template.resources.limits["cpu"];
+  expect(nativeCapacityReservedPoolResources(pool)).toBeNull();
+  pool.spec.template.resources.limits["cpu"] = "4";
+  pool.spec.template.resources.requests["memory"] = "invalid";
+  expect(() => nativeCapacityReservedPoolResources(pool)).toThrow("Invalid Kubernetes memory");
+});
+
+test("ARM admission selects only the installation architecture and preserves it through readiness and pool creation", () => {
+  const f = nativeCapacityFixture("arm64");
+  const arm = f.node("arm-worker");
+  const x86 = nativeCapacityFixture().node("x86-worker");
+  const nodes = { items: [arm, x86] };
+  const result = nativeCapacityCandidates(nodes, { items: [] }, "arm64");
+  expect(result.candidates).toHaveLength(1);
+  const candidate = result.candidates[0];
+  if (!candidate) throw Error("No ARM candidate");
+  expect(candidate.architecture).toBe("arm64");
+  const pool = renderNativeCapacityPool(
+    requireNativeCapacityBase({ items: [f.base] }, f.selector, "arm64"),
+    candidate,
+    f.selector,
+    crypto.randomUUID(),
+  );
+  expect(pool.spec.template.nodeSelector["kubernetes.io/arch"]).toBe("arm64");
+  expect(nativeCapacityNodeReady(nodes, candidate)).toBe(true);
+  const changed = structuredClone(arm);
+  changed.status.nodeInfo.architecture = "amd64";
+  expect(nativeCapacityNodeReady({ items: [changed] }, candidate)).toBe(false);
+  expect(result.refused.map((node) => node.nodeName)).toEqual(["x86-worker"]);
+  expect(() => requireNativeCapacityBase({ items: [f.base] }, f.selector, "amd64")).toThrow(
+    "installation architecture",
+  );
+  expect(() =>
+    renderNativeCapacityPool(
+      requireNativeCapacityBase({ items: [nativeCapacityFixture().base] }, f.selector, "amd64"),
+      candidate,
+      f.selector,
+      crypto.randomUUID(),
+    ),
+  ).toThrow("another runtime architecture");
+});
 
 test("native Kubernetes creation passes its manifest on stdin without application credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "native-capacity-client-"));
@@ -69,13 +126,13 @@ test("native joined-node admission shares scheduler accounting without opt-in la
       },
     ],
   };
-  const admitted = nativeCapacityCandidates({ items: [node] }, pods);
+  const admitted = nativeCapacityCandidates({ items: [node] }, pods, "amd64");
   expect(admitted.refused).toHaveLength(0);
   expect(admitted.candidates[0]?.resources).toEqual({ cpuMilli: 7250, memoryMiB: 12288 });
   const candidate = admitted.candidates[0];
   if (!candidate) throw Error("No native node candidate");
   const pool = renderNativeCapacityPool(
-    requireNativeCapacityBase({ items: [f.base] }, f.selector),
+    requireNativeCapacityBase({ items: [f.base] }, f.selector, "amd64"),
     candidate,
     f.selector,
     crypto.randomUUID(),
@@ -103,18 +160,18 @@ test("native joined-node admission shares scheduler accounting without opt-in la
 test("fresh native pools retain CPU for an independent editor and refuse budgets below the worker minimum", () => {
   const f = nativeCapacityFixture();
   const node = f.node("native-a");
-  const fresh = nativeCapacityCandidates({ items: [node] }, { items: [] }).candidates[0];
+  const fresh = nativeCapacityCandidates({ items: [node] }, { items: [] }, "amd64").candidates[0];
   expect(fresh?.resources.cpuMilli).toBe(7750);
   expect(8000 - (fresh?.resources.cpuMilli ?? 8000)).toBeGreaterThanOrEqual(50);
   const constrained = structuredClone(node);
   constrained.status.allocatable.cpu = "400m";
-  const refused = nativeCapacityCandidates({ items: [constrained] }, { items: [] });
+  const refused = nativeCapacityCandidates({ items: [constrained] }, { items: [] }, "amd64");
   expect(refused.candidates).toHaveLength(0);
   expect(refused.refused[0]?.reason).toContain("access-service headroom");
   constrained.status.allocatable.cpu = "500m";
   expect(
-    nativeCapacityCandidates({ items: [constrained] }, { items: [] }).candidates[0]?.resources
-      .cpuMilli,
+    nativeCapacityCandidates({ items: [constrained] }, { items: [] }, "amd64").candidates[0]
+      ?.resources.cpuMilli,
   ).toBe(250);
 });
 
@@ -133,17 +190,19 @@ test.each(["taint", "pressure", "unschedulable", "architecture", "operating-syst
     if (scenario === "architecture") node.status.nodeInfo.architecture = "arm64";
     if (scenario === "operating-system") node.status.nodeInfo.operatingSystem = "windows";
     if (scenario === "deleting") node.metadata.deletionTimestamp = new Date().toISOString();
-    expect(nativeCapacityCandidates({ items: [node] }, { items: [] }).candidates).toHaveLength(0);
+    expect(
+      nativeCapacityCandidates({ items: [node] }, { items: [] }, "amd64").candidates,
+    ).toHaveLength(0);
   },
 );
 
 test("native pool observations require exact create time, UID, labels, pin and resource budget", () => {
   const f = nativeCapacityFixture();
-  const node = nativeCapacityCandidates({ items: [f.node("native-a")] }, { items: [] })
+  const node = nativeCapacityCandidates({ items: [f.node("native-a")] }, { items: [] }, "amd64")
     .candidates[0];
   if (!node) throw Error("No candidate");
   const intended = renderNativeCapacityPool(
-    requireNativeCapacityBase({ items: [f.base] }, f.selector),
+    requireNativeCapacityBase({ items: [f.base] }, f.selector, "amd64"),
     node,
     f.selector,
     crypto.randomUUID(),

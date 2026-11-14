@@ -4,38 +4,26 @@ import { parse, parseAllDocuments } from "yaml";
 import upstream from "../../upstream.json";
 
 const chart = "deploy/helm/factory";
+const applicationImage = `registry.example/factory@sha256:${"a".repeat(64)}`;
 const localValues = [
   "--set",
-  "image=owned-factory-proof:unit",
+  `image=${applicationImage}`,
   "--set",
   "publicURL=http://127.0.0.1:58000",
   "--set",
-  "forgejoPublicURL=http://127.0.0.1:58001",
+  "forgejoPublicURL=https://git.example.com",
   "--set",
   "developmentZeroURL=http://127.0.0.1:58002",
   "--set",
   "development=true",
-  "--set",
-  `factorybox.image=registry.invalid/worker@sha256:${"a".repeat(64)}`,
-  "--set",
-  `factorybox.executableSHA256=${"b".repeat(64)}`,
-  "--set",
-  "factorybox.nodeName=owned-node",
-  "--set",
-  "factorybox.architecture=amd64",
 ];
-async function helm(args: string[]) {
-  if (args[0] === "template")
-    args.push(
-      "--set",
-      `factorybox.image=registry.invalid/worker@sha256:${"a".repeat(64)}`,
-      "--set",
-      `factorybox.executableSHA256=${"b".repeat(64)}`,
-      "--set",
-      "factorybox.nodeName=owned-node",
-    );
-  if (args[0] === "template" && !args.some((value) => value.startsWith("factorybox.architecture=")))
-    args.push("--set", "factorybox.architecture=amd64");
+async function helm(args: string[], nativeDefaults = true) {
+  if (args[0] === "template" && nativeDefaults) {
+    if (!args.some((value) => value.startsWith("substrate.workspaceConfigurationSecret=")))
+      args.push("--set", "substrate.workspaceConfigurationSecret=native-workspaces");
+    if (!args.some((value) => value.startsWith("substrate.provisionerTokenSecret=")))
+      args.push("--set", "substrate.provisionerTokenSecret=native-provisioner");
+  }
   const child = Bun.spawn(["helm", ...args], { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
@@ -97,6 +85,8 @@ type Resource = {
     tls?: Array<{ hosts: string[] }>;
   };
   rules?: Array<{ resources?: string[]; verbs?: string[]; apiGroups?: string[] }>;
+  subjects?: Array<{ kind: string; name: string; namespace?: string }>;
+  roleRef?: { kind: string; name: string };
 };
 let rendered: Promise<Resource[]> | undefined;
 function resources() {
@@ -155,206 +145,41 @@ test("maintenance resources are independently configurable without changing the 
   ).toBe("200m");
 });
 
-test("native Workspace configuration adds only native pool create/observe and profile reads alongside separate rotating credentials", async () => {
-  const missing = await helm([
-    "template",
-    "portable",
-    chart,
-    ...localValues,
-    "--set",
-    "substrate.workspaceConfigurationSecret=native-workspaces",
-  ]);
+test("native installation configuration and separately rotating credentials are required", async () => {
+  const missing = await helm(["template", "portable", chart, ...localValues], false);
   expect(missing.exitCode).not.toBe(0);
-  expect(missing.stderr).toContain("substrate.provisionerTokenSecret");
-  const result = await helm([
-    "template",
-    "portable",
-    chart,
-    "--namespace",
-    "factory-proof",
-    ...localValues,
-    "--set",
-    "substrate.workspaceConfigurationSecret=native-workspaces",
-    "--set",
-    "substrate.provisionerTokenSecret=native-provisioner",
-  ]);
-  expect(result.exitCode).toBe(0);
-  const all = parseAllDocuments(result.stdout).map((d) => d.toJSON() as Resource);
-  const app = all.find((r) => r.kind === "Deployment" && r.metadata.name === "portable");
-  expect(app?.spec?.template?.spec.containers[0]?.env).toContainEqual({
-    name: "FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION",
-    value: "/run/factory/substrate-configuration/configuration.json",
-  });
-  expect(JSON.stringify(app?.spec?.template?.spec.volumes)).toContain(
-    '"audience":"api.ate-system.svc"',
-  );
-  expect(JSON.stringify(app?.spec?.template?.spec.volumes)).toContain('"expirationSeconds":600');
-  expect(JSON.stringify(app?.spec?.template?.spec.volumes)).toContain(
-    '"secretName":"native-provisioner"',
-  );
-  const roles = (rows: Resource[]) =>
-    rows.filter((r) => r.kind === "ClusterRole" || r.kind === "Role");
-  expect(
-    roles(all).flatMap(
-      (role) => role.rules?.filter((rule) => rule.apiGroups?.includes("ate.dev")) ?? [],
-    ),
-  ).toEqual([
-    { apiGroups: ["ate.dev"], resources: ["workerpools"], verbs: ["get", "list", "create"] },
-    { apiGroups: ["ate.dev"], resources: ["sandboxconfigs"], verbs: ["get"] },
-  ]);
-  const withoutNativeRules: Resource[] = roles(all).map((role) => ({
-    ...role,
-    ...(role.rules
-      ? { rules: role.rules.filter((rule) => !rule.apiGroups?.includes("ate.dev")) }
-      : {}),
-  }));
-  expect(withoutNativeRules).toEqual(roles(await resources()));
-});
-
-test("worker storage capacity is explicit before its immutable first admission", async () => {
-  const defaultConfig = (await resources()).find(
-    (resource) =>
-      resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
-  );
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(64 * 1024 ** 3));
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]).toBe(
-    String(8 * 1024 ** 3),
-  );
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("128");
-  const result = await helm([
-    "template",
-    "portable",
-    chart,
-    ...localValues,
-    "--set",
-    "factorybox.storeGiB=24",
-    "--set",
-    "factorybox.claimGiB=48",
-  ]);
-  expect(result.exitCode).toBe(0);
-  const config = parseAllDocuments(result.stdout)
-    .map((document) => document.toJSON() as Resource)
-    .find(
-      (resource) =>
-        resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
-    );
-  expect(config?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(24 * 1024 ** 3));
-  expect(config?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("48");
-  expect(config?.data?.["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]).toBe(String(8 * 1024 ** 3));
-});
-
-test.each(["0", "7", "8.5", "65"])(
-  "worker rejects an invalid automatic minimum %s",
-  async (minimum) => {
-    const result = await helm([
-      "template",
-      "portable",
-      chart,
-      ...localValues,
-      "--set-string",
-      `factorybox.minimumStoreGiB=${minimum}`,
-    ]);
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("factorybox.minimumStoreGiB");
-  },
-);
-
-test("worker chart accepts a larger store with actual claim headroom", async () => {
-  const result = await helm([
-    "template",
-    "portable",
-    chart,
-    ...localValues,
-    "--set",
-    "factorybox.storeGiB=256",
-    "--set",
-    "factorybox.claimGiB=512",
-  ]);
-  expect(result.exitCode).toBe(0);
-  const config = parseAllDocuments(result.stdout)
-    .map((document) => document.toJSON() as Resource)
-    .find(
-      (resource) =>
-        resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
-    );
-  expect(config?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(256 * 1024 ** 3));
-  expect(config?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("512");
-});
-
-test("fresh worker CPU requests are distinct from their qualified burst ceiling", async () => {
-  const defaults = (await resources()).find(
-    (item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
-  );
-  expect(defaults?.data?.["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"]).toBe("100");
-  expect(defaults?.data?.["FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB"]).toBe("2048");
-  const result = await helm([
-    "template",
-    "portable",
-    chart,
-    ...localValues,
-    "--set",
-    "factorybox.cpuRequestMilli=250",
-  ]);
-  expect(result.exitCode).toBe(0);
-  const config = parseAllDocuments(result.stdout)
-    .map((document) => document.toJSON() as Resource)
-    .find((item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]);
-  expect(config?.data?.["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"]).toBe("250");
-});
-
-test.each(["-1", "1.5", "invalid"])(
-  "invalid worker memory headroom %s is refused",
-  async (value) => {
-    const result = await helm([
-      "template",
-      "portable",
-      chart,
-      ...localValues,
-      "--set-string",
-      `factorybox.memoryHeadroomMiB=${value}`,
-    ]);
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("factorybox.memoryHeadroomMiB");
-  },
-);
-
-test.each([
-  ["0", "0"],
-  ["null", "2048"],
-] as const)(
-  "worker memory headroom %s preserves explicit zero or an older values document's default",
-  async (value, expected) => {
-    const result = await helm([
+  expect(missing.stderr).toContain("substrate.workspaceConfigurationSecret");
+  const noOwner = await helm(
+    [
       "template",
       "portable",
       chart,
       ...localValues,
       "--set",
-      `factorybox.memoryHeadroomMiB=${value}`,
-    ]);
-    expect(result.exitCode).toBe(0);
-    const config = parseAllDocuments(result.stdout)
-      .map((document) => document.toJSON() as Resource)
-      .find((item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]);
-    expect(config?.data?.["FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB"]).toBe(expected);
-  },
-);
-
-test.each(["0", "9", "100.5", "3001", "invalid"])(
-  "invalid worker CPU request %s is refused before installation",
-  async (value) => {
-    const result = await helm([
-      "template",
-      "portable",
-      chart,
-      ...localValues,
-      "--set-string",
-      `factorybox.cpuRequestMilli=${value}`,
-    ]);
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("factorybox.cpuRequestMilli");
-  },
-);
+      "substrate.workspaceConfigurationSecret=native-workspaces",
+    ],
+    false,
+  );
+  expect(noOwner.exitCode).not.toBe(0);
+  expect(noOwner.stderr).toContain("substrate.provisionerTokenSecret");
+  const all = await resources();
+  const app = all.find((r) => r.kind === "Deployment" && r.metadata.name === "portable");
+  expect(app?.spec?.template?.spec.containers[0]?.env).toContainEqual({
+    name: "FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION",
+    value: "/run/factory/substrate-configuration/configuration.json",
+  });
+  const projected = JSON.stringify(app?.spec?.template?.spec.volumes);
+  expect(projected).toContain('"audience":"api.ate-system.svc"');
+  expect(projected).toContain('"expirationSeconds":600');
+  expect(projected).toContain('"secretName":"native-provisioner"');
+  const role = all.find(
+    (r) => r.kind === "ClusterRole" && r.metadata.name === "factory-proof-portable",
+  );
+  expect(role?.rules?.filter((rule) => rule.apiGroups?.includes("ate.dev"))).toEqual([
+    { apiGroups: ["ate.dev"], resources: ["workerpools"], verbs: ["get", "list", "create"] },
+    { apiGroups: ["ate.dev"], resources: ["sandboxconfigs"], verbs: ["get"] },
+  ]);
+});
 
 test("operators can right-size dependency CPU reservations without raising their limits", async () => {
   const result = await helm([
@@ -384,51 +209,6 @@ test("operators can right-size dependency CPU reservations without raising their
     expect(container?.resources?.limits["cpu"]).toBe(limit);
   }
 });
-
-test.each([
-  { store: "7", claim: "32" },
-  { store: "64", claim: "80" },
-  { store: "8.5", claim: "32" },
-  { store: "24", claim: "40" },
-  { store: "8", claim: "31" },
-  { store: "8", claim: "32.5" },
-  { store: "8", claim: "8388608" },
-])("worker storage capacity rejects invalid operator values $store/$claim", async (capacity) => {
-  const result = await helm([
-    "template",
-    "portable",
-    chart,
-    ...localValues,
-    "--set-string",
-    `factorybox.storeGiB=${capacity.store}`,
-    "--set-string",
-    `factorybox.claimGiB=${capacity.claim}`,
-  ]);
-  expect(result.exitCode).not.toBe(0);
-  expect(result.stderr).toContain("factorybox.");
-});
-
-test.each(["arm64", "amd64"] as const)(
-  "the chart preserves an explicit %s worker profile independently of application placement",
-  async (architecture) => {
-    const rendered = await helm([
-      "template",
-      "portable",
-      chart,
-      ...localValues,
-      "--set",
-      `factorybox.architecture=${architecture}`,
-    ]);
-    expect(rendered.exitCode).toBe(0);
-    const config = parseAllDocuments(rendered.stdout)
-      .map((document) => document.toJSON() as Resource)
-      .find(
-        (resource) =>
-          resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
-      );
-    expect(config?.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]).toBe(architecture);
-  },
-);
 
 test("native mirror hosts share the import allowlist without permitting private or unencrypted destinations", async () => {
   const result = await helm([
@@ -492,36 +272,22 @@ test("native mirror hosts share the import allowlist without permitting private 
   }
 });
 
-test("the worker kernel is optional and only a real restriction reaches Factory", async () => {
-  const kernelOf = async (...extra: string[]) => {
-    const result = await helm(["template", "portable", chart, ...localValues, ...extra]);
-    expect(result.exitCode).toBe(0);
-    const config = parseAllDocuments(result.stdout)
-      .map((document) => document.toJSON() as Resource)
-      .find(
-        (resource) =>
-          resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
-      );
-    return config?.data?.["FACTORY_FACTORYBOX_KERNEL"];
-  };
-  expect(await kernelOf()).toBeUndefined();
-  expect(await kernelOf("--set", "factorybox.kernel=*")).toBeUndefined();
-  expect(await kernelOf("--set", "factorybox.kernel=5.15.0-*-azure\\,6.8.0-*-azure")).toBe(
-    "5.15.0-*-azure,6.8.0-*-azure",
-  );
-});
-
-test("the chart rejects an unsupported worker architecture before installing resources", async () => {
-  const rendered = await helm([
-    "template",
-    "portable",
-    chart,
-    ...localValues,
-    "--set",
-    "factorybox.architecture=riscv64",
-  ]);
-  expect(rendered.exitCode).not.toBe(0);
-  expect(rendered.stderr).toContain("factorybox.architecture must be arm64 or amd64");
+test("the chart has native configuration and no legacy worker or execution reserve settings", async () => {
+  const all = await resources();
+  const config = all.find(
+    (item) => item.kind === "ConfigMap" && item.metadata.name === "portable-config",
+  )?.data;
+  expect(config).toBeDefined();
+  expect(
+    Object.keys(config ?? {}).some(
+      (name) =>
+        name.startsWith("FACTORY_FACTORYBOX") || name === "FACTORY_EXECUTION_RESERVE_TARGET",
+    ),
+  ).toBe(false);
+  const values = parse(await readFile(`${chart}/values.yaml`, "utf8"));
+  expect(values).not.toHaveProperty("factorybox");
+  expect(values).not.toHaveProperty("executionReserveTarget");
+  expect(values.stateSize).toBe("8Gi");
 });
 
 test("the repository chart is a Kubernetes installation, not a host Docker launcher", async () => {
@@ -547,7 +313,6 @@ test("the repository chart is a Kubernetes installation, not a host Docker launc
       "host.docker.internal",
       "orbstack",
       "hostNetwork",
-      "KUBECONFIG",
     ])
       expect(definition).not.toContain(forbidden);
   }
@@ -743,11 +508,23 @@ test("PostgreSQL detects lost coordination peers without expiring healthy idle o
   });
 });
 
+test("PostgreSQL liveness does not depend on container exec under runtime load", async () => {
+  const { all } = await renderAll();
+  const postgres = workloads(all).find((item) => item.metadata.name === "portable-postgres")?.spec
+    .template.spec.containers[0];
+  expect(postgres?.livenessProbe).toEqual({
+    tcpSocket: { port: 5432 },
+    timeoutSeconds: 10,
+    periodSeconds: 20,
+    failureThreshold: 6,
+  });
+});
+
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {
   const all = await resources();
   const config = all.find((resource) => resource.metadata.name === "portable-config")?.data;
   expect(config?.["FACTORY_BASE_URL"]).toBe("http://127.0.0.1:58000");
-  expect(config?.["FACTORY_FORGEJO_PUBLIC_URL"]).toBe("http://127.0.0.1:58001");
+  expect(config?.["FACTORY_FORGEJO_PUBLIC_URL"]).toBe("https://git.example.com");
   expect(config?.["FACTORY_ZERO_CACHE_PUBLIC_URL"]).toBe("http://127.0.0.1:58002/zero");
   expect(config?.["FACTORY_INTERNAL_URL"]).toBe("http://portable-internal.factory-proof.svc:3000");
   expect(config?.["FACTORY_FORGEJO_API_URL"]).toBe(
@@ -783,7 +560,7 @@ test("offline upgrades refuse to silently replace retained credentials and TLS i
 });
 
 test("non-development installations require deliberate HTTPS browser origins", async () => {
-  const missing = await helm(["template", "portable", chart, "--set", "image=owned-proof:unit"]);
+  const missing = await helm(["template", "portable", chart, "--set", `image=${applicationImage}`]);
   expect(missing.exitCode).not.toBe(0);
   expect(missing.stderr).toContain("publicURL");
   const unsafe = await helm([
@@ -814,7 +591,7 @@ test("standard Ingress routes the public UI, Forgejo and single-label runtime wi
     "portable",
     chart,
     "--set",
-    "image=owned-factory-proof:unit",
+    `image=${applicationImage}`,
     "--set",
     "publicURL=https://factory.example.com",
     "--set",
@@ -870,7 +647,7 @@ test("local planning transport keeps the same cookie hostname on a separate list
   }
 });
 
-test("the local preset is installable with one image setting and keeps all browser access on loopback", async () => {
+test("the local preset keeps Factory/planning on loopback but requires native secrets and Forge HTTPS", async () => {
   const result = await helm([
     "template",
     "factory",
@@ -885,7 +662,7 @@ test("the local preset is installable with one image setting and keeps all brows
   const config = all.find((resource) => resource.metadata.name === "factory-config")?.data;
   expect(config?.["NODE_ENV"]).toBe("development");
   expect(config?.["FACTORY_BASE_URL"]).toBe("http://127.0.0.1:58000");
-  expect(config?.["FACTORY_FORGEJO_PUBLIC_URL"]).toBe("http://127.0.0.1:58001");
+  expect(config?.["FACTORY_FORGEJO_PUBLIC_URL"]).toBe("https://git.factory.example");
   expect(config?.["FACTORY_ZERO_CACHE_PUBLIC_URL"]).toBe("http://127.0.0.1:58002/zero");
   expect(all.some((resource) => resource.kind === "Ingress")).toBe(false);
 });
@@ -904,7 +681,12 @@ type Container = {
   command?: string[];
   volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
   env?: Array<{ name: string; value?: string; valueFrom?: { secretKeyRef?: { name: string } } }>;
-  livenessProbe?: { periodSeconds?: number; failureThreshold?: number; timeoutSeconds?: number };
+  livenessProbe?: {
+    tcpSocket?: { port: number };
+    periodSeconds?: number;
+    failureThreshold?: number;
+    timeoutSeconds?: number;
+  };
   readinessProbe?: unknown;
   startupProbe?: unknown;
 };
@@ -1051,7 +833,22 @@ test.each([
 );
 
 test("the application ServiceAccount has no cluster-wide Secret watch, update or wildcard grants", async () => {
-  const role = (await resources()).find((resource) => resource.kind === "ClusterRole");
+  const all = await resources();
+  const account = all.find(
+    (resource) => resource.kind === "Deployment" && resource.metadata.name === "portable",
+  )?.spec?.template?.spec.serviceAccountName;
+  const binding = all.find(
+    (resource) =>
+      resource.kind === "ClusterRoleBinding" &&
+      resource.subjects?.some(
+        (subject) => subject.kind === "ServiceAccount" && subject.name === account,
+      ),
+  );
+  const role = all.find(
+    (resource) =>
+      resource.kind === "ClusterRole" && resource.metadata.name === binding?.roleRef?.name,
+  );
+  expect(role).toBeDefined();
   const rules = role?.rules ?? [];
   const granted = (group: string, resource: string) =>
     rules
@@ -1068,6 +865,7 @@ test("the application ServiceAccount has no cluster-wide Secret watch, update or
   expect(granted("", "pods/exec").sort()).toEqual(["create", "get"]);
   expect(granted("", "pods/portforward").sort()).toEqual(["create", "get"]);
   expect(granted("", "nodes")).toEqual(["get", "list"]);
+  expect(granted("metrics.k8s.io", "pods")).toEqual([]);
   expect(granted("", "events")).toEqual([]);
   expect(granted("storage.k8s.io", "storageclasses")).toEqual([]);
 });
@@ -1177,8 +975,26 @@ test("default-deny ingress is followed by only the flows Factory uses", async ()
           peer.podSelector?.matchLabels["app.kubernetes.io/component"] ??
           `namespace:${peer.namespaceSelector?.matchLabels?.["app.kubernetes.io/managed-by"]}`,
       );
-  expect(sources("factory")).toEqual(["zero", "forgejo", "namespace:open-software-factory"]);
-  expect(sources("forgejo")).toEqual(["factory", "namespace:open-software-factory"]);
+  expect(sources("factory")).toEqual([
+    "factory",
+    "zero",
+    "forgejo",
+    "namespace:open-software-factory",
+  ]);
+  expect(
+    byName
+      .get("portable-allow-factory")
+      ?.spec.ingress?.flatMap((rule) => rule.from ?? [])
+      .find((peer) => peer.podSelector?.matchLabels["app.kubernetes.io/component"] === "factory"),
+  ).toEqual({
+    podSelector: {
+      matchLabels: {
+        "app.kubernetes.io/instance": "portable",
+        "app.kubernetes.io/component": "factory",
+      },
+    },
+  });
+  expect(sources("forgejo")).toEqual(["factory"]);
   expect(sources("zero")).toEqual(["factory"]);
   expect(sources("postgres")).toEqual(["factory", "zero", "maintenance", "backup"]);
   expect(sources("openbao")).toEqual(["factory", "openbao", "backup"]);
@@ -1254,7 +1070,9 @@ test("operator-owned Secrets replace generated ones and roll the pods that read 
     "portable-objects",
     "portable-openbao-tls",
   ]);
-  for (const workload of workloads(generated.all))
+  for (const workload of workloads(generated.all).filter(
+    (item) => item.metadata.name !== "portable",
+  ))
     expect(
       workload.spec.template.metadata?.annotations?.["checksum/existing-secrets"],
     ).toBeUndefined();
@@ -1338,25 +1156,54 @@ test("every chart-owned service image is pinned by digest", async () => {
 test("the preflight is a Helm test hook that is not privileged and never runs at install", async () => {
   const all = await resources();
   const hooks = all.filter((item) => item.metadata.annotations?.["helm.sh/hook"] === "test");
-  expect(hooks.map((item) => item.kind).sort()).toEqual([
-    "ClusterRole",
-    "ClusterRoleBinding",
-    "Job",
-    "ServiceAccount",
-  ]);
+  expect(hooks.map((item) => item.kind)).toEqual(["Job"]);
   const job = hooks.find((item) => item.kind === "Job");
   const definition = JSON.stringify(job?.spec);
   expect(definition).not.toContain('privileged":true');
   expect(definition).not.toContain("hostPath");
-  expect(job?.spec?.template?.spec.containers[0]?.command?.slice(0, 2)).toEqual([
+  expect(job?.spec?.template?.spec.containers[0]?.command).toEqual([
     "bun",
     "scripts/kubernetes/preflight.ts",
+    "--service-account",
   ]);
-  const role = hooks.find((item) => item.kind === "ClusterRole");
+  const role = all.find(
+    (item) => item.kind === "ClusterRole" && item.metadata.name.endsWith("-preflight"),
+  );
   for (const rule of role?.rules ?? []) {
     expect(rule.verbs).not.toContain("update");
     expect(rule.verbs).not.toContain("patch");
   }
+});
+
+test("preflight authentication and read-only RBAC survive dependency hook success until the Job finishes", async () => {
+  const all = await resources();
+  const job = all.find((item) => item.kind === "Job" && item.metadata.name.endsWith("-preflight"));
+  const account = job?.spec?.template?.spec.serviceAccountName;
+  const binding = all.find(
+    (item) =>
+      item.kind === "ClusterRoleBinding" &&
+      item.subjects?.some(
+        (subject) => subject.kind === "ServiceAccount" && subject.name === account,
+      ),
+  );
+  const dependencies = [
+    all.find((item) => item.kind === "ServiceAccount" && item.metadata.name === account),
+    binding,
+    all.find(
+      (item) => item.kind === "ClusterRole" && item.metadata.name === binding?.roleRef?.name,
+    ),
+  ].filter((item): item is Resource => Boolean(item));
+  expect(dependencies).toHaveLength(3);
+  for (const resource of dependencies) {
+    const cleanup = resource.metadata.annotations?.["helm.sh/hook-delete-policy"]?.split(",");
+    expect(resource.metadata.annotations?.["helm.sh/hook"]).toBeUndefined();
+    // Helm completes non-Job hooks as soon as they exist. Deleting here revokes
+    // the ServiceAccount/token and binding before the later test Job can read.
+    expect(cleanup ?? []).not.toContain("hook-succeeded");
+  }
+  expect(job?.metadata.annotations?.["helm.sh/hook-delete-policy"]?.split(",")).toContain(
+    "hook-succeeded",
+  );
 });
 
 test("Factory runs as an unprivileged user and fixes retained state ownership once", async () => {
@@ -1464,7 +1311,7 @@ test("backup images are pinned and match the maintained service pins", async () 
   for (const name of ["own-backup", "prepare", "objects", "finalize"])
     expect(images.get(name)).toBe(upstream.rclone.image);
   // The Forgejo step needs kubectl, which only the Factory image carries.
-  expect(images.get("forgejo")).toBe("owned-factory-proof:unit");
+  expect(images.get("forgejo")).toBe(applicationImage);
   for (const [name, image] of images)
     if (name !== "forgejo") expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
   expect(upstream.rclone.image).toContain(`:${upstream.rclone.version}@sha256:`);
@@ -1581,46 +1428,12 @@ test("a default install backs OpenBao up with the AppRole login Factory stores i
   expect(all.some((item) => item.metadata.name === "portable-backup-openbao")).toBe(false);
 });
 
-test("the OpenBao recovery listener is off by default and loopback-only when enabled", async () => {
-  const bao = (all: Resource[]) =>
-    workloads(all).find((item) => item.metadata.name === "portable-openbao")?.spec.template.spec
-      .containers[0];
-  const defaults = (await renderAll()).all;
-  expect(defaults.some((item) => item.metadata.name === "portable-openbao-recovery")).toBe(false);
-  expect(bao(defaults)?.command).toEqual([
-    "/usr/bin/bao",
-    "server",
-    "-config=/bao/config/config.json",
-  ]);
-  const enabled = (await renderAll(["--set", "openbao.recovery.enabled=true"])).all;
-  expect(bao(enabled)?.command).toEqual([
-    "/usr/bin/bao",
-    "server",
-    "-config=/bao/config/config.json",
-    "-config=/bao/recovery/recovery.json",
-  ]);
-  const config = enabled.find(
-    (item) => item.kind === "ConfigMap" && item.metadata.name === "portable-openbao-recovery",
-  )?.data as Record<string, string>;
-  const listener = JSON.parse(config["recovery.json"] as string).listener.tcp;
-  expect(listener.address).toBe("127.0.0.1:8210");
-  expect(listener.cluster_address).toBe("127.0.0.1:8211");
-  expect(listener.disable_unauthed_generate_root_endpoints).toBe(false);
-  // The shared listener keeps the 2.7 default, and no Service or NetworkPolicy opens the new port.
-  const sharedConfig = enabled.find(
-    (item) => item.kind === "ConfigMap" && item.metadata.name === "portable-openbao",
-  )?.data as Record<string, string>;
-  const shared = JSON.parse(sharedConfig["config.json"] as string).listener.tcp;
-  expect(shared.address).toBe("0.0.0.0:8200");
-  expect(shared.disable_unauthed_generate_root_endpoints).toBeUndefined();
-  expect(JSON.stringify(enabled.filter((item) => item.kind === "Service"))).not.toContain("8210");
-  expect(JSON.stringify(policies(enabled))).not.toContain("8210");
-  const openbaoPolicy = policies(enabled).find(
-    (policy) => policy.metadata.name === "portable-allow-openbao",
-  );
-  expect(
-    openbaoPolicy?.spec.ingress?.flatMap((rule) => rule.ports ?? []).map((entry) => entry.port),
-  ).toEqual([8200]);
+test("native installations have no legacy unauthenticated OpenBao recovery listener", async () => {
+  const all = await resources();
+  expect(JSON.stringify(all)).not.toContain("8210");
+  expect(all.some((item) => item.metadata.name === "portable-openbao-recovery")).toBe(false);
+  const values = parse(await readFile(`${chart}/values.yaml`, "utf8"));
+  expect(values.openbao).not.toHaveProperty("recovery");
 });
 
 test("backups can send sets to an operator remote and carry an OpenBao snapshot token", async () => {

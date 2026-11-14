@@ -1,31 +1,8 @@
-import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
-import type { FactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
-
-export const ownedFactoryboxLocation = factoryboxLocation("68f16b47-92d3-493d-8145-f92742951764");
-
-// Controller fixtures inject Kubernetes. These artifacts are never pulled or started.
-export const ownedFactoryboxProfile = {
-  image: `example.invalid/owned-worker@sha256:${"e".repeat(64)}`,
-  executableSHA256: "f".repeat(64),
-  cpuRequestMilli: 100,
-  architecture: "amd64",
-  nodeName: "owned-node",
-  kernel: "6.12.0",
-  boundedBytes: 8589934592,
-  claimGiB: 32,
-} satisfies FactoryboxRuntimeProfile;
-
+// Controlled tool/Forge inputs only. Native installation selection belongs to
+// the explicit Substrate fixture; no legacy worker tuple is commissioned here.
 export const ownedRuntimeConfiguration = {
   FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
   FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
-  FACTORY_FACTORYBOX_WORKER_IMAGE: ownedFactoryboxProfile.image,
-  FACTORY_FACTORYBOX_EXECUTABLE_SHA256: ownedFactoryboxProfile.executableSHA256,
-  FACTORY_FACTORYBOX_CPU_REQUEST_MILLI: String(ownedFactoryboxProfile.cpuRequestMilli),
-  FACTORY_FACTORYBOX_BOUNDED_BYTES: String(ownedFactoryboxProfile.boundedBytes),
-  FACTORY_FACTORYBOX_CLAIM_GIB: String(ownedFactoryboxProfile.claimGiB),
-  FACTORY_FACTORYBOX_ARCHITECTURE: ownedFactoryboxProfile.architecture,
-  FACTORY_FACTORYBOX_NODE: ownedFactoryboxProfile.nodeName,
-  FACTORY_FACTORYBOX_KERNEL: ownedFactoryboxProfile.kernel,
   FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
   FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
   FACTORY_FORGEJO_OWNER: "owned-runtime-fixture",

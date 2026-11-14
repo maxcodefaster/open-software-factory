@@ -22,6 +22,8 @@ export function createSetupReadiness(input: {
   const sql = input.database.client;
   const access = createAccessController(input.database);
   const running = new Map<string, Promise<void>>();
+  let stopping = false;
+  let closing: Promise<void> | undefined;
 
   async function status(projectID: string, userID: string) {
     await access.requireProject(userID, projectID);
@@ -178,7 +180,8 @@ export function createSetupReadiness(input: {
     recovering: boolean,
     retryWiki: boolean,
   ) {
-    const connection = await sql.reserve();
+    // Coordination must not consume the pool used by the tasks it protects.
+    const connection = input.database.coordination();
     try {
       const [lock] = await connection<
         { held: boolean }[]
@@ -235,7 +238,7 @@ export function createSetupReadiness(input: {
         await connection`SELECT pg_advisory_unlock(hashtext(${`project-readiness:${projectID}`}))`;
       }
     } finally {
-      connection.release();
+      await connection.end({ timeout: 1 });
     }
   }
 
@@ -246,6 +249,7 @@ export function createSetupReadiness(input: {
     recovering = false,
     retryWiki = false,
   ) {
+    if (stopping) return Promise.reject(new Error("Project preparation is shutting down"));
     const active = running.get(projectID);
     if (active) return active;
     const work = run(projectID, userID, starter, recovering, retryWiki).finally(() =>
@@ -255,6 +259,7 @@ export function createSetupReadiness(input: {
     return work;
   }
   async function retry(projectID: string, userID: string, name: SetupTask, starter: boolean) {
+    if (stopping) throw new Error("Project preparation is shutting down");
     await access.requireProject(userID, projectID, true);
     await status(projectID, userID);
     await sql`UPDATE factory.project_setup_readiness SET state='pending',failure=NULL,operation_id=NULL
@@ -262,6 +267,7 @@ export function createSetupReadiness(input: {
     await start(projectID, userID, starter, false, name === "wiki");
   }
   async function recover() {
+    if (stopping) return;
     const projects = await sql<{ id: string; userID: string; starter: boolean }[]>`SELECT
       project.id,COALESCE(intent.user_id,project.created_by) AS "userID",COALESCE(intent.kind='starter',false) AS starter
       FROM factory.project project
@@ -272,5 +278,10 @@ export function createSetupReadiness(input: {
     for (const project of projects)
       void start(project.id, project.userID, project.starter, true).catch(() => {});
   }
-  return { status, start, retry, recover, observeWikiRetry };
+  function close() {
+    stopping = true;
+    closing ??= Promise.allSettled([...running.values()]).then(() => {});
+    return closing;
+  }
+  return { status, start, retry, recover, observeWikiRetry, close };
 }

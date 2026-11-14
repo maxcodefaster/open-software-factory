@@ -81,7 +81,12 @@ export function createKnowledgeController(
   >,
   generationAgent: (input: WikiGenerationInput) => ReturnType<typeof generateWiki> = generateWiki,
 ) {
-  const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
+  const {
+    FACTORY_FORGEJO_API_URL,
+    FACTORY_FORGEJO_PUBLIC_URL,
+    FACTORY_FORGEJO_TOKEN,
+    FACTORY_FORGEJO_OWNER,
+  } = process.env;
   if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER) {
     throw new Error("Forgejo configuration is required");
   }
@@ -89,7 +94,11 @@ export function createKnowledgeController(
     apiURL: FACTORY_FORGEJO_API_URL,
     token: FACTORY_FORGEJO_TOKEN,
   });
-  const forgeOrigin = { apiURL: FACTORY_FORGEJO_API_URL, owner: FACTORY_FORGEJO_OWNER };
+  const forgeOrigin = {
+    apiURL: FACTORY_FORGEJO_API_URL,
+    publicURL: FACTORY_FORGEJO_PUBLIC_URL,
+    owner: FACTORY_FORGEJO_OWNER,
+  };
   const running = new Set<string>();
   const executions = new Set<Promise<void>>();
   const lifetime = new AbortController();
@@ -115,6 +124,7 @@ export function createKnowledgeController(
       value.repositoryURL,
       forgeOrigin.apiURL,
       forgeOrigin.owner,
+      forgeOrigin.publicURL,
     );
     return { ...value, repository };
   }

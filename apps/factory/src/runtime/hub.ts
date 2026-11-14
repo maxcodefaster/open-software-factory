@@ -641,7 +641,7 @@ export class RuntimeHub {
   ) {
     // The existing Workspace lock and Source writer epoch have already fenced
     // this internal checkpoint. An idle claim must block user traffic, not the
-    // preservation RPCs needed to finish that same pause.
+    // checkpoint RPCs needed to finish that same pause.
     const checkpointTraffic =
       channel === "source" &&
       request.method === "POST" &&

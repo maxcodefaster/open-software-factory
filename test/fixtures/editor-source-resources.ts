@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { z } from "zod";
 import type { createDatabase } from "../../packages/db/src/client";
-import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
 import { eventually } from "./factory-process";
 
@@ -17,43 +16,32 @@ export async function recordedEditorIdentity(
   return developerIDEIdentity(userID, Number(editor.epoch), editor.resourceID);
 }
 
-export async function removeOwnedProjectSources(
+export async function requireOwnedProjectSourceRetention(
   database: ReturnType<typeof createDatabase>,
   projectID: string,
-  stop: (workspaceID: string) => Promise<unknown>,
 ) {
-  const sources = await database.client<
-    Array<{
-      id: string;
-      state: string;
-      namespace: string;
-      namespaceUID: string | null;
-      workerID: string;
-    }>
-  >`
-    SELECT workspace.id,source.state,workspace.kubernetes_namespace AS namespace,
-      source.namespace_uid AS "namespaceUID",workspace.factorybox_worker_id AS "workerID"
-    FROM factory.development_workspace workspace JOIN factory.workspace_source source ON source.workspace_id=workspace.id
-    WHERE workspace.project_id=${projectID}`;
-  for (const source of sources) {
-    if (source.namespace !== factoryboxLocation(source.workerID).namespace)
-      throw new Error("Project source does not belong to its recorded Factory worker");
-    if (source.state !== "stopped") {
-      await stop(source.id);
-      await eventually(
-        async () => {
-          const [current] = await database.client<Array<{ state: string }>>`
-            SELECT state FROM factory.workspace_source WHERE workspace_id=${source.id}`;
-          return current?.state;
-        },
-        (state) => state === "stopped",
-        "Owned Project source did not Stop",
-        40_000,
-      );
-    }
-    // Source Stop removes only its own service epoch. The shared claim and
-    // worker remain for other Projects. Whole-fixture teardown is separate.
-  }
+  z.uuid().parse(projectID);
+  // Read-only product-state evidence, not native-resource deletion or a restore
+  // proof. Workspace Stop must already have retained Source and confirmed Delete.
+  const [unsettled] = await database.client`
+    SELECT 'runtime' AS kind FROM factory.runtime_attempt attempt
+      LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+      WHERE attempt.project_id=${projectID}
+        AND (NOT attempt.substrate OR attempt.state<>'stopped' OR binding.deleted_at IS NULL)
+    UNION ALL
+    SELECT 'source' AS kind FROM factory.substrate_source source
+      JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
+      LEFT JOIN factory.substrate_binding binding ON binding.actor_uid=source.actor_uid
+      WHERE workspace.project_id=${projectID}
+        AND (NOT workspace.substrate OR source.owner<>'service' OR NOT source.writable
+          OR source.generation<1 OR source.checkpoint IS NULL OR source.service_base IS NULL
+          OR source.checkpoint->>'actorUID' IS DISTINCT FROM source.actor_uid::text
+          OR binding.deleted_at IS NULL)
+    LIMIT 1`;
+  if (unsettled)
+    throw new Error(
+      "Native fixture cleanup requires confirmed Actor Stop and independent retained Source; no data was released",
+    );
 }
 
 export async function editorFixtureKubectl(args: string[], input?: unknown, timeout = 30_000) {

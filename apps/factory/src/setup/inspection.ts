@@ -58,6 +58,7 @@ export function createSetupInspection(input: {
   database: ReturnType<typeof createDatabase>;
   forge: ReturnType<typeof createForgejoClient>;
   forgeURL: string;
+  forgePublicURL?: string;
   forgeOwner: string;
   model(
     projectID: string,
@@ -101,7 +102,12 @@ export function createSetupInspection(input: {
     if (!value) throw new CommandError("not-found", "Project not found");
     return {
       ...value,
-      repository: factoryForgeSource(value.url, input.forgeURL, input.forgeOwner),
+      repository: factoryForgeSource(
+        value.url,
+        input.forgeURL,
+        input.forgeOwner,
+        input.forgePublicURL,
+      ),
     };
   }
   async function row(id: string) {

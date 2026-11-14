@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import {
+  dispatchActorRPCIn,
+  intendActorRPCIn,
+} from "../../apps/factory/src/runtime/substrate-rpc-facts";
+import {
   hashConnectorToken,
   runtimeConnectorTokens,
 } from "../../packages/runtime-domain/src/identity";
@@ -17,7 +21,7 @@ test("failed personal bootstrap reconnect admits its retained Source Parent only
   f.config.deployment = "fresh-workspaces";
   let actor: NativeActor | null = null;
   const source = createSubstrateSources(f.database, f.hub);
-  const controller = f.controller(async (method) => {
+  const controller = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -39,8 +43,6 @@ test("failed personal bootstrap reconnect admits its retained Source Parent only
     throw new Error(`Unexpected failed-bootstrap effect: ${method}`);
   }, source);
   try {
-    await f.database
-      .client`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
     await controller.start(f.projectID, f.userID);
     const uid = nativeActor.parse(actor).metadata.uid;
     await f.database
@@ -73,7 +75,7 @@ test("a previously ready personal Workspace with its original frozen pause recov
   let actor: NativeActor | null = null;
   let resumes = 0;
   const source = createSubstrateSources(f.database, f.hub);
-  const controller = f.controller(async (method) => {
+  const controller = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -96,8 +98,6 @@ test("a previously ready personal Workspace with its original frozen pause recov
     throw Error(`Read-only pause recovery dispatched ${method}`);
   }, source);
   try {
-    await f.database
-      .client`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
     await controller.start(f.projectID, f.userID);
     const uid = nativeActor.parse(actor).metadata.uid;
     const checkpointID = crypto.randomUUID();
@@ -201,10 +201,8 @@ test.each(["starting", "failed"])(
       }
       throw new Error(`Unexpected bootstrap effect: ${method}`);
     };
-    const controller = f.controller(call, source);
+    const controller = await f.controller(call, source);
     try {
-      await f.database
-        .client`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
       await controller.start(f.projectID, f.userID);
       const uid = nativeActor.parse(actor).metadata.uid;
       expect(await source.lease(f.workspaceID)).toMatchObject({
@@ -224,6 +222,14 @@ test.each(["starting", "failed"])(
       expect((await source.lease(f.workspaceID))?.writerEpoch).toBe(1);
       // Controlled native observation of an earlier completed dispatch, not a
       // fresh Suspend or permission to restart the uncertain original bootstrap.
+      const dispatch = await intendActorRPCIn(
+        f.database.client,
+        f.attemptID,
+        "suspend",
+        null,
+        nativeActor.parse(actor),
+      );
+      await dispatchActorRPCIn(f.database.client, f.attemptID, dispatch);
       const completed = nativeActor.parse(actor);
       const uuid = crypto.randomUUID();
       completed.metadata.version = "3";
@@ -252,7 +258,8 @@ test.each(["starting", "failed"])(
         "Reconcile the startup outcome",
       );
       expect(resumes).toBe(1);
-      expect((await controller.stop(f.attemptID))?.state).toBe("paused");
+      expect((await controller.pause(f.attemptID))?.state).toBe("paused");
+      await expect(controller.stop(f.attemptID)).rejects.toThrow("independent Source");
       expect((await controller.get(f.attemptID))?.native).toMatchObject({
         actorUID: uid,
         sourceHandoff: "pending",
@@ -268,11 +275,11 @@ test.each(["starting", "failed"])(
         writerEpoch: 1,
         checkpoint: null,
       });
-      expect(
-        await f.database.client`SELECT workspace_id FROM factory.workspace_source`,
-      ).toHaveLength(0);
-      expect(await f.database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
-      expect((await controller.stop(f.attemptID))?.state).toBe("paused");
+      expect([
+        ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
+          to_regclass('factory.factorybox_worker') AS worker`),
+      ]).toEqual([{ source: null, worker: null }]);
+      expect((await controller.pause(f.attemptID))?.state).toBe("paused");
       expect(suspends).toBe(0);
       await controller.recover();
       expect(resumes).toBe(1);
@@ -334,7 +341,7 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
     f.hub.parentOperation = async () => {
       throw new Error("Source drain remains unconfirmed");
     };
-    const controller = f.controller(async (method) => {
+    const controller = await f.controller(async (method) => {
       if (method === "GetAtespace") return f.space;
       if (method === "GetActorTemplate") return f.template;
       if (method === "GetActor") {
@@ -360,12 +367,11 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
       throw new Error(`Unexpected ${method}`);
     }, source);
     try {
-      await f.database
-        .client`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
       if (scenario === "ticket")
         await f.database
           .client`UPDATE factory.change_writer SET state='human',epoch=2,user_id=${f.userID} WHERE change_id=${f.changeID}`;
-      await controller.start(f.projectID, f.userID);
+      if (scenario === "ticket") await controller.startPersisted(f.changeID, f.userID);
+      else await controller.start(f.projectID, f.userID);
       if (scenario === "previously-ready")
         await f.database
           .client`UPDATE factory.runtime_attempt SET ready_at=now() WHERE id=${f.attemptID}`;

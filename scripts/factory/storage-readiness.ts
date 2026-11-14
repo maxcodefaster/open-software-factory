@@ -531,10 +531,10 @@ async function storageCheck(
           restartPolicy: "Never",
           terminationGracePeriodSeconds: 1,
           securityContext: {
-            runAsUser: 101000,
-            runAsGroup: 101000,
+            runAsUser: 1000,
+            runAsGroup: 1000,
             runAsNonRoot: true,
-            fsGroup: 101000,
+            fsGroup: 1000,
             fsGroupChangePolicy: "OnRootMismatch",
             seccompProfile: { type: "RuntimeDefault" },
           },

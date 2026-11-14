@@ -3,7 +3,7 @@ import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
 import { CommandError } from "../command-error";
-import { runtimeRepositoryCloneURL, substrateRepositoryCloneURL } from "../runtime/endpoints";
+import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
 import { RuntimeParentOperationError } from "../runtime/hub";
 
@@ -52,19 +52,16 @@ export function createChangeIntegration(
     action: "git-prepare-integration" | "git-observe-commit" | "git-push",
   ) {
     const [current] = await database.client<
-      { id: string; native: boolean; nativeIntent: unknown }[]
-    >`SELECT current.id,current.substrate AS native,binding.intent AS "nativeIntent" FROM factory.change change
+      { id: string; nativeIntent: unknown }[]
+    >`SELECT current.id,binding.intent AS "nativeIntent" FROM factory.change change
       JOIN factory.runtime_attempt current ON current.id=change.runtime_attempt_id
       JOIN factory.runtime_attempt original ON original.id=${op.attemptID}
-      LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
-      WHERE change.id=${op.changeID} AND current.state='ready' AND original.workspace_id=current.workspace_id`;
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
+      WHERE change.id=${op.changeID} AND current.state='ready' AND original.workspace_id=current.workspace_id
+        AND current.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL`;
     if (!current)
       throw new CommandError("unavailable", "The Ticket Workspace is not ready for integration.");
-    const repositoryURL = current.native
-      ? substrateRepositoryCloneURL(op.repository, current.nativeIntent)
-      : op.repository.startsWith("file://")
-        ? op.repository
-        : runtimeRepositoryCloneURL(op.repository);
+    const repositoryURL = substrateRepositoryCloneURL(op.repository, current.nativeIntent);
     return hub.parentOperation(
       current.id,
       {
@@ -86,9 +83,9 @@ export function createChangeIntegration(
           const writer = await lockChangeWriterIn(sql, op.changeID);
           await projectAuthorityIn(sql, op.userID, writer.projectID);
           const [valid] = await sql<
-            { id: string; repository: string; native: boolean; nativeIntent: unknown }[]
+            { id: string; repository: string; nativeIntent: unknown }[]
           >`SELECT operation.id,project.repository_url AS repository,
-              current.substrate AS native,binding.intent AS "nativeIntent"
+              binding.intent AS "nativeIntent"
             FROM factory.change_commit_operation operation
           JOIN factory.change change ON change.id=operation.change_id
           JOIN factory.project project ON project.id=change.project_id
@@ -97,7 +94,7 @@ export function createChangeIntegration(
           JOIN factory.change_agent_session session ON session.change_id=change.id
           JOIN factory.runtime_attempt current ON current.id=change.runtime_attempt_id
           JOIN factory.runtime_attempt original ON original.id=operation.runtime_attempt_id
-          LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
           JOIN factory.project_delivery_queue queue ON queue.project_id=change.project_id AND queue.change_id=change.id
           WHERE operation.id=${op.id} AND operation.source='integration'
             AND operation.expected_parent_sha=${op.parent} AND operation.merge_parent_sha=${op.base}
@@ -106,18 +103,16 @@ export function createChangeIntegration(
             AND change.state='active' AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
             AND session.state='committed' AND NOT session.stop_pending
             AND current.id=${current.id} AND current.state='ready' AND current.workspace_id=original.workspace_id
+            AND current.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
             AND approval.requirement_revision_id=(SELECT id FROM factory.requirement_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1)
-            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running','uncertain'))`;
+            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running','uncertain'))
+          FOR SHARE OF current,project`;
           if (!valid || !writer.available || writer.state !== "agent")
             throw new CommandError(
               "conflict",
               "Integration writing authority changed before dispatch.",
             );
-          const destination = valid.native
-            ? substrateRepositoryCloneURL(valid.repository, valid.nativeIntent)
-            : valid.repository.startsWith("file://")
-              ? valid.repository
-              : runtimeRepositoryCloneURL(valid.repository);
+          const destination = substrateRepositoryCloneURL(valid.repository, valid.nativeIntent);
           if (destination !== repositoryURL)
             throw new CommandError("conflict", "Integration destination changed before dispatch.");
           forward();

@@ -4,7 +4,7 @@ import {
   type EnvironmentBundle,
   type EnvironmentManifest,
   type EnvironmentSettingsView,
-  type EnvironmentWrite,
+  type EnvironmentWriteInput,
   environmentManifest,
   environmentMetadata,
   environmentWrite,
@@ -133,7 +133,7 @@ export function createEnvironmentController(
     projectID: string,
     userID: string,
     environment: ProjectEnvironment,
-    value: EnvironmentWrite,
+    value: EnvironmentWriteInput,
   ) {
     const input = environmentWrite.parse(value);
     // HMAC protects low-entropy values against offline guessing from persisted intent metadata.

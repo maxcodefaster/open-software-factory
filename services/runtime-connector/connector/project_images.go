@@ -5,6 +5,7 @@ import (
 	_ "crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,10 @@ import (
 )
 
 const maxProjectImages = 8
+
+func projectImagePreparationInterrupted() error {
+	return fmt.Errorf("Project image preparation was cancelled or exceeded %d seconds", projectImagePullTimeout/time.Second)
+}
 
 func requirePreparedProjectImages(prepared, current []string) error {
 	keys := func(references []string) (map[string]bool, error) {
@@ -104,7 +109,7 @@ func prepareProjectImagesWith(parent context.Context, references []string, acqui
 		return firstError
 	}
 	if ctx.Err() != nil {
-		return errors.New("Project image preparation was cancelled or exceeded 180 seconds")
+		return projectImagePreparationInterrupted()
 	}
 	return nil
 }
@@ -149,7 +154,7 @@ func acquireProjectImage(ctx context.Context, reference string) error {
 			break
 		}
 		if ctx.Err() != nil {
-			return errors.New("Project image preparation was cancelled or exceeded 180 seconds")
+			return projectImagePreparationInterrupted()
 		}
 		if !retryableImageDownload(diagnostic.String()) {
 			return errors.New(projectImageDownloadDiagnostic(diagnostic.String()))
@@ -161,7 +166,7 @@ func acquireProjectImage(ctx context.Context, reference string) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return errors.New("Project image preparation was cancelled or exceeded 180 seconds")
+			return projectImagePreparationInterrupted()
 		case <-timer.C:
 		}
 		if !mutable && confirmed() {

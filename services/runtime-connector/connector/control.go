@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -18,8 +19,16 @@ type controlConnection struct {
 	connection  *websocket.Conn
 	readTimeout time.Duration
 	writeLock   sync.Mutex
+	readOnce    sync.Once
+	incoming    chan controlFrame
+	readerDone  chan struct{}
 	closeOnce   sync.Once
 	done        chan struct{}
+}
+
+type controlFrame struct {
+	message Message
+	err     error
 }
 
 func dialControl(ctx context.Context, assignment Assignment, role string, token string) (*controlConnection, error) {
@@ -55,7 +64,7 @@ func dialControl(ctx context.Context, assignment Assignment, role string, token 
 	connection.SetReadLimit(maxControlBytes)
 	control := &controlConnection{connection: connection, done: make(chan struct{})}
 	control.armReadDeadline(controlReadTimeout)
-	go control.keepAlive(ctx)
+	go control.keepAlive(ctx, controlPingInterval)
 	return control, nil
 }
 
@@ -115,13 +124,65 @@ func (control *controlConnection) armReadDeadline(timeout time.Duration) {
 	})
 }
 
-// read blocks for the next control message. Use it instead of reading the
-// socket directly so the heartbeat deadline is refreshed for each message.
+// Parent can prepare images and hooks before its application read loop starts.
+// One transport reader still has to process Ping/Pong frames during that work.
+// Received application messages stay ordered and bounded; reading a frame never
+// dispatches an operation, restarts preparation or changes its admission.
+func (control *controlConnection) startReader() {
+	control.readOnce.Do(func() {
+		control.incoming = make(chan controlFrame, controlReadQueueLimit)
+		control.readerDone = make(chan struct{})
+		go func() {
+			defer close(control.readerDone)
+			defer control.close()
+			for {
+				select {
+				case <-control.done:
+					return
+				default:
+				}
+				if control.readTimeout > 0 {
+					_ = control.connection.SetReadDeadline(time.Now().Add(control.readTimeout))
+				}
+				var frame controlFrame
+				frame.err = control.connection.ReadJSON(&frame.message)
+				select {
+				case control.incoming <- frame:
+				case <-control.done:
+					return
+				}
+				if frame.err != nil {
+					return
+				}
+			}
+		}()
+	})
+}
+
+// Preserve the socket's receive order, including complete frames received before
+// EOF. A terminal frame is not an acknowledgement of an application operation.
 func (control *controlConnection) read(message *Message) error {
-	if control.readTimeout > 0 {
-		_ = control.connection.SetReadDeadline(time.Now().Add(control.readTimeout))
+	control.startReader()
+	receive := func(frame controlFrame) error {
+		*message = frame.message
+		return frame.err
 	}
-	return control.connection.ReadJSON(message)
+	select {
+	case frame := <-control.incoming:
+		return receive(frame)
+	default:
+	}
+	select {
+	case frame := <-control.incoming:
+		return receive(frame)
+	case <-control.done:
+		select {
+		case frame := <-control.incoming:
+			return receive(frame)
+		default:
+			return net.ErrClosed
+		}
+	}
 }
 
 // reconnectBackoff spaces control reconnect attempts with exponential growth
@@ -143,6 +204,14 @@ func (backoff *reconnectBackoff) reset() { backoff.attempt = 0 }
 func (control *controlConnection) write(message Message) error {
 	control.writeLock.Lock()
 	defer control.writeLock.Unlock()
+	// Close announces the lost transport before TCP Close finishes. A producer
+	// waiting on done must not mistake a write in that gap for a terminal report.
+	select {
+	case <-control.done:
+		return net.ErrClosed
+	default:
+	}
+	control.startReader()
 	if err := control.connection.SetWriteDeadline(time.Now().Add(controlWriteTimeout)); err != nil {
 		return err
 	}
@@ -158,8 +227,8 @@ func (control *controlConnection) close() error {
 	return err
 }
 
-func (control *controlConnection) keepAlive(ctx context.Context) {
-	ticker := time.NewTicker(controlPingInterval)
+func (control *controlConnection) keepAlive(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

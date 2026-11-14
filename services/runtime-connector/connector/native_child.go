@@ -10,7 +10,7 @@ import (
 
 // Only the trusted native transport crosses into the injected child. Its CA is
 // copied, not mounted from infrastructure; no parent capability or control token
-// reaches the Dev Container environment. Ordinary Factorybox injection is unchanged.
+// reaches the Dev Container environment.
 func nativeChildTransport(ctx context.Context, containerID string, generation uint64) ([]string, error) {
 	uid := os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID")
 	if uid == "" {

@@ -4,7 +4,7 @@ import { createConnection } from "node:net";
 import { createServer } from "node:tls";
 import { z } from "zod";
 import { removeRuntimeRepository } from "../../apps/factory/src/runtime/git-http";
-import type { SubstrateWorkspaceConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { createFactoryApplication } from "../../apps/factory/src/server/application";
 import { startFactoryLifecycle } from "../../apps/factory/src/server/lifecycle";
 import { startFactoryTransport } from "../../apps/factory/src/server/transport";
@@ -62,10 +62,9 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
   if (!port) throw new Error("Owned Factory listener address missing");
   await reserve.stop(true);
   const base = `http://127.0.0.1:${port}`;
-  const configuration: SubstrateWorkspaceConfiguration = {
+  const configuration: SubstrateInstallationConfiguration = {
     deployment: "owned-test",
     database: new URL(target.url).pathname.slice(1),
-    projectID,
     connection: {
       bridge: live.bridge,
       endpoint: live.endpoint,
@@ -111,7 +110,6 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
     FACTORY_FORGEJO_API_URL: "http://127.0.0.1:9/api/v1",
     FACTORY_FORGEJO_OWNER: "owned-native",
     FACTORY_FORGEJO_TOKEN: "owned-unused-forge-token",
-    FACTORY_EXECUTION_RESERVE_TARGET: "0",
     FACTORY_ZERO_CACHE_URL: "",
     FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION: configFile,
     FACTORY_MODEL_BASE_URL: "http://127.0.0.1:9/v1",
@@ -230,6 +228,7 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
           "node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2",
         remoteUser: "node",
         workspaceFolder: "/workspace/project",
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: The Dev Containers CLI resolves this variable.
         workspaceMount: "source=${localWorkspaceFolder},target=/workspace/project,type=bind",
         runArgs: ["--cap-drop=NET_RAW", "--cap-drop=SYS_PTRACE"],
         mounts: ["source=owned-native-home,target=/home/node,type=volume"],
@@ -324,9 +323,9 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
     const sourceView = await app.workspaceSources.ensurePersonal(projectID, userID);
     expect(sourceView.state).toBe("ready");
     expect(sourceView.workspaceID).toBe(workspaceID);
-    expect(await database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
-      0,
-    );
+    expect([
+      ...(await database.client`SELECT to_regclass('factory.workspace_source') AS source`),
+    ]).toEqual([{ source: null }]);
     const save = await source("write", {
       path: "owned-editor.txt",
       content: Buffer.from("editor-active").toString("base64"),
@@ -747,7 +746,9 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
       restoredTerminal.close();
       await app.runtimeController.closeTerminal(started.id, "native-source-after");
     }
-    expect(await database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    expect([
+      ...(await database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
+    ]).toEqual([{ worker: null }]);
     expect(
       await database.client`SELECT atespace,policy,template,atespace_attempted_at,policy_attempted_at,template_attempted_at FROM factory.substrate_workspace WHERE workspace_id=${workspaceID}`,
     ).toEqual(originalProvision);

@@ -12,13 +12,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // Explicit offline component proof. The caller owns an isolated, resource-bounded
-// private Docker daemon. This does not claim Factorybox or installation acceptance.
+// private Docker daemon. This does not claim Substrate or installation acceptance.
 func TestPrebuildComposeNative(t *testing.T) {
 	if os.Getenv("FACTORY_COMPOSE_PREBUILD_NATIVE") != "1" {
 		t.Skip("explicit native Compose prebuild component proof")
@@ -28,10 +27,13 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if kind == "" {
 		kind = "build"
 	}
-	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" && kind != "prepared-image" && kind != "prepared-rootfs" && kind != "runtime-environment" {
+	coldConsumer := kind == "cold-prebuild"
+	if coldConsumer {
+		kind = "build"
+	}
+	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "credential-free" && kind != "runtime-environment" {
 		t.Fatal("unknown native Compose proof recipe")
 	}
-	preparedRecipe := kind == "prepared-image" || kind == "prepared-rootfs"
 	platform := "linux/" + runtime.GOARCH
 	if runtime.GOOS != "linux" || platform != os.Getenv("FACTORY_COMPOSE_PROOF_PLATFORM") {
 		t.Fatal("proof is not running on its admitted native architecture")
@@ -171,13 +173,6 @@ exec %q "$@"
 		t.Fatal("owned base publication changed the original native payload")
 	}
 	root := filepath.Join(t.TempDir(), "project")
-	if preparedRecipe {
-		root = "/home/coder/project"
-		if _, err := os.Lstat(root); !os.IsNotExist(err) {
-			t.Fatal("owned prepared-image proof cannot replace an existing canonical checkout")
-		}
-		t.Cleanup(func() { os.RemoveAll(root) })
-	}
 	files := map[string]string{
 		".devcontainer/devcontainer.json":                 `{"dockerComposeFile":"compose.json","service":"workspace","workspaceFolder":"/workspace/project","remoteUser":"root","features":{"./feature":{}},"onCreateCommand":["node","-e","const fs=require('fs');fs.cpSync('/opt/project-seed','/workspace/project/dependency',{recursive:true});fs.appendFileSync('/workspace/project/create-hook','required create hook\\n')"],"postCreateCommand":["node","-e","require('fs').appendFileSync('/workspace/project/project-hook','required project hook\\n')"]}`,
 		".devcontainer/compose.json":                      `{"name":"owned_compose_project","services":{"workspace":{"build":{"context":"..","dockerfile":".devcontainer/Dockerfile"},"volumes":["..:/workspace/project"],"cap_drop":["ALL"],"command":["sleep","infinity"]},"support":{"image":"` + base + `","command":["sleep","infinity"]}}}`,
@@ -189,14 +184,6 @@ exec %q "$@"
 		"seed/dependency/index.js":                        `module.exports="exact offline dependency";`,
 		"seed/package-lock.json":                          `{"name":"seed","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"seed","version":"1.0.0","dependencies":{"local-dependency":"file:./dependency"}},"dependency":{"name":"local-dependency","version":"1.0.0"},"node_modules/local-dependency":{"resolved":"dependency","link":true}}}`,
 		".gitignore":                                      "/dependency/\n/project-hook\n/feature-hook\n/create-hook\n",
-	}
-	if kind == "prepared-rootfs" {
-		var config map[string]any
-		json.Unmarshal([]byte(files[".devcontainer/devcontainer.json"]), &config)
-		config["postCreateCommand"] = []string{"node", "-e", `const fs=require('fs'),p=require('os').homedir()+'/.cache/owned-prepared-tool';if(!fs.existsSync(p)){fs.mkdirSync(require('path').dirname(p),{recursive:true});fs.writeFileSync(p,'prepared outside the checkout');fs.appendFileSync('/workspace/project/cache-downloads','download\n')}fs.appendFileSync('/workspace/project/project-hook','required project hook\n')`}
-		encoded, _ := json.Marshal(config)
-		files[".devcontainer/devcontainer.json"] = string(encoded)
-		files[".gitignore"] += "/cache-downloads\n"
 	}
 	if kind == "image-only" {
 		var config map[string]any
@@ -263,7 +250,7 @@ exec %q "$@"
 	if kind == "build-no-features" {
 		assignment.ComposeProjectName = "project_devcontainer"
 	}
-	if preparedRecipe {
+	if kind == "credential-free" {
 		version := uint64(9)
 		assignment.EnvironmentVersion = &version
 		assignment.PublicImageBuild = publicImageBuild(runtimeEnvironment{Version: version, Bundle: environmentBundle{
@@ -341,48 +328,30 @@ exec %q "$@"
 	assignment.RegistryCAFile = grants.caFile
 	ctx = context.WithValue(ctx, dockerConfigContextKey{}, grants.dockerConfig)
 	ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
-	if kind == "dependency-seed" || preparedRecipe {
+	if kind == "credential-free" {
 		assignment.EnvironmentVersion = nil
 		assignment.RuntimeEnvironment = nil
 		assignment.EnvironmentSecretsFile = ""
 		assignment.DockerConfigDirectory = ""
 		assignment.RegistryCAFile = ""
 	}
-	if !preparedRecipe {
-		path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
-		if err != nil {
-			t.Fatal(err)
+	if kind == "credential-free" {
+		if image := compatiblePrebuild(ctx, assignment, result, readPrebuildConfiguration); image != result.Image {
+			t.Fatal("credential-free consumer did not confirm its exact committed prebuild input")
 		}
-		defer cleanup()
-		assignment.EffectiveConfiguration = path
-		assignment.PrebuildCacheImage = result.Image
-		if _, err := validateDevcontainer(ctx, assignment); err != nil {
-			t.Fatal(err)
-		}
+	}
+	path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	assignment.EffectiveConfiguration = path
+	assignment.PrebuildCacheImage = result.Image
+	if _, err := validateDevcontainer(ctx, assignment); err != nil {
+		t.Fatal(err)
 	}
 	started = time.Now()
-	var container devcontainerResult
-	var preparedRootFS *preparedProject
-	if preparedRecipe {
-		assignment.ControlURL = "ws://unassigned.invalid/"
-		assignment.ConnectorStateDir = "/home/coder/connector-state"
-		assignment.PreparedImage = &result
-		assignment.DeferRuntimeProcesses = true
-		assignment.Channels = []Channel{{Name: "app", Kind: "app", Target: "http://127.0.0.1:19472", HealthPath: "/"}}
-		assignment.Processes = []Process{{Name: "app", Command: []string{"node", "server.js"}}}
-		project, prepareErr := prepareReservedProject(context.Background(), assignment)
-		err = prepareErr
-		if project != nil {
-			preparedRootFS = project
-			container = project.result
-			assignment = project.assignment
-			if assignment.PrebuildCacheImage != result.Image || assignment.EffectiveConfiguration == "" {
-				t.Fatal("real credential-free template fell back to rebuilding the Project image")
-			}
-		}
-	} else {
-		container, err = startDevcontainer(ctx, assignment)
-	}
+	container, err := startDevcontainer(ctx, assignment)
 	if err != nil {
 		diagnostic, _ := os.ReadFile("/tmp/owned-devcontainer-up.log")
 		if len(diagnostic) > 24*1024 {
@@ -425,12 +394,19 @@ exec %q "$@"
 	if json.Unmarshal([]byte(output), &selected) != nil || selected["Image"] != result.Image {
 		t.Fatalf("Compose consumer did not use the exact prebuilt digest: %s", output)
 	}
+	if coldConsumer {
+		if !t.Run("cold-consumer", func(t *testing.T) {
+			proveColdPrebuildConsumer(t, ctx, assignment, container, result)
+		}) {
+			t.FailNow()
+		}
+	}
 	if kind == "build-no-features" {
 		if selected["User"] != "node" {
 			t.Fatal("prepared child regression requires the actual non-root image USER")
 		}
 		artifacts := map[string]string{
-			"connector":       "#!/bin/sh\nprintf '%s' prepared-child-readable",
+			"connector":       "#!/bin/sh\nprintf '%s' native-child-readable",
 			"assignment.json": `{"public":"credential-free recipe"}`,
 		}
 		for name, content := range artifacts {
@@ -448,94 +424,88 @@ exec %q "$@"
 			"/tmp/owned-connector", "/tmp/owned-assignment.json"); err != nil {
 			t.Fatalf("non-root primary cannot prepare the captured child: %v", err)
 		}
-		if command("docker", "exec", container.ContainerID, "/tmp/owned-connector") != "prepared-child-readable" ||
+		if command("docker", "exec", container.ContainerID, "/tmp/owned-connector") != "native-child-readable" ||
 			command("docker", "exec", container.ContainerID, "stat", "-c", "%u:%a",
 				"/tmp/owned-assignment.json") != "0:444" {
 			t.Fatal("artifact setup did not leave the non-root child readable and executable")
 		}
 	}
-	var dependencyRebuildMS int64
-	if kind == "dependency-seed" {
-		source := assignment
-		source.ControlURL = "ws://unassigned.invalid/"
-		target := source
-		target.RuntimeAttemptID = "owned-fresh-granted-consumer"
-		target.EnvironmentVersion = &version
-		var requested atomic.Bool
-		endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/internal/runtime-environment/"+target.RuntimeAttemptID {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			if r.Header.Get("Authorization") != "Bearer owned-fresh-parent" {
-				t.Error("fresh assignment requested Runtime values without its own authority")
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			requested.Store(true)
-			json.NewEncoder(w).Encode(runtimeEnvironment{Version: version, Bundle: environmentBundle{
-				Variables: []environmentVariable{{Name: "PREPARED_RUNTIME_VALUE", Value: "fresh-after-image-preparation", Runtime: true}},
-			}})
-		}))
-		defer endpoint.Close()
-		target.ControlURL = strings.Replace(endpoint.URL, "http://", "ws://", 1) + "/internal/runtime-connect"
-		grants.cleanup()
-		previousContainer := container.ContainerID
-		// The production Parent authenticates fresh values, then must stop
-		// the clean processes without throwing away this exact dependency
-		// checkout. This owned endpoint intentionally refuses the later WS.
-		err := runParent(context.Background(), target, "owned-fresh-parent", "owned-fresh-child", &preparedProject{
-			assignment: source, result: container,
-			origin: containerOrigin{source.RuntimeAttemptID, source.Generation, container.ComposeProjectName},
-		})
-		if err == nil || !requested.Load() {
-			t.Fatalf("fresh-grant rebuild did not reach its own control boundary: %v", err)
-		}
-		manual, err := os.ReadFile(filepath.Join(root, "dependency/manual"))
-		if err != nil || string(manual) != "still writable" {
-			t.Fatalf("fresh-grant rebuild discarded the actual prepared dependency tree: %v", err)
-		}
-		if err := checkoutProject(context.Background(), target); err != nil {
-			t.Fatalf("retained prepared dependencies bypassed exact clean-source validation: %v", err)
-		}
-		grants, err = prepareEnvironmentFiles(runtimeEnvironment{Version: version, Bundle: environmentBundle{
-			Variables: []environmentVariable{{Name: "PREPARED_RUNTIME_VALUE", Value: "fresh-after-image-preparation", Runtime: true}},
-		}})
+	t.Logf("Offline native Compose component %s on %s passed: first build %dms, completed-result reuse %dms, cache-independent consumer %dms; this is not Factory/Substrate E2E qualification", kind, platform, first.Milliseconds(), replayed.Milliseconds(), consumer.Milliseconds())
+}
+
+// A real-CLI process boundary with no surviving override. This uses the owned
+// component daemon, not a Substrate Actor or a substitute native acceptance.
+func proveColdPrebuildConsumer(t *testing.T, ctx context.Context, assignment Assignment, original devcontainerResult, result PrebuildResult) {
+	t.Helper()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("owned cold component Docker operation: %v: %s", err, out)
 		}
-		defer grants.cleanup()
-		target.RuntimeEnvironment = map[string]string{"PREPARED_RUNTIME_VALUE": "fresh-after-image-preparation"}
-		target.EnvironmentSecretsFile = grants.secretsFile
-		target.DockerConfigDirectory = grants.dockerConfig
-		target.RegistryCAFile = grants.caFile
-		ctx = context.WithValue(context.Background(), dockerConfigContextKey{}, grants.dockerConfig)
-		ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
-		path, cleanup, err := preparePrebuildConsumer(ctx, target, result.Image)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer cleanup()
-		target.EffectiveConfiguration = path
-		if _, err := validateDevcontainer(ctx, target); err != nil {
-			t.Fatal(err)
-		}
-		started = time.Now()
-		assignment = target
-		container, err = startDevcontainer(ctx, assignment)
-		if err != nil || container.ContainerID == previousContainer {
-			t.Fatalf("fresh grants did not start a separate compliant Dev Container: %v", err)
-		}
-		dependencyRebuildMS = time.Since(started).Milliseconds()
-		observation = command("docker", "exec", container.ContainerID, "node", "-e",
-			`const fs=require("fs");if(fs.readFileSync("/workspace/project/dependency/manual","utf8")!=="still writable"||fs.readFileSync("/workspace/project/project-hook","utf8")!=="required project hook\nrequired project hook\n")process.exit(1);process.stdout.write(require("/workspace/project/dependency/node_modules/local-dependency"));`)
-		if observation != "exact offline dependency" {
-			t.Fatal("fresh compliant startup lost its dependency or skipped its required hook")
-		}
+		return strings.TrimSpace(string(out))
 	}
-	if kind == "prepared-rootfs" {
-		grants.cleanup()
-		dependencyRebuildMS = provePreparedRootFSRebuild(t, preparedRootFS).Milliseconds()
+	if err := os.MkdirAll("/run/user/1000", 0700); err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("Offline native Compose component %s on %s passed: first build %dms, completed-result reuse %dms, cache-independent consumer %dms, fresh-grant rebuild %dms; this is not Factory/Substrate E2E qualification", kind, platform, first.Milliseconds(), replayed.Milliseconds(), consumer.Milliseconds(), dependencyRebuildMS)
+	socket := "/run/user/1000/docker.sock"
+	if err := os.Symlink("/var/run/docker.sock", socket); err != nil {
+		t.Fatal("cold component cannot replace an existing native socket", err)
+	}
+	defer os.Remove(socket)
+	assignment.nativeActorUID = "owned-component-actor"
+	assignment.ConnectorStateDir = t.TempDir()
+	t.Setenv("FACTORY_SUBSTRATE_ACTOR_UID", assignment.nativeActorUID)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	t.Setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:8888")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+	if err := rememberNativePrebuild(ctx, &assignment); err != nil {
+		t.Fatal(err)
+	}
+	state := parentState{
+		RuntimeAttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation,
+		ContainerID: original.ContainerID, ComposeProjectName: original.ComposeProjectName,
+		ContainerOrigin: &containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, original.ComposeProjectName},
+		NativeActorUID:  assignment.nativeActorUID, PrebuildCacheImage: result.Image,
+		PrebuildInputIdentity: assignment.prebuildInputIdentity, PrebuildConfigurationSHA256: assignment.prebuildConfigurationSHA256,
+	}
+	if err := writeParentState(assignment, state); err != nil {
+		t.Fatal(err)
+	}
+	run("stop", original.ContainerID)
+	if err := os.RemoveAll(filepath.Dir(assignment.EffectiveConfiguration)); err != nil {
+		t.Fatal(err)
+	}
+	assignment.EffectiveConfiguration, assignment.PrebuildCacheImage = "", ""
+	if err := os.WriteFile(filepath.Join(assignment.WorkspaceFolder, "offline-edit.txt"), []byte("latest independent Source\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	image, err := retainedNativePrebuild(ctx, assignment)
+	if err != nil || image != result.Image {
+		t.Fatalf("real-CLI cold consumer lost its confirmed prepared image: %q %v", image, err)
+	}
+	path, cleanup, err := preparePrebuildConsumer(ctx, assignment, image)
+	defer cleanup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment.EffectiveConfiguration, assignment.PrebuildCacheImage = path, image
+	// Native Source/egress/hook activation is a separate live gate. This proof
+	// runs the real upstream CLI against its original offline component graph.
+	assignment.nativeActorUID = ""
+	resumed, err := startDevcontainer(ctx, assignment)
+	if err != nil {
+		diagnostic, _ := os.ReadFile("/tmp/owned-devcontainer-up.log")
+		if len(diagnostic) > 24*1024 {
+			diagnostic = diagnostic[len(diagnostic)-24*1024:]
+		}
+		t.Log(string(diagnostic))
+		t.Fatal(err)
+	}
+	if resumed.ContainerID != original.ContainerID || run("inspect", "--format", "{{.Config.Image}}", resumed.ContainerID) != result.Image ||
+		run("exec", resumed.ContainerID, "cat", "/workspace/project/offline-edit.txt") != "latest independent Source" {
+		t.Fatal("cold CLI replaced its original primary/image or lost offline Source")
+	}
+	t.Log("real pinned CLI reopened the same prepared primary after override removal and offline Source edits")
 }

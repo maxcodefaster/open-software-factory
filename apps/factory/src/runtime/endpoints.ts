@@ -26,29 +26,19 @@ function runtimeHostURL(url: URL) {
   return url.toString();
 }
 
-export function runtimeRepositoryCloneURL(repositoryURL: string) {
-  const apiURL = process.env["FACTORY_FORGEJO_API_URL"];
-  if (!apiURL) return repositoryURL;
-  const configured = new URL(apiURL);
-  const url = new URL(repositoryURL);
-  const publicURL = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
-  if (url.origin === configured.origin || (publicURL && url.origin === new URL(publicURL).origin)) {
-    url.protocol = configured.protocol;
-    url.host = configured.host;
-    return runtimeHostURL(url);
-  }
-  return repositoryURL;
-}
-
 // Native Actors may reach only the immutable Connector binding's admitted TLS
 // destinations. Never translate Git to a legacy internal HTTP Service or host.
-export function substrateRepositoryCloneURL(repositoryURL: string, binding: unknown) {
+export function substrateRepositoryCloneURL(
+  repositoryURL: string,
+  binding: unknown,
+  environment: Record<string, string | undefined> = process.env,
+) {
   const native = z
     .object({ connectorURL: z.url(), egressHosts: z.array(z.string()).default([]) })
     .parse(binding);
   const connector = new URL(native.connectorURL);
-  const publicURL = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
-  const apiURL = process.env["FACTORY_FORGEJO_API_URL"];
+  const publicURL = environment["FACTORY_FORGEJO_PUBLIC_URL"];
+  const apiURL = environment["FACTORY_FORGEJO_API_URL"];
   if (!publicURL || !apiURL)
     throw new Error("Native Git requires the configured Forge HTTPS origin");
   const forge = new URL(publicURL);

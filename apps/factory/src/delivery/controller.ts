@@ -257,7 +257,9 @@ export function createDeliveryController(
       WHERE verification.id=${verificationID} AND verification.runner_id IS NULL
         AND (verification.runtime_attempt_id IS NULL OR EXISTS(
           SELECT 1 FROM factory.runtime_attempt attempt
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
           WHERE attempt.id=verification.runtime_attempt_id AND attempt.state='stopped'
+            AND binding.deleted_at IS NOT NULL
         ))`;
     return Boolean(confirmed);
   }
@@ -1506,8 +1508,8 @@ export function createDeliveryController(
               AND state IN ('pending','dispatching','running','uncertain'))
             AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
               AND state NOT IN ('succeeded','failed'))
-            AND NOT EXISTS(SELECT 1 FROM factory.factorybox_runtime native
-              WHERE native.runtime_attempt_id=verification_runtime.id AND native.inputs_released_at IS NULL)
+            AND EXISTS(SELECT 1 FROM factory.substrate_binding binding
+              WHERE binding.runtime_attempt_id=verification_runtime.id AND binding.deleted_at IS NOT NULL)
             AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE change_id=change.id
               AND kind='thread' AND state<>'resolved')
             AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id AND trashed_at IS NULL)

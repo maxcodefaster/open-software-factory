@@ -1,17 +1,17 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
-import { WindowHeading } from "./workspace-chrome";
-import { WorkspaceActionBar } from "./ui/workspace-actions";
+import { createEffect, createSignal, For, Show, untrack } from "solid-js";
+import { plainErrorMessage } from "./command-error";
 import { serverCall } from "./server-functions/result";
 import {
   enableWorkspaceCollaboration,
   getAvailableWorkspaces,
   getWorkspaceCollaboration,
   getWorkspaceSharing,
-  shareWorkspace,
   inspectWorkspaceSubmission,
+  shareWorkspace,
   submitWorkspace,
 } from "./server-functions/workspaces";
-import { plainErrorMessage } from "./command-error";
+import { WorkspaceActionBar } from "./ui/workspace-actions";
+import { WindowHeading } from "./workspace-chrome";
 import "./workspace-sharing.css";
 
 type Available = {
@@ -59,15 +59,14 @@ export function WorkspaceSharingBar(props: {
     | undefined;
   let dialog: HTMLDialogElement | undefined, opener: HTMLButtonElement | undefined;
   async function refresh() {
-    const projectID = props.projectID,
-      workspaceID = props.workspaceID;
+    const [projectID, workspaceID] = untrack(() => [props.projectID, props.workspaceID] as const);
     if (projectID) {
       const value = await serverCall(getAvailableWorkspaces({ data: [projectID] }));
-      if (props.projectID === projectID) setAvailable(value);
+      if (untrack(() => props.projectID) === projectID) setAvailable(value);
     }
     if (workspaceID) {
       const value = await serverCall(getWorkspaceCollaboration({ data: [workspaceID] }));
-      if (props.workspaceID === workspaceID) setState(value);
+      if (untrack(() => props.workspaceID) === workspaceID) setState(value);
     }
   }
   createEffect(
@@ -203,14 +202,17 @@ export function WorkspaceSharingBar(props: {
             <option value="" disabled>
               Choose Workspace
             </option>
-            <For each={available()}>
+            <For each={available()} keyed={(row) => row.workspaceID}>
               {(row) => (
-                <option value={row.workspaceID}>
-                  {row.kind === "ticket"
-                    ? row.name
-                    : row.ownerID === props.userID
+                <option
+                  value={row().workspaceID}
+                  selected={row().workspaceID === props.workspaceID}
+                >
+                  {row().kind === "ticket"
+                    ? row().name
+                    : row().ownerID === props.userID
                       ? "My workspace"
-                      : `${row.name}'s workspace`}
+                      : `${row().name}'s workspace`}
                 </option>
               )}
             </For>
@@ -340,18 +342,18 @@ export function WorkspaceSharingBar(props: {
             when={sharing()?.members.length}
             fallback={<p>No other current Project Developers are available.</p>}
           >
-            <For each={sharing()?.members ?? []}>
+            <For each={sharing()?.members ?? []} keyed={(member) => member.userID}>
               {(member) => (
                 <label class="control-field workspace-sharing-member">
-                  <span>{member.name}</span>
+                  <span>{member().name}</span>
                   <select
-                    aria-label={`Access for ${member.name}`}
-                    data-member-id={member.userID}
-                    value={member.permission ?? "private"}
+                    aria-label={`Access for ${member().name}`}
+                    data-member-id={member().userID}
+                    value={member().permission ?? "private"}
                     disabled={busy()}
                     onChange={(event) =>
                       void decide(
-                        member,
+                        member(),
                         event.currentTarget.value === "private"
                           ? null
                           : (event.currentTarget.value as "observe" | "collaborate"),

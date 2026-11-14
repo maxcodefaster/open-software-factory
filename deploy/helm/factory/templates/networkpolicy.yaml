@@ -1,16 +1,17 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- /*
 Ingress is denied for every Pod of this release, then each flow Factory uses is allowed:
-  Factory   <- Zero, Forgejo (callbacks, OIDC discovery), runtime namespaces (/internal/*), ingress controller
-  Forgejo   <- Factory, runtime namespaces (git clone/push), ingress controller
+  Factory   <- Factory (MCP public keys), Zero, Forgejo (callbacks, OIDC discovery), editor namespaces, ingress controller
+  Forgejo   <- Factory, ingress controller
   Zero      <- Factory, ingress controller (/zero)
   PostgreSQL<- Factory, Zero, the pre-upgrade maintenance Job, the backup Job
   OpenBao   <- Factory, the backup Job
   Garage    <- Factory, the backup Job
 `kubectl port-forward` (factory:connect, Source/editor forwards) enters through the Pod's own
 loopback and is not subject to these policies. Probes come from the kubelet on the node.
-Runtime namespaces are every Namespace labelled app.kubernetes.io/managed-by=open-software-factory,
-which Factory sets on each Namespace it creates. They cannot reach PostgreSQL, OpenBao or Garage.
+Editor namespaces carry app.kubernetes.io/managed-by=open-software-factory.
+Native Actors use their admitted public HTTPS/WSS origins through the TLS ingress,
+not an internal HTTP Forgejo route. Neither path may reach PostgreSQL, OpenBao or Garage.
 */ -}}
 {{- $name := include "factory.name" . }}
 {{- $instance := .Release.Name }}
@@ -26,8 +27,8 @@ their labels. The backup steps retry their connections for that reason.
 */}}
 {{- $backup := ternary (list (get $peers "backup")) (list) .Values.backup.enabled }}
 {{- $rules := list
-  (dict "component" "factory" "port" 3000 "from" (list (get $peers "zero") (get $peers "forgejo") $runtime) "controller" true)
-  (dict "component" "forgejo" "port" 3000 "from" (list (get $peers "factory") $runtime) "controller" true)
+  (dict "component" "factory" "port" 3000 "from" (list (get $peers "factory") (get $peers "zero") (get $peers "forgejo") $runtime) "controller" true)
+  (dict "component" "forgejo" "port" 3000 "from" (list (get $peers "factory")) "controller" true)
   (dict "component" "zero" "port" 4848 "from" (list (get $peers "factory")) "controller" true)
   (dict "component" "postgres" "port" 5432 "from" (concat (list (get $peers "factory") (get $peers "zero") (get $peers "maintenance")) $backup))
   (dict "component" "openbao" "port" 8200 "from" (concat (list (get $peers "factory") (get $peers "openbao")) $backup))

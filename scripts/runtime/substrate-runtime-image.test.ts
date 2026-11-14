@@ -3,9 +3,11 @@ import pins from "../../deploy/substrate/runtime-pins.json";
 
 test("Factory native image keeps exact Factory tools and the official matching containerd daemon/shim API", async () => {
   const dockerfile = await Bun.file("deploy/substrate/Runtime.Dockerfile").text();
-  expect(dockerfile).toContain(
-    `--checksum=sha256:${pins.containerd.sha256} ${pins.containerd.url}`,
-  );
+  for (const [architecture, pin] of Object.entries(pins.containerd.architectures)) {
+    expect(dockerfile).toContain(`FROM tools AS containerd-${architecture}`);
+    expect(dockerfile).toContain(`--checksum=sha256:${pin.sha256} ${pin.url}`);
+  }
+  expect(dockerfile).toContain("FROM containerd-${TARGETARCH} AS containerd");
   expect(dockerfile).toContain(pins.containerd.revision);
   for (const version of [
     "29.9.0",
@@ -21,11 +23,22 @@ test("Factory native image keeps exact Factory tools and the official matching c
   const child = await Bun.file("deploy/substrate/rootless/runtime-child.sh").text();
   expect(child).toContain("exec dockerd --rootless");
   expect(child).toContain("--default-cgroupns-mode=host");
+  expect(child).toContain("--data-root=/home/rootless/persist/docker/graph");
+  expect(child).toContain("--storage-driver=overlay2");
+  expect(child).not.toContain("--storage-driver=vfs");
+  expect(child).toContain('test "$(stat -c \'%u:%g:%a\' "$storage")" = 0:0:700');
   expect(child).not.toContain("--containerd=");
   expect(child).not.toContain("docker.sock:/");
   const bootstrap = await Bun.file("deploy/substrate/rootless/child.sh").text();
   expect(bootstrap).toContain("--containerd=/run/user/1000/docker/containerd/containerd.sock");
+  expect(await Bun.file("deploy/substrate/rootless/tinyproxy.conf").text()).toMatch(
+    /^Timeout 30$/m,
+  );
   const factory = await Bun.file("deploy/factory/Dockerfile").text();
+  const tools = await Bun.file("deploy/runtime-host/Dockerfile").text();
+  expect(tools).toContain(
+    "COPY --from=input-stop /out/input-stop.mjs /opt/factory/opencode/server/input-stop.mjs",
+  );
   expect(factory).toContain("COPY deploy/substrate/pins.json ./deploy/substrate/pins.json");
   expect(await Bun.file(".dockerignore").text()).toContain("core.[0-9]*");
   expect(factory).toContain(

@@ -33,16 +33,21 @@ type devcontainerResult struct {
 }
 
 type parentState struct {
-	RuntimeAttemptID   string           `json:"runtimeAttemptId"`
-	Generation         uint64           `json:"generation"`
-	ContainerID        string           `json:"containerId"`
-	ComposeProjectName string           `json:"composeProjectName"`
-	PreserveWorkspace  bool             `json:"preserveWorkspace"`
-	ContainerOrigin    *containerOrigin `json:"containerOrigin,omitempty"`
+	RuntimeAttemptID            string           `json:"runtimeAttemptId"`
+	Generation                  uint64           `json:"generation"`
+	ContainerID                 string           `json:"containerId"`
+	ComposeProjectName          string           `json:"composeProjectName"`
+	PreserveWorkspace           bool             `json:"preserveWorkspace"`
+	ContainerOrigin             *containerOrigin `json:"containerOrigin,omitempty"`
+	NativeActorUID              string           `json:"nativeActorUID,omitempty"`
+	PrebuildCacheImage          string           `json:"prebuildCacheImage,omitempty"`
+	PrebuildInputIdentity       string           `json:"prebuildInputIdentity,omitempty"`
+	PrebuildConfigurationSHA256 string           `json:"prebuildConfigurationSHA256,omitempty"`
 }
 
 type inspectedContainer struct {
 	ID     string `json:"Id"`
+	Image  string `json:"Image"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
 		Image  string            `json:"Image"`
@@ -78,10 +83,6 @@ type inspectedContainer struct {
 }
 
 func RunParent(ctx context.Context, assignment Assignment, token string, childToken string) (returnError error) {
-	return runParent(ctx, assignment, token, childToken, nil)
-}
-
-func runParent(ctx context.Context, assignment Assignment, token string, childToken string, prepared *preparedProject) (returnError error) {
 	environment, err := readRuntimeEnvironment(ctx, assignment, token)
 	if err != nil {
 		return err
@@ -95,14 +96,6 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	if token == "" || childToken == "" {
 		return errors.New("Factory parent and child connector tokens are required")
-	}
-	prepared, preparedDependencies, err := reconcilePreparedProject(assignment, environment, prepared)
-	if err != nil {
-		return err
-	}
-	if prepared != nil {
-		origin := prepared.origin
-		assignment.containerOrigin = &origin
 	}
 	finishDocker := startupPhase("private-docker")
 	dockerErr := waitForDocker(ctx)
@@ -150,43 +143,38 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	if assignment.Prebuild != nil {
 		return runPrebuildAttempt(ctx, assignment, token, control)
 	}
-	if prepared == nil {
-		cleanup, err := prepareFreshDevcontainer(ctx, &assignment, token, preparedDependencies)
-		defer cleanup()
-		if err != nil {
-			return retainParentStartupFailure(ctx, assignment, token, &control, err)
-		}
+	cleanup, err := prepareFreshDevcontainer(ctx, &assignment, token)
+	defer cleanup()
+	if err != nil {
+		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
 	preparation := prepareBrowserImage(ctx, func(ctx context.Context) error {
 		return ensureBrowserImage(ctx, assignment.BrowserToolsImage)
 	})
 	defer preparation.stop()
 	finishDevcontainer := startupPhase("devcontainer-start")
-	var result devcontainerResult
-	if prepared == nil {
-		result, err = startDevcontainer(ctx, assignment)
-	} else {
-		result, err = prepared.observe()
-	}
+	result, err := startDevcontainer(ctx, assignment)
 	finishDevcontainer()
 	if err != nil {
 		err = cleanupFailedParentStartup(assignment, err)
 		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
-	if prepared == nil {
-		// The CLI's standalone image path has no Compose label. Preserve that
-		// observed absence instead of substituting the logical Workspace name.
-		// Browser and cleanup still require this exact primary/attempt/generation.
-		origin := containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, result.ComposeProjectName}
-		assignment.containerOrigin = &origin
-	}
+	// The CLI's standalone image path has no Compose label. Preserve that
+	// observed absence instead of substituting the logical Workspace name.
+	// Browser and cleanup still require this exact primary/attempt/generation.
+	origin := containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, result.ComposeProjectName}
+	assignment.containerOrigin = &origin
 	state := parentState{
-		RuntimeAttemptID:   assignment.RuntimeAttemptID,
-		Generation:         assignment.Generation,
-		ContainerID:        result.ContainerID,
-		ComposeProjectName: result.ComposeProjectName,
-		PreserveWorkspace:  assignment.PreserveWorkspace,
-		ContainerOrigin:    assignment.containerOrigin,
+		RuntimeAttemptID:            assignment.RuntimeAttemptID,
+		Generation:                  assignment.Generation,
+		ContainerID:                 result.ContainerID,
+		ComposeProjectName:          result.ComposeProjectName,
+		PreserveWorkspace:           assignment.PreserveWorkspace,
+		ContainerOrigin:             assignment.containerOrigin,
+		NativeActorUID:              assignment.nativeActorUID,
+		PrebuildCacheImage:          assignment.PrebuildCacheImage,
+		PrebuildInputIdentity:       assignment.prebuildInputIdentity,
+		PrebuildConfigurationSHA256: assignment.prebuildConfigurationSHA256,
 	}
 	retainingFailure := false
 	defer func() {
@@ -214,12 +202,7 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		}
 	}()
 	finishInjection := startupPhase("tool-injection")
-	var injectionErr error
-	if prepared == nil {
-		injectionErr = injectChild(ctx, assignment, result, childToken)
-	} else {
-		injectionErr = activatePreparedChild(ctx, assignment, result, childToken)
-	}
+	injectionErr := injectChild(ctx, assignment, result, childToken)
 	finishInjection()
 	if err := injectionErr; err != nil {
 		retainingFailure = true
@@ -272,36 +255,6 @@ func applyRuntimeEnvironment(ctx context.Context, assignment *Assignment, enviro
 	return ctx, files.cleanup, nil
 }
 
-// reconcilePreparedProject decides whether a captured prepared Project can serve
-// this assignment. It returns the prepared Project to keep, if any, and the
-// prepared Project whose dependency files may seed a fresh start.
-func reconcilePreparedProject(assignment Assignment, environment runtimeEnvironment, prepared *preparedProject) (*preparedProject, *preparedProject, error) {
-	if prepared == nil {
-		return nil, nil, nil
-	}
-	// Runtime grants are read only after assignment. Never inject them into
-	// the captured clean processes, even when only their version changed.
-	if samePreparedProject(prepared.assignment, assignment) &&
-		len(environment.Bundle.Variables) == 0 && len(environment.Bundle.Registries) == 0 {
-		return prepared, nil, nil
-	}
-	if err := cleanupProject(prepared.state()); err != nil {
-		return nil, nil, err
-	}
-	// This is the Fork's separate clean checkout, never canonical
-	// Workspace source. Fresh grants require fresh processes and
-	// hooks, not deletion of its exact prepared dependency files.
-	// checkoutProject still verifies its Project, commit and clean
-	// tracked source before the ordinary Dev Container startup.
-	if reusablePreparedDependencies(prepared.assignment, assignment, environment) {
-		return nil, prepared, nil
-	}
-	if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
-		return nil, nil, err
-	}
-	return nil, nil, nil
-}
-
 // runPrebuildAttempt produces and publishes a Project prebuild instead of
 // starting a Dev Container.
 func runPrebuildAttempt(ctx context.Context, assignment Assignment, token string, control *controlConnection) error {
@@ -323,25 +276,26 @@ func runPrebuildAttempt(ctx context.Context, assignment Assignment, token string
 // prepareFreshDevcontainer selects a prebuilt image when one is compatible and
 // validates the Dev Container configuration before the CLI can run any
 // lifecycle hook. The returned cleanup is always safe to call.
-func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token string, preparedDependencies *preparedProject) (func(), error) {
+func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token string) (func(), error) {
 	var cleanups []func()
 	cleanup := func() {
 		for index := len(cleanups) - 1; index >= 0; index-- {
 			cleanups[index]()
 		}
 	}
-	if preparedDependencies != nil && preparedDependencies.rootFSImage != "" {
-		image, err := preparedDependencies.inspectRootFS(ctx, preparedDependencies.rootFSImage)
+	if assignment.EffectiveConfiguration == "" {
+		image, err := retainedNativePrebuild(ctx, *assignment)
 		if err != nil {
 			return cleanup, err
 		}
-		consumer := *assignment
-		consumer.preparedRootFSImage = image
-		path, remove, err := preparePrebuildConsumer(ctx, consumer, image)
-		if err == nil {
+		if image != "" {
+			path, remove, err := preparePrebuildConsumer(ctx, *assignment, image)
+			if err != nil {
+				return cleanup, err
+			}
 			cleanups = append(cleanups, remove)
+			assignment.PrebuildCacheImage = image
 			assignment.EffectiveConfiguration = path
-			assignment.preparedRootFSImage = image
 		}
 	}
 	if assignment.EffectiveConfiguration == "" {
@@ -351,7 +305,14 @@ func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token
 			if err == nil {
 				cleanups = append(cleanups, remove)
 				assignment.EffectiveConfiguration = path
+			} else {
+				assignment.PrebuildCacheImage = ""
 			}
+		}
+	}
+	if assignment.PrebuildCacheImage != "" && assignment.nativeActorUID != "" {
+		if err := rememberNativePrebuild(ctx, assignment); err != nil {
+			return cleanup, err
 		}
 	}
 	if err := prepareDevcontainerProject(ctx, *assignment); err != nil {

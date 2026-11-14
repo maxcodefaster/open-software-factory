@@ -1,78 +1,58 @@
 import { expect, test } from "bun:test";
 import { recoverWorkspaceSource } from "./source-recovery";
 
-function commands(states: Array<"stop-intended" | "stopped" | "failed"> = ["stopped"]) {
+function commands() {
   const calls: string[] = [];
   return {
     calls,
-    stop: async (workspace: string) => {
-      calls.push(`stop:${workspace}`);
-    },
-    read: async (workspace: string) => {
-      const state = states.shift();
-      if (!state) throw Error("Unexpected source poll");
-      calls.push(`read:${workspace}:${state}`);
-      return { state };
-    },
     ensure: async (workspace: string) => {
       calls.push(`ensure:${workspace}`);
     },
-    wait: async () => {},
   };
 }
 
 test("an ordinary file-access retry re-observes the same source intent without Stop", async () => {
   const api = commands();
-  await recoverWorkspaceSource("retained-workspace", false, new AbortController().signal, api);
+  await recoverWorkspaceSource("retained-workspace", new AbortController().signal, api);
   expect(api.calls).toEqual(["ensure:retained-workspace"]);
 });
 
-test("an explicit file-access restart confirms Stop before ensuring the frozen Workspace", async () => {
-  const api = commands(["stop-intended", "stopped"]);
-  await recoverWorkspaceSource("retained-workspace", true, new AbortController().signal, api);
-  expect(api.calls).toEqual([
-    "stop:retained-workspace",
-    "read:retained-workspace:stop-intended",
-    "read:retained-workspace:stopped",
-    "ensure:retained-workspace",
-  ]);
-});
-
-test("failed or cancelled Stop never starts another source access epoch", async () => {
-  const failed = commands(["failed"]);
-  await expect(
-    recoverWorkspaceSource("retained-workspace", true, new AbortController().signal, failed),
-  ).rejects.toThrow("Stop was not confirmed");
-  expect(failed.calls.some((call) => call.startsWith("ensure:"))).toBe(false);
-  const cancelled = new AbortController();
-  const stopped = Promise.withResolvers<void>();
+test("an unavailable Source is not silently retried or replaced", async () => {
   const api = commands();
-  api.stop = async (workspace) => {
-    api.calls.push(`stop:${workspace}`);
-    await stopped.promise;
+  api.ensure = async (workspace) => {
+    api.calls.push(`ensure:${workspace}`);
+    throw Error("Source owner is still unavailable; keep the editor buffer");
   };
-  const recovery = recoverWorkspaceSource("old-workspace", true, cancelled.signal, api);
-  cancelled.abort(new Error("Workspace selection changed"));
-  stopped.resolve();
-  await expect(recovery).rejects.toThrow("Workspace selection changed");
-  expect(api.calls).toEqual(["stop:old-workspace"]);
+  await expect(
+    recoverWorkspaceSource("retained-workspace", new AbortController().signal, api),
+  ).rejects.toThrow("Source owner is still unavailable");
+  expect(api.calls).toEqual(["ensure:retained-workspace"]);
 });
 
-test("a late stopped observation cannot start source access after selection changes", async () => {
+test("a cancelled selection does not query another Source owner", async () => {
+  const cancelled = new AbortController();
+  const api = commands();
+  cancelled.abort(new Error("Workspace selection changed"));
+  await expect(recoverWorkspaceSource("old-workspace", cancelled.signal, api)).rejects.toThrow(
+    "Workspace selection changed",
+  );
+  expect(api.calls).toEqual([]);
+});
+
+test("a late Source observation cannot rebind the editor after selection changes", async () => {
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const cancel = new AbortController();
   const api = commands();
-  api.read = async (workspace) => {
-    api.calls.push(`read:${workspace}:pending`);
+  api.ensure = async (workspace) => {
+    api.calls.push(`ensure:${workspace}`);
     entered.resolve();
     await release.promise;
-    return { state: "stopped" };
   };
-  const recovery = recoverWorkspaceSource("old-workspace", true, cancel.signal, api);
+  const recovery = recoverWorkspaceSource("old-workspace", cancel.signal, api);
   await entered.promise;
   cancel.abort(new Error("Workspace selection changed"));
   release.resolve();
   await expect(recovery).rejects.toThrow("Workspace selection changed");
-  expect(api.calls).toEqual(["stop:old-workspace", "read:old-workspace:pending"]);
+  expect(api.calls).toEqual(["ensure:old-workspace"]);
 });

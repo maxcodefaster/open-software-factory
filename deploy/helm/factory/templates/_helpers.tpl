@@ -32,11 +32,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- if or (not (has $url.scheme (list "http" "https"))) (not $url.host) $url.userinfo $url.query $url.fragment (and $url.path (ne $url.path "/")) -}}
 {{- fail "forgejoPublicURL must be an HTTP(S) origin without credentials, query or path" -}}
 {{- end -}}
-{{- if and (not .Values.development) (ne $url.scheme "https") -}}
-{{- fail "Non-development Factory requires an HTTPS forgejoPublicURL" -}}
+{{- if ne $url.scheme "https" -}}
+{{- fail "Native Factory requires an HTTPS forgejoPublicURL" -}}
 {{- end -}}
-{{- if and .Values.development (not (regexMatch "^(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?$" $url.host)) -}}
-{{- fail "development is limited to loopback Forgejo browser access" -}}
+{{- if or (regexMatch "^[0-9.]+(:[0-9]+)?$" $url.host) (hasPrefix "[" $url.host) (and (contains ":" $url.host) (not (hasSuffix ":443" $url.host))) -}}
+{{- fail "Native forgejoPublicURL requires a DNS hostname on TLS port 443" -}}
 {{- end -}}
 {{- if eq (trimSuffix "/" .Values.publicURL) (trimSuffix "/" $value) -}}
 {{- fail "Factory and Forgejo require distinct browser origins" -}}
@@ -76,7 +76,11 @@ resources:
 {{- end -}}
 
 {{- define "factory.image" -}}
-{{- required "image is required: set it to the Factory application image reference (an @sha256 digest outside local acceptance)" .Values.image | quote -}}
+{{- $value := required "image is required: set it to the Factory application image reference (an @sha256 digest outside local acceptance)" .Values.image -}}
+{{- if and (not .Values.development) (not (regexMatch "^[a-zA-Z0-9.:/_-]+@sha256:[a-f0-9]{64}$" $value)) -}}
+{{- fail "Non-development Factory requires an image pinned by @sha256 digest" -}}
+{{- end -}}
+{{- $value | quote -}}
 {{- end -}}
 
 {{- define "factory.credentialsSecret" -}}
@@ -119,8 +123,8 @@ seccompProfile: {type: RuntimeDefault}
 {{- end -}}
 
 {{- /*
-Chart-managed volumes from earlier releases hold root-owned files. A short root init container
-hands them to the unprivileged service user; it needs only chown and traversal capabilities.
+Fresh chart-managed volumes start root-owned. A short root init container hands
+them to the service user; it needs only chown and traversal capabilities.
 */ -}}
 {{- define "factory.ownVolume" -}}
 - name: own-data

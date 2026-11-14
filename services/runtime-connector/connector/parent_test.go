@@ -275,7 +275,12 @@ func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures
 	for _, diagnostic := range []string{
 		"x509: certificate signed by unknown authority",
 		"x509: certificate signed by unknown authority after a connection refused",
+		"x509: certificate signed by unknown authority after Unable to connect",
 		"unauthorized: no such host",
+		"unauthorized: Unable to connect",
+		"unauthorized: EOF",
+		"x509: certificate signed by unknown authority: EOF",
+		"manifest unknown: EOF",
 		"forbidden: connection reset",
 		"manifest unknown",
 		"invalid reference format",
@@ -283,6 +288,7 @@ func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures
 		"no space left on device after a connection reset",
 		"toomanyrequests after connection refused",
 		"unclassified private-registry-secret",
+		"unclassified EOF condition",
 	} {
 		if retryableImageDownload(diagnostic) {
 			t.Fatal("permanent or unknown image failure was silently retried", diagnostic)
@@ -294,6 +300,9 @@ func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures
 		"lookup registry.factory: no such host",
 		"unexpected status: 503 Service Unavailable",
 		"unexpected EOF",
+		"EOF\n",
+		"Download failed after 5 attempts: EOF",
+		`Error response from daemon: Get "https://registry.factory/v2/": Unable to connect`,
 	} {
 		if !retryableImageDownload(diagnostic) {
 			t.Fatal("transient Registry transport failure was made permanent", diagnostic)

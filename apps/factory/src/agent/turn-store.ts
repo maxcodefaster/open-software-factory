@@ -138,7 +138,9 @@ async function currentAuthorityIn(
         AND verification.runner_id IS NULL
         AND (verification.runtime_attempt_id IS NULL OR EXISTS(
           SELECT 1 FROM factory.runtime_attempt execution
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=execution.id
           WHERE execution.id=verification.runtime_attempt_id AND execution.state='stopped'
+            AND binding.deleted_at IS NOT NULL
         ))
         AND review.state IN ('pending','running')
         AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation

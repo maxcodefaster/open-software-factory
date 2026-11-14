@@ -4,8 +4,8 @@ import type { RuntimeHub } from "./hub";
 
 type Database = ReturnType<typeof createDatabase>;
 
-// A Pause and Resume cost about 25 s together, so an attended Workspace keeps
-// compute for 15 minutes. One nobody is looking at pauses sooner.
+// Idle policy is independent of lifecycle latency. An unattached Workspace
+// receives the existing shorter grace; activity remains ephemeral.
 function minutes(
   environment: Readonly<Record<string, string | undefined>>,
   name: string,
@@ -34,19 +34,12 @@ export function executionReviewMS(environment: Readonly<Record<string, string | 
   return minutes(environment, "FACTORY_EXECUTION_REVIEW_MINUTES", "30");
 }
 
-// Factorybox keeps every Pause of a Sandbox in one bounded lifecycle record, and refuses to resume
-// a Sandbox whose record could no longer hold its next Pause. Measured, that happens after 19
-// Pauses. A Sandbox with this many Pauses stops instead, so the next open starts fresh from its
-// Source before the limit can trap it.
-export const maximumPausesPerSandbox = 12;
-
 // Activity stays in memory. Restart starts a new grace; it never stores user heartbeats.
 export function createIdleCompute(
   database: Database,
   hub: Pick<RuntimeHub, "claimIdle" | "releaseIdle">,
   runtimes: {
     pause(attemptID: string): Promise<unknown>;
-    stop(attemptID: string): Promise<unknown>;
   },
   idleMS = executionIdleMS(process.env),
   quietMS = Math.min(executionQuietMS(process.env), idleMS),
@@ -60,19 +53,20 @@ export function createIdleCompute(
   async function reconcile() {
     if (!idleMS || closed) return;
     const candidates = await database.client<
-      Array<{ id: string; projectID: string; changeID: string | null }>
-    >`SELECT id,project_id AS "projectID",change_id AS "changeID" FROM factory.runtime_attempt
-      WHERE workspace_id IS NOT NULL AND state='ready'
+      Array<{ id: string; projectID: string; workspaceID: string; changeID: string | null }>
+    >`SELECT id,project_id AS "projectID",workspace_id AS "workspaceID",change_id AS "changeID" FROM factory.runtime_attempt
+      WHERE workspace_id IS NOT NULL AND substrate AND state='ready'
         AND (${after}::uuid IS NULL OR id>${after}::uuid) ORDER BY id LIMIT 64`;
     // Advance even when every candidate is busy. Activity remains ephemeral.
     after = candidates.length === 64 ? (candidates.at(-1)?.id ?? null) : null;
     for (const attempt of candidates) {
       if (closed) return;
       let claimed = false;
-      let recorded: false | "pause" | "stop" = false;
+      let recorded = false;
       try {
         recorded = await database.client.begin(async (sql) => {
           await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${attempt.projectID}`}))`;
+          await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${attempt.workspaceID}`}))`;
           if (attempt.changeID) {
             // Same locks as Build admission. Read work again only after acquiring them.
             await sql`SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
@@ -81,33 +75,13 @@ export function createIdleCompute(
           const [current] = await sql<Array<{ state: string }>>`
             SELECT state FROM factory.runtime_attempt WHERE id=${attempt.id} FOR UPDATE`;
           if (current?.state !== "ready") return false;
-          const [work] = await sql<
-            Array<{ active: boolean; releasable: boolean; reviewing: boolean }>
-          >`
+          const [work] = await sql<Array<{ active: boolean; reviewing: boolean }>>`
             SELECT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${attempt.changeID}
               AND state IN ('pending','dispatching','running','uncertain'))
               OR EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${attempt.changeID}
                 AND (state IN ('starting','working') OR stop_pending))
               OR EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${attempt.changeID}
                 AND state NOT IN ('succeeded','failed')) AS active,
-              EXISTS(SELECT 1 FROM factory.change_agent_session session
-                JOIN factory.change change ON change.id=session.change_id
-                JOIN factory.change_writer writer ON writer.change_id=change.id
-                JOIN factory.agent_turn turn ON turn.id=session.active_turn_id AND turn.change_id=change.id
-                WHERE change.id=${attempt.changeID} AND change.runtime_attempt_id=${attempt.id}
-                  AND session.runtime_attempt_id=${attempt.id}
-                  AND NOT session.stop_pending
-                  AND writer.state IN ('agent','unassigned')
-                  AND change.state IN ('active','delivering','delivered')
-                  AND ((session.state='committed' AND turn.state='completed'
-                    AND EXISTS(SELECT 1 FROM factory.change_commit_operation
-                      WHERE change_id=change.id AND state='succeeded'))
-                    OR (session.state='failed' AND turn.state='failed'
-                      AND (writer.state='unassigned' OR writer.turn_id=turn.id)
-                      AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
-                        WHERE intent.turn_id=turn.id AND intent.change_id=change.id
-                          AND intent.runtime_attempt_id=${attempt.id}
-                          AND intent.session_id=session.opencode_session_id)))) AS releasable,
               ${reviewMS} > 0 AND (
                 EXISTS(SELECT 1 FROM factory.verification verification
                   WHERE verification.change_id=${attempt.changeID}
@@ -121,25 +95,13 @@ export function createIdleCompute(
           if (work?.active || work?.reviewing || !hub.claimIdle(attempt.id, idleMS, quietMS))
             return false;
           claimed = true;
-          // Submitted work needs no checkpoint; a definite failure already
-          // requires fresh, fenced execution on explicit retry. Preserve their
-          // Source and native Sessions while releasing the private backing.
-          const [history] = await sql<Array<{ pauses: number }>>`
-            SELECT count(*)::int AS pauses FROM factory.factorybox_lifecycle_operation
-            WHERE runtime_attempt_id=${attempt.id} AND action='pause' AND completed_at IS NOT NULL`;
-          const mode =
-            work?.releasable || (history?.pauses ?? 0) >= maximumPausesPerSandbox
-              ? "stop"
-              : "pause";
-          await sql`UPDATE factory.runtime_attempt SET
-            state=${mode === "stop" ? "stop-intended" : "pausing"}::factory.runtime_attempt_state,
-            stop_intended_at=CASE WHEN ${mode === "stop"} THEN now() ELSE stop_intended_at END,
-            updated_at=now()
+          // Idle is Pause, never an implicit destructive Stop. Official
+          // Substrate owns snapshot retention; no Factorybox pause cap applies.
+          await sql`UPDATE factory.runtime_attempt SET state='pausing',updated_at=now()
             WHERE id=${attempt.id} AND state='ready'`;
-          return mode;
+          return true;
         });
-        if (recorded === "stop") await runtimes.stop(attempt.id);
-        else if (recorded === "pause") await runtimes.pause(attempt.id);
+        if (recorded) await runtimes.pause(attempt.id);
       } finally {
         if (claimed && !recorded) hub.releaseIdle(attempt.id);
       }

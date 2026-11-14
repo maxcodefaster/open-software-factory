@@ -12,7 +12,7 @@ import { createForgejoClient } from "../../packages/forge/src/forge";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { assistedImportRuntime } from "../fixtures/assisted-import-runtime";
-import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
@@ -166,16 +166,7 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
               150_000,
             );
           }
-          await removeOwnedProjectSources(database, importedProjectID, (workspace) =>
-            serverCall(
-              callFactoryFunction(
-                fixtureValue(factory, "factory").base,
-                "stopWorkspaceSource",
-                [workspace],
-                { cookie },
-              ),
-            ),
-          );
+          await requireOwnedProjectSourceRetention(database, importedProjectID);
           succeeded = true;
           return;
         }

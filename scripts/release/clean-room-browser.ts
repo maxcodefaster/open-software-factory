@@ -22,6 +22,7 @@ export type JourneyInput = {
   id: string;
   withSandbox: boolean;
   directory: string;
+  signal?: AbortSignal;
 };
 
 export type JourneyResult = {
@@ -146,6 +147,10 @@ export async function browserJourney(input: JourneyInput): Promise<JourneyResult
   const executablePath = process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"];
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   let signedIn = false;
+  const abort = () => {
+    void browser?.close().catch(() => {});
+  };
+  input.signal?.addEventListener("abort", abort, { once: true });
 
   const step = async (
     name: string,
@@ -162,6 +167,7 @@ export async function browserJourney(input: JourneyInput): Promise<JourneyResult
       });
     if (!precondition) return finish("failed", "An earlier browser step failed");
     try {
+      input.signal?.throwIfAborted();
       const result = await work();
       if (typeof result === "string") finish("passed", result);
       else finish("skipped", result.skipped);
@@ -176,11 +182,17 @@ export async function browserJourney(input: JourneyInput): Promise<JourneyResult
   };
 
   try {
+    input.signal?.throwIfAborted();
     browser = await chromium.launch({
       headless: true,
       ...(executablePath ? { executablePath } : {}),
     });
+    if (input.signal?.aborted) {
+      await browser.close();
+      input.signal.throwIfAborted();
+    }
   } catch (cause) {
+    input.signal?.removeEventListener("abort", abort);
     const detail = `Chromium did not start: ${cause instanceof Error ? cause.message.split("\n")[0] : String(cause)}. Run bunx playwright install chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE.`;
     for (const name of [
       "sign-in",
@@ -293,6 +305,7 @@ export async function browserJourney(input: JourneyInput): Promise<JourneyResult
     });
     await context.close();
   } finally {
+    input.signal?.removeEventListener("abort", abort);
     await browser.close().catch(() => undefined);
   }
   return {

@@ -2,12 +2,54 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { parseAllDocuments } from "yaml";
 import upstream from "../../upstream.json";
 import { connectArguments, localAccessConfiguration } from "./connect";
 
 const options = connectArguments(["--namespace", "owned-proof", "--release", "proof"]);
 
-function configuration(ports = [58000, 58001, 58002]) {
+test("local access accepts the shipped native local chart without proxying its Forge TLS origin", async () => {
+  const child = Bun.spawn(
+    [
+      "helm",
+      "template",
+      options.release,
+      resolve(import.meta.dir, "../../deploy/helm/factory"),
+      "--namespace",
+      options.namespace,
+      "--values",
+      resolve(import.meta.dir, "../../deploy/helm/factory/values.local.yaml"),
+      "--set-string",
+      `image=registry.example.invalid/factory@sha256:${"a".repeat(64)}`,
+      "--set-string",
+      "substrate.workspaceConfigurationSecret=owned-native-configuration",
+      "--set-string",
+      "substrate.provisionerTokenSecret=owned-native-provisioner",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [output, error, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exit !== 0) throw Error(`Owned native chart render failed: ${error}`);
+  const config = parseAllDocuments(output)
+    .map((document) => document.toJSON())
+    .find(
+      (document) => document?.kind === "ConfigMap" && document.metadata?.name === "proof-config",
+    );
+  if (!config) throw Error("Current chart's public configuration is missing");
+  // The API adds namespace and UID to a chart object. No cluster is contacted.
+  config.metadata.namespace = options.namespace;
+  config.metadata.uid = "owned-rendered-native-chart";
+  const selected = localAccessConfiguration(config, options);
+  expect(selected.targets.map((target) => target.role)).toEqual(["Factory", "Planning"]);
+  expect(selected.forgejoURL).toBe("https://git.factory.example");
+  expect(selected.targets.every((target) => target.component !== "forgejo")).toBe(true);
+});
+
+function configuration(ports = [58000, 58002]) {
   return {
     metadata: {
       name: "proof-config",
@@ -23,8 +65,8 @@ function configuration(ports = [58000, 58001, 58002]) {
       NODE_ENV: "development",
       FACTORY_HELM_RELEASE: "proof",
       FACTORY_BASE_URL: `http://127.0.0.1:${ports[0]}`,
-      FACTORY_FORGEJO_PUBLIC_URL: `http://127.0.0.1:${ports[1]}`,
-      FACTORY_ZERO_CACHE_PUBLIC_URL: `http://127.0.0.1:${ports[2]}/zero`,
+      FACTORY_FORGEJO_PUBLIC_URL: "https://git.owned-test.invalid",
+      FACTORY_ZERO_CACHE_PUBLIC_URL: `http://127.0.0.1:${ports[1]}/zero`,
     },
   };
 }
@@ -50,7 +92,7 @@ test("local access has one command with explicit optional installation selection
     expect(() => connectArguments(args)).toThrow();
 });
 
-test("local access discovers only the three installed public transports, never secrets or storage", () => {
+test("local access forwards only Factory and planning, leaving the installed Forge TLS origin unchanged", () => {
   const value = configuration();
   const result = localAccessConfiguration(value, options);
   expect(result.uid).toBe(value.metadata.uid);
@@ -63,10 +105,10 @@ test("local access discovers only the three installed public transports, never s
     })),
   ).toEqual([
     { service: "proof-factory", port: 58000, remotePort: 3000, address: "127.0.0.1" },
-    { service: "proof-forgejo", port: 58001, remotePort: 3000, address: "127.0.0.1" },
     { service: "proof-zero", port: 58002, remotePort: 4848, address: "127.0.0.1" },
   ]);
-  expect(result.targets[2]?.url).toBe(`${value.data.FACTORY_ZERO_CACHE_PUBLIC_URL}`);
+  expect(result.targets[1]?.url).toBe(`${value.data.FACTORY_ZERO_CACHE_PUBLIC_URL}`);
+  expect(result.forgejoURL).toBe(value.data.FACTORY_FORGEJO_PUBLIC_URL);
 });
 
 test("the selected Helm identity and development mode are required before opening ports", () => {
@@ -119,7 +161,7 @@ test("local access refuses external hosts, TLS endpoints, paths, credentials and
   const mismatch = configuration();
   mismatch.data.FACTORY_ZERO_CACHE_PUBLIC_URL = "http://localhost:58002/zero";
   expect(() => localAccessConfiguration(mismatch, options)).toThrow("same cookie hostname");
-  expect(() => localAccessConfiguration(configuration([58000, 58000, 58002]), options)).toThrow(
+  expect(() => localAccessConfiguration(configuration([58000, 58000]), options)).toThrow(
     "distinct ports",
   );
   const wrongPath = configuration();
@@ -127,14 +169,35 @@ test("local access refuses external hosts, TLS endpoints, paths, credentials and
   expect(() => localAccessConfiguration(wrongPath, options)).toThrow();
 });
 
+test("Forgejo stays on DNS HTTPS and never becomes a local HTTP or alternate-port fallback", () => {
+  for (const url of [
+    "http://git.owned-test.invalid",
+    "http://127.0.0.1:58001",
+    "https://127.0.0.1",
+    "https://[::1]",
+    "https://localhost",
+    "https://git.localhost",
+    "https://git.owned-test.invalid:8443",
+    "https://user:password@git.owned-test.invalid",
+    "https://git.owned-test.invalid/api",
+    "https://git.owned-test.invalid/?secret=value",
+    "https://git.owned-test.invalid/#fragment",
+  ]) {
+    const value = configuration();
+    value.data.FACTORY_FORGEJO_PUBLIC_URL = url;
+    expect(() => localAccessConfiguration(value, options)).toThrow("HTTPS DNS origin");
+  }
+  const explicitPort = configuration();
+  explicitPort.data.FACTORY_FORGEJO_PUBLIC_URL = "https://git.owned-test.invalid:443/";
+  expect(localAccessConfiguration(explicitPort, options).forgejoURL).toBe(
+    "https://git.owned-test.invalid",
+  );
+});
+
 test("localhost and IPv6 remain loopback-only, and long Helm names use the actual chart name", () => {
   const value = configuration();
   for (const host of ["localhost", "[::1]"]) {
-    for (const key of [
-      "FACTORY_BASE_URL",
-      "FACTORY_FORGEJO_PUBLIC_URL",
-      "FACTORY_ZERO_CACHE_PUBLIC_URL",
-    ] as const)
+    for (const key of ["FACTORY_BASE_URL", "FACTORY_ZERO_CACHE_PUBLIC_URL"] as const)
       value.data[key] = value.data[key].replace(/127\.0\.0\.1|localhost|\[::1\]/, host);
     expect(localAccessConfiguration(value, options).targets[0]?.address).toBe(
       host === "[::1]" ? "::1" : "127.0.0.1",
@@ -178,7 +241,7 @@ async function fixture(extraEnvironment: Record<string, string> = {}) {
   const httpTracePath = join(directory, "http.jsonl");
   const hangPath = join(directory, "hung-forward");
   const unavailablePath = join(directory, "upstream-unavailable");
-  const reservations = Array.from({ length: 3 }, () =>
+  const reservations = Array.from({ length: 2 }, () =>
     Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") }),
   );
   const value = configuration(
@@ -367,7 +430,7 @@ await import(${JSON.stringify(join(directory, "pinned-kubectl"))});
   };
 }
 
-test("one CLI opens all public connections, pins current context and disconnects only its children", async () => {
+test("one CLI opens both local connections, pins current context and disconnects only its children", async () => {
   const proof = await fixture();
   const unrelated = Bun.serve({
     hostname: "127.0.0.1",
@@ -382,7 +445,9 @@ test("one CLI opens all public connections, pins current context and disconnects
     );
     const calls = await proof.trace();
     const forwards = calls.filter((call) => call.args.includes("port-forward"));
-    expect(forwards).toHaveLength(3);
+    expect(forwards).toHaveLength(2);
+    expect(forwards.some((call) => call.args.includes("service/proof-forgejo"))).toBe(false);
+    expect(proof.output()).toContain(`Forgejo: ${proof.value.data.FACTORY_FORGEJO_PUBLIC_URL}`);
     for (const call of forwards) {
       expect(call.args.slice(0, 4)).toEqual([
         "--context",
@@ -414,7 +479,7 @@ test("local access uses the pinned client even when PATH shadows kubectl", async
     );
     const calls = await proof.trace();
     expect(calls.filter((call) => call.args.includes("version"))).toHaveLength(1);
-    expect(calls.filter((call) => call.args.includes("port-forward"))).toHaveLength(3);
+    expect(calls.filter((call) => call.args.includes("port-forward"))).toHaveLength(2);
     expect(proof.error()).not.toContain("unrelated PATH");
   } finally {
     await proof.cleanup();
@@ -450,10 +515,10 @@ test("an interrupted forward reconnects automatically without replacing the othe
     await waitFor(() => proof.output().includes("Local access restored."), "restored connection");
     const calls = await proof.trace();
     const forwards = calls.filter((call) => call.args.includes("port-forward"));
-    expect(forwards).toHaveLength(4);
+    expect(forwards).toHaveLength(3);
     expect(forwards.filter((call) => call.args.includes("service/proof-factory"))).toHaveLength(2);
     expect(forwards.filter((call) => call.args.includes("service/proof-zero"))).toHaveLength(1);
-    expect(forwards.filter((call) => call.args.includes("service/proof-forgejo"))).toHaveLength(1);
+    expect(forwards.filter((call) => call.args.includes("service/proof-forgejo"))).toHaveLength(0);
     expect(
       calls
         .filter((call) => !call.args.includes("version"))
@@ -478,7 +543,7 @@ test("transport observations use fresh header-only requests", async () => {
       "transport observations",
     );
     const requests = await proof.requests();
-    expect(requests.length).toBeGreaterThanOrEqual(3);
+    expect(requests.length).toBeGreaterThanOrEqual(2);
     expect(
       requests.every((request) => request.method === "HEAD" && request.connection === "close"),
     ).toBe(true);
@@ -503,7 +568,7 @@ test("a half-open forward heals before a browser request, even when kubectl neve
       25_000,
     );
     const forwards = (await proof.trace()).filter((call) => call.args.includes("port-forward"));
-    expect(forwards).toHaveLength(4);
+    expect(forwards).toHaveLength(3);
     const response = await fetch(proof.value.data.FACTORY_BASE_URL);
     expect(await response.text()).toBe("owned forward");
   } finally {
@@ -527,14 +592,14 @@ test("an unconfirmed upstream never causes healthy local transports to churn", a
         const calls = await proof.trace();
         return (
           calls.some((call) => call.args.includes("--raw")) ||
-          calls.filter((call) => call.args.includes("port-forward")).length > 3
+          calls.filter((call) => call.args.includes("port-forward")).length > 2
         );
       },
       "an upstream observation instead of a local restart",
       30_000,
     );
     expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
-      3,
+      2,
     );
     expect(proof.output()).not.toContain("connection lost");
     await proof.upstreamAvailable(true);
@@ -544,7 +609,7 @@ test("an unconfirmed upstream never causes healthy local transports to churn", a
       30_000,
     );
     expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
-      4,
+      3,
     );
   } finally {
     await proof.cleanup();
@@ -557,7 +622,7 @@ test("an HTTP bootstrap failure is live transport, not permission to churn conne
     proof.start();
     await waitFor(() => proof.output().includes("Local access connected."), "live HTTP transport");
     expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
-      3,
+      2,
     );
     expect(proof.output()).not.toContain("Factory ready");
   } finally {
@@ -576,7 +641,7 @@ test("a slow healthy HTTP response does not turn a working connection into an ou
     );
     await Bun.sleep(12_000);
     expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
-      3,
+      2,
     );
     expect(proof.output()).not.toContain("connection lost");
   } finally {
@@ -597,44 +662,54 @@ test("reconnection refuses an installation replaced under the same name", async 
     expect(await command.exited).toBe(1);
     expect(proof.error()).toContain("installation identity or addresses changed");
     expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
-      3,
+      2,
     );
   } finally {
     await proof.cleanup();
   }
 });
 
-test("reconnection cannot silently change retained browser identities on the same installation", async () => {
-  const proof = await fixture();
-  try {
-    const command = proof.start();
-    await waitFor(() => proof.output().includes("Local access connected."), "initial connections");
-    proof.value.data.FACTORY_BASE_URL = proof.value.data.FACTORY_BASE_URL.replace(
-      "127.0.0.1",
-      "localhost",
-    );
-    proof.value.data.FACTORY_ZERO_CACHE_PUBLIC_URL =
-      proof.value.data.FACTORY_ZERO_CACHE_PUBLIC_URL.replace("127.0.0.1", "localhost");
-    await proof.update();
-    const forward = (await proof.trace()).find((call) => call.args.includes("port-forward"));
-    if (!forward) throw new Error("Owned forward is missing");
-    process.kill(forward.pid, "SIGTERM");
-    expect(await command.exited).toBe(1);
-    expect(proof.error()).toContain("installation identity or addresses changed");
-    expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
-      3,
-    );
-  } finally {
-    await proof.cleanup();
-  }
-});
+test.each(["local", "Forge TLS"] as const)(
+  "reconnection cannot silently change %s browser identities on the same installation",
+  async (scope) => {
+    const proof = await fixture();
+    try {
+      const command = proof.start();
+      await waitFor(
+        () => proof.output().includes("Local access connected."),
+        "initial connections",
+      );
+      if (scope === "Forge TLS") {
+        proof.value.data.FACTORY_FORGEJO_PUBLIC_URL = "https://other.owned-test.invalid";
+      } else {
+        proof.value.data.FACTORY_BASE_URL = proof.value.data.FACTORY_BASE_URL.replace(
+          "127.0.0.1",
+          "localhost",
+        );
+        proof.value.data.FACTORY_ZERO_CACHE_PUBLIC_URL =
+          proof.value.data.FACTORY_ZERO_CACHE_PUBLIC_URL.replace("127.0.0.1", "localhost");
+      }
+      await proof.update();
+      const forward = (await proof.trace()).find((call) => call.args.includes("port-forward"));
+      if (!forward) throw new Error("Owned forward is missing");
+      process.kill(forward.pid, "SIGTERM");
+      expect(await command.exited).toBe(1);
+      expect(proof.error()).toContain("installation identity or addresses changed");
+      expect(
+        (await proof.trace()).filter((call) => call.args.includes("port-forward")),
+      ).toHaveLength(2);
+    } finally {
+      await proof.cleanup();
+    }
+  },
+);
 
 test("startup failure closes the other forwards instead of reporting partial readiness", async () => {
-  const proof = await fixture({ FAKE_FAIL_SERVICE: "proof-forgejo" });
+  const proof = await fixture({ FAKE_FAIL_SERVICE: "proof-zero" });
   try {
     const command = proof.start();
     expect(await command.exited).toBe(1);
-    expect(proof.error()).toContain("Forgejo connection failed");
+    expect(proof.error()).toContain("Planning connection failed");
     expect(proof.output()).not.toContain("Local access connected.");
   } finally {
     await proof.cleanup();
@@ -666,7 +741,7 @@ test("a silent half-prepared forward does not count as connected and Stop reaps 
     const command = proof.start();
     await waitFor(
       async () =>
-        (await proof.trace()).filter((call) => call.args.includes("port-forward")).length === 3,
+        (await proof.trace()).filter((call) => call.args.includes("port-forward")).length === 2,
       "forward subprocesses",
     );
     expect(proof.output()).not.toContain("Local access connected.");

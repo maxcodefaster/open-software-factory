@@ -18,8 +18,6 @@ export type RuntimeAttemptView = {
   currentStaging?: boolean;
   state: string;
   computeWait?: string | null;
-  kubernetesNamespace?: string;
-  kubernetesPodName?: string;
   failure: string | null;
   createdAt: string;
   updatedAt: string;

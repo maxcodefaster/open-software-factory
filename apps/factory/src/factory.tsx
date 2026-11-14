@@ -1793,6 +1793,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   };
   const {
     openIDETarget,
+    startPersonalIDE,
     openChatActivity,
     openPreviewTarget,
     retryMainPreview,
@@ -1943,6 +1944,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     stopAgent,
     ideTargets,
     openIDETarget,
+    startPersonalIDE,
     ticketPreviewTarget,
     openPreviewTarget,
     retryMainPreview,

@@ -27,7 +27,7 @@ func projectImageDownloadDiagnostic(diagnostic string) string {
 }
 
 func retryableImageDownload(diagnostic string) bool {
-	value := strings.ToLower(diagnostic)
+	value := strings.ToLower(strings.TrimSpace(diagnostic))
 	for _, permanent := range []string{
 		"x509:", "certificate verify failed", "tls: failed to verify certificate",
 		"unauthorized", "authentication required", "forbidden", "denied:",
@@ -39,8 +39,16 @@ func retryableImageDownload(diagnostic string) bool {
 			return false
 		}
 	}
+	// Docker can return bare EOF, including after its own layer-download
+	// retries. Keep that transport loss inside the original acquisition window.
+	if value == "eof" || strings.HasSuffix(value, ": eof") {
+		return true
+	}
 	for _, transient := range []string{
 		"connection refused", "connection reset", "no route to host", "no such host",
+		// Native Tinyproxy exposes a failed upstream DNS/connect as this
+		// CONNECT status text, without its internal resolver diagnostic.
+		"unable to connect",
 		"i/o timeout", "tls handshake timeout", "context deadline exceeded", "unexpected eof",
 		"temporary failure in name resolution", "server misbehaving",
 		"500 internal server error", "502 bad gateway", "503 service unavailable", "504 gateway timeout",

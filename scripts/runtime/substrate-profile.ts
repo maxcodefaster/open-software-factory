@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import flags from "../../deploy/substrate/internal_flags.json";
 import pins from "../../deploy/substrate/pins.json";
+import {
+  nativeArchitecture,
+  type NativeArchitecture,
+  pinnedNativeSandboxSpec,
+} from "../../packages/runtime-kubernetes/src/substrate-profile";
 
 export { flags, pins };
 
@@ -11,6 +16,7 @@ const name = z
   .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/);
 const image = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[a-f0-9]{64}$/);
 export const substrateProfileInput = z.strictObject({
+  architecture: nativeArchitecture,
   namespace: name,
   pool: name,
   node: z
@@ -30,8 +36,9 @@ export function digest(bytes: Uint8Array, algorithm = "sha256") {
   return createHash(algorithm).update(bytes).digest("hex");
 }
 
-export function verifyNightly(bytes: Uint8Array) {
-  if (digest(bytes) !== pins.gvisor.sha256 || digest(bytes, "sha512") !== pins.gvisor.sha512)
+export function verifyNightly(bytes: Uint8Array, architecture: NativeArchitecture) {
+  const expected = pins.gvisor.architectures[nativeArchitecture.parse(architecture)];
+  if (digest(bytes) !== expected.sha256 || digest(bytes, "sha512") !== expected.sha512)
     throw new Error("Official gVisor archive does not match both pinned published checksums");
 }
 
@@ -45,24 +52,7 @@ export function renderSubstrateProfile(value: unknown) {
     apiVersion: "ate.dev/v1",
     kind: "SandboxConfig",
     metadata: { name: configName },
-    spec: {
-      sandboxClass: "gvisor",
-      defaultVersion: configName,
-      versions: [
-        {
-          name: configName,
-          state: "Enabled",
-          assets: {
-            amd64: {
-              gvisor: {
-                url: pins.gvisor.url.replace("https://storage.googleapis.com/", "gs://"),
-                sha256: pins.gvisor.sha256,
-              },
-            },
-          },
-        },
-      ],
-    },
+    spec: pinnedNativeSandboxSpec(),
   };
   const workerPool = {
     apiVersion: "ate.dev/v1",
@@ -73,7 +63,11 @@ export function renderSubstrateProfile(value: unknown) {
       workerImage: input.workerImage,
       sandboxClasses: [{ name: "gvisor", configRef: { name: configName } }],
       template: {
-        nodeSelector: { "kubernetes.io/hostname": input.node },
+        nodeSelector: {
+          "kubernetes.io/hostname": input.node,
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": input.architecture,
+        },
         resources: {
           requests: { cpu: "250m", memory: "1536Mi" },
           limits: { cpu: "2", memory: "2Gi" },

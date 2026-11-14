@@ -6,9 +6,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 image="${1:?Pass an immutable runtime-host image}"
 node_image="${2:?Pass an immutable native Node image}"
 registry_image="${3:?Pass an immutable Registry image}"
-recipes="${4:-build image-only build-no-features dependency-seed prepared-image runtime-environment}"
+recipes="${4:-build image-only build-no-features credential-free runtime-environment cold-prebuild}"
 for kind in $recipes; do
-  case "$kind" in build|image-only|build-no-features|dependency-seed|prepared-image|prepared-rootfs|runtime-environment) ;; *) echo "Unknown Compose component recipe" >&2; exit 1 ;; esac
+  case "$kind" in build|image-only|build-no-features|credential-free|runtime-environment|cold-prebuild) ;; *) echo "Unknown Compose component recipe" >&2; exit 1 ;; esac
 done
 for reference in "$image" "$node_image" "$registry_image"; do
   if [[ ! "$reference" =~ ^sha256:[a-f0-9]{64}$ && ! "$reference" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]; then
@@ -33,7 +33,7 @@ node_alias_created=0
 registry_alias_created=0
 directory="$PWD/.factory/test-results/runtime-compose-prebuild/$owner"
 mkdir -p "$directory"
-printf '{"owner":"%s","image":"%s","platform":"linux/%s","nativeFactoryboxProof":false,"network":"none","cpu":3,"memoryGiB":3}\n' \
+printf '{"owner":"%s","image":"%s","platform":"linux/%s","nativeSubstrateProof":false,"network":"none","cpu":3,"memoryGiB":3}\n' \
   "$owner" "$image" "$architecture" > "$directory/intent.json"
 cleanup() {
   result=$?

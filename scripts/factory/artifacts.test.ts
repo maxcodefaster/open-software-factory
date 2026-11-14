@@ -8,8 +8,38 @@ import {
   publishedRuntimeArtifacts,
   runtimeArtifactNames,
   runtimeArtifactsSchema,
+  runtimeArtifactEnvironment,
 } from "./artifacts";
 import { fixtureValue } from "../../test/fixtures/value";
+
+test("native installations require four artifacts and no separate Source image", async () => {
+  const names = ["runtime-host", "browser-tools", "developer-ide", "substrate-runtime"] as const;
+  const bundle = Object.fromEntries(
+    names.map((name) => [name, `registry.example/${name}@sha256:${"a".repeat(64)}`]),
+  );
+  expect(runtimeArtifactsSchema.safeParse(bundle).success).toBe(true);
+  const native = runtimeArtifactsSchema.parse(bundle);
+  expect([...runtimeArtifactNames]).toEqual([...names]);
+  expect(runtimeArtifactEnvironment(native)).toEqual({
+    FACTORY_RUNTIME_HOST_IMAGE: native["runtime-host"],
+    FACTORY_BROWSER_TOOLS_IMAGE: native["browser-tools"],
+    FACTORY_DEVELOPER_IDE_IMAGE: native["developer-ide"],
+  });
+  expect(
+    runtimeArtifactsSchema.safeParse({
+      ...bundle,
+      "workspace-files": `registry.example/workspace-files@sha256:${"a".repeat(64)}`,
+    }).success,
+  ).toBe(false);
+  const directory = await mkdtemp(join(tmpdir(), "factory-native-artifacts-"));
+  try {
+    await installRuntimeArtifacts(directory, native);
+    expect(await publishedRuntimeArtifacts(directory)).toEqual(native);
+    expect(await Bun.file(join(directory, "workspace-files-image")).exists()).toBe(false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("artifact publication rejects consumer references runtime admission cannot accept", () => {
   const bundle = Object.fromEntries(
@@ -22,6 +52,11 @@ test("artifact publication rejects consumer references runtime admission cannot 
     expect(runtimeArtifactsSchema.safeParse({ ...bundle, "runtime-host": reference }).success).toBe(
       false,
     );
+  const { "substrate-runtime": _native, ...toolsOnly } = bundle;
+  expect(runtimeArtifactsSchema.safeParse(toolsOnly).success).toBe(false);
+  expect(
+    runtimeArtifactsSchema.safeParse({ ...bundle, factorybox: bundle["runtime-host"] }).success,
+  ).toBe(false);
 });
 
 test("published defaults supersede installation bootstrap pins without changing retained identities", () => {

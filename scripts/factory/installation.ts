@@ -1,6 +1,7 @@
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { resetResources } from "./reset-resources";
 
 const image = z.string().regex(/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/);
 const name = z
@@ -10,7 +11,7 @@ const name = z
 const port = z.number().int().min(1024).max(65535);
 const installationSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     disposable: z.literal(true),
     name,
     owner: z.uuid(),
@@ -18,13 +19,11 @@ const installationSchema = z
     ports: z.object({ factory: port, postgres: port, forgejo: port, zero: port }).strict(),
     runtimeImage: image,
     browserImage: image,
-    resetRuntimeNamespaces: z
-      .array(z.string().regex(/^factory-(workspace|runtime)-[a-f0-9]{12}$/))
-      .optional(),
+    resetResources: resetResources.optional(),
   })
   .strict()
   .refine((value) => new Set(Object.values(value.ports)).size === 4)
-  .refine((value) => value.phase === "active" || value.resetRuntimeNamespaces !== undefined);
+  .refine((value) => value.phase === "active" || value.resetResources !== undefined);
 
 export type DisposableInstallation = z.infer<typeof installationSchema>;
 
@@ -84,7 +83,7 @@ export async function createInstallation(
     const [factory, postgres, forgejo, zero] = reservations.map((value) => value.port);
     const value = parseInstallation(
       {
-        version: 1,
+        version: 2,
         disposable: true,
         name: id,
         owner: crypto.randomUUID(),

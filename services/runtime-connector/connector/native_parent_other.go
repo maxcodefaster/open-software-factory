@@ -16,14 +16,6 @@ func reserveNativeDevcontainerLockfile(Assignment) error {
 	return errors.New("native Dev Container lockfile ownership requires Linux")
 }
 
-func RunSubstrateSourcePreserve(string, string, io.Writer) error {
-	return errors.New("retained native Source preservation requires Linux")
-}
-
-func RunSubstrateSourcePreserveReconciled(string, string, string, io.Writer) error {
-	return errors.New("retained native Source preservation requires Linux")
-}
-
 func RunSubstrateSource(context.Context) error {
 	return errors.New("native Source requires Linux")
 }
@@ -35,4 +27,7 @@ func RunSourceMaterialize(string, string) error {
 }
 func RunSubstrateSourceRestore(context.Context) error {
 	return errors.New("Source restore requires Linux")
+}
+func RunSubstrateBootstrapMode(io.Writer) error {
+	return errors.New("native cold mode requires Linux")
 }

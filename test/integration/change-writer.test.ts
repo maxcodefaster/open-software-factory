@@ -9,8 +9,10 @@ import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import type { RuntimeAttemptView } from "../../apps/factory/src/runtime/types";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 import { fixtureValue } from "../fixtures/value";
 
 test.each(["continue", "stop"] as const)(
@@ -41,17 +43,23 @@ test.each(["continue", "stop"] as const)(
         grants.push([...writers]);
       },
     });
-    const replacementID = crypto.randomUUID();
+    const replacementID = runtimeIdentity(owned.workspaceID, 2).attemptID;
     const controller = createAgentController(
       owned.database,
       owned.hub,
       {
         startPersisted: async () => {
           starts++;
-          await owned.database.client`INSERT INTO factory.runtime_attempt(
-          id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          SELECT ${replacementID},project_id,change_id,workspace_id,generation+1,revision,'ready',parent_connector_token_hash,child_connector_token_hash,now(),created_by
-          FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+          expect(
+            await recordUncreatedWorkspaceAttempt(owned.database, {
+              workspaceID: owned.workspaceID,
+              generation: 2,
+              createdBy: owned.userID,
+              parentHash: "b".repeat(64),
+              childHash: "c".repeat(64),
+              connectorURL: "wss://owned-build.factory.invalid/internal/runtime-connect",
+            }),
+          ).toBe(replacementID);
           await owned.database
             .client`UPDATE factory.change SET runtime_attempt_id=${replacementID} WHERE id=${owned.changeID}`;
           return null;

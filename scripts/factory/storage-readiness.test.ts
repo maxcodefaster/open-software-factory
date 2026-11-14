@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { disposeRuntimeStorageCheck, requireWritableRuntimeStorage } from "./storage-readiness";
 
-const image = `registry.invalid/workspace-files@sha256:${"a".repeat(64)}`;
+const image = `registry.invalid/runtime-host@sha256:${"a".repeat(64)}`;
 function argument(args: string[], index: number) {
   const value = args[index];
   if (!value) throw new Error("Missing test command argument");
@@ -273,7 +273,7 @@ test("storage readiness requires a real owned RWO write/read check and confirms 
     const pod = cluster.calls.find((call) => call.body?.["kind"] === "Pod")?.body;
     expect(pod?.["spec"]).toMatchObject({
       automountServiceAccountToken: false,
-      securityContext: { runAsNonRoot: true, runAsUser: 101000, fsGroup: 101000 },
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000 },
       volumes: [{ persistentVolumeClaim: { claimName: "runtime-data" } }],
       containers: [{ image, securityContext: { readOnlyRootFilesystem: true } }],
     });
@@ -478,7 +478,7 @@ test.each(["image", "storage-class"])("resumed cleanup cannot qualify a changed 
     );
     const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
     const previousClass = process.env["FACTORY_STORAGE_CLASS"];
-    const nextImage = `registry.invalid/workspace-files@sha256:${"b".repeat(64)}`;
+    const nextImage = `registry.invalid/runtime-host@sha256:${"b".repeat(64)}`;
     if (changed === "storage-class") process.env["FACTORY_STORAGE_CLASS"] = "different-storage";
     try {
       const result = await requireWritableRuntimeStorage(

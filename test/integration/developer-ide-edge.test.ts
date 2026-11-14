@@ -1,13 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
 import { createAccountRevocation } from "../../apps/factory/src/access/account-revocation";
 import { createAccessRevocation } from "../../apps/factory/src/access/revocation";
 import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createDeveloperIDEController } from "../../apps/factory/src/workspace/developer-ide-controller";
 import {
   createDeveloperIDEEdge,
@@ -15,26 +11,25 @@ import {
 } from "../../apps/factory/src/workspace/developer-ide-edge";
 import { createDeveloperIDERuntime } from "../../apps/factory/src/workspace/developer-ide-runtime";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import { eventually } from "../fixtures/factory-process";
+import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 const ClientSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
 };
 async function verifyEditorIngress(protocol: string) {
-  const fixture = await factoryProcess();
-  const database = fixture.connect();
-  const userID = crypto.randomUUID();
+  const fixture = await substrateFixture();
+  const database = fixture.database;
+  const userID = fixture.userID;
   const otherUserID = crypto.randomUUID();
-  const projectID = crypto.randomUUID();
+  const projectID = fixture.projectID;
   const sessionID = crypto.randomUUID();
-  const repository = await mkdtemp(join(tmpdir(), "factory-editor-edge-"));
   const previous = {
     editor: process.env["FACTORY_DEVELOPER_IDE_IMAGE"],
-    files: process.env["FACTORY_WORKSPACE_FILES_IMAGE"],
   };
   const image = `registry.invalid/ide@sha256:${"4".repeat(64)}`;
   process.env["FACTORY_DEVELOPER_IDE_IMAGE"] = image;
-  process.env["FACTORY_WORKSPACE_FILES_IMAGE"] = image;
   const upstreamHeaders: Headers[] = [];
   const backend = Bun.serve({
     hostname: "127.0.0.1",
@@ -79,40 +74,26 @@ async function verifyEditorIngress(protocol: string) {
     async stop() {},
     close() {},
   });
-  const sources = createWorkspaceSourceController(database, "source-test-secret", {
-    async executionNode() {
-      throw new Error("No execution");
-    },
-    async prepare() {
-      return {
-        namespaceUID: "source-namespace",
-        podUID: "source-pod",
-        claimUID: "claim",
-        storageNode: "node",
-        ready: true,
-        failed: false,
-      };
-    },
-    async observe() {
-      return null;
-    },
-    async connect() {},
-    async request(_input, operation, _request, signal) {
-      if (operation === "events")
-        return new Response(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(new TextEncoder().encode('data: {"kind":"resync","path":""}\n\n'));
-              signal.addEventListener("abort", () => controller.close(), { once: true });
-            },
-          }),
-          { headers: { "content-type": "text/event-stream" } },
-        );
-      return Response.json({ content: "aHVtYW4=", version: "version" });
-    },
-    async stop() {},
-    close() {},
-  });
+  const hub = fixture.hub;
+  hub.sourceConnected = () => true;
+  hub.request = async (_attempt, channel, request, path) => {
+    expect(channel).toBe("source");
+    const operation = path.split("/").at(-1);
+    const signal = request.signal;
+    if (operation === "events")
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: {"kind":"resync","path":""}\n\n'));
+            signal.addEventListener("abort", () => controller.close(), { once: true });
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    return Response.json({ content: "aHVtYW4=", version: "version" });
+  };
+  const nativeSource = createSubstrateSources(database, hub);
+  const sources = createWorkspaceSourceController(database, hub, nativeSource);
   let edge: ReturnType<typeof createDeveloperIDEEdge>;
   const frontend = Bun.serve<DeveloperEditorSocketData>({
     hostname: "127.0.0.1",
@@ -155,7 +136,6 @@ async function verifyEditorIngress(protocol: string) {
       },
     },
   });
-  const hub = new RuntimeHub(async () => {});
   const noCompute = async (): Promise<never> => {
     throw new Error("Browsing must not start compute");
   };
@@ -182,30 +162,15 @@ async function verifyEditorIngress(protocol: string) {
   );
   let socket: WebSocket | undefined;
   try {
-    for (const args of [
-      ["init", "-b", "main"],
-      [
-        "-c",
-        "user.name=Factory",
-        "-c",
-        "user.email=factory@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "Owned editor source",
-      ],
-    ]) {
-      const git = Bun.spawn(["git", "-C", repository, ...args], {
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      if (await git.exited) throw new Error("Owned editor repository preparation failed");
-    }
-    for (const id of [userID, otherUserID])
-      await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Edge fixture',${`${id}@factory.invalid`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`edge-${projectID}`},'Edge fixture',${`file://${repository}`},'main','.devcontainer/devcontainer.json',${userID})`;
-    for (const id of [userID, otherUserID])
-      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${id},'developer',${userID})`;
+    const runtime = await startSubstrateFixtureWorkspace(fixture);
+    const actorUID = (await runtime.get(fixture.attemptID))?.native?.actorUID;
+    if (!actorUID) throw Error("Owned native Source Actor missing");
+    await nativeSource.attach(fixture.workspaceID, actorUID, database.client);
+    await database.client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${fixture.attemptID}`;
+    const originalAttempts =
+      await database.client`SELECT * FROM factory.runtime_attempt WHERE project_id=${projectID}`;
+    await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${otherUserID},'Edge fixture',${`${otherUserID}@factory.invalid`})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${otherUserID},'developer',${userID})`;
     await database.client`INSERT INTO auth.session(id,token,user_id,expires_at) VALUES(${sessionID},${crypto.randomUUID()},${userID},now()+interval '1 hour')`;
     await editors.ensure(projectID, userID);
     const source = await sources.ensurePersonal(projectID, userID);
@@ -298,8 +263,8 @@ async function verifyEditorIngress(protocol: string) {
     ).toEqual({
       workspaceID: source.workspaceID,
       kind: "personal",
-      attemptID: null,
-      state: "stopped",
+      attemptID: fixture.attemptID,
+      state: "reconnecting",
       failure: null,
       restoreFailed: false,
     });
@@ -408,8 +373,8 @@ async function verifyEditorIngress(protocol: string) {
     expect((await reader?.read())?.done).toBe(true);
     expect((await edge.route(new Request(editorURL, { headers: { cookie } }))).status).toBe(401);
     expect(
-      await database.client`SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID}`,
-    ).toHaveLength(0);
+      await database.client`SELECT * FROM factory.runtime_attempt WHERE project_id=${projectID}`,
+    ).toEqual(originalAttempts);
   } finally {
     socket?.close();
     // Bun 1.3.14 leaves the stop promise pending after server-initiated WS close.
@@ -418,19 +383,14 @@ async function verifyEditorIngress(protocol: string) {
     await backend.stop(true);
     await editors.close();
     await sources.close();
-    for (const [key, value] of [
-      ["FACTORY_DEVELOPER_IDE_IMAGE", previous.editor],
-      ["FACTORY_WORKSPACE_FILES_IMAGE", previous.files],
-    ] as const) {
+    for (const [key, value] of [["FACTORY_DEVELOPER_IDE_IMAGE", previous.editor]] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
     try {
       await expect(fetch(frontend.url, { signal: AbortSignal.timeout(1_000) })).rejects.toThrow();
     } finally {
-      await database.client.end({ timeout: 2 });
       await fixture.dispose();
-      await rm(repository, { recursive: true, force: true });
     }
   }
 }

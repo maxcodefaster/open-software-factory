@@ -46,8 +46,8 @@ func TestSourceInitializationPublishesOnceAndRetainsHumanWork(t *testing.T) {
 	}
 	canonical := filepath.Join(parent, "project")
 	var info unix.Stat_t
-	if err := unix.Stat(canonical, &info); err != nil || info.Uid != 101000 || info.Gid != 101000 {
-		t.Fatalf("incorrect mapped source owner: %v %v", info, err)
+	if err := unix.Stat(canonical, &info); err != nil || info.Uid != 1000 || info.Gid != 1000 {
+		t.Fatalf("incorrect development source owner: %v %v", info, err)
 	}
 	if err := os.WriteFile(filepath.Join(canonical, "source.txt"), []byte("human edit"), 0644); err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestSourceInitializationPublishesOnceAndRetainsHumanWork(t *testing.T) {
 	}
 }
 
-func TestActorCheckoutReusesInitializerWithoutSysboxOwnership(t *testing.T) {
+func TestActorCheckoutRequiresItsExactRootlessKitOwnership(t *testing.T) {
 	if !actorSourceIDMap("         0       1000          1\n         1     100000      65536\n") {
 		t.Fatal("normal private RootlessKit mapping rejected")
 	}

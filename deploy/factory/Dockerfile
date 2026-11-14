@@ -46,7 +46,7 @@ COPY apps/factory/public ./apps/factory/public
 COPY --from=build /opt/factory/apps/factory/dist ./apps/factory/dist
 COPY packages ./packages
 COPY deploy/substrate/pins.json ./deploy/substrate/pins.json
-COPY scripts/factory/artifacts.ts scripts/factory/preflight.ts scripts/factory/forge-identity.ts scripts/factory/forge-logout.ts scripts/factory/readiness.ts scripts/factory/storage-readiness.ts scripts/factory/openbao-bootstrap.ts ./scripts/factory/
+COPY scripts/factory/artifacts.ts scripts/factory/preflight.ts scripts/factory/forge-identity.ts scripts/factory/forge-logout.ts scripts/factory/readiness.ts scripts/factory/storage-readiness.ts scripts/factory/openbao-bootstrap.ts scripts/factory/native-installation.ts ./scripts/factory/
 COPY scripts/kubernetes ./scripts/kubernetes
 COPY templates ./templates
 # Every installed image embeds the exact runtime role references.

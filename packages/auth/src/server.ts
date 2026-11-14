@@ -237,6 +237,9 @@ export function createFactoryAuth(
     async mcpSession(request: Request) {
       if (policy.setupCommandID || policy.emergencyOnly) throw new APIError("UNAUTHORIZED");
       const payload = await resourceActions.verifyAccessTokenRequest(request, {
+        // Fetch public keys over the installation's existing backchannel, without
+        // changing the signed issuer, audience or request-bound token checks.
+        ...(backchannel ? { jwksUrl: new URL("/api/auth/jwks", backchannel).href } : {}),
         verifyOptions: { audience: factoryMCPResource(baseURL) },
         requiredScopes: ["factory:read"],
       });

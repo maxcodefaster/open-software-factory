@@ -5,13 +5,12 @@ import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
-import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
 import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { ensureLocalForgeIdentity } from "../../scripts/factory/forge-identity";
 import { localOpenBao } from "../../scripts/factory/openbao";
-import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { monitoringNativeSource, ownedMonitoringForge } from "../fixtures/monitoring-native";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
@@ -653,27 +652,10 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
             180_000,
           );
         }
-        const sources = createWorkspaceSourceController(
+        await requireOwnedProjectSourceRetention(
           database,
-          "owned-process-auth-secret-not-a-production-credential",
+          fixtureValue(state.projectId, "state.projectId"),
         );
-        try {
-          await removeOwnedProjectSources(
-            database,
-            fixtureValue(state.projectId, "state.projectId"),
-            async (id) => {
-              const [workspace] = await database.client<
-                { owner: string | null; createdBy: string }[]
-              >`
-              SELECT workspace.owner_user_id AS owner,project.created_by AS "createdBy"
-              FROM factory.development_workspace workspace JOIN factory.project project ON project.id=workspace.project_id WHERE workspace.id=${id} AND workspace.project_id=${fixtureValue(state.projectId, "state.projectId")}`;
-              if (!workspace) throw new Error("Owned monitoring source identity disappeared");
-              return sources.stop(id, workspace.owner ?? workspace.createdBy);
-            },
-          );
-        } finally {
-          await sources.close();
-        }
         await database.client.end();
         await factory.dispose();
         await bao.dispose();

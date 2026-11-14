@@ -4,8 +4,9 @@ import upstream from "../../upstream.json";
 
 // The host check cannot cover *_linux.go on macOS. Build/race/vet the same source
 // on Linux with a digest-pinned Go image containing its native C compiler.
-// AllThreadsSyscall intentionally rejects CGO binaries. Its irreversible credential
-// transition is proved separately using the same CGO=0 mode as shipped Source.
+// The real Source-service entrypoint also runs with the CGO=0 mode shipped in
+// Factory and Actors. Its inherited private descriptors and development UID
+// are checked in an owned subprocess, not through obsolete host UID mappings.
 const owner = crypto.randomUUID();
 const name = `factory-connector-check-${owner}`;
 const label = "factory.connector-check";
@@ -109,7 +110,7 @@ try {
         upstream.go.testImage,
         "sh",
         "-ec",
-        "go test -p 2 -race -skip '^TestSourceServingPermanentlyDropsInitializerPrivileges$' ./... && CGO_ENABLED=0 go test -p 2 ./workspacefiles -run '^TestSourceServingPermanentlyDropsInitializerPrivileges$' -count=1 && go vet -p 2 ./...",
+        "go test -p 2 -race ./... && CGO_ENABLED=0 go test -p 2 ./cmd/factory-runtime-connector -run '^TestNativeSourceServiceRunsAsDevelopmentUser$' -count=1 && go vet -p 2 ./...",
       ],
       { stdout: "inherit", stderr: "inherit" },
     );

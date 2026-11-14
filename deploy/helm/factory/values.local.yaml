@@ -2,5 +2,6 @@
 # Keep these origins stable after installation, including their ports.
 development: true
 publicURL: http://127.0.0.1:58000
-forgejoPublicURL: http://127.0.0.1:58001
+# Supply real DNS/TLS for native Git; a forwarded HTTP Forge cannot serve Actors.
+forgejoPublicURL: https://git.factory.example
 developmentZeroURL: http://127.0.0.1:58002

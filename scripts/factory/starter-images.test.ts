@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import upstream from "../../upstream.json";
-import { localStarterCompose, starterImageManifest } from "./starter-images";
+import {
+  localStarterCompose,
+  nativeStarterImages,
+  starterImageManifest,
+  starterImagesSchema,
+} from "./starter-images";
 
 test("Starter includes the pinned Git Feature for human and Agent source inspection", async () => {
   const config = JSON.parse(
@@ -25,7 +30,7 @@ test("Starter locality selects only the exact native manifest and leaves unrelat
     "unique",
   );
   const images = {
-    platform: "linux/arm64" as const,
+    platform: "linux/amd64" as const,
     development: `registry.invalid/starter@${manifest.digest}`,
     support: `registry.invalid/support@${manifest.digest}`,
   };
@@ -36,4 +41,15 @@ test("Starter locality selects only the exact native manifest and leaves unrelat
     ),
   ).toBe(`${images.development}\n${images.support}\ncustom:image`);
   expect(() => localStarterCompose("compose", { ...images, development: "node:latest" })).toThrow();
+});
+
+test("native Starter always uses the Actor's amd64 profile and pinned upstream registries", () => {
+  const images = nativeStarterImages();
+  expect(images).toEqual({
+    platform: "linux/amd64",
+    development: upstream.nodeDevelopment.image,
+    support: upstream.node.image,
+  });
+  expect(JSON.stringify(images)).not.toContain(":5000");
+  expect(starterImagesSchema.safeParse({ ...images, platform: "linux/arm64" }).success).toBe(false);
 });

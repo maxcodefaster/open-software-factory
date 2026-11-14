@@ -1,18 +1,17 @@
-# Native Factorybox lane. It needs a self-hosted runner with the `sysbox` label: a Linux host that
-# an operator has admitted for the pinned Factorybox worker (Sysbox, CRIU, Docker, Kubernetes
-# access and the Factory test environment described in the README). It never runs for pull
-# requests or release publication; start it with "Run workflow".
-name: Native Factorybox lane
+# The operator prepares explicitly owned native fixtures on an amd64 runner.
+# Missing Substrate fixture/configuration is a failure, never a skipped proof.
+# This manual lane does not qualify the complete installed-image product journey.
+name: Native Substrate lane
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: native-factorybox
+  group: native-substrate
   cancel-in-progress: false
 jobs:
   native:
-    runs-on: [self-hosted, sysbox]
+    runs-on: [self-hosted, linux, x64, substrate]
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -22,5 +21,3 @@ jobs:
         run: mise exec -- bun install --frozen-lockfile
       - name: Run the native Factory lane
         run: mise exec -- bun run test:native
-      - name: Run runtime conformance against the admitted worker
-        run: mise exec -- bun run runtime:conformance

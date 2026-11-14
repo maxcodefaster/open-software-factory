@@ -8,6 +8,7 @@ import type { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { candidateReviewCallInput } from "../../packages/conversation-domain/src/candidate-review";
 import { environmentMetadata } from "../../packages/project-domain/src/environment";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 function actions(input: Record<string, unknown> = {}) {
   const parsed = candidateReviewCallInput.parse({
@@ -48,6 +49,7 @@ test("execution history uses only recorded implementation ancestry, bounded page
             password: "registry value with spaces",
             certificate: "",
             verification: false,
+            publish: false,
           },
         ],
       },
@@ -263,12 +265,21 @@ test.each(["workspace", "environment"])(
     });
     try {
       if (missing === "environment") {
-        const missingEnvironment = crypto.randomUUID();
-        await f.database.client`INSERT INTO factory.runtime_attempt(
-          id,project_id,change_id,workspace_id,generation,revision,state,
-          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          VALUES(${missingEnvironment},${f.projectID},${f.changeID},${f.workspaceID},2,${f.commit},
-            'stopped',${"a".repeat(64)},${"b".repeat(64)},now(),${f.userID})`;
+        await f.database.client`UPDATE factory.runtime_attempt SET state='stopped'
+          WHERE id=${f.attemptID}`;
+        const missingEnvironment = await recordUncreatedWorkspaceAttempt(f.database, {
+          workspaceID: f.workspaceID,
+          generation: 2,
+          createdBy: f.userID,
+          revision: f.commit,
+          parentHash: "a".repeat(64),
+          childHash: "b".repeat(64),
+          connectorURL: "wss://owned-build.factory.invalid/internal/runtime-connect",
+          state: "stopped",
+          recordEnvironment: false,
+        });
+        await f.database.client`UPDATE factory.runtime_attempt SET state='ready'
+          WHERE id=${f.attemptID}`;
         await f.database
           .client`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${missingEnvironment}
           WHERE turn_id=${f.initial.id}`;

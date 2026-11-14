@@ -69,10 +69,11 @@ spec:
             tcpSocket: {port: 5432}
             timeoutSeconds: 5
             periodSeconds: 5
-          # Two minutes of failures under heavy execution load before a restart.
+          # A busy container runtime can stall ExecSync while PostgreSQL still
+          # serves connections. Check the listener without spawning a process.
+          # Startup above still verifies PostgreSQL's own readiness.
           livenessProbe:
-            exec:
-              command: [pg_isready, -U, factory, -d, factory, -t, "5"]
+            tcpSocket: {port: 5432}
             timeoutSeconds: 10
             periodSeconds: 20
             failureThreshold: 6

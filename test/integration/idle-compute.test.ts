@@ -5,7 +5,6 @@ import {
   executionIdleMS,
   executionQuietMS,
   executionReviewMS,
-  maximumPausesPerSandbox,
 } from "../../apps/factory/src/runtime/idle";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -16,7 +15,7 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
   let idle: ReturnType<typeof createIdleCompute> | undefined;
   try {
     const owned = await fixture(undefined, undefined, database);
-    let stops = 0;
+    let pauses = 0;
     idle = createIdleCompute(
       database,
       { claimIdle: () => true, releaseIdle: () => {} },
@@ -26,10 +25,7 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
           const [intent] = await database.client<Array<{ state: string; stopped: boolean }>>`
           SELECT state,stop_intended_at IS NOT NULL AS stopped FROM factory.runtime_attempt WHERE id=${attemptID}`;
           expect(intent).toEqual({ state: "pausing", stopped: false });
-          stops++;
-        },
-        async stop() {
-          throw new Error("Unsubmitted compute must retain Pause");
+          pauses++;
         },
       },
       1,
@@ -37,7 +33,7 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
       0,
     );
     await Promise.all([idle.sweep(), idle.sweep()]);
-    expect(stops).toBe(1);
+    expect(pauses).toBe(1);
     expect(
       await database.client`SELECT id FROM factory.development_workspace WHERE change_id=${owned.changeID}`,
     ).toHaveLength(1);
@@ -59,13 +55,17 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
     ), workspaces AS (
       INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
       SELECT gen_random_uuid(),${owned.projectID},'personal',users.id,'main',${"a".repeat(40)},${owned.userID} FROM users
-      RETURNING id,owner_user_id,kubernetes_namespace
-    ) INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
+      RETURNING id,owner_user_id
+    ), attempts AS (INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
       create_intended_at,created_by,updated_at)
       SELECT CASE WHEN users.name='fairness-65' THEN ${tail}::uuid ELSE gen_random_uuid() END,
-        ${owned.projectID},workspaces.id,1,${"a".repeat(40)},'ready',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},
+        ${owned.projectID},workspaces.id,1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},
         CASE WHEN users.name='fairness-65' THEN now() ELSE now()-interval '1 minute' END
-      FROM workspaces JOIN users ON users.id=workspaces.owner_user_id`;
+      FROM workspaces JOIN users ON users.id=workspaces.owner_user_id RETURNING id)
+      INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+        SELECT id,'fa-' || replace(id::text,'-',''),'runtime-' || replace(id::text,'-',''),'{}'::jsonb FROM attempts`;
+    await database.client`UPDATE factory.runtime_attempt SET state='ready'
+      WHERE project_id=${owned.projectID} AND id<>${owned.attemptID}`;
     await idle.close();
     const checked = new Set<string>();
     idle = createIdleCompute(
@@ -80,9 +80,6 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
       {
         async pause(id) {
           expect(id).toBe(tail);
-        },
-        async stop() {
-          throw new Error("Personal compute must retain Pause");
         },
       },
       1,
@@ -121,9 +118,6 @@ test("idle Pause waits for Build admission and retains pending, working and unce
       },
       {
         async pause() {
-          throw new Error("Active work must not stop");
-        },
-        async stop() {
           throw new Error("Active work must not stop");
         },
       },
@@ -197,9 +191,6 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
         async pause() {
           throw new Error("Uncommitted intent cannot stop compute");
         },
-        async stop() {
-          throw new Error("Uncommitted intent cannot stop compute");
-        },
       },
       1,
       1,
@@ -216,44 +207,3 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
     await processFixture.dispose();
   }
 }, 30_000);
-
-test("a Sandbox with the maximum number of Pauses stops instead of pausing again", async () => {
-  const processFixture = await factoryProcess();
-  const database = processFixture.connect();
-  let idle: ReturnType<typeof createIdleCompute> | undefined;
-  try {
-    const owned = await fixture(undefined, undefined, database);
-    await database.client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${owned.attemptID}`;
-    await database.client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request)
-      VALUES(${owned.attemptID},${JSON.stringify({ sandboxID: "runtime-test" })}::text::jsonb)`;
-    await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
-    for (let index = 0; index < maximumPausesPerSandbox; index += 1)
-      await database.client`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,snapshot_id,attempted_at,completed_at)
-        VALUES(${owned.attemptID},'pause',${crypto.randomUUID().replaceAll("-", "")},now(),now())`;
-    const stopped: string[] = [];
-    idle = createIdleCompute(
-      database,
-      { claimIdle: () => true, releaseIdle: () => {} },
-      {
-        async pause() {
-          throw new Error("A Sandbox at its Pause limit must stop");
-        },
-        async stop(attemptID) {
-          const [intent] = await database.client<Array<{ state: string }>>`
-            SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
-          expect(intent?.state).toBe("stop-intended");
-          stopped.push(attemptID);
-        },
-      },
-      1,
-      1,
-      0,
-    );
-    await idle.sweep();
-    expect(stopped).toEqual([owned.attemptID]);
-  } finally {
-    await idle?.close();
-    await database.client.end({ timeout: 2 });
-    await processFixture.dispose();
-  }
-}, 60_000);

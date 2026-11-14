@@ -1,10 +1,11 @@
 {{- /*
-`helm test RELEASE` runs scripts/kubernetes/preflight.ts as this Job. It checks the configured
-worker node, storage class and Pod admission, and prints PASS/WARN/FAIL lines with the exact fix.
-Helm creates these hook resources only while the test runs and deletes them after success.
-The ServiceAccount is separate from Factory's. It can create one throwaway `factory-preflight-*`
-Namespace with a privileged probe Pod (the same trust Factory's own ServiceAccount already holds
-for worker Pods), and the script deletes that Namespace before it exits.
+`helm test RELEASE` reads the native profile, original WorkerPool, a Ready worker
+and installation StorageClass. It creates no Actors, probe Pods or namespaces.
+The separate ServiceAccount has read-only Kubernetes permissions and receives no
+native provisioner credential. Actor assignment and full runtime qualification
+are verified by the explicit live lane, not by this preflight. The identity and
+read-only RBAC are normal release resources: Helm may complete and delete a
+non-Job test hook before starting the Job that needs it.
 */ -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -12,10 +13,6 @@ metadata:
   name: {{ include "factory.name" . }}-preflight
   labels:
     {{- include "factory.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: test
-    helm.sh/hook-weight: "-5"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -23,29 +20,25 @@ metadata:
   name: {{ .Release.Namespace }}-{{ include "factory.name" . }}-preflight
   labels:
     {{- include "factory.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: test
-    helm.sh/hook-weight: "-5"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 rules:
   - apiGroups: [""]
     resources: [nodes]
-    verbs: [get]
+    verbs: [get, list]
   - apiGroups: ["storage.k8s.io"]
-    resources: [storageclasses, csinodes]
+    resources: [storageclasses]
     verbs: [get, list]
   - apiGroups: [""]
     resources: [namespaces]
-    verbs: [get, create, delete]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, list, create]
-  - apiGroups: [""]
-    resources: [pods/log]
     verbs: [get]
   - apiGroups: [""]
-    resources: [persistentvolumeclaims]
-    verbs: [create]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: ["ate.dev"]
+    resources: [workerpools]
+    verbs: [get, list]
+  - apiGroups: ["ate.dev"]
+    resources: [sandboxconfigs]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -53,10 +46,6 @@ metadata:
   name: {{ .Release.Namespace }}-{{ include "factory.name" . }}-preflight
   labels:
     {{- include "factory.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: test
-    helm.sh/hook-weight: "-4"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 subjects:
   - kind: ServiceAccount
     name: {{ include "factory.name" . }}-preflight
@@ -78,7 +67,7 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 1500
+  activeDeadlineSeconds: 180
   template:
     metadata:
       labels:
@@ -96,7 +85,7 @@ spec:
         - name: preflight
           image: {{ include "factory.image" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
-          command: [bun, scripts/kubernetes/preflight.ts, --probe-timeout-seconds, "900"]
+          command: [bun, scripts/kubernetes/preflight.ts, --service-account]
           securityContext:
             runAsNonRoot: true
             {{- include "factory.containerSecurity" . | nindent 12 }}
@@ -105,17 +94,25 @@ spec:
           env:
             - name: HOME
               value: /tmp
-            # Factory's own container writes a kubeconfig context for its ServiceAccount at start.
-            # This Job has none, so kubectl uses the ServiceAccount of this Pod.
+            # The preflight writes its own private, temporary kubeconfig referencing
+            # this Pod's rotating ServiceAccount token and CA, not kubectl's fallback.
             - {name: FACTORY_KUBERNETES_CONTEXT, value: ""}
+            - {name: KUBECONFIG, value: ""}
+            - name: FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION
+              value: /run/factory/substrate-configuration/configuration.json
             - name: FACTORY_PREFLIGHT_NAMESPACE
               valueFrom:
                 fieldRef: {fieldPath: metadata.namespace}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
+            - {name: substrate-configuration, mountPath: /run/factory/substrate-configuration, readOnly: true}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {cpu: "1", memory: 512Mi}
       volumes:
         - name: tmp
           emptyDir: {sizeLimit: 64Mi}
+        - name: substrate-configuration
+          secret:
+            secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
+            items: [{key: configuration.json, path: configuration.json}, {key: factory-ca.pem, path: factory-ca.pem}]

@@ -1,32 +1,21 @@
 import { expect, test } from "bun:test";
-import { createAccessController } from "../../apps/factory/src/access/controller";
 import { workspaceWriteAuthorityIn } from "../../apps/factory/src/access/change-writer";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import { workspaceAuthorityIn } from "../../apps/factory/src/access/workspace";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
-import { factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 async function fixture() {
-  const process = await factoryProcess();
-  const database = process.connect();
-  const owner = crypto.randomUUID();
+  const native = await substrateFixture();
+  const { database, userID: owner, projectID: project, workspaceID: workspace } = native;
   const editor = crypto.randomUUID();
   const viewer = crypto.randomUUID();
   const contributor = crypto.randomUUID();
-  const project = crypto.randomUUID();
-  const workspace = personalWorkspaceIdentity(project, owner).workspaceID;
-  for (const id of [owner, editor, viewer, contributor])
+  for (const id of [editor, viewer, contributor])
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Sharing fixture',${`${id}@factory.invalid`})`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${project},${`sharing-${project}`},'Workspace sharing','https://github.com/example/project','main','.devcontainer/devcontainer.json',${owner})`;
-  for (const id of [owner, editor, viewer, contributor])
+  for (const id of [editor, viewer, contributor])
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${id},${id === contributor ? "product-contributor" : "developer"},${owner})`;
-  await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
-    VALUES(${workspace},${project},'personal',${owner},'main',${"a".repeat(40)},${owner})`;
   const revoked: { workspaceID: string; userID: string }[] = [];
   const sharing = createWorkspaceSharing(database, (workspaceID, userID) => {
     revoked.push({ workspaceID, userID });
@@ -49,6 +38,7 @@ async function fixture() {
       expectedVersion,
     });
   return {
+    native,
     database,
     owner,
     editor,
@@ -62,8 +52,7 @@ async function fixture() {
     write,
     grant,
     async dispose() {
-      await database.client.end({ timeout: 2 });
-      await process.dispose();
+      await native.dispose();
     },
   };
 }
@@ -115,13 +104,13 @@ test("sharing retries observe the original decision, not newer permissions", asy
 
 test("a kick revokes only the member's access and preserves shared runtime identity and state", async () => {
   const f = await fixture();
-  const attemptID = crypto.randomUUID();
+  const attemptID = f.native.attemptID;
   try {
     await f.grant(f.editor, "collaborate");
     await f.grant(f.viewer, "observe");
+    await startSubstrateFixtureWorkspace(f.native);
     await f.database
-      .client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${attemptID},${f.project},${f.workspace},1,${"a".repeat(40)},'ready','parent-fixture','child-fixture',now(),${f.owner})`;
+      .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${attemptID}`;
     const access = createAccessController(f.database);
     await access.requireRuntime(f.editor, attemptID, "ide");
     const [before] = await f.database
@@ -178,22 +167,18 @@ test("pending access revocation is recovered without undoing a later sharing dec
   }
 }, 30000);
 
-test("an invited collaborator connects to the retained owner's compute, not a second personal Workspace", async () => {
-  const restore = installOwnedRuntimeConfiguration();
+test("an invited collaborator connects to the owner's native compute, not a second personal Workspace", async () => {
   const f = await fixture();
-  const attemptID = crypto.randomUUID();
+  const attemptID = f.native.attemptID;
   try {
     await f.grant(f.editor, "collaborate");
     await f.grant(f.viewer, "observe");
-    await f.database
-      .client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${attemptID},${f.project},${f.workspace},1,${"a".repeat(40)},'ready','retained-parent','retained-child',now(),${f.owner})`;
-    const hub = new RuntimeHub(async () => {});
-    const controller = createRuntimeController(f.database, hub, "shared-runtime-fixture", {
-      async prepareExecution() {
-        throw new Error("An existing shared attempt must not create Source");
-      },
-    });
+    const controller = await startSubstrateFixtureWorkspace(f.native);
+    await f.database.client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now()
+      WHERE id=${attemptID}`;
+    const [original] = await f.database.client`
+      SELECT parent_connector_token_hash,child_connector_token_hash
+      FROM factory.runtime_attempt WHERE id=${attemptID}`;
     expect((await controller.start(f.project, f.editor, f.workspace))?.id).toBe(attemptID);
     expect((await controller.start(f.project, f.owner, f.workspace))?.id).toBe(attemptID);
     await expect(controller.start(f.project, f.viewer, f.workspace)).rejects.toThrow(
@@ -211,12 +196,11 @@ test("an invited collaborator connects to the retained owner's compute, not a se
     expect(retained).toMatchObject({
       generation: "1",
       created_by: f.owner,
-      parent_connector_token_hash: "retained-parent",
-      child_connector_token_hash: "retained-child",
+      parent_connector_token_hash: original?.["parent_connector_token_hash"],
+      child_connector_token_hash: original?.["child_connector_token_hash"],
       state: "ready",
     });
   } finally {
     await f.dispose();
-    restore();
   }
 }, 30000);

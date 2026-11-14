@@ -4,6 +4,11 @@ import { z } from "zod";
 import pins from "../../../deploy/substrate/pins.json";
 import { runEnvironmentCommand } from "./command";
 import { kubernetesCommand, kubernetesConnectionEnvironment } from "./config";
+import {
+  nativeArchitecture,
+  type NativeArchitecture,
+  pinnedNativeSandboxSpec,
+} from "./substrate-profile";
 import { kubernetesResourceQuantity, selectWorkerNodeResources } from "./worker-resource-admission";
 
 const metadata = z.object({
@@ -47,8 +52,25 @@ export type NativeCapacityNode = {
   uid: string;
   bootID: string;
   hostname: string;
+  architecture: NativeArchitecture;
   resources: { cpuMilli: number; memoryMiB: number };
 };
+
+export function nativeCapacityReservedPoolResources(pool: NativeCapacityPool) {
+  const { requests, limits } = pool.spec.template.resources;
+  const cpuMilli = kubernetesResourceQuantity(requests["cpu"], "cpu");
+  const memoryBytes = kubernetesResourceQuantity(requests["memory"], "memory");
+  if (
+    cpuMilli <= 0 ||
+    memoryBytes <= 0 ||
+    cpuMilli !== kubernetesResourceQuantity(limits["cpu"], "cpu") ||
+    memoryBytes !== kubernetesResourceQuantity(limits["memory"], "memory")
+  )
+    return null;
+  // Only fully reserved budgets are usable for admission. A bootstrap pool's
+  // larger limit is not a reservation, and fractional MiB cannot be rounded up.
+  return { cpuMilli, memoryMiB: Math.floor(memoryBytes / (1024 * 1024)) };
+}
 
 export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCapacityNode) {
   const nodes = z
@@ -85,8 +107,11 @@ export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCap
       node.metadata.name === original.name &&
       !node.metadata.deletionTimestamp &&
       node.metadata.labels["kubernetes.io/hostname"] === original.hostname &&
+      node.metadata.labels["kubernetes.io/arch"] === original.architecture &&
+      node.metadata.labels["kubernetes.io/os"] === "linux" &&
       node.status.nodeInfo.bootID === original.bootID &&
-      node.status.nodeInfo.architecture === "amd64" &&
+      node.status.nodeInfo.architecture === original.architecture &&
+      nativeArchitecture.safeParse(original.architecture).success &&
       node.status.nodeInfo.operatingSystem === "linux" &&
       !node.spec?.unschedulable &&
       !node.spec?.taints?.length &&
@@ -118,7 +143,11 @@ export function nativeCapacityOwner(selector: Record<string, string>) {
     .slice(0, 32);
 }
 
-export function requireNativeCapacityBase(poolsInput: unknown, selector: Record<string, string>) {
+export function requireNativeCapacityBase(
+  poolsInput: unknown,
+  selector: Record<string, string>,
+  architecture: NativeArchitecture,
+) {
   const pools = z
     .object({ items: z.array(z.unknown()) })
     .parse(poolsInput)
@@ -130,6 +159,12 @@ export function requireNativeCapacityBase(poolsInput: unknown, selector: Record<
   );
   if (base.length !== 1 || !base[0]?.metadata.namespace || base[0].metadata.deletionTimestamp)
     throw new Error("Native capacity requires its one original admitted WorkerPool");
+  if (
+    base[0].spec.template.nodeSelector["kubernetes.io/arch"] !==
+      nativeArchitecture.parse(architecture) ||
+    base[0].spec.template.nodeSelector["kubernetes.io/os"] !== "linux"
+  )
+    throw new Error("Original native WorkerPool differs from the installation architecture");
   return base[0];
 }
 
@@ -137,24 +172,7 @@ export function requireNativeCapacitySandbox(value: unknown) {
   const config = z
     .object({ metadata: metadata.omit({ namespace: true }), spec: z.unknown() })
     .parse(value);
-  const expected = {
-    sandboxClass: "gvisor",
-    defaultVersion: pins.gvisor.version,
-    versions: [
-      {
-        name: pins.gvisor.version,
-        state: "Enabled",
-        assets: {
-          amd64: {
-            gvisor: {
-              url: pins.gvisor.url.replace("https://storage.googleapis.com/", "gs://"),
-              sha256: pins.gvisor.sha256,
-            },
-          },
-        },
-      },
-    ],
-  };
+  const expected = pinnedNativeSandboxSpec();
   if (
     config.metadata.name !== pins.gvisor.version ||
     config.metadata.deletionTimestamp ||
@@ -164,7 +182,12 @@ export function requireNativeCapacitySandbox(value: unknown) {
   return config.metadata.uid;
 }
 
-export function nativeCapacityCandidates(nodesInput: unknown, podsInput: unknown) {
+export function nativeCapacityCandidates(
+  nodesInput: unknown,
+  podsInput: unknown,
+  architecture: NativeArchitecture,
+) {
+  nativeArchitecture.parse(architecture);
   const nodes = z.object({ items: z.array(z.unknown()) }).parse(nodesInput).items;
   const pods = z
     .object({
@@ -194,10 +217,15 @@ export function nativeCapacityCandidates(nodesInput: unknown, podsInput: unknown
     try {
       const hostname = node.metadata.labels["kubernetes.io/hostname"];
       if (!hostname) throw new Error("Node hostname label is unavailable");
+      if (
+        node.metadata.labels["kubernetes.io/arch"] !== architecture ||
+        node.metadata.labels["kubernetes.io/os"] !== "linux"
+      )
+        throw new Error("Node labels differ from the selected native Linux architecture");
       const resources = selectWorkerNodeResources(
         {
           nodeName: node.metadata.name,
-          architecture: "amd64",
+          architecture,
           memoryHeadroomMiB: 2048,
           cpuRequestMilli: nativeCPUSchedulingQuantum,
         },
@@ -216,6 +244,7 @@ export function nativeCapacityCandidates(nodesInput: unknown, podsInput: unknown
         uid: node.metadata.uid,
         bootID: node.status.nodeInfo.bootID,
         hostname,
+        architecture,
         resources,
       });
     } catch (error) {
@@ -238,6 +267,11 @@ export function renderNativeCapacityPool(
   z.uuid().parse(creationID);
   const namespace = base.metadata.namespace;
   if (!namespace) throw new Error("Native capacity requires its original WorkerPool namespace");
+  if (
+    base.spec.template.nodeSelector["kubernetes.io/arch"] !== node.architecture ||
+    base.spec.template.nodeSelector["kubernetes.io/os"] !== "linux"
+  )
+    throw new Error("Native capacity pool cannot substitute another runtime architecture");
   const owner = nativeCapacityOwner(selector);
   const id = createHash("sha256").update(`${owner}:${node.uid}`).digest("hex").slice(0, 32);
   const labels = { ...selector, "factory.dev/native-capacity": owner };
@@ -267,7 +301,7 @@ export function renderNativeCapacityPool(
         nodeSelector: {
           "kubernetes.io/hostname": node.hostname,
           "kubernetes.io/os": "linux",
-          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/arch": nativeArchitecture.parse(node.architecture),
         },
         resources: { requests: { cpu, memory }, limits: { cpu, memory } },
       },

@@ -43,6 +43,7 @@ test("Build preparation distinguishes lost history and retains correction routin
   let runtimeState = "starting";
   let turn: AgentView["turn"];
   const prompts: Array<{ text: string; commandId: string }> = [];
+  const commandRequests: Array<{ command: string; status?: number }> = [];
   let researchRequests = 0;
   const view = () => ({
     state,
@@ -107,12 +108,27 @@ test("Build preparation distinguishes lost history and retains correction routin
         "stopRuntimeAttempt",
       ].map(factoryFunctionMatcher),
     );
+    const commandMatchers = await Promise.all(
+      ["sendCodingPrompt", "requestCodingChanges", "setConversationMode"].map(async (command) => ({
+        command,
+        matches: await factoryFunctionMatcher(command),
+      })),
+    );
     page.on("request", (request) => {
       if (
         request.method() === "POST" &&
         executionCommands.some((matches) => matches(new URL(request.url())))
       )
         mutations++;
+      if (request.method() === "POST")
+        for (const { command, matches } of commandMatchers)
+          if (matches(new URL(request.url()))) commandRequests.push({ command });
+    });
+    page.on("response", (response) => {
+      if (response.request().method() === "POST")
+        for (const { command, matches } of commandMatchers)
+          if (matches(new URL(response.url())))
+            commandRequests.push({ command, status: response.status() });
     });
     await mockFactoryFunctions(page, {
       workspaces: {
@@ -283,6 +299,22 @@ test("Build preparation distinguishes lost history and retains correction routin
       await Bun.write(
         ".factory/test-results/build-startup-browser/failure-ui.txt",
         await page.locator("body").innerText(),
+      );
+      await Bun.write(
+        `.factory/test-results/build-startup-browser/commands-${fixture.id}.json`,
+        JSON.stringify(
+          {
+            state,
+            runtimeState,
+            sessionAvailable,
+            mutations,
+            researchRequests,
+            promptCount: prompts.length,
+            commandRequests,
+          },
+          null,
+          2,
+        ),
       );
     }
     throw cause;

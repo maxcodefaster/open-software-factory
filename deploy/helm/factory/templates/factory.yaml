@@ -43,9 +43,8 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       # No fsGroup: kubelet would add group read and write to every retained state file, and
       # Factory refuses an OpenBao token file that is group-accessible. This container chowns the
-      # claim once instead. Files from earlier releases are root-owned, and a fresh claim is too.
-      # Delete .owner-uid-1000 from the state claim to force another pass, for example after
-      # rolling back to a release that ran as root.
+      # fresh claim once instead. Existing correctly owned Source and bootstrap
+      # files remain unchanged; this is not an old-runtime adoption path.
       initContainers:
         - name: own-state
           image: {{ include "factory.image" . }}
@@ -84,10 +83,8 @@ spec:
           envFrom:
             - configMapRef: {name: "{{ include "factory.name" . }}-config"}
           env:
-            {{- if .Values.substrate.workspaceConfigurationSecret }}
             - name: FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION
               value: /run/factory/substrate-configuration/configuration.json
-            {{- end }}
             - name: FACTORY_OBJECT_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef: {name: {{ include "factory.objectsSecret" . | quote }}, key: access-key-id}
@@ -97,6 +94,9 @@ spec:
             - name: FACTORY_NAMESPACE
               valueFrom:
                 fieldRef: {fieldPath: metadata.namespace}
+            - name: FACTORY_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef: {fieldPath: spec.serviceAccountName}
             - name: FACTORY_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
@@ -139,16 +139,13 @@ spec:
             - {name: state, mountPath: /var/lib/factory}
             - {name: temporary, mountPath: /tmp}
             - {name: openbao-tls, mountPath: /run/factory/openbao, readOnly: true}
-            {{- if .Values.substrate.workspaceConfigurationSecret }}
             - {name: substrate-configuration, mountPath: /run/factory/substrate-configuration, readOnly: true}
             - {name: substrate-control, mountPath: /run/factory/substrate-control, readOnly: true}
             - {name: substrate-provisioner, mountPath: /run/factory/substrate-provisioner, readOnly: true}
-            {{- end }}
             {{- if .Values.registryCASecret }}
             - {name: registry-ca, mountPath: /run/factory/registry, readOnly: true}
             {{- end }}
       volumes:
-        {{- if .Values.substrate.workspaceConfigurationSecret }}
         - name: substrate-configuration
           secret:
             secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
@@ -171,7 +168,6 @@ spec:
                     matchLabels:
                       podcert.ate.dev/canarying: live
                   path: ca.pem
-        {{- end }}
         - name: state
           persistentVolumeClaim: {claimName: "{{ include "factory.name" . }}-state"}
         - name: temporary

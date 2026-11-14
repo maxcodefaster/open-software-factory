@@ -100,6 +100,16 @@ test("persists unique disposable ports/owner before creates, and reuses identity
       "identity",
     );
     expect(() => parseInstallation(created, "different-name")).toThrow("identity");
+    expect(() => parseInstallation({ ...created, version: 1 }, created.name)).toThrow("identity");
+    expect(() => parseInstallation({ ...created, phase: "reset-intent" }, created.name)).toThrow(
+      "identity",
+    );
+    const resetting = {
+      ...created,
+      phase: "reset-intent" as const,
+      resetResources: { nativeScopes: [], editorNamespaces: [], capacityPools: [] },
+    };
+    expect(parseInstallation(resetting, created.name)).toEqual(resetting);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

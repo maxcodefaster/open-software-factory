@@ -1,15 +1,12 @@
 import { expect, test } from "bun:test";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { buildModelID } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { controlledForgeProtection } from "../fixtures/forge-protection";
+import { nativeBuildProcessFixture } from "../fixtures/native-build-process";
+import { nativeProcessProtocol } from "../fixtures/native-process-protocol";
 import { callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
-
-const ConnectorSocket = WebSocket as typeof WebSocket & {
-  new (url: string, options: Bun.WebSocketOptions): WebSocket;
-};
 
 test.each(["Build", "Staging"] as const)(
   "%s reconnects both Connector roles without replacing compute or replaying work",
@@ -18,22 +15,36 @@ test.each(["Build", "Staging"] as const)(
     const process = await factoryProcess(undefined, {
       FACTORY_FORGEJO_ADMIN_TOKEN: forge.FACTORY_FORGEJO_ADMIN_TOKEN,
       FACTORY_FORGEJO_API_URL: forge.FACTORY_FORGEJO_API_URL,
+      FACTORY_FORGEJO_PUBLIC_URL: "https://owned-build.factory.invalid",
     });
     const database = process.connect();
     const sockets: WebSocket[] = [];
+    let native: Awaited<ReturnType<typeof nativeProcessProtocol>> | undefined;
+    let ownedFixture: Awaited<ReturnType<typeof nativeBuildProcessFixture>> | undefined;
     try {
-      const token = crypto.randomUUID();
-      const owned = await fixture(undefined, undefined, database, token);
+      native = await nativeProcessProtocol(process, database);
+      const peer = native;
+      const initialized = await process.start();
+      await process.kill(initialized);
+      const owned = await nativeBuildProcessFixture(database, peer);
+      ownedFixture = owned;
       if (target === "Staging") {
         // Use an independent Staging attempt; the Ticket runtime remains untouched.
-        await database.client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind,
-          generation, revision, state,
-          parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-          SELECT ${crypto.randomUUID()}, project_id, 'staging', generation, revision, 'ready', parent_connector_token_hash,
-            child_connector_token_hash, now(), created_by FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
-        await database.client`INSERT INTO factory.staging_preview(project_id, revision, runtime_attempt_id)
-          SELECT project_id, revision, id FROM factory.runtime_attempt
-          WHERE project_id = ${owned.projectID} AND isolated_kind = 'staging'`;
+        await database.client`INSERT INTO factory.staging_preview(project_id,revision)
+          VALUES(${owned.projectID},${"a".repeat(40)})`;
+        await peer.startStaging(owned.projectID, owned.userID, {
+          version: 1,
+          primaryApp: "web",
+          apps: [
+            {
+              id: "web",
+              label: "Owned Web",
+              command: ["node", "web.js"],
+              port: 4321,
+              healthPath: "/",
+            },
+          ],
+        });
       }
       const [attempt] = await database.client<{ id: string }[]>`
         SELECT id FROM factory.runtime_attempt WHERE project_id = ${owned.projectID}
@@ -52,33 +63,47 @@ test.each(["Build", "Staging"] as const)(
       const instructions = new Map<string, unknown>();
       const mcpServers = new Set<string>();
       async function connect(role: "parent" | "child") {
-        const socket = new ConnectorSocket(
-          `${process.base.replace("http:", "ws:")}/internal/runtime-connect`,
-          {
-            protocols: [RuntimeHub.protocol()],
-            headers: {
-              authorization: `Bearer ${token}`,
-              "x-factory-connector-role": role,
-              "x-factory-runtime-attempt": attemptID,
-              "x-factory-runtime-generation": "1",
-            },
-          },
-        );
-        sockets.push(socket);
-        socket.addEventListener("message", (event) => {
-          const frame = JSON.parse(String(event.data)) as {
-            type: string;
-            path: string;
-            method: string;
-            data: string;
-            streamId: string;
-            operationId: string;
-            action: string;
-          };
-          if (frame.type === "operation-request") {
-            // Grant renewal and closing its ephemeral browser are not model
-            // inference, Runtime Stop or an App action.
-            if (["browser-renew", "browser-close"].includes(frame.action)) {
+        return peer.connect(attemptID, role, (socket) => {
+          sockets.push(socket);
+          socket.addEventListener("message", async (event) => {
+            const frame = JSON.parse(String(event.data)) as {
+              type: string;
+              path: string;
+              method: string;
+              data: string;
+              streamId: string;
+              operationId: string;
+              action: string;
+              channel: string;
+            };
+            if (frame.channel === "source") {
+              await peer.sourceFence(socket, frame);
+              return;
+            }
+            if (frame.type === "operation-request") {
+              // Grant renewal and closing its ephemeral browser are not model
+              // inference, Runtime Stop or an App action.
+              if (["browser-renew", "browser-close"].includes(frame.action)) {
+                socket.send(
+                  JSON.stringify({
+                    type: "operation-response",
+                    operationId: frame.operationId,
+                    action: frame.action,
+                  }),
+                );
+                return;
+              }
+              mutationCalls += 1;
+              if (frame.action !== "skills-install")
+                throw new Error(`Unexpected owned Connector operation: ${frame.action}`);
+              const manifest = JSON.parse(frame.data) as { files: { path: string }[] };
+              installedSkills = [
+                ...new Set(
+                  manifest.files.map((file) =>
+                    fixtureValue(file.path.split("/")[0], 'file.path.split("/")[0]'),
+                  ),
+                ),
+              ];
               socket.send(
                 JSON.stringify({
                   type: "operation-response",
@@ -88,170 +113,174 @@ test.each(["Build", "Staging"] as const)(
               );
               return;
             }
-            mutationCalls += 1;
-            if (frame.action !== "skills-install")
-              throw new Error(`Unexpected owned Connector operation: ${frame.action}`);
-            const manifest = JSON.parse(frame.data) as { files: { path: string }[] };
-            installedSkills = [
-              ...new Set(
-                manifest.files.map((file) =>
-                  fixtureValue(file.path.split("/")[0], 'file.path.split("/")[0]'),
-                ),
-              ),
-            ];
-            socket.send(
-              JSON.stringify({
-                type: "operation-response",
-                operationId: frame.operationId,
-                action: frame.action,
-              }),
-            );
-            return;
-          }
-          if (frame.type !== "http-request") return;
-          const path = new URL(frame.path, "http://owned.invalid").pathname;
-          if (path.endsWith("/log")) {
+            if (frame.type !== "http-request") return;
+            const path = new URL(frame.path, "http://owned.invalid").pathname;
+            if (path.endsWith("/log")) {
+              socket.send(
+                JSON.stringify({
+                  type: "http-response",
+                  streamId: frame.streamId,
+                  status: 200,
+                  headers: { "content-type": "text/event-stream" },
+                }),
+              );
+              socket.send(
+                JSON.stringify({
+                  type: "stream-data",
+                  streamId: frame.streamId,
+                  data: Buffer.from(
+                    `data: ${JSON.stringify({
+                      type: "log.synced",
+                      aggregateID: owned.sessionID,
+                      seq: 1,
+                    })}\n\n`,
+                  ).toString("base64"),
+                }),
+              );
+              socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
+              return;
+            }
+            if (frame.method !== "GET" && frame.method !== "HEAD") mutationCalls += 1;
+            let data: unknown = [];
+            let status = 200;
+            if (path.includes("/instructions/entries")) {
+              if (frame.method === "GET")
+                data = [...instructions].map(([key, value]) => ({ key, value }));
+              else {
+                status = 204;
+                const key = decodeURIComponent(
+                  fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)'),
+                );
+                if (frame.method === "PUT")
+                  instructions.set(
+                    key,
+                    (JSON.parse(Buffer.from(frame.data, "base64").toString()) as { value: unknown })
+                      .value,
+                  );
+                else instructions.delete(key);
+              }
+            } else if (
+              [
+                "/api/experimental/mcp/factory_browser",
+                "/api/experimental/mcp/factory_sources",
+              ].includes(path) &&
+              frame.method === "PUT"
+            ) {
+              mcpServers.add(fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)'));
+              status = 204;
+            } else if (path === "/api/mcp") {
+              data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
+            } else if (path === "/api/info") {
+              data = { version: "2.0.27" };
+            } else if (path === "/api/skill") {
+              data = installedSkills.map((id) => ({
+                id,
+                name: id,
+                path: `/opt/factory/admitted-skills/${id}/SKILL.md`,
+                content: "",
+              }));
+            } else if (path.endsWith("/agent")) {
+              status = 204;
+            } else if (path === "/api/model") data = [{ providerID: "factory", id: buildModelID }];
+            else if (path.endsWith(`/${owned.sessionID}`))
+              data = {
+                id: owned.sessionID,
+                location: { directory: "/workspace/project" },
+                model: { providerID: "factory", id: buildModelID },
+              };
+            else if (path.endsWith("/active")) {
+              activeReads += 1;
+              data = promptID ? { [owned.sessionID]: { type: "running" } } : {};
+            } else if (path.endsWith("/prompt")) {
+              promptCalls += 1;
+              promptID = (
+                JSON.parse(Buffer.from(frame.data, "base64").toString()) as { id: string }
+              ).id;
+              data = {
+                id: promptID,
+                sessionID: owned.sessionID,
+                type: "user",
+                time: { created: 1 },
+                delivery: "queue",
+                payload: JSON.parse(Buffer.from(frame.data, "base64").toString()),
+              };
+              queuedInput = data;
+            } else if (path.endsWith("/inbox")) {
+              data = queuedInput ? [queuedInput] : [];
+            } else if (path.endsWith("/message"))
+              data = promptID
+                ? [{ id: promptID, type: "user", time: { created: 1 }, text: "Owned reconnect" }]
+                : [
+                    {
+                      id: "msg_owned_boundary",
+                      type: "agent-selected",
+                      agent: "build",
+                      time: { created: 0 },
+                    },
+                  ];
             socket.send(
               JSON.stringify({
                 type: "http-response",
                 streamId: frame.streamId,
-                status: 200,
-                headers: { "content-type": "text/event-stream" },
+                status,
+                headers: { "content-type": "application/json" },
               }),
             );
-            socket.send(
-              JSON.stringify({
-                type: "stream-data",
-                streamId: frame.streamId,
-                data: Buffer.from(
-                  `data: ${JSON.stringify({
-                    type: "log.synced",
-                    aggregateID: owned.sessionID,
-                    seq: 1,
-                  })}\n\n`,
-                ).toString("base64"),
-              }),
-            );
-            socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
-            return;
-          }
-          if (frame.method !== "GET" && frame.method !== "HEAD") mutationCalls += 1;
-          let data: unknown = [];
-          let status = 200;
-          if (path.includes("/instructions/entries")) {
-            if (frame.method === "GET")
-              data = [...instructions].map(([key, value]) => ({ key, value }));
-            else {
-              status = 204;
-              const key = decodeURIComponent(
-                fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)'),
+            if (status !== 204)
+              socket.send(
+                JSON.stringify({
+                  type: "stream-data",
+                  streamId: frame.streamId,
+                  data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
+                }),
               );
-              if (frame.method === "PUT")
-                instructions.set(
-                  key,
-                  (JSON.parse(Buffer.from(frame.data, "base64").toString()) as { value: unknown })
-                    .value,
-                );
-              else instructions.delete(key);
-            }
-          } else if (
-            [
-              "/api/experimental/mcp/factory_browser",
-              "/api/experimental/mcp/factory_sources",
-            ].includes(path) &&
-            frame.method === "PUT"
-          ) {
-            mcpServers.add(fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)'));
-            status = 204;
-          } else if (path === "/api/mcp") {
-            data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
-          } else if (path === "/api/info") {
-            data = { version: "2.0.27" };
-          } else if (path === "/api/skill") {
-            data = installedSkills.map((id) => ({
-              id,
-              name: id,
-              path: `/opt/factory/admitted-skills/${id}/SKILL.md`,
-              content: "",
-            }));
-          } else if (path.endsWith("/agent")) {
-            status = 204;
-          } else if (path === "/api/model") data = [{ providerID: "factory", id: buildModelID }];
-          else if (path.endsWith(`/${owned.sessionID}`))
-            data = {
-              id: owned.sessionID,
-              location: { directory: "/workspace/project" },
-              model: { providerID: "factory", id: buildModelID },
-            };
-          else if (path.endsWith("/active")) {
-            activeReads += 1;
-            data = promptID ? { [owned.sessionID]: { type: "running" } } : {};
-          } else if (path.endsWith("/prompt")) {
-            promptCalls += 1;
-            promptID = (JSON.parse(Buffer.from(frame.data, "base64").toString()) as { id: string })
-              .id;
-            data = {
-              id: promptID,
-              sessionID: owned.sessionID,
-              type: "user",
-              time: { created: 1 },
-              delivery: "queue",
-              payload: JSON.parse(Buffer.from(frame.data, "base64").toString()),
-            };
-            queuedInput = data;
-          } else if (path.endsWith("/inbox")) {
-            data = queuedInput ? [queuedInput] : [];
-          } else if (path.endsWith("/message"))
-            data = promptID
-              ? [{ id: promptID, type: "user", time: { created: 1 }, text: "Owned reconnect" }]
-              : [
-                  {
-                    id: "msg_owned_boundary",
-                    type: "agent-selected",
-                    agent: "build",
-                    time: { created: 0 },
-                  },
-                ];
-          socket.send(
-            JSON.stringify({
-              type: "http-response",
-              streamId: frame.streamId,
-              status,
-              headers: { "content-type": "application/json" },
-            }),
-          );
-          if (status !== 204)
-            socket.send(
-              JSON.stringify({
-                type: "stream-data",
-                streamId: frame.streamId,
-                data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
-              }),
-            );
-          socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
-        });
-        await new Promise<void>((resolve, reject) => {
-          socket.addEventListener("open", () => resolve(), { once: true });
-          socket.addEventListener("error", () => reject(new Error("Owned Connector failed")), {
-            once: true,
+            socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
           });
         });
-        socket.send(JSON.stringify({ type: "hello", role, channels: [] }));
-        return socket;
       }
       const state = async () => {
         const [row] = await database.client<{ state: string; failure: string | null }[]>`
           SELECT state, failure FROM factory.runtime_attempt WHERE id = ${attempt.id}`;
         return row;
       };
-      const identity = async () => database.client`
-        SELECT id, generation, revision, workspace_id, kubernetes_namespace, kubernetes_pod_name,
-          parent_connector_token_hash, child_connector_token_hash
-        FROM factory.runtime_attempt WHERE project_id = ${owned.projectID} ORDER BY id`;
+      const identity = async () => [
+        ...(await database.client`
+        SELECT attempt.id,attempt.generation,attempt.revision,attempt.workspace_id,
+          binding.atespace,binding.actor_name,binding.actor_uid,binding.intent,
+          attempt.parent_connector_token_hash,attempt.child_connector_token_hash,
+          COALESCE(workspace.atespace,isolated.atespace)#>>'{metadata,uid}' AS atespace_uid,
+          COALESCE(workspace.template,isolated.template)#>>'{metadata,uid}' AS template_uid
+        FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+        LEFT JOIN factory.substrate_workspace workspace ON workspace.workspace_id=attempt.workspace_id AND workspace.generation=attempt.generation
+        LEFT JOIN factory.substrate_isolated isolated ON isolated.runtime_attempt_id=attempt.id
+        WHERE attempt.project_id=${owned.projectID} ORDER BY attempt.id`),
+      ];
       const before = await identity();
+      expect(
+        before.every(
+          (row) =>
+            row["actor_uid"] &&
+            row["atespace_uid"] &&
+            row["template_uid"] &&
+            row["parent_connector_token_hash"] !== row["child_connector_token_hash"],
+        ),
+      ).toBe(true);
+      const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
       let parent = await connect("parent");
       let child = await connect("child");
       await eventually(state, (row) => row?.state === "ready", "Initial readiness missing");
+      const parentHeaders = await peer.connectorHeaders(attemptID, "parent");
+      for (const invalid of [
+        { "x-factory-runtime-actor-uid": crypto.randomUUID() },
+        { "x-factory-runtime-actor-uid": "" },
+        { "x-factory-runtime-generation": "2" },
+        { "x-factory-connector-role": "child" },
+      ]) {
+        const rejected = await fetch(`${process.base}/internal/runtime-connect`, {
+          headers: { ...parentHeaders, ...invalid },
+        });
+        expect(rejected.status).toBe(401);
+      }
       const commandID = crypto.randomUUID();
       if (target === "Build") {
         const response = await callFactoryFunction(
@@ -282,6 +311,7 @@ test.each(["Build", "Staging"] as const)(
       const turn = target === "Build" ? await owned.turn(commandID) : undefined;
       const beforeMutations = mutationCalls;
       const beforeReads = activeReads;
+      const beforeFences = [...peer.sourceFences];
       parent.close();
       child.close();
       await eventually(
@@ -338,9 +368,14 @@ test.each(["Build", "Staging"] as const)(
       }
       expect(promptCalls).toBe(target === "Build" ? 1 : 0);
       expect(mutationCalls).toBe(beforeMutations);
+      expect(peer.sourceFences).toEqual(beforeFences);
+      expect(peer.calls.filter((call) => !call.method.startsWith("Get"))).toEqual(lifecycleBefore);
     } finally {
       await process.shutdown();
       for (const socket of sockets) socket.close();
+      await ownedFixture?.shutdown();
+      ownedFixture?.restoreEnvironment();
+      await native?.close();
       await database.client.end({ timeout: 0 });
       await process.dispose();
       await forge.dispose();

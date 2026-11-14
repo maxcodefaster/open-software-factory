@@ -3,10 +3,18 @@ import upstream from "../../upstream.json";
 
 const pinned = z.string().regex(/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/);
 export const starterImagesSchema = z.object({
-  platform: z.enum(["linux/amd64", "linux/arm64"]),
+  platform: z.literal("linux/amd64"),
   development: pinned,
   support: pinned,
 });
+
+export function nativeStarterImages() {
+  return starterImagesSchema.parse({
+    platform: "linux/amd64",
+    development: upstream.nodeDevelopment.image,
+    support: upstream.node.image,
+  });
+}
 
 export function starterImageManifest(index: unknown, platform: string) {
   const [os, architecture] = platform.split("/");

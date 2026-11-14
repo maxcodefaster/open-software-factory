@@ -5,6 +5,10 @@ import { isDeepStrictEqual } from "node:util";
 import { parseAllDocuments } from "yaml";
 import { z } from "zod";
 import {
+  nativeArchitecture,
+  type NativeArchitecture,
+} from "../../packages/runtime-kubernetes/src/substrate-profile";
+import {
   overlaySubstrateEgress,
   parseEnvoy,
   verifySubstrateLiveClusters,
@@ -87,8 +91,9 @@ export async function upstreamEgress(directory: string) {
   return z.object({ data: z.record(z.string(), z.string()) }).parse(maps[0]).data;
 }
 
-export async function verifySubstrateArchive(path: string) {
-  verifyNightly(await readFile(path));
+export async function verifySubstrateArchive(path: string, architecture: NativeArchitecture) {
+  const expected = pins.gvisor.architectures[nativeArchitecture.parse(architecture)];
+  verifyNightly(await readFile(path), architecture);
   const child = Bun.spawn(["tar", "--zstd", "-xOf", path, "runsc"], {
     stdout: "pipe",
     stderr: "pipe",
@@ -98,31 +103,33 @@ export async function verifySubstrateArchive(path: string) {
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  if (status !== 0 || digest(new Uint8Array(bytes)) !== pins.gvisor.runscSha256)
+  if (status !== 0 || digest(new Uint8Array(bytes)) !== expected.runscSha256)
     throw new Error(`Pinned archive runsc verification failed: ${error}`);
-  return { archive: pins.gvisor.sha256, runsc: pins.gvisor.runscSha256 };
+  return { architecture, archive: expected.sha256, runsc: expected.runscSha256 };
 }
 
-async function assets(directory: string) {
+async function assets(directory: string, architecture: NativeArchitecture) {
+  const expected = pins.gvisor.architectures[architecture];
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const download = async (url: string) => {
     const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
     if (!response.ok) throw new Error(`Official asset download failed: ${response.status}`);
     return new Uint8Array(await response.arrayBuffer());
   };
-  const archive = await download(pins.gvisor.url);
-  verifyNightly(archive);
-  const published = new TextDecoder().decode(await download(`${pins.gvisor.url}.sha512`));
-  if (published.trim().split(/\s+/)[0] !== pins.gvisor.sha512)
+  const archive = await download(expected.url);
+  verifyNightly(archive, architecture);
+  const published = new TextDecoder().decode(await download(`${expected.url}.sha512`));
+  if (published.trim().split(/\s+/)[0] !== expected.sha512)
     throw new Error("Official published SHA512 differs from approved pin");
   const path = resolve(directory, "gvisor.tar.zstd");
   await save(path, archive);
   await save(resolve(directory, "gvisor.tar.zstd.sha512"), published);
-  await verifySubstrateArchive(path);
+  await verifySubstrateArchive(path, architecture);
   const cli = await download(
-    `https://github.com/agent-substrate/substrate/releases/download/${pins.substrate.release}/kubectl-ate-linux-amd64`,
+    `https://github.com/agent-substrate/substrate/releases/download/${pins.substrate.release}/kubectl-ate-linux-${architecture}`,
   );
-  if (digest(cli) !== pins.substrate.cliSha256) throw new Error("Substrate CLI checksum mismatch");
+  if (digest(cli) !== pins.substrate.architectures[architecture].cliSha256)
+    throw new Error("Substrate CLI checksum mismatch");
   await save(resolve(directory, "kubectl-ate"), cli, 0o500);
 }
 
@@ -264,9 +271,12 @@ export async function applySubstrateEgress(
 
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
-  if (command === "assets" && args.length === 1) await assets(resolve(args[0] ?? ""));
-  else if (command === "verify-assets" && args.length === 1)
-    console.log(await verifySubstrateArchive(resolve(args[0] ?? "")));
+  if (command === "assets" && args.length === 2)
+    await assets(resolve(args[0] ?? ""), nativeArchitecture.parse(args[1]));
+  else if (command === "verify-assets" && args.length === 2)
+    console.log(
+      await verifySubstrateArchive(resolve(args[0] ?? ""), nativeArchitecture.parse(args[1])),
+    );
   else if (command === "overlay-egress" && args.length === 3) {
     const data = await upstreamEgress(args[0] ?? "");
     const value = JSON.parse(await readFile(resolve(args[1] ?? ""), "utf8"));
@@ -319,6 +329,6 @@ if (import.meta.main) {
     );
   } else
     throw new Error(
-      "Usage: substrate-profile-command.ts assets DIR | verify-assets ARCHIVE | render INPUT DIR | check-upstream SOURCE RENDERED_DIR | overlay-egress SOURCE INPUT OUTPUT | apply-egress SOURCE KUBECONFIG CONTEXT LOCAL_PORT | verify-egress SOURCE KUBECONFIG CONTEXT LOCAL_PORT",
+      "Usage: substrate-profile-command.ts assets DIR ARCHITECTURE | verify-assets ARCHIVE ARCHITECTURE | render INPUT DIR | check-upstream SOURCE RENDERED_DIR | overlay-egress SOURCE INPUT OUTPUT | apply-egress SOURCE KUBECONFIG CONTEXT LOCAL_PORT | verify-egress SOURCE KUBECONFIG CONTEXT LOCAL_PORT",
     );
 }

@@ -62,7 +62,9 @@ func TestLanguageBackpressureCannotBlockControlClose(t *testing.T) {
 	go func() { defer manager.readers.Done(); manager.writeLoop("owned-language", session) }()
 	runtime := &childRuntime{languages: manager}
 	finished := make(chan error, 1)
-	go func() { finished <- runtime.readLoop(ctx, &controlConnection{connection: client}) }()
+	go func() {
+		finished <- runtime.readLoop(ctx, &controlConnection{connection: client, done: make(chan struct{})})
+	}()
 	defer func() { client.Close(); <-finished }()
 	body := `{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"factory-workspace://workspace-a/main.ts","languageId":"typescript","version":1,"text":"const n = 1;"}}}`
 	if err := controlPeer.WriteJSON(Message{Type: "websocket-message", StreamID: "owned-language", MessageType: 1, Data: base64.StdEncoding.EncodeToString([]byte(body))}); err != nil {

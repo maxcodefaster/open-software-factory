@@ -88,7 +88,9 @@ export function createReviewAdmission(
           AND verification.runner_id IS NULL
           AND (verification.runtime_attempt_id IS NULL OR EXISTS(
             SELECT 1 FROM factory.runtime_attempt execution
+            JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=execution.id
             WHERE execution.id=verification.runtime_attempt_id AND execution.state='stopped'
+              AND binding.deleted_at IS NOT NULL
           ))
           AND (review.finding_source_id IS NULL OR (source.result IS NOT NULL AND source.finding_source_id IS NULL
             AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=source.turn_id AND state='completed')))

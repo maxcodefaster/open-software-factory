@@ -3,7 +3,6 @@ import { dirname, resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
-import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import upstream from "../../upstream.json";
 import { inspectRegistryArtifact, requireAvailableRuntimeArtifacts } from "./artifact-availability";
 import {
@@ -11,6 +10,7 @@ import {
   localRuntimeDefaults,
   publishedRuntimeArtifacts,
   type RuntimeArtifacts,
+  runtimeArtifactEnvironment,
   runtimeArtifactsSchema,
 } from "./artifacts";
 import { ensureLocalForgeIdentity } from "./forge-identity";
@@ -24,7 +24,12 @@ import {
   requireOwnedResource,
   requireResetConfirmation,
 } from "./installation";
-import { ensureLocalMetricsServer } from "./metrics-server";
+import {
+  requireNativeBrowserImage,
+  requireNativeForgeOrigin,
+  requireNativeInstallation,
+  requireNativeRuntimeArtifact,
+} from "./native-installation";
 import { localOpenBao } from "./openbao";
 import {
   inspectCurrentContainers,
@@ -35,7 +40,8 @@ import {
 import { completeFactoryStartup, waitForFactory } from "./readiness";
 import { waitForRegistry } from "./registry-readiness";
 import { requireSafeRegistryStorage } from "./registry-storage";
-import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
+import { resetDisposable } from "./reset";
+import { readResetResources, requireResetResourcesAbsent } from "./reset-resources";
 import { publishRuntimeImage } from "./runtime-publication";
 import {
   factoryServerComposeOverlay,
@@ -46,7 +52,7 @@ import {
   stopFactoryServerContainer,
 } from "./server-container";
 import { localForgeIdentityEndpoints, localServerSettings } from "./server-settings";
-import { localStarterCompose, starterImageManifest, starterImagesSchema } from "./starter-images";
+import { localStarterCompose, nativeStarterImages, starterImagesSchema } from "./starter-images";
 import { disposeRuntimeStorageCheck, requireWritableRuntimeStorage } from "./storage-readiness";
 
 const root = resolve(import.meta.dir, "../..");
@@ -102,7 +108,6 @@ const stateDirectory = installation
   : sharedStateDirectory;
 const runtimeImageFile = resolve(stateDirectory, "runtime-host-image");
 const browserImageFile = resolve(stateDirectory, "browser-tools-image");
-const sourceFilesImageFile = resolve(sharedStateDirectory, "workspace-files-image");
 const developerIDEImageFile = resolve(sharedStateDirectory, "developer-ide-image");
 const serverPIDFile = resolve(stateDirectory, "server.pid");
 const forgejoTokenFile = resolve(stateDirectory, "forgejo-token");
@@ -173,7 +178,10 @@ async function preflight() {
       "Set FACTORY_RUNTIME_HOST to this host's address reachable from Kubernetes Pods",
     );
   if (Bun.version !== "1.4.3") throw new Error("Factory startup requires Bun 1.4.3");
-  configuredFactoryboxRuntimeProfile();
+  const nativeConfiguration = requireNativeInstallation();
+  requireNativeForgeOrigin(process.env, nativeConfiguration);
+  if (action === "publish-runtime" || !(await publishedRuntimeArtifacts(sharedStateDirectory)))
+    requireNativeBrowserImage(process.env);
   for (const value of [upstream.docker.image, upstream.nodeDevelopment.image])
     requirePinnedImage(value);
   if (
@@ -269,6 +277,7 @@ async function ensureRegistry() {
 }
 
 async function publishRuntimeHost() {
+  const nativeBrowserImage = requireNativeBrowserImage(process.env);
   const reservation = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -305,22 +314,6 @@ async function publishRuntimeHost() {
         target: "runtime-host",
       },
       {
-        name: "browser-tools",
-        repository: `${registryHost}/open-factory/browser-tools`,
-        metadata: resolve(stateDirectory, "browser-tools-metadata.json"),
-        state: browserImageFile,
-        dockerfile: "deploy/browser-tools/Dockerfile",
-        target: undefined,
-      },
-      {
-        name: "workspace-files",
-        repository: `${registryHost}/open-factory/workspace-files`,
-        metadata: resolve(sharedStateDirectory, "workspace-files-metadata.json"),
-        state: sourceFilesImageFile,
-        dockerfile: "deploy/workspace-files/Dockerfile",
-        target: undefined,
-      },
-      {
         name: "developer-ide",
         repository: `${registryHost}/open-factory/developer-ide`,
         metadata: resolve(sharedStateDirectory, "developer-ide-metadata.json"),
@@ -347,59 +340,16 @@ async function publishRuntimeHost() {
       outputs.push({ path: artifact.state, reference });
       if (artifact.name === "runtime-host") runtimeReference = reference;
     }
-    // Copy upstream native manifests unchanged. No rebuilt base image or
-    // node Docker graph is shared with a Workspace's private Docker daemon.
-    const architecture = await command(["docker", "info", "--format", "{{.Architecture}}"], {
-      quiet: true,
-    });
-    const platform =
-      architecture === "aarch64" || architecture === "arm64"
-        ? "linux/arm64"
-        : architecture === "x86_64" || architecture === "amd64"
-          ? "linux/amd64"
-          : undefined;
-    if (!platform) throw new Error("Starter publication requires a supported native architecture");
-    const references: string[] = [];
-    for (const [name, image] of [
-      ["development", upstream.nodeDevelopment.image],
-      ["support", upstream.node.image],
-    ] as const) {
-      const index = JSON.parse(
-        await command(["docker", "buildx", "imagetools", "inspect", "--raw", image], {
-          quiet: true,
-        }),
-      );
-      const digest = starterImageManifest(index, platform);
-      if (!digest) throw new Error("Starter native image digest missing");
-      const nativeImage = `${image.split("@")[0]}@${digest}`;
-      const destination = `${registryHost}/open-factory/starter-${name}:local`;
-      await command(["docker", "pull", "--platform", platform, nativeImage]);
-      await command(["docker", "tag", nativeImage, destination]);
-      await command(["docker", "push", "--platform", platform, destination]);
-      const localManifest = await command(
-        [
-          "docker",
-          "buildx",
-          "imagetools",
-          "inspect",
-          "--raw",
-          `${destination.split(":local")[0]}@${digest}`,
-        ],
-        { quiet: true },
-      );
-      if (!localManifest) throw new Error("Published Starter manifest was not confirmed");
-      references.push(
-        `registry.${namespace}.svc.cluster.local:5000/open-factory/starter-${name}@${digest}`,
-      );
-    }
-    await writeFile(
-      starterImagesFile,
-      JSON.stringify(
-        starterImagesSchema.parse({ platform, development: references[0], support: references[1] }),
-      ),
-    );
+    // Actor architecture is independent of the control-plane host. Use the
+    // exact upstream HTTPS registries, not the old port-5000 fixture mirror.
+    await writeFile(starterImagesFile, JSON.stringify(nativeStarterImages()));
     // Adopt the complete remotely observed generation atomically. Interrupted
     // publication must not combine old and new individual image files.
+    // The Actor image comes from the admitted amd64 native build, never this
+    // host's runtime-host tools. Source development consumes that exact image.
+    published["substrate-runtime"] = requireNativeInstallation().workloadImage;
+    published["browser-tools"] = nativeBrowserImage;
+    await requireAvailableRuntimeArtifacts(published);
     await installRuntimeArtifacts(sharedStateDirectory, published);
     for (const output of outputs) await writeFile(output.path, `${output.reference}\n`);
     return runtimeReference;
@@ -753,36 +703,29 @@ async function publishedBrowserImage() {
   return browserImage;
 }
 
-async function publishedSourceImages() {
+async function publishedDeveloperIDEImage() {
   const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
-  const files =
-    process.env["FACTORY_WORKSPACE_FILES_IMAGE"] ??
-    artifacts?.["workspace-files"] ??
-    (await readFile(sourceFilesImageFile, "utf8")).trim();
-  requirePinnedImage(files);
   const editor =
     process.env["FACTORY_DEVELOPER_IDE_IMAGE"] ??
     artifacts?.["developer-ide"] ??
     (await readFile(developerIDEImageFile, "utf8")).trim();
   requirePinnedImage(editor);
-  return {
-    FACTORY_WORKSPACE_FILES_IMAGE: files,
-    FACTORY_DEVELOPER_IDE_IMAGE: editor,
-  };
+  return editor;
 }
 
 async function configuredRuntimeArtifacts(runtimeImage: string) {
-  const sourceImages = await publishedSourceImages();
+  const native = requireNativeInstallation();
+  const published = await publishedRuntimeArtifacts(sharedStateDirectory);
+  if (published) requireNativeRuntimeArtifact(native, published);
   return runtimeArtifactsSchema.parse({
     "runtime-host": runtimeImage,
     "browser-tools": await publishedBrowserImage(),
-    "workspace-files": sourceImages.FACTORY_WORKSPACE_FILES_IMAGE,
-    "developer-ide": sourceImages.FACTORY_DEVELOPER_IDE_IMAGE,
+    "developer-ide": await publishedDeveloperIDEImage(),
+    "substrate-runtime": native.workloadImage,
   });
 }
 
 async function startServer(
-  runtimeImage: string,
   forgejoToken: string | undefined,
   artifacts: RuntimeArtifacts,
   forgeIdentity: ReturnType<typeof localForgeIdentityEndpoints>,
@@ -791,7 +734,6 @@ async function startServer(
     installation
       ? {
           FACTORY_HOST: process.env["FACTORY_HOST"],
-          FACTORY_EXECUTION_RESERVE_TARGET: process.env["FACTORY_EXECUTION_RESERVE_TARGET"],
         }
       : process.env,
     {
@@ -806,17 +748,13 @@ async function startServer(
   const environment = {
     ...process.env,
     FACTORY_STATE_DIRECTORY: stateDirectory,
-    FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
+    ...runtimeArtifactEnvironment(artifacts),
     FACTORY_REGISTRY_CA_NAMESPACE: namespace,
     FACTORY_REGISTRY_CA_SECRET: "registry-tls",
     ...(process.env["FACTORY_OPENBAO_URL"]
       ? {}
       : await (await localOpenBao(stateDirectory)).start()),
-    FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
-    FACTORY_WORKSPACE_FILES_IMAGE: artifacts["workspace-files"],
-    FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],
     FACTORY_HOST: settings.host,
-    FACTORY_EXECUTION_RESERVE_TARGET: settings.executionReserveTarget,
     FACTORY_PORT: String(factoryPort),
     FACTORY_BASE_URL: factoryBaseURL,
     FACTORY_WIKI_WEBHOOK_URL:
@@ -920,30 +858,10 @@ function announceReady() {
 
 async function up() {
   await preflight();
-  await ensureLocalMetricsServer(command);
   const published = await publishedRuntimeArtifacts(sharedStateDirectory);
   if (!installation && !published) await ensureRegistry();
-  if (published && !(await Bun.file(starterImagesFile).exists())) {
-    const architecture = await command(["docker", "info", "--format", "{{.Architecture}}"], {
-      quiet: true,
-    });
-    const platform =
-      architecture === "arm64" || architecture === "aarch64"
-        ? "linux/arm64"
-        : architecture === "amd64" || architecture === "x86_64"
-          ? "linux/amd64"
-          : undefined;
-    await writeFile(
-      starterImagesFile,
-      JSON.stringify(
-        starterImagesSchema.parse({
-          platform,
-          development: upstream.nodeDevelopment.image,
-          support: upstream.node.image,
-        }),
-      ),
-      { mode: 0o600 },
-    );
+  if (published) {
+    await writeFile(starterImagesFile, JSON.stringify(nativeStarterImages()), { mode: 0o600 });
   }
   const runtimeImage =
     localRuntimeDefaults(published, installation).runtimeImage ?? (await publishRuntimeHost());
@@ -954,7 +872,7 @@ async function up() {
     checkStorageReady: () =>
       requireWritableRuntimeStorage({
         stateDirectory,
-        image: artifacts["workspace-files"],
+        image: artifacts["runtime-host"],
       }),
     startDependencies: startDataServices,
     startServer: async () => {
@@ -966,7 +884,7 @@ async function up() {
         env: { NODE_ENV: "production" },
       });
       await stopServer();
-      await startServer(runtimeImage, forgejoToken, artifacts, forgeIdentity);
+      await startServer(forgejoToken, artifacts, forgeIdentity);
     },
     startPlanningCache,
     ready: announceReady,
@@ -1030,14 +948,14 @@ async function restart() {
     checkStorageReady: () =>
       requireWritableRuntimeStorage({
         stateDirectory,
-        image: artifacts["workspace-files"],
+        image: artifacts["runtime-host"],
       }),
     startDependencies: startDataServices,
     startServer: async () => {
       await command(["bun", "run", "db:migrate"], { quiet: true });
       const forgeIdentity = await configuredForgeIdentity();
       await stopServer();
-      await startServer(runtimeImage, undefined, artifacts, forgeIdentity);
+      await startServer(undefined, artifacts, forgeIdentity);
     },
     startPlanningCache,
     ready: announceReady,
@@ -1096,7 +1014,7 @@ async function reset() {
   );
 }
 
-let resetRuntimeNamespaces = installation?.resetRuntimeNamespaces ?? [];
+let resetResources = installation?.resetResources;
 async function validateResetRuntimes() {
   if (!installation) throw new Error("Disposable installation required");
   const containers = (
@@ -1105,16 +1023,7 @@ async function validateResetRuntimes() {
   if (containers.includes(`${composeProject(installation)}-postgres-1`)) {
     const database = createDatabase(1);
     try {
-      const pending = await database.client<
-        Array<{ id: string }>
-      >`SELECT id FROM factory.runtime_attempt WHERE state NOT IN ('stopped', 'failed') LIMIT 1`;
-      if (pending.length)
-        throw new Error("Reset refused: stop pending/active runtimes through Factory first");
-      const namespaces = await database.client<Array<{ namespace: string }>>`
-        SELECT kubernetes_namespace AS namespace FROM factory.runtime_attempt
-        UNION SELECT kubernetes_namespace AS namespace FROM factory.development_workspace
-      `;
-      resetRuntimeNamespaces = namespaces.map((value) => value.namespace);
+      resetResources = await readResetResources(database);
     } finally {
       await database.client.end();
     }
@@ -1123,9 +1032,19 @@ async function validateResetRuntimes() {
       "Reset cannot confirm product ownership without its disposable database or a persisted reset intent",
     );
   }
-  await requireRuntimeNamespacesAbsent(resetRuntimeNamespaces, async (candidate) => {
+  if (!resetResources)
+    throw new Error("Reset cannot confirm native resources without its saved exact inventory");
+  await requireResetResourcesAbsent(resetResources, async (kind, name, namespace) => {
     const existing = await kubectl(
-      ["get", "namespace", candidate, "--ignore-not-found", "-o", "name"],
+      [
+        "get",
+        kind,
+        name,
+        ...(namespace ? ["-n", namespace] : []),
+        "--ignore-not-found",
+        "-o",
+        "name",
+      ],
       undefined,
       true,
     );
@@ -1137,7 +1056,7 @@ async function saveInstallationPhase(phase: "reset-intent" | "reset") {
   if (!installation) throw new Error("Disposable installation required");
   await writeFile(
     resolve(stateDirectory, "installation.next.json"),
-    `${JSON.stringify({ ...installation, phase, resetRuntimeNamespaces })}\n`,
+    `${JSON.stringify({ ...installation, phase, resetResources })}\n`,
     { mode: 0o600 },
   );
   await rename(

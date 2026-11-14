@@ -77,6 +77,46 @@ export async function deleteFactoryProject(
   const database = ownedDatabase ?? createDatabase(1);
   try {
     await database.client.begin(async (transaction) => {
+      const [scope] = await transaction<{ name: string }[]>`SELECT current_database() AS name`;
+      if (!scope || !/^owned_[a-f0-9]{32}$/.test(scope.name))
+        throw Error(
+          "UI fixture deletion requires its explicitly owned disposable database; retained data was not changed",
+        );
+      await transaction`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE`;
+      await transaction`SELECT binding.runtime_attempt_id FROM factory.substrate_binding binding
+        JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id
+        WHERE attempt.project_id=${projectID} FOR UPDATE OF binding`;
+      await transaction`SELECT provision.workspace_id FROM factory.substrate_workspace provision
+        JOIN factory.development_workspace workspace ON workspace.id=provision.workspace_id
+        WHERE workspace.project_id=${projectID} FOR UPDATE OF provision`;
+      const [external] = await transaction`
+        SELECT attempt.id FROM factory.runtime_attempt attempt
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+          WHERE attempt.project_id=${projectID} AND (binding.create_attempted_at IS NOT NULL OR binding.actor_uid IS NOT NULL)
+        UNION ALL
+        SELECT workspace.id FROM factory.development_workspace workspace
+          JOIN factory.substrate_workspace provision ON provision.workspace_id=workspace.id
+          WHERE workspace.project_id=${projectID}
+        UNION ALL
+        SELECT owner.owner_id FROM factory.substrate_isolated owner WHERE owner.project_id=${projectID}
+        UNION ALL
+        SELECT owner.preparation_id FROM factory.substrate_prebuild owner
+          JOIN factory.project_image_preparation preparation ON preparation.id=owner.preparation_id
+          WHERE preparation.project_id=${projectID}
+        UNION ALL
+        SELECT owner.verification_id FROM factory.substrate_verification owner
+          JOIN factory.verification verification ON verification.id=owner.verification_id
+          JOIN factory.change change ON change.id=verification.change_id
+          WHERE change.project_id=${projectID}
+        UNION ALL
+        SELECT source.workspace_id FROM factory.substrate_source source
+          JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
+          WHERE workspace.project_id=${projectID}
+        LIMIT 1`;
+      if (external)
+        throw Error(
+          "UI fixture has native execution or retained Source; no product history or Source was deleted",
+        );
       await transaction`DELETE FROM factory.usage_operation WHERE project_id=${projectID}`;
       await transaction`SET LOCAL session_replication_role = 'replica'`;
       await transaction`DELETE FROM factory.implementation_order WHERE project_id=${projectID}`;
@@ -156,10 +196,10 @@ export async function deleteFactoryProject(
         WHERE change_id IN (SELECT id FROM factory.change WHERE project_id = ${projectID})
       `;
       await transaction`DELETE FROM factory.staging_preview WHERE project_id = ${projectID}`;
-      await transaction`DELETE FROM factory.runtime_artifact_intent WHERE runtime_attempt_id IN (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
       await transaction`DELETE FROM factory.runtime_environment_intent WHERE runtime_attempt_id IN (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
+      await transaction`DELETE FROM factory.substrate_binding WHERE runtime_attempt_id IN (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
       await transaction`DELETE FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
-      await transaction`DELETE FROM factory.workspace_source WHERE workspace_id IN (SELECT id FROM factory.development_workspace WHERE project_id = ${projectID})`;
+      await transaction`DELETE FROM factory.substrate_workspace WHERE workspace_id IN (SELECT id FROM factory.development_workspace WHERE project_id = ${projectID})`;
       await transaction`DELETE FROM factory.development_workspace WHERE project_id = ${projectID}`;
       await transaction`
         DELETE FROM factory.branch_create_operation

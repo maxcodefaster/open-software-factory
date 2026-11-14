@@ -7,14 +7,14 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(integrationLane("test/integration/native-skill-loading.test.ts")).toBe("native");
   expect(integrationLane("test/integration/substrate-adapter.native.test.ts")).toBe("native");
   expect(integrationLane("test/integration/substrate-workspaces.native.test.ts")).toBe("native");
+  expect(integrationLane("test/integration/developer-ide-kubernetes.native.test.ts")).toBe(
+    "native",
+  );
   expect(integrationLane("test/integration/substrate-workspaces.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/substrate-verification.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/substrate-source.test.ts")).toBe("controllers");
-  expect(integrationLane("test/integration/substrate-source-preservation.test.ts")).toBe(
-    "controllers",
-  );
   expect(integrationLane("test/integration/substrate-adapter.test.ts")).toBe("controllers");
-  expect(integrationLane("test/integration/team-delivery.live.test.ts")).toBe("live");
+  expect(integrationLane("test/integration/project-environments.live.test.ts")).toBe("live");
   expect(browserLane("agent-turn-live.spec.ts")).toBe("paid");
   expect(browserLane("project-agent.spec.ts")).toBe("paid");
   expect(browserLane("runtime-console.spec.ts")).toBe("native");
@@ -32,19 +32,30 @@ test("the default browser selection excludes explicitly paid cases in mixed jour
 test("self-contained protocol and PostgreSQL proofs do not acquire an unused shared database", () => {
   expect(controllerNeedsDatabase("test/integration/substrate-adapter.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/substrate-adapter.native.test.ts")).toBe(false);
-  expect(controllerNeedsDatabase("test/integration/substrate-upgrade.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/developer-ide-kubernetes.native.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/native-project-releases.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/schema-baseline.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/substrate-workspaces.native.test.ts")).toBe(
     false,
   );
   expect(controllerNeedsDatabase("test/integration/substrate-workspaces.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/substrate-verification.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-runtime-list.test.ts")).toBe(false);
+  expect(integrationLane("test/integration/substrate-runtime-list.test.ts")).toBe("controllers");
+  for (const name of [
+    "runtime-app-origins",
+    "runtime-declared-apps",
+    "project-preparation",
+    "verification-cancellation",
+    "usage-cleanup",
+  ]) {
+    const path = `test/integration/${name}.test.ts`;
+    expect(integrationLane(path)).toBe("controllers");
+    expect(controllerNeedsDatabase(path)).toBe(false);
+  }
   expect(controllerNeedsDatabase("test/integration/substrate-source.test.ts")).toBe(false);
-  expect(controllerNeedsDatabase("test/integration/substrate-source-preservation.test.ts")).toBe(
-    false,
-  );
-  expect(
-    controllerNeedsDatabase("test/integration/substrate-source-preservation-upgrade.test.ts"),
-  ).toBe(false);
   expect(controllerNeedsDatabase("test/integration/openbao.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/postgres-baseline.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-knowledge.test.ts")).toBe(false);

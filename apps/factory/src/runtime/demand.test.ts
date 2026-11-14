@@ -23,10 +23,9 @@ test("App demand resumes exactly the original Attempt once and waits for readine
   const demand = createRuntimeDemand(
     {
       get: async () => ({ state, failure: null }),
-      async resumeForApp(attemptID, userID, deadline) {
+      async resumeForApp(attemptID, userID) {
         expect(attemptID).toBe("original");
         expect(userID).toBe("authorized-viewer");
-        expect(deadline).toBe(420_000);
         resumes++;
         state = "starting";
       },

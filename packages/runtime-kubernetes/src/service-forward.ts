@@ -6,23 +6,15 @@ import { kubernetesConnectionEnvironment } from "./config";
 // process bootstrap as well as establishing the approved Kubernetes connection.
 export const serviceForwardTimeoutMS = 60_000;
 
-export function startServiceForward(role: "source" | "editor", namespace: string, podName: string) {
-  const label = role === "source" ? "Source" : "Developer IDE";
+export function startServiceForward(namespace: string, podName: string) {
+  const label = "Developer IDE";
   const ready = Promise.withResolvers<string>();
   const cancel = new AbortController();
   // A caller can still be validating its exact resource before awaiting the
   // endpoint. Keep rejection observable there without an unhandled rejection.
   void ready.promise.catch(() => {});
   const child = Bun.spawn(
-    [
-      process.execPath,
-      resolve(
-        import.meta.dir,
-        role === "source" ? "source-forward.ts" : "developer-ide-forward.ts",
-      ),
-      namespace,
-      podName,
-    ],
+    [process.execPath, resolve(import.meta.dir, "developer-ide-forward.ts"), namespace, podName],
     {
       env: kubernetesConnectionEnvironment(),
       stdin: "ignore",

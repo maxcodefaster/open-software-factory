@@ -1,12 +1,11 @@
 import type { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
 import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
-import { inject, injectable } from "@theia/core/shared/inversify";
 import { CommandRegistry } from "@theia/core/lib/common/command";
+import { inject, injectable } from "@theia/core/shared/inversify";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
 import type { EditorWidget } from "@theia/editor/lib/browser/editor-widget";
 import { MonacoEditor } from "@theia/monaco/lib/browser/monaco-editor";
 import type * as monaco from "@theia/monaco-editor-core";
-import * as Y from "yjs";
 import { MonacoBinding } from "y-monaco";
 import {
   Awareness,
@@ -14,6 +13,7 @@ import {
   encodeAwarenessUpdate,
   removeAwarenessStates,
 } from "y-protocols/awareness";
+import * as Y from "yjs";
 import { sharedEditorDocuments } from "./factory-collaboration-registry";
 import { workspaceResource, workspaceScheme } from "./factory-workspace-files";
 
@@ -101,6 +101,7 @@ export class FactoryCollaboration implements FrontendApplicationContribution {
     let original = model.getValue();
     let active = true,
       started = false,
+      sourceOnly = false,
       canWrite = false,
       binding: MonacoBinding | undefined;
     let serverVector: Uint8Array | undefined,
@@ -285,7 +286,9 @@ export class FactoryCollaboration implements FrontendApplicationContribution {
             return;
           }
           original = model.getValue();
-          for (const target of editors) target.updateOptions({ readOnly: true });
+          // A confirmed private file still uses ordinary Source editing. A
+          // slow check for newly enabled sharing must not disable its input.
+          if (!sourceOnly) for (const target of editors) target.updateOptions({ readOnly: true });
         }
         const local = awareness.getLocalState()?.selection as
           | { anchor: Y.RelativePosition; head: Y.RelativePosition }
@@ -320,6 +323,7 @@ export class FactoryCollaboration implements FrontendApplicationContribution {
         serverVector = bytes(result.vector);
         revision = result.revision;
         canWrite = result.canWrite;
+        sourceOnly = false;
         if (update) acknowledgedUpdates = sentUpdates;
         if (!started) {
           if (model.getValue() !== original)
@@ -363,15 +367,17 @@ export class FactoryCollaboration implements FrontendApplicationContribution {
         const error = cause as Error & { status?: number };
         if (this.editors.currentEditor?.editor.uri.toString() === key)
           this.resolveActive = undefined;
-        for (const target of editors) target.updateOptions({ readOnly: true });
         show(error.message);
         // A non-shared Workspace continues to use the normal source provider.
         if (!started && error.status === 409) {
+          sourceOnly = true;
           for (const target of editors) target.updateOptions({ readOnly: false });
           void this.status.removeElement("factory-collaboration");
           timer = setTimeout(() => void poll(), 2000);
           return;
         }
+        sourceOnly = false;
+        for (const target of editors) target.updateOptions({ readOnly: true });
         if ([401, 403, 404].includes(error.status ?? 0)) {
           active = false;
           return;
@@ -386,7 +392,7 @@ export class FactoryCollaboration implements FrontendApplicationContribution {
           binding?.destroy();
           binding = new MonacoBinding(doc.getText("text"), model, editors, awareness);
         }
-        target.updateOptions({ readOnly: !canWrite });
+        target.updateOptions({ readOnly: started ? !canWrite : !sourceOnly });
       },
       remove: (target: monaco.editor.IStandaloneCodeEditor) => {
         editors.delete(target);

@@ -14,7 +14,6 @@ import {
   getDeveloperIDE,
   getWorkspaceSource,
   stopDeveloperIDE,
-  stopWorkspaceSource,
 } from "./server-functions/workspaces";
 import { recoverWorkspaceSource } from "./source-recovery";
 import { createWaitElapsed, waitLabel } from "./wait-elapsed";
@@ -27,6 +26,7 @@ export function DeveloperIDEWorkspace(props: {
   workspaceID: string | undefined;
   preparationFailure?: string | undefined;
   onRetrySelection?: (() => void) | undefined;
+  onStartSelection?: (() => Promise<void>) | undefined;
   active: boolean;
   onDevelopmentPreview: (message: DevelopmentPreviewMessage) => void;
   navigation?: ActivityNavigationRequest | undefined;
@@ -44,6 +44,7 @@ export function DeveloperIDEWorkspace(props: {
     availableSource() ? "" : plainErrorMessage(sourceError() || props.preparationFailure || "");
   const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
+  const [startingSelection, setStartingSelection] = createSignal(false);
   const [editorRecovering, setEditorRecovering] = createSignal(false);
   const [editorState, setEditorState] = createSignal<WorkspaceSourceState>();
   const preparingFiles = () =>
@@ -88,7 +89,7 @@ export function DeveloperIDEWorkspace(props: {
       setSourceRecovering(false);
     },
   );
-  async function retrySource(restart: boolean) {
+  async function retrySource() {
     const workspaceID = props.workspaceID;
     if (!workspaceID) {
       props.onRetrySelection?.();
@@ -101,11 +102,8 @@ export function DeveloperIDEWorkspace(props: {
     setSourceRecovering(true);
     setAvailableSource(undefined);
     try {
-      await recoverWorkspaceSource(workspaceID, restart, signal, {
-        stop: (id, signal) => serverCall(stopWorkspaceSource({ ...{ signal }, data: [id] })),
-        read: (id, signal) => serverCall(getWorkspaceSource({ ...{ signal }, data: [id] })),
+      await recoverWorkspaceSource(workspaceID, signal, {
         ensure: (id, signal) => serverCall(ensureWorkspaceSource({ ...{ signal }, data: [id] })),
-        wait: pause,
       });
       if (!cancel.signal.aborted) setSourceRetry((value) => value + 1);
     } catch (cause) {
@@ -124,6 +122,24 @@ export function DeveloperIDEWorkspace(props: {
         sourceRecovery = undefined;
         setSourceRecovering(false);
       }
+    }
+  }
+  async function startSelection() {
+    const start = props.onStartSelection;
+    const projectID = props.projectID;
+    if (!props.allowed || props.workspaceID || !start || startingSelection()) return;
+    setStartingSelection(true);
+    try {
+      await start();
+    } catch (cause) {
+      if (props.projectID === projectID && props.onStartSelection === start && !props.workspaceID)
+        setSourceError(
+          cause instanceof Error
+            ? plainErrorMessage(cause.message)
+            : "Workspace Start is unconfirmed. Check its recorded state before retrying.",
+        );
+    } finally {
+      setStartingSelection(false);
     }
   }
   async function restartEditor() {
@@ -252,7 +268,10 @@ export function DeveloperIDEWorkspace(props: {
           const source = await tolerant(cancel.signal, () =>
             serverCall(getWorkspaceSource({ ...{ signal: cancel.signal }, data: [workspaceID] })),
           );
-          if (!cancel.signal.aborted) setSourceState(source.state);
+          if (!cancel.signal.aborted) {
+            setSourceState(source.state);
+            setSourceError(plainErrorMessage(source.failure ?? ""));
+          }
           if (source.state === "ready") {
             if (!cancel.signal.aborted) setAvailableSource(workspaceID);
             return;
@@ -453,27 +472,26 @@ export function DeveloperIDEWorkspace(props: {
               <p role="status">{fileError()}</p>
             </Show>
             <div class="editor-recovery-actions">
+              <Show when={fileError() && !props.workspaceID && props.onStartSelection}>
+                <button
+                  class="quiet-button"
+                  type="button"
+                  disabled={startingSelection() || sourceRecovering() || editorRecovering()}
+                  onClick={() => void startSelection()}
+                >
+                  {startingSelection() ? "Starting compute…" : "Start compute"}
+                </button>
+              </Show>
               <Show when={fileError()}>
                 <button
                   class="quiet-button"
                   type="button"
-                  disabled={sourceRecovering() || editorRecovering()}
-                  title="Checks the recorded file-access attempt without stopping it."
-                  onClick={() => void retrySource(false)}
+                  disabled={startingSelection() || sourceRecovering() || editorRecovering()}
+                  title="Checks the current file owner without stopping Source or starting compute."
+                  onClick={() => void retrySource()}
                 >
-                  {sourceRecovering() ? "Recovering file access…" : "Retry file access"}
+                  {sourceRecovering() ? "Checking file access…" : "Retry file access"}
                 </button>
-                <Show when={sourceState() === "failed" || sourceState() === "stop-intended"}>
-                  <button
-                    class="quiet-button"
-                    type="button"
-                    disabled={sourceRecovering() || editorRecovering()}
-                    title="Stops and reopens file access. Keeps your files, running Apps and editor buffers."
-                    onClick={() => void retrySource(true)}
-                  >
-                    Restart file access
-                  </button>
-                </Show>
               </Show>
               <Show when={editorError() || editorSlow() || editorRecovering()}>
                 <button

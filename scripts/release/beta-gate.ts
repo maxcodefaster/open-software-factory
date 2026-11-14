@@ -1,9 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-// The local release gate. Public CI only runs on release tags, so this is the
-// check that stands between a commit and a tag: it runs every lane on this
-// machine and writes a receipt that names the exact commit it judged.
+// The local source, controller and UI gate. Native runtime and paid product
+// acceptance remain separate explicit lanes, not implicit claims of this receipt.
 
 export const gitleaksImage =
   "zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f";
@@ -42,6 +41,7 @@ export function gateSteps(): GateStep[] {
     { name: "typecheck", command: ["bun", "run", "typecheck"] },
     { name: "unit", command: ["bun", "run", "test:unit"] },
     { name: "connector", command: ["bun", "run", "connector:check"] },
+    { name: "substrate", command: ["bun", "run", "substrate:check"] },
     {
       name: "controllers",
       command: ["bun", "run", "test:controllers"],
@@ -201,6 +201,8 @@ export async function runGate(root: string) {
   }
   const receipt = {
     schema: 1,
+    scope: "source-controller-ui",
+    nativeProductAcceptance: false,
     commit,
     passed: ok && results.length === 3 + gateSteps().length,
     finishedAt: new Date().toISOString(),

@@ -5,7 +5,6 @@ import { resolve } from "node:path";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { createForgejoReleases } from "../../packages/forge/src/releases";
 import { releasePackageOwner } from "../../packages/project-domain/src/release";
-import { publicationRuntimeProof } from "../fixtures/publication-runtime";
 import { releaseArgoProof } from "../fixtures/release-argo";
 import { fixtureValue } from "../fixtures/value";
 
@@ -20,7 +19,6 @@ test(
     const origin = `http://127.0.0.1:${port}`;
     let owned = false;
     let runnerOwned = false;
-    let preserve = false;
     const runnerContainer = `factory-publication-runner-${id}`;
     const directory = resolve(".factory/test-results/releases", `native-${id}`);
     async function command(args: string[]) {
@@ -516,56 +514,6 @@ test(
       expect(
         JSON.parse(fixtureValue(observed, "observed").event_payload).inputs.factory_release_id,
       ).toBe(attemptID);
-      if (process.env["FACTORY_RUN_RELEASE_RUNTIME_PROOF"] === "1") {
-        expect(
-          (
-            await api("user/repos", "POST", {
-              name: "runtime-source",
-              private: true,
-              auto_init: true,
-            })
-          ).status,
-        ).toBe(201);
-        await publicationRuntimeProof({
-          origin,
-          token: adminToken,
-          repository: { ...repository, name: "runtime-source" },
-          forge,
-          preserve: () => {
-            preserve = true;
-          },
-          captureFailure: async () => {
-            const files = await command([
-              "docker",
-              "exec",
-              container,
-              "find",
-              "/var/lib/gitea/actions_log/factory-control/runtime-source",
-              "-type",
-              "f",
-              "-name",
-              "*.zst",
-            ]);
-            for (const file of files.split("\n").filter(Boolean)) {
-              const process = Bun.spawn(["docker", "exec", container, "cat", file], {
-                stdout: "pipe",
-                stderr: "ignore",
-              });
-              const bytes = await new Response(process.stdout).arrayBuffer();
-              if (await process.exited) continue;
-              const text = new TextDecoder()
-                .decode(Bun.zstdDecompressSync(new Uint8Array(bytes)))
-                .split("\n")
-                .filter((line) => !/token|password|secret|authorization|bearer/i.test(line))
-                .map((line) => line.replace(/[a-f0-9]{40,}/g, "[digest]"))
-                .join("\n");
-              await writeFile(resolve(directory, "publication-job-diagnostic.txt"), text, {
-                mode: 0o600,
-              });
-            }
-          },
-        });
-      }
     } finally {
       if (runnerOwned) {
         const label = await command([
@@ -578,7 +526,7 @@ test(
         expect(label).toBe(id);
         await command(["docker", "rm", "-fv", runnerContainer]);
       }
-      if (owned && !preserve) {
+      if (owned) {
         const label = await command([
           "docker",
           "inspect",
@@ -593,8 +541,5 @@ test(
       await rm(resolve(directory, "runner"), { force: true });
     }
   },
-  process.env["FACTORY_RUN_RELEASE_RUNTIME_PROOF"] === "1" ||
-    process.env["FACTORY_RUN_ARGO_RELEASE_PROOF"] === "1"
-    ? 720_000
-    : 180_000,
+  process.env["FACTORY_RUN_ARGO_RELEASE_PROOF"] === "1" ? 720_000 : 180_000,
 );

@@ -99,9 +99,8 @@ test("the warm hidden editor selects no Workspace until it is deliberately opene
 
 async function fixture(page: Page, unconfirmedEditor = false) {
   const calls: string[] = [];
-  let sourceState: WorkspaceSourceState = "failed",
-    sourceEpoch = 1,
-    sourceReads = 0;
+  let sourceState: WorkspaceSourceState = "failed";
+  const sourceEpoch = 1;
   let editorState: WorkspaceSourceState = "failed",
     editorEpoch = 1,
     editorReads = 0;
@@ -111,7 +110,7 @@ async function fixture(page: Page, unconfirmedEditor = false) {
     serviceID: "owned-source",
     epoch: sourceEpoch,
     state: sourceState,
-    failure: sourceState === "failed" ? "Owned source needs an explicit restart." : null,
+    failure: sourceState === "failed" ? "The current Source owner is unavailable." : null,
   });
   const editor = () => ({
     serviceID: "owned-editor",
@@ -125,19 +124,12 @@ async function fixture(page: Page, unconfirmedEditor = false) {
         return source();
       },
       async getSource() {
-        if (sourceState === "stop-intended" && ++sourceReads >= 2) sourceState = "stopped";
         calls.push(`source-read:${sourceState}`);
         return source();
       },
-      async stopSource() {
-        calls.push("source-stop");
-        sourceState = "stop-intended";
-      },
       async ensureSource() {
         calls.push(`source-ensure:${sourceState}`);
-        if (sourceState !== "stopped") throw new Error("Source Stop must be confirmed");
         sourceState = "ready";
-        sourceEpoch++;
         return source();
       },
       async getEditor() {
@@ -171,9 +163,10 @@ async function fixture(page: Page, unconfirmedEditor = false) {
     }),
   );
   await page.goto(`${origin}/workspace-transport.html`);
-  await expect(
-    page.getByRole("button", { name: "Restart file access", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Restart file access", exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("button", { name: "Retry file access", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Restart editor", exact: true })).toBeVisible();
   return calls;
 }
@@ -204,7 +197,6 @@ test("a rejected editor keeps its recovery action right under its message", asyn
       async ensureSource() {
         return source();
       },
-      async stopSource() {},
       async getEditor() {
         return editor();
       },
@@ -236,19 +228,22 @@ test("a rejected editor keeps its recovery action right under its message", asyn
   }
 });
 
-test("Workspace source restart observes confirmed Stop before preparing another access epoch", async ({
+test("native file access offers retry without a separate Source teardown", async ({ page }) => {
+  await fixture(page);
+  await expect(page.getByRole("button", { name: "Restart file access", exact: true })).toHaveCount(
+    0,
+  );
+});
+
+test("native file-access retry rechecks the same Source without restarting the editor", async ({
   page,
 }) => {
   const calls = await fixture(page);
-  await page.getByRole("button", { name: "Restart file access", exact: true }).click();
-  await expect.poll(() => calls.includes("source-ensure:stopped")).toBe(true);
-  expect(calls.filter((call) => call === "source-stop")).toHaveLength(1);
-  const start = calls.indexOf("source-stop");
-  expect(calls.slice(start, start + 4)).toEqual([
-    "source-stop",
-    "source-read:stop-intended",
-    "source-read:stopped",
-    "source-ensure:stopped",
+  await page.getByRole("button", { name: "Retry file access", exact: true }).click();
+  await expect.poll(() => calls.includes("source-ensure:failed")).toBe(true);
+  expect(calls.some((call) => call.includes("stop") && call.startsWith("source-"))).toBe(false);
+  expect(calls.filter((call) => call.startsWith("source-ensure:"))).toEqual([
+    "source-ensure:failed",
   ]);
   expect(calls.filter((call) => call.startsWith("editor-ensure:"))).toEqual([
     "editor-ensure:failed",
@@ -256,6 +251,23 @@ test("Workspace source restart observes confirmed Stop before preparing another 
   await page.screenshot({ path: `${directory}/source-recovered-desktop.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${directory}/source-recovered-narrow.png`, fullPage: true });
+});
+
+test("touch file-access retry offers no destructive Source action", async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  try {
+    const page = await context.newPage();
+    const calls = await fixture(page);
+    await page.screenshot({ path: `${directory}/source-unavailable-touch.png`, fullPage: true });
+    await page.getByRole("button", { name: "Retry file access", exact: true }).tap();
+    await expect.poll(() => calls.includes("source-ensure:failed")).toBe(true);
+    expect(calls.some((call) => call.includes("stop") && call.startsWith("source-"))).toBe(false);
+  } finally {
+    await context.close();
+  }
 });
 
 test("Workspace editor restart waits for Stop and leaves source lifecycle alone", async ({

@@ -1,12 +1,10 @@
 import { kubernetesCommand, kubernetesConnectionEnvironment } from "./config";
 import { serviceForwardTimeoutMS } from "./service-forward";
 // Fixed trusted service connections only. IPC disconnection owns cleanup after Factory death.
-export async function runServiceForward(role: "source" | "editor", args: readonly string[]) {
+export async function runServiceForward(args: readonly string[]) {
   const [namespace, podName] = args;
-  const namespacePattern =
-    role === "source" ? /^factory-box-[a-f0-9]{32}$/ : /^factory-editor-[a-f0-9]{32}$/;
-  const podPattern =
-    role === "source" ? /^source-[a-f0-9]{32}-[1-9][0-9]*$/ : /^editor-[1-9][0-9]*$/;
+  const namespacePattern = /^factory-editor-[a-f0-9]{32}$/;
+  const podPattern = /^editor-[1-9][0-9]*$/;
   if (
     !process.send ||
     !namespace ||
@@ -23,7 +21,7 @@ export async function runServiceForward(role: "source" | "editor", args: readonl
       "-n",
       namespace,
       `pod/${podName}`,
-      role === "source" ? "0:4600" : "0:4400",
+      "0:4400",
     ]),
     {
       env: kubernetesConnectionEnvironment(),

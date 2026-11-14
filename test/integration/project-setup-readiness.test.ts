@@ -4,8 +4,94 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createEnvironmentController } from "../../apps/factory/src/environments/controller";
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
 import { createSetupReadiness } from "../../apps/factory/src/setup/readiness";
-import { factoryProcess } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
+
+test("setup coordination leaves a one-connection pool available and joins admitted work before shutdown", async () => {
+  const host = await factoryProcess();
+  const database = host.connect(1);
+  const userID = crypto.randomUUID();
+  const projects = [crypto.randomUUID(), crypto.randomUUID()];
+  const release = Promise.withResolvers<void>();
+  const hooks: string[] = [];
+  const coordinator = createSetupReadiness({
+    database,
+    environments: createEnvironmentController(
+      database,
+      { configured: true, read: async () => undefined, create: async () => {} },
+      "owned-readiness-shutdown",
+    ),
+    signingKey: "owned-readiness-shutdown",
+    protection: async () => {},
+    hook: async (projectID) => {
+      hooks.push(projectID);
+      await release.promise;
+    },
+    wiki: async () => {
+      throw new Error("Owned fixture has no model");
+    },
+    prepare: async () => {
+      throw new Error("Unconfirmed imported configuration must not start execution");
+    },
+    preview: async () => {
+      throw new Error("Unconfirmed imported configuration must not start execution");
+    },
+  });
+  let work: Promise<unknown> | undefined;
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${userID},'Owned shutdown',${`${userID}@setup.test`})`;
+    for (const projectID of projects) {
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${projectID},${`shutdown-${projectID}`},'Owned shutdown','https://example.invalid/owned','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+        VALUES(${projectID},${userID},'developer',true,${userID})`;
+    }
+    const projectID = fixtureValue(projects[0], "first owned Project");
+    const laterProjectID = fixtureValue(projects[1], "later owned Project");
+    // Capture failure for cleanup too, so a failed assertion leaves no unjoined work.
+    work = coordinator.start(projectID, userID, false).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    await eventually(
+      async () => hooks.length,
+      (count) => count === 1,
+      "Setup coordinator exhausted its own task pool",
+      2000,
+    );
+    expect(
+      (await coordinator.status(projectID, userID)).find((task) => task.task === "hook"),
+    ).toMatchObject({ state: "running" });
+    let closed = false;
+    const closing = coordinator.close().then(() => {
+      closed = true;
+    });
+    expect(coordinator.close()).toBe(coordinator.close());
+    await Bun.sleep(10);
+    expect(closed).toBe(false);
+    await expect(coordinator.start(laterProjectID, userID, false)).rejects.toThrow("shutting down");
+    expect(
+      (
+        await database.client`SELECT task FROM factory.project_setup_readiness WHERE project_id=${laterProjectID}`
+      ).length,
+    ).toBe(0);
+    release.resolve();
+    expect(await work).toBeUndefined();
+    await closing;
+    expect(closed).toBe(true);
+    expect(hooks).toEqual([projectID]);
+    expect(
+      (await coordinator.status(projectID, userID)).find((task) => task.task === "hook"),
+    ).toMatchObject({ state: "ready" });
+  } finally {
+    release.resolve();
+    await work;
+    await coordinator.close();
+    await database.client.end({ timeout: 1 });
+    await host.dispose();
+  }
+}, 10_000);
 
 test("setup readiness separates protected environments, observes exact work and isolates failure and retry", async () => {
   const process = await factoryProcess();

@@ -5,7 +5,10 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { test } from "../fixtures/browser-test";
-import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
+import {
+  recordedEditorIdentity,
+  requireOwnedProjectSourceRetention,
+} from "../fixtures/editor-source-resources";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
@@ -314,38 +317,9 @@ for (const restore of [false, true])
         throw error;
       } finally {
         if (projectID) {
-          const sources = await db.client<
-            Array<{ id: string; namespace: string; ownerID: string | null }>
-          >`
-        SELECT id,kubernetes_namespace AS namespace,owner_user_id AS "ownerID" FROM factory.development_workspace WHERE project_id=${projectID}`;
-          const namespaces = [];
-          for (const source of sources) {
-            const namespace = await fixtureNamespace(source.namespace, source.id);
-            if (namespace) namespaces.push(namespace);
-          }
           if (changeID) await serverCall(requestFunction(page.request, "cancelChange", [changeID]));
           await stopProjectRuntimes(page.request, projectID);
-          for (const source of sources) {
-            const ownerIndex = users.findIndex((user) => user.id === source.ownerID);
-            const actorPage = cleanupActor(
-              ownerIndex < 0
-                ? page
-                : fixtureValue(contexts[ownerIndex], "contexts[ownerIndex]").pages()[0],
-              "source",
-            );
-            await serverCall(browserFunction(actorPage, "stopWorkspaceSource", [source.id]));
-          }
-          await expect
-            .poll(
-              async () =>
-                (
-                  await db.client`SELECT s.workspace_id FROM factory.workspace_source s
-        JOIN factory.development_workspace w ON w.id=s.workspace_id WHERE w.project_id=${projectID} AND s.state<>'stopped'`
-                ).length,
-              { timeout: 60_000 },
-            )
-            .toBe(0);
-          for (const namespace of namespaces) await removeFixtureNamespace(namespace);
+          await requireOwnedProjectSourceRetention(db, projectID);
           for (const [index, user] of users.entries()) {
             const [editor] = await db.client<
               Array<{ state: string }>

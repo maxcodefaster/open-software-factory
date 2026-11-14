@@ -34,15 +34,20 @@ func servePrebuildControl(parent context.Context, assignment Assignment, token s
 					if err != nil {
 						continue
 					}
-					if next.write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation, Channels: parentChannels(assignment)}) != nil || next.write(Message{Type: "status", Phase: "starting"}) != nil {
-						next.close()
-						continue
-					}
+					// Publish the replacement as one step with its startup
+					// reports. The transport reader can answer a heartbeat
+					// before these writes return and the producer may finish
+					// concurrently; its result must use this same connection.
 					lock.Lock()
 					if ctx.Err() != nil {
 						lock.Unlock()
 						next.close()
 						return
+					}
+					if next.write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation, Channels: parentChannels(assignment)}) != nil || next.write(Message{Type: "status", Phase: "starting"}) != nil {
+						lock.Unlock()
+						next.close()
+						continue
 					}
 					current = next
 					lock.Unlock()

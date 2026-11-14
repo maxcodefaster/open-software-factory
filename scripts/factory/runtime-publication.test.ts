@@ -8,7 +8,7 @@ const artifact = {
   metadata: "/owned/runtime-metadata.json",
 };
 
-test("runtime publication uses the same trusted Docker push as Starter, without an insecure HTTP fallback", async () => {
+test("tool publication uses trusted Docker push without an insecure HTTP fallback", async () => {
   const calls: string[][] = [];
   await publishRuntimeImage(artifact, async (args) => {
     calls.push(args);

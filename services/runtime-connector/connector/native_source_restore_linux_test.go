@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -14,6 +15,99 @@ import (
 
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/workspacefiles"
 )
+
+func TestSubstrateSourceRestoreBindsCurrentActorAndCheckpointProvenance(t *testing.T) {
+	const workspaceID = "11345112-f121-4739-b2f3-6c6cf60bd2bf"
+	const actorUID = "526dbdeb-6396-42c2-a0ab-6a69f5173b36"
+	const predecessorUID = "9e6d84df-2a59-41e8-b5bc-1711af5bcc3e"
+	original := sourceRestoreResponse{
+		ActorUID: actorUID, CheckpointActorUID: predecessorUID,
+		WriterEpoch: 5, ChangeWriterEpoch: 42,
+		Checkpoint: &sourceRestoreCheckpoint{
+			ID:          "375460ae-0b12-4efb-98b0-5ce0ca928a8d",
+			WorkspaceID: workspaceID, ActorUID: predecessorUID,
+			WriterEpoch: 4, Generation: 2,
+			Bundle: workspacefiles.Bundle{
+				Version: 1, Bytes: 8, SHA256: strings.Repeat("a", 64),
+				Chunks: []string{strings.Repeat("a", 64)},
+			},
+		},
+	}
+	if err := validateSourceRestoreLease(original, workspaceID, actorUID); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []func(*sourceRestoreResponse){
+		func(r *sourceRestoreResponse) { r.ActorUID = predecessorUID },
+		func(r *sourceRestoreResponse) { r.CheckpointActorUID = actorUID },
+		func(r *sourceRestoreResponse) { r.Checkpoint.ActorUID = actorUID },
+		func(r *sourceRestoreResponse) { r.Checkpoint.WorkspaceID = actorUID },
+		func(r *sourceRestoreResponse) { r.Checkpoint.WriterEpoch = r.WriterEpoch },
+		func(r *sourceRestoreResponse) { r.Checkpoint.Generation = 0 },
+		func(r *sourceRestoreResponse) { r.Checkpoint.Bundle.Bytes = 0 },
+		func(r *sourceRestoreResponse) { r.Checkpoint.Bundle.Chunks = nil },
+	} {
+		bytes, err := json.Marshal(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var changed sourceRestoreResponse
+		if err := json.Unmarshal(bytes, &changed); err != nil {
+			t.Fatal(err)
+		}
+		mutation(&changed)
+		if err := validateSourceRestoreLease(changed, workspaceID, actorUID); err == nil {
+			t.Fatalf("foreign/incomplete Source lease was accepted: %+v", changed)
+		}
+	}
+	fresh := sourceRestoreResponse{ActorUID: actorUID, WriterEpoch: 1, ChangeWriterEpoch: 1}
+	if err := validateSourceRestoreLease(fresh, workspaceID, actorUID); err != nil {
+		t.Fatal(err)
+	}
+	fresh.CheckpointActorUID = predecessorUID
+	if err := validateSourceRestoreLease(fresh, workspaceID, actorUID); err == nil {
+		t.Fatal("fresh Source accepted an unbound checkpoint producer")
+	}
+	changed := original
+	copy := *original.Checkpoint
+	changed.Checkpoint = &copy
+	changed.Checkpoint.Bundle.SHA256 = strings.Repeat("b", 64)
+	if sameSourceRestoreLease(changed, original) {
+		t.Fatal("publication check did not detect changed checkpoint bytes under the same ID")
+	}
+}
+
+func TestInputStopSourceRestoreRequiresReadOnlyOriginalCheckpoint(t *testing.T) {
+	input := ownedInputStop()
+	const workspaceID = "11345112-f121-4739-b2f3-6c6cf60bd2bf"
+	const actorUID = "526dbdeb-6396-42c2-a0ab-6a69f5173b36"
+	original := sourceRestoreResponse{ActorUID: actorUID, CheckpointActorUID: actorUID, WriterEpoch: 5, ChangeWriterEpoch: 42,
+		ReadOnly: true, InputStop: &input, Checkpoint: &sourceRestoreCheckpoint{ID: input.StopID, WorkspaceID: workspaceID,
+			ActorUID: actorUID, WriterEpoch: 4, Generation: 2, Bundle: workspacefiles.Bundle{
+				Version: 1, Bytes: 4, SHA256: strings.Repeat("a", 64), Chunks: []string{strings.Repeat("a", 64)}}}}
+	if err := validateSourceRestoreLease(original, workspaceID, actorUID); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*sourceRestoreResponse){
+		func(r *sourceRestoreResponse) { r.ReadOnly = false },
+		func(r *sourceRestoreResponse) { r.Checkpoint = nil },
+		func(r *sourceRestoreResponse) { r.InputStop.Mode = "observe" },
+		func(r *sourceRestoreResponse) { r.InputStop.SessionID = "unbound" },
+		func(r *sourceRestoreResponse) {
+			r.CheckpointActorUID = input.StopID
+			r.Checkpoint.ActorUID = input.StopID
+		},
+	} {
+		data, _ := json.Marshal(original)
+		var changed sourceRestoreResponse
+		if err := json.Unmarshal(data, &changed); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&changed)
+		if validateSourceRestoreLease(changed, workspaceID, actorUID) == nil {
+			t.Fatal("unbound/writable Stop Source restore was accepted")
+		}
+	}
+}
 
 func TestSubstrateSourceRestoreRetriesOnlyExactCheckpointReads(t *testing.T) {
 	for _, failure := range []string{"gateway", "truncated-body"} {

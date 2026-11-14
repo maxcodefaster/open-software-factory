@@ -109,13 +109,15 @@ func preparedCheckout(ctx context.Context, directory, projectID string) bool {
 }
 
 func Initialize(ctx context.Context, parent string, input Initialization) error {
-	return initialize(ctx, parent, input, 101000, 101000)
+	return initialize(ctx, parent, input, 1000, 1000)
 }
 
-// InitializeActor reuses the canonical atomic checkout initializer without the
-// Sysbox host-UID mapping. It is not a Source handoff or a retained conversion.
+// InitializeActor validates the private native namespace before publishing the
+// canonical checkout with development UID 1000. It never transfers Source ownership.
 func InitializeActor(ctx context.Context, parent string, input Initialization) error {
-	if err := ValidateActorSourceIdentity(parent); err != nil { return err }
+	if err := ValidateActorSourceIdentity(parent); err != nil {
+		return err
+	}
 	// The existing initializer leaves its private staging identity after atomic
 	// publication. Missing published Source is not permission to clone over a loss.
 	if _, err := os.Lstat(filepath.Join(parent, "project")); os.IsNotExist(err) {

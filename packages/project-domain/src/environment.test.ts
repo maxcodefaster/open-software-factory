@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
+import { fixtureValue } from "../../../test/fixtures/value";
 import {
   environmentMetadata,
   environmentWrite,
   parseEnvironmentPaste,
   replaceEnvironment,
 } from "./environment";
-import { fixtureValue } from "../../../test/fixtures/value";
 
 test("masked metadata never includes values, passwords or certificates", () => {
   const manifest = environmentMetadata({
@@ -19,11 +19,35 @@ test("masked metadata never includes values, passwords or certificates", () => {
         password: "private-password",
         certificate: "private-cert",
         verification: false,
+        publish: false,
       },
     ],
   });
   expect(JSON.stringify(manifest)).not.toContain("private-");
   expect(manifest.registries[0]?.hasPassword).toBe(true);
+  expect(manifest.registries[0]?.publish).toBe(false);
+});
+
+test("registry publication is denied by default and requires an explicit saved choice", () => {
+  for (const publish of [undefined, false, true]) {
+    const input = environmentWrite.parse({
+      commandID: crypto.randomUUID(),
+      version: 0,
+      variables: [],
+      registries: [
+        {
+          host: "registry.example.com",
+          username: "owned-publisher",
+          password: "owned-registry-password",
+          verification: true,
+          publish,
+        },
+      ],
+    });
+    const bundle = replaceEnvironment(input, { variables: [], registries: [] });
+    expect(bundle.registries[0]?.publish).toBe(publish === true);
+    expect(environmentMetadata(bundle).registries[0]?.publish).toBe(publish === true);
+  }
 });
 
 test("replace-only keeps unspecified values and never grants verification implicitly", () => {

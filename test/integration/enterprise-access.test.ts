@@ -5,8 +5,10 @@ import { createMembershipCommands } from "../../apps/factory/src/access/membersh
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 test("Product leads manage without code, cannot self-upgrade, and serialize last-manager removal", async () => {
   const process = await factoryProcess();
@@ -324,16 +326,21 @@ test("personal App previews stay private until shared and current Project develo
     for (const id of [owner, contributor, stranger, collaborator])
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Preview member',${`${id}@factory.local`})`;
     const project = crypto.randomUUID();
-    const workspace = crypto.randomUUID();
-    const attempt = crypto.randomUUID();
+    const workspace = personalWorkspaceIdentity(project, owner).workspaceID;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${project},${`preview-${project}`},'Preview','https://example.invalid/repo.git','main','.devcontainer/devcontainer.json',${owner})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${owner},'developer',${owner}),(${project},${contributor},'product-contributor',${owner}),(${project},${collaborator},'developer',${owner})`;
     await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
       VALUES(${workspace},${project},'personal',${owner},'main',${"a".repeat(40)},${owner})`;
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${attempt},${project},${workspace},1,${"a".repeat(40)},'ready',${"b".repeat(64)},${"c".repeat(64)},now(),${owner})`;
+    const attempt = await recordUncreatedWorkspaceAttempt(database, {
+      workspaceID: workspace,
+      generation: 1,
+      createdBy: owner,
+      parentHash: "b".repeat(64),
+      childHash: "c".repeat(64),
+      connectorURL: "wss://owned-preview.factory.invalid/internal/runtime-connect",
+    });
     const access = createAccessController(database);
     await expect(access.requireRuntime(contributor, attempt, "app")).rejects.toThrow(
       "Developer access required",

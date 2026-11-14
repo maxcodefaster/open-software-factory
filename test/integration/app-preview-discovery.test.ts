@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
-import { factoryProcess } from "../fixtures/factory-process";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
+import type { SystemContract } from "../../packages/system-contract/src/system-contract";
+import { factoryProcess } from "../fixtures/factory-process";
+import { nativeJobsFixture } from "../fixtures/native-jobs";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 test.each(["ready", "paused", "unavailable"] as const)(
   "Development App names come from their admitted revision without compute: %s",
@@ -12,7 +15,6 @@ test.each(["ready", "paused", "unavailable"] as const)(
     const stranger = crypto.randomUUID();
     const project = crypto.randomUUID();
     const workspace = crypto.randomUUID();
-    const attempt = crypto.randomUUID();
     const revision = "a".repeat(40);
     const calls: string[] = [];
     let sourceUnavailable = state === "unavailable";
@@ -56,11 +58,13 @@ test.each(["ready", "paused", "unavailable"] as const)(
     });
     const previous = {
       FACTORY_FORGEJO_API_URL: process.env["FACTORY_FORGEJO_API_URL"],
+      FACTORY_FORGEJO_PUBLIC_URL: process.env["FACTORY_FORGEJO_PUBLIC_URL"],
       FACTORY_FORGEJO_TOKEN: process.env["FACTORY_FORGEJO_TOKEN"],
       FACTORY_FORGEJO_OWNER: process.env["FACTORY_FORGEJO_OWNER"],
     };
     try {
       process.env["FACTORY_FORGEJO_API_URL"] = `${forge.url}api/v1/`;
+      process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://owned-app-preview.invalid";
       process.env["FACTORY_FORGEJO_TOKEN"] = "owned-preview-label-fixture";
       process.env["FACTORY_FORGEJO_OWNER"] = "owned";
       for (const id of [owner, stranger])
@@ -75,18 +79,27 @@ test.each(["ready", "paused", "unavailable"] as const)(
       await database.client`INSERT INTO factory.development_workspace(
         id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
         VALUES(${workspace},${project},'personal',${owner},'main',${revision},${owner})`;
-      await database.client`INSERT INTO factory.runtime_attempt(
-        id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,
-        child_connector_token_hash,create_intended_at,created_by,declared_apps)
-        VALUES(${attempt},${project},${workspace},1,${revision},${state === "paused" ? "paused" : "ready"},
-          ${"c".repeat(64)},${"d".repeat(64)},now(),${owner},'["app","app-editor"]'::jsonb)`;
+      async function declaredAttempt(workspaceID: string, createdBy: string, paused = false) {
+        const id = await recordUncreatedWorkspaceAttempt(database, {
+          workspaceID,
+          createdBy,
+          generation: 1,
+          parentHash: "c".repeat(64),
+          childHash: "d".repeat(64),
+          connectorURL: "wss://owned-app-preview.invalid/internal/runtime-connect",
+        });
+        await database.client`UPDATE factory.runtime_attempt
+          SET state=${paused ? "paused" : "ready"},declared_apps='["app","app-editor"]'::jsonb
+          WHERE id=${id}`;
+        return id;
+      }
+      const attempt = await declaredAttempt(workspace, owner, state === "paused");
       const attempts: string[] = [attempt];
       if (state === "unavailable") {
         // More than one read batch must still share the same failed lookup.
         for (let index = 0; index < 5; index++) {
           const other = crypto.randomUUID();
           const otherWorkspace = crypto.randomUUID();
-          const otherAttempt = crypto.randomUUID();
           await database.client`INSERT INTO auth."user"(id,name,email)
             VALUES(${other},'Mara',${`${other}@factory.local`})`;
           await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
@@ -94,11 +107,7 @@ test.each(["ready", "paused", "unavailable"] as const)(
           await database.client`INSERT INTO factory.development_workspace(
             id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
             VALUES(${otherWorkspace},${project},'personal',${other},'main',${revision},${other})`;
-          await database.client`INSERT INTO factory.runtime_attempt(
-            id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,
-            child_connector_token_hash,create_intended_at,created_by,declared_apps)
-            VALUES(${otherAttempt},${project},${otherWorkspace},1,${revision},'ready',
-              ${"c".repeat(64)},${"d".repeat(64)},now(),${other},'["app","app-editor"]'::jsonb)`;
+          const otherAttempt = await declaredAttempt(otherWorkspace, other);
           attempts.push(otherAttempt);
           // Personal Previews are private. This batch deliberately includes only invited readers.
           await createWorkspaceSharing(database, () => {}).decide(other, {
@@ -182,14 +191,15 @@ test.each([
     const contributor = crypto.randomUUID();
     const stranger = crypto.randomUUID();
     const project = crypto.randomUUID();
-    const attempt = crypto.randomUUID();
+    let attempt: string | null = null;
+    let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
     const revision = "a".repeat(40);
-    const contract = {
+    const contract: SystemContract = {
       version: 1,
       primaryApp: "web",
       apps: ["web", "forms-web", "forms-api", "forms-admin"].map((id, index) => ({
         id,
-        label: ["Website", "Forms editor", "Forms API", "Forms administration"][index],
+        label: ["Website", "Forms editor", "Forms API", "Forms administration"][index] ?? id,
         command: ["node", "dev.mjs"],
         port: 4300 + index,
         healthPath: "/",
@@ -221,11 +231,13 @@ test.each([
     });
     const previous = {
       FACTORY_FORGEJO_API_URL: process.env["FACTORY_FORGEJO_API_URL"],
+      FACTORY_FORGEJO_PUBLIC_URL: process.env["FACTORY_FORGEJO_PUBLIC_URL"],
       FACTORY_FORGEJO_TOKEN: process.env["FACTORY_FORGEJO_TOKEN"],
       FACTORY_FORGEJO_OWNER: process.env["FACTORY_FORGEJO_OWNER"],
     };
     try {
       process.env["FACTORY_FORGEJO_API_URL"] = `${forge.url}api/v1/`;
+      process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://owned-app-preview.invalid";
       process.env["FACTORY_FORGEJO_TOKEN"] = "owned-preview-fixture";
       process.env["FACTORY_FORGEJO_OWNER"] = "owned";
       for (const id of [owner, contributor, stranger])
@@ -234,7 +246,7 @@ test.each([
       await database.client`INSERT INTO factory.project(
         id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
         VALUES(${project},${`apps-${project}`},'Owned ACME Preview',
-          ${`${forge.url}owned/acme.git`},'main','.devcontainer/devcontainer.json',${owner})`;
+          'https://owned-app-preview.invalid/owned/acme.git','main','.devcontainer/devcontainer.json',${owner})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${project},${owner},'developer',${owner}),
           (${project},${contributor},'product-contributor',${owner})`;
@@ -244,16 +256,15 @@ test.each([
       const hasAttempt = !["unconfigured", "configuring", "first-open", "not-started"].includes(
         state,
       );
-      if (hasAttempt)
-        await database.client`INSERT INTO factory.runtime_attempt(
-          id,project_id,isolated_kind,generation,revision,state,
-          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,declared_apps)
-          VALUES(${attempt},${project},'staging',1,${revision},${state},
-            ${"c".repeat(64)},${"d".repeat(64)},now(),${owner},
-            ${JSON.stringify(["app", "app-forms-web", "app-forms-api", "app-forms-admin"])}::text::jsonb)`;
       if (state !== "first-open")
         await database.client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id)
-          VALUES(${project},${revision},${hasAttempt ? attempt : null})`;
+          VALUES(${project},${revision},NULL)`;
+      if (hasAttempt) {
+        native = await nativeJobsFixture(database, project, contract);
+        attempt = await native.startStaging(owner);
+        await database.client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${attempt}`;
+      }
+      const nativeCalls = native?.calls.length ?? 0;
       const previews = createProjectAppPreviews(database, () => {
         throw new Error("Declared Apps must not require live Connector channels");
       });
@@ -276,8 +287,10 @@ test.each([
       ]);
       for (const app of first) {
         expect(app.projectID).toBe(project);
-        if (["starting", "ready", "paused"].includes(state)) expect(app.attemptID).toBe(attempt);
-        else expect(app.attemptID).toBeUndefined();
+        if (["starting", "ready", "paused"].includes(state)) {
+          if (!attempt) throw Error("The controlled native Staging owner did not bind its Attempt");
+          expect(app.attemptID).toBe(attempt);
+        } else expect(app.attemptID).toBeUndefined();
       }
       expect(await previews(project, contributor)).toEqual(first);
       expect(calls.filter((path) => path.includes("/contents/"))).toHaveLength(1);
@@ -295,7 +308,9 @@ test.each([
           SELECT state FROM factory.runtime_attempt WHERE id=${attempt}`;
         expect(retained?.state).toBe(state);
       }
+      expect(native?.calls.length ?? 0).toBe(nativeCalls);
     } finally {
+      await native?.close();
       for (const [name, value] of Object.entries(previous))
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;

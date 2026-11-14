@@ -1,24 +1,29 @@
 import { expect, test } from "bun:test";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
+import { retryVerificationBootstrap } from "../../apps/factory/src/delivery/verification-retry";
 import { createForgejoClient } from "../../packages/forge/src/forge";
-import { fixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { nativeJobsFixture } from "../fixtures/native-jobs";
 
 async function deliveryFixture() {
   const process = await factoryProcess();
   const database = process.connect();
+  let scope: Awaited<ReturnType<typeof candidateReviewFixture>> | undefined;
+  let jobs: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
+  const controllers = new Set<ReturnType<typeof createDeliveryController>>();
   try {
-    const owned = await fixture(undefined, undefined, database);
-    const sha = "d".repeat(40);
-    await database.client`UPDATE factory.project SET repository_url = 'http://forge.invalid/owned/build.git'
+    const owned = await candidateReviewFixture(undefined, database);
+    scope = owned;
+    const sha = owned.commit;
+    await database.client`DELETE FROM factory.candidate_review WHERE id=${owned.reviewID}`;
+    await database.client`DELETE FROM factory.verification WHERE id=${owned.verificationID}`;
+    await database.client`UPDATE factory.project SET repository_url = 'https://owned-build.factory.invalid/owned/build.git'
       WHERE id = ${owned.projectID}`;
-    await database.client`INSERT INTO factory.change_commit_operation(
-      id, change_id, runtime_attempt_id, sequence, branch_name, expected_parent_sha,
-      commit_sha, observed_remote_sha, commit_message, idempotency_key, state, created_by, completed_at)
-      SELECT ${crypto.randomUUID()}, id, runtime_attempt_id, 1, branch_name, base_sha,
-        ${sha}, ${sha}, 'Owned Delivery regression', ${crypto.randomUUID()}, 'succeeded', created_by, now()
-      FROM factory.change WHERE id = ${owned.changeID}`;
+    jobs = await nativeJobsFixture(database, owned.projectID);
+    const native = jobs;
     await database.client`INSERT INTO factory.pull_request_operation(
       id, change_id, repository_owner, repository_name, base_branch, head_branch,
       first_head_sha, title, body, idempotency_key, state, pull_request_number, pull_request_url, completed_at)
@@ -71,8 +76,48 @@ async function deliveryFixture() {
       process,
       database,
       owned,
+      native,
+      controllers,
       sha,
       forge,
+      async approvedMerge() {
+        await database.client`INSERT INTO factory.verification(
+          id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,completed_at)
+          VALUES(${owned.verificationID},${owned.changeID},${sha},1,'owned-exact-promotion',
+            'succeeded',1,${owned.userID},now())`;
+        await database.client`INSERT INTO factory.candidate_review(
+          id,verification_id,change_id,commit_sha,base_sha,created_by)
+          VALUES(${owned.reviewID},${owned.verificationID},${owned.changeID},${sha},
+            ${"a".repeat(40)},${owned.userID})`;
+        const turn = await owned.activeReview();
+        await owned.turns.settle(
+          turn.id,
+          turn.ownerToken,
+          "completed",
+          "Exact candidate passed",
+          async (sql) => {
+            await sql`UPDATE factory.candidate_review SET state='passed',result=${JSON.stringify({
+              verdict: "passed",
+              summary: "Owned exact source observation",
+              criteria: [{ criterion: 1, status: "passed", evidence: "Owned candidate checked" }],
+              findings: [],
+              ui: "not-applicable",
+            })}::jsonb,completed_at=now() WHERE id=${owned.reviewID}`;
+            await sql`UPDATE factory.change_agent_session SET state='committed'
+            WHERE change_id=${owned.changeID}`;
+          },
+        );
+        const approval = crypto.randomUUID();
+        await database.client`INSERT INTO factory.delivery_approval(
+          id,change_id,verification_id,candidate_review_id,commit_sha,approved_by)
+          VALUES(${approval},${owned.changeID},${owned.verificationID},${owned.reviewID},${sha},${owned.userID})`;
+        await database.client`INSERT INTO factory.merge_operation(
+          id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,
+          idempotency_key,state,observed_default_sha,completed_at)
+          VALUES(${crypto.randomUUID()},${owned.changeID},${approval},1,${"a".repeat(40)},
+            ${sha},${crypto.randomUUID()},'succeeded',${sha},now())`;
+        await database.client`UPDATE factory.change SET state='delivering' WHERE id=${owned.changeID}`;
+      },
       setHead(value: string) {
         head = value;
       },
@@ -83,13 +128,24 @@ async function deliveryFixture() {
         status = value;
       },
       async close() {
-        await database.client.end({ timeout: 0 });
-        await process.dispose();
+        try {
+          for (const controller of controllers) await controller.close();
+          await native.close();
+          await database.client.end({ timeout: 0 });
+          await process.dispose();
+        } finally {
+          owned.restoreEnvironment();
+        }
       },
     };
   } catch (cause) {
-    await database.client.end({ timeout: 0 });
-    await process.dispose();
+    try {
+      await jobs?.close();
+      await database.client.end({ timeout: 0 });
+      await process.dispose();
+    } finally {
+      scope?.restoreEnvironment();
+    }
     throw cause;
   }
 }
@@ -97,8 +153,6 @@ async function deliveryFixture() {
 test("failed Verification compute is visible while human editing fences reconciliation", async () => {
   const f = await deliveryFixture();
   const verificationID = crypto.randomUUID();
-  const attemptID = crypto.randomUUID();
-  const replacementID = crypto.randomUUID();
   const unavailable = async () => {
     throw new Error("Status reads must not start compute, inference or external mutations");
   };
@@ -109,15 +163,16 @@ test("failed Verification compute is visible while human editing fences reconcil
       SELECT ${crypto.randomUUID()},id,'owned','build',branch_name,base_sha,${crypto.randomUUID()},
         'succeeded',base_sha,now() FROM factory.change WHERE id=${f.owned.changeID}`;
     await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,runner_token)
-      VALUES(${verificationID},${f.owned.changeID},${f.sha},1,'owned-startup-failure','runner-starting',1,${f.owned.userID},'owned-unused')`;
-    await f.database.client`INSERT INTO factory.runtime_attempt(
-      id,project_id,verification_id,isolated_kind,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,failure)
-      VALUES(${attemptID},${f.owned.projectID},${verificationID},'verification',2,${f.sha},'failed',
-        ${"a".repeat(64)},${"b".repeat(64)},now(),${f.owned.userID},'no space left on device')`;
+      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,
+      runner_uuid,runner_token,runner_job_handle)
+      VALUES(${verificationID},${f.owned.changeID},${f.sha},1,'owned-startup-failure',1,
+        ${f.owned.userID},${crypto.randomUUID()},'owned-unused','owned-startup-job')`;
+    const attemptID = await f.native.startVerification(verificationID, f.owned.userID);
     await f.database
-      .client`UPDATE factory.verification SET runtime_attempt_id=${attemptID} WHERE id=${verificationID}`;
+      .client`UPDATE factory.verification SET state='runner-starting' WHERE id=${verificationID}`;
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='failed',failure='no space left on device'
+      WHERE id=${attemptID}`;
     await f.database
       .client`UPDATE factory.change_writer SET state='human',user_id=${f.owned.userID},turn_id=NULL
       WHERE change_id=${f.owned.changeID}`;
@@ -150,6 +205,8 @@ test("failed Verification compute is visible while human editing fences reconcil
       unavailable,
       { client: f.forge, owner: "owned" },
     );
+    f.controllers.add(delivery);
+    const beforeReads = f.native.calls.length;
     for (const state of ["failed", "cleanup-failed", "stopped"] as const) {
       await f.database
         .client`UPDATE factory.runtime_attempt SET state=${state}::factory.runtime_attempt_state WHERE id=${attemptID}`;
@@ -163,15 +220,37 @@ test("failed Verification compute is visible while human editing fences reconcil
         "failed",
       );
     }
-    // A replacement's actual startup clears the old presentation without
-    // rewriting the recorded Verification or manufacturing a passing result.
-    await f.database.client`INSERT INTO factory.runtime_attempt(
-      id,project_id,verification_id,isolated_kind,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${replacementID},${f.owned.projectID},${verificationID},'verification',3,${f.sha},'starting',
-        ${"c".repeat(64)},${"d".repeat(64)},now(),${f.owned.userID})`;
+    expect(f.native.calls).toHaveLength(beforeReads);
+    // Only the explicit exact-job retry can select a successor. Reading the
+    // human-owned checkout never cleans up, retries or rewrites the failed job.
+    await f.native.stop(attemptID);
+    await f.database.client`UPDATE factory.change_writer SET state='agent',user_id=NULL,
+      turn_id=${f.owned.initial.id} WHERE change_id=${f.owned.changeID}`;
+    await f.database.client`UPDATE factory.verification SET state='failed',completed_at=now(),
+      diagnosis=${JSON.stringify({
+        kind: "execution-failed",
+        runtimeAttemptId: attemptID,
+        summary: "no space left on device",
+        jobs: [],
+      })}::jsonb WHERE id=${verificationID}`;
+    await retryVerificationBootstrap(
+      f.database,
+      f.owned.changeID,
+      f.owned.userID,
+      crypto.randomUUID(),
+      verificationID,
+      attemptID,
+    );
+    await f.database.client`UPDATE factory.verification SET runner_uuid=${crypto.randomUUID()},
+      runner_token='owned-retry-token' WHERE id=${verificationID}`;
+    const replacementID = await f.native.startVerification(verificationID, f.owned.userID);
+    expect(replacementID).toBe(runtimeIdentity(verificationID, 2).attemptID);
     await f.database
-      .client`UPDATE factory.verification SET runtime_attempt_id=${replacementID} WHERE id=${verificationID}`;
+      .client`UPDATE factory.verification SET state='runner-starting' WHERE id=${verificationID}`;
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.owned.userID},
+      turn_id=NULL WHERE change_id=${f.owned.changeID}`;
+    const afterRetry = f.native.calls.length;
     expect(await delivery.get(f.owned.changeID)).toMatchObject({
       verificationState: "runner-starting",
       verificationSummary: null,
@@ -179,7 +258,7 @@ test("failed Verification compute is visible while human editing fences reconcil
       verificationPreparationFailure: null,
     });
     expect((await changes.get(f.owned.changeID))?.verificationState).toBe("runner-starting");
-    const preparationIssue = "Factorybox capacity refused preparation before dispatch";
+    const preparationIssue = "Native WorkerPool capacity refused preparation before dispatch";
     await f.database
       .client`UPDATE factory.runtime_attempt SET failure=${preparationIssue} WHERE id=${replacementID}`;
     expect(await delivery.get(f.owned.changeID)).toMatchObject({
@@ -222,6 +301,7 @@ test("failed Verification compute is visible while human editing fences reconcil
       await f.database
         .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.owned.changeID}`,
     ).toHaveLength(0);
+    expect(f.native.calls).toHaveLength(afterRetry);
   } finally {
     await f.close();
   }
@@ -254,6 +334,7 @@ test("failed exact Verification requests one bounded repair on the same Change",
       async () => {},
       { client: f.forge, owner: "owned" },
     );
+    f.controllers.add(controller);
     await controller.reconcile(f.owned.changeID);
     await controller.reconcile(f.owned.changeID);
     const [verification] = await f.database.client<
@@ -285,7 +366,6 @@ test.each(["failure", "success"] as const)(
   async (status) => {
     const f = await deliveryFixture();
     const verificationID = crypto.randomUUID();
-    const attemptID = crypto.randomUUID();
     const repairs: string[] = [];
     const reviews: string[] = [];
     const stops: string[] = [];
@@ -293,16 +373,12 @@ test.each(["failure", "success"] as const)(
     try {
       f.setStatus(status);
       await f.database.client`INSERT INTO factory.verification(
-        id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,
-        runner_id,runner_uuid,runner_token)
-        VALUES(${verificationID},${f.owned.changeID},${f.sha},1,'owned-cleanup-handoff','running',1,
-          ${f.owned.userID},27,${crypto.randomUUID()},'owned-unused')`;
-      await f.database.client`INSERT INTO factory.runtime_attempt(
-        id,project_id,verification_id,isolated_kind,generation,revision,state,
-        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${attemptID},${f.owned.projectID},${verificationID},'verification',2,${f.sha},'ready',
-          ${"a".repeat(64)},${"b".repeat(64)},now(),${f.owned.userID})`;
-      await f.database.client`UPDATE factory.verification SET runtime_attempt_id=${attemptID}
+        id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,
+        runner_id,runner_uuid,runner_token,runner_job_handle)
+        VALUES(${verificationID},${f.owned.changeID},${f.sha},1,'owned-cleanup-handoff',1,
+          ${f.owned.userID},27,${crypto.randomUUID()},'owned-unused','owned-cleanup-job')`;
+      const attemptID = await f.native.startVerification(verificationID, f.owned.userID);
+      await f.database.client`UPDATE factory.verification SET state='running'
         WHERE id=${verificationID}`;
       const controller = createDeliveryController(
         f.database,
@@ -344,6 +420,7 @@ test.each(["failure", "success"] as const)(
           owner: "owned",
         },
       );
+      f.controllers.add(controller);
       try {
         for (const state of ["ready", "stop-intended", "stopping", "cleanup-failed"] as const) {
           await f.database.client`UPDATE factory.runtime_attempt SET state=${state}
@@ -363,6 +440,14 @@ test.each(["failure", "success"] as const)(
         expect(repairs).toEqual([]);
         expect(reviews).toEqual([]);
         runnerRevoked = true;
+        await controller.reconcile(f.owned.changeID);
+        expect(repairs).toEqual([]);
+        expect(reviews).toEqual([]);
+        expect(
+          await f.database.client`SELECT runtime_attempt_id FROM factory.substrate_binding
+          WHERE runtime_attempt_id=${attemptID} AND deleted_at IS NULL`,
+        ).toHaveLength(1);
+        await f.native.stop(attemptID);
         await controller.reconcile(f.owned.changeID);
         if (status === "failure") await controller.reconcile(f.owned.changeID);
         expect(repairs).toEqual(status === "failure" ? [verificationID] : []);
@@ -399,6 +484,7 @@ test.each(["head", "base"] as const)(
         async () => {},
         { client: f.forge, owner: "owned" },
       );
+      f.controllers.add(controller);
       await controller.reconcile(f.owned.changeID);
       if (moved === "head") f.setHead("e".repeat(40));
       else f.setBase("e".repeat(40));
@@ -423,32 +509,16 @@ test.each(["head", "base"] as const)(
 test("promotion retains the healthy Staging while starting, then retries only owned cleanup", async () => {
   const f = await deliveryFixture();
   try {
-    const previous = crypto.randomUUID();
-    const replacement = crypto.randomUUID();
-    const verification = crypto.randomUUID();
-    const approval = crypto.randomUUID();
-    await f.database
-      .client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number, runner_name, state, action_run_id, created_by, completed_at)
-      VALUES (${verification}, ${f.owned.changeID}, ${f.sha}, 1, 'owned-complete', 'succeeded', 1, ${f.owned.userID}, now())`;
-    await f.database
-      .client`INSERT INTO factory.delivery_approval(id, change_id, verification_id, commit_sha, approved_by)
-      VALUES (${approval}, ${f.owned.changeID}, ${verification}, ${f.sha}, ${f.owned.userID})`;
-    await f.database
-      .client`INSERT INTO factory.merge_operation(id, change_id, delivery_approval_id, pull_request_number, base_sha, commit_sha, idempotency_key, state, observed_default_sha, completed_at)
-      VALUES (${crypto.randomUUID()}, ${f.owned.changeID}, ${approval}, 1, ${"a".repeat(40)}, ${f.sha}, ${crypto.randomUUID()}, 'succeeded', ${f.sha}, now())`;
-    for (const [id, revision, state, generation] of [
-      [previous, "a".repeat(40), "ready", 2],
-      [replacement, f.sha, "starting", 3],
-    ] as const) {
-      await f.database
-        .client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        VALUES (${id}, ${f.owned.projectID}, 'staging', ${generation}, ${revision}, ${state}::factory.runtime_attempt_state, ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${f.owned.userID})`;
-    }
-    await f.database
-      .client`INSERT INTO factory.staging_preview(project_id, revision, runtime_attempt_id) VALUES (${f.owned.projectID}, ${"a".repeat(40)}, ${previous})`;
-    await f.database
-      .client`INSERT INTO factory.promotion_operation(id, change_id, project_id, commit_sha, state, previous_runtime_attempt_id, replacement_runtime_attempt_id)
-      VALUES (${crypto.randomUUID()}, ${f.owned.changeID}, ${f.owned.projectID}, ${f.sha}, 'starting', ${previous}, ${replacement})`;
+    await f.database.client`INSERT INTO factory.staging_preview(project_id,revision)
+      VALUES(${f.owned.projectID},${"a".repeat(40)})`;
+    const previous = await f.native.startStaging(f.owned.userID);
+    await f.database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${previous}`;
+    await f.approvedMerge();
+    const promotion = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.promotion_operation(
+      id,change_id,project_id,commit_sha,previous_runtime_attempt_id)
+      VALUES(${promotion},${f.owned.changeID},${f.owned.projectID},${f.sha},${previous})`;
+    const replacement = await f.native.startStaging(f.owned.userID, promotion);
     const stopped: string[] = [];
     const retired: string[] = [];
     let failed = false;
@@ -463,6 +533,7 @@ test("promotion retains the healthy Staging while starting, then retries only ow
             failed = true;
             throw new Error("Owned cleanup response lost");
           }
+          if (id !== f.owned.attemptID) await f.native.stop(id);
           return null;
         },
       },
@@ -475,6 +546,7 @@ test("promotion retains the healthy Staging while starting, then retries only ow
         owner: "owned",
       },
     );
+    f.controllers.add(controller);
     await controller.reconcile(f.owned.changeID);
     const [before] = await f.database.client<
       { id: string }[]
@@ -496,6 +568,10 @@ test("promotion retains the healthy Staging while starting, then retries only ow
     expect(stopped).toEqual([previous, previous, f.owned.attemptID]);
     expect(stopped).not.toContain(replacement);
     expect(retired).toEqual([f.owned.changeID]);
+    const [deleted] = await f.database.client`
+      SELECT deleted_at IS NOT NULL AS confirmed FROM factory.substrate_binding
+      WHERE runtime_attempt_id=${previous}`;
+    expect(deleted).toEqual({ confirmed: true });
   } finally {
     await f.close();
   }
@@ -504,44 +580,22 @@ test("promotion retains the healthy Staging while starting, then retries only ow
 test("failed Promotion retry preserves its original attempt and admits one new exact-commit Start", async () => {
   const f = await deliveryFixture();
   try {
-    const previous = crypto.randomUUID();
-    const failed = crypto.randomUUID();
     const promotion = crypto.randomUUID();
     const command = crypto.randomUUID();
-    const replacement = crypto.randomUUID();
-    const verification = crypto.randomUUID();
-    const approval = crypto.randomUUID();
-    await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,completed_at)
-      VALUES(${verification},${f.owned.changeID},${f.sha},1,'retry-exact','succeeded',1,${f.owned.userID},now())`;
-    await f.database.client`INSERT INTO factory.delivery_approval(
-      id,change_id,verification_id,commit_sha,approved_by)
-      VALUES(${approval},${f.owned.changeID},${verification},${f.sha},${f.owned.userID})`;
-    await f.database.client`INSERT INTO factory.merge_operation(
-      id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,idempotency_key,
-      state,observed_default_sha,completed_at)
-      VALUES(${crypto.randomUUID()},${f.owned.changeID},${approval},1,${"a".repeat(40)},
-        ${f.sha},${crypto.randomUUID()},'succeeded',${f.sha},now())`;
-    for (const [id, revision, state, generation] of [
-      [previous, "a".repeat(40), "ready", 2],
-      [failed, f.sha, "failed", 3],
-    ] as const)
-      await f.database.client`INSERT INTO factory.runtime_attempt(
-        id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,
-        child_connector_token_hash,create_intended_at,created_by,failure)
-        VALUES(${id},${f.owned.projectID},'staging',${generation},${revision},
-          ${state}::factory.runtime_attempt_state,${"a".repeat(64)},${"b".repeat(64)},now(),
-          ${f.owned.userID},${id === failed ? "missing Main-Preview configuration" : null})`;
-    await f.database
-      .client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id)
-      VALUES(${f.owned.projectID},${"a".repeat(40)},${previous})`;
+    const replacement = runtimeIdentity(command, 1).attemptID;
+    await f.database.client`INSERT INTO factory.staging_preview(project_id,revision)
+      VALUES(${f.owned.projectID},${"a".repeat(40)})`;
+    const previous = await f.native.startStaging(f.owned.userID);
+    await f.database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${previous}`;
+    await f.approvedMerge();
     await f.database.client`INSERT INTO factory.promotion_operation(
-      id,change_id,project_id,commit_sha,state,previous_runtime_attempt_id,
-      replacement_runtime_attempt_id,last_error,completed_at)
-      VALUES(${promotion},${f.owned.changeID},${f.owned.projectID},${f.sha},'failed',
-        ${previous},${failed},'Replacement Staging failed before readiness',now())`;
-    await f.database
-      .client`UPDATE factory.change SET state='delivering' WHERE id=${f.owned.changeID}`;
+      id,change_id,project_id,commit_sha,previous_runtime_attempt_id)
+      VALUES(${promotion},${f.owned.changeID},${f.owned.projectID},${f.sha},${previous})`;
+    const failed = await f.native.startStaging(f.owned.userID, promotion);
+    await f.database.client`UPDATE factory.runtime_attempt SET state='failed',
+      failure='missing Main-Preview configuration' WHERE id=${failed}`;
+    await f.database.client`UPDATE factory.promotion_operation SET state='failed',
+      last_error='Replacement Staging failed before readiness',completed_at=now() WHERE id=${promotion}`;
     const [original] = await f.database
       .client`SELECT * FROM factory.promotion_operation WHERE id=${promotion}`;
     if (!original) throw new Error("Missing original failed Promotion fixture");
@@ -553,7 +607,7 @@ test("failed Promotion retry preserves its original attempt and admits one new e
         startVerification: async () => {
           throw new Error("Retry must not repeat Verification");
         },
-        startStagingReplacement: async (id) => {
+        startStagingReplacement: async (id, userID) => {
           const [intent] = await f.database.client`SELECT commit_sha,previous_runtime_attempt_id
             FROM factory.promotion_operation WHERE id=${id}`;
           expect(intent).toMatchObject({
@@ -561,17 +615,12 @@ test("failed Promotion retry preserves its original attempt and admits one new e
             previous_runtime_attempt_id: previous,
           });
           starts.push(id);
-          await f.database.client`INSERT INTO factory.runtime_attempt(
-            id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,
-            child_connector_token_hash,create_intended_at,created_by)
-            VALUES(${replacement},${f.owned.projectID},'staging',4,${f.sha},'starting',
-              ${"c".repeat(64)},${"d".repeat(64)},now(),${f.owned.userID})`;
-          await f.database.client`UPDATE factory.promotion_operation SET state='starting',
-            replacement_runtime_attempt_id=${replacement} WHERE id=${id} AND state='pending'`;
+          expect(await f.native.startStaging(userID, id)).toBe(replacement);
           return null;
         },
         stop: async (id) => {
           stops.push(id);
+          if (id !== f.owned.attemptID) await f.native.stop(id);
           return null;
         },
       },
@@ -583,6 +632,7 @@ test("failed Promotion retry preserves its original attempt and admits one new e
       async () => {},
       { client: f.forge, owner: "owned" },
     );
+    f.controllers.add(controller);
     expect(typeof controller.retryPromotion).toBe("function");
     for (const state of ["starting", "ready", "pausing", "stopping", "cleanup-failed"]) {
       await f.database.client`UPDATE factory.runtime_attempt
@@ -591,16 +641,12 @@ test("failed Promotion retry preserves its original attempt and admits one new e
         controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
       ).rejects.toThrow("cleanup are confirmed");
     }
-    // A terminal product state alone cannot erase an outstanding native input.
-    await f.database.client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${failed}`;
-    await f.database.client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request)
-      VALUES(${failed},'{}'::jsonb)`;
+    // A terminal product state alone cannot confirm original Actor deletion.
     await f.database.client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${failed}`;
     await expect(
       controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
     ).rejects.toThrow("cleanup are confirmed");
-    await f.database.client`UPDATE factory.factorybox_runtime SET inputs_released_at=now()
-      WHERE runtime_attempt_id=${failed}`;
+    await f.native.stop(failed);
     await f.database.client`UPDATE factory.staging_preview SET runtime_attempt_id=${failed}
       WHERE project_id=${f.owned.projectID}`;
     await expect(
@@ -619,6 +665,11 @@ test("failed Promotion retry preserves its original attempt and admits one new e
       controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
     ]);
     await controller.reconcile(f.owned.changeID);
+    await eventually(
+      () => controller.get(f.owned.changeID),
+      (row) => row?.["promotionState"] === "starting",
+      "The explicit native Promotion retry did not retain its replacement",
+    );
     expect(starts).toEqual([command]);
     expect((await controller.get(f.owned.changeID))?.["promotionId"]).toBe(command);
     expect((await controller.get(f.owned.changeID))?.["promotionState"]).toBe("starting");
@@ -662,7 +713,7 @@ test("failed Promotion retry preserves its original attempt and admits one new e
     ).toEqual(original);
     expect(
       await f.database.client`SELECT state,failure FROM factory.runtime_attempt WHERE id=${failed}`,
-    ).toMatchObject([{ state: "failed", failure: "missing Main-Preview configuration" }]);
+    ).toMatchObject([{ state: "stopped", failure: "missing Main-Preview configuration" }]);
   } finally {
     await f.close();
   }

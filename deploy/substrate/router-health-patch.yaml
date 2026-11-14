@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atenet-router
+spec:
+  template:
+    spec:
+      containers:
+        - name: envoy
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: envoy-metrics
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: envoy-metrics
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6

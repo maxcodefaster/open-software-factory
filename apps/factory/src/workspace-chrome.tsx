@@ -35,7 +35,7 @@ export function WindowHeading(props: {
             class="bare-icon"
             aria-label="Close workspace"
             title="Close workspace"
-            onClick={onClose()}
+            onClick={() => onClose()()}
           >
             <Icon name="close" />
           </button>

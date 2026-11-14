@@ -152,7 +152,8 @@ function EnvironmentDocument(
               registry.password !== undefined ||
               registry.certificate !== undefined ||
               registry.username !== original.username ||
-              registry.verification !== original.verification
+              registry.verification !== original.verification ||
+              registry.publish !== original.publish
             );
           })),
     );
@@ -817,7 +818,13 @@ function EnvironmentDocument(
                         setEditingRegistry(registries().length);
                         setRegistries((items) => [
                           ...items,
-                          { host: "", username: "", password: "", verification: false },
+                          {
+                            host: "",
+                            username: "",
+                            password: "",
+                            verification: false,
+                            publish: false,
+                          },
                         ]);
                         setNotice("");
                       }}
@@ -828,7 +835,7 @@ function EnvironmentDocument(
                 </header>
                 <p class="model-settings-note">
                   Credentials for private image downloads during environment preparation and
-                  startup.
+                  startup. Publishing prepared images needs a separate permission.
                 </p>
                 <For each={registries()} keyed={false}>
                   {(registry, index) => (
@@ -843,6 +850,9 @@ function EnvironmentDocument(
                           </Show>
                           <Show when={registry().verification}>
                             <span class="model-settings-note">Verification</span>
+                          </Show>
+                          <Show when={registry().publish}>
+                            <span class="model-settings-note">Prepared image publishing</span>
                           </Show>
                         </div>
                         <Show when={current().canManage}>
@@ -865,7 +875,8 @@ function EnvironmentDocument(
                         >
                           <p class="environment-registry-note model-settings-note">
                             Choose images in your repository's Dev Container configuration. Use a
-                            read-only token limited to the images this Project needs.
+                            read-only token limited to the images this Project needs. Publication
+                            requires a token allowed to push this Project's prepared images.
                           </p>
                           <label>
                             Registry address
@@ -904,6 +915,22 @@ function EnvironmentDocument(
                               }
                             />
                           </label>
+                          <label class="environment-check">
+                            <input
+                              type="checkbox"
+                              checked={registry().publish}
+                              onChange={(event) =>
+                                changeRegistry(index, {
+                                  publish: event.currentTarget.checked,
+                                })
+                              }
+                            />
+                            Allow publishing prepared images for this Project
+                          </label>
+                          <p class="environment-registry-note model-settings-note">
+                            Applies to new image preparations using the registry selected by your
+                            Factory administrator. Image downloads alone never grant publication.
+                          </p>
                           <details>
                             <summary>Certificate and Verification access</summary>
                             <label>

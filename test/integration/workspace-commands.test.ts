@@ -1,33 +1,18 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceCommands } from "../../apps/factory/src/workspace/commands";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import { eventually } from "../fixtures/factory-process";
+import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 async function commandFixture(loseStartReply = false) {
-  const restore = installOwnedRuntimeConfiguration();
-  const process = await factoryProcess();
-  const database = process.connect();
-  const owner = crypto.randomUUID(),
-    guest = crypto.randomUUID(),
-    project = crypto.randomUUID();
-  const workspaceID = personalWorkspaceIdentity(project, owner).workspaceID;
-  const attemptID = crypto.randomUUID();
-  for (const id of [owner, guest])
-    await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Command fixture',${`${id}@factory.invalid`})`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${project},${`command-${project}`},'Command fixture','https://github.com/example/project','main','.devcontainer/devcontainer.json',${owner})`;
-  for (const id of [owner, guest])
-    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${id},'developer',${owner})`;
-  await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
-    VALUES(${workspaceID},${project},'personal',${owner},'main',${"a".repeat(40)},${owner})`;
-  await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-    VALUES(${attemptID},${project},${workspaceID},1,${"a".repeat(40)},'ready','parent-command-fixture','child-command-fixture',now(),${owner})`;
-  const hub = new RuntimeHub(async () => {});
+  const fixture = await substrateFixture();
+  const { database, userID: owner, projectID: project, workspaceID, attemptID, hub } = fixture;
+  const guest = crypto.randomUUID();
+  await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${guest},'Command fixture',${`${guest}@factory.invalid`})`;
+  await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${guest},'developer',${owner})`;
+  const runtime = await startSubstrateFixtureWorkspace(fixture);
   type Native = {
     id: string;
     digest: string;
@@ -106,11 +91,6 @@ async function commandFixture(loseStartReply = false) {
       terminalRevision: 1,
     }),
   );
-  const runtime = createRuntimeController(database, hub, "command-fixture-key", {
-    async prepareExecution() {
-      throw new Error("No new execution is allowed");
-    },
-  });
   const commands = createWorkspaceCommands(database, hub, runtime, "command-fixture-key");
   const sharing = createWorkspaceSharing(database, () => {});
   return {
@@ -130,9 +110,7 @@ async function commandFixture(loseStartReply = false) {
     async dispose() {
       await commands.close();
       hub.revoke(attemptID);
-      await database.client.end({ timeout: 2 });
-      await process.dispose();
-      restore();
+      await fixture.dispose();
     },
   };
 }

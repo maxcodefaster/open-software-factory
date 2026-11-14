@@ -105,6 +105,8 @@ test.each([
   "Session",
   "operation",
   "runtime",
+  "runtime Stop",
+  "native Delete",
 ] as const)("the actual parent frame rejects changed %s authority", async (boundary) => {
   const scope = await forwarding();
   try {
@@ -137,6 +139,12 @@ test.each([
     if (boundary === "runtime")
       await owned.database
         .client`UPDATE factory.runtime_attempt SET state = 'starting' WHERE id = ${owned.attemptID}`;
+    if (boundary === "runtime Stop")
+      await owned.database
+        .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${owned.attemptID}`;
+    if (boundary === "native Delete")
+      await owned.database
+        .client`UPDATE factory.substrate_binding SET delete_intended_at=now() WHERE runtime_attempt_id=${owned.attemptID}`;
     await expect(scope.transport(owned.attemptID, scope.operation)).rejects.toThrow(
       "authority changed before dispatch",
     );

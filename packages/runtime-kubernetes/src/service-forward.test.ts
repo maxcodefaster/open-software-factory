@@ -18,10 +18,10 @@ async function fixture() {
   const previous = process.env["PATH"];
   return {
     calls: () => readFile(calls, "utf8"),
-    start(role: "source" | "editor", namespace: string, pod: string) {
+    start(namespace: string, pod: string) {
       try {
         process.env["PATH"] = `${directory}:${previous ?? ""}`;
-        return startServiceForward(role, namespace, pod);
+        return startServiceForward(namespace, pod);
       } finally {
         if (previous === undefined) delete process.env["PATH"];
         else process.env["PATH"] = previous;
@@ -35,52 +35,42 @@ async function fixture() {
   };
 }
 
-test("the actual Source forwarding child admits a shared Factorybox namespace and full Workspace epoch", async () => {
+test("the editor forwarding child retains its existing independent editor boundary", async () => {
   const f = await fixture();
-  const namespace = `factory-box-${"a".repeat(32)}`;
-  const pod = `source-${"b".repeat(32)}-12`;
-  const connection = f.start("source", namespace, pod);
+  const namespace = `factory-editor-${"a".repeat(32)}`;
+  const pod = "editor-2";
+  const connection = f.start(namespace, pod);
   try {
     expect(await connection.endpoint).toBe("http://127.0.0.1:32123");
-    const args = (await f.calls()).trim().split("\n");
-    expect(args.slice(-7)).toEqual([
+    expect((await f.calls()).trim().split("\n").slice(-7)).toEqual([
       "port-forward",
       "--address",
       "127.0.0.1",
       "-n",
       namespace,
       `pod/${pod}`,
-      "0:4600",
+      "0:4400",
     ]);
   } finally {
     await f.close(connection);
   }
 });
 
-test("the editor forwarding child retains its existing independent editor boundary", async () => {
-  const f = await fixture();
-  const connection = f.start("editor", `factory-editor-${"a".repeat(32)}`, "editor-2");
-  try {
-    expect(await connection.endpoint).toBe("http://127.0.0.1:32123");
-    expect((await f.calls()).trim().split("\n").at(-1)).toBe("0:4400");
-  } finally {
-    await f.close(connection);
-  }
-});
-
-test("Source forwarding refuses legacy names, another service role and arbitrary exec targets", async () => {
+test("editor forwarding refuses obsolete Source names and arbitrary Kubernetes targets", async () => {
   for (const [namespace, pod] of [
     [`factory-workspace-${"a".repeat(12)}`, "source-1"],
     [`factory-box-${"a".repeat(32)}`, "source-1"],
     [`factory-box-${"a".repeat(32)}`, "worker"],
     [`factory-box-${"a".repeat(32)}`, `source-${"b".repeat(32)}-0`],
     [`factory-editor-${"a".repeat(32)}`, `source-${"b".repeat(32)}-1`],
+    [`factory-editor-${"a".repeat(32)}`, "editor-0"],
+    [`factory-editor-${"a".repeat(32)}`, "worker"],
     ["kube-system", `source-${"b".repeat(32)}-1`],
   ] as const) {
     const f = await fixture();
-    const connection = f.start("source", namespace, pod);
+    const connection = f.start(namespace, pod);
     try {
-      await expect(connection.endpoint).rejects.toThrow("Source connection closed");
+      await expect(connection.endpoint).rejects.toThrow("Developer IDE connection closed");
       await expect(f.calls()).rejects.toThrow();
     } finally {
       await f.close(connection);

@@ -14,6 +14,16 @@ export CURL_CA_BUNDLE="$SSL_CERT_FILE"
 export HTTP_PROXY=http://127.0.0.1:8888 HTTPS_PROXY=http://127.0.0.1:8888
 export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
 export NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1
+if [ "${FACTORY_SUBSTRATE_BOOTSTRAP+present}" = present ]; then
+  # A previous ROOTFS contains its old mode marker. It is not admission for
+  # this cold start. Delete only this private transient receipt, never Source.
+  marker=/home/rootless/persist/connector/source-restored.json
+  test ! -L "$marker"
+  if [ -e "$marker" ]; then
+    test -f "$marker"
+    rm "$marker"
+  fi
+fi
 mkdir -p "$XDG_RUNTIME_DIR"
 for path in docker-direct docker; do
   test ! -L "$XDG_RUNTIME_DIR/$path"
@@ -26,6 +36,18 @@ rootlesskit --state-dir="$DOCKERD_ROOTLESSKIT_STATE_DIR" --net=slirp4netns \
   /opt/factory-rootless/child.sh &
 daemon=$!
 trap 'kill "$daemon" 2>/dev/null || true' EXIT
+if [ "${FACTORY_SUBSTRATE_BOOTSTRAP+present}" = present ]; then
+  mode="$(python3 /opt/factory-rootless/wait.py bootstrap "$daemon")"
+  case "$mode" in
+    input-stop)
+      python3 /opt/factory-rootless/ready.py --input-stop "$daemon" &
+      wait "$daemon"
+      exit "$?"
+      ;;
+    docker) ;;
+    *) echo 'Unconfirmed native cold mode' >&2; exit 1 ;;
+  esac
+fi
 python3 /opt/factory-rootless/wait.py docker "$daemon"
 # A cold restart does not replay a fixture initializer or old command queue.
 # An adapter can pass its authenticated Connector launch as the explicit command.

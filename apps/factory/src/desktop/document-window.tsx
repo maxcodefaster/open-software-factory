@@ -59,8 +59,8 @@ import {
   loadRuntimeWorkspace,
   prefetchDeveloperWorkspaceChunks,
 } from "../workspace-chunks";
-import { WorkspaceTabbar, workspacePanelID } from "../workspace-tabbar";
 import { WorkspaceSharingBar } from "../workspace-sharing";
+import { WorkspaceTabbar, workspacePanelID } from "../workspace-tabbar";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import { browserWarmupEnvironment, scheduleWarmup } from "../workspace-warmup";
 import type { DesktopMutation, FactoryDesktopProps, TicketDetail } from "./contracts";
@@ -236,6 +236,7 @@ export interface DocumentWindowModel {
   stopAgent: () => Promise<void>;
   ideTargets: () => RuntimeDockTarget[];
   openIDETarget: (target: RuntimeDockTarget) => Promise<void>;
+  startPersonalIDE: () => Promise<void>;
   ticketPreviewTarget: (changeID: string | undefined) => RuntimeDockTarget | undefined;
   openPreviewTarget: (target: RuntimeDockTarget) => Promise<void>;
   retryMainPreview: (tab: WorkspaceTab) => Promise<void>;
@@ -754,6 +755,11 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
               const target = model.ideTargets().find((item) => `ide:${item.id}` === tab?.id);
               if (target) void model.openIDETarget(target);
             }}
+            onStartSelection={
+              model.activeWorkspaceTab()?.id === `ide:personal:${model.selectedProjectID()}`
+                ? model.startPersonalIDE
+                : undefined
+            }
             workspaceID={
               model.activeWorkspaceTab()?.view === "ide"
                 ? model.activeWorkspaceTab()?.workspaceID

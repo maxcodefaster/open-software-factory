@@ -67,6 +67,7 @@ const registryMetadata = z
       .max(256)
       .refine((value) => !/[:\0\r\n]/.test(value)),
     verification: z.boolean(),
+    publish: z.boolean().default(false),
     hasPassword: z.boolean(),
     hasCertificate: z.boolean(),
   })
@@ -123,6 +124,7 @@ export const environmentWrite = z
     }
   });
 export type EnvironmentWrite = z.output<typeof environmentWrite>;
+export type EnvironmentWriteInput = z.input<typeof environmentWrite>;
 
 export const environmentBundle = z
   .object({

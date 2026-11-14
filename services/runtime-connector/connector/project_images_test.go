@@ -93,6 +93,44 @@ func TestProjectImagePreparationUsesTwoWorkersAndJoinsOnCancellation(t *testing.
 	}
 }
 
+func TestProjectImagePreparationSharesOneColdAcquisitionDeadline(t *testing.T) {
+	for _, shorterParent := range []bool{false, true} {
+		t.Run(fmt.Sprint(shorterParent), func(t *testing.T) {
+			ctx := context.Background()
+			parentDeadline := time.Now().Add(30 * time.Second)
+			if shorterParent {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, parentDeadline)
+				defer cancel()
+			}
+			deadlines := make(chan time.Time, 2)
+			started := time.Now()
+			err := prepareProjectImagesWith(ctx, []string{projectImage("a"), projectImage("b")}, func(ctx context.Context, _ string) error {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					return errors.New("image acquisition has no deadline")
+				}
+				deadlines <- deadline
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, second := <-deadlines, <-deadlines
+			if !first.Equal(second) {
+				t.Fatal("Project image workers did not share the original deadline")
+			}
+			if shorterParent {
+				if !first.Equal(parentDeadline) {
+					t.Fatal("cold image acquisition widened the caller's deadline")
+				}
+			} else if first.Before(started.Add(10*time.Minute)) || first.After(time.Now().Add(10*time.Minute)) {
+				t.Fatal("cold Project image acquisition did not receive its ten-minute window")
+			}
+		})
+	}
+}
+
 func TestProjectImageAcquisitionConfirmsDigestAndKeepsRegistryOutputPrivate(t *testing.T) {
 	for _, scenario := range []string{"cached", "cold", "wrong-digest", "wrong-repository", "pull-failed", "unconfirmed", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -308,6 +346,54 @@ esac
 	commands, _ := os.ReadFile(logPath)
 	if strings.Count(string(commands), "pull ") != 2 || strings.Contains(string(commands), "run ") {
 		t.Fatalf("recovery changed scope or failed to confirm its exact image: %s", commands)
+	}
+}
+
+func TestProjectImageRecoversNativeRegistryTransportFailures(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		diagnostic string
+	}{
+		{"proxy", `Error response from daemon: Get "https://registry.factory/v2/": Unable to connect`},
+		{"empty-response", "EOF"},
+		{"download-end", "Error response from daemon: error pulling image configuration: download failed after attempts=6: EOF"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			directory := t.TempDir()
+			logPath := filepath.Join(directory, "commands")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FACTORY_IMAGE_LOG"
+case "$1 $2" in
+  "image inspect")
+    if [ ! -f "$FACTORY_IMAGE_LOG.pulled" ]; then exit 1; fi
+    printf '["%s"]' "$FACTORY_IMAGE_REFERENCE";;
+  "pull "*)
+    if [ ! -f "$FACTORY_IMAGE_LOG.failed" ]; then
+      touch "$FACTORY_IMAGE_LOG.failed"
+      printf '%s\n' "$FACTORY_IMAGE_FAILURE" >&2
+      exit 1
+    fi
+    touch "$FACTORY_IMAGE_LOG.pulled";;
+  *) exit 99;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FACTORY_IMAGE_LOG", logPath)
+			t.Setenv("FACTORY_IMAGE_REFERENCE", projectImage("a"))
+			t.Setenv("FACTORY_IMAGE_FAILURE", scenario.diagnostic)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := prepareProjectImages(ctx, []string{projectImage("a")}); err != nil {
+				t.Fatalf("native Registry transport failure cancelled the original image preparation: %v", err)
+			}
+			commands, _ := os.ReadFile(logPath)
+			if strings.Count(string(commands), "pull ") != 2 || strings.Contains(string(commands), "run ") {
+				t.Fatalf("Registry recovery repeated Project code or missed exact image confirmation: %s", commands)
+			}
+		})
 	}
 }
 

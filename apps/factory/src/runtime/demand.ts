@@ -9,7 +9,7 @@ export function runtimeDocumentRequest(request: Request) {
 export function createRuntimeDemand(
   runtime: {
     get(attemptID: string): Promise<{ state: string; failure: string | null } | null>;
-    resumeForApp(attemptID: string, userID: string, deadline: number): Promise<unknown>;
+    resumeForApp(attemptID: string, userID: string): Promise<unknown>;
   },
   hub: { use(attemptID: string): boolean },
   sleep: (ms: number) => Promise<unknown> = Bun.sleep,
@@ -24,7 +24,7 @@ export function createRuntimeDemand(
       if (current.state === "ready") return hub.use(attemptID);
       if (["pausing", "paused", "resuming"].includes(current.state) && !requested) {
         requested = true;
-        await runtime.resumeForApp(attemptID, userID, deadline);
+        await runtime.resumeForApp(attemptID, userID);
         continue;
       }
       if (!["create-intended", "starting", "pausing", "resuming"].includes(current.state))

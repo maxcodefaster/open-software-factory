@@ -105,6 +105,22 @@ function requestedResource(item: z.infer<typeof pod>, resource: "cpu" | "memory"
   );
 }
 
+function podRequests(item: z.infer<typeof pod>) {
+  // Terminating Pods still hold resources until they actually exit.
+  if (item.status?.phase === "Failed" || item.status?.phase === "Succeeded")
+    return { cpuMilli: 0, memoryBytes: 0 };
+  const cpuMilli = requestedResource(item, "cpu");
+  const memoryBytes = requestedResource(item, "memory");
+  if (!Number.isSafeInteger(cpuMilli) || !Number.isSafeInteger(memoryBytes))
+    throw new Error("Pod resource requests exceed safe admission accounting");
+  return { cpuMilli, memoryBytes };
+}
+
+/** Scheduler reservations, not measured usage. Shared by admission and install headroom checks. */
+export function kubernetesPodRequestedResources(input: unknown) {
+  return podRequests(pod.parse(input));
+}
+
 export function selectWorkerNodeResources(
   policy: {
     nodeName: string;
@@ -167,10 +183,9 @@ export function selectWorkerNodeResources(
   for (const item of pods) {
     if (item.spec.nodeName !== policy.nodeName)
       throw new Error("Worker resource observation includes another node");
-    // Terminating Pods still hold resources until they actually exit.
-    if (item.status?.phase === "Failed" || item.status?.phase === "Succeeded") continue;
-    requested += requestedResource(item, "memory");
-    requestedCPU += requestedResource(item, "cpu");
+    const resources = podRequests(item);
+    requested += resources.memoryBytes;
+    requestedCPU += resources.cpuMilli;
     if (!Number.isSafeInteger(requested) || !Number.isSafeInteger(requestedCPU))
       throw new Error("Node resource requests exceed safe admission accounting");
   }

@@ -152,8 +152,6 @@ export const runtimeAttemptSchema = z.object({
   failure: optionalString,
   generation: z.string().optional(),
   revision: z.string().optional(),
-  kubernetesNamespace: optionalString,
-  kubernetesPodName: optionalString,
   createdAt: optionalString,
   updatedAt: optionalString,
   readyAt: optionalString,

@@ -12,21 +12,28 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { runtimeBuildBrowserToken } from "../../packages/runtime-domain/src/identity";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
+import { nativeJobsFixture } from "../fixtures/native-jobs";
 import { observe } from "../fixtures/pinned-opencode";
 
 test("direct review admission also waits for exact Verification cleanup and runner revocation", async () => {
-  const f = await candidateReviewFixture();
-  const attemptID = crypto.randomUUID();
-  const admit = createReviewAdmission(f.database);
+  const host = await factoryProcess();
+  const database = host.connect();
+  let owned: Awaited<ReturnType<typeof candidateReviewFixture>> | undefined;
+  let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
   try {
-    await f.database.client`INSERT INTO factory.runtime_attempt(
-      id,project_id,verification_id,isolated_kind,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${attemptID},${f.projectID},${f.verificationID},'verification',2,${f.commit},'ready',
-        ${"a".repeat(64)},${"b".repeat(64)},now(),${f.userID})`;
+    const f = await candidateReviewFixture(undefined, database);
+    owned = f;
+    native = await nativeJobsFixture(database, f.projectID);
+    const admit = createReviewAdmission(f.database);
     await f.database.client`UPDATE factory.verification
-      SET runtime_attempt_id=${attemptID},runner_id=27,runner_uuid=${crypto.randomUUID()},
-        runner_token='owned-unused' WHERE id=${f.verificationID}`;
+      SET state='pending',completed_at=NULL,summary=NULL,runner_id=27,
+        runner_uuid=${crypto.randomUUID()},runner_token='owned-unused',
+        runner_job_handle='owned-review-job' WHERE id=${f.verificationID}`;
+    const attemptID = await native.startVerification(f.verificationID, f.userID);
+    await f.database.client`UPDATE factory.verification
+      SET state='succeeded',completed_at=now(),summary='Owned exact CI'
+      WHERE id=${f.verificationID}`;
     for (const state of [
       "ready",
       "stop-intended",
@@ -50,6 +57,16 @@ test("direct review admission also waits for exact Verification cleanup and runn
     });
     await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
       WHERE id=${attemptID}`;
+    // A state projection cannot stand in for deletion of the original Actor.
+    await expect(admit(f.changeID, f.reviewID, f.userID)).rejects.toMatchObject({
+      code: "conflict",
+    });
+    expect(await f.turns.getByCommand(f.reviewID)).toBeNull();
+    await native.stop(attemptID);
+    const [deleted] = await database.client`
+      SELECT deleted_at IS NOT NULL AS confirmed FROM factory.substrate_binding
+      WHERE runtime_attempt_id=${attemptID}`;
+    expect(deleted).toEqual({ confirmed: true });
     const accepted = await admit(f.changeID, f.reviewID, f.userID);
     expect(accepted.replayed).toBe(false);
     expect((await admit(f.changeID, f.reviewID, f.userID)).turn.id).toBe(accepted.turn.id);
@@ -70,7 +87,48 @@ test("direct review admission also waits for exact Verification cleanup and runn
     expect((await f.turns.beginDispatch(claimed.id, claimed.ownerToken))?.id).toBe(claimed.id);
     expect(f.requests()).toBe(0);
   } finally {
-    await f.dispose();
+    try {
+      await native?.close();
+      await database.client.end({ timeout: 0 });
+      await host.dispose();
+    } finally {
+      owned?.restoreEnvironment();
+    }
+  }
+});
+
+test("a queued review rechecks original Actor deletion immediately before dispatch", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  let owned: Awaited<ReturnType<typeof candidateReviewFixture>> | undefined;
+  let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
+  try {
+    const f = await candidateReviewFixture(undefined, database);
+    owned = f;
+    const accepted = await createReviewAdmission(database)(f.changeID, f.reviewID, f.userID);
+    const claimed = await f.turns.claimPending(accepted.turn.id);
+    if (!claimed?.ownerToken) throw new Error("Missing owned pending review");
+    native = await nativeJobsFixture(database, f.projectID);
+    await database.client`UPDATE factory.verification SET state='pending',completed_at=NULL,
+      runner_uuid=${crypto.randomUUID()},runner_token='owned-unused',
+      runner_job_handle='owned-queued-review-job' WHERE id=${f.verificationID}`;
+    const attemptID = await native.startVerification(f.verificationID, f.userID);
+    await database.client`UPDATE factory.verification SET state='succeeded',completed_at=now()
+      WHERE id=${f.verificationID}`;
+    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${attemptID}`;
+    expect(await f.turns.beginDispatch(claimed.id, claimed.ownerToken)).toBeNull();
+    expect(f.requests()).toBe(0);
+    await native.stop(attemptID);
+    expect((await f.turns.beginDispatch(claimed.id, claimed.ownerToken))?.id).toBe(claimed.id);
+    expect(f.requests()).toBe(0);
+  } finally {
+    try {
+      await native?.close();
+      await database.client.end({ timeout: 0 });
+      await host.dispose();
+    } finally {
+      owned?.restoreEnvironment();
+    }
   }
 });
 

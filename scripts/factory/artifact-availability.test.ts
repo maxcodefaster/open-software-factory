@@ -146,7 +146,7 @@ test("an unavailable Registry fails within the observation window without retryi
   }
 });
 
-test("startup observes all six role manifests, and a missing role stops the check without retrying", async () => {
+test("startup observes every required role manifest, and a missing role stops the check without retrying", async () => {
   const references = Object.fromEntries(
     runtimeArtifactNames.map((name) => [name, `registry.invalid/open-factory/${name}@${digest}`]),
   );

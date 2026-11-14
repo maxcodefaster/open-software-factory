@@ -36,6 +36,21 @@ func prebuildCommand(ctx context.Context, home, name string, arguments ...string
 	return command
 }
 
+func prebuildSourceGit(ctx context.Context, repository string, args ...string) (string, error) {
+	if ctx.Value(nativePrebuildTransportKey{}) == true {
+		// `git status` can refresh the index even during recipe observation.
+		// Native Source keeps its development owner and the existing scrubbed
+		// Git boundary, not the privileged Parent's UID or registry credentials.
+		command := workspaceGitCommand(context.WithValue(ctx, nativeCommitGitKey{}, true), repository, args...)
+		out, err := command.Output()
+		if err != nil || len(out) > 4096 {
+			return "", errors.New("prebuild exact repository input is unavailable")
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+	return prebuildGit(ctx, repository, args...)
+}
+
 func prebuildGit(ctx context.Context, repository string, args ...string) (string, error) {
 	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "safe.directory=" + repository, "-C", repository}
 	out, err := prebuildCommand(ctx, "/tmp", "git", append(base, args...)...).Output()

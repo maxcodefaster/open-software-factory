@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +16,57 @@ import (
 )
 
 type bootstrap struct {
+	InputStop *struct {
+		Version         int    `json:"version"`
+		OpenCodeVersion string `json:"openCodeVersion"`
+	} `json:"inputStop,omitempty"`
 	SourceHandoff bool                          `json:"sourceHandoff,omitempty"`
 	Assignment    Assignment                    `json:"assignment"`
 	Source        workspacefiles.Initialization `json:"source"`
 	ParentToken   string                        `json:"parentToken"`
 	ChildToken    string                        `json:"childToken"`
 	FactoryCA     string                        `json:"factoryCA"`
+}
+
+func readNativeRestored(b bootstrap, actorUID string) (sourceRestored, error) {
+	var restored sourceRestored
+	data, err := os.ReadFile(filepath.Join(b.Assignment.ConnectorStateDir, "source-restored.json"))
+	if err != nil || json.Unmarshal(data, &restored) != nil || restored.ActorUID != actorUID ||
+		restored.AttemptID != b.Assignment.RuntimeAttemptID || restored.Generation != b.Assignment.Generation ||
+		restored.WriterEpoch == 0 || restored.ChangeWriterEpoch == 0 {
+		return restored, errors.New("Source was not restored for this exact cold bootstrap")
+	}
+	if restored.InputStop != nil && (b.InputStop == nil || b.InputStop.Version != 1 ||
+		restored.InputStop.validate() != nil || restored.InputStop.AttemptID != restored.AttemptID ||
+		restored.InputStop.Version != b.InputStop.OpenCodeVersion || !restored.ReadOnly) {
+		return restored, errors.New("input Stop cold admission is invalid")
+	}
+	return restored, nil
+}
+
+func RunSubstrateBootstrapMode(output io.Writer) error {
+	var b bootstrap
+	d := json.NewDecoder(strings.NewReader(os.Getenv("FACTORY_SUBSTRATE_BOOTSTRAP")))
+	d.DisallowUnknownFields()
+	if d.Decode(&b) != nil || b.Assignment.Validate() != nil {
+		return errors.New("invalid native cold mode")
+	}
+	mode := "docker"
+	if b.SourceHandoff {
+		uid, err := os.ReadFile("/run/ate/identity/uid")
+		if err != nil {
+			return err
+		}
+		restored, err := readNativeRestored(b, strings.TrimSpace(string(uid)))
+		if err != nil {
+			return err
+		}
+		if restored.InputStop != nil {
+			mode = "input-stop"
+		}
+	}
+	_, err := fmt.Fprintln(output, mode)
+	return err
 }
 
 func RunSubstrateParent(ctx context.Context) error {
@@ -64,6 +111,18 @@ func RunSubstrateParent(ctx context.Context) error {
 	os.Setenv("GIT_SSL_CAINFO", ca)
 	os.Setenv("NODE_EXTRA_CA_CERTS", ca)
 	os.Setenv("FACTORY_CONNECTOR_CA_FILE", ca)
+	var restored sourceRestored
+	if b.SourceHandoff {
+		restored, err = readNativeRestored(b, strings.TrimSpace(string(uid)))
+		if err != nil {
+			return err
+		}
+		if restored.InputStop != nil {
+			// This branch precedes checkout/initialization and never calls
+			// RunParent, private Docker, Dev Containers or Project hooks.
+			return runNativeInputStopParent(ctx, b, restored)
+		}
+	}
 	initCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	err = workspacefiles.InitializeActor(initCtx, "/home/rootless/persist", b.Source)
 	cancel()
@@ -77,11 +136,6 @@ func RunSubstrateParent(ctx context.Context) error {
 	ownerEpoch := uint64(1)
 	readOnly := false
 	if b.SourceHandoff {
-		var restored sourceRestored
-		file, readErr := os.ReadFile(filepath.Join(b.Assignment.ConnectorStateDir, "source-restored.json"))
-		if readErr != nil || json.Unmarshal(file, &restored) != nil || restored.ActorUID != strings.TrimSpace(string(uid)) || restored.WriterEpoch == 0 || restored.ChangeWriterEpoch == 0 {
-			return errors.New("Source was not restored before Docker startup")
-		}
 		ownerEpoch, writerEpoch, readOnly = restored.WriterEpoch, restored.ChangeWriterEpoch, restored.ReadOnly
 	}
 	handler, closeSource, err := startNativeSource(ctx, b.Source.WorkspaceID, b.Assignment.Generation, ownerEpoch, writerEpoch, readOnly, b.Assignment.ConnectorStateDir, cancelSource)

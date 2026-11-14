@@ -5,7 +5,7 @@ import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repositor
 import { workspaceAuthorityIn } from "../access/workspace";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
-import { runtimeRepositoryCloneURL } from "../runtime/endpoints";
+import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
 import type { createWorkspaceCollaboration } from "./collaboration";
 import { personalGitStatus } from "./personal-git";
@@ -23,6 +23,7 @@ type Saved = {
   changeID: string;
   attemptID: string;
   repositoryURL: string;
+  nativeIntent: unknown;
   branch: string;
   base: string;
   authorName: string;
@@ -53,26 +54,31 @@ export function createWorkspaceSubmission(
     const [row] = await database.client<
       Saved[]
     >`SELECT workspace.id AS "workspaceID",workspace.change_id AS "changeID",change.runtime_attempt_id AS "attemptID",
-      project.repository_url AS "repositoryURL",change.branch_name AS branch,change.base_sha AS base,person.name AS "authorName",person.email AS "authorEmail"
+      project.repository_url AS "repositoryURL",binding.intent AS "nativeIntent",change.branch_name AS branch,change.base_sha AS base,person.name AS "authorName",person.email AS "authorEmail"
       FROM factory.development_workspace workspace JOIN factory.change change ON change.id=workspace.change_id
+      JOIN factory.runtime_attempt attempt ON attempt.id=change.runtime_attempt_id AND attempt.workspace_id=workspace.id
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
       JOIN factory.project project ON project.id=workspace.project_id JOIN auth."user" person ON person.id=${userID}
-      WHERE workspace.id=${workspaceID} AND workspace.kind='ticket' AND change.state IN ('active','starting','failed') AND change.cancel_requested_at IS NULL`;
+      WHERE workspace.id=${workspaceID} AND workspace.kind='ticket' AND change.state IN ('active','starting','failed') AND change.cancel_requested_at IS NULL
+        AND attempt.state='ready' AND attempt.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id AND session.stop_pending)`;
     if (!row || !hub.connected(row.attemptID))
       throw new CommandError(
         "conflict",
         "Start the selected Ticket Workspace before submitting saved source",
       );
+    substrateRepositoryCloneURL(row.repositoryURL, row.nativeIntent);
     return row;
   }
   async function row(id: string) {
     const [result] = await database.client<
       Operation[]
     >`SELECT operation.id,submission.workspace_id AS "workspaceID",submission.actor_id AS "actorID",operation.change_id AS "changeID",
-      operation.runtime_attempt_id AS "attemptID",project.repository_url AS "repositoryURL",operation.branch_name AS branch,operation.integration_base_sha AS base,
+      operation.runtime_attempt_id AS "attemptID",submission.repository_url AS "repositoryURL",binding.intent AS "nativeIntent",operation.branch_name AS branch,operation.integration_base_sha AS base,
       operation.expected_parent_sha AS "expectedHead",submission.remote_head AS "remoteHead",operation.commit_message AS message,operation.state,operation.commit_sha AS "commitSHA",
       submission.prepare_attempted_at IS NOT NULL AS attempted,submission.writer_epoch::text AS epoch,person.name AS "authorName",person.email AS "authorEmail"
       FROM factory.workspace_submission submission JOIN factory.change_commit_operation operation ON operation.id=submission.id
-      JOIN factory.change change ON change.id=operation.change_id JOIN factory.project project ON project.id=change.project_id
+      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=operation.runtime_attempt_id
       JOIN auth."user" person ON person.id=submission.actor_id WHERE submission.id=${id}`;
     if (!result) throw new CommandError("not-found", "Workspace submission not found");
     return result;
@@ -104,6 +110,10 @@ export function createWorkspaceSubmission(
     op: Operation,
     action: "git-prepare-commit" | "git-observe-commit" | "git-push",
   ) {
+    const repositoryURL =
+      action === "git-push"
+        ? substrateRepositoryCloneURL(op.repositoryURL, op.nativeIntent)
+        : undefined;
     return hub.parentOperation(
       op.attemptID,
       {
@@ -117,7 +127,7 @@ export function createWorkspaceSubmission(
           ? {
               commitSha: op.commitSHA ?? "",
               branch: op.branch,
-              repositoryURL: runtimeRepositoryCloneURL(op.repositoryURL),
+              repositoryURL: repositoryURL ?? "",
               username: credentials.username,
               password: credentials.password,
             }
@@ -129,18 +139,30 @@ export function createWorkspaceSubmission(
           await workspaceAuthorityIn(sql, op.workspaceID, op.actorID, true);
           if (writer.state !== "unassigned" || writer.epoch !== op.epoch || !writer.available)
             throw new CommandError("conflict", "Shared submission authority changed");
-          const [active] =
-            await sql`SELECT operation.id FROM factory.change_commit_operation operation
+          const [active] = await sql<
+            { id: string; repositoryURL: string; nativeIntent: unknown }[]
+          >`SELECT operation.id,project.repository_url AS "repositoryURL",binding.intent AS "nativeIntent"
+              FROM factory.change_commit_operation operation
               JOIN factory.change change ON change.id=operation.change_id
+              JOIN factory.project project ON project.id=change.project_id
               JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+              JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
               WHERE operation.id=${op.id} AND operation.runtime_attempt_id=${op.attemptID}
                 AND change.runtime_attempt_id=attempt.id AND attempt.state='ready'
-                AND operation.state=${action === "git-push" ? "push-intended" : "commit-intended"}`;
+                AND attempt.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+                AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id AND session.stop_pending)
+                AND operation.state=${action === "git-push" ? "push-intended" : "commit-intended"}
+              FOR SHARE OF attempt,project`;
           if (!active)
             throw new CommandError(
               "conflict",
               "Submission dispatch no longer matches its saved intent",
             );
+          if (
+            substrateRepositoryCloneURL(active.repositoryURL, active.nativeIntent) !==
+            op.repositoryURL
+          )
+            throw new CommandError("conflict", "Submission destination changed before dispatch");
           send();
         });
       },
@@ -224,8 +246,9 @@ export function createWorkspaceSubmission(
                 VALUES(${input.requestID},${saved.changeID},${saved.attemptID},(SELECT COALESCE(max(sequence),0)+1 FROM factory.change_commit_operation WHERE change_id=${saved.changeID}),
                   ${saved.branch},${input.expectedHead},${saved.base},${input.message},${`workspace:${input.requestID}`},'commit-intended',${userID},'workspace')`;
               await sql`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,turn_id=NULL,epoch=epoch+1,updated_at=now() WHERE change_id=${saved.changeID}`;
-              await sql`INSERT INTO factory.workspace_submission(id,workspace_id,actor_id,writer_epoch,remote_head)
-                VALUES(${input.requestID},${input.workspaceID},${userID},${writer.epoch}::bigint+1,${input.expectedRemoteHead})`;
+              await sql`INSERT INTO factory.workspace_submission(id,workspace_id,actor_id,writer_epoch,remote_head,repository_url)
+                VALUES(${input.requestID},${input.workspaceID},${userID},${writer.epoch}::bigint+1,${input.expectedRemoteHead},
+                  ${substrateRepositoryCloneURL(saved.repositoryURL, saved.nativeIntent)})`;
             });
           }
           let op = await row(input.requestID);

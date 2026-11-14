@@ -1,22 +1,10 @@
 import { expect, test } from "bun:test";
 import { composeProject, parseInstallation, requireOwnedResource } from "./installation";
-import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
-
-test("existing or unobservable runtime namespaces prevent reset", async () => {
-  await expect(
-    requireRuntimeNamespacesAbsent(["factory-workspace-123456abcdef"], async () => true),
-  ).rejects.toThrow("Reset refused");
-  await expect(
-    requireRuntimeNamespacesAbsent(["factory-workspace-123456abcdef"], async () => {
-      throw new Error("namespace observation failed");
-    }),
-  ).rejects.toThrow("observation failed");
-  await requireRuntimeNamespacesAbsent(["factory-workspace-123456abcdef"], async () => false);
-});
+import { resetDisposable } from "./reset";
 
 const installation = parseInstallation(
   {
-    version: 1,
+    version: 2,
     disposable: true,
     name: "release-proof",
     owner: crypto.randomUUID(),

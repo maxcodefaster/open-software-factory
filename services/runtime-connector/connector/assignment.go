@@ -17,10 +17,6 @@ import (
 
 const AssignmentVersion = 1
 
-// unassignedControlURL marks a Project preparation assignment that has no
-// Factory connection and never dials.
-const unassignedControlURL = "ws://unassigned.invalid/"
-
 var (
 	identityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	channelPattern  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -28,37 +24,37 @@ var (
 )
 
 type Assignment struct {
-	Version                   int                 `json:"version"`
-	RuntimeAttemptID          string              `json:"runtimeAttemptId"`
-	Generation                uint64              `json:"generation"`
-	WorkspaceFolder           string              `json:"workspaceFolder"`
-	RemoteWorkspaceFolder     string              `json:"remoteWorkspaceFolder"`
-	RepositoryURL             string              `json:"repositoryUrl"`
-	RepositoryIdentity        string              `json:"repositoryIdentity"`
-	PreserveWorkspace         bool                `json:"preserveWorkspace"`
-	Revision                  string              `json:"revision"`
-	DevcontainerPath          string              `json:"devcontainerPath"`
-	ComposeProjectName        string              `json:"composeProjectName"`
-	ControlURL                string              `json:"controlUrl"`
-	Channels                  []Channel           `json:"channels"`
-	Processes                 []Process           `json:"processes"`
-	ConnectorStateDir         string              `json:"connectorStateDir,omitempty"`
-	BrowserToolsImage         string              `json:"browserToolsImage,omitempty"`
-	EnvironmentVersion        *uint64             `json:"environmentVersion,omitempty"`
-	RuntimeEnvironment        map[string]string   `json:"-"`
-	EnvironmentSecretsFile    string              `json:"-"`
-	DockerConfigDirectory     string              `json:"-"`
-	RegistryCAFile            string              `json:"-"`
-	Prebuild                  *PrebuildAssignment `json:"prebuild,omitempty"`
-	EffectiveConfiguration    string              `json:"-"`
-	PrebuildCacheImage        string              `json:"-"`
-	PreparedImage             *PrebuildResult     `json:"preparedImage,omitempty"`
-	PublicImageBuild          bool                `json:"-"`
-	BuildEnvironmentSHA256    string              `json:"-"`
-	DeferRuntimeProcesses     bool                `json:"deferRuntimeProcesses,omitempty"`
-	containerOrigin           *containerOrigin
-	preparedRootFSImage       string
-	nativeDependencyReference string
+	Version                     int                 `json:"version"`
+	RuntimeAttemptID            string              `json:"runtimeAttemptId"`
+	Generation                  uint64              `json:"generation"`
+	WorkspaceFolder             string              `json:"workspaceFolder"`
+	RemoteWorkspaceFolder       string              `json:"remoteWorkspaceFolder"`
+	RepositoryURL               string              `json:"repositoryUrl"`
+	RepositoryIdentity          string              `json:"repositoryIdentity"`
+	PreserveWorkspace           bool                `json:"preserveWorkspace"`
+	Revision                    string              `json:"revision"`
+	DevcontainerPath            string              `json:"devcontainerPath"`
+	ComposeProjectName          string              `json:"composeProjectName"`
+	ControlURL                  string              `json:"controlUrl"`
+	Channels                    []Channel           `json:"channels"`
+	Processes                   []Process           `json:"processes"`
+	ConnectorStateDir           string              `json:"connectorStateDir,omitempty"`
+	BrowserToolsImage           string              `json:"browserToolsImage,omitempty"`
+	EnvironmentVersion          *uint64             `json:"environmentVersion,omitempty"`
+	RuntimeEnvironment          map[string]string   `json:"-"`
+	EnvironmentSecretsFile      string              `json:"-"`
+	DockerConfigDirectory       string              `json:"-"`
+	RegistryCAFile              string              `json:"-"`
+	Prebuild                    *PrebuildAssignment `json:"prebuild,omitempty"`
+	EffectiveConfiguration      string              `json:"-"`
+	PrebuildCacheImage          string              `json:"-"`
+	prebuildInputIdentity       string
+	prebuildConfigurationSHA256 string
+	PublicImageBuild            bool   `json:"-"`
+	BuildEnvironmentSHA256      string `json:"-"`
+	containerOrigin             *containerOrigin
+	preparedRootFSImage         string
+	nativeDependencyReference   string
 	// Set only by the verified native bootstrap, never decoded from Project JSON.
 	nativeActorUID       string
 	nativeRetainedSource bool
@@ -118,18 +114,6 @@ func ReadAssignment(path string) (Assignment, error) {
 }
 
 func (assignment Assignment) Validate() error {
-	if assignment.PreparedImage != nil {
-		key, err := projectImageKey(assignment.PreparedImage.Image)
-		if err != nil || !regexpIdentity(assignment.PreparedImage.Identity) ||
-			!strings.HasSuffix(strings.Split(key, "@")[0], "/"+assignment.RepositoryIdentity) ||
-			assignment.ControlURL != unassignedControlURL ||
-			assignment.Prebuild != nil || assignment.EnvironmentVersion != nil {
-			return errors.New("prepared image must be an exact credential-free Project artifact")
-		}
-	}
-	if assignment.DeferRuntimeProcesses && assignment.ControlURL != unassignedControlURL {
-		return errors.New("required Runtime processes may be deferred only in unassigned Project preparation")
-	}
 	if assignment.Prebuild != nil && (assignment.Prebuild.ID == "" || (assignment.Prebuild.Platform != "native" && assignment.Prebuild.Platform != "linux/arm64" && assignment.Prebuild.Platform != "linux/amd64") || !strings.HasSuffix(assignment.Prebuild.ImageRepository, "/"+assignment.RepositoryIdentity)) {
 		return errors.New("Invalid Project prebuild assignment")
 	}
@@ -171,8 +155,8 @@ func (assignment Assignment) Validate() error {
 		return errors.New("control URL must be an absolute ws or wss URL without user information")
 	}
 	// The Bearer capability crosses this connection. Plain ws is limited to the
-	// unassigned Project preparation placeholder and local or private endpoints.
-	if control.Scheme == "ws" && assignment.ControlURL != unassignedControlURL && !repositoryurl.PrivateHost(control.Hostname()) {
+	// local or private installation endpoints.
+	if control.Scheme == "ws" && !repositoryurl.PrivateHost(control.Hostname()) {
 		return errors.New("control URL must use wss unless it targets a loopback or private installation endpoint")
 	}
 	if len(assignment.Channels) == 0 || len(assignment.Channels) > 8 {

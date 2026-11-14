@@ -1,34 +1,59 @@
 import { describe, expect, test } from "bun:test";
-import { migrationFiles, pendingMigrations, readMigration, shippedMigrations } from "./migrations";
+import { createHash } from "node:crypto";
+import {
+  baselineDigest,
+  migrationFiles,
+  pendingMigrations,
+  readMigration,
+  shippedMigrations,
+} from "./migrations";
 
-describe("migration sequence", () => {
-  test("shipped files are one contiguous sequence that registers its own version", async () => {
+describe("native Greenfield baseline", () => {
+  test("ships exactly one transactional baseline with its exact SQL fingerprint", async () => {
     const files = await shippedMigrations();
-    expect(files[0]?.name).toBe("0001_baseline.sql");
-    for (const file of files) {
-      const sql = await readMigration(file);
-      expect(sql).toMatch(
-        new RegExp(
-          `INSERT INTO factory\\.schema_migration\\(version\\)\\s*VALUES\\s*\\(${file.version}\\)`,
-        ),
-      );
-      if (file.version > 1) {
-        expect(sql.trimStart().startsWith("BEGIN;")).toBe(true);
-        expect(sql.trimEnd().endsWith("COMMIT;")).toBe(true);
-      }
-    }
+    expect(files).toEqual([{ name: "0001_baseline.sql", version: 1 }]);
+    const file = files[0];
+    if (!file) throw new Error("Missing native baseline");
+    const sql = await readMigration(file);
+    expect(sql).toContain("\nBEGIN;\n");
+    expect(sql.endsWith("\nCOMMIT;\n")).toBe(true);
+    expect(baselineDigest(sql)).toMatch(/^[a-f0-9]{64}$/);
+    expect(sql.includes("protect_substrate_source_preservation")).toBe(false);
+    expect(/\bpreservation\b/.test(sql)).toBe(false);
+    expect(pendingMigrations(files, [1])).toEqual([]);
   });
 
-  test("applies only newer files and refuses unknown history or downgrades", () => {
-    const files = migrationFiles(["0001_a.sql", "0002_b.sql", "0003_c.sql", "notes.txt"]);
-    expect(pendingMigrations(files, [1]).map((file) => file.version)).toEqual([2, 3]);
-    expect(pendingMigrations(files, [1, 2, 3])).toEqual([]);
-    expect(() => pendingMigrations(files, [1, 3])).toThrow("Greenfield baseline");
-    expect(() => pendingMigrations(files, [2])).toThrow("Greenfield baseline");
-    expect(() => pendingMigrations(files, [1, 2, 3, 4])).toThrow("downgrade");
+  test("refuses historical sequences, unknown files and versions", () => {
+    const files = migrationFiles(["0001_baseline.sql", "notes.txt"]);
+    for (const names of [
+      [],
+      ["0001_a.sql"],
+      ["0001_baseline.sql", "0002_more.sql"],
+      ["0001_baseline.sql", "0001_duplicate.sql"],
+      ["0002_baseline.sql"],
+    ])
+      expect(() => migrationFiles(names)).toThrow("one Greenfield baseline");
+    for (const applied of [[], [0], [2], [1, 2], [1, 1]])
+      expect(() => pendingMigrations(files, applied)).toThrow("Greenfield baseline");
+    expect(() => pendingMigrations([{ name: "0002_baseline.sql", version: 2 }], [1])).toThrow(
+      "Greenfield baseline",
+    );
   });
 
-  test("a gap in the shipped files is a build error", () => {
-    expect(() => migrationFiles(["0001_a.sql", "0003_c.sql"])).toThrow("contiguous");
+  test("detects edited SQL, missing or duplicate registration and unverified trailing commands", () => {
+    const prefix = "BEGIN;\nSELECT 1;\n";
+    const hash = createHash("sha256").update(prefix).digest("hex");
+    const registration = `-- Baseline registration.\nINSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'${hash}');\nCOMMIT;\n`;
+    const sql = prefix + registration;
+    expect(baselineDigest(sql)).toBe(hash);
+    for (const altered of [
+      sql.replace("SELECT 1", "SELECT 2"),
+      prefix,
+      sql + registration,
+      `${sql}DROP SCHEMA factory CASCADE;\n`,
+      sql.replace(hash, "0".repeat(64)),
+      sql.replace("VALUES(1,", "VALUES(2,"),
+    ])
+      expect(() => baselineDigest(altered)).toThrow("exact SQL source");
   });
 });

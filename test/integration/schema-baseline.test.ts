@@ -1,16 +1,30 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
 import { is } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
+import { baselineDigest, readMigration, shippedMigrations } from "../../packages/db/src/migrations";
 import * as schema from "../../packages/db/src/schema";
-import { factoryProcess } from "../fixtures/factory-process";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { verificationEnvironment } from "../../scripts/testing/test-prerequisites";
+import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 
-const digest = (sql: string) => createHash("sha256").update(sql).digest("hex");
+async function initialize(url: string) {
+  const child = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {
+    env: { ...verificationEnvironment(process.env), DATABASE_URL: url },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [status, stderr, stdout] = await Promise.all([
+    child.exited,
+    new Response(child.stderr).text(),
+    new Response(child.stdout).text(),
+  ]);
+  return { status, stderr, stdout };
+}
 
 async function dump(container: string, database: string) {
-  const process = Bun.spawn(
+  const child = Bun.spawn(
     [
       "docker",
       "exec",
@@ -29,9 +43,9 @@ async function dump(container: string, database: string) {
     { stdout: "pipe", stderr: "pipe" },
   );
   const [output, error, status] = await Promise.all([
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-    process.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
   ]);
   if (status !== 0) throw new Error(`Owned schema dump failed: ${error}`);
   return output
@@ -42,21 +56,34 @@ async function dump(container: string, database: string) {
     .trim();
 }
 
-test("fresh and repeated installs preserve typed schema, allowed Zero tables and database invariants", async () => {
-  const factory = await factoryProcess();
-  const database = factory.connect(1);
-  const candidateURL = new URL(factory.databaseURL);
-  const probeName = `baseline_probe_${factory.id.replaceAll("-", "")}`;
-  candidateURL.pathname = `/${probeName}`;
-  const candidate = postgres(candidateURL.toString(), { max: 1 });
-  let created = false;
+async function fingerprint() {
+  const file = (await shippedMigrations())[0];
+  if (!file) throw new Error("Missing native baseline");
+  return baselineDigest(await readMigration(file));
+}
+
+test("fresh concurrent initialization and repeated startup preserve the native schema, Source and approvals", async () => {
+  const server = await ownedPostgresServer();
+  const target = await ownedTestDatabase(server.identity, crypto.randomUUID(), false, "template0");
+  const sql = postgres(target.url, { max: 1 });
+  const container = `factory-test-postgres-${server.identity.owner}`;
+  const name = new URL(target.url).pathname.slice(1);
+  const actorID = crypto.randomUUID(),
+    projectID = crypto.randomUUID();
+  const workspaceID = crypto.randomUUID(),
+    actorUID = crypto.randomUUID();
+  const ticketID = crypto.randomUUID(),
+    revisionID = crypto.randomUUID(),
+    approvalID = crypto.randomUUID();
+  const attemptID = runtimeIdentity(workspaceID, 1).attemptID;
   try {
-    const shared = process.env["FACTORY_TEST_POSTGRES"];
-    const container = shared
-      ? `factory-test-postgres-${(JSON.parse(shared) as { owner: string }).owner}`
-      : `factory-owned-commit-process-${factory.id}`;
-    const original = await dump(container, new URL(factory.databaseURL).pathname.slice(1));
-    const publications = await database.client<{ schemaname: string; tablename: string }[]>`
+    const installs = await Promise.all([initialize(target.url), initialize(target.url)]);
+    for (const install of installs) expect(install).toEqual({ status: 0, stderr: "", stdout: "" });
+    const originalSchema = await dump(container, name);
+    expect([...(await sql`SELECT version,source_digest FROM factory.schema_migration`)]).toEqual([
+      { version: 1, source_digest: await fingerprint() },
+    ]);
+    const publications = await sql<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables
       WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
     expect(publications.map((table) => `${table.schemaname}.${table.tablename}`)).toEqual([
@@ -69,190 +96,166 @@ test("fresh and repeated installs preserve typed schema, allowed Zero tables and
       "factory.ticket",
       "factory.ticket_dependency",
     ]);
-    await database.client.unsafe(`CREATE DATABASE ${probeName}`);
-    created = true;
-    const sql = await readFile("packages/db/migrations/0001_baseline.sql", "utf8");
-    await candidate.unsafe(sql);
-    const baselineDigest = digest(await dump(container, probeName));
-    const freshPublication = await candidate<{ schemaname: string; tablename: string }[]>`
-      SELECT schemaname,tablename FROM pg_publication_tables
-      WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
-    expect([...freshPublication]).toEqual([...publications]);
-    expect([...(await candidate`SELECT version FROM factory.schema_migration`)]).toEqual([
-      { version: 1 },
-    ]);
-    await candidate`INSERT INTO factory.factorybox_worker(
-      profile,runtime_host_image,node_name,namespace_uid,source_claim_uid,claim_uid,pod_uid,create_attempted)
-      VALUES('{"retained":"original"}'::jsonb,${`registry.invalid/runtime@sha256:${"a".repeat(64)}`},
-        'owned-node','original-namespace','original-source','original-store','original-pod',true)`;
-    const [retainedWorker] = await candidate`SELECT * FROM factory.factorybox_worker`;
-    if (!retainedWorker) throw new Error("Missing retained baseline worker");
-    const actorID = crypto.randomUUID();
-    const projectID = crypto.randomUUID();
-    const attemptID = crypto.randomUUID();
-    await candidate`INSERT INTO auth."user"(id,name,email)
-      VALUES(${actorID},'Owned retained baseline',${`${actorID}@baseline.test`})`;
-    await candidate`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,
-      devcontainer_path,created_by,desktop_background_key)
-      VALUES(${projectID},${`baseline-${projectID}`},'Owned retained baseline',
-        'https://example.invalid/baseline.git','main','.devcontainer/devcontainer.json',
-        ${actorID},'river-landscape')`;
-    await candidate`INSERT INTO factory.runtime_attempt(
-      id,project_id,isolated_kind,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${attemptID},${projectID},'staging',1,${"a".repeat(40)},'failed',
-        ${"b".repeat(64)},${"c".repeat(64)},now(),${actorID})`;
-    const [retainedAttempt] =
-      await candidate`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`;
-    if (!retainedAttempt) throw new Error("Missing retained baseline Runtime Attempt");
     for (const table of Object.values(schema)) {
       if (!is(table, PgTable)) continue;
       const config = getTableConfig(table);
-      await candidate.unsafe(
+      await sql.unsafe(
         `SELECT ${config.columns.map((column) => `"${column.name}"`).join(",")} FROM "${config.schema}"."${config.name}" LIMIT 0`,
       );
     }
-    let upgradedDigest = "";
-    for (let run = 0; run < 2; run++) {
-      const migration = Bun.spawn(
-        [process.execPath, "--no-env-file", "packages/db/src/migrate.ts"],
-        {
-          env: { ...process.env, DATABASE_URL: candidateURL.toString() },
-          stdout: "ignore",
-          stderr: "pipe",
-        },
-      );
-      const [error, status] = await Promise.all([
-        new Response(migration.stderr).text(),
-        migration.exited,
+    expect(await sql`SELECT singleton FROM factory.installation_maintenance`).toHaveLength(1);
+    expect(await sql`SELECT id FROM factory.attachment_storage`).toHaveLength(1);
+    for (const table of [
+      "factorybox_worker",
+      "factorybox_worker_admission",
+      "factorybox_runtime",
+      "factorybox_lifecycle_operation",
+      "execution_slot",
+      "workspace_source",
+      "runtime_artifact_intent",
+      "verification_compute_placement",
+    ])
+      expect([...(await sql`SELECT to_regclass(${`factory.${table}`}) AS relation`)]).toEqual([
+        { relation: null },
       ]);
-      if (status !== 0) throw new Error(`Repeated owned migration failed: ${error}`);
-      const currentDigest = digest(await dump(container, probeName));
-      if (run === 0) upgradedDigest = currentDigest;
-      else expect(currentDigest).toBe(upgradedDigest);
-      expect([...(await candidate`SELECT * FROM factory.factorybox_worker`)]).toEqual([
-        retainedWorker,
-      ]);
-      const [upgradedAttempt] =
-        await candidate`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`;
-      if (!upgradedAttempt) throw new Error("Upgrade lost the retained Runtime Attempt");
-      const {
-        factorybox_admission_id,
-        ready_at,
-        app_ready_at,
-        resume_failed_at,
-        ...unchangedAttempt
-      } = upgradedAttempt;
-      expect(factorybox_admission_id).toBe(retainedWorker["id"]);
-      // Existing attempts keep no readiness timing.
-      expect(ready_at).toBeNull();
-      expect(app_ready_at).toEqual({});
-      expect(resume_failed_at).toBeNull();
-      expect(unchangedAttempt).toEqual(retainedAttempt);
-      expect([
-        ...(await candidate`SELECT id,worker_id,profile,runtime_host_image,claim_uid,pod_uid,
-          identity,create_attempted,previous_id,retired_at FROM factory.factorybox_worker_admission`),
-      ]).toEqual([
-        {
-          id: retainedWorker["id"],
-          worker_id: retainedWorker["id"],
-          profile: { retained: "original" },
-          runtime_host_image: `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
-          claim_uid: "original-store",
-          pod_uid: "original-pod",
-          identity: null,
-          create_attempted: true,
-          previous_id: null,
-          retired_at: null,
-        },
-      ]);
-    }
-    expect(upgradedDigest).not.toBe(baselineDigest);
-    expect(upgradedDigest).toBe(digest(original));
-    const versions = (await readdir("packages/db/migrations"))
-      .filter((file) => /^\d{4}_.+\.sql$/.test(file))
-      .map((file) => ({ version: Number(file.slice(0, 4)) }))
-      .sort((a, b) => a.version - b.version);
-    expect([
-      ...(await candidate`SELECT version FROM factory.schema_migration ORDER BY version`),
-    ]).toEqual(versions);
-    await candidate`INSERT INTO auth."user"(id,name,email,email_verified)
-      VALUES ('01994a7d-0000-7000-8000-000000000001','Owned baseline invariant probe','baseline@test.invalid',true)`;
-    const invariants = Bun.spawn(
-      [process.execPath, "--no-env-file", "scripts/integration/postgres.ts"],
-      {
-        env: { ...process.env, DATABASE_URL: candidateURL.toString() },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-    const [output, error, status] = await Promise.all([
-      new Response(invariants.stdout).text(),
-      new Response(invariants.stderr).text(),
-      invariants.exited,
-    ]);
-    if (status !== 0) throw new Error(`Fresh owned baseline invariants failed: ${error}`);
-    expect(output).toContain("clean baseline invariants passed");
-    expect(await candidate`SELECT singleton FROM factory.installation_maintenance`).toHaveLength(1);
-    expect(await candidate`SELECT id FROM factory.attachment_storage`).toHaveLength(1);
-    console.log(
-      JSON.stringify({
-        schemaBaselineDigest: digest(original),
-        bytes: original.length,
-        publicationTables: publications.length,
-      }),
-    );
-  } finally {
-    await candidate.end({ timeout: 2 });
-    if (created) await database.client.unsafe(`DROP DATABASE ${probeName} WITH (FORCE)`);
-    await database.client.end({ timeout: 2 });
-    await factory.dispose();
-  }
-}, 60000);
+    expect(
+      await sql`
+      SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='factory'
+        AND (column_name LIKE '%factorybox%' OR (table_name='substrate_source' AND column_name='preservation')
+          OR (table_name IN ('runtime_attempt','development_workspace')
+          AND column_name IN ('kubernetes_namespace','namespace_uid','pod_uid','claim_uid',
+            'volume_name','cleanup_job_name','cleanup_job_uid')))`,
+    ).toHaveLength(0);
+    const functions = await sql<{ definition: string }[]>`
+      WITH scoped AS MATERIALIZED (
+        SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='factory' AND p.prokind='f')
+      SELECT pg_get_functiondef(oid) AS definition FROM scoped`;
+    expect(
+      functions.filter(({ definition }) =>
+        /factorybox|execution_slot|workspace_source|runtime_artifact_intent|verification_compute_placement|protect_execution_template_initial_health|protect_substrate_source_preservation/i.test(
+          definition,
+        ),
+      ),
+    ).toHaveLength(0);
 
-test.each(["historical versions", "partial schema"] as const)(
-  "Greenfield install refuses %s without deleting or rewriting existing data",
-  async (state) => {
-    const factory = await factoryProcess();
-    const database = factory.connect(1);
-    const userID = crypto.randomUUID();
-    try {
-      const originalVersions = [
-        ...(await database.client<{ version: number }[]>`
-          SELECT version FROM factory.schema_migration ORDER BY version`),
-      ];
-      expect(originalVersions[0]?.version).toBe(1);
-      await database.client`INSERT INTO auth."user"(id,name,email)
-        VALUES(${userID},'Retained owner',${`${userID}@baseline.test`})`;
-      if (state === "historical versions")
-        await database.client`UPDATE factory.schema_migration SET version=0 WHERE version=1`;
-      else await database.client`DROP TABLE factory.schema_migration`;
-      const child = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {
-        env: { ...process.env, DATABASE_URL: factory.databaseURL },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [status, error] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-      expect(status).not.toBe(0);
-      expect(error).toContain("Greenfield baseline");
-      expect([...(await database.client`SELECT name FROM auth."user" WHERE id=${userID}`)]).toEqual(
-        [{ name: "Retained owner" }],
-      );
-      if (state === "historical versions")
-        expect([
-          ...(await database.client`SELECT version FROM factory.schema_migration ORDER BY version`),
-        ]).toEqual(
-          originalVersions.map((row) => ({ version: row.version === 1 ? 0 : row.version })),
-        );
-      else {
-        const [schema] = await database.client<{ relation: string | null }[]>`
-          SELECT to_regclass('factory.schema_migration')::text AS relation`;
-        expect(schema?.relation).toBeNull();
-      }
-    } finally {
-      await database.client.end({ timeout: 2 });
-      await factory.dispose();
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO auth."user"(id,name,email)
+        VALUES(${actorID},'Owned native baseline',${`${actorID}@baseline.test`})`;
+      await tx`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${projectID},${`baseline-${projectID}`},'Owned native baseline',
+          'https://example.invalid/baseline.git','main','.devcontainer/devcontainer.json',${actorID})`;
+      await tx`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+        VALUES(${workspaceID},${projectID},'personal',${actorID},'main',${"a".repeat(40)},${actorID})`;
+      await tx`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${workspaceID},'{}')`;
+      await tx`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${attemptID},${projectID},${workspaceID},1,${"a".repeat(40)},'create-intended',
+          ${"b".repeat(64)},${"c".repeat(64)},now(),${actorID})`;
+      await tx`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
+        VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await tx`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${attemptID}`;
+      await tx`INSERT INTO factory.substrate_source(workspace_id,actor_uid) VALUES(${workspaceID},${actorUID})`;
+      await tx`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,checkpoint_id=${crypto.randomUUID()}
+        WHERE workspace_id=${workspaceID}`;
+      await tx`INSERT INTO factory.ticket(id,project_id,title,created_by)
+        VALUES(${ticketID},${projectID},'Approved saved requirement',${actorID})`;
+      const content = '{"summary":"Keep this approval pinned"}';
+      await tx`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by)
+        VALUES(${revisionID},${ticketID},1,${content},${createHash("sha256").update(content).digest("hex")},${actorID})`;
+      await tx`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by)
+        VALUES(${approvalID},${ticketID},${revisionID},${actorID})`;
+    });
+    const records = () => sql`SELECT 'account' AS kind,to_jsonb(a) AS value FROM auth."user" a
+      UNION ALL SELECT 'project',to_jsonb(p) FROM factory.project p
+      UNION ALL SELECT 'workspace',to_jsonb(w) FROM factory.development_workspace w
+      UNION ALL SELECT 'provision',to_jsonb(p) FROM factory.substrate_workspace p
+      UNION ALL SELECT 'attempt',to_jsonb(a) FROM factory.runtime_attempt a
+      UNION ALL SELECT 'binding',to_jsonb(b) FROM factory.substrate_binding b
+      UNION ALL SELECT 'source',to_jsonb(s) FROM factory.substrate_source s
+      UNION ALL SELECT 'requirement',to_jsonb(r) FROM factory.requirement_revision r
+      UNION ALL SELECT 'approval',to_jsonb(a) FROM factory.requirement_approval a
+      UNION ALL SELECT 'attachment-storage',to_jsonb(s) FROM factory.attachment_storage s
+      ORDER BY kind`;
+    const retained = await records();
+    for (let run = 0; run < 2; run++) {
+      expect(await initialize(target.url)).toEqual({ status: 0, stderr: "", stdout: "" });
+      expect(await dump(container, name)).toBe(originalSchema);
+      expect(await records()).toEqual(retained);
+      expect([...(await sql`SELECT version,source_digest FROM factory.schema_migration`)]).toEqual([
+        { version: 1, source_digest: await fingerprint() },
+      ]);
     }
-  },
-  60_000,
-);
+  } finally {
+    await sql.end({ timeout: 2 });
+    await target.dispose();
+    await server.dispose();
+  }
+}, 60_000);
+
+test("unknown history, missing registration and mismatched fingerprints refuse startup without modifying retained data", async () => {
+  const server = await ownedPostgresServer();
+  try {
+    for (const state of [
+      "historical versions",
+      "missing fingerprint",
+      "partial schema",
+      "mismatched fingerprint",
+    ]) {
+      const target = await ownedTestDatabase(
+        server.identity,
+        crypto.randomUUID(),
+        false,
+        "template0",
+      );
+      const sql = postgres(target.url, { max: 1 });
+      const container = `factory-test-postgres-${server.identity.owner}`;
+      const name = new URL(target.url).pathname.slice(1);
+      try {
+        if (state === "mismatched fingerprint") {
+          expect((await initialize(target.url)).status).toBe(0);
+          await sql`UPDATE factory.schema_migration SET source_digest=${"0".repeat(64)} WHERE version=1`;
+          await sql`INSERT INTO auth."user"(id,name,email)
+            VALUES(${crypto.randomUUID()},'Retained owner','retained@baseline.test')`;
+        } else {
+          // A stand-in for unknown history, not a supported upgrade fixture.
+          await sql.unsafe(`CREATE SCHEMA auth; CREATE SCHEMA factory;
+            CREATE TABLE auth."user"(id text PRIMARY KEY,name text);
+            INSERT INTO auth."user" VALUES('retained','Retained owner');`);
+          if (state === "historical versions") {
+            await sql.unsafe(
+              "CREATE TABLE factory.schema_migration(version integer,source_digest text)",
+            );
+            await sql`INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,${await fingerprint()}),(37,'unknown')`;
+          } else if (state === "missing fingerprint") {
+            await sql.unsafe(
+              "CREATE TABLE factory.schema_migration(version integer); INSERT INTO factory.schema_migration VALUES(1)",
+            );
+          }
+        }
+        const before = await dump(container, name);
+        const account = await sql`SELECT * FROM auth."user"`;
+        const registered =
+          state === "partial schema"
+            ? []
+            : [...(await sql`SELECT * FROM factory.schema_migration`)];
+        for (let run = 0; run < 2; run++) {
+          const result = await initialize(target.url);
+          expect(result.status).not.toBe(0);
+          expect(result.stderr).toContain(
+            state === "mismatched fingerprint" ? "baseline differs" : "Greenfield baseline",
+          );
+          expect(await sql`SELECT * FROM auth."user"`).toEqual(account);
+          expect(await dump(container, name)).toBe(before);
+          if (state !== "partial schema")
+            expect([...(await sql`SELECT * FROM factory.schema_migration`)]).toEqual(registered);
+        }
+      } finally {
+        await sql.end({ timeout: 2 });
+        await target.dispose();
+      }
+    }
+  } finally {
+    await server.dispose();
+  }
+}, 60_000);

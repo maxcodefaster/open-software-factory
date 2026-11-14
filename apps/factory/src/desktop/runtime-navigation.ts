@@ -10,7 +10,11 @@ import { plainErrorMessage, untilReachable } from "../command-error";
 import type { ActivityNavigationRequest } from "../ide-messages";
 import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
-import { ensureStaging, startFreshRuntimeAttempt } from "../server-functions/runtime";
+import {
+  ensureStaging,
+  startFreshRuntimeAttempt,
+  startPersonalWorkspace,
+} from "../server-functions/runtime";
 import {
   ensureChangeSource,
   ensurePersonalSource,
@@ -44,6 +48,29 @@ interface RuntimeNavigationDependencies {
 
 export function createRuntimeNavigation(dependencies: RuntimeNavigationDependencies) {
   const preparingPreviews = new Set<string>();
+  async function startPersonalIDE() {
+    const projectID = dependencies.selectedProjectID();
+    const tab = dependencies.activeWorkspaceTab();
+    if (
+      !projectID ||
+      !dependencies.canDevelopProject() ||
+      tab?.id !== `ide:personal:${projectID}` ||
+      tab.workspaceID
+    )
+      return;
+    await dependencies.mutate(async () => {
+      const attempt = await serverCall(startPersonalWorkspace({ data: [projectID] }));
+      if (!attempt.workspaceId)
+        throw new Error(
+          "Workspace Start is unconfirmed. Check its recorded state before retrying.",
+        );
+      const started = { ...tab, workspaceID: attempt.workspaceId, attemptID: attempt.id };
+      delete started.preparationFailure;
+      dependencies.updateWorkspaceTab(started, projectID);
+      await dependencies.refreshServerState();
+    });
+  }
+
   async function openIDETarget(target: RuntimeDockTarget) {
     if (!dependencies.canDevelopProject()) return;
     const projectID = dependencies.selectedProjectID();
@@ -288,6 +315,7 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
 
   return {
     openIDETarget,
+    startPersonalIDE,
     openChatActivity,
     openPreviewTarget,
     retryMainPreview,

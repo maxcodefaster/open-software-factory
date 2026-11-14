@@ -20,8 +20,8 @@ test.skipIf(process.env["FACTORY_RUN_STORAGE_READINESS_PROOF"] !== "1")(
     const artifacts = JSON.parse(
       await readFile(".factory/runtime-artifacts.json", "utf8"),
     ) as Record<string, string>;
-    const image = artifacts["workspace-files"];
-    if (!image) throw new Error("Published workspace-files image is required");
+    const image = artifacts["runtime-host"];
+    if (!image) throw new Error("Published runtime-host tools image is required");
     const calls: string[][] = [];
     let lostCreate = false;
     let namespaceCreates = 0;

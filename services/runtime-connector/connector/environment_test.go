@@ -320,12 +320,9 @@ func TestNativeComposeIdentityOverridesInheritedAndProjectValuesOnlyForNativeCLI
 
 func TestCredentialFreeCommandsRetainAdmittedFactoryRegistryTrust(t *testing.T) {
 	t.Setenv("NODE_EXTRA_CA_CERTS", "/foreign/inherited-ca")
-	slot, _ := preparedFixture(t)
-	if err := validatePreparedProject(*slot.Project); err != nil {
-		t.Fatal(err)
-	}
+	assignment := validAssignment()
 	for _, environment := range [][]string{
-		devcontainerEnvironment(*slot.Project),
+		devcontainerEnvironment(assignment),
 		prebuildCommand(context.Background(), "/tmp", "node", "--version").Env,
 	} {
 		count := 0

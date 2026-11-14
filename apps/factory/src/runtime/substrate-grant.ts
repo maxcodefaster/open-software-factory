@@ -1,6 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/controller";
 import { type AgentTurnTransaction, createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
@@ -94,14 +94,21 @@ export async function substrateWorkspaceGrantIn(
     FROM factory.development_workspace WHERE id=${workspaceID} AND substrate`;
   if (!workspace) throw new CommandError("forbidden", "Current native Workspace grant required");
   if (workspace.kind === "personal") {
-    if (workspace.ownerID !== userID)
-      throw new CommandError("forbidden", "Current personal Workspace grant required");
-    await projectDevelopmentAuthorityIn(sql, userID, workspace.projectID);
+    await workspaceWriteAuthorityIn(sql, workspaceID, userID);
     return workspace;
   }
   if (!workspace.changeID) throw new CommandError("forbidden", "Ticket Workspace identity missing");
   const writer = await lockChangeWriterIn(sql, workspace.changeID);
   if (!writer.available) throw new CommandError("conflict", "Ticket execution is no longer active");
+  if (newExecution) {
+    const [pendingStop] = await sql`SELECT change_id FROM factory.change_agent_session
+      WHERE change_id=${workspace.changeID} AND stop_pending`;
+    if (pendingStop)
+      throw new CommandError(
+        "conflict",
+        "Confirm the recorded Agent Stop before restarting Ticket compute",
+      );
+  }
   if (writer.state === "human") {
     await workspaceWriteAuthorityIn(sql, workspaceID, userID);
     return workspace;
@@ -163,7 +170,7 @@ export async function substrateWorkspaceGrantIn(
   return workspace;
 }
 
-export async function substrateTicketSourceIn(
+export async function substrateWorkspaceSourceIn(
   database: ReturnType<typeof createDatabase>,
   sql: AgentTurnTransaction,
   attemptID: string,
@@ -171,10 +178,10 @@ export async function substrateTicketSourceIn(
   const [scope] = await sql<{ workspaceID: string; repository: string }[]>`
     SELECT w.id AS "workspaceID",project.repository_url AS repository
     FROM factory.runtime_attempt a JOIN factory.development_workspace w
-      ON w.id=a.workspace_id AND w.substrate AND w.kind='ticket'
-        AND w.project_id=a.project_id AND w.change_id=a.change_id
+      ON w.id=a.workspace_id AND w.substrate AND w.kind IN ('personal','ticket')
+        AND w.project_id=a.project_id AND w.change_id IS NOT DISTINCT FROM a.change_id
     JOIN factory.project project ON project.id=a.project_id
-    JOIN factory.substrate_workspace provision ON provision.workspace_id=w.id
+    JOIN factory.substrate_workspace provision ON provision.workspace_id=w.id AND provision.generation=a.generation
     JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=a.id
     WHERE a.id=${attemptID} AND a.substrate AND a.state='starting' AND a.ready_at IS NULL AND a.stop_intended_at IS NULL
       AND provision.intent->>'repositoryURL'=project.repository_url
@@ -182,8 +189,7 @@ export async function substrateTicketSourceIn(
       AND binding.actor_uid IS NOT NULL AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
       AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=w.id AND newer.generation>a.generation)`;
-  if (!scope)
-    throw new CommandError("forbidden", "Current commissioned native Ticket Source grant required");
+  if (!scope) throw new CommandError("forbidden", "Current native Workspace Source grant required");
   const principal = await substrateRuntimePrincipalIn(sql, attemptID);
   await substrateWorkspaceGrantIn(database, sql, scope.workspaceID, principal, true);
   return scope.repository;

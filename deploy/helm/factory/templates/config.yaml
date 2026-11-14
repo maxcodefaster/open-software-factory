@@ -1,37 +1,5 @@
-{{- if not (has .Values.factorybox.architecture (list "arm64" "amd64")) }}
-{{- fail "factorybox.architecture must be arm64 or amd64" }}
-{{- end }}
-{{- $storeGiB := int .Values.factorybox.storeGiB }}
-{{- $minimumStoreGiB := 8 }}
-{{- if hasKey .Values.factorybox "minimumStoreGiB" }}
-{{- $minimumStoreGiB = int .Values.factorybox.minimumStoreGiB }}
-{{- if ne (toString .Values.factorybox.minimumStoreGiB) (printf "%d" $minimumStoreGiB) }}
-{{- fail "factorybox.minimumStoreGiB must be a whole number between 8 and storeGiB" }}
-{{- end }}
-{{- end }}
-{{- $claimGiB := int .Values.factorybox.claimGiB }}
-{{- $cpuRequestMilli := int .Values.factorybox.cpuRequestMilli }}
-{{- if or (ne (toString .Values.factorybox.cpuRequestMilli) (printf "%d" $cpuRequestMilli)) (lt $cpuRequestMilli 10) (gt $cpuRequestMilli 3000) }}
-{{- fail "factorybox.cpuRequestMilli must be a whole number between 10 and 3000" }}
-{{- end }}
-{{- $memoryHeadroomMiB := 2048 }}
-{{- if hasKey .Values.factorybox "memoryHeadroomMiB" }}
-{{- $memoryHeadroomMiB = int .Values.factorybox.memoryHeadroomMiB }}
-{{- if or (ne (toString .Values.factorybox.memoryHeadroomMiB) (printf "%d" $memoryHeadroomMiB)) (lt $memoryHeadroomMiB 0) }}
-{{- fail "factorybox.memoryHeadroomMiB must be a nonnegative whole number" }}
-{{- end }}
-{{- end }}
-{{- if or (lt $minimumStoreGiB 8) (gt $minimumStoreGiB $storeGiB) }}
-{{- fail "factorybox.minimumStoreGiB must be a whole number between 8 and storeGiB" }}
-{{- end }}
-{{- /* Largest whole-GiB quantity whose byte count is a safe JavaScript integer. */}}
-{{- $maxSafeStorageGiB := 8388607 }}
-{{- if or (ne (toString .Values.factorybox.storeGiB) (printf "%d" $storeGiB)) (lt $storeGiB 8) (gt $storeGiB $maxSafeStorageGiB) }}
-{{- fail "factorybox.storeGiB must be a whole number of at least 8 with a safely representable byte count" }}
-{{- end }}
-{{- if or (ne (toString .Values.factorybox.claimGiB) (printf "%d" $claimGiB)) (lt $claimGiB 32) (gt $claimGiB $maxSafeStorageGiB) (lt $claimGiB (add $storeGiB 17)) }}
-{{- fail "factorybox.claimGiB must be a safely representable whole-GiB quantity of at least 32 and at least storeGiB + 17" }}
-{{- end }}
+{{- $_ := required "substrate.workspaceConfigurationSecret is required: Factory has only native Substrate execution" .Values.substrate.workspaceConfigurationSecret }}
+{{- $_ := required "substrate.provisionerTokenSecret is required for native Workspace provisioning" .Values.substrate.provisionerTokenSecret }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -71,21 +39,6 @@ data:
   FACTORY_FORGEJO_OWNER: "factory-mutation"
   FACTORY_FORGEJO_POD: "{{ include "factory.name" . }}-forgejo-0"
   FACTORY_HELM_RELEASE: {{ .Release.Name | quote }}
-  FACTORY_EXECUTION_RESERVE_TARGET: {{ .Values.executionReserveTarget | quote }}
-  FACTORY_FACTORYBOX_WORKER_IMAGE: {{ required "factorybox.image requires an admitted private worker digest" .Values.factorybox.image | quote }}
-  FACTORY_FACTORYBOX_EXECUTABLE_SHA256: {{ required "factorybox.executableSHA256 is required" .Values.factorybox.executableSHA256 | quote }}
-  FACTORY_FACTORYBOX_CPU_REQUEST_MILLI: {{ $cpuRequestMilli | quote }}
-  FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB: {{ $memoryHeadroomMiB | quote }}
-  FACTORY_FACTORYBOX_ARCHITECTURE: {{ required "factorybox.architecture must be arm64 or amd64" .Values.factorybox.architecture | quote }}
-  FACTORY_FACTORYBOX_NODE: {{ required "factorybox.nodeName is required" .Values.factorybox.nodeName | quote }}
-  {{- with .Values.factorybox.kernel }}
-  {{- if ne (toString .) "*" }}
-  FACTORY_FACTORYBOX_KERNEL: {{ . | quote }}
-  {{- end }}
-  {{- end }}
-  FACTORY_FACTORYBOX_BOUNDED_BYTES: {{ mul $storeGiB 1073741824 | quote }}
-  FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES: {{ mul $minimumStoreGiB 1073741824 | quote }}
-  FACTORY_FACTORYBOX_CLAIM_GIB: {{ $claimGiB | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap

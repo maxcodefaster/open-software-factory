@@ -1,11 +1,20 @@
-import type { RuntimeManifestInput } from "./manifest";
+import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
 import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 
-// The same pinned OpenCode process/configuration for both concrete runtimes.
-export function runtimeAgentProcess(
-  agent: NonNullable<RuntimeManifestInput["agent"]>,
-  generation: number,
-) {
+export interface RuntimeAgentConfiguration {
+  readonly modelBaseURL: string;
+  readonly modelToken: string;
+  readonly modelID: string;
+  readonly modelIDs: readonly string[];
+  readonly provider?: "openai" | "anthropic" | "deepseek";
+  readonly reasoningEffort?: CodingReasoning;
+  readonly browserToolsImage: string;
+  readonly browserURL: string;
+  readonly browserToken: string;
+}
+
+// The pinned OpenCode process inside the Substrate-owned Dev Container.
+export function runtimeAgentProcess(agent: RuntimeAgentConfiguration, generation: number) {
   return {
     name: "agent",
     command: [

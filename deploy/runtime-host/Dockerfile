@@ -61,6 +61,16 @@ COPY deploy/opencode-server/server.mjs deploy/opencode-server/retained-events.mj
 COPY deploy/opencode-server/config ./config
 RUN chmod 0555 config && chmod 0444 config/opencode.json config/AGENTS.md
 
+FROM opencode-server AS input-stop
+WORKDIR /src
+COPY package.json bun.lock ./
+COPY patches ./patches
+RUN bun install --frozen-lockfile --ignore-scripts --production
+COPY upstream.json ./upstream.json
+COPY apps/factory/src/agent/opencode-client.ts apps/factory/src/agent/input-stop-worker.ts ./apps/factory/src/agent/
+COPY scripts/factory/build-input-stop.ts ./scripts/factory/build-input-stop.ts
+RUN bun scripts/factory/build-input-stop.ts /out
+
 FROM node AS bun-tool
 ARG TARGETARCH
 WORKDIR /opt/factory/opencode/server
@@ -139,6 +149,7 @@ COPY --from=language-node-musl /opt/node-runtime /opt/factory/language-tools/mus
 COPY --from=build-tool /opt/factory/opencode/opencode /opt/factory/opencode/opencode
 COPY --from=build-tool /opt/factory/opencode/glibc/opencode /opt/factory/opencode/glibc/opencode
 COPY --from=opencode-server /opt/factory/opencode/server /opt/factory/opencode/server
+COPY --from=input-stop /out/input-stop.mjs /opt/factory/opencode/server/input-stop.mjs
 COPY --from=bun-tool /opt/factory/opencode/glibc/bun /opt/factory/opencode/glibc/bun
 COPY --from=bun-tool /opt/factory/opencode/musl/bun /opt/factory/opencode/musl/bun
 COPY --from=verification-tool /usr/local/bin/forgejo-runner /usr/local/bin/forgejo-runner
