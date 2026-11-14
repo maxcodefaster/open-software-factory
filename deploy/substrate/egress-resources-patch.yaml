@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atenet-egress
+  namespace: ate-system
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: sdsmint
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi

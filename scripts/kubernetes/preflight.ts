@@ -179,12 +179,20 @@ export async function runPreflight(
       const pods = z
         .object({ items: z.array(podSchema) })
         .parse(
-          await json(["get", "pods", "-n", base.metadata.namespace ?? "", "-l", selector]),
+          await json([
+            "get",
+            "pods",
+            "-n",
+            base.metadata.namespace ?? "",
+            "-l",
+            `ate.dev/worker-pool=${base.metadata.name}`,
+          ]),
         ).items;
       if (
         !pods.some(
           (pod) =>
             pod.metadata.namespace === base.metadata.namespace &&
+            pod.metadata.labels["ate.dev/worker-pool"] === base.metadata.name &&
             !pod.metadata.deletionTimestamp &&
             readyNodes.some((node) => node.metadata.name === pod.spec.nodeName) &&
             pod.spec.containers.some((container) => container.image === base.spec.workerImage) &&

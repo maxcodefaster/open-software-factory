@@ -808,6 +808,16 @@ fits that minimum. Qualify the actual recipe and control-plane load.
 Apply it with the observed-object procedure below, selecting Deployment
 `ate-api-server` and `api-resources-patch.yaml` instead of the router pair.
 
+For the owned eight-core shared-node profile, also apply
+[`egress-resources-patch.yaml`](egress-resources-patch.yaml) to Deployment
+`atenet-egress` and [`postgres-resources-patch.yaml`](postgres-resources-patch.yaml)
+to StatefulSet `postgres` through that same observed-object procedure.
+The egress certificate sidecar requests 100m CPU and 128 MiB; PostgreSQL requests
+100m CPU and retains its existing memory request. Images, limits, TLS, probes and
+WorkerPool budgets remain unchanged. These are scheduling reservations, not measured
+consumption or a universal minimum. Reverify live egress after the rollout and qualify
+the complete Project recipe under cold load before accepting this profile.
+
 This shared-node profile keeps the official native API and PostgreSQL health endpoints
 and probe periods, with a five-second readiness timeout and a ten-second liveness
 timeout with six consecutive failures before restart. Apply those probe settings through

@@ -59,8 +59,9 @@ function clusterFixture() {
       conditions: [{ type: "Ready", status: "True" }],
     },
   };
+  const workerLabels: Record<string, string> = { "ate.dev/worker-pool": pool.metadata.name };
   const worker = {
-    metadata: { ...metadata("owned-worker", "ate-workers"), labels: configuration.workerSelector },
+    metadata: { ...metadata("owned-worker", "ate-workers"), labels: workerLabels },
     spec: { nodeName: node.metadata.name, containers: [{ image: pool.spec.workerImage }] },
     status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] },
   };
@@ -92,7 +93,16 @@ function clusterFixture() {
       sandboxconfig: sandbox,
       workerpools: { items: [pool] },
       nodes: { items: [node] },
-      pods: { items: [worker] },
+      pods: {
+        items: [worker].filter((pod) => {
+          const index = args.indexOf("-l");
+          if (index < 0) return true;
+          return args[index + 1]?.split(",").every((entry) => {
+            const [key, value] = entry.split("=");
+            return key && pod.metadata.labels[key] === value;
+          });
+        }),
+      },
       namespace,
       storageclasses: storage,
     };
@@ -131,6 +141,17 @@ test("ARM preflight requires its selected ARM pool, node and Ready worker withou
   f.node.status.nodeInfo.architecture = "arm64";
   f.pool.spec.template.nodeSelector["kubernetes.io/arch"] = "amd64";
   expect(preflightExitCode(await runPreflight(options, f.run))).toBe(1);
+  expect(f.calls.every((args) => args[0] === "get")).toBe(true);
+});
+
+test("a Ready worker from another native pool cannot satisfy the original pool preflight", async () => {
+  const f = clusterFixture();
+  f.worker.metadata.labels["ate.dev/worker-pool"] = "another-pool";
+  const checks = await runPreflight(
+    { configuration: f.configuration, releaseNamespace: "factory" },
+    f.run,
+  );
+  expect(checks.find((check) => check.id === "native.capacity")?.status).toBe("FAIL");
   expect(f.calls.every((args) => args[0] === "get")).toBe(true);
 });
 
