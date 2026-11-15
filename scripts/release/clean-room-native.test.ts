@@ -234,6 +234,7 @@ test("native commissioning rejects inherited identities, unadmitted egress and t
   }
 });
 
+// Two independent real CAs can exceed the default unit-test deadline on a busy host.
 test("native TLS commissioning rejects a mismatched key, missing wildcard and wrong trust without a TLS bypass", async () => {
   const f = await fixture();
   try {
@@ -260,7 +261,7 @@ test("native TLS commissioning rejects a mismatched key, missing wildcard and wr
   } finally {
     await f.close();
   }
-});
+}, 30_000);
 
 test("native private files reject group access and symlinks before their bytes are commissioned", async () => {
   const f = await fixture();
