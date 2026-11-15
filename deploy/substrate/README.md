@@ -6,11 +6,10 @@ the unchanged official worker and separately pinned official gVisor/CLI binaries
 ARM artifact verification is not a native lifecycle or complete product proof.
 Factory's runtime controller now requires
 this native installation configuration and has no Factorybox execution fallback. The
-chart now requires native configuration and has a read-only native preflight; Actor-image
-publication, the full launcher path and live qualification are still unfinished. No runtime
+chart requires native configuration and has a read-only native preflight. No runtime
 fork, provider framework or new controller is used. The concrete Factory Workspace,
-Connector and Source path is described below. Coding, Verification/Delivery,
-archive/manual-Continue and the complete Greenfield product path still need native proof. The Factory
+Connector and Source path is described below; live product coverage and its limits are
+listed in [qualification scope](#qualification-scope). The Factory
 [gRPC/Connector adapter slice](../../services/substrate-control/README.md) is
 available without changing these profile pins or the retained runtime default.
 Fresh Staging, promotion replacement and publication use the existing product owners and
@@ -36,6 +35,40 @@ SQL fingerprint and serializes concurrent startup. Repeated startup with the sam
 fingerprint preserves accounts, Source ownership, runtime identities and approvals.
 Unknown historical schemas or a different fingerprint are refused without modifying
 their data. This is not a database upgrade or Factorybox data-transfer path.
+
+## Qualification scope
+
+The Greenfield source-chart product path has been exercised on Linux arm64 with the
+unchanged pinned official worker, gVisor profile and original WorkerPool budget. This is
+not a published Factory release or a claim that every operator environment is qualified.
+The same fresh Helm installation covers:
+
+- Two ordinary Projects, the shipped Starter's signup/login/signout flow and healthy
+  Staging Apps, without Factorybox configuration or a retained-installation conversion.
+- Saved requirements, explicit Implement approval, real OpenCode implementation,
+  exact-commit native Verification, independent review and deliberate Delivery through
+  merge and healthy replacement Staging. Infrastructure changes still require human approval.
+- Independent Source reads and saved edits without waking compute, ROOTFS cold restart,
+  explicit Stop with UID-confirmed Delete and a new immutable generation retaining saved source.
+  IDE and real UID-1000 ARM terminal use, OAuth MCP and shared Source editing have live coverage.
+- Native build-only prebuild publication for both Project Environments, including mixed
+  private-registry credentials and certificate-only registry trust, followed by confirmed
+  producer cleanup. Runtime-interpolated Compose recipes remain unsupported for prebuilds;
+  that explicit skip retains normal Dev Container startup.
+- Source-only release publication and a native attested one-job artifact publication after
+  the normal approval/Verification/review/Delivery path. Actual downloaded artifact bytes
+  and SHA-256 match the recorded release; temporary access and compute are revoked afterward.
+
+Local qualification receipts and inspected media copies stay under
+`.factory/test-results/substrate-only/`, not in the source distribution. Factory retains
+its normal approvals, exact-commit results and review media in the installation.
+Failed or interrupted receipts remain failed; later explicit fixture runs do not relabel them.
+Controller, package and ordinary Docker checks retain their narrower meaning below.
+
+This scope does not qualify a full amd64 product journey, the source-development launcher,
+different-node recovery, independent disaster restore or every offline queued-input
+Stop/manual-Continue case. ROOTFS cold restart is the contract, not warm memory continuity.
+Actor-level limits remain the enforcement boundary, not per-inner-container cgroups.
 
 ## Fresh Factory Workspace provisioning
 
@@ -100,9 +133,9 @@ intent. A commissioned Contributor uses the saved Agent turn and its live
 authority/lease, not a personal Owner or Developer impersonation. Human execution
 still requires the current Developer writer. The native bootstrap uses the same
 `agentConfiguration` and pinned OpenCode process settings as the existing runtime.
-This is integration in progress, not a qualified Coding, QA or Delivery journey.
-The shipped-template interview, human approvals and live model proof remain
-separate acceptance gates; controller fixtures do not satisfy them.
+Controller fixtures alone do not qualify Coding, QA or Delivery. The live ARM
+journey is listed in the qualification scope; reading or saving requirements never
+implicitly starts an AI Interview.
 Native Project prebuilds now enter the existing preparation queue. Each producer
 retains its exact revision, Environment version,
 private checkout, native create outcomes and publication repository; it allocates
@@ -140,12 +173,12 @@ captured-process path. Source initialization and service subprocesses use develo
 UID 1000, without the former shifted host UID.
 The baseline keeps isolated generations local to each Verification or preparation
 owner, without a shared Project counter.
-These are controller regressions, not live native prebuild qualification. Runtime-only
+Controller regressions are separate from live native prebuild qualification. Runtime-only
 Compose service environments are omitted from the private producer snapshot without
 resolving their values; consumers retain the original files and fresh Runtime grants.
 Image/build/file-selection interpolation remains refused. The Connector component lane
 checks a real pinned CLI build, completed-result reuse and a cache-independent consumer;
-the shipped Starter still needs actual Substrate producer qualification. Unsupported
+the shipped Starter's runtime-interpolated Compose recipe deliberately skips preparation. Unsupported
 recipes keep normal startup available without exporting Runtime secrets. A dispatched
 build with no positively observed original image is retained as uncertain, never rerun.
 Native producers use only the verified Actor-private Docker socket and proxy.
@@ -155,8 +188,8 @@ Actor identities stay private and are not needed to match a cached artifact.
 Native prebuilds hash and embed a canonical public certificate set. PEM ordering,
 whitespace and duplicates cannot separate otherwise identical producer/consumer inputs.
 Different certificates or transport code still produce a different identity. Existing
-results are not rewritten to match the new transport contract; fresh native
-producer/consumer qualification remains required.
+results are not rewritten to match the new transport contract. Native producer coverage is
+listed above; component consumer checks do not broaden that coverage.
 
 Native model and browser callbacks use the exact Connector HTTPS origin, with
 their existing attempt-scoped tokens. Legacy internal-host URL settings do not
@@ -199,8 +232,8 @@ authorize replay of unsettled OpenCode input.
 
 The Source controller has no Factorybox allocation, Kubernetes Source creation or legacy Git
 bootstrap route. Source materialization uses the separate coordination connection, not the
-application query pool. Native controller and Connector tests cover these boundaries; full native
-Workspace Stop/Start and shipped-template qualification remain open.
+application query pool. Native controller and Connector tests cover these boundaries;
+the live ARM Workspace and shipped-template coverage is listed above.
 
 The application no longer has a Factorybox executor, prepared execution reserve or worker-recovery
 path. Idle compute records Pause under the Workspace lock and never applies the removed Factorybox
@@ -273,9 +306,8 @@ Substrate Actor lifecycle and UID-bound cleanup. Lost create replies retain thei
 original intent and are observed rather than repeated. The baseline retains each
 provisioning generation when the existing explicit queued-bootstrap
 retry decision has confirmed exact predecessor cleanup; a lost or still-live
-outcome cannot select a successor. These are controller regressions, not real
-native CI qualification. Live prebuild, Staging, publication and the
-shipped-template journey remain open.
+outcome cannot select a successor. Controller regressions remain separate from real
+native CI qualification; the live ARM coverage is listed above.
 Ticket bootstrap repository reads recheck the current commissioned writer and live
 execution lease. Isolated Verification reads use their exact-job provisioning grant,
 not a personal Developer Workspace grant, and reject a retargeted repository or
@@ -437,8 +469,8 @@ Native startup defers user lifecycle commands with the pinned CLI's
 uses `run-user-commands` once with that bridge's observed proxy gateway. Child
 transport uses the same observation; Compose never inherits another bridge's
 unreachable default address. Missing, changed or ambiguous networks fail closed.
-This path still requires rebuilt-image and shipped-template native qualification;
-the earlier Alpine Workspace proof does not qualify it.
+The earlier Alpine Workspace proof alone does not qualify this path. The current
+ARM Starter coverage uses the rebuilt image and is listed above.
 The Factory-specific child bootstrap lets Docker 29.9 manage its own matching
 containerd. The Docker bundle supplies shim **2.4.1** but omits the standalone
 daemon. The image therefore intentionally replaces the bootstrap's **2.1.5** daemon
@@ -565,7 +597,8 @@ start against the older tree. Private Docker data remains in native ROOTFS, outs
 the Source archive. Neither file access nor restoration replays a model command.
 Transient checkpoint-read failures retry only the same authenticated read under native
 wakeup supervision and caller cancellation. Invalid serving identity, grants, epochs,
-checksums and archive bounds still fail closed. Rebuilt-image qualification remains required.
+checksums and archive bounds still fail closed. Image package checks alone do not
+qualify this Source restoration.
 Archive file reads use bounded read-only mappings. The pinned native runtime
 accepts `O_NOATIME` but still changes access time on ordinary reads; mappings avoid
 that mutation without changing the runtime or repairing Source timestamps. A
@@ -593,8 +626,8 @@ Its native receipt records `sourceHandoff: confirmed-same-node`, `coldRestart: t
 `portable: false` and `fullFactoryE2E: false`. That earlier receipt did not qualify
 a replacement Attempt. The current Workspace controller requires independent Source
 before UID-bound Delete and supports an explicit next generation after confirmed cleanup.
-Stop is not reported as successful when only Pause completed. The complete live
-Stop/Start journey and the shipped Starter still need qualification. Pause preserves
+Stop is not reported as successful when only Pause completed. Live ARM coverage
+is listed above. Pause preserves
 private Docker data in the Actor's ROOTFS; an explicit Stop removes that Actor and its
 compute state only after Source has an independent owner.
 An initial personal bootstrap without its current Source checkpoint service cannot

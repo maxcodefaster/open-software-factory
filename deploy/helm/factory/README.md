@@ -2,8 +2,9 @@
 
 This chart installs the Factory control plane on an existing Kubernetes cluster. Factory uses
 only the pinned official Substrate runtime. It does not install a cluster, an Ingress controller
-or a private runtime fork. The native replacement is not yet qualified as a complete shipped
-product. Use the checkout chart and explicitly qualified images until the live product gates pass.
+or a private runtime fork. Use the checkout chart and explicitly qualified immutable images.
+The [native profile's qualification scope](../../substrate/README.md#qualification-scope) separates
+the live ARM product path from packaging, source-launcher and other architecture checks.
 
 ## Prerequisites
 
@@ -196,7 +197,8 @@ the store again, replace its claim or mint a root token to clear this condition.
 
 The image also packages the pinned native Substrate gRPC bridge and Source service. Fresh
 Workspace provisioning is installation-scoped and applies to all Projects. The chart requires
-native configuration, not Factorybox workers. Its full product cutover is not yet qualified.
+native configuration, not Factorybox workers. The source launcher and the fresh Helm product
+qualification are separate checks.
 See [the concrete Substrate configuration](../../substrate/README.md#fresh-factory-workspace-provisioning)
 for the separate native Owner/Editor credentials, required rotation, immutable
 profile/image bindings, same-node sleeping Source handoff and remaining qualification limits.
@@ -215,7 +217,7 @@ automatically available to every Kubernetes distribution.
 
 The source launcher also requires `FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION` before startup.
 Native Git requires real Forge DNS/TLS and the configured native WSS endpoint, even when the
-browser uses a loopback listener. Source-launcher, Starter and Delivery qualification remain open.
+browser uses a loopback listener. The source launcher is not covered by the Helm qualification.
 There is no one-image HTTP-worker installation or legacy runtime fallback.
 
 For local browser transport, combine the small local preset with private values supplying the
@@ -592,7 +594,7 @@ Factory neither installs a cluster metrics-server nor requests its Pod metrics A
 native API does not expose per-Actor CPU/RAM samples. Current consumption stays unavailable rather
 than substituting a shared Worker's aggregate or reporting missing measurements as zero.
 
-## Runtime artifacts and remaining gates
+## Runtime artifacts and qualification limits
 
 The application packages the official gRPC adapter and Source service. The normal tool bundle,
 Browser tools and independent developer IDE remain exact immutable artifacts. Source is embedded
@@ -706,7 +708,8 @@ Repeated interrupts do not bypass the owned-client joins or cleanup.
 [The native operator profile](../../substrate/README.md) records image/CLI/worker/gVisor pins,
 TLS/egress checks, concrete commands and the scope of existing evidence. Installation-wide native
 configuration, normal Workspace/Source commands and isolated product owners have controlled
-regression coverage. Clean installed-image qualification, native prebuild/Verification, offline
-OpenCode Stop/manual Continue and the complete approved Ticket through Delivery and healthy
-Staging remain live gates. A fresh installation must serve at least two ordinary Projects before
-this replacement is described as shipped.
+regression coverage. Native product acceptance is separate from `helm test` and the clean-room
+command's control-plane receipt. Use the profile's qualification scope for the live Starter,
+Workspace, prebuild, exact-commit Verification/review, Delivery, Staging and publication coverage.
+Neither that scope nor an ARM run qualifies an independent disaster restore, joined-node
+recovery, the source launcher or a full amd64 product journey.

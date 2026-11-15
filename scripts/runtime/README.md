@@ -18,6 +18,9 @@ The owned ARM infrastructure proof has separately verified actual worker/runsc
 checksums, current-image private Docker, native DNS/TLS policy, synchronous durable
 ROOTFS cold restart and UID-bound Actor deletion. It is not the normal Factory
 Workspace/Source path or complete product acceptance.
+The [current qualification scope](../../deploy/substrate/README.md#qualification-scope) records
+the separately exercised ARM product path. The commands below retain their individual fixture
+boundaries; a passing component receipt is not a substitute for that product path.
 
 The profile tools are explicit operator commands:
 

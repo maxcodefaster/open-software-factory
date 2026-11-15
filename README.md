@@ -5,23 +5,23 @@ write requirements, and let an agent implement them. Tests and an independent re
 commit before you approve delivery.
 
 Runs on Kubernetes with Linux arm64 and amd64 artifacts. The Substrate profile pins both worker
-architectures; native product qualification is still incomplete. Apache-2.0. No telemetry.
+architectures; [qualification scope](deploy/substrate/README.md#qualification-scope) distinguishes
+the live ARM product path from component and packaging checks. Apache-2.0. No telemetry.
 
 [Runtime direction](#runtime-direction) · [Install](#install) · [Develop](#developing)
 
 ## Runtime direction
 
-Factory is moving to **Substrate as its sole execution runtime**, using the pinned official API
+Factory uses **Substrate as its sole execution runtime**, using the pinned official API
 and gVisor profile with ROOTFS cold restart, private Docker and Dev Containers. Factory retains
 product authority, approvals and execution intent; Substrate owns native lifecycle and snapshots.
-See [the Substrate integration](deploy/substrate/README.md) for the implemented path and remaining gates.
+See [the Substrate integration](deploy/substrate/README.md) for the supported contract and qualification limits.
 
-The replacement is not yet a completed product cutover. Factorybox execution, the execution reserve
-and worker recovery have been removed from the application. The chart now requires native
-installation configuration. The distribution build now packages a separate multi-architecture Actor image;
-its native qualification and the complete launcher path remain unfinished.
-Native Staging, promotion and publication have controller integration;
-their live qualification and the complete approved Ticket journey remain unfinished.
+Factorybox execution, the execution reserve and worker recovery have been removed. This is a
+Greenfield installation, with no old-runtime compatibility or data-transfer path. The chart requires
+installation-wide native configuration, and the distribution build packages a separate
+multi-architecture Actor image. Workspace compute, prebuilds, Verification, Staging, promotion and
+publication use the official runtime through Factory's adapters.
 
 ## The workflow
 
@@ -150,7 +150,8 @@ mise exec -- helm install factory ./deploy/helm/factory \
 Supply the exact application image, public TLS origins, installation-wide Substrate configuration
 and separately rotated native provisioner credential in `private-values.yaml`. Install and qualify
 the pinned official runtime on workers matching the selected Linux arm64 or amd64 identity first. The chart supplies the Factory data
-services and credentials; the runtime replacement is not yet qualified as a released product.
+services and credentials. Use the exact images qualified for the selected architecture; a source-chart
+qualification is not publication of a new Factory release.
 The Namespace label admits trusted Factory clients through Substrate's API NetworkPolicy;
 it does not grant native authority. Keep execution and editor namespaces unlabelled.
 [Installation, backups and recovery](deploy/helm/factory/README.md).
