@@ -30,7 +30,6 @@ test("production Server Functions use real sessions, durable exact saves and no 
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const page = await context.newPage();
   const errors: string[] = [];
-  let runner: ReturnType<typeof Bun.spawn> | undefined;
   const assets: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
@@ -157,6 +156,9 @@ test("production Server Functions use real sessions, durable exact saves and no 
       expect(source.includes("Missing authenticated Factory request context")).toBe(false);
       expect(source.includes("SELECT id,kubernetes_namespace AS namespace")).toBe(false);
     }
+    expect((await database.client`SELECT id FROM factory.runtime_attempt`).length).toBe(0);
+    expect((await database.client`SELECT id FROM factory.development_workspace`).length).toBe(0);
+    expect((await database.client`SELECT id FROM factory.agent_turn`).length).toBe(0);
     await writeFile(
       `${directory}/production-proof.json`,
       JSON.stringify(
@@ -178,6 +180,23 @@ test("production Server Functions use real sessions, durable exact saves and no 
       ),
     );
     await context.close();
+  } finally {
+    await browser.close();
+    await database.client.end();
+    await owned.dispose();
+  }
+}, 300_000);
+
+test("maintained UI regressions use an isolated production Factory without runtime or inference", async () => {
+  // This bundle owns its fixture and deadline independently of the focused RPC proof.
+  const owned = await factoryProcess();
+  const database = owned.connect();
+  let runner: ReturnType<typeof Bun.spawn> | undefined;
+  try {
+    await owned.startPlanningCache();
+    await owned.start();
+    const directory = ".factory/test-results/server-functions";
+    await mkdir(directory, { recursive: true });
     // Reuse the maintained UI regression against this owned installation, never the user's.
     const projectID = crypto.randomUUID();
     const administrator = "01994a7d-0000-7000-8000-000000000001";
@@ -236,7 +255,6 @@ test("production Server Functions use real sessions, durable exact saves and no 
   } finally {
     if (runner?.exitCode === null) runner.kill("SIGTERM");
     await runner?.exited;
-    await browser.close();
     await database.client.end();
     await owned.dispose();
   }

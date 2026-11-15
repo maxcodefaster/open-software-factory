@@ -248,9 +248,9 @@ test.each(["development", "production"] as const)(
           ),
         ).toBe(true);
         await other.close();
-        // Developers run the shipped checks while the dev server is still up.
-        // That production build must not stale a page's lazy decoder imports.
-        await starter.command(["npm", "run", "check"]);
+        // A production build while the dev server is still up must not invalidate
+        // this page's lazy decoder imports. starter.test.ts owns the full shipped check.
+        await starter.command(["npm", "run", "build"]);
       }
       async function navigateHome() {
         const missing = await page.goto(`${appURL}missing`);
