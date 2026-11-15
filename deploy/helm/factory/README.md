@@ -304,8 +304,10 @@ A failed step leaves `<step>.failed` and does not stop the others. The final ste
 `COMPLETE`, prunes and uploads only when every step succeeded, and otherwise fails the Job so the
 failure shows in `kubectl get jobs`. `backup.retention` (default 7) keeps that many complete sets.
 Incomplete sets are removed when a later run completes. Every network call retries, because a new
-Pod can be refused by NetworkPolicy for a few seconds. The NetworkPolicy lets Pods labelled
-`app.kubernetes.io/component=backup` reach PostgreSQL, OpenBao and Garage and nothing else.
+Pod can be refused by NetworkPolicy for a few seconds. The release's ingress rules admit Pods
+labelled `app.kubernetes.io/component=backup` to PostgreSQL, OpenBao and Garage, not the application
+services. Backup Pods have no egress restriction in this chart; they also need the Kubernetes API
+and, when configured, an offsite destination.
 
 Init containers stage static `kubectl` and `bao` binaries from the existing Factory and OpenBao
 images into a tools volume; they do not mount backup data, object-store keys or OpenBao credentials.
