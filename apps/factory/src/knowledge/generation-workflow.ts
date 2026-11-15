@@ -81,6 +81,24 @@ const reviewSchema = z.object({
   issues: z.array(z.string().min(1).max(800)).max(12),
   advisory: z.array(z.string().min(1).max(800)).max(8).optional(),
 });
+export const wikiPlanReviewSchema = z.strictObject({
+  findings: z
+    .array(
+      z.discriminatedUnion("kind", [
+        z.strictObject({
+          kind: z.literal("actionable"),
+          readerTask: z.string().min(1).max(400),
+          requiredChange: z.string().min(1).max(800),
+          sourcePaths: z.array(z.string().min(1).max(500)).min(1).max(8),
+        }),
+        z.strictObject({
+          kind: z.literal("nonissue"),
+          reason: z.string().min(1).max(800),
+        }),
+      ]),
+    )
+    .max(12),
+});
 const loopSchema = z.object({
   round: z.number().int(),
   issues: z.array(z.string()),
@@ -163,7 +181,8 @@ export const wikiPlanReviewTask =
   "Accept an empty plan only when current pages already cover the useful supported guidance and no material correction is needed. Do not invent a minimum number of pages, require a page per feature, duplicate existing guidance, or demand unrelated rewrites. A small Project or one substantial guide can already be complete. " +
   "Reject a new topic whose reader task is already covered by an existing page or another planned topic. If a changed fact belongs to an existing page, require an update to that identity rather than a parallel replacement guide. Do not demand wording changes, commit summaries or extra pages merely because changedPaths is nonempty. " +
   "completedPageIDs are read-only checked publications for this exact commit, not proof that other useful topics exist. Keep valid human framing, hierarchy and exact completed pages. Do not demand links to guides that will publish later. " +
-  "Report essential tasks omitted by the plan, necessary corrections to evidence-disproven current prose, and redundant proposed topics or unnecessary rewrites. For duplication, name the proposed topic and existing page that already covers its task. For missing or stale guidance, identify the actual current text or absent task and its inspected supporting source. Do not invent claims from a topic title or demand implementation changes to make a documentation topic valid. Accurately described source defects are not documentation defects. Ignore personal wording preferences. Never request source-code changes. Return issues:[] for a sufficient plan with no redundant work.";
+  "Report essential tasks omitted by the plan, necessary corrections to evidence-disproven current prose, and redundant proposed topics or unnecessary rewrites. For duplication, name the proposed topic and existing page that already covers its task. For missing or stale guidance, identify the actual current text or absent task and its inspected supporting source. Do not invent claims from a topic title or demand implementation changes to make a documentation topic valid. Accurately described source defects are not documentation defects. Ignore personal wording preferences. Never request source-code changes. " +
+  "Return findings, each explicitly classified by kind. Use kind:'actionable' only for a concrete coverage blocker: name the readerTask, the requiredChange that must be made, and sourcePaths actually inspected that support that change. Use kind:'nonissue' with a reason for a checked concern that requires no change. An identity that matches the README, guidance already supplied by current pages or scheduled topics, or a conclusion that no stale claim or material correction is established is a nonissue, not an actionable finding. Do not invent a requiredChange to turn a nonissue into a blocker. Return findings:[] or only nonissue findings for a sufficient plan with no redundant work.";
 
 export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {
   if (!input.publish) throw new Error("Wiki workflow requires checked publication");
@@ -457,9 +476,11 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           ? "Each topic purpose is at most 800 characters, with at most 16 existing seed paths and 12 existing pageIDs. Topics must have unique slugs and cannot claim the same pageID."
           : id === "investigator"
             ? "Return at most 24 findings, each at most 6000 characters with at most 8 inspected paths, and at most 8 uncertainties of 400 characters each."
-            : id === "checker" || id === "topic-plan-checker"
-              ? "Return at most 12 concise issues, each at most 800 characters."
-              : "Respect the declared page and source bounds and this topic's writing instructions.";
+            : id === "topic-plan-checker"
+              ? "Return at most 12 findings. Each actionable finding requires readerTask, requiredChange and inspected sourcePaths; a nonissue requires only kind and reason."
+              : id === "checker"
+                ? "Return at most 12 concise issues, each at most 800 characters."
+                : "Respect the declared page and source bounds and this topic's writing instructions.";
       const shorter = outOfBudget
         ? " Your previous answer ended before it was complete. Return a shorter result: fewer, tighter sentences, no repeated points, and finish the JSON."
         : "";
@@ -576,7 +597,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   async function reviewCoverage(remaining: z.infer<typeof planSchema>): Promise<Topic[]> {
     const coverage = await ask(
       "topic-plan-checker",
-      reviewSchema,
+      wikiPlanReviewSchema,
       {
         project: input.name,
         repository,
@@ -588,8 +609,20 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       },
       planSources,
       wikiPlanReviewTask,
+      (review) => {
+        const unread = review.findings
+          .flatMap((finding) => (finding.kind === "actionable" ? finding.sourcePaths : []))
+          .filter((path) => !planSources.read.has(path));
+        if (unread.length) throw new WikiSourceEvidenceError([...new Set(unread)]);
+      },
     );
-    const issues = [...coverage.issues];
+    const issues = coverage.findings.flatMap((finding) =>
+      finding.kind === "actionable"
+        ? [
+            `${finding.readerTask}: ${finding.requiredChange} Sources: ${finding.sourcePaths.join(", ")}`,
+          ]
+        : [],
+    );
     // A new Wiki with several documented reader areas is not complete as one overview page.
     if (
       !issues.length &&
@@ -625,8 +658,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           (extra) => validatePlan({ topics: [...remaining.topics, ...extra.topics] }),
         )
       : { topics: [] };
-    if (!remaining.topics.length && !additional.topics.length)
-      throw new WikiTopicCoverageError(issues);
+    if (!additional.topics.length) throw new WikiTopicCoverageError(issues);
     return additional.topics;
   }
   // A new Wiki is one overview with guides beneath it, whatever parent the planner left empty.

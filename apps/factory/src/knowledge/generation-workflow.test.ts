@@ -177,7 +177,7 @@ test.each([
       let sourceToolCall = false;
       let sourcePaths: string[] | undefined;
       if (system.includes("Review the whole proposed Wiki topic plan")) {
-        output = { issues: [] };
+        output = { findings: [] };
       } else if (system.includes("Research manifests")) {
         plans++;
         if (parsed.correction) corrections.push(parsed);
@@ -663,7 +663,9 @@ test.each(["update", "no-op", "foreign-id", "identity-field", "checked-retry"])(
                           },
                         ],
                 }
-              : { issues: [] };
+              : system.includes("Review the whole proposed Wiki topic plan")
+                ? { findings: [] }
+                : { issues: [] };
         return Response.json({
           id: "owned-existing-wiki",
           object: "chat.completion",

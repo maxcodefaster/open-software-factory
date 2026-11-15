@@ -9,6 +9,7 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import {
   wikiInstructions,
+  wikiPlanReviewSchema,
   wikiPlanReviewTask,
 } from "../../apps/factory/src/knowledge/generation-workflow";
 import { nativeAgentPolicy, nativeStepGuard } from "../../apps/factory/src/models/execution-policy";
@@ -167,21 +168,20 @@ test.skipIf(process.env["FACTORY_WIKI_PLAN_COVERAGE_LIVE"] !== "1")(
             modelSettings: { maxRetries: 0, maxOutputTokens: 8000 },
             ...(providerOptions ? { providerOptions } : {}),
             structuredOutput: {
-              schema: z.object({ issues: z.array(z.string().min(1).max(800)).max(12) }),
+              schema: wikiPlanReviewSchema,
               jsonPromptInjection: "auto",
             },
           },
         );
         if (output.error) throw output.error;
-        const issues = output.object?.issues;
+        const { findings } = wikiPlanReviewSchema.parse(output.object);
         results.push({
           name: control.name,
           expectedRejection: control.reject,
-          issues,
+          findings,
           elapsedMS: Math.round(performance.now() - started),
         });
-        expect(issues).toBeDefined();
-        expect((issues?.length ?? 0) > 0).toBe(control.reject);
+        expect(findings.some((finding) => finding.kind === "actionable")).toBe(control.reject);
       }
     } finally {
       controller.abort();

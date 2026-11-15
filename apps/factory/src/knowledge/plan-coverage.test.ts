@@ -1,8 +1,22 @@
 import { expect, test } from "bun:test";
 import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
-import { generateWiki } from "./generation-workflow";
+import { generateWiki, wikiPlanReviewSchema } from "./generation-workflow";
 
-test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-reviewer"] as const)(
+// Live generation 5bd8b45f-001f-4203-87ca-c6d643d49320, 2026-11-15.
+const selfNegatingLiveFinding =
+  "The current pages cover application development, tests and production behavior, but the overview is titled “Factory Starter” and presents the project as a generic starter. That framing is contradicted by the repository README’s project identity, “Factory Starter,” so no stale claim is established; however, with no proposed topics and no material changes to document, the plan does not call for any Wiki work. A useful Wiki should orient contributors to the existing guides, but the current overview already provides a short orientation and the other pages cover their reader tasks.";
+
+test.each([
+  "missing-guide",
+  "genuine-no-op",
+  "self-negating-live-finding",
+  "actionable-live-finding",
+  "mixed-findings",
+  "malformed-coverage",
+  "unread-evidence",
+  "rejected-plan",
+  "unavailable-reviewer",
+] as const)(
   "whole-Wiki planning checks useful coverage before accepting %s",
   async (scenario) => {
     const overview: WikiPageSnapshot = {
@@ -10,7 +24,7 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
       slug: "overview",
       title: "Forms project",
       body:
-        scenario === "genuine-no-op"
+        scenario === "genuine-no-op" || scenario === "self-negating-live-finding"
           ? "Run npm run dev for the local Forms editor. Verify with npm test. Production writes remain disabled."
           : "This project has a Forms editor. Local setup and verification are planned for separate guides.",
       version: 1,
@@ -74,6 +88,13 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
           }
           output = { topics: [] };
         } else if (system.includes("additional topics")) {
+          const user = messages.find((message) => message.role === "user")?.content ?? "";
+          expect(user).toContain(
+            scenario === "actionable-live-finding"
+              ? selfNegatingLiveFinding
+              : "Local setup and verification",
+          );
+          expect(user).not.toContain('"kind":"nonissue"');
           plans++;
           output = { topics: scenario === "missing-guide" ? [topic] : [] };
         } else if (system.includes("Review the whole proposed Wiki topic plan")) {
@@ -84,14 +105,30 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
               { error: { message: "Controlled unavailable coverage reviewer" } },
               { status: 503 },
             );
-          output = {
-            issues:
-              scenario === "genuine-no-op"
-                ? []
-                : [
-                    "Local setup and verification are deferred by the current overview, although docs/forms.md describes both. The empty plan leaves that useful guidance missing.",
-                  ],
+          expect(system).toContain("Do not invent a requiredChange");
+          const nonissue = { kind: "nonissue", reason: selfNegatingLiveFinding };
+          const actionable = {
+            kind: "actionable",
+            readerTask: "Local setup and verification",
+            requiredChange:
+              scenario === "actionable-live-finding"
+                ? selfNegatingLiveFinding
+                : "Local setup and verification are deferred by the current overview, although docs/forms.md describes both. Add that missing reader guidance.",
+            sourcePaths: scenario === "unread-evidence" ? ["src/unread.ts"] : [source.path],
           };
+          output =
+            scenario === "malformed-coverage"
+              ? { findings: [], issues: [selfNegatingLiveFinding] }
+              : {
+                  findings:
+                    scenario === "genuine-no-op"
+                      ? []
+                      : scenario === "self-negating-live-finding"
+                        ? [nonissue]
+                        : scenario === "mixed-findings"
+                          ? [nonissue, actionable]
+                          : [actionable],
+                };
         } else if (system.includes("Follow relationships")) {
           output = {
             findings: [{ claim: source.content, paths: [source.path] }],
@@ -134,7 +171,10 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
           apiKey: "owned-test-not-a-secret",
         },
         pages,
-        inventory: [{ path: source.path, sha: "b".repeat(40), size: source.content.length }],
+        inventory: [
+          { path: source.path, sha: "b".repeat(40), size: source.content.length },
+          { path: "src/unread.ts", sha: "c".repeat(40), size: 30 },
+        ],
         changedPaths: [source.path],
         sources: [source],
         signal: AbortSignal.timeout(15_000),
@@ -162,9 +202,15 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
           return pages;
         },
       });
-      if (scenario === "rejected-plan") {
+      if (["rejected-plan", "actionable-live-finding", "mixed-findings"].includes(scenario)) {
         await expect(run).rejects.toThrow("Wiki topic plan omits essential reader coverage");
         expect([plans, coverageChecks, publications]).toEqual([2, 1, 0]);
+      } else if (scenario === "malformed-coverage") {
+        await expect(run).rejects.toThrow("Structured output validation failed");
+        expect([plans, coverageChecks, publications]).toEqual([1, 3, 0]);
+      } else if (scenario === "unread-evidence") {
+        await expect(run).rejects.toThrow("Research cites unread source: src/unread.ts");
+        expect([plans, coverageChecks, publications]).toEqual([1, 2, 0]);
       } else if (scenario === "unavailable-reviewer") {
         await expect(run).rejects.toThrow();
         expect([plans, coverageChecks, publications]).toEqual([1, 1, 0]);
@@ -181,6 +227,21 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
   },
   20_000,
 );
+
+test.each([
+  { findings: [{ kind: "actionable", readerTask: "Setup", sourcePaths: ["README.md"] }] },
+  { findings: [{ kind: "actionable", requiredChange: "Add setup", sourcePaths: ["README.md"] }] },
+  {
+    findings: [
+      { kind: "actionable", readerTask: "Setup", requiredChange: "Add setup", sourcePaths: [] },
+    ],
+  },
+  { findings: [{ kind: "nonissue", reason: "Covered", requiredChange: "Add setup" }] },
+  { findings: [{ kind: "unknown", reason: "Covered" }] },
+  { findings: [], issues: ["Setup is missing"] },
+])("the plan review contract rejects incomplete or ambiguous findings: %j", (output) => {
+  expect(wikiPlanReviewSchema.safeParse(output).success).toBe(false);
+});
 
 test("the coverage reviewer receives bounded previews and a refused request is repeated", async () => {
   const large = {
@@ -203,7 +264,7 @@ test("the coverage reviewer receives bounded previews and a refused request is r
         .filter((message) => message.role === "system")
         .map((message) => text(message.content))
         .join("\n");
-      let output: unknown = { issues: [] };
+      let output: unknown = { findings: [] };
       if (system.includes("Review the whole proposed Wiki topic plan")) {
         // The first coverage request is refused before any inference starts.
         if (refusals++ === 0)

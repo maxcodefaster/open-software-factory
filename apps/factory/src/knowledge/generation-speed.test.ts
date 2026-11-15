@@ -41,6 +41,7 @@ const fileList = (count: number) =>
 
 async function scenario(options: {
   reply(seen: Seen): Reply | Promise<Reply>;
+  coverage?(seen: Seen): Reply | Promise<Reply>;
   files?: number;
   pages?: WikiPageSnapshot[];
   changedPaths?: string[];
@@ -99,7 +100,10 @@ async function scenario(options: {
         at: performance.now(),
       };
       seen.push(entry);
-      const reply = await options.reply(entry);
+      const reply =
+        role === "coverage"
+          ? await (options.coverage?.(entry) ?? { output: { findings: [] } })
+          : await options.reply(entry);
       if ("output" in reply && reply.delay) await Bun.sleep(reply.delay);
       const done = (content: string, finish = "stop") =>
         Response.json({
@@ -376,13 +380,25 @@ test("the first topic starts while the coverage review runs and its extra guides
   let coverageAnswered = 0;
   let writerStarted = 0;
   const result = await scenario({
+    sources: [{ path: "src/file-0.ts", content: "Setup guidance." }],
+    coverage: async () => {
+      await Bun.sleep(400);
+      coverageAnswered = performance.now();
+      return {
+        output: {
+          findings: [
+            {
+              kind: "actionable",
+              readerTask: "Setup",
+              requiredChange: "Add missing setup guidance.",
+              sourcePaths: paths,
+            },
+          ],
+        },
+      };
+    },
     reply: async ({ role, prompt }) => {
       if (role === "planner") return { output: { topics: [topic("overview", paths, null)] } };
-      if (role === "coverage") {
-        await Bun.sleep(400);
-        coverageAnswered = performance.now();
-        return { output: { issues: ["Setup guidance is missing"] } };
-      }
       if (role === "additional") return { output: { topics: [topic("setup", paths, "overview")] } };
       if (role === "investigator")
         return { output: { findings: [{ claim: "Verified", paths }], uncertainties: [] } };
@@ -399,6 +415,38 @@ test("the first topic starts while the coverage review runs and its extra guides
   expect(writerStarted).toBeLessThan(coverageAnswered);
   expect(result.published.map((entry) => entry.slug)).toEqual(["overview", "setup"]);
   expect(result.progress.at(-1)).toMatchObject({ topicsTotal: 2, topicsDone: 2 });
+});
+
+test("an empty coverage repair fails even when another topic is already planned", async () => {
+  const paths = ["src/file-0.ts"];
+  let repairs = 0;
+  await expect(
+    scenario({
+      sources: [{ path: "src/file-0.ts", content: "Run the local verification checks." }],
+      coverage: () => ({
+        output: {
+          findings: [
+            {
+              kind: "actionable",
+              readerTask: "Verification",
+              requiredChange: "Add the missing verification guide beyond the short overview.",
+              sourcePaths: paths,
+            },
+          ],
+        },
+      }),
+      reply: ({ role }) => {
+        if (role === "planner") return { output: { topics: [topic("overview", paths, null)] } };
+        if (role === "additional") {
+          repairs++;
+          return { output: { topics: [] } };
+        }
+        if (role === "writer") return { output: page("Short orientation.", paths) };
+        return { output: { issues: [] } };
+      },
+    }),
+  ).rejects.toThrow("Wiki topic plan omits essential reader coverage");
+  expect(repairs).toBe(1);
 });
 
 test("a new Wiki with several documented areas and a single topic gets one more planning request", async () => {
