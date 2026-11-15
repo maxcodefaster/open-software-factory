@@ -62,6 +62,13 @@ type Resource = {
             periodSeconds: number;
             timeoutSeconds: number;
           };
+          livenessProbe?: {
+            exec?: { command: string[] };
+            tcpSocket?: { port: number };
+            periodSeconds: number;
+            timeoutSeconds: number;
+            failureThreshold: number;
+          };
           resources?: {
             requests: Record<string, string>;
             limits: Record<string, string>;
@@ -518,6 +525,29 @@ test("PostgreSQL liveness does not depend on container exec under runtime load",
     periodSeconds: 20,
     failureThreshold: 6,
   });
+});
+
+test("OpenBao liveness does not restart an encrypted store because container exec stalls", async () => {
+  const openbao = (await resources()).find(
+    (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-openbao",
+  )?.spec?.template?.spec.containers[0];
+  expect(openbao?.livenessProbe).toEqual({
+    tcpSocket: { port: 8200 },
+    periodSeconds: 20,
+    timeoutSeconds: 10,
+    failureThreshold: 6,
+  });
+  for (const probe of [openbao?.startupProbe, openbao?.readinessProbe]) {
+    const command = probe?.exec?.command.join(" ") ?? "";
+    expect(command).toContain("bao status -address=https://");
+    expect(command).toContain("-ca-cert=/bao/tls/ca.crt");
+    expect(command).toContain('test "$result" -eq 0 -o "$result" -eq 2');
+  }
+  const config = (await resources()).find(
+    (resource) => resource.metadata.name === "portable-config",
+  )?.data;
+  expect(config?.["FACTORY_OPENBAO_URL"]).toBe("https://portable-openbao.factory-proof.svc:8200");
+  expect(config?.["FACTORY_OPENBAO_CA_FILE"]).toBe("/run/factory/openbao/ca.crt");
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {

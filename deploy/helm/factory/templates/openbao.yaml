@@ -63,8 +63,10 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 60
           livenessProbe:
-            exec:
-              command: [sh, -c, {{ $localStatus | quote }}]
+            # A stalled container-exec request must not restart and reseal a
+            # store whose listener is still reachable. Startup and readiness
+            # retain their CA-verified TLS checks above.
+            tcpSocket: {port: 8200}
             periodSeconds: 20
             timeoutSeconds: 10
             failureThreshold: 6

@@ -67,6 +67,10 @@ an editor backend or the Helm preflight. Its holder is still a trusted native gl
   container. A stalled container-exec request must not restart a database that still accepts
   connections. Startup still uses `pg_isready`. A listening socket alone does not prove that
   SQL queries succeed.
+- OpenBao liveness also checks its TCP listener. Container-exec delays must not restart and
+  reseal a reachable store. Startup and readiness retain their CA-verified HTTPS checks and
+  accept the sealed state so bootstrap can unseal it. A listening socket is not proof that
+  secret reads or writes work.
 - No PodDisruptionBudget is rendered. Every service is a single replica on a ReadWriteOnce volume,
   so `minAvailable: 1` would block node drains for good, and `maxUnavailable: 1` would not protect
   anything. Factory itself cannot run more than one replica: the state claim is ReadWriteOnce, the
@@ -84,7 +88,7 @@ Secrets yourself and set `existingSecrets.credentials`, `existingSecrets.objects
 `existingSecrets.openbaoTLS` (key names are in `values.yaml`). The chart then renders no Secret.
 Factory, Zero, Garage and OpenBao carry a checksum of the Secrets they read, so Helm and Flux roll them
 when a Secret changes. Argo CD cannot read the Secret, so bump `existingSecrets.revision`.
-The OpenBao certificate must cover the OpenBao Service names and `127.0.0.1`, which the liveness probe uses.
+The OpenBao certificate must cover the OpenBao Service names and `127.0.0.1`, which the startup probe uses.
 
 ## Install
 
