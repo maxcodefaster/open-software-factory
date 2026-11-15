@@ -470,7 +470,9 @@ The inner daemon therefore uses its Actor-private virtual cgroups (`host` in
 Docker's inner terminology), never the node's cgroup hierarchy. The Connector
 accepts that one resolved field only with an unexported assignment fact set by
 `native-parent` after the exact private RootlessKit UID/GID checks, matching
-projected Actor UID and actual absence of `/proc/self/ns/cgroup`. The Parent has
+projected Actor UID and actual absence of `/proc/self/ns/cgroup`. Browser and App-proxy
+containers use the same authenticated exception; their network, mounts and capability checks
+remain unchanged. The Parent has
 authenticated that Actor-bound capability before container inspection. A Project
 JSON field or environment variable alone cannot enable it. Every other container,
 mount and capability fence remains unchanged. There is **no qualified per-inner-container cgroup/resource

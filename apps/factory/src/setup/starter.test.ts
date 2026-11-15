@@ -1,8 +1,40 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parse } from "yaml";
 import upstream from "../../../../upstream.json";
 import { starterFiles } from "./starter";
+
+test("Starter runtime-generated Feature lockfiles stay out of ordinary Git changes, while tracked metadata is retained", async () => {
+  const files = await starterFiles();
+  const ignore = files.find((file) => file.path === ".gitignore");
+  if (!ignore) throw new Error("Authored Starter ignore rules are missing");
+  const directory = await mkdtemp(join(tmpdir(), "factory-starter-lockfile-"));
+  const lockfile = ".devcontainer/devcontainer-lock.json";
+  const git = async (...args: string[]) => {
+    const child = Bun.spawn(["git", ...args], { cwd: directory, stdout: "pipe", stderr: "pipe" });
+    const text = await new Response(child.stdout).text();
+    await new Response(child.stderr).text();
+    if ((await child.exited) !== 0) throw new Error("Owned Starter Git fixture failed");
+    return text;
+  };
+  try {
+    await writeFile(join(directory, ".gitignore"), ignore.content);
+    await mkdir(join(directory, ".devcontainer"));
+    await writeFile(join(directory, lockfile), '{"features":{}}\n');
+    await writeFile(join(directory, ".devcontainer/devcontainer.json"), '{"image":"owned"}\n');
+    await git("init", "--initial-branch=main");
+    await git("add", "--all");
+    expect((await git("ls-files")).split("\n")).not.toContain(lockfile);
+    expect((await git("ls-files")).split("\n")).toContain(".devcontainer/devcontainer.json");
+    await git("add", "--force", lockfile);
+    expect((await git("ls-files")).split("\n")).toContain(lockfile);
+    expect(await readFile(join(directory, lockfile), "utf8")).toBe('{"features":{}}\n');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("the authored Starter uses the selected exact toolchain and database images", async () => {
   const files = await starterFiles();

@@ -4,3 +4,4 @@ dist/
 .tanstack/
 .env
 *.tsbuildinfo
+.devcontainer/devcontainer-lock.json

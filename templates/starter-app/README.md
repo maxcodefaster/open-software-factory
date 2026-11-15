@@ -15,6 +15,10 @@ types, runs every `test/*.test.ts` file, then checks TypeScript. `npm test` also
 Tests need a working `DATABASE_URL` and a `BETTER_AUTH_SECRET` of at least 32 characters.
 Keep credentials out of source control.
 
+The pinned Dev Containers CLI generates `.devcontainer/devcontainer-lock.json` during runtime
+setup. The Starter ignores this generated metadata; its Feature reference already pins the digest.
+An explicitly tracked lockfile remains tracked and is never removed by these ignore rules.
+
 ## Application and tests
 
 - `src/routes/` contains Start's file-based routes. `__root.tsx` owns the streamed HTML document,

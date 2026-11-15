@@ -374,6 +374,49 @@ func TestBrowserRuntimeRecoveredIsolation(t *testing.T) {
 	}
 }
 
+func TestBrowserRuntimeActorPrivateCgroups(t *testing.T) {
+	manager, scope := browserRuntimeFixture(t)
+	directory := manager.directory(scope.SessionID)
+	assignment := manager.assignment
+	assignment.nativeActorUID = "original-native-actor"
+	for _, proxy := range []bool{false, true} {
+		container := browserIsolationFixture(t, manager, directory, proxy)
+		container.HostConfig.CgroupnsMode = "host"
+		native := nativeActorCgroups(assignment, assignment.nativeActorUID, os.ErrNotExist)
+		if err := validateBrowserIsolationResolved(container, assignment, manager.primaryID, directory, proxy, native); err != nil {
+			t.Fatal("rejected the exact Actor-private virtual cgroups", err)
+		}
+		for _, allowed := range []bool{
+			nativeActorCgroups(Assignment{}, assignment.nativeActorUID, os.ErrNotExist),
+			nativeActorCgroups(assignment, "different-actor", os.ErrNotExist),
+			nativeActorCgroups(assignment, assignment.nativeActorUID, nil),
+			nativeActorCgroups(assignment, assignment.nativeActorUID, os.ErrPermission),
+		} {
+			if err := validateBrowserIsolationResolved(container, assignment, manager.primaryID, directory, proxy, allowed); err == nil {
+				t.Fatal("accepted host cgroups without the authenticated native boundary")
+			}
+		}
+		for _, alter := range []func(*inspectedContainer){
+			func(c *inspectedContainer) { c.HostConfig.NetworkMode = "host" },
+			func(c *inspectedContainer) { c.HostConfig.PidMode = "host" },
+			func(c *inspectedContainer) { c.HostConfig.IpcMode = "host" },
+			func(c *inspectedContainer) { c.HostConfig.Privileged = true },
+			func(c *inspectedContainer) { c.HostConfig.ReadonlyRootfs = false },
+			func(c *inspectedContainer) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} },
+			func(c *inspectedContainer) { c.HostConfig.Memory = 0 },
+			func(c *inspectedContainer) { c.HostConfig.PidsLimit = 0 },
+			func(c *inspectedContainer) { c.Mounts[1].RW = true },
+		} {
+			bad := browserIsolationFixture(t, manager, directory, proxy)
+			bad.HostConfig.CgroupnsMode = "host"
+			alter(&bad)
+			if err := validateBrowserIsolationResolved(bad, assignment, manager.primaryID, directory, proxy, native); err == nil {
+				t.Fatal("native cgroups relaxed another browser isolation check")
+			}
+		}
+	}
+}
+
 func TestBrowserRuntimeCleanupMustBeConfirmed(t *testing.T) {
 	manager, scope := browserRuntimeFixture(t)
 	live, cancel := context.WithCancel(context.Background())

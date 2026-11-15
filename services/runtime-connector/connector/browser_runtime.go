@@ -265,6 +265,12 @@ func (manager *browserRuntimeManager) inspectOwned(ctx context.Context, name str
 }
 
 func validateBrowserIsolation(container inspectedContainer, assignment Assignment, primaryID, directory string, proxy bool) error {
+	_, namespaceError := os.Stat("/proc/self/ns/cgroup")
+	return validateBrowserIsolationResolved(container, assignment, primaryID, directory, proxy,
+		nativeActorCgroups(assignment, os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID"), namespaceError))
+}
+
+func validateBrowserIsolationResolved(container inspectedContainer, assignment Assignment, primaryID, directory string, proxy, actorCgroups bool) error {
 	denied := errors.New("browser container did not retain its exact isolation boundary")
 	network := "none"
 	if proxy {
@@ -273,7 +279,7 @@ func validateBrowserIsolation(container inspectedContainer, assignment Assignmen
 	host := container.HostConfig
 	if host.NetworkMode != network || !host.ReadonlyRootfs || host.Privileged ||
 		container.Config.User != "1000:1000" || container.Config.Image != assignment.BrowserToolsImage ||
-		host.PidMode != "" || host.IpcMode == "host" || host.UTSMode != "" || host.CgroupnsMode == "host" ||
+		host.PidMode != "" || host.IpcMode == "host" || host.UTSMode != "" || (host.CgroupnsMode == "host" && !actorCgroups) ||
 		len(host.CapAdd) != 0 || len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" ||
 		len(host.Devices) != 0 || len(host.VolumesFrom) != 0 || len(host.SecurityOpt) != 1 ||
 		(host.SecurityOpt[0] != "no-new-privileges" && host.SecurityOpt[0] != "no-new-privileges=true") ||
