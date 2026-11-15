@@ -88,12 +88,7 @@ func startNativeSource(ctx context.Context, workspaceID string, generation, owne
 		close(done)
 		failed()
 	}()
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-		},
-		ResponseHeaderTimeout: 10 * time.Second,
-	}
+	proxy, transport := nativeSourceProxy(socket, access)
 	cleanup := func() {
 		_ = command.Process.Kill()
 		<-done
@@ -102,6 +97,19 @@ func startNativeSource(ctx context.Context, workspaceID string, generation, owne
 		// removeStaleSocket checks the exact file type/UID and refuses a live
 		// replacement; never unlink an unrelated path during error cleanup.
 		_ = removeStaleSocket(socket)
+	}
+	return proxy, cleanup, nil
+}
+
+func nativeSourceProxy(socket string, access workspacefiles.Access) (*httputil.ReverseProxy, *http.Transport) {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		},
+		// Checkpoint headers follow the complete Source export. Use the same
+		// two-minute window as Factory's checkpoint caller, not the short
+		// ordinary readiness window. Request cancellation remains authoritative.
+		ResponseHeaderTimeout: 120 * time.Second,
 	}
 	proxy := &httputil.ReverseProxy{
 		ErrorLog: log.New(io.Discard, "", 0),
@@ -117,7 +125,7 @@ func startNativeSource(ctx context.Context, workspaceID string, generation, owne
 			http.Error(response, "Native Source is unavailable", http.StatusServiceUnavailable)
 		},
 	}
-	return proxy, cleanup, nil
+	return proxy, transport
 }
 
 // RunSourceHost is Factory's small independent Source-service launcher. Its
