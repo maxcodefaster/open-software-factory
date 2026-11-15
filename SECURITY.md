@@ -16,6 +16,7 @@ reporter unless they ask otherwise.
 
 ## Scope
 
-Factory runs Project code in Sandboxes on a Factorybox worker. Reports about escaping a Sandbox,
-reading another Project's source or secrets, or bypassing an approval are in scope. Findings that
-need an operator to disable the cluster policies the install guide asks for are not.
+Factory runs Project code in official Substrate Actors with private Docker and Dev Containers.
+Reports about escaping that isolation, reading another Project's source or secrets, or bypassing
+an approval are in scope. Findings that need an operator to disable the cluster policies the
+install guide asks for are not.
