@@ -23,6 +23,10 @@ evidence cannot prove an absence. Do not infer wasted time from elapsed wall-clo
 Assess fulfillment, avoidable rework and verification separately. Necessary clarification,
 failed experiments and detecting genuine defects are not avoidable rework by themselves.
 Find a specific observed cause, not generic advice. Cite only supplied exact evidence IDs.
+Return cases as an object keyed by every supplied case id exactly once, not as an array.
+Case ids and outer evidence ids are per-call aliases. Use only a case's outer evidence[].id
+values in its verdict, never ids found inside evidence bodies. Use these same aliases in
+finding and proposal references. For missing evidence, return unknown verdicts with evidenceIds: [].
 Batch repeated causes into one proposal. Prefer simplifying/replacing wrong guidance over
 adding more rules. Propose nothing when evidence is weak or the process worked as intended.
 When the packet lists prior proposals, do not repeat the same proposed, commissioned or dismissed
@@ -35,7 +39,7 @@ comparison case. Removing/skipping tests needs preserved defect detection, not j
 When a case supplies editable targets, you may include one small exact before/after edit to that
 observed target and field. Copy its complete immutable target identity. The before passage must
 occur in the provided target text and identify one passage. Do not invent target IDs, versions,
-unseen text or a replacement whole document. No editable target means edit must be null or omitted.
+unseen text or a replacement whole document. No editable target means edit must be null.
 Include the editable target's evidenceId among the proposal's evidence references, together with
 the observed outcome or artifact that establishes the cause.
 An edit is only a proposal. Separate comparison, authority and publication checks follow.
