@@ -461,7 +461,7 @@ export function createSubstrateWorkspaces(
           command: app.command,
           ...(origins ? { env: { FACTORY_APP_ORIGINS: JSON.stringify(origins) } } : {}),
         }));
-        const configuredAgent = changeID
+        const agent = changeID
           ? await agentConfiguration(
               database,
               changeID,
@@ -469,17 +469,8 @@ export function createSubstrateWorkspaces(
               attemptID,
               generation,
               process.env["FACTORY_BROWSER_TOOLS_IMAGE"] ?? null,
+              config,
             )
-          : undefined;
-        // Native egress admits the pinned Connector TLS origin, not legacy
-        // host.orb/internal HTTP routes. Keep the normal frozen model/token
-        // configuration and address both callbacks through that exact origin.
-        const agent = configuredAgent
-          ? {
-              ...configuredAgent,
-              modelBaseURL: new URL(`/internal/model/${attemptID}/v1`, factoryOrigin).href,
-              browserURL: new URL(`/internal/build-browser/${attemptID}`, factoryOrigin).href,
-            }
           : undefined;
         if (agent) {
           assignment.channels.push({

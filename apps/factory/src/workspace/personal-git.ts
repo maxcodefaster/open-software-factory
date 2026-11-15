@@ -4,7 +4,7 @@ import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
-import { runtimeFactoryURL } from "../runtime/endpoints";
+import { substrateFactoryURL } from "../runtime/endpoints";
 import { runtimeSourceCapability } from "../runtime/git-http";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 
@@ -26,6 +26,7 @@ type Source = {
   attemptID: string;
   authorName: string;
   authorEmail: string;
+  binding: unknown;
 };
 type Operation = {
   workspaceID: string;
@@ -75,12 +76,14 @@ export function createPersonalGit(
     await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, userID, write));
     const [row] = await database.client<Source[]>`
       SELECT workspace.project_id AS "projectID",project.default_branch AS branch,
-        attempt.id AS "attemptID",person.name AS "authorName",person.email AS "authorEmail"
+        attempt.id AS "attemptID",person.name AS "authorName",person.email AS "authorEmail",
+        binding.intent AS binding
       FROM factory.development_workspace workspace
       JOIN factory.project project ON project.id=workspace.project_id
       JOIN auth."user" person ON person.id=${userID}
       JOIN LATERAL (SELECT id FROM factory.runtime_attempt WHERE workspace_id=workspace.id
         AND state='ready' AND stop_intended_at IS NULL ORDER BY generation DESC LIMIT 1) attempt ON true
+      LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
       WHERE workspace.id=${workspaceID} AND workspace.kind='personal'`;
     if (!row) throw new CommandError("conflict", "Open your personal Workspace before using Git");
     await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, row.projectID));
@@ -199,8 +202,9 @@ export function createPersonalGit(
               authorEmail: saved.authorEmail,
               ...(action !== "commit"
                 ? {
-                    repository: runtimeFactoryURL(
+                    repository: substrateFactoryURL(
                       `/internal/personal-git/${input.commandID}/${personalGitCapability(input.commandID)}`,
+                      saved.binding,
                     ),
                   }
                 : {}),

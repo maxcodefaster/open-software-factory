@@ -109,6 +109,23 @@ async function setup() {
   };
 }
 
+test("native browser MCP uses the bound Actor TLS origin, not the chart's private backchannel", async () => {
+  const previous = process.env["FACTORY_INTERNAL_URL"];
+  process.env["FACTORY_INTERNAL_URL"] = "http://factory-internal.release.svc:3000";
+  let scope: Awaited<ReturnType<typeof setup>> | undefined;
+  try {
+    scope = await setup();
+    expect(scope.grant.runtimeEndpoint).toBe(
+      `https://owned-build.factory.invalid/internal/build-browser/${scope.owned.attemptID}/${scope.turn.id}`,
+    );
+    expect(scope.frames).toHaveLength(0);
+  } finally {
+    await scope?.dispose();
+    if (previous === undefined) delete process.env["FACTORY_INTERNAL_URL"];
+    else process.env["FACTORY_INTERNAL_URL"] = previous;
+  }
+});
+
 test("browser create intent is immutable, deterministic and persisted before exact dispatch", async () => {
   const scope = await setup();
   try {

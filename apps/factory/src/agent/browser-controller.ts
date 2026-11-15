@@ -12,7 +12,7 @@ import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/sr
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { createReviewMedia, maximumRecordingBytes } from "../review/media";
-import { runtimeFactoryURL } from "../runtime/endpoints";
+import { substrateFactoryURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 
@@ -446,11 +446,14 @@ export function createBuildBrowserController(
       const session = allowed ? await row(id) : undefined;
       if (!session || !["intended", "active"].includes(session.state))
         throw new CommandError("conflict", "Browser requires the current admitted Build execution");
+      const [binding] = await database.client<{ intent: unknown }[]>`
+        SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${session.attemptID}`;
       return {
         sessionID: session.id,
         bearer: capability(session.id),
-        runtimeEndpoint: runtimeFactoryURL(
+        runtimeEndpoint: substrateFactoryURL(
           `/internal/build-browser/${session.attemptID}/${turnID}`,
+          binding?.intent,
         ),
         runtimeBearer: runtimeBuildBrowserToken(secret, session.attemptID, session.generation),
       };

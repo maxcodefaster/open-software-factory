@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { runtimeFactoryURL, runtimeForgeURL, substrateRepositoryCloneURL } from "./endpoints";
+import { runtimeForgeURL, substrateFactoryURL, substrateRepositoryCloneURL } from "./endpoints";
 
 describe("runtime Factory endpoints", () => {
   test("native Git uses the admitted Forge TLS origin, never legacy internal host rewriting", () => {
@@ -73,37 +73,30 @@ describe("runtime Factory endpoints", () => {
       }
     }
   });
-  test("control-plane callbacks use their configured internal Service", () => {
-    const keys = [
-      "FACTORY_INTERNAL_URL",
-      "FACTORY_BASE_URL",
-      "FACTORY_FORGEJO_API_URL",
-      "FACTORY_FORGEJO_PUBLIC_URL",
-    ] as const;
+  test("Actor callbacks retain their native TLS binding despite private or changed browser origins", () => {
+    const keys = ["FACTORY_INTERNAL_URL", "FACTORY_BASE_URL", "FACTORY_RUNTIME_HOST"] as const;
     const previous = keys.map((key) => [key, process.env[key]] as const);
     try {
-      process.env["FACTORY_INTERNAL_URL"] = "http://factory.portable.svc:3000";
-      process.env["FACTORY_BASE_URL"] = "https://factory.example";
-      process.env["FACTORY_FORGEJO_API_URL"] = "http://forgejo.portable.svc:3000/api/v1/";
-      process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://forge.example";
-      expect(runtimeFactoryURL("/internal/runtime-connect")).toBe(
-        "http://factory.portable.svc:3000/internal/runtime-connect",
-      );
-      expect(runtimeFactoryURL("/internal/model/attempt/v1")).toBe(
-        "http://factory.portable.svc:3000/internal/model/attempt/v1",
-      );
-      expect(runtimeForgeURL()).toBe("http://forgejo.portable.svc:3000/");
-      for (const invalid of [
-        "file:///tmp/factory",
-        "http://user:secret@factory.portable.svc",
-        "http://factory.portable.svc/path",
-        "http://factory.portable.svc?key=value",
+      process.env["FACTORY_INTERNAL_URL"] = "http://factory-internal.release.svc:3000";
+      process.env["FACTORY_BASE_URL"] = "http://localhost:58000";
+      process.env["FACTORY_RUNTIME_HOST"] = "host.orb.internal";
+      for (const path of [
+        "/internal/model/attempt/v1",
+        "/internal/build-browser/attempt/turn",
+        "/internal/mcp/attempt/turn",
+        "/internal/personal-git/command/capability",
       ]) {
-        process.env["FACTORY_INTERNAL_URL"] = invalid;
-        expect(() => runtimeFactoryURL("/internal/runtime-connect")).toThrow(
-          "FACTORY_INTERNAL_URL",
-        );
+        expect(
+          substrateFactoryURL(path, {
+            connectorURL: "wss://frozen-factory.example/internal/runtime-connect",
+          }),
+        ).toBe(`https://frozen-factory.example${path}`);
       }
+      expect(
+        substrateFactoryURL("/internal/model/attempt/v1", {
+          connectorURL: "wss://frozen-factory.example:8443/internal/runtime-connect",
+        }),
+      ).toBe("https://frozen-factory.example:8443/internal/model/attempt/v1");
     } finally {
       for (const [key, value] of previous) {
         if (value === undefined) delete process.env[key];
@@ -111,15 +104,33 @@ describe("runtime Factory endpoints", () => {
       }
     }
   });
-  test("control-plane callbacks use the installation's reachable host", () => {
-    const prior = process.env["FACTORY_RUNTIME_HOST"];
-    try {
-      process.env["FACTORY_RUNTIME_HOST"] = "192.0.2.10";
-      expect(runtimeFactoryURL("/internal/runtime-connect")).toContain("192.0.2.10");
-    } finally {
-      if (prior === undefined) delete process.env["FACTORY_RUNTIME_HOST"];
-      else process.env["FACTORY_RUNTIME_HOST"] = prior;
-    }
+  test("Actor callbacks fail closed on missing bindings or a different origin or path", () => {
+    for (const connectorURL of [
+      "http://factory.example/internal/runtime-connect",
+      "https://factory.example/internal/runtime-connect",
+      "ws://factory.example/internal/runtime-connect",
+      "wss://user:secret@factory.example/internal/runtime-connect",
+      "wss://factory.example/internal/runtime-connect?key=secret",
+      "wss://factory.example/internal/runtime-connect#fragment",
+      "wss://factory.example/other",
+    ])
+      expect(() => substrateFactoryURL("/internal/model/attempt/v1", { connectorURL })).toThrow();
+    for (const binding of [null, {}, { connectorURL: "" }])
+      expect(() => substrateFactoryURL("/internal/model/attempt/v1", binding)).toThrow();
+    for (const path of [
+      "https://other.example/internal/model/attempt/v1",
+      "//other.example/internal/model/attempt/v1",
+      "/internal/../../outside",
+      "/internal/../outside",
+      "/outside",
+      "/internal/model?token=secret",
+      "/internal/model#fragment",
+    ])
+      expect(() =>
+        substrateFactoryURL(path, {
+          connectorURL: "wss://factory.example/internal/runtime-connect",
+        }),
+      ).toThrow();
   });
   test("resolves the configured control-plane Forge helper", () => {
     const previous = process.env["FACTORY_FORGEJO_API_URL"];
@@ -131,35 +142,6 @@ describe("runtime Factory endpoints", () => {
     } finally {
       if (previous === undefined) delete process.env["FACTORY_FORGEJO_API_URL"];
       else process.env["FACTORY_FORGEJO_API_URL"] = previous;
-    }
-  });
-
-  test("keeps the configured scheme and port when resolving the OrbStack host", () => {
-    const previous = process.env["FACTORY_BASE_URL"];
-    try {
-      for (const hostname of ["127.0.0.1", "localhost", "[::1]"]) {
-        process.env["FACTORY_BASE_URL"] = `http://${hostname}:51321`;
-        expect(runtimeFactoryURL("/internal/runtime-connect")).toBe(
-          "http://host.orb.internal:51321/internal/runtime-connect",
-        );
-        expect(runtimeFactoryURL("/internal/model/attempt/v1")).toBe(
-          "http://host.orb.internal:51321/internal/model/attempt/v1",
-        );
-        expect(runtimeFactoryURL("/internal/runtime-source/attempt/capability")).toBe(
-          "http://host.orb.internal:51321/internal/runtime-source/attempt/capability",
-        );
-      }
-      delete process.env["FACTORY_BASE_URL"];
-      expect(runtimeFactoryURL("/internal/runtime-connect")).toBe(
-        "http://host.orb.internal:3000/internal/runtime-connect",
-      );
-      process.env["FACTORY_BASE_URL"] = "https://factory.example:8443";
-      expect(runtimeFactoryURL("/internal/runtime-connect")).toBe(
-        "https://factory.example:8443/internal/runtime-connect",
-      );
-    } finally {
-      if (previous === undefined) delete process.env["FACTORY_BASE_URL"];
-      else process.env["FACTORY_BASE_URL"] = previous;
     }
   });
 });

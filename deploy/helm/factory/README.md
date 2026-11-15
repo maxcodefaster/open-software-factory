@@ -172,6 +172,10 @@ localhost fallback nor overwrites an operator's kubeconfig. Standalone preflight
 without that switch retain the operator's selected kubeconfig and context.
 
 Model credentials are configured in Factory Settings and encrypted through OpenBao, not Helm values.
+Add a custom model provider's HTTPS origin to `modelAllowedOrigins` before saving that connection.
+Actor model, browser-MCP and personal Git callbacks use the HTTPS origin of their original
+Substrate Connector binding. They do not use the chart's private `FACTORY_INTERNAL_URL`
+backchannel or a loopback browser address.
 The chart supplies PostgreSQL, Forgejo, Zero, OpenBao and a private Garage bucket for retained Source
 chunks, attachments, QA recordings and stills. Public readiness includes an authenticated object
 write/read. The store is not high availability. Project Git mirrors are optional HTTPS code copies,

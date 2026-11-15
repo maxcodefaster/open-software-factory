@@ -4,7 +4,7 @@ import {
   runtimeModelToken,
 } from "../../../../packages/runtime-domain/src/identity";
 import { modelEnvironment } from "../models/controller";
-import { runtimeFactoryURL } from "./endpoints";
+import { substrateFactoryURL } from "./endpoints";
 
 type Database = ReturnType<typeof createDatabase>;
 const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
@@ -15,6 +15,7 @@ export async function agentConfiguration(
   attemptID: string,
   generation: number,
   browserToolsImage: string | null,
+  binding: unknown,
 ) {
   if (!browserToolsImage || !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(browserToolsImage))
     throw new Error(
@@ -35,14 +36,14 @@ export async function agentConfiguration(
     WHERE turn.change_id=${changeID} ORDER BY turn.created_at, turn.id LIMIT 1`;
   const modelID = admitted?.modelID ?? agentModelID;
   return {
-    modelBaseURL: runtimeFactoryURL(`/internal/model/${attemptID}/v1`),
+    modelBaseURL: substrateFactoryURL(`/internal/model/${attemptID}/v1`, binding),
     modelToken: runtimeModelToken(secret, attemptID, generation),
     modelID,
     modelIDs: admitted ? [modelID] : modelEnvironment().models,
     provider: admitted?.provider ?? "openai",
     ...(admitted?.reasoningEffort ? { reasoningEffort: admitted.reasoningEffort } : {}),
     browserToolsImage,
-    browserURL: runtimeFactoryURL(`/internal/build-browser/${attemptID}`),
+    browserURL: substrateFactoryURL(`/internal/build-browser/${attemptID}`, binding),
     browserToken: runtimeBuildBrowserToken(secret, attemptID, generation),
   };
 }

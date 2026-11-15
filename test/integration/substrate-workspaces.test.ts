@@ -29,6 +29,29 @@ import {
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
+const starterSourceFile = (path: string) => !path.split(/[\\/]/).includes("node_modules");
+
+test("Starter fixture copies source without local installed dependencies", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-starter-copy-"));
+  try {
+    const source = join(directory, "source");
+    const target = join(directory, "target");
+    await mkdir(join(source, "node_modules", "installed-package"), { recursive: true });
+    await mkdir(join(source, "src"));
+    await writeFile(join(source, "src", "app.ts"), "export const source = true;\n");
+    await writeFile(join(source, "node_modules", "installed-package", "index.js"), "ignored");
+    await cp(source, target, { recursive: true, filter: starterSourceFile });
+    expect(await Bun.file(join(target, "src", "app.ts")).text()).toBe(
+      "export const source = true;\n",
+    );
+    expect(
+      await Bun.file(join(target, "node_modules", "installed-package", "index.js")).exists(),
+    ).toBe(false);
+  } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
 test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; lost replies keep the same native intent", async () => {
   const f = await substrateFixture();
   const directory = await mkdtemp(join(tmpdir(), "substrate-provision-"));
@@ -339,7 +362,10 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
   await mkdir(".factory/test-results", { recursive: true });
   const directory = await mkdtemp(resolve(".factory/test-results/native-ticket-controller-"));
   const repo = join(directory, "repository");
-  await cp("templates/starter-app", repo, { recursive: true });
+  await cp("templates/starter-app", repo, {
+    recursive: true,
+    filter: starterSourceFile,
+  });
   await Bun.$`git init -b main ${repo}`.quiet();
   await Bun.$`git -C ${repo} add .`.quiet();
   await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();

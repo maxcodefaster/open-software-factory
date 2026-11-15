@@ -12,6 +12,8 @@ import { fixtureValue } from "../fixtures/value";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 test("personal Git retains intent before dispatch, rechecks authority and never replays uncertain writes", async () => {
+  const previousInternalURL = process.env["FACTORY_INTERNAL_URL"];
+  process.env["FACTORY_INTERNAL_URL"] = "http://factory-internal.release.svc:3000";
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
   try {
@@ -38,7 +40,10 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
       connected: (id) => id === attemptID,
       async parentOperation(id, operation, beforeSend) {
         expect(id).toBe(attemptID);
-        const input = JSON.parse(String(operation["data"])) as { action: string };
+        const input = JSON.parse(String(operation["data"])) as {
+          action: string;
+          repository?: string;
+        };
         if (mode === "revoked")
           await database.client`UPDATE factory.project_membership SET role='product-contributor'
             WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
@@ -50,10 +55,16 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
             Array<{ state: string }>
           >`SELECT state FROM factory.personal_git_operation WHERE id=${operation.operationId}`;
           expect(intent?.state).toBe("attempted");
-          if (input.action === "fetch" || input.action === "pull")
+          if (input.action === "fetch" || input.action === "pull") {
+            const callback = new URL(input.repository ?? "");
+            expect(callback.origin).toBe("https://owned-build.factory.invalid");
+            expect(callback.pathname).toStartWith(
+              `/internal/personal-git/${operation.operationId}/`,
+            );
             expect(await personalGitRepository(database, operation.operationId)).toBe(
               "https://owned-build.factory.invalid/owned/owned-build.git",
             );
+          }
         }
         if (mode === "lost") throw new Error("Owned response lost");
         if (mode === "rejected")
@@ -157,5 +168,7 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
   } finally {
     await database.client.end({ timeout: 2 });
     await processFixture.dispose();
+    if (previousInternalURL === undefined) delete process.env["FACTORY_INTERNAL_URL"];
+    else process.env["FACTORY_INTERNAL_URL"] = previousInternalURL;
   }
 }, 30_000);

@@ -1,22 +1,28 @@
-export function runtimeFactoryURL(path: string) {
-  const internal = process.env["FACTORY_INTERNAL_URL"];
-  if (internal) return new URL(path, requireInternalOrigin(internal)).toString();
-  const url = new URL(path, process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000");
-  return runtimeHostURL(url);
-}
-
-function requireInternalOrigin(value: string) {
-  const url = new URL(value);
+// Actor callbacks use their immutable native Connector origin. The control
+// plane's private HTTP backchannel is neither reachable nor admitted there.
+export function substrateFactoryURL(path: string, binding: unknown) {
+  const { connectorURL } = z.object({ connectorURL: z.url() }).parse(binding);
+  const url = new URL(connectorURL);
   if (
-    !["http:", "https:"].includes(url.protocol) ||
+    url.protocol !== "wss:" ||
     url.username ||
     url.password ||
-    url.pathname !== "/" ||
+    url.pathname !== "/internal/runtime-connect" ||
     url.search ||
     url.hash
   )
-    throw new Error("FACTORY_INTERNAL_URL must be an HTTP(S) origin without credentials or a path");
-  return url;
+    throw new Error("Native callback requires the exact admitted WSS Connector binding");
+  url.protocol = "https:";
+  const callback = new URL(path, url.origin);
+  if (
+    !path.startsWith("/internal/") ||
+    callback.origin !== url.origin ||
+    !callback.pathname.startsWith("/internal/") ||
+    callback.search ||
+    callback.hash
+  )
+    throw new Error("Native callback must stay within its bound Factory origin");
+  return callback.href;
 }
 
 function runtimeHostURL(url: URL) {
