@@ -23,8 +23,20 @@ import { eventually } from "../fixtures/factory-process";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
 
-test("native Workspace generations retain old identities and give a shared explicit Start the latest confirmed Source export", async () => {
-  const f = await substrateFixture();
+async function proveGenerations(kind: "personal" | "ticket") {
+  const base = "a".repeat(40);
+  let submitted = "d".repeat(40);
+  const f = await substrateFixture(base, kind);
+  const recordSubmission = (revision: string, sequence: number, state = "succeeded") =>
+    f.database.client`INSERT INTO factory.change_commit_operation(
+        id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
+        observed_remote_sha,commit_message,idempotency_key,state,source,created_by,completed_at)
+        SELECT ${crypto.randomUUID()},id,runtime_attempt_id,${sequence},branch_name,base_sha,${revision},
+          ${revision},'Owned saved checkout',${`generation:${f.changeID}:${sequence}`},${state},'workspace',${f.userID},now()
+        FROM factory.change WHERE id=${f.changeID}`;
+  if (kind === "ticket")
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',epoch=2,user_id=${f.userID} WHERE change_id=${f.changeID}`;
   const directory = await mkdtemp(join(tmpdir(), "factory-generation-"));
   const ca = join(directory, "ca.pem");
   await writeFile(
@@ -217,6 +229,8 @@ test("native Workspace generations retain old identities and give a shared expli
     }
     throw new Error(`Unexpected native operation ${method}`);
   };
+  const contractRevisions: string[] = [];
+  let submitDuringContractRead = false;
   const workspaces = createSubstrateWorkspaces(
     f.database,
     f.hub,
@@ -224,17 +238,35 @@ test("native Workspace generations retain old identities and give a shared expli
     config,
     call,
     call,
-    async () => ({
-      version: 1,
-      primaryApp: "web",
-      apps: [
-        { id: "web", label: "Owned", command: ["node", "server.mjs"], port: 4300, healthPath: "/" },
-      ],
-    }),
+    async (_repository, revision) => {
+      contractRevisions.push(revision);
+      if (submitDuringContractRead) {
+        submitDuringContractRead = false;
+        submitted = "f".repeat(40);
+        await recordSubmission(submitted, 3);
+      }
+      return {
+        version: 1,
+        primaryApp: "web",
+        apps: [
+          {
+            id: "web",
+            label: "Owned",
+            command: ["node", "server.mjs"],
+            port: 4300,
+            healthPath: "/",
+          },
+        ],
+      };
+    },
     sources,
   );
+  const start = (userID = f.userID) =>
+    kind === "ticket"
+      ? workspaces.start(userID, f.changeID)
+      : workspaces.start(userID, undefined, f.workspaceID);
   try {
-    const firstID = await workspaces.start(f.userID);
+    const firstID = await start();
     expect(firstID).toBe(f.attemptID);
     const first = await workspaces.forAttempt(firstID);
     if (!first) throw new Error("First native owner is missing");
@@ -244,13 +276,17 @@ test("native Workspace generations retain old identities and give a shared expli
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${firstID}`;
     await expect(first.stop()).rejects.toThrow("lost predecessor Delete reply");
-    await expect(workspaces.start(f.userID)).rejects.toThrow("retired");
+    await expect(start()).rejects.toThrow("retired");
     expect(creates).toHaveLength(5);
     await first.stop();
+    if (kind === "ticket") {
+      await recordSubmission(submitted, 1);
+      await recordSubmission("e".repeat(40), 2, "failed");
+    }
     const original = await f.database
       .client`SELECT row_to_json(b) AS binding FROM factory.substrate_binding b WHERE runtime_attempt_id=${firstID}`;
     independent = false;
-    await expect(workspaces.start(f.userID)).rejects.toThrow("independent Source");
+    await expect(start()).rejects.toThrow("independent Source");
     expect(creates).toHaveLength(5);
     independent = true;
     latestBytes = new TextEncoder().encode("saved edits made after Stop");
@@ -260,18 +296,30 @@ test("native Workspace generations retain old identities and give a shared expli
     await f.database
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${f.projectID},${collaborator},'developer',${f.userID})`;
-    await createWorkspaceSharing(f.database, () => {}).decide(f.userID, {
-      commandID: crypto.randomUUID(),
-      workspaceID: f.workspaceID,
-      userID: collaborator,
-      permission: "collaborate",
-      expectedVersion: 0,
-    });
+    if (kind === "personal")
+      await createWorkspaceSharing(f.database, () => {}).decide(f.userID, {
+        commandID: crypto.randomUUID(),
+        workspaceID: f.workspaceID,
+        userID: collaborator,
+        permission: "collaborate",
+        expectedVersion: 0,
+      });
+    const nextUser = kind === "personal" ? collaborator : f.userID;
+    if (kind === "ticket") {
+      submitDuringContractRead = true;
+      await expect(start(nextUser)).rejects.toThrow(
+        "execution revision changed before native provisioning",
+      );
+      expect(contractRevisions.at(-1)).toBe("d".repeat(40));
+      expect(creates).toHaveLength(5);
+      expect(
+        await f.database
+          .client`SELECT generation FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=2`,
+      ).toHaveLength(0);
+    }
     loseCreate = true;
-    await expect(workspaces.start(collaborator, undefined, f.workspaceID)).rejects.toThrow(
-      "lost successor Create reply",
-    );
-    const secondID = await workspaces.start(collaborator, undefined, f.workspaceID);
+    await expect(start(nextUser)).rejects.toThrow("lost successor Create reply");
+    const secondID = await start(nextUser);
     expect(secondID).not.toBe(firstID);
     expect(creates).toHaveLength(10);
     const second = await workspaces.forAttempt(secondID);
@@ -304,12 +352,27 @@ test("native Workspace generations retain old identities and give a shared expli
       await f.database
         .client`SELECT row_to_json(b) AS binding FROM factory.substrate_binding b WHERE runtime_attempt_id=${firstID}`,
     ).toEqual(original);
+    const revision = kind === "ticket" ? submitted : base;
     const attempts = await f.database
-      .client`SELECT generation,created_by FROM factory.runtime_attempt WHERE workspace_id=${f.workspaceID} ORDER BY generation`;
+      .client`SELECT generation,created_by,revision FROM factory.runtime_attempt WHERE workspace_id=${f.workspaceID} ORDER BY generation`;
     expect([...attempts]).toEqual([
-      { generation: "1", created_by: f.userID },
-      { generation: "2", created_by: collaborator },
+      { generation: "1", created_by: f.userID, revision: base },
+      { generation: "2", created_by: nextUser, revision },
     ]);
+    expect(contractRevisions.at(-1)).toBe(revision);
+    expect(
+      (
+        await f.database.client<
+          { source_revision: string }[]
+        >`SELECT source_revision FROM factory.development_workspace WHERE id=${f.workspaceID}`
+      )[0]?.source_revision,
+    ).toBe(base);
+    const successor = (
+      await f.database.client<
+        { intent: { revision: string } }[]
+      >`SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=2`
+    )[0]?.intent;
+    expect(successor?.revision).toBe(revision);
     expect((await first.get()).state).toBe("deleted");
     const provisions = await f.database
       .client`SELECT generation FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} ORDER BY generation`;
@@ -335,7 +398,13 @@ test("native Workspace generations retain old identities and give a shared expli
     await f.dispose();
     await rm(directory, { recursive: true, force: true });
   }
-}, 60_000);
+}
+
+test.each(["personal", "ticket"] as const)(
+  "native %s Workspace generations retain old identities and start from the latest submitted revision and confirmed Source",
+  proveGenerations,
+  60_000,
+);
 
 test("a human Ticket Start rechecks a concurrent Agent Stop after the existing Change lock", async () => {
   const f = await substrateFixture("a".repeat(40), "ticket");

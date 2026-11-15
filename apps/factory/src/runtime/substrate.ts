@@ -33,6 +33,7 @@ import {
   substrateRuntimePrincipalIn,
   substrateUnsettledBootstrapIn,
   substrateWorkspaceGrantIn,
+  substrateWorkspaceRevisionIn,
 } from "./substrate-grant";
 import {
   matchesNativeInputStop,
@@ -999,9 +1000,18 @@ export function createSubstrateExecution(
             } else {
               if (!workspaceID) throw new Error("Native Workspace identity is missing");
               await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
+              const revision = await substrateWorkspaceRevisionIn(tx, workspaceID);
+              const [provision] = await tx<{ revision: string }[]>`
+                SELECT intent->>'revision' AS revision FROM factory.substrate_workspace
+                WHERE workspace_id=${workspaceID} AND generation=${config.generation}`;
+              if (provision && provision.revision !== revision)
+                throw new CommandError(
+                  "conflict",
+                  "Workspace execution revision differs from its native provisioning intent",
+                );
               await admitComputeIn(tx, config.projectID, substrateResourceReservation(config));
               await tx`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-              SELECT ${attemptID},project_id,id,change_id,${config.generation},source_revision,'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID}
+              SELECT ${attemptID},project_id,id,change_id,${config.generation},${revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID}
                 FROM factory.development_workspace WHERE id=${workspaceID}`;
             }
             await tx`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent) VALUES(${attemptID},${atespace},${actorName},${JSON.stringify(retainedIntent)}::text::jsonb)`;

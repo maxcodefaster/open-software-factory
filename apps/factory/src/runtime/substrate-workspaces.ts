@@ -44,6 +44,7 @@ import {
   substrateBootstrapRetentionIn,
   substrateUnsettledBootstrapIn,
   substrateWorkspaceGrantIn,
+  substrateWorkspaceRevisionIn,
 } from "./substrate-grant";
 import { substrateResourceReservation, substrateResources } from "./substrate-resources";
 import { renderSubstrateTemplate } from "./substrate-template";
@@ -320,10 +321,9 @@ export function createSubstrateWorkspaces(
             substrate: boolean;
             owner: string | null;
             changeID: string | null;
-            revision: string;
             branch: string;
           }[]
-        >`SELECT substrate,owner_user_id AS owner,change_id AS "changeID",source_revision AS revision,source_branch AS branch FROM factory.development_workspace WHERE id=${workspaceID}`;
+        >`SELECT substrate,owner_user_id AS owner,change_id AS "changeID",source_branch AS branch FROM factory.development_workspace WHERE id=${workspaceID}`;
         if (
           workspace &&
           (!workspace.substrate || (changeID ? workspace.changeID !== changeID : !workspace.owner))
@@ -389,7 +389,10 @@ export function createSubstrateWorkspaces(
         }
         const [ticket] = changeID
           ? await sql<{ id: string; revision: string; branch: string }[]>`
-          SELECT c.ticket_id AS id,c.base_sha AS revision,c.branch_name AS branch
+          SELECT c.ticket_id AS id,COALESCE(
+            (SELECT commit_sha FROM factory.change_commit_operation
+              WHERE change_id=c.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
+            c.base_sha) AS revision,c.branch_name AS branch
           FROM factory.change c JOIN factory.ticket t ON t.id=c.ticket_id
           JOIN factory.branch_create_operation b ON b.change_id=c.id
           WHERE c.id=${changeID} AND c.project_id=${config.projectID}
@@ -402,10 +405,13 @@ export function createSubstrateWorkspaces(
           { repository: string; branch: string; devcontainerPath: string }[]
         >`SELECT repository_url AS repository,default_branch AS branch,devcontainer_path AS "devcontainerPath" FROM factory.project WHERE id=${config.projectID}`;
         if (!project) throw new CommandError("not-found", "Project not found");
-        const revision =
-          workspace?.revision ??
-          ticket?.revision ??
-          (await resolveRepositoryRevision(project.repository, project.branch));
+        const revision = workspace
+          ? await sql.begin(async (tx) => {
+              await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
+              return substrateWorkspaceRevisionIn(tx, workspaceID);
+            })
+          : (ticket?.revision ??
+            (await resolveRepositoryRevision(project.repository, project.branch)));
         const branch = workspace?.branch ?? ticket?.branch ?? project.branch;
         if (!readContract)
           throw new Error("Native Workspace requires the normal Project System Contract reader");
@@ -520,6 +526,11 @@ export function createSubstrateWorkspaces(
           else if (!workspace)
             await tx`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${config.projectID},'personal',${userID},${branch},${revision},${userID})`;
           await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
+          if ((await substrateWorkspaceRevisionIn(tx, workspaceID)) !== revision)
+            throw new CommandError(
+              "conflict",
+              "Workspace execution revision changed before native provisioning",
+            );
           if (!prior)
             await tx`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent) VALUES(${workspaceID},${generation},${JSON.stringify(intent)}::text::jsonb)`;
         });

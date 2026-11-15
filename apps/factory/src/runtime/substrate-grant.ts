@@ -170,6 +170,20 @@ export async function substrateWorkspaceGrantIn(
   return workspace;
 }
 
+// Call after the Workspace grant has locked its Change. The retained Source
+// basis never changes, but a new Ticket execution starts at its latest submission.
+export async function substrateWorkspaceRevisionIn(sql: AgentTurnTransaction, workspaceID: string) {
+  const [workspace] = await sql<{ revision: string }[]>`
+    SELECT COALESCE(
+      (SELECT commit_sha FROM factory.change_commit_operation
+        WHERE change_id=w.change_id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
+      c.base_sha,w.source_revision) AS revision
+    FROM factory.development_workspace w LEFT JOIN factory.change c ON c.id=w.change_id
+    WHERE w.id=${workspaceID} AND w.substrate`;
+  if (!workspace) throw new CommandError("not-found", "Native Workspace not found");
+  return workspace.revision;
+}
+
 export async function substrateWorkspaceSourceIn(
   database: ReturnType<typeof createDatabase>,
   sql: AgentTurnTransaction,
