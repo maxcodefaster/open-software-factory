@@ -262,25 +262,35 @@ const options = (stateDirectory: string) => ({
 
 test("storage readiness requires a real owned RWO write/read check and confirms volume cleanup", () =>
   fixture(async (directory, cluster) => {
-    cluster.beforeCreate = async () => {
-      const intent = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
-      expect(intent.id).toBeTruthy();
-    };
-    const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
-    const diagnostic = JSON.parse(await readFile(result.diagnosticFile, "utf8"));
-    expect(diagnostic).toMatchObject({ verified: true, cleanupConfirmed: true });
-    expect(cluster.resources.size).toBe(0);
-    const pod = cluster.calls.find((call) => call.body?.["kind"] === "Pod")?.body;
-    expect(pod?.["spec"]).toMatchObject({
-      automountServiceAccountToken: false,
-      securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000 },
-      volumes: [{ persistentVolumeClaim: { claimName: "runtime-data" } }],
-      containers: [{ image, securityContext: { readOnlyRootFilesystem: true } }],
-    });
-    expect(JSON.stringify(pod)).toContain("sync -d /data/factory-storage-check; test");
-    await expect(readFile(join(directory, "storage-readiness.json"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    // Cluster transitions are immediate in this fixture. Host filesystem load
+    // must not consume its simulated observation deadline.
+    const clock = spyOn(Date, "now").mockReturnValue(Date.now());
+    try {
+      cluster.beforeCreate = async () => {
+        const intent = JSON.parse(
+          await readFile(join(directory, "storage-readiness.json"), "utf8"),
+        );
+        expect(intent.id).toBeTruthy();
+        await Bun.sleep(40);
+      };
+      const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
+      const diagnostic = JSON.parse(await readFile(result.diagnosticFile, "utf8"));
+      expect(diagnostic).toMatchObject({ verified: true, cleanupConfirmed: true });
+      expect(cluster.resources.size).toBe(0);
+      const pod = cluster.calls.find((call) => call.body?.["kind"] === "Pod")?.body;
+      expect(pod?.["spec"]).toMatchObject({
+        automountServiceAccountToken: false,
+        securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000 },
+        volumes: [{ persistentVolumeClaim: { claimName: "runtime-data" } }],
+        containers: [{ image, securityContext: { readOnlyRootFilesystem: true } }],
+      });
+      expect(JSON.stringify(pod)).toContain("sync -d /data/factory-storage-check; test");
+      await expect(readFile(join(directory, "storage-readiness.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      clock.mockRestore();
+    }
   }));
 
 test("a bound volume and zero exit code do not bypass a still-Running Pod", () =>
