@@ -10,6 +10,66 @@ import {
 
 const repositories: string[] = [];
 
+test("configured public Forge source resolves and streams only through its private authenticated API", async () => {
+  const requests: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      requests.push(new URL(request.url).pathname);
+      if (new URL(request.url).pathname.includes("/branches/")) {
+        expect(request.headers.get("authorization")).toBe("Bearer controlled-owned-token");
+        return Response.json({ name: "main", commit: { id: "a".repeat(40) } });
+      }
+      expect(request.headers.get("authorization")).toBe(
+        `Basic ${Buffer.from("factory:controlled-owned-token").toString("base64")}`,
+      );
+      return new Response("owned-private-git");
+    },
+  });
+  const values = {
+    FACTORY_FORGEJO_API_URL: `${server.url}api/v1/`,
+    FACTORY_FORGEJO_PUBLIC_URL: "https://git.owned-factory.invalid",
+    FACTORY_FORGEJO_OWNER: "owned",
+    FACTORY_FORGEJO_TOKEN: "controlled-owned-token",
+  };
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, values);
+    expect(
+      await resolveRepositoryRevision("https://git.owned-factory.invalid/owned/source.git", "main"),
+    ).toBe("a".repeat(40));
+    const response = await serveRuntimeRepository(
+      new Request("https://factory.test/source/info/refs?service=git-upload-pack"),
+      "https://git.owned-factory.invalid/owned/source.git",
+      "/source",
+    );
+    expect(await response.text()).toBe("owned-private-git");
+    expect(requests).toEqual([
+      "/api/v1/repos/owned/source/branches/main",
+      "/owned/source.git/info/refs",
+    ]);
+    for (const url of [
+      "https://unrelated.invalid/owned/source.git",
+      "https://user:password@git.owned-factory.invalid/owned/source.git",
+      "https://git.owned-factory.invalid/owned/source.git?token=not-allowed",
+      "https://git.owned-factory.invalid/owned/source.git#fragment",
+      "https://git.owned-factory.invalid/other/source.git",
+      "https://git.owned-factory.invalid/owned/nested/source.git",
+    ])
+      await expect(resolveRepositoryRevision(url, "main")).rejects.toThrow(
+        "outside the configured forge",
+      );
+    expect(requests).toHaveLength(2);
+  } finally {
+    for (const key of Object.keys(values)) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    await server.stop(true);
+  }
+});
+
 afterEach(async () => {
   await Promise.all(
     repositories.splice(0).map((path) => rm(path, { recursive: true, force: true })),

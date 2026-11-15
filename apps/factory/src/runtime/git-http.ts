@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { runEnvironmentCommand } from "../../../../packages/runtime-kubernetes/src/command";
+import { factoryForgeSource } from "../knowledge/forge-source";
 
 const sourceRoot = "/tmp/open-software-factory-runtime-sources";
 
@@ -137,7 +138,10 @@ export async function serveRuntimeRepository(
     return new Response(null, { status: 403 });
   if (repository.protocol !== "file:") {
     const configured = configuredRepository(repositoryURL);
-    const target = new URL(repositoryURL);
+    const target = new URL(
+      `/${encodeURIComponent(configured.owner)}/${encodeURIComponent(configured.name)}.git`,
+      new URL(configured.apiURL).origin,
+    );
     target.pathname += requestedSuffix;
     target.search = requestURL.search;
     const contentEncoding = request.headers.get("content-encoding");
@@ -211,24 +215,19 @@ function configuredRepository(repositoryURL: string) {
   const apiURL = process.env["FACTORY_FORGEJO_API_URL"];
   const token = process.env["FACTORY_FORGEJO_TOKEN"];
   const owner = process.env["FACTORY_FORGEJO_OWNER"];
-  const url = new URL(repositoryURL);
-  const parts = url.pathname
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  if (
-    !apiURL ||
-    !token ||
-    !owner ||
-    url.origin !== new URL(apiURL).origin ||
-    url.username ||
-    url.password ||
-    parts.length !== 2 ||
-    parts[0] !== owner ||
-    !parts[1]
-  )
+  if (!apiURL || !token || !owner)
     throw new Error("Project repository is outside the configured forge");
-  return { apiURL, token, owner, name: parts[1] };
+  try {
+    const repository = factoryForgeSource(
+      repositoryURL,
+      apiURL,
+      owner,
+      process.env["FACTORY_FORGEJO_PUBLIC_URL"],
+    );
+    return { apiURL, token, ...repository };
+  } catch {
+    throw new Error("Project repository is outside the configured forge");
+  }
 }
 
 // Git transport credentials exist only in this server-side process environment.
