@@ -14,6 +14,7 @@ import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 import { fixtureValue } from "../fixtures/value";
+import { guardWriterCoordination } from "../fixtures/writer-coordination";
 
 test.each(["continue", "stop"] as const)(
   "an admitted Build waits for previous writer teardown before %s without a new command",
@@ -350,22 +351,39 @@ test("observing settled work never takes editing; explicit takeover retains its 
     expect(stopping).toBe(stopsBeforeStale);
     await complete(second.turn.id);
     // A newer settled epoch must not recursively reacquire its own operation lock.
-    const stale = recovered.takeOver(
+    const guarded = guardWriterCoordination(owned.database.coordination);
+    const guardedController = createChangeWriterController({
+      ...options,
+      database: { ...owned.database, coordination: guarded.coordination },
+    });
+    // Negative control: hold the actual PostgreSQL lock, then reject re-entry
+    // before a second connection can wait on it and strand fixture cleanup.
+    const key = `change-writer-operation:${owned.changeID}`;
+    const outer = guarded.coordination();
+    try {
+      await outer`SELECT pg_advisory_lock(hashtext(${key}))`;
+      await expect(
+        guardedController.takeOver(owned.changeID, owned.userID, crypto.randomUUID(), initialEpoch),
+      ).rejects.toThrow("Reentrant writer coordination lock");
+      expect(guarded.heldKeys).toEqual([key]);
+    } finally {
+      try {
+        await outer`SELECT pg_advisory_unlock(hashtext(${key}))`;
+      } finally {
+        await outer.end({ timeout: 1 });
+      }
+    }
+    const beforeStale = guarded.acquisitions;
+    const stale = guardedController.takeOver(
       owned.changeID,
       owned.userID,
       crypto.randomUUID(),
       initialEpoch,
     );
-    expect(
-      (
-        await Promise.race([
-          stale,
-          Bun.sleep(1_000).then(() => {
-            throw new Error("Stale completion deadlocked");
-          }),
-        ])
-      ).state,
-    ).toBe("agent");
+    // Await the operation itself, including unlock/close, without orphaning a race loser.
+    expect((await stale).state).toBe("agent");
+    expect(guarded.acquisitions).toBe(beforeStale + 1);
+    expect(guarded.heldKeys).toEqual([]);
     const latest = await recovered.view(owned.changeID, owned.userID);
     expect(latest).toMatchObject({ state: "agent", canWrite: false });
     expect(stopping).toBe(stopsBeforeStale);
