@@ -16,14 +16,17 @@ import (
 )
 
 type controlConnection struct {
-	connection  *websocket.Conn
-	readTimeout time.Duration
-	writeLock   sync.Mutex
-	readOnce    sync.Once
-	incoming    chan controlFrame
-	readerDone  chan struct{}
-	closeOnce   sync.Once
-	done        chan struct{}
+	connection   *websocket.Conn
+	readTimeout  time.Duration
+	writeLock    sync.Mutex
+	readOnce     sync.Once
+	incoming     chan controlFrame
+	readerDone   chan struct{}
+	closeOnce    sync.Once
+	done         chan struct{}
+	source       *parentSourceStreams
+	sourceCtx    context.Context
+	cancelSource context.CancelFunc
 }
 
 type controlFrame struct {
@@ -63,6 +66,10 @@ func dialControl(ctx context.Context, assignment Assignment, role string, token 
 	}
 	connection.SetReadLimit(maxControlBytes)
 	control := &controlConnection{connection: connection, done: make(chan struct{})}
+	if role == "parent" && assignment.nativeSource != nil {
+		control.source = &parentSourceStreams{handler: assignment.nativeSource}
+		control.sourceCtx, control.cancelSource = context.WithCancel(ctx)
+	}
 	control.armReadDeadline(controlReadTimeout)
 	go control.keepAlive(ctx, controlPingInterval)
 	return control, nil
@@ -126,8 +133,10 @@ func (control *controlConnection) armReadDeadline(timeout time.Duration) {
 
 // Parent can prepare images and hooks before its application read loop starts.
 // One transport reader still has to process Ping/Pong frames during that work.
-// Received application messages stay ordered and bounded; reading a frame never
-// dispatches an operation, restarts preparation or changes its admission.
+// Native Source is initialized before Parent bootstrap. Serve its authenticated
+// streams here even while images and hooks are being prepared. Other application
+// messages stay ordered and bounded; reading never dispatches an operation,
+// restarts preparation or changes its admission.
 func (control *controlConnection) startReader() {
 	control.readOnce.Do(func() {
 		control.incoming = make(chan controlFrame, controlReadQueueLimit)
@@ -146,6 +155,16 @@ func (control *controlConnection) startReader() {
 				}
 				var frame controlFrame
 				frame.err = control.connection.ReadJSON(&frame.message)
+				if frame.err == nil && control.source != nil {
+					switch frame.message.Type {
+					case "http-request":
+						control.source.start(control.sourceCtx, control, frame.message)
+						continue
+					case "stream-close":
+						control.source.close(frame.message.StreamID)
+						continue
+					}
+				}
 				select {
 				case control.incoming <- frame:
 				case <-control.done:
@@ -222,6 +241,9 @@ func (control *controlConnection) close() error {
 	var err error
 	control.closeOnce.Do(func() {
 		close(control.done)
+		if control.cancelSource != nil {
+			control.cancelSource()
+		}
 		err = control.connection.Close()
 	})
 	return err
