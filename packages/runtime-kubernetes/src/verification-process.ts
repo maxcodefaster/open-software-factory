@@ -49,6 +49,9 @@ export function runtimeVerificationProcess(input: RuntimeVerification) {
   const publication = input.publication;
   const publicationEnvironment = publication
     ? {
+        // Node's fetch must use the existing native egress proxy. This enables
+        // its standard proxy support without changing destinations or TLS trust.
+        NODE_USE_ENV_PROXY: "1",
         FACTORY_RELEASE_ID: publication.id,
         FACTORY_RELEASE_VERSION: publication.version,
         FACTORY_RELEASE_SOURCE: "/workspace/project",

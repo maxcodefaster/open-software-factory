@@ -14,6 +14,9 @@ reviewed Change and Delivery path before publication.
 Image/chart publication requires a reachable HTTPS Forgejo public origin with trusted
 certificates. The runner uses that registry origin, not an internal plaintext Git API address.
 Factory does not weaken Docker's TLS checks to make a local HTTP registry work.
+Native publication jobs enable Node's environment-proxy support, so `fetch` uses the
+Actor's existing egress proxy and copied public CA trust. This does not add allowed
+destinations, import Development credentials or disable certificate verification.
 
 The contract declares package names under the Project's private Forgejo package organization.
 It may declare `images`, one `chart`, and `files`, for example
@@ -59,16 +62,21 @@ the release source's availability, it must take custody of the artifacts itself.
 ## Verification
 
 ```sh
-mise exec -- bun run test:controllers project-releases factory-mcp
+mise exec -- bun run test:controllers project-releases
 mise exec -- bun run test:native native-project-releases
-FACTORY_RUN_RELEASE_RUNTIME_PROOF=1 FACTORY_RUN_ARGO_RELEASE_PROOF=1 \
+FACTORY_RUN_ARGO_RELEASE_PROOF=1 \
   mise exec -- bun run test:native native-project-releases
+mise exec -- bun run test:live native-publication.live
 ```
 
 The ordinary native proof checks Git/package isolation, read-only permissions, protected source
-and tags, native job attribution and revocation of an already-issued OCI bearer. The opt-in
-runtime proof needs the locally prepared immutable runtime image metadata. It runs a real
-Factorybox publication against its own Forgejo, OpenBao and database without a consumer.
+and tags, native job attribution and revocation of an already-issued OCI bearer. Its one-job
+runner is a Forgejo component check, not a Substrate product acceptance test.
+The explicit `native-publication.live` lane requires the separately commissioned native
+configuration and TLS origins described in [the runtime checks](../../scripts/runtime/README.md).
+It exercises Substrate publication against its own Forgejo, OpenBao and database without a consumer.
+Its admitted execution fixture does not replace the normal requirements, Verification,
+independent review and human Delivery path.
 The separate Argo compatibility fixture uses a pinned repository server to resolve `1.4.*`
 to `1.4.3`, excluding `1.5.0`, and render a private chart containing the confirmed image digest.
 It also rejects invalid credentials. It installs no CRDs, deploys no workloads and is not an
