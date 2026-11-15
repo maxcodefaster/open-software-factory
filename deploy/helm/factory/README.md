@@ -279,23 +279,43 @@ Forwarding and DNS checks do not qualify native Actor startup or a complete Proj
 `backup.enabled` (default true) renders one CronJob, `<release>-backup`, a dedicated retained claim
 (`backup.size`, default 40Gi) held by a one-container StatefulSet `<release>-backup-store` so
 WaitForFirstConsumer storage binds it, and a ServiceAccount. It runs on `backup.schedule` (default
-`17 2 * * *`) and never overlaps itself. One Pod takes every part in this order, so the object
-mirror always contains the objects the database dump refers to:
+`17 2 * * *`). The CronJob's `Forbid` policy prevents overlapping scheduled Jobs. Manual Jobs
+created with `kubectl create job <job-name> --from=cronjob/<release>-backup` also pass through a
+nonblocking filesystem lock at `/backup/.lock`. If another backup holds it, the new Job fails
+before changing `.current`, any set or the object mirror. Inspect that Job's logs. Start another
+deliberately after the active backup finishes. Do not remove the lock file.
+
+One runner holds the lock through every step, completion, pruning and offsite copy. Its local
+child processes inherit the lock descriptor, so killing the runner cannot admit another backup
+while a surviving child still writes. Termination signals reach the current step's process group.
+The lock releases when its last inherited descriptor closes; no stale-lock cleanup is needed.
+One Pod takes every part in this order, so the object mirror always contains the objects the
+database dump refers to:
 
 | Step | Tool | Result in `<timestamp>/` |
 | --- | --- | --- |
-| PostgreSQL | `pg_dump --format=custom` from the pinned postgres image, checked with `pg_restore --list` | `postgres.dump` |
+| PostgreSQL | `pg_dump --format=custom` through exec in the existing pinned PostgreSQL Pod, checked there with `pg_restore --list` | `postgres.dump` |
 | Forgejo | `forgejo dump` run in the Forgejo container through `kubectl exec`, streamed back and checked | `forgejo.tar.gz` (`forgejo-db.sql`, repositories, attachments, configuration) |
 | Objects | `rclone sync` of the Garage bucket | one mirror at `objects/`; replaced or deleted objects move to `objects-changed/<timestamp>/` |
 | OpenBao | `bao operator raft snapshot save`, logged in as the `factory-backup` AppRole | `openbao.snap` |
 | State | `tar` of the Factory state claim, mounted read-only | `state.tar.gz` (unseal key, AppRole login, installation identity) |
 
-A failed step leaves `<step>.failed` and does not stop the others. The last container writes
+A failed step leaves `<step>.failed` and does not stop the others. The final step writes
 `COMPLETE`, prunes and uploads only when every step succeeded, and otherwise fails the Job so the
 failure shows in `kubectl get jobs`. `backup.retention` (default 7) keeps that many complete sets.
 Incomplete sets are removed when a later run completes. Every network call retries, because a new
 Pod can be refused by NetworkPolicy for a few seconds. The NetworkPolicy lets Pods labelled
 `app.kubernetes.io/component=backup` reach PostgreSQL, OpenBao and Garage and nothing else.
+
+Init containers stage static `kubectl` and `bao` binaries from the existing Factory and OpenBao
+images into a tools volume; they do not mount backup data, object-store keys or OpenBao credentials.
+The rclone runner alone writes backup data. It mounts the tools, state, OpenBao TLS/login and
+optional remote configuration read-only. Its namespace-scoped Role permits exec only into the exact
+`<release>-postgres-0` and `<release>-forgejo-0` Pods. Database credentials remain in PostgreSQL.
+Every remote Forgejo dump attempt uses its own temporary directory named with the backup Pod UID.
+A dump left running after an exec disconnect cannot collide with a later Job or retry.
+The remote shell removes its directory on normal exit or a handled signal. A forced kill can leave
+it for operator inspection.
 
 Limits to know before relying on this:
 

@@ -8,7 +8,16 @@ load_set
 dump() {
   rm -f "$DIR/forgejo.tar.gz.part"
   kubectl exec --namespace "$BACKUP_NAMESPACE" "$FORGEJO_POD" --container forgejo -- sh -c \
-    'mkdir -p /var/lib/gitea/git/repositories && exec forgejo dump --quiet --skip-log --type tar.gz --file - --tempdir /tmp' \
+    'set -eu
+     umask 077
+     temporary="$(mktemp -d "/tmp/factory-backup.$1.XXXXXX")"
+     cleanup() { rm -rf "$temporary"; }
+     trap cleanup EXIT
+     trap "exit 143" TERM
+     trap "exit 130" INT
+     mkdir -p /var/lib/gitea/git/repositories
+     forgejo dump --quiet --skip-log --type tar.gz --file - --tempdir "$temporary"' \
+    sh "$BACKUP_POD_UID" \
     > "$DIR/forgejo.tar.gz.part" &&
     gzip -t "$DIR/forgejo.tar.gz.part" &&
     tar -tzf "$DIR/forgejo.tar.gz.part" > /tmp/forgejo.list &&

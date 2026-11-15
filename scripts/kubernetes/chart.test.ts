@@ -680,7 +680,11 @@ type Container = {
   };
   command?: string[];
   volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
-  env?: Array<{ name: string; value?: string; valueFrom?: { secretKeyRef?: { name: string } } }>;
+  env?: Array<{
+    name: string;
+    value?: string;
+    valueFrom?: { secretKeyRef?: { name: string }; fieldRef?: { fieldPath: string } };
+  }>;
   livenessProbe?: {
     tcpSocket?: { port: number };
     periodSeconds?: number;
@@ -1270,13 +1274,30 @@ test("backups are on by default and write to one dedicated retained claim", asyn
   const pod = cron?.spec.template.spec;
   expect(pod?.initContainers?.map((container) => container.name)).toEqual([
     "own-backup",
-    "prepare",
-    "postgres",
-    "forgejo",
-    "objects",
-    "openbao",
+    "stage-kubectl",
+    "stage-bao",
   ]);
-  expect(pod?.containers.map((container) => container.name)).toEqual(["finalize"]);
+  expect(pod?.containers.map((container) => container.name)).toEqual(["backup"]);
+  expect(pod?.containers[0]?.command).toEqual(["sh", "/scripts/run.sh"]);
+  expect(
+    pod?.initContainers?.find((container) => container.name === "stage-kubectl")?.command,
+  ).toEqual(["cp", "/usr/local/bin/kubectl", "/tools/kubectl"]);
+  expect(pod?.initContainers?.find((container) => container.name === "stage-bao")?.command).toEqual(
+    ["cp", "/usr/bin/bao", "/tools/bao"],
+  );
+  for (const container of pod?.initContainers?.slice(1) ?? [])
+    expect(container.volumeMounts).toEqual([{ name: "tools", mountPath: "/tools" }]);
+  // Only the ownership init container and locked runner may mount the backup PVC.
+  expect(
+    [...(pod?.initContainers ?? []), ...(pod?.containers ?? [])]
+      .filter((container) => container.volumeMounts?.some((mount) => mount.name === "backup"))
+      .map((container) => container.name),
+  ).toEqual(["own-backup", "backup"]);
+  expect(pod?.containers[0]?.volumeMounts).toContainEqual({
+    name: "tools",
+    mountPath: "/tools",
+    readOnly: true,
+  });
   const claims = pod?.volumes?.flatMap((volume) =>
     volume.persistentVolumeClaim ? [volume.persistentVolumeClaim] : [],
   );
@@ -1284,16 +1305,23 @@ test("backups are on by default and write to one dedicated retained claim", asyn
     { claimName: "store-portable-backup-store-0" },
     { claimName: "portable-state", readOnly: true },
   ]);
-  // The read-only state claim is mounted by the OpenBao step alone.
+  // Only the locked runner sees state and credentials; the tool-staging containers do not.
   const mounts = (pod?.initContainers ?? [])
     .concat(pod?.containers ?? [])
     .filter((container) => container.volumeMounts?.some((mount) => mount.name === "state"));
-  expect(mounts.map((container) => container.name)).toEqual(["openbao"]);
+  expect(mounts.map((container) => container.name)).toEqual(["backup"]);
   expect(mounts[0]?.volumeMounts?.find((mount) => mount.name === "state")?.readOnly).toBe(true);
   expect(JSON.stringify(pod?.affinity)).toContain('"app.kubernetes.io/component":"factory"');
-  const finalize = pod?.containers[0];
-  expect(finalize?.env).toContainEqual({ name: "BACKUP_RETENTION", value: "7" });
-  expect(finalize?.env?.some((entry) => entry.name === "BACKUP_REMOTE")).toBe(false);
+  const runner = pod?.containers[0];
+  expect(runner?.env).toContainEqual({ name: "BACKUP_RETENTION", value: "7" });
+  expect(runner?.env?.some((entry) => entry.name === "BACKUP_REMOTE")).toBe(false);
+  expect(runner?.env).toContainEqual({ name: "POSTGRES_POD", value: "portable-postgres-0" });
+  expect(runner?.env).toContainEqual({ name: "FORGEJO_POD", value: "portable-forgejo-0" });
+  expect(runner?.env).toContainEqual({
+    name: "BACKUP_POD_UID",
+    valueFrom: { fieldRef: { fieldPath: "metadata.uid" } },
+  });
+  expect(runner?.env?.some((entry) => entry.name === "PGPASSWORD")).toBe(false);
 });
 
 test("backup images are pinned and match the maintained service pins", async () => {
@@ -1306,31 +1334,33 @@ test("backup images are pinned and match the maintained service pins", async () 
       container.image,
     ]),
   );
-  expect(images.get("postgres")).toBe(compose.services.postgres.image);
-  expect(images.get("openbao")).toBe(upstream.openbao.image);
-  for (const name of ["own-backup", "prepare", "objects", "finalize"])
-    expect(images.get(name)).toBe(upstream.rclone.image);
-  // The Forgejo step needs kubectl, which only the Factory image carries.
-  expect(images.get("forgejo")).toBe(applicationImage);
+  expect(
+    workloads(all).find((workload) => workload.metadata.name === "portable-postgres")?.spec.template
+      .spec.containers[0]?.image,
+  ).toBe(compose.services.postgres.image);
+  expect(images.get("stage-bao")).toBe(upstream.openbao.image);
+  for (const name of ["own-backup", "backup"]) expect(images.get(name)).toBe(upstream.rclone.image);
+  // Stage the existing static kubectl; do not introduce a new image or distribution build.
+  expect(images.get("stage-kubectl")).toBe(applicationImage);
   for (const [name, image] of images)
-    if (name !== "forgejo") expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
+    if (name !== "stage-kubectl") expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
   expect(upstream.rclone.image).toContain(`:${upstream.rclone.version}@sha256:`);
 });
 
-test("the backup ServiceAccount may only exec into the Forgejo Pod", async () => {
+test("the backup ServiceAccount may only exec into the exact PostgreSQL and Forgejo Pods", async () => {
   const all = await resources();
   const role = all.find((item) => item.kind === "Role" && item.metadata.name === "portable-backup");
   expect(role?.rules as unknown).toEqual([
     {
       apiGroups: [""],
       resources: ["pods"],
-      resourceNames: ["portable-forgejo-0"],
+      resourceNames: ["portable-postgres-0", "portable-forgejo-0"],
       verbs: ["get"],
     },
     {
       apiGroups: [""],
       resources: ["pods/exec"],
-      resourceNames: ["portable-forgejo-0"],
+      resourceNames: ["portable-postgres-0", "portable-forgejo-0"],
       verbs: ["get", "create"],
     },
   ]);
@@ -1375,7 +1405,11 @@ test("backups retry network calls and keep failed steps from hiding behind later
     "openbao.sh",
     "postgres.sh",
     "prepare.sh",
+    "run.sh",
   ]);
+  expect(scripts["run.sh"]).toContain('exec 9>>"$BACKUP/.lock"');
+  expect(scripts["run.sh"]).toContain("flock -n 9");
+  expect(scripts["run.sh"]).toContain("prepare postgres forgejo objects openbao finalize");
   expect(scripts["common.sh"]).toContain("retry()");
   for (const name of ["postgres", "forgejo", "objects", "openbao"])
     expect(scripts[`${name}.sh`]).toMatch(/step \w+ retry \d+/);
@@ -1393,7 +1427,7 @@ test("backups retry network calls and keep failed steps from hiding behind later
 test("a default install backs OpenBao up with the AppRole login Factory stores in a Secret", async () => {
   const all = await resources();
   const pod = workloads(all).find((item) => item.kind === "CronJob")?.spec.template.spec;
-  const openbao = pod?.initContainers?.find((container) => container.name === "openbao");
+  const openbao = pod?.containers[0];
   expect(openbao?.volumeMounts).toContainEqual({
     name: "openbao-login",
     mountPath: "/openbao-login",
@@ -1416,7 +1450,7 @@ test("a default install backs OpenBao up with the AppRole login Factory stores i
   const mounting = (pod?.initContainers ?? [])
     .concat(pod?.containers ?? [])
     .filter((container) => container.volumeMounts?.some((mount) => mount.name === "openbao-login"));
-  expect(mounting.map((container) => container.name)).toEqual(["openbao"]);
+  expect(mounting.map((container) => container.name)).toEqual(["backup"]);
   const scripts = all.find(
     (item) => item.metadata.name === "portable-backup" && item.kind === "ConfigMap",
   )?.data as Record<string, string>;
@@ -1456,7 +1490,7 @@ test("backups can send sets to an operator remote and carry an OpenBao snapshot 
     mountPath: "/rclone",
     readOnly: true,
   });
-  const openbao = pod?.initContainers?.find((container) => container.name === "openbao");
+  const openbao = pod?.containers[0];
   expect(openbao?.volumeMounts).toContainEqual({
     name: "openbao-token",
     mountPath: "/openbao-token",

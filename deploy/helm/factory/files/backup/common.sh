@@ -1,4 +1,4 @@
-# Sourced by every backup step. POSIX sh: the step images are Debian (dash) and Alpine (busybox).
+# Sourced by the locked runner and its backup steps. POSIX sh for Alpine's BusyBox.
 set -u
 umask 007
 BACKUP=/backup

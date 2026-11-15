@@ -2,11 +2,16 @@
 . /scripts/common.sh
 load_set
 
-# pg_dump reads one snapshot, so the custom-format file is consistent while Factory runs.
+# Use the existing pinned PostgreSQL Pod's tools, password and local socket. The runner needs
+# no database password or PostgreSQL binaries. Only the archive streams onto the backup PVC.
 dump() {
   rm -f "$DIR/postgres.dump.part"
-  pg_dump --format=custom --no-password --file="$DIR/postgres.dump.part" &&
-    pg_restore --list "$DIR/postgres.dump.part" > /dev/null &&
+  kubectl exec --namespace "$BACKUP_NAMESPACE" "$POSTGRES_POD" --container postgres -- sh -c \
+    'export PGPASSWORD="$POSTGRES_PASSWORD"
+     exec pg_dump --format=custom --no-password --username=factory --dbname=factory' \
+    > "$DIR/postgres.dump.part" &&
+    kubectl exec --stdin --namespace "$BACKUP_NAMESPACE" "$POSTGRES_POD" --container postgres -- \
+      pg_restore --list < "$DIR/postgres.dump.part" > /dev/null &&
     mv "$DIR/postgres.dump.part" "$DIR/postgres.dump"
 }
 
@@ -16,7 +21,10 @@ step postgres retry 5 dump
 # and pg_restore then cannot recreate the foreign key, so the set restores with errors. The set is
 # kept, the Job warns, and postgres.orphans lists the constraints and row counts.
 orphans() {
-  psql --no-password -X -At -f /scripts/foreign-keys.sql | awk -F'|' '$3 > 0'
+  kubectl exec --stdin --namespace "$BACKUP_NAMESPACE" "$POSTGRES_POD" --container postgres -- sh -c \
+    'export PGPASSWORD="$POSTGRES_PASSWORD"
+     exec psql --no-password --username=factory --dbname=factory -X -At' \
+    < /scripts/foreign-keys.sql | awk -F'|' '$3 > 0'
 }
 
 rm -f "$DIR/postgres.orphans"
