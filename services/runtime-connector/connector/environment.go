@@ -417,7 +417,11 @@ func prepareEnvironmentFilesAt(environment runtimeEnvironment, memoryDirectory, 
 	auths := map[string]map[string]string{}
 	var certificates strings.Builder
 	for _, registry := range environment.Bundle.Registries {
-		auths[registry.Host] = map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(registry.Username + ":" + registry.Password))}
+		// Certificate-only entries need trust, not an empty login. Docker rejects
+		// that login and discards credentials for every other registry too.
+		if registry.Username != "" || registry.Password != "" {
+			auths[registry.Host] = map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(registry.Username + ":" + registry.Password))}
+		}
 		certificates.WriteString(registry.Certificate)
 		certificates.WriteByte('\n')
 	}

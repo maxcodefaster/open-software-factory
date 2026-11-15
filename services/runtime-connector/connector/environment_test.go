@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,44 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestCertificateOnlyRegistryPreservesPrivateDockerAuthentication(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	certificate := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))
+	root := t.TempDir()
+	environment := runtimeEnvironment{Version: 1, Bundle: environmentBundle{Registries: []environmentRegistry{
+		{Host: "private.example", Username: "owned-user", Password: "owned-password"},
+		{Host: "public.example", Certificate: certificate},
+	}}}
+	files, err := prepareEnvironmentFilesAt(environment, root, filepath.Join(root, "build-secrets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.cleanup()
+	content, err := os.ReadFile(filepath.Join(files.dockerConfig, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configuration struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(content, &configuration); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := configuration.Auths["public.example"]; present {
+		t.Fatal("certificate-only registry created an empty Docker login, invalidating private authentication")
+	}
+	if len(configuration.Auths) != 1 || configuration.Auths["private.example"].Auth != base64.StdEncoding.EncodeToString([]byte("owned-user:owned-password")) {
+		t.Fatal("private Docker credentials were lost or changed")
+	}
+	trust, err := os.ReadFile(files.caFile)
+	if err != nil || !strings.Contains(string(trust), certificate) {
+		t.Fatal("certificate-only registry trust was lost")
+	}
+}
 
 func TestRuntimeEnvironmentAuthenticationVersionAndSanitizedFailures(t *testing.T) {
 	version := uint64(3)
