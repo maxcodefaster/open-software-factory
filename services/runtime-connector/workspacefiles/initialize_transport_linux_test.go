@@ -172,6 +172,41 @@ func TestSourceInitializationResetExhaustionDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestSourceInitializationReportsCredentialFreeTransportCategories(t *testing.T) {
+	for _, fixture := range []struct {
+		name, message, category string
+		transient               bool
+	}{
+		{"certificate", "SSL certificate problem: unable to get local issuer certificate", "TLS verification", false},
+		{"hostname", "SSL: no alternative certificate subject name matches target hostname", "TLS verification", false},
+		{"trust", "OpenSSL SSL_connect: tlsv1 alert unknown ca", "TLS verification", false},
+		{"ca-file", "error setting certificate verify locations: CAfile: /private/ca.pem", "TLS verification", false},
+		{"reset", "OpenSSL SSL_read: SSL_ERROR_SYSCALL, errno 104", "connection reset", true},
+		{"unknown-ssl", "SSL connection error", "SSL", false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			// Synthetic stderr detail must never appear in the returned category.
+			message := "fatal: unable to access 'https://fixture:DO_NOT_LOG@forge.factory.invalid/PRIVATE_DETAIL': " + fixture.message
+			parent, intent, calls := checkoutTransportGit(t, message, 100)
+			err := Initialize(context.Background(), parent, intent)
+			if err == nil || err.Error() != "source checkout preparation failed: "+fixture.category {
+				t.Fatal("initializer did not return the expected fixed diagnostic category")
+			}
+			var transient *transientSourceError
+			if errors.As(err, &transient) != fixture.transient {
+				t.Fatal("diagnostic category changed retry eligibility")
+			}
+			expected := 1
+			if fixture.transient {
+				expected += len(sourceConnectDelays)
+			}
+			if calls() != expected {
+				t.Fatal("diagnostic classification changed bounded clone attempts")
+			}
+		})
+	}
+}
+
 func TestSourceInitializationResetWaitHonorsCancellation(t *testing.T) {
 	parent, intent, calls := checkoutTransportGit(t, "Recv failure: Connection reset by peer", 100)
 	sourceConnectDelays = []time.Duration{time.Hour}

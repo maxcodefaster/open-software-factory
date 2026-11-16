@@ -65,12 +65,25 @@ func retryTransientSource(ctx context.Context, delays []time.Duration, operation
 
 var sourceConnectDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
 
+func sourceTLSVerificationFailure(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range []string{"certificate", "cafile", "capath", "hostname", "host name", "subject name", "issuer", "trust", "unknown ca"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func sourceConnectionFailure(message string) string {
 	lower := strings.ToLower(message)
 	// A reset can accompany a permanent TLS, proxy or authority failure.
 	// Those explicit failures always take precedence over transport symptoms.
+	if sourceTLSVerificationFailure(message) {
+		return ""
+	}
 	for _, permanent := range []string{
-		"certificate", "cafile", "capath", "hostname", "host name", "subject name", "issuer", "trust", "alert", "ssl_error_ssl",
+		"alert", "ssl_error_ssl",
 		"authentication", "authorization", "username", "password", "denied", "forbidden", "unauthorized",
 		"not allowed", "not authorized", "egress", "policy", "401", "403", "407", "503",
 	} {
@@ -114,6 +127,9 @@ func initGit(ctx context.Context, directory string, args ...string) (string, err
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			message := string(exit.Stderr)
+			if sourceTLSVerificationFailure(message) {
+				return "", errors.New("source checkout preparation failed: TLS verification")
+			}
 			if category := sourceConnectionFailure(message); category != "" {
 				return "", &transientSourceError{"source checkout preparation failed: " + category}
 			}
