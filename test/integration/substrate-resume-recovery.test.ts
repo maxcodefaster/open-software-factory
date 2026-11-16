@@ -250,28 +250,36 @@ test.each(["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"] as const)(
       const recoveredFacts = await facts();
       expect(recoveredFacts).toHaveLength(2);
       const firstRecovered = recoveredFacts.find((row) => row["attemptID"] === f.attemptID);
+      const originalFirst = originalFacts.find((row) => row["attemptID"] === f.attemptID);
+      if (!firstRecovered || !originalFirst) throw Error("Original first Resume fact missing");
       if (firstState === "ACTOR_STATE_RUNNING") {
         expect(firstRecovered?.["outcome"]).toMatchObject({
           actorUID: firstActor.metadata.uid,
           state: firstState,
         });
-        expect({ ...firstRecovered, outcome: null, outcome_recorded_at: null }).toEqual(
-          originalFacts.find((row) => row["attemptID"] === f.attemptID),
-        );
+        const firstDispatch: typeof originalFirst = {
+          ...firstRecovered,
+          outcome: null,
+          outcome_recorded_at: null,
+        };
+        expect(firstDispatch).toEqual(originalFirst);
       } else {
-        expect(firstRecovered).toEqual(
-          originalFacts.find((row) => row["attemptID"] === f.attemptID),
-        );
+        expect(firstRecovered).toEqual(originalFirst);
       }
       const completed = recoveredFacts.find((row) => row["attemptID"] === secondAttemptID);
+      const originalSecond = originalFacts.find((row) => row["attemptID"] === secondAttemptID);
+      if (!completed || !originalSecond) throw Error("Original second Resume fact missing");
       expect(completed?.["outcome"]).toMatchObject({
         actorUID: second?.actor?.metadata.uid,
         state: "ACTOR_STATE_RUNNING",
       });
       expect(completed?.["outcome_recorded_at"]).not.toBeNull();
-      expect({ ...completed, outcome: null, outcome_recorded_at: null }).toEqual(
-        originalFacts.find((row) => row["attemptID"] === secondAttemptID),
-      );
+      const completedDispatch: typeof originalSecond = {
+        ...completed,
+        outcome: null,
+        outcome_recorded_at: null,
+      };
+      expect(completedDispatch).toEqual(originalSecond);
       const bindings = await f.database.client`
       SELECT runtime_attempt_id::text AS "attemptID",actor_uid::text,checkpoint
       FROM factory.substrate_binding WHERE runtime_attempt_id IN (${f.attemptID},${secondAttemptID})`;

@@ -229,7 +229,8 @@ test.each([
       expect(actor?.status.snapshots).toEqual(snapshots);
       expect(actor?.status.state).toBe("ACTOR_STATE_RUNNING");
       const completed = await facts();
-      expect({ ...completed, outcome: null }).toEqual(originalFact());
+      const completedDispatch: ResumeFact = { ...completed, outcome: null };
+      expect(completedDispatch).toEqual(originalFact());
       expect(completed.outcome).toMatchObject({ actorUID: uid, state: "ACTOR_STATE_RUNNING" });
       await runtime.resumeForApp(f.attemptID, f.userID);
       expect(resumes).toBe(priorCalls + 1);
