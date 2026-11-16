@@ -31,6 +31,7 @@ import {
   substrateBootstrapContinuationBlocked,
   substrateBootstrapRetentionIn,
   substrateRuntimePrincipalIn,
+  substrateTicketSourcePauseIn,
   substrateUnsettledBootstrapIn,
   substrateWorkspaceGrantIn,
   substrateWorkspaceRevisionIn,
@@ -456,6 +457,9 @@ export function createSubstrateExecution(
     if (config.deployment !== "fresh-workspaces" || !workspaceID || !sources) return false;
     return Boolean(await substrateBootstrapRetentionIn(sql, workspaceID, attemptID));
   }
+  async function retainedTicketPause(sql: Database["client"]) {
+    return workspaceID && sources ? substrateTicketSourcePauseIn(sql, attemptID) : null;
+  }
   async function requireSettledBootstrap(sql: Database["client"], saved: Binding, generation = 0) {
     if (
       (saved.checkpoint || generation > 0) &&
@@ -859,6 +863,13 @@ export function createSubstrateExecution(
           allow(actor.metadata.uid);
           return;
         }
+        if (await retainedTicketPause(sql)) {
+          allow(actor.metadata.uid);
+          // Admission precedes reconnect. Only the authenticated, advertising
+          // original Parent can continue this same checkpoint after it returns.
+          if (hub.sourceConnected(attemptID)) await suspendIn(sql);
+          return;
+        }
         const [attempt] = await sql<
           { userID: string }[]
         >`SELECT created_by AS "userID" FROM factory.runtime_attempt a WHERE id=${attemptID}
@@ -1200,7 +1211,11 @@ export function createSubstrateExecution(
       });
     },
     async authorizeConnector(request: Request) {
-      if (request.headers.get("x-factory-runtime-attempt") !== attemptID) return false;
+      if (
+        request.headers.get("x-factory-runtime-attempt") !== attemptID ||
+        request.headers.get("x-factory-runtime-generation") !== String(config.generation)
+      )
+        return false;
       return locked(async (sql) => {
         const saved = await binding(sql);
         if (
@@ -1229,6 +1244,8 @@ export function createSubstrateExecution(
             return false;
           return (await observe(sql, saved)).status.state === "ACTOR_STATE_RUNNING";
         }
+        if (retainedSourceParent && (await retainedTicketPause(sql)))
+          return (await observe(sql, saved)).status.state === "ACTOR_STATE_RUNNING";
         const principal = await sql.begin((tx) =>
           preparationID
             ? substratePrebuildPrincipalIn(tx, attemptID)

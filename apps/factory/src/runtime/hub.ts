@@ -471,6 +471,8 @@ export class RuntimeHub {
       this.#disconnectTimers.delete(`${socket.data.attemptID}:parent`);
       if (this.ready(socket.data.attemptID)) {
         this.#observeStatus(socket, "ready");
+      } else if (this.#sourceParents.has(socket)) {
+        this.#observeStatus(socket, "source-ready");
       }
       return;
     }
@@ -711,7 +713,7 @@ export class RuntimeHub {
         reject,
         timer: setTimeout(
           () => this.#failHTTP(streamID, pending, "Runtime request timed out"),
-          60_000,
+          checkpointTraffic ? 120_000 : 60_000,
         ),
         detach: () => request.signal.removeEventListener("abort", abort),
       };

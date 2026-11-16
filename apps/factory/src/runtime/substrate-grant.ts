@@ -43,6 +43,59 @@ export async function substrateBootstrapRetentionIn(
   return row;
 }
 
+// Cleanup authority for one already frozen Ticket handoff, never execution
+// authority for its current Change writer. The storage and Change epochs are
+// separate; a failed Retry cannot replace this original Source checkpoint.
+export async function substrateTicketSourcePauseIn(
+  sql: ReturnType<typeof createDatabase>["client"] | AgentTurnTransaction,
+  attemptID: string,
+) {
+  const [pause] = await sql<{ userID: string; projectID: string }[]>`
+    SELECT original.created_by AS "userID",a.project_id AS "projectID"
+    FROM factory.runtime_attempt a
+    JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.project_id=a.project_id
+      AND w.kind='ticket' AND w.substrate AND w.change_id=a.change_id
+    JOIN factory.change c ON c.id=w.change_id AND c.runtime_attempt_id=a.id
+      AND c.project_id=a.project_id AND c.state IN ('starting','active','failed')
+      AND c.cancel_requested_at IS NULL
+    JOIN factory.ticket ticket ON ticket.id=c.ticket_id AND ticket.id=w.ticket_id
+      AND ticket.trashed_at IS NULL
+    JOIN factory.requirement_approval approval ON approval.id=c.requirement_approval_id
+    JOIN factory.change_agent_session session ON session.change_id=c.id AND session.runtime_attempt_id=a.id
+      AND NOT session.stop_pending AND session.state IN ('failed','waiting','committed','stopped')
+    JOIN factory.agent_turn original ON original.id=session.active_turn_id AND original.change_id=c.id
+      AND original.project_id=a.project_id AND original.ticket_id=ticket.id
+      AND original.created_by=a.created_by AND original.authority->>'mode'='build'
+      AND original.authority->>'requirementRevisionId'=approval.requirement_revision_id::text
+      AND original.state IN ('failed','completed','stopped')
+    JOIN factory.change_agent_turn_intent input ON input.turn_id=original.id
+      AND input.runtime_attempt_id=a.id AND input.session_id=session.opencode_session_id
+    JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id AND b.actor_uid IS NOT NULL
+      AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected
+      AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
+    JOIN factory.substrate_source s ON s.workspace_id=w.id AND s.actor_uid=b.actor_uid
+      AND s.owner='actor' AND NOT s.writable AND s.writer_epoch>1 AND s.checkpoint_id IS NOT NULL
+    JOIN factory.substrate_actor_rpc pause ON pause.runtime_attempt_id=a.id AND pause.action='suspend'
+      AND pause.actor_uid=b.actor_uid AND pause.stop_id IS NULL AND pause.attempted_at IS NULL
+      AND pause.origin_key=COALESCE(b.checkpoint->>'uuid','initial')
+      AND pause.origin_checkpoint IS NOT DISTINCT FROM b.checkpoint
+      AND pause.native_version=b.observation#>>'{metadata,version}'
+    JOIN factory.substrate_actor_rpc resumed ON resumed.runtime_attempt_id=a.id AND resumed.action='resume'
+      AND resumed.origin_key=pause.origin_key AND resumed.actor_uid=b.actor_uid
+      AND resumed.attempted_at IS NOT NULL AND resumed.outcome->>'state'='ACTOR_STATE_RUNNING'
+    WHERE a.id=${attemptID} AND a.substrate AND a.state='pausing' AND a.ready_at IS NOT NULL
+      AND a.stop_intended_at IS NULL AND b.observation#>>'{status,state}'='ACTOR_STATE_RUNNING'
+      AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+        WHERE newer.workspace_id=w.id AND newer.generation>a.generation)
+      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn active WHERE active.change_id=c.id
+        AND active.state IN ('pending','dispatching','running','uncertain'))
+      AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation operation
+        WHERE operation.change_id=c.id AND operation.state NOT IN ('succeeded','failed'))
+      AND NOT EXISTS(SELECT 1 FROM factory.substrate_input_stop stopped WHERE stopped.runtime_attempt_id=a.id)`;
+  if (pause) await projectAuthorityIn(sql, pause.userID, pause.projectID);
+  return pause ?? null;
+}
+
 // Connector/restore capabilities identify an Attempt, not its original creator
 // as a permanent writer. A recorded handoff keeps creation attribution immutable
 // while the existing Change writer determines the current execution principal.

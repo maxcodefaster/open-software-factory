@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import {
   appRuntimeHeaders,
@@ -37,6 +37,57 @@ function connectorSocket(role: "parent" | "child") {
     },
   } as unknown as ServerWebSocket<RuntimeSocketData>;
 }
+
+test.each([
+  ["source", "http://source.internal", "checkpoint", 120_000],
+  ["source", "http://source.internal", "chunk", 120_000],
+  ["source", "https://factory.test", "checkpoint", 60_000],
+  ["source", "http://source.internal", "read", 60_000],
+  ["agent", "http://source.internal", "checkpoint", 60_000],
+] as const)(
+  "only internal Source handoff HTTP receives its caller's first-response budget: %s %s %s",
+  async (channel, origin, operation, milliseconds) => {
+    const hub = new RuntimeHub(async () => {});
+    const parent = connectorSocket("parent");
+    const child = connectorSocket("child");
+    const sent = Promise.withResolvers<string>();
+    const send = (raw: string) => {
+      const frame = JSON.parse(raw);
+      if (frame.type === "http-request") sent.resolve(frame.streamId);
+      return 1;
+    };
+    parent.send = child.send = send as typeof parent.send;
+    hub.open(parent);
+    hub.message(
+      parent,
+      JSON.stringify({
+        type: "hello",
+        role: "parent",
+        channels: [{ name: "source", kind: "source" }],
+      }),
+    );
+    hub.open(child);
+    const timer = spyOn(globalThis, "setTimeout");
+    try {
+      const response = hub.request(
+        "attempt",
+        channel,
+        new Request(origin, { method: "POST", body: "{}" }),
+        `/v1/workspaces/01994a7d-0000-7000-8000-000000000001/${operation}`,
+      );
+      const streamId = await sent.promise;
+      const deadline = timer.mock.calls.at(-1)?.[1];
+      const socket = channel === "source" ? parent : child;
+      hub.message(socket, JSON.stringify({ type: "http-response", streamId, status: 200 }));
+      hub.message(socket, JSON.stringify({ type: "stream-end", streamId }));
+      expect(await (await response).text()).toBe("");
+      expect(deadline).toBe(milliseconds);
+    } finally {
+      timer.mockRestore();
+      hub.revoke("attempt");
+    }
+  },
+);
 
 test.each([true, false])(
   "failed Parent preserves only its advertised Source/checkpoint protocol, advertised=%s",

@@ -1,5 +1,5 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import { stripVTControlCharacters } from "node:util";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import type { SubstrateCall } from "../../../../packages/runtime-kubernetes/src/substrate-control";
@@ -10,12 +10,12 @@ import {
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
-import { CommandError } from "../command-error";
 import {
   createChangeAgentStop,
-  requireStoppedAgentInputsIn,
   type RetainedStopTarget,
+  requireStoppedAgentInputsIn,
 } from "../agent/stop";
+import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
@@ -210,6 +210,9 @@ export function createRuntimeController(
   }
   async function status(attemptID: string, phase: string, error?: string) {
     const native = await execution(attemptID);
+    // A retained Source Parent can finish its recorded pause without a Child,
+    // a new Build grant, or a fresh native Resume.
+    if (phase === "source-ready") return native.recover();
     if (["stopped", "failed", "cleanup-failed"].includes(phase)) {
       const [preparation] = await database.client<{ id: string; state: string }[]>`
         SELECT id,state FROM factory.project_image_preparation WHERE runtime_attempt_id=${attemptID}`;
