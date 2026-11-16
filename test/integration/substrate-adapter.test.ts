@@ -317,17 +317,20 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
       snapshot.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_PENDING";
     }
     pending.metadata.version = String(BigInt(pending.metadata.version) + 1n);
-    await expect(c.pause(f.attemptID)).rejects.toThrow("not confirmed durable");
+    // The preceding observation already retained COMPLETED. A later PENDING
+    // snapshot is a durability regression, not resumable native progress.
+    await expect(c.pause(f.attemptID)).rejects.toThrow("snapshot changed during continuation");
     expect(suspends).toBe(1);
     expect(checkpoints).toBe(1);
+    await expect(c.resumeForApp(f.attemptID, f.userID)).rejects.toThrow();
+    const [unconfirmed] = await f.database
+      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+    expect(unconfirmed?.["checkpoint"]).toBeNull();
     for (const value of pending.status.snapshots ?? []) {
       const snapshot = value as { durableSnapshot: { state: string } };
       snapshot.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_COMPLETED";
     }
-    pending.metadata.version = String(BigInt(pending.metadata.version) + 1n);
-    await expect(c.pause(f.attemptID)).rejects.toThrow("not repeated");
-    expect(suspends).toBe(1);
-    // Only Substrate completes finalization, not a second Factory Suspend.
+    // A positive completed observation needs no native continuation call.
     pending.status.state = "ACTOR_STATE_SUSPENDED";
     pending.metadata.version = String(BigInt(pending.metadata.version) + 1n);
     expect((await c.pause(f.attemptID))?.state).toBe("paused");

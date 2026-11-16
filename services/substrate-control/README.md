@@ -29,8 +29,11 @@ a shorter client deadline can interrupt finalization after a checkpoint commits.
 Other RPCs retain the existing finite lookup/create bound. No RPC is retried.
 The Factory adapter also saves immutable Resume/Suspend dispatch facts under its
 existing runtime lock, bound to the original Actor and preceding confirmed ROOTFS
-UUID. Lost replies are observed, not replayed. Native SUSPENDING finalization cannot
-be driven by a second Suspend. A new confirmed checkpoint permits a later deliberate
+UUID. Lost replies in the preceding native state are observed, not replayed. Only a
+recorded SUSPENDING Actor may re-enter the official workflow with the original dispatched
+operation and exact persisted snapshot identity. This continues that snapshot rather
+than capturing a new one; PENDING progress never permits Source handoff or Resume.
+A new confirmed checkpoint permits a later deliberate
 Resume; an unresolved Pause never reopens Connector authority. These are execution
 facts, not a second lifecycle controller.
 

@@ -105,6 +105,7 @@ test.each([
           // atelet Checkpoint is idempotent. This controlled transport mirrors
           // TestSuspendActor_CheckpointError and ReentryKeepsPersistedSnapshotLocation.
           expect(actor.status.state).toBe("ACTOR_STATE_SUSPENDING");
+          if (!original) throw Error("Original Suspend dispatch was not captured");
           expect(await fact()).toEqual(original);
           expect(minted).toHaveLength(2);
           expect(actor.status.lastAssignedGeneration).toBe(2);
@@ -139,6 +140,7 @@ test.each([
       await expect(runtime.pause(f.attemptID)).rejects.toThrow("Owned native workflow lease ended");
       const identity = actor?.metadata.uid;
       expect(suspends).toBe(2);
+      if (!original) throw Error("Original Suspend dispatch was not captured");
       if (fault === "advance") {
         await runtime.get(f.attemptID);
         if (!actor) throw Error("Original Actor is unavailable");
@@ -224,8 +226,8 @@ test.each([
       expect(actor?.metadata.uid).toBe(identity);
       expect(minted).toHaveLength(2);
       const observed = await fact();
-      expect(observed["attempted_at"]).toBe(original?.["attempted_at"]);
-      expect(observed["native_version"]).toBe(original?.["native_version"]);
+      expect(observed["attempted_at"]).toBe(original["attempted_at"]);
+      expect(observed["native_version"]).toBe(original["native_version"]);
       expect(observed["origin_key"]).toBe(minted[0]?.uuid);
       expect(observed["outcome"]).toMatchObject({
         actorUID: identity,
