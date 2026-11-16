@@ -57,13 +57,40 @@ func retryTransientSource(ctx context.Context, delays []time.Duration, operation
 		}
 		select {
 		case <-ctx.Done():
-			return err
+			return ctx.Err()
 		case <-time.After(delays[attempt]):
 		}
 	}
 }
 
 var sourceConnectDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
+
+func sourceConnectionFailure(message string) string {
+	lower := strings.ToLower(message)
+	// A reset can accompany a permanent TLS, proxy or authority failure.
+	// Those explicit failures always take precedence over transport symptoms.
+	for _, permanent := range []string{
+		"certificate", "cafile", "capath", "hostname", "host name", "subject name", "issuer", "trust", "alert", "ssl_error_ssl",
+		"authentication", "authorization", "username", "password", "denied", "forbidden", "unauthorized",
+		"not allowed", "not authorized", "egress", "policy", "401", "403", "407", "503",
+	} {
+		if strings.Contains(lower, permanent) {
+			return ""
+		}
+	}
+	for _, category := range []string{"Could not resolve host", "Failed to connect"} {
+		if strings.Contains(message, category) {
+			return category
+		}
+	}
+	// Linux ECONNRESET from libcurl/OpenSSL. Do not retry generic SSL errors,
+	// SSL_ERROR_SSL or SSL_ERROR_SYSCALL with an unspecified/zero errno.
+	if strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "ssl_read: ssl_error_syscall, errno 104") {
+		return "connection reset"
+	}
+	return ""
+}
 
 func initGit(ctx context.Context, directory string, args ...string) (string, error) {
 	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.logAllRefUpdates=false", "-c", "safe.directory=" + directory}
@@ -81,15 +108,18 @@ func initGit(ctx context.Context, directory string, args ...string) (string, err
 	}
 	output, err := command.Output()
 	if err != nil {
+		if canceled := ctx.Err(); canceled != nil {
+			return "", canceled
+		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			message := string(exit.Stderr)
+			if category := sourceConnectionFailure(message); category != "" {
+				return "", &transientSourceError{"source checkout preparation failed: " + category}
+			}
 			for _, category := range []string{"Could not resolve host", "Failed to connect", "403", "503", "Permission denied", "dubious ownership", "RPC failed", "SSL", "not a git command", "not found"} {
 				if strings.Contains(message, category) {
 					failure := "source checkout preparation failed: " + category
-					if category == "Failed to connect" || category == "Could not resolve host" {
-						return "", &transientSourceError{failure}
-					}
 					return "", errors.New(failure)
 				}
 			}
@@ -232,6 +262,15 @@ func initialize(ctx context.Context, parent string, input Initialization, uid, g
 	if !preparedCheckout(ctx, checkout, input.ProjectID) {
 		if err := retryTransientSource(ctx, sourceConnectDelays, func() error {
 			_, err := initGit(ctx, "", "clone", "--no-checkout", "--no-hardlinks", "--", input.RepositoryURL, checkout)
+			var transient *transientSourceError
+			if errors.As(err, &transient) {
+				// Git can leave a nonempty destination on transport failure.
+				// Remove only this failed attempt's identity-verified private
+				// staging, never the canonical checkout or another Source.
+				if cleanup := os.RemoveAll(checkout); cleanup != nil {
+					return errors.New("partial source initialization could not be removed")
+				}
+			}
 			return err
 		}); err != nil {
 			return err
