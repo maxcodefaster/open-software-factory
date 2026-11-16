@@ -250,11 +250,18 @@ test("a later pending Stop gets its own observer while the previous observer sle
   const release = Promise.withResolvers<void>();
   let waits = 0;
   let empty = false;
-  owned.hub.request = async (...args) =>
-    new URL(args[2].url).pathname.endsWith("/message") &&
-    new URL(args[2].url).searchParams.get("limit") === "1"
-      ? Response.json({ data: empty ? [] : [{ id: "owned-incomplete-message" }], cursor: {} })
-      : request(...args);
+  let newerInboxUnavailable = false;
+  owned.hub.request = async (...args) => {
+    const url = new URL(args[2].url);
+    if (newerInboxUnavailable && url.pathname.endsWith("/inbox"))
+      throw new Error("Owned newer Inbox read is unavailable");
+    if (url.pathname.endsWith("/message") && url.searchParams.get("limit") === "1")
+      return Response.json({
+        data: empty ? [] : [{ id: "owned-incomplete-message" }],
+        cursor: {},
+      });
+    return request(...args);
+  };
   const clock = spyOn(Bun, "sleep").mockImplementation(async (duration) => {
     if (duration !== 1_000) return sleep(duration);
     if (++waits === 1) {
@@ -276,10 +283,21 @@ test("a later pending Stop gets its own observer while the previous observer sle
       owned.userID,
       { kind: "change-prompt", commandId: crypto.randomUUID(), text: "Owned later Stop target" },
     );
+    // Give the later observer a genuinely assigned input. Canceling an
+    // unbound preparation must preserve the previous confirmed Session Stop.
+    await owned.database.client.begin(async (sql) => {
+      await sql`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${owned.attemptID}
+        WHERE turn_id=${next.turn.id}`;
+      await sql`UPDATE factory.change_agent_session SET state='starting',active_turn_id=${next.turn.id}
+        WHERE change_id=${owned.changeID}`;
+    });
     await stop.persist(owned.changeID);
     await owned.database.client`UPDATE factory.change_agent_session SET stop_dispatched = true
       WHERE change_id = ${owned.changeID}`;
     empty = false;
+    // Missing queue evidence for the newly assigned input must keep this
+    // observer pending, independently of the earlier confirmed empty tree.
+    newerInboxUnavailable = true;
     await controller.recover();
     let state = await controller.get(owned.changeID);
     for (let read = 0; read < 100 && !state.lastError; read += 1) {

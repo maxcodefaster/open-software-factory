@@ -333,10 +333,10 @@ test("periodic dispatch recovers the exact unbound pending input after preparati
     await controller.dispatchRuntimePending(owned.attemptID);
     expect(owned.requests()).toBe(held.priorRequests + 1);
     expect(held.runtimeStarts()).toBe(1);
-    expect(
-      await owned.database.client`SELECT id,generation::int AS generation
-      FROM factory.runtime_attempt WHERE project_id=${owned.projectID}`,
-    ).toEqual([{ id: owned.attemptID, generation: 1 }]);
+    expect([
+      ...(await owned.database.client`SELECT id,generation::int AS generation
+      FROM factory.runtime_attempt WHERE project_id=${owned.projectID}`),
+    ]).toEqual([{ id: owned.attemptID, generation: 1 }]);
     expect(await retainedSession(owned)).toMatchObject({
       activeTurnID: admitted.turnID,
       state: "working",

@@ -375,8 +375,12 @@ test("a late acknowledgement cannot clear a newer Stop identity", async () => {
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const request = owned.hub.request.bind(owned.hub);
+  let empty = false;
   owned.hub.request = async (attempt, channel, input, path) => {
-    if (new URL(input.url).pathname.endsWith("/interrupt")) {
+    const pathname = new URL(input.url).pathname;
+    if (empty && input.method === "GET" && pathname.endsWith("/message"))
+      return Response.json({ data: [], cursor: {} });
+    if (pathname.endsWith("/interrupt")) {
       entered.resolve();
       await release.promise;
     }
@@ -389,13 +393,22 @@ test("a late acknowledgement cannot clear a newer Stop identity", async () => {
     const original = await pendingStop(owned);
     confirming = first.confirm(owned.changeID);
     await entered.promise;
-    // Destruction of the exact Runtime independently confirms the first Stop.
-    await owned.database
-      .client`UPDATE factory.runtime_attempt SET state = 'stopped' WHERE id = ${owned.attemptID}`;
+    // An independent ordered empty-tree observation confirms the first Stop
+    // while its earlier interruption acknowledgement is still delayed.
+    empty = true;
     expect(await createChangeAgentStop(owned.database, owned.hub).confirm(owned.changeID)).toBe(
       true,
     );
     const next = await admit(owned, "This new turn has its own Stop");
+    // This case needs a new assigned input, not a locally canceled unbound
+    // preparation whose prior confirmed Stop should remain unchanged.
+    await owned.database.client.begin(async (sql) => {
+      await sql`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${owned.attemptID}
+        WHERE turn_id=${next.turn.id}`;
+      await sql`UPDATE factory.change_agent_session SET state='starting',active_turn_id=${next.turn.id}
+        WHERE change_id=${owned.changeID}`;
+    });
+    empty = false;
     await createChangeAgentStop(owned.database, owned.hub).persist(owned.changeID);
     const current = await pendingStop(owned);
     expect(current.id).not.toBe(original.id);
