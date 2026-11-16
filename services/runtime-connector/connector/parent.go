@@ -1302,8 +1302,10 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 }
 
 func injectChild(ctx context.Context, assignment Assignment, result devcontainerResult, token string) error {
+	finishStaging := startupPhase("child-staging")
 	executable, err := os.Executable()
 	if err != nil {
+		finishStaging()
 		return fmt.Errorf("resolve Connector executable: %w", err)
 	}
 	connectorPath := fmt.Sprintf("/tmp/factory-runtime-connector-%d", assignment.Generation)
@@ -1312,25 +1314,36 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	childAssignment.WorkspaceFolder = result.RemoteWorkspaceFolder
 	encoded, err := json.Marshal(childAssignment)
 	if err != nil {
+		finishStaging()
 		return fmt.Errorf("encode child assignment: %w", err)
 	}
 	temporary, err := os.CreateTemp("", "factory-runtime-assignment-*.json")
 	if err != nil {
+		finishStaging()
 		return err
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
 	if _, err := temporary.Write(encoded); err != nil {
 		temporary.Close()
+		finishStaging()
 		return err
 	}
 	if err := temporary.Close(); err != nil {
+		finishStaging()
 		return err
 	}
-	if err := copyChildExecutable(ctx, result.ContainerID, executable, connectorPath); err != nil {
+	finishStaging()
+	finishConnector := startupPhase("child-connector-injection")
+	err = copyChildExecutable(ctx, result.ContainerID, executable, connectorPath)
+	finishConnector()
+	if err != nil {
 		return err
 	}
-	if err := exec.CommandContext(ctx, "docker", "cp", temporaryName, result.ContainerID+":"+assignmentPath).Run(); err != nil {
+	finishAssignment := startupPhase("child-assignment-copy")
+	err = exec.CommandContext(ctx, "docker", "cp", temporaryName, result.ContainerID+":"+assignmentPath).Run()
+	finishAssignment()
+	if err != nil {
 		return fmt.Errorf("copy Connector child assignment: %w", err)
 	}
 	if err := injectApprovedTools(ctx, assignment, result.ContainerID); err != nil {
@@ -1339,7 +1352,9 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err := prepareChildPermissions(ctx, result.ContainerID, connectorPath, assignmentPath); err != nil {
 		return err
 	}
+	finishTransport := startupPhase("child-transport")
 	transport, err := nativeChildTransport(ctx, result.ContainerID, assignment.Generation)
+	finishTransport()
 	if err != nil {
 		return err
 	}
@@ -1350,7 +1365,10 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	command.Stdin = strings.NewReader(string(credentials))
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	if err := command.Start(); err != nil {
+	finishStart := startupPhase("child-start")
+	err = command.Start()
+	finishStart()
+	if err != nil {
 		return fmt.Errorf("start Connector child: %w", err)
 	}
 	go func() { reportChildExit(os.Stderr, assignment, command.Wait()) }()
@@ -1387,52 +1405,89 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 	}
 	if needsLanguages {
 		tool := "/opt/factory/language-tools/musl"
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput(); !strings.Contains(strings.ToLower(string(output)), "musl") {
+		finishProbe := startupPhase("language-tools-probe")
+		output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
+		finishProbe()
+		if !strings.Contains(strings.ToLower(string(output)), "musl") {
 			if err != nil {
 				return errors.New("Language tools require a supported glibc or musl development container")
 			}
 			tool = "/opt/factory/language-tools/glibc"
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput(); err != nil {
+		finishSetup := startupPhase("language-tools-setup")
+		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput()
+		finishSetup()
+		if err != nil {
 			return fmt.Errorf("create language tools destination: %w: %s", err, output)
 		}
-		for _, copy := range [][2]string{{"/opt/factory/language-tools/node_modules", "/opt/factory/language-tools/node_modules"}, {tool + "/.", "/opt/factory/language-tools/runtime"}} {
-			if output, err := exec.CommandContext(ctx, "docker", "cp", copy[0], containerID+":"+copy[1]).CombinedOutput(); err != nil {
-				return fmt.Errorf("inject language tools: %w: %s", err, output)
-			}
+		finishTree := startupPhase("language-tools-tree-copy")
+		output, err = exec.CommandContext(ctx, "docker", "cp", "/opt/factory/language-tools/node_modules", containerID+":/opt/factory/language-tools/node_modules").CombinedOutput()
+		finishTree()
+		if err != nil {
+			return fmt.Errorf("inject language tools: %w: %s", err, output)
+		}
+		finishRuntime := startupPhase("language-tools-runtime-copy")
+		output, err = exec.CommandContext(ctx, "docker", "cp", tool+"/.", containerID+":/opt/factory/language-tools/runtime").CombinedOutput()
+		finishRuntime()
+		if err != nil {
+			return fmt.Errorf("inject language tools: %w: %s", err, output)
 		}
 	}
 	if needsAgent {
 		// Match the primary container's native libc. Upstream binaries stay
 		// unmodified; no injected loader or compatibility package is required.
 		tool := "/opt/factory/opencode/musl/bun"
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput(); !strings.Contains(strings.ToLower(string(output)), "musl") {
+		finishProbe := startupPhase("opencode-probe")
+		output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
+		finishProbe()
+		if !strings.Contains(strings.ToLower(string(output)), "musl") {
 			if err != nil {
 				return errors.New("OpenCode requires a supported glibc or musl development container")
 			}
 			tool = "/opt/factory/opencode/glibc/bun"
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput(); err != nil {
+		finishSetup := startupPhase("opencode-setup")
+		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput()
+		finishSetup()
+		if err != nil {
 			return fmt.Errorf("create OpenCode destination: %w: %s", err, output)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput(); err != nil {
+		finishServer := startupPhase("opencode-server-copy")
+		output, err = exec.CommandContext(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput()
+		finishServer()
+		if err != nil {
 			return fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
 		}
-		if err := copyChildExecutable(ctx, containerID, tool, "/opt/factory/opencode/bun"); err != nil {
+		finishRuntime := startupPhase("opencode-runtime-injection")
+		err = copyChildExecutable(ctx, containerID, tool, "/opt/factory/opencode/bun")
+		finishRuntime()
+		if err != nil {
 			return fmt.Errorf("inject OpenCode: %w", err)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput(); err != nil {
+		finishPermissions := startupPhase("opencode-permissions")
+		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput()
+		finishPermissions()
+		if err != nil {
 			return fmt.Errorf("prepare OpenCode: %w: %s", err, output)
 		}
 	}
 	if needsVerification {
-		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput(); err != nil {
+		finishSetup := startupPhase("verification-runner-setup")
+		output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput()
+		finishSetup()
+		if err != nil {
 			return fmt.Errorf("create Forgejo Runner destination: %w: %s", err, output)
 		}
-		if err := copyChildExecutable(ctx, containerID, "/usr/local/bin/forgejo-runner", "/opt/factory/forgejo-runner"); err != nil {
+		finishRunner := startupPhase("verification-runner-injection")
+		err = copyChildExecutable(ctx, containerID, "/usr/local/bin/forgejo-runner", "/opt/factory/forgejo-runner")
+		finishRunner()
+		if err != nil {
 			return fmt.Errorf("inject Forgejo Runner: %w", err)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput(); err != nil {
+		finishPermissions := startupPhase("verification-runner-permissions")
+		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput()
+		finishPermissions()
+		if err != nil {
 			return fmt.Errorf("prepare Forgejo Runner: %w: %s", err, output)
 		}
 	}
