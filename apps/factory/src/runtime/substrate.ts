@@ -191,7 +191,11 @@ export function requireSubstrateActor(
 export function requireDurableROOTFS(
   actor: NativeActor,
   binding: Pick<Binding, "intent" | "atespace" | "actorUID">,
-  expected?: { uuid: string; generation: number },
+  expected?: {
+    uuid: string;
+    generation: number;
+    durableSnapshot?: { object: { snapshotUri: string } };
+  },
 ) {
   if (actor.metadata.uid !== binding.actorUID || actor.status.state !== "ACTOR_STATE_SUSPENDED")
     throw new Error("Original native Actor is not suspended");
@@ -214,7 +218,12 @@ export function requireDurableROOTFS(
     !uri.pathname.endsWith(
       `/atespaces/${binding.atespace}/actors/${actor.metadata.uid}/snapshots/${snapshot.uuid}`,
     ) ||
-    (expected && (expected.uuid !== snapshot.uuid || expected.generation !== snapshot.generation))
+    (expected &&
+      (expected.uuid !== snapshot.uuid ||
+        expected.generation !== snapshot.generation ||
+        (expected.durableSnapshot &&
+          expected.durableSnapshot.object.snapshotUri !==
+            snapshot.durableSnapshot.object.snapshotUri)))
   )
     throw new Error(
       "Durable ROOTFS snapshot identity differs from the original Actor/template/runtime/generation",
@@ -262,6 +271,35 @@ function requireRecordedPause(actor: NativeActor, saved: Binding) {
   )
     throw new Error("Recorded ROOTFS pause identity/generation differs from its original binding");
   return snapshot;
+}
+
+function retainedPauseProgress(saved: Binding) {
+  const observed = nativeActor.safeParse(saved.observation);
+  const previous = saved.checkpoint ? nativeSnapshot.parse(saved.checkpoint) : null;
+  if (
+    !observed.success ||
+    observed.data.status.lastAssignedGeneration !== (previous?.generation ?? 0) + 1
+  )
+    return undefined;
+  return requireRecordedPause(observed.data, saved);
+}
+
+function requirePauseContinuity(actor: NativeActor, saved: Binding) {
+  const retained = retainedPauseProgress(saved);
+  const current =
+    retained !== undefined || actor.status.state === "ACTOR_STATE_SUSPENDING"
+      ? requireRecordedPause(actor, saved)
+      : undefined;
+  if (
+    retained &&
+    current &&
+    (retained.uuid !== current.uuid ||
+      retained.generation !== current.generation ||
+      retained.durableSnapshot.object.snapshotUri !== current.durableSnapshot.object.snapshotUri ||
+      (retained.durableSnapshot.state === "SNAPSHOT_STORAGE_STATE_COMPLETED" &&
+        current.durableSnapshot.state !== "SNAPSHOT_STORAGE_STATE_COMPLETED"))
+  )
+    throw new Error("Recorded native pause snapshot changed during continuation");
 }
 
 // One concrete facade. Substrate owns transitions; Factory retains only its
@@ -407,6 +445,9 @@ export function createSubstrateExecution(
     const old = saved.observation ? nativeActor.parse(saved.observation) : null;
     if (old && BigInt(actor.metadata.version) < BigInt(old.metadata.version))
       throw new Error("Stale native resource version");
+    // Validate before replacing the retained observation. A rejected native
+    // substitution must not become the next read's trusted progress.
+    requirePauseContinuity(actor, saved);
     const result =
       await sql`UPDATE factory.substrate_binding SET actor_uid=COALESCE(actor_uid,${actor.metadata.uid}::uuid),observation=${JSON.stringify(actor)}::text::jsonb
       WHERE runtime_attempt_id=${attemptID} AND deleted_at IS NULL AND (actor_uid IS NULL OR actor_uid=${actor.metadata.uid}::uuid)`;
@@ -593,13 +634,7 @@ export function createSubstrateExecution(
     const completing =
       before.status.state === "ACTOR_STATE_SUSPENDED" &&
       (recorded?.state === "pausing" || recorded?.state === "paused");
-    const observed = nativeActor.safeParse(saved.observation);
-    const retainedProgress =
-      (reentering || completing) &&
-      observed.success &&
-      observed.data.status.state === "ACTOR_STATE_SUSPENDING"
-        ? requireRecordedPause(observed.data, saved)
-        : undefined;
+    const retainedProgress = reentering || completing ? retainedPauseProgress(saved) : undefined;
     const continuation = reentering ? requireRecordedPause(before, saved) : retainedProgress;
     // A disconnected initial Parent cannot prove workload liveness. An already
     // completed durable pause can be reconciled without another checkpoint.

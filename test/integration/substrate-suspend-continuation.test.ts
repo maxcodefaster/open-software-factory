@@ -9,6 +9,7 @@ import { substrateFixture } from "../fixtures/substrate";
 test.each([
   { label: "pending capture", durability: "PENDING", fault: null },
   { label: "durable capture", durability: "COMPLETED", fault: null },
+  { label: "background durability progress", durability: "PENDING", fault: "advance" },
   { label: "foreign Actor", durability: "PENDING", fault: "actor" },
   { label: "foreign template", durability: "PENDING", fault: "template" },
   { label: "foreign runtime", durability: "PENDING", fault: "runtime" },
@@ -21,6 +22,7 @@ test.each([
   { label: "substituted completed capture", durability: "PENDING", fault: "completed-uuid" },
   { label: "unfinished continuation", durability: "PENDING", fault: "unfinished" },
   { label: "substituted reply", durability: "PENDING", fault: "returned-uuid" },
+  { label: "substituted storage reply", durability: "PENDING", fault: "returned-bucket" },
 ] as const)(
   "native Suspend continuation preserves its original checkpoint: $label",
   async ({ durability, fault }) => {
@@ -117,6 +119,9 @@ test.each([
           latest.uuid = crypto.randomUUID();
           latest.durableSnapshot.object.snapshotUri = `s3://owned/prefix/atespaces/${f.atespace}/actors/${actor.metadata.uid}/snapshots/${latest.uuid}`;
         }
+        if (suspends === 3 && fault === "returned-bucket")
+          latest.durableSnapshot.object.snapshotUri =
+            latest.durableSnapshot.object.snapshotUri.replace("s3://owned/", "s3://other/");
         actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
         actor.status.state =
           suspends === 3 && fault === "unfinished"
@@ -134,7 +139,14 @@ test.each([
       await expect(runtime.pause(f.attemptID)).rejects.toThrow("Owned native workflow lease ended");
       const identity = actor?.metadata.uid;
       expect(suspends).toBe(2);
-      if (fault) {
+      if (fault === "advance") {
+        await runtime.get(f.attemptID);
+        if (!actor) throw Error("Original Actor is unavailable");
+        const latest = actor.status.snapshots?.at(-1) as { durableSnapshot: { state: string } };
+        latest.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_COMPLETED";
+        actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
+      }
+      if (fault && fault !== "advance") {
         await runtime.get(f.attemptID);
         if (!actor) throw Error("Original Actor is unavailable");
         const latest = actor.status.snapshots?.at(-1) as {
@@ -188,7 +200,8 @@ test.each([
             break;
         }
         await expect(runtime.pause(f.attemptID)).rejects.toThrow();
-        expect(suspends).toBe(["unfinished", "returned-uuid"].includes(fault) ? 3 : 2);
+        const called = ["unfinished", "returned-uuid", "returned-bucket"].includes(fault) ? 3 : 2;
+        expect(suspends).toBe(called);
         expect(minted).toHaveLength(2);
         expect(await fact()).toEqual(original);
         const [saved] = await f.database
@@ -198,9 +211,11 @@ test.each([
         const first = minted[0];
         if (!first) throw Error("Previous confirmed checkpoint is unavailable");
         expect(saved?.["checkpoint"]).toMatchObject(first);
-        if (fault === "returned-uuid") {
+        if (["uuid", "bucket", "returned-uuid", "returned-bucket"].includes(fault)) {
+          await expect(runtime.get(f.attemptID)).rejects.toThrow();
           await expect(runtime.pause(f.attemptID)).rejects.toThrow();
-          expect(suspends).toBe(3);
+          expect(suspends).toBe(called);
+          expect(await fact()).toEqual(original);
         }
         return;
       }
