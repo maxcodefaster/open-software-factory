@@ -1,18 +1,24 @@
 import { expect, test } from "bun:test";
+import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { requireStoppedAgentInputsIn } from "../../apps/factory/src/agent/stop";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { substrateActorSelector } from "../../apps/factory/src/runtime/substrate";
-import { nativeInstallationFixture } from "../fixtures/native-installation";
-import { substrateFixture } from "../fixtures/substrate";
-import { pinnedOpenCode } from "../fixtures/pinned-opencode";
+import {
+  actorRPCIn,
+  dispatchActorRPCIn,
+  intendActorRPCIn,
+  observeActorRPCIn,
+} from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
 import {
   type NativeActor,
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { buildModelID } from "../fixtures/change-agent-turns";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import { nativeInstallationFixture } from "../fixtures/native-installation";
+import { pinnedOpenCode } from "../fixtures/pinned-opencode";
+import { substrateFixture } from "../fixtures/substrate";
 
 test("native teardown refuses unresolved Coding, including a pending Stop with no identifiable input", async () => {
   const f = await substrateFixture("a".repeat(40), "ticket");
@@ -146,12 +152,9 @@ test.each([false, true])(
         }
         throw new Error(`Unexpected lifecycle effect: ${method}`);
       }, sources);
-      actor = f.actor();
+      const ownedActor = f.actor();
+      actor = ownedActor;
       const actorUID = actor.metadata.uid;
-      actor.status = {
-        state: "ACTOR_STATE_RUNNING",
-        workerAssignment: { sandboxRuntime: f.config.runtime },
-      };
       const bound = {
         ...f.config,
         environment: { version: 0, secretKey: null },
@@ -161,13 +164,34 @@ test.each([false, true])(
       };
       await f.database.client.begin(async (sql) => {
         await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
-          VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(bound)}::jsonb,${actorUID},now()-interval '1 second')`;
+        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},${f.config.generation},${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
+        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at,observation)
+          VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(bound)}::jsonb,${actorUID},now()-interval '1 second',${JSON.stringify(ownedActor)}::jsonb)`;
+        // Seed the completed initial Resume before testing Stop on this running Actor.
+        const resume = await intendActorRPCIn(sql, f.attemptID, "resume", null, ownedActor);
+        await dispatchActorRPCIn(sql, f.attemptID, resume);
+        ownedActor.metadata.version = "2";
+        ownedActor.status = {
+          state: "ACTOR_STATE_RUNNING",
+          lastAssignedGeneration: 0,
+          workerAssignment: { sandboxRuntime: f.config.runtime },
+        };
+        await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(ownedActor)}::jsonb
+          WHERE runtime_attempt_id=${f.attemptID}`;
+        await observeActorRPCIn(sql, f.attemptID, resume, ownedActor);
         await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
         await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
         await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
         VALUES(${f.changeID},${f.attemptID},${sessionID},'working',now(),${f.userID})`;
+      });
+      expect(await actorRPCIn(f.database.client, f.attemptID, "resume", "initial")).toEqual({
+        action: "resume",
+        originKey: "initial",
+        actorUID,
+        nativeVersion: "1",
+        stopID: null,
+        attempted: true,
+        outcome: { actorUID, version: "2", state: "ACTOR_STATE_RUNNING" },
       });
       for (const [id, parentID] of [
         [sessionID, undefined],
