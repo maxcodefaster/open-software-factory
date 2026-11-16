@@ -81,6 +81,14 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
       if (method === "CreateActor") {
         effects.push(method);
         actor = f.actor();
+        const [created] = await f.database.client<{ at: string }[]>`
+          SELECT (create_attempted_at + interval '1 millisecond')::text AS at
+          FROM factory.substrate_binding
+          WHERE runtime_attempt_id=${f.attemptID} AND create_attempted_at IS NOT NULL`;
+        if (!created) throw Error("Owned native Create intent is missing");
+        // Keep simulated native creation after its dispatch on the fixture DB's
+        // clock, rather than depending on host/container wall-clock alignment.
+        actor.metadata.createTime = new Date(created.at).toISOString();
         return structuredClone(actor);
       }
       if (method === "ResumeActor" && actor) {
@@ -101,7 +109,9 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
           writable: false,
           generation: 1,
         });
-        expect(lease?.checkpoint?.id).toBe(lease?.checkpointID);
+        if (!lease?.checkpoint || !lease.checkpointID)
+          throw Error("Source checkpoint must be confirmed before native Suspend");
+        expect(lease.checkpoint.id).toBe(lease.checkpointID);
         const [dispatch] = await f.database.client`
         SELECT attempted_at IS NOT NULL AS attempted FROM factory.substrate_actor_rpc
         WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`;
@@ -209,6 +219,13 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
     };
     await expect(controller.pause(f.attemptID)).rejects.toThrow("Runtime request timed out");
     const frozen = await source.lease(f.workspaceID);
+    if (!frozen?.actorUID || !frozen.checkpointID)
+      throw Error("Owned frozen Source identity is missing");
+    const frozenIdentity = {
+      ...frozen,
+      actorUID: frozen.actorUID,
+      checkpointID: frozen.checkpointID,
+    };
     expect(frozen).toMatchObject({
       owner: "actor",
       writable: false,
@@ -241,7 +258,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
       f,
       source,
       controller,
-      frozen,
+      frozen: frozenIdentity,
       effects,
       checkpoints,
       request,
@@ -250,7 +267,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
       async retainedExecution(call: SubstrateCall, changed = false) {
         const [saved] = await f.database.client<
           {
-            intent: SubstrateConfiguration & { actorSelector: Record<string, string> };
+            intent: SubstrateConfiguration & { actorSelector?: Record<string, string> };
           }[]
         >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
         if (!saved) throw Error("Original binding missing");

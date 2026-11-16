@@ -458,7 +458,9 @@ export function createSubstrateExecution(
     return Boolean(await substrateBootstrapRetentionIn(sql, workspaceID, attemptID));
   }
   async function retainedTicketPause(sql: Database["client"]) {
-    return workspaceID && sources ? substrateTicketSourcePauseIn(sql, attemptID) : null;
+    return workspaceID && sources
+      ? sql.begin((transaction) => substrateTicketSourcePauseIn(transaction, attemptID))
+      : null;
   }
   async function requireSettledBootstrap(sql: Database["client"], saved: Binding, generation = 0) {
     if (

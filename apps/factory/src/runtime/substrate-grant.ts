@@ -46,10 +46,7 @@ export async function substrateBootstrapRetentionIn(
 // Cleanup authority for one already frozen Ticket handoff, never execution
 // authority for its current Change writer. The storage and Change epochs are
 // separate; a failed Retry cannot replace this original Source checkpoint.
-export async function substrateTicketSourcePauseIn(
-  sql: ReturnType<typeof createDatabase>["client"] | AgentTurnTransaction,
-  attemptID: string,
-) {
+export async function substrateTicketSourcePauseIn(sql: AgentTurnTransaction, attemptID: string) {
   const [pause] = await sql<{ userID: string; projectID: string }[]>`
     SELECT original.created_by AS "userID",a.project_id AS "projectID"
     FROM factory.runtime_attempt a
