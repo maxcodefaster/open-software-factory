@@ -20,6 +20,7 @@ async function recoverOriginal(
   >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
   if (!saved) throw Error("Original binding is unavailable");
   const { actorSelector, ...configuration } = saved.intent;
+  if (!f.config.workerSelector) throw Error("Original Actor selector is unavailable");
   expect(actorSelector).toEqual(f.config.workerSelector);
   return createSubstrateExecution(
     f.database,
