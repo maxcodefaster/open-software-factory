@@ -9,11 +9,13 @@ import {
   cleanRoomValues,
   createReceipt,
   namespaceManifest,
+  readinessVerdict,
   serializeReceipt,
 } from "./clean-room-model";
 import {
   createNativeCleanRoomSecrets,
   prepareNativeCleanRoom,
+  readNativeCleanRoomReadiness,
   requireFreshNativeIngress,
 } from "./clean-room-native";
 
@@ -81,6 +83,77 @@ async function fixture() {
     throw cause;
   }
 }
+
+test.each(["trusted", "wrong CA", "wrong hostname", "cancelled"] as const)(
+  "public readiness uses only the supplied native CA with normal TLS checks: %s",
+  async (scenario) => {
+    const f = await fixture();
+    let other: Awaited<ReturnType<typeof fixture>> | undefined;
+    let server: ReturnType<typeof Bun.serve> | undefined;
+    let requests = 0;
+    try {
+      if (scenario !== "wrong hostname")
+        await f.certificate(f.input.ingressCertificateFile, f.input.ingressKeyFile, [
+          "factory.owned-cleanroom.invalid",
+          "git.owned-cleanroom.invalid",
+          "*.runtime.factory.owned-cleanroom.invalid",
+          "127.0.0.1",
+        ]);
+      const native = await f.prepare();
+      expect(native.ca).toBe(await readFile(f.input.factoryCAFile, "utf8"));
+      server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        tls: {
+          cert: await readFile(f.input.ingressCertificateFile),
+          key: await readFile(f.input.ingressKeyFile),
+        },
+        fetch(request) {
+          requests++;
+          expect(new URL(request.url).pathname).toBe("/health/ready");
+          expect(new URL(request.url).search).toBe("?installation=complete");
+          expect(request.headers.has("authorization")).toBe(false);
+          return Response.json(
+            { ready: true },
+            {
+              headers: {
+                "x-open-factory": "ready",
+                "x-open-factory-startup": "owned-startup",
+                connection: "close",
+              },
+            },
+          );
+        },
+      });
+      let ca = native.ca;
+      if (scenario === "wrong CA") {
+        other = await fixture();
+        ca = await readFile(other.input.factoryCAFile, "utf8");
+      }
+      const abort = new AbortController();
+      if (scenario === "cancelled") abort.abort(new Error("Owned readiness cancelled"));
+      const request = readNativeCleanRoomReadiness(
+        `https://127.0.0.1:${server.port}`,
+        ca,
+        abort.signal,
+      );
+      if (scenario === "trusted") {
+        const response = await request;
+        expect(readinessVerdict(response).ready).toBe(true);
+        expect(await response.json()).toEqual({ ready: true });
+        expect(requests).toBe(1);
+      } else {
+        await expect(request).rejects.toThrow();
+        expect(requests).toBe(0);
+      }
+    } finally {
+      await server?.stop(true);
+      await other?.close();
+      await f.close();
+    }
+  },
+  15_000,
+);
 
 test("native commissioning renders the real chart with separate fresh Secrets and no retained identities", async () => {
   const f = await fixture();

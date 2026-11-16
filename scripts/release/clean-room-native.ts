@@ -283,6 +283,7 @@ export async function prepareNativeCleanRoom(
     namespace,
     values,
     configuration,
+    ca,
     metadata: {
       configurationSHA256: createHash("sha256").update(configurationJSON).digest("hex"),
       certificateSHA256: certificate.fingerprint256,
@@ -309,6 +310,19 @@ export async function prepareNativeCleanRoom(
       secret(values.tlsSecret, { "tls.crt": cert, "tls.key": key }, "kubernetes.io/tls"),
     ],
   };
+}
+
+export async function readNativeCleanRoomReadiness(
+  origin: string,
+  ca: string,
+  signal: AbortSignal,
+) {
+  signal.throwIfAborted();
+  return fetch(`${origin}/health/ready?installation=complete`, {
+    tls: { ca },
+    signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
+    redirect: "error",
+  });
 }
 
 export function requireFreshNativeIngress(value: unknown, values: NativeCleanRoomValues) {

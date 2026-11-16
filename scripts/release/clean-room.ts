@@ -73,6 +73,7 @@ import {
 import {
   createNativeCleanRoomSecrets,
   prepareNativeCleanRoom,
+  readNativeCleanRoomReadiness,
   requireFreshNativeIngress,
 } from "./clean-room-native";
 import { packageFactoryChart } from "./package-chart";
@@ -710,16 +711,15 @@ async function main(options: Options) {
     });
 
     await step("readiness", async () => {
+      if (!native) throw Error("Native public readiness trust is unavailable");
+      const ca = native.ca;
       let startupID = "";
       await until(
         "public readiness",
         600_000,
         async () => {
           connection.signal.throwIfAborted();
-          const response = await fetch(`${origin}/health/ready?installation=complete`, {
-            signal: AbortSignal.any([connection.signal, AbortSignal.timeout(5_000)]),
-            redirect: "error",
-          });
+          const response = await readNativeCleanRoomReadiness(origin, ca, connection.signal);
           await response.body?.cancel();
           const verdict = readinessVerdict(response);
           startupID = verdict.startupID;

@@ -106,6 +106,12 @@ creating it again. Do not label Project execution or editor namespaces. This gra
 network reachability, not native authority; the separate Owner/Editor credentials
 and verified serving TLS are still required.
 
+Configure the operator's Ingress controller to route HTTPS, not just load a certificate.
+With Traefik, enable [TLS on the HTTPS entrypoint](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/),
+or supply its TLS router annotations through `ingress.annotations`. A certificate Secret
+alone does not enable that router. A single-node controller that binds host port 443 also
+needs a rollout strategy that can release the existing port.
+
 Create two operator-owned Secrets in the release Namespace:
 
 - `substrate.workspaceConfigurationSecret`, with `configuration.json` and `factory-ca.pem`.
@@ -663,7 +669,8 @@ Reserve distinct, unused public Factory and Forgejo DNS names through the existi
 controller. Supply a currently valid leaf certificate and matching private key covering both
 names and `*.runtime.<factory-hostname>`, plus its public CA bundle. The command checks for
 overlapping existing Ingress hosts before creating resources. It does not configure DNS, install
-a runtime or weaken certificate validation. The browser host must already trust the certificate.
+a runtime or weaken certificate validation. Public readiness uses the supplied CA bundle.
+The browser host must already trust the certificate.
 
 Create a separate input JSON file. The `configuration` object supplies the actually observed
 pinned native runtime/profile, immutable Actor image, WorkerPool selector and admitted egress.
