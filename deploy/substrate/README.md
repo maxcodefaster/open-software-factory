@@ -106,6 +106,11 @@ including verified Source import before Docker starts. It no longer cuts that im
 off at the ordinary Docker check's 150-second limit. The worker still owns the overall
 wakeup deadline. Fixed Source lease, download and materialization timings are ephemeral
 diagnostics, not readiness or successful restoration evidence.
+Parent tool-injection timings separate fixed probes, payload copies, executable
+staging, permissions and Child launch. Per-tool and shared executable timings can
+nest and must not be added together. The total ends at Child launch, before Child
+health or model readiness; new phases require rebuilt `runtime-host` and derived
+`substrate-runtime` artifacts.
 
 Connector transport reads Ping/Pong frames after its first startup message, including
 while Parent prepares images, Features and hooks. One socket reader keeps complete
