@@ -205,7 +205,7 @@ describe("Ticket board stages", () => {
       ["delivered", "history", "Delivered"],
       ["delivering", "review", "Delivering"],
       ["cancelling", "implementation", "Cancelling"],
-    ]) {
+    ] as const) {
       expect(ticketBoardStage({ ...input, changeState })).toBe(stage);
       expect(ticketBoardStatus({ ...input, changeState })).toBe(status);
     }
