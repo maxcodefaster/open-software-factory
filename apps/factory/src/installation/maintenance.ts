@@ -1,4 +1,5 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { confirmUndispatchedReviewStopsIn } from "../agent/stop";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { createUsageJournal } from "../usage/journal";
 
@@ -29,6 +30,10 @@ export async function beginInstallationMaintenance(database: Database) {
       UPDATE factory.installation_maintenance SET enabled=true,requested_at=now()
       WHERE singleton RETURNING singleton`;
     if (!state) throw new Error("Installation maintenance state is unavailable");
+    // Only the same pure, fenced no-input proof used by normal Stop. Never
+    // interrupt native work or equate an unknown Session with an empty one.
+    // A later rejection rolls this publication back with the admission fence.
+    await confirmUndispatchedReviewStopsIn(sql);
     const [work] = await sql<{ active: boolean }[]>`
       SELECT
         EXISTS(SELECT 1 FROM factory.agent_turn WHERE state IN ('pending','dispatching','running')

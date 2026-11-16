@@ -29,6 +29,71 @@ export type RetainedStopTarget = {
   mode: "interrupt" | "observe";
 };
 
+// A review has its own deterministic native Session. Until native confirmation
+// is durable, Factory cannot submit its input. A captured stopped Turn fences
+// late confirmation and forwarding. Retained implementation history is not
+// confirmation of this different Session, nor proof that compute is stopped.
+// Keep this proof pure so controlled maintenance can use the same transaction.
+export async function confirmUndispatchedReviewStopsIn(
+  sql: AgentTurnTransaction,
+  target?: { changeID: string; stopID: string },
+) {
+  const candidates = await sql<{ changeID: string; stopID: string; workspaceID: string }[]>`
+    SELECT session.change_id AS "changeID",session.stop_id AS "stopID",attempt.workspace_id AS "workspaceID"
+    FROM factory.change_agent_session session
+    JOIN factory.change change ON change.id=session.change_id AND change.runtime_attempt_id=session.runtime_attempt_id
+    JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id AND attempt.workspace_id IS NOT NULL
+    JOIN factory.agent_turn turn ON turn.id=session.stop_turn_id
+    WHERE session.state='stopped' AND session.stop_pending AND session.stop_id IS NOT NULL
+      AND session.native_session_confirmed_at IS NULL
+      AND turn.state='stopped' AND turn.input->>'kind'='change-review'
+      AND (${target?.changeID ?? null}::uuid IS NULL OR change.id=${target?.changeID ?? null})
+      AND (${target?.stopID ?? null}::uuid IS NULL OR session.stop_id=${target?.stopID ?? null})
+    ORDER BY attempt.workspace_id,session.change_id`;
+  let count = 0;
+  for (const candidate of candidates) {
+    // Native metadata-worker admission uses this same Workspace lock. Never
+    // wait on it while holding maintenance's admission fence, or use the
+    // pre-lock snapshot to decide whether an outstanding worker exists.
+    const [lock] = await sql<{ acquired: boolean }[]>`
+      SELECT pg_try_advisory_xact_lock(hashtext(${`runtime:${candidate.workspaceID}`})) AS acquired`;
+    if (!lock?.acquired) continue;
+    const confirmed = await sql<{ changeID: string }[]>`
+    UPDATE factory.change_agent_session session SET stop_pending=false,
+      stop_dispatched=false,last_error=NULL,updated_at=now()
+    FROM factory.change change, factory.runtime_attempt attempt,
+      factory.agent_turn turn, factory.change_agent_turn_intent intent,
+      factory.candidate_review review
+    WHERE session.change_id=change.id AND change.runtime_attempt_id=attempt.id
+      AND attempt.id=session.runtime_attempt_id AND attempt.change_id=change.id
+      AND attempt.project_id=change.project_id
+      AND change.id=${candidate.changeID} AND session.stop_id=${candidate.stopID}
+      AND attempt.workspace_id=${candidate.workspaceID}
+      AND session.state='stopped' AND session.stop_pending AND NOT session.stop_dispatched
+      AND session.stop_id IS NOT NULL AND session.active_turn_id=session.stop_turn_id
+      AND session.native_session_confirmed_at IS NULL
+      AND session.implementation_session_confirmed_at IS NOT NULL
+      AND session.implementation_session_id IS NOT NULL
+      AND session.implementation_session_id<>session.opencode_session_id
+      AND turn.id=session.stop_turn_id AND turn.change_id=change.id AND turn.state='stopped'
+      AND turn.project_id=change.project_id AND turn.ticket_id=change.ticket_id
+      AND turn.input->>'kind'='change-review'
+      AND intent.turn_id=turn.id AND intent.change_id=change.id AND intent.bootstrap
+      AND intent.runtime_attempt_id=attempt.id AND intent.session_id=session.opencode_session_id
+      AND review.id=turn.command_id AND review.turn_id=turn.id AND review.change_id=change.id
+      AND review.state='pending' AND turn.input->>'reviewId'=review.id::text
+      AND turn.authority->'review'->>'reviewId'=review.id::text
+      AND session.opencode_session_id='ses_factory_review_'||replace(review.id::text,'-','')
+      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn other WHERE other.change_id=change.id
+        AND other.id<>turn.id AND other.state IN ('pending','dispatching','running','uncertain'))
+      AND NOT EXISTS(SELECT 1 FROM factory.substrate_input_stop worker
+        WHERE worker.runtime_attempt_id=attempt.id AND worker.completed_at IS NULL)
+    RETURNING session.change_id AS "changeID"`;
+    count += confirmed.length;
+  }
+  return count;
+}
+
 // Read-only cleanup authority for the original Attempt, not permission to stop
 // or dispatch the newly commissioned writer's unassigned input.
 export async function requirePendingWriterHandoffIn(
@@ -331,6 +396,14 @@ export function createChangeAgentStop(
         current,
         caller?.changeID === changeID ? caller.origin : undefined,
       );
+      const currentStopID = current.stopID;
+      if (
+        currentStopID &&
+        (await database.client.begin((sql) =>
+          confirmUndispatchedReviewStopsIn(sql, { changeID, stopID: currentStopID }),
+        ))
+      )
+        return true;
       if (current.currentAttemptID !== current.attemptID) return false;
       // A fresh Session cannot receive its prompt before native confirmation
       // is durable. Stop fences late confirmation. With exact compute teardown,
