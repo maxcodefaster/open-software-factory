@@ -20,7 +20,12 @@ import { substrateFixture } from "../fixtures/substrate";
 
 test.each([
   "valid",
+  "shared-query-transaction",
   "missing-capability",
+  "missing-reader",
+  "native-template-replaced",
+  "native-template-changed",
+  "native-template-unavailable",
   "bound-history",
   "older-bound-history",
   "missing-input-history",
@@ -60,14 +65,28 @@ test.each([
   async (fault) => {
     const f = await substrateFixture("a".repeat(40), "ticket");
     const sources = createSubstrateSources(f.database, f.hub);
-    const sourceController = createWorkspaceSourceController(f.database, f.hub, sources);
+    let runtime: Awaited<ReturnType<typeof f.controller>> | undefined;
+    let capabilityReads = 0;
+    const sourceController = createWorkspaceSourceController(
+      f.database,
+      f.hub,
+      sources,
+      fault === "missing-reader"
+        ? undefined
+        : {
+            async supportsInitialRole(attemptID, sql) {
+              capabilityReads++;
+              return runtime ? runtime.supportsInitialSourceRole(attemptID, sql) : false;
+            },
+          },
+    );
     let actor: NativeActor | undefined;
     let creates = 0;
     let resumes = 0;
     try {
       f.config.deployment = "fresh-workspaces";
       const metadata = f.template.metadata;
-      Object.assign(
+      const nativeTemplate = Object.assign(
         f.template,
         renderSubstrateTemplate(
           f.atespace,
@@ -95,9 +114,13 @@ test.each([
         { metadata },
       );
       f.config.templateSHA256 = substrateTemplateSHA256(f.template);
-      const runtime = await f.controller(async (method) => {
+      runtime = await f.controller(async (method) => {
         if (method === "GetAtespace") return f.space;
-        if (method === "GetActorTemplate") return f.template;
+        if (method === "GetActorTemplate") {
+          if (fault === "native-template-unavailable" && capabilityReads)
+            throw new SubstrateRPCError("Unavailable", "Owned native template read unavailable");
+          return f.template;
+        }
         if (method === "GetActor") {
           if (!actor) throw new SubstrateRPCError("NotFound", "Owned Actor absent");
           return structuredClone(actor);
@@ -222,8 +245,20 @@ test.each([
       const [preparing] = await f.database.client`
       SELECT state,fence_required FROM factory.change_writer WHERE change_id=${f.changeID}`;
       expect(preparing).toMatchObject({ state: "agent-preparing", fence_required: false });
+      const [provision] = await f.database.client<{ template: object }[]>`
+        SELECT template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=1`;
+      expect(Object.keys(provision?.template ?? {})).toEqual(["metadata"]);
 
       switch (fault) {
+        case "native-template-replaced":
+          nativeTemplate.metadata.uid = crypto.randomUUID();
+          break;
+        case "native-template-changed": {
+          const container = nativeTemplate.containers[0];
+          if (!container) throw Error("Owned native workload missing");
+          container.image = `registry.test/other@sha256:${"b".repeat(64)}`;
+          break;
+        }
         case "existing-session":
           await f.database.client`INSERT INTO factory.change_agent_session(
           change_id,runtime_attempt_id,opencode_session_id,state,created_by,active_turn_id)
@@ -282,11 +317,19 @@ test.each([
                 : new Response("not JSON");
           break;
       }
-      if (fault !== "valid" && !fault.startsWith("late-")) {
+      if (fault !== "valid" && fault !== "shared-query-transaction" && !fault.startsWith("late-")) {
         const prepared = await writers
           .prepareAgent(f.changeID, next.id, next.ownerToken)
           .catch((cause) => {
+            const nativeFailure =
+              ((fault === "native-template-replaced" || fault === "native-template-changed") &&
+                cause instanceof Error &&
+                cause.message === "Native Atespace/template/profile binding changed") ||
+              (fault === "native-template-unavailable" &&
+                cause instanceof SubstrateRPCError &&
+                cause.code === "Unavailable");
             if (
+              !nativeFailure &&
               !(cause instanceof CommandError) &&
               !(fault === "connected-source-malformed" && cause instanceof SyntaxError)
             )
@@ -300,7 +343,19 @@ test.each([
       }
       // Only the strictly initial read-only role may await its first Parent.
       // Native continuation still owns the original Actor and dispatch identity.
-      expect(await writers.prepareAgent(f.changeID, next.id, next.ownerToken)).toBe(true);
+      const originalClient = f.database.client;
+      if (fault === "shared-query-transaction")
+        f.database.client = new Proxy(originalClient, {
+          apply() {
+            throw Error("Source capability lookup left its already-owned query transaction");
+          },
+        });
+      try {
+        expect(await writers.prepareAgent(f.changeID, next.id, next.ownerToken)).toBe(true);
+      } finally {
+        f.database.client = originalClient;
+      }
+      expect(capabilityReads).toBe(1);
       await runtime.startPersisted(f.changeID, f.userID);
       expect({ creates, resumes }).toEqual({ creates: 1, resumes: 2 });
       expect(actor?.metadata.uid).toBe(initialSource?.actorUID);

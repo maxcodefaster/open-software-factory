@@ -25,9 +25,11 @@ import {
   type RetainedStopTarget,
   requireStoppedAgentInputsIn,
 } from "../agent/stop";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { admitComputeIn } from "../usage/compute";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
+import { templateInitialSourceRole } from "../workspace/source-role-fence";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
 import type { RuntimeHub } from "./hub";
 import { trackNativeOperation } from "./native-lock";
@@ -410,7 +412,7 @@ export function createSubstrateExecution(
     )
       throw new Error("Native Connector egress differs from its pinned restricted policy");
   }
-  async function binding(sql = database.client) {
+  async function binding(sql: Database["client"] | AgentTurnTransaction = database.client) {
     const [row] = await sql<
       Binding[]
     >`SELECT intent,atespace,actor_name AS "actorName",actor_uid::text AS "actorUID",
@@ -468,6 +470,7 @@ export function createSubstrateExecution(
       substrateTemplateSHA256(template) !== config.templateSHA256
     )
       throw new Error("Native Atespace/template/profile binding changed");
+    return template;
   }
   async function getActor() {
     try {
@@ -845,6 +848,31 @@ export function createSubstrateExecution(
   return {
     matchesProject: (id: string) => id === config.projectID,
     matchesAttempt: (id: string) => id === attemptID,
+    async supportsInitialSourceRole(sql: AgentTurnTransaction) {
+      return trackNativeOperation(
+        (async () => {
+          if (!workspaceID || config.generation !== 1 || config.deployment !== "fresh-workspaces")
+            return false;
+          const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
+          if (db?.name !== config.database)
+            throw new Error("Native adapter is limited to its explicitly owned database");
+          const saved = await binding(sql);
+          if (saved.deleting || saved.deleted || !saved.actorUID || saved.checkpoint) return false;
+          const [provision] = await sql<{ workloadImage: string }[]>`
+          SELECT intent#>>'{configuration,workloadImage}' AS "workloadImage"
+          FROM factory.substrate_workspace WHERE workspace_id=${workspaceID} AND generation=1`;
+          if (!provision?.workloadImage) return false;
+          // The caller already owns the runtime try-lock. Do not acquire another
+          // connection/lock here. Native reads validate UID/version/full spec hash.
+          return templateInitialSourceRole(await profile(), {
+            workspaceID,
+            attemptID,
+            projectID: config.projectID,
+            workloadImage: provision.workloadImage,
+          });
+        })(),
+      );
+    },
     async settleInputStop(target: RetainedStopTarget, signal: AbortSignal) {
       if (!workspaceID || !sources || target.attemptID !== attemptID || signal.aborted)
         return false;

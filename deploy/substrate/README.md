@@ -240,6 +240,8 @@ original initial Actor is still RESUMING and its Source Parent is unavailable. T
 the exact live approval/lease, complete no-input history, no previous human writer or Session,
 initial Source ownership and authenticated role-restore capability. It defers initialization
 of the read-only Source API role, not an old-writer teardown or proof that hooks stopped.
+The native owner checks that capability against the original template's live UID, version
+and full specification hash; Factory's metadata-only cache is not a copy of its bootstrap secrets.
 Before any new input enters dispatch, the running Source must acknowledge the current Change
 writer epoch as read-only. Missing, rejected or lost acknowledgements refuse dispatch; an old
 restore marker or transport reconnect is not confirmation of the current role.

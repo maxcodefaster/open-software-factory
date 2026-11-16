@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { AgentTurnTransaction } from "../agent/turn-store";
-import { substrateTemplateSHA256 } from "../runtime/substrate";
 
 // These are internal calls under the caller's validated Turn/Change transaction.
 // The ordinary human handoff has neither mode and always needs its real fence.
@@ -43,6 +42,34 @@ const sourceBootstrap = z.object({
   source: z.object({ workspaceId: z.string(), projectId: z.string() }),
 });
 
+// Called only after the native owner verified the template's immutable profile.
+// Never persist or return the credential-bearing bootstrap body.
+export function templateInitialSourceRole(
+  value: unknown,
+  identity: { attemptID: string; workspaceID: string; projectID: string; workloadImage: string },
+) {
+  const parsed = retainedBootstrapTemplate.safeParse(value);
+  if (!parsed.success) return false;
+  const workload = parsed.data.containers.filter((container) => container.name === "workload");
+  const container = workload[0];
+  if (workload.length !== 1 || !container || container.image !== identity.workloadImage)
+    return false;
+  const environment = container.env.filter((item) => item.name === "FACTORY_SUBSTRATE_BOOTSTRAP");
+  if (environment.length !== 1) return false;
+  let bootstrap: z.infer<typeof sourceBootstrap>;
+  try {
+    bootstrap = sourceBootstrap.parse(JSON.parse(environment[0]?.value ?? ""));
+  } catch {
+    return false;
+  }
+  return (
+    bootstrap.assignment.runtimeAttemptId === identity.attemptID &&
+    bootstrap.assignment.repositoryIdentity === identity.projectID &&
+    bootstrap.source.workspaceId === identity.workspaceID &&
+    bootstrap.source.projectId === identity.projectID
+  );
+}
+
 export async function initialSourceRoleIn(
   sql: AgentTurnTransaction,
   workspaceID: string,
@@ -52,21 +79,18 @@ export async function initialSourceRoleIn(
 ) {
   const [row] = await sql<
     {
-      projectID: string;
       atespace: string;
       template: unknown;
       templateUID: string;
       templateVersion: string;
       templateSHA256: string;
       provisionSHA256: string;
-      workloadImage: string;
     }[]
-  >`SELECT a.project_id AS "projectID",binding.atespace,provision.template,
+  >`SELECT binding.atespace,provision.template,
       binding.intent->>'templateUID' AS "templateUID",
       binding.intent->>'templateVersion' AS "templateVersion",
       binding.intent->>'templateSHA256' AS "templateSHA256",
-      provision.intent->>'templateSHA256' AS "provisionSHA256",
-      provision.intent#>>'{configuration,workloadImage}' AS "workloadImage"
+      provision.intent->>'templateSHA256' AS "provisionSHA256"
     FROM factory.runtime_attempt a
     JOIN factory.development_workspace workspace ON workspace.id=a.workspace_id
       AND workspace.project_id=a.project_id AND workspace.change_id=a.change_id
@@ -121,34 +145,15 @@ export async function initialSourceRoleIn(
             OR prior.change_id<>change.id OR NOT prior.bootstrap
             OR prior.runtime_attempt_id IS NOT NULL OR previous.authority ? 'review'))`;
   if (!row) return false;
-  const parsed = retainedBootstrapTemplate.safeParse(row.template);
+  // Provisioning retains metadata only. Reading the credential-bearing native
+  // specification belongs to its existing runtime owner, never this cache.
+  const parsed = retainedBootstrapTemplate.pick({ metadata: true }).safeParse(row.template);
   if (!parsed.success) return false;
   const template = parsed.data;
-  const workload = template.containers.filter((container) => container.name === "workload");
-  const container = workload[0];
-  if (
-    template.metadata.uid !== row.templateUID ||
-    template.metadata.version !== row.templateVersion ||
-    template.metadata.atespace !== row.atespace ||
-    row.templateSHA256 !== row.provisionSHA256 ||
-    substrateTemplateSHA256(row.template) !== row.templateSHA256 ||
-    workload.length !== 1 ||
-    !container ||
-    container.image !== row.workloadImage
-  )
-    return false;
-  const environment = container.env.filter((item) => item.name === "FACTORY_SUBSTRATE_BOOTSTRAP");
-  if (environment.length !== 1) return false;
-  let bootstrap: z.infer<typeof sourceBootstrap>;
-  try {
-    bootstrap = sourceBootstrap.parse(JSON.parse(environment[0]?.value ?? ""));
-  } catch {
-    return false;
-  }
   return (
-    bootstrap.assignment.runtimeAttemptId === attemptID &&
-    bootstrap.assignment.repositoryIdentity === row.projectID &&
-    bootstrap.source.workspaceId === workspaceID &&
-    bootstrap.source.projectId === row.projectID
+    template.metadata.uid === row.templateUID &&
+    template.metadata.version === row.templateVersion &&
+    template.metadata.atespace === row.atespace &&
+    row.templateSHA256 === row.provisionSHA256
   );
 }

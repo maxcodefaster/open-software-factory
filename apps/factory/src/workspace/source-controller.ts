@@ -31,6 +31,9 @@ export function createWorkspaceSourceController(
   database: Database,
   hub: Pick<RuntimeHub, "sourceConnected" | "parentConnected">,
   sources: ReturnType<typeof createSubstrateSources>,
+  options?: {
+    supportsInitialRole(attemptID: string, sql: AgentTurnTransaction): Promise<boolean>;
+  },
 ) {
   const streams = new Map<
     AbortController,
@@ -201,7 +204,8 @@ export function createWorkspaceSourceController(
           current?.attemptID &&
           !hub.parentConnected(current.attemptID) &&
           !hub.sourceConnected(current.attemptID) &&
-          (await initialSourceRoleIn(sql, workspace.id, current.attemptID, epoch, commission))
+          (await initialSourceRoleIn(sql, workspace.id, current.attemptID, epoch, commission)) &&
+          (await options?.supportsInitialRole(current.attemptID, sql))
         )
           // There was no admitted human Source writer or dispatched input.
           // Authenticated cold restore initializes the read-only API role.

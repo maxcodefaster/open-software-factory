@@ -17,6 +17,7 @@ import {
   requirePendingWriterHandoffIn,
   requireStoppedAgentInputsIn,
 } from "../agent/stop";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
@@ -268,6 +269,13 @@ export function createRuntimeController(
     );
   });
   return {
+    async supportsInitialSourceRole(attemptID: string, sql: AgentTurnTransaction) {
+      const [attempt] = await sql<{ projectID: string }[]>`
+        SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt) return false;
+      const owner = await project(attempt.projectID).workspaces.forAttempt(attemptID, sql);
+      return owner ? owner.supportsInitialSourceRole(sql) : false;
+    },
     async settleRetainedInputStop(target: RetainedStopTarget, signal: AbortSignal) {
       return (await execution(target.attemptID)).settleInputStop(target, signal);
     },

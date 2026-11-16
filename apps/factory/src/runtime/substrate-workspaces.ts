@@ -23,6 +23,7 @@ import {
 import upstream from "../../../../upstream.json";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
 import { agentConfiguration } from "./agent-configuration";
@@ -172,7 +173,11 @@ export function createSubstrateWorkspaces(
       throw error;
     }
   }
-  async function saved(workspaceID: string, generation: number, sql = database.client) {
+  async function saved(
+    workspaceID: string,
+    generation: number,
+    sql: typeof database.client | AgentTurnTransaction = database.client,
+  ) {
     const [row] = await sql<
       Provision[]
     >`SELECT generation::float8 AS generation,intent,atespace,policy,template,
@@ -213,15 +218,18 @@ export function createSubstrateWorkspaces(
   }
   return {
     matchesProject: (id: string) => id === config.projectID,
-    async forAttempt(attemptID: string) {
-      const [attempt] = await database.client<
+    async forAttempt(
+      attemptID: string,
+      sql: typeof database.client | AgentTurnTransaction = database.client,
+    ) {
+      const [attempt] = await sql<
         { workspaceID: string; generation: string }[]
       >`SELECT a.workspace_id AS "workspaceID",a.generation::text AS generation
         FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.id=${attemptID} AND a.project_id=${config.projectID} AND a.substrate`;
       if (!attempt) return undefined;
       return execution(
         attempt.workspaceID,
-        await saved(attempt.workspaceID, Number(attempt.generation)),
+        await saved(attempt.workspaceID, Number(attempt.generation), sql),
       );
     },
     async recover() {

@@ -384,6 +384,12 @@ export function createChangeWriterController(options: {
               : undefined,
           );
           await options.protect(changeID, []);
+          if (
+            ownerToken &&
+            !current.fenceRequired &&
+            !(await turns.validateExecutionIn(sql, turnID, ownerToken))
+          )
+            throw new CommandError("conflict", "Build authority changed during Source preparation");
         };
         if (ownerToken && !writer.fenceRequired) {
           // Take the operation lock before Turn/Change validation, then share

@@ -270,6 +270,10 @@ export async function createFactoryApplication() {
     database,
     runtimeHub,
     createSubstrateSources(database, runtimeHub),
+    {
+      supportsInitialRole: (attemptID, sql) =>
+        runtimeController.supportsInitialSourceRole(attemptID, sql),
+    },
   );
   const workspaceCollaboration = createWorkspaceCollaboration(database, workspaceSources);
   const workspaceSharing = createWorkspaceSharing(database, async (workspaceID, userID) => {
