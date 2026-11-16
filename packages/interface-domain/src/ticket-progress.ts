@@ -88,19 +88,29 @@ export function ticketProgress(input: TicketProgressInput): string {
     return "The last agent outcome is unconfirmed. Check the retained work before starting another request; Factory has not replayed it.";
   if (input.checksPaused)
     return "The submitted version is retained. Resume checks to continue without repeating implementation.";
+  const activeImplementationTurn =
+    input.building &&
+    input.turnPurpose !== "review" &&
+    ["pending", "dispatching", "running"].includes(input.turnState ?? "");
+  const implementationState =
+    input.turnPurpose !== "review" && ["stopped", "failed"].includes(input.turnState ?? "")
+      ? input.turnState
+      : input.implementationState;
   if (
     input.turnPurpose !== "review" &&
-    (input.turnState === "stopped" || input.implementationState === "stopped")
+    (input.turnState === "stopped" ||
+      (implementationState === "stopped" && !activeImplementationTurn))
   )
     return "Implementation is stopped. Retained code is not lost; resume deliberately when ready.";
-  if (input.implementationState === "waiting")
+  if (implementationState === "waiting")
     return "Implementation needs an answer. Open the Coding conversation to continue.";
   if (input.turnPurpose === "review" && input.changeState === "failed")
     return "Review preparation failed. The submitted version is retained. Retry review to continue without repeating implementation.";
   if (
     input.changeState === "failed" ||
     (input.turnPurpose !== "review" &&
-      (input.turnState === "failed" || input.implementationState === "failed"))
+      (input.turnState === "failed" ||
+        (implementationState === "failed" && !activeImplementationTurn)))
   )
     return "Implementation could not finish. The Coding conversation shows the saved failure and offers Retry; retained work is kept.";
   if (input.changeState === "delivering") {
@@ -139,11 +149,7 @@ export function ticketProgress(input: TicketProgressInput): string {
     (input.turnPurpose === "review" && ["failed", "stopped"].includes(input.turnState ?? ""))
   )
     return "Checks passed, but independent review is incomplete. Inspect its findings before explicitly retrying review.";
-  if (
-    input.implementationState &&
-    input.implementationState !== "committed" &&
-    input.turnPurpose !== "review"
-  )
+  if (implementationState && implementationState !== "committed" && input.turnPurpose !== "review")
     return "Retained changes are not submitted. Finish implementation before treating earlier checks as current.";
   if (input.verificationState === "failed") {
     switch (input.verificationFailureKind) {

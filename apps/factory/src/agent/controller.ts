@@ -1819,6 +1819,7 @@ export function createAgentController(
       let messagesAvailable = false;
       let activityAttemptID = session.runtimeAttemptID;
       let activityRuntimeState = session.runtimeState;
+      let displayRuntimeState = session.runtimeState;
       if (session.sessionID && ["failed", "stopped"].includes(session.runtimeState)) {
         const [retained] = await database.client<Array<{ id: string; state: string }>>`
           SELECT current.id, current.state FROM factory.change change
@@ -1827,10 +1828,14 @@ export function createAgentController(
           WHERE change.id = ${changeID} AND change.state IN ('starting', 'active')
             AND current.change_id = change.id AND original.change_id = change.id
             AND current.workspace_id = original.workspace_id AND current.workspace_id IS NOT NULL
-            AND current.generation > original.generation AND current.state = 'ready'`;
+            AND current.generation > original.generation`;
         if (retained) {
-          activityAttemptID = retained.id;
-          activityRuntimeState = retained.state;
+          displayRuntimeState = retained.state;
+          // Saved lifecycle state is displayable before retained OpenCode history is reachable.
+          if (retained.state === "ready") {
+            activityAttemptID = retained.id;
+            activityRuntimeState = retained.state;
+          }
         }
       }
       if (session.sessionConfirmed && session.sessionID && activityRuntimeState === "ready")
@@ -1925,7 +1930,7 @@ export function createAgentController(
                 ? "starting"
                 : session.state,
         turn,
-        runtimeState: activityRuntimeState,
+        runtimeState: displayRuntimeState,
         lastError:
           turn?.state === "uncertain"
             ? `Execution outcome uncertain. Stop or resolve this turn before new Build work. ${turn.summary ?? ""}`

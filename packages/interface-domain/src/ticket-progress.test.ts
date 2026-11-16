@@ -35,6 +35,113 @@ test("a failed change points to the Coding conversation and keeps retained work"
   expect(text).toContain("Retry");
 });
 
+test.each(
+  (["stopped", "failed"] as const).flatMap((implementationState) =>
+    (["pending", "dispatching", "running"] as const).map((turnState) => ({
+      implementationState,
+      turnState,
+    })),
+  ),
+)(
+  "a current $turnState implementation outranks the previous $implementationState Session",
+  (input) => {
+    const text = ticketProgress({
+      ...submitted,
+      ...input,
+      building: true,
+      preparing: input.turnState !== "running",
+    });
+    expect(text).toBe(
+      input.turnState === "running"
+        ? "The approved requirements are being implemented. Checks and independent review follow submission. No action needed."
+        : "Factory is preparing the implementation. Approved requirements and existing code are retained. No action needed.",
+    );
+  },
+);
+
+test.each(
+  (
+    [
+      ["stopped", "Implementation is stopped"],
+      ["failed", "Implementation could not finish"],
+      ["uncertain", "outcome is unconfirmed"],
+    ] as const
+  ).flatMap(([turnState, text]) =>
+    ["working", "waiting", "stopped", "failed"].map((implementationState) => ({
+      turnState,
+      implementationState,
+      text,
+    })),
+  ),
+)("a current $turnState turn outranks stale $implementationState building flags", (input) => {
+  expect(ticketProgress({ ...submitted, ...input, building: true, preparing: true })).toContain(
+    input.text,
+  );
+});
+
+test.each(["stopped", "failed"] as const)(
+  "building alone cannot hide a retained %s implementation without an active turn",
+  (implementationState) => {
+    for (const turnState of [undefined, "completed"]) {
+      expect(
+        ticketProgress({
+          ...submitted,
+          implementationState,
+          turnState,
+          building: true,
+          preparing: true,
+        }),
+      ).toContain(
+        implementationState === "stopped"
+          ? "Implementation is stopped"
+          : "Implementation could not finish",
+      );
+    }
+  },
+);
+
+test.each(["cancelled", "cancelling", "delivering", "delivered"] as const)(
+  "%s keeps precedence over an active implementation",
+  (changeState) => {
+    const input = {
+      ...submitted,
+      changeState,
+      turnState: "pending",
+      building: true,
+      preparing: true,
+    };
+    expect(ticketProgress(input)).toBe(
+      ticketProgress({ ...input, building: false, preparing: false }),
+    );
+    expect(ticketProgress(input)).not.toContain("preparing the implementation");
+  },
+);
+
+test("Ticket cancellation and incomplete independent review are not hidden by building flags", () => {
+  expect(
+    ticketProgress({
+      ...submitted,
+      ticketState: "cancelled",
+      turnState: "pending",
+      building: true,
+    }),
+  ).toContain("Work was cancelled");
+  for (const implementationState of ["stopped", "failed"]) {
+    expect(
+      ticketProgress({
+        ...submitted,
+        implementationState,
+        turnPurpose: "review",
+        turnState: "failed",
+        verificationState: "succeeded",
+        reviewState: "failed",
+        building: true,
+        preparing: true,
+      }),
+    ).toContain("independent review is incomplete");
+  }
+});
+
 test("failed review preparation keeps the recovery action scoped to the submitted candidate", () => {
   const text = ticketProgress({
     ...submitted,
