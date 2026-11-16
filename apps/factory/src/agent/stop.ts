@@ -15,6 +15,7 @@ import { createStopTransport } from "./stop-transport";
 
 type Database = ReturnType<typeof createDatabase>;
 type StopTarget = { stopID: string | null; turnID: string | null };
+export type PendingWriterHandoff = { turnID: string; epoch: string };
 export type RetainedStopTarget = {
   changeID: string;
   stopID: string;
@@ -24,18 +25,67 @@ export type RetainedStopTarget = {
   mode: "interrupt" | "observe";
 };
 
+// Read-only cleanup authority for the original Attempt, not permission to stop
+// or dispatch the newly commissioned writer's unassigned input.
+export async function requirePendingWriterHandoffIn(
+  sql: Database["client"] | AgentTurnTransaction,
+  attemptID: string,
+  handoff: PendingWriterHandoff,
+): Promise<void> {
+  const [pending] = await sql`
+    SELECT attempt.id FROM factory.runtime_attempt attempt
+    JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+      AND workspace.project_id=attempt.project_id AND workspace.change_id=attempt.change_id
+      AND workspace.kind='ticket' AND workspace.substrate
+    JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
+      AND change.project_id=attempt.project_id
+    JOIN factory.ticket ticket ON ticket.id=change.ticket_id AND ticket.id=workspace.ticket_id
+      AND ticket.project_id=change.project_id
+    JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
+      AND approval.ticket_id=ticket.id
+    JOIN factory.change_writer writer ON writer.change_id=change.id
+    JOIN factory.agent_turn turn ON turn.id=writer.turn_id AND turn.change_id=change.id
+      AND turn.project_id=change.project_id AND turn.ticket_id=ticket.id
+    JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id AND intent.change_id=change.id
+    WHERE attempt.id=${attemptID} AND attempt.substrate
+      AND change.state IN ('starting','active','failed') AND change.cancel_requested_at IS NULL
+      AND ticket.trashed_at IS NULL
+      AND writer.state='agent-preparing' AND writer.turn_id=${handoff.turnID}
+      AND writer.epoch=${handoff.epoch}::bigint AND writer.fence_required
+      AND writer.fence_attempt_id=attempt.id
+      AND turn.state='pending' AND turn.owner_token IS NOT NULL
+      AND turn.owner_expires_at>clock_timestamp() AND turn.authority->>'mode'='build'
+      AND turn.authority->>'requirementRevisionId'=approval.requirement_revision_id::text
+      AND approval.requirement_revision_id=(SELECT id FROM factory.requirement_revision
+        WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1)
+      AND intent.runtime_attempt_id IS NULL
+      AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+        WHERE newer.workspace_id=workspace.id AND newer.generation>attempt.generation)
+      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn active
+        WHERE active.change_id=change.id AND active.id<>turn.id
+          AND active.state IN ('pending','dispatching','running','uncertain'))`;
+  if (!pending)
+    throw new CommandError(
+      "conflict",
+      "Pending writer handoff no longer owns cleanup of the original Workspace.",
+    );
+}
+
 // Substrate teardown must not turn a lost/queued OpenCode input into apparent
 // cancellation. A fresh bootstrap whose native confirmation was fenced cannot
 // have submitted input; every confirmed/reused Session needs actual settlement.
 export async function requireStoppedAgentInputsIn(
   sql: Database["client"] | AgentTurnTransaction,
   attemptID: string,
+  handoff?: PendingWriterHandoff,
 ) {
+  if (handoff) await requirePendingWriterHandoffIn(sql, attemptID, handoff);
   const [unsettled] = await sql`
     SELECT attempt.id FROM factory.runtime_attempt attempt
     WHERE attempt.id=${attemptID} AND attempt.change_id IS NOT NULL AND (
       EXISTS(SELECT 1 FROM factory.agent_turn turn
-        WHERE turn.change_id=attempt.change_id AND turn.state IN ('pending','dispatching','running','uncertain'))
+        WHERE turn.change_id=attempt.change_id AND turn.state IN ('pending','dispatching','running','uncertain')
+          AND turn.id IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid)
       OR EXISTS(SELECT 1 FROM factory.change_agent_session session
         LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
         LEFT JOIN factory.agent_turn stopped ON stopped.id=session.stop_turn_id
@@ -75,17 +125,28 @@ export function createChangeAgentStop(
   }
 
   return {
-    async persist(changeID: string) {
+    async persist(changeID: string, handoff?: PendingWriterHandoff) {
       // Admission locks Change/Ticket before reading the barrier. Publish it
       // without waiting for any Turn lock: execution locks Turn before Change.
       const target = await database.client.begin(async (sql) => {
-        await sql`SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
+        const [change] = await sql<{ attemptID: string | null }[]>`
+          SELECT change.runtime_attempt_id AS "attemptID" FROM factory.change change
+          JOIN factory.ticket ticket ON ticket.id = change.ticket_id
           WHERE change.id = ${changeID} FOR UPDATE OF change, ticket`;
+        if (handoff) {
+          if (!change?.attemptID)
+            throw new CommandError(
+              "conflict",
+              "Pending writer handoff no longer owns cleanup of the original Workspace.",
+            );
+          await requirePendingWriterHandoffIn(sql, change.attemptID, handoff);
+        }
         // A pending admission may not yet have prepared the Session. With no
         // active turn, retain this exact Session's last assigned input: a failed
         // outcome does not prove that its native Inbox entry was removed.
         const turns = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
           WHERE change_id = ${changeID} AND state IN ('pending', 'dispatching', 'running', 'uncertain')
+            AND id IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid
           ORDER BY created_at DESC LIMIT 1`;
         const rows = await sql<
           StopTarget[]
