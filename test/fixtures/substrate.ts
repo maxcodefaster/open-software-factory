@@ -214,7 +214,7 @@ export async function substrateFixture(
         VALUES(${workspaceID},${JSON.stringify(intent)}::text::jsonb,
           ${space.metadata.createTime},${JSON.stringify(space)}::text::jsonb,
           ${policy.metadata.createTime},${JSON.stringify(policy)}::text::jsonb,
-          ${template.metadata.createTime},${JSON.stringify({ metadata: template.metadata })}::text::jsonb)`;
+          ${template.metadata.createTime},${JSON.stringify(template)}::text::jsonb)`;
       const withEgress: SubstrateCall = async (method, request) => {
         if (method === "GetAtespaceAccessPolicy") return structuredClone(policy);
         if (method === "GetActorEgressPolicy")
