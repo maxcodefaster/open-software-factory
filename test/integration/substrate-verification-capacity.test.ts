@@ -97,9 +97,10 @@ test("initial Verification continuation keeps exact-job, native identity and rev
         f.calls.filter((call) => call.scope === atespace && call.method === "ResumeActor").length;
       const creates = () =>
         f.calls.filter((call) => call.scope === atespace && call.method === "CreateActor").length;
-      const wait = () =>
-        f.database
-          .client`SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`;
+      const wait = async () => [
+        ...(await f.database.client<{ reason: string }[]>`
+          SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`),
+      ];
       const facts = () =>
         f.database
           .client`SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
@@ -163,7 +164,9 @@ test("initial Verification continuation keeps exact-job, native identity and rev
         expect(await facts(), fault).toEqual(originalFacts);
       }
       expect(creates(), fault).toBe(1);
-      expect(await f.database.client`SELECT * FROM factory.substrate_source`, fault).toEqual([]);
+      expect([...(await f.database.client`SELECT * FROM factory.substrate_source`)], fault).toEqual(
+        [],
+      );
       if (fault === "revoked")
         await f.database
           .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)

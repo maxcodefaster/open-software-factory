@@ -272,8 +272,10 @@ test("native Verification continues initial capacity rejection on its exact-job 
       stop_id: null,
       outcome: null,
     });
-    const capacityWait = await f.database.client`
-      SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`;
+    const capacityWait = [
+      ...(await f.database.client<{ reason: string }[]>`
+        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`),
+    ];
     // The pinned native workflow rejected assignment before advancing the Actor.
     // A current exact-job commission continues that same idempotent native Resume,
     // not another Actor or an edited/cleared immutable dispatch fact.
@@ -285,10 +287,10 @@ test("native Verification continues initial capacity rejection on its exact-job 
     expect(coalesced?.id).toBe(attemptID);
     expect(resumeCalls).toBe(2);
     expect(capacityWait).toEqual([{ reason: "compute-capacity" }]);
-    expect(
-      await f.database.client`
-        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`,
-    ).toEqual([]);
+    expect([
+      ...(await f.database.client<{ reason: string }[]>`
+        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`),
+    ]).toEqual([]);
     const [completedResume] = await f.database.client`
       SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
         intended_at::text,attempted_at::text,outcome
