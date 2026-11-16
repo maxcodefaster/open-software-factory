@@ -11,6 +11,9 @@ tinyproxy -d -c /opt/factory-rootless/tinyproxy.conf &
 # or Agent. This is a fixed authenticated import, never a saved command queue.
 /usr/local/bin/factory-runtime-connector native-source-restore
 mode="$(/usr/local/bin/factory-runtime-connector native-bootstrap-mode)"
+# The cold step owner-validates native roots plus the frozen Factory public CA.
+# Select that exact bundle before private dockerd can cache its TLS roots.
+export SSL_CERT_FILE=/home/rootless/persist/connector/trust.pem
 case "$mode" in
   input-stop) exec /usr/local/bin/factory-runtime-connector native-parent ;;
   docker) ;;

@@ -65,8 +65,35 @@ func RunSubstrateBootstrapMode(output io.Writer) error {
 			mode = "input-stop"
 		}
 	}
+	// Only the inner cold step may publish. The outer UID-1000 readiness
+	// process observes that same file without racing its creation/replacement.
+	prepare := os.Geteuid() == 0
+	if prepare {
+		if err := workspacefiles.ValidateActorSourceIdentity("/home/rootless/persist"); err != nil {
+			return err
+		}
+	} else if os.Geteuid() != 1000 {
+		return errors.New("native cold mode requires its private owner")
+	}
+	if _, err := selectNativeBootstrapTrust(b, prepare); err != nil {
+		return err
+	}
 	_, err := fmt.Fprintln(output, mode)
 	return err
+}
+
+func selectNativeBootstrapTrust(b bootstrap, prepare bool) (string, error) {
+	if b.Assignment.WorkspaceFolder != "/home/rootless/persist/project" ||
+		b.Assignment.ConnectorStateDir != nativeBootstrapStateDirectory {
+		return "", errors.New("native bootstrap trust requires its fixed private paths")
+	}
+	// Always read the native projection, never ambient SSL_CERT_FILE or a
+	// retained combined bundle. A cold boot must not accumulate old Factory CAs.
+	trust, err := os.ReadFile(nativeBootstrapTrustProjection)
+	if err != nil {
+		return "", errors.New("native trust projection is unavailable")
+	}
+	return nativeBootstrapTrust(nativeBootstrapStateDirectory, trust, b.FactoryCA, prepare)
 }
 
 func RunSubstrateParent(ctx context.Context) error {
@@ -93,18 +120,8 @@ func RunSubstrateParent(ctx context.Context) error {
 		return errors.New("native Actor UID is unavailable")
 	}
 	os.Setenv("FACTORY_SUBSTRATE_ACTOR_UID", strings.TrimSpace(string(uid)))
-	trust, err := os.ReadFile(os.Getenv("SSL_CERT_FILE"))
+	ca, err := selectNativeBootstrapTrust(b, false)
 	if err != nil {
-		return errors.New("native trust projection is unavailable")
-	}
-	if !strings.Contains(b.FactoryCA, "-----BEGIN CERTIFICATE-----") || strings.Contains(b.FactoryCA, "PRIVATE KEY") {
-		return errors.New("Factory serving CA is invalid")
-	}
-	if err := os.MkdirAll(b.Assignment.ConnectorStateDir, 0700); err != nil {
-		return err
-	}
-	ca := filepath.Join(b.Assignment.ConnectorStateDir, "trust.pem")
-	if err := os.WriteFile(ca, append(append(trust, '\n'), []byte(b.FactoryCA)...), 0600); err != nil {
 		return err
 	}
 	os.Setenv("SSL_CERT_FILE", ca)
