@@ -40,7 +40,7 @@ import { type ReviewActions, ReviewPanel, ReviewThreadStatus } from "./review/pa
 import { RichDocumentSurface } from "./rich-document-surface";
 import { sourceReviewURL } from "./source-review";
 import { TicketActionBar, type TicketHeaderAction } from "./ticket-action-bar";
-import { checksWaitingForCapacity, TicketChecks } from "./ticket-checks";
+import { TicketChecks } from "./ticket-checks";
 import { TicketDependencies, type TicketDependenciesProps } from "./ticket-dependencies";
 import { documentChangedSinceImplementation } from "./ticket-document-notice";
 import { TechnicalDesignSections, TicketChapterNavigation } from "./ticket-planning";
@@ -1563,47 +1563,38 @@ function TicketDocument(props: TicketWorkspaceProps) {
                                   !props.planningBusy &&
                                   !props.awaitingAnswer
                                 ? incompleteReason
-                                : props.change?.state === "active" &&
-                                    props.current.ticket.state !== "cancelled" &&
-                                    props.change.implementationState === "committed" &&
-                                    !implementationBusy() &&
-                                    !["failed", "stopped", "uncertain"].includes(
-                                      props.change.buildTurnState ?? "",
-                                    ) &&
-                                    checksWaitingForCapacity(props.delivery)
-                                  ? "Checks will start automatically when capacity is available. No action needed."
-                                  : ticketProgress({
-                                      ticketState: props.current.ticket.state,
-                                      changeState: props.change?.state,
-                                      turnState: props.change?.buildTurnState,
-                                      turnPurpose: props.change?.buildTurnPurpose,
-                                      implementationState: props.change?.implementationState,
-                                      building: implementationBusy(),
-                                      preparing: implementationPreparing(),
-                                      verificationState: props.delivery?.verificationState,
-                                      verificationFailureKind:
-                                        props.delivery?.verificationFailureKind,
-                                      verificationSummary: props.delivery?.verificationSummary,
-                                      verificationPreparationFailure:
-                                        props.delivery?.verificationPreparationFailure,
-                                      correctionState: props.delivery?.correctionState,
-                                      reviewState: props.delivery?.reviewState,
-                                      checksPaused: Boolean(props.delivery?.checksStopId),
-                                      checksRetryable: Boolean(
-                                        props.delivery?.checksRetryAttemptId,
-                                      ),
-                                      threads:
-                                        openReviewThreads() ?? props.delivery?.openReviewThreads,
-                                      approved: Boolean(props.delivery?.approvedAt),
-                                      cleanupError: props.delivery?.cleanupError,
-                                      promotionState: props.delivery?.promotionState,
-                                      deliveryBlock: props.deliveryBlock,
-                                      canDevelop: props.canDevelop,
-                                      planning: props.planningBusy,
-                                      awaitingAnswer: props.awaitingAnswer,
-                                      technicalPlanningOutstanding:
-                                        props.current.technicalPlanningPending,
-                                    })}
+                                : ticketProgress({
+                                    ticketState: props.current.ticket.state,
+                                    changeState: props.change?.state,
+                                    turnState: props.change?.buildTurnState,
+                                    turnPurpose: props.change?.buildTurnPurpose,
+                                    implementationState: props.change?.implementationState,
+                                    building: implementationBusy(),
+                                    preparing: implementationPreparing(),
+                                    verificationState: props.delivery?.verificationState,
+                                    verificationFailureKind:
+                                      props.delivery?.verificationFailureKind,
+                                    verificationSummary: props.delivery?.verificationSummary,
+                                    verificationPreparationFailure:
+                                      props.delivery?.verificationPreparationFailure,
+                                    verificationComputeWait:
+                                      props.delivery?.verificationComputeWait,
+                                    correctionState: props.delivery?.correctionState,
+                                    reviewState: props.delivery?.reviewState,
+                                    checksPaused: Boolean(props.delivery?.checksStopId),
+                                    checksRetryable: Boolean(props.delivery?.checksRetryAttemptId),
+                                    threads:
+                                      openReviewThreads() ?? props.delivery?.openReviewThreads,
+                                    approved: Boolean(props.delivery?.approvedAt),
+                                    cleanupError: props.delivery?.cleanupError,
+                                    promotionState: props.delivery?.promotionState,
+                                    deliveryBlock: props.deliveryBlock,
+                                    canDevelop: props.canDevelop,
+                                    planning: props.planningBusy,
+                                    awaitingAnswer: props.awaitingAnswer,
+                                    technicalPlanningOutstanding:
+                                      props.current.technicalPlanningPending,
+                                  })}
                     </span>
                   </p>
                 </Show>

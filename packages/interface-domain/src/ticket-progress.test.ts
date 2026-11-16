@@ -168,6 +168,56 @@ test.each(["pending", "runner-starting"])(
   },
 );
 
+test.each(["pending", "runner-starting"])(
+  "submitted %s Verification explains its recorded capacity wait",
+  (verificationState) => {
+    const text = ticketProgress({
+      ...submitted,
+      verificationState,
+      verificationComputeWait: true,
+    });
+    expect(text).toBe(
+      "Checks will start automatically when capacity is available. No action needed.",
+    );
+    expect(text).not.toContain("passed");
+  },
+);
+
+test.each([
+  { verificationPreparationFailure: "The check environment image is unavailable." },
+  { checksPaused: true },
+  { checksRetryable: true },
+  { verificationState: "failed", verificationFailureKind: "execution-failed" },
+  { verificationState: "failed", verificationFailureKind: "check-failed" },
+  { verificationState: "running" },
+  { verificationState: "cancelled" },
+  { verificationState: "succeeded", reviewState: "passed", canDevelop: true },
+  { implementationState: "working" },
+  { implementationState: "waiting" },
+  { turnState: "failed" },
+  { turnState: "stopped" },
+  { turnState: "uncertain" },
+  { ticketState: "cancelled" },
+  { changeState: "failed" },
+  { changeState: "cancelling" },
+  { changeState: "cancelled" },
+  { changeState: "delivering" },
+  { changeState: "delivered" },
+  { changeState: "starting" },
+  { correctionState: "running" },
+  { building: true },
+  { reviewState: "failed" },
+  { reviewState: "incomplete" },
+  { reviewState: "pending" },
+  { reviewState: "running" },
+  { reviewState: "passed" },
+])("a capacity hint does not override saved progress %j", (state) => {
+  const input = { ...submitted, verificationState: "runner-starting", ...state };
+  const text = ticketProgress({ ...input, verificationComputeWait: true });
+  expect(text).toBe(ticketProgress({ ...input, verificationComputeWait: false }));
+  expect(text).not.toContain("when capacity is available");
+});
+
 test("a retained preparation issue stays distinct from application failure and active checks", () => {
   const input = {
     ...submitted,

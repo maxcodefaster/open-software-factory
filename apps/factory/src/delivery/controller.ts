@@ -1529,6 +1529,7 @@ export function createDeliveryController(
             WHERE waiting.attempt_id=verification_runtime.id AND waiting.reason='compute-capacity'
               AND verification_runtime.verification_id=verification.id
               AND verification_runtime.state='starting' AND nullif(verification_runtime.failure,'') IS NULL
+              AND verification_runtime.ready_at IS NULL AND verification_runtime.stop_intended_at IS NULL
               AND verification.state IN ('pending','runner-starting')
               AND change.state='active' AND change.cancel_requested_at IS NULL
               AND session.state='committed' AND NOT session.stop_pending

@@ -285,6 +285,16 @@ test("failed Verification compute is visible while human editing fences reconcil
         approvedAt: undefined,
       });
     }
+    // A retained wait row cannot promise a fresh start after readiness or Stop intent.
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET ready_at=now() WHERE id=${replacementID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`UPDATE factory.runtime_attempt SET ready_at=NULL,stop_intended_at=now()
+      WHERE id=${replacementID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL WHERE id=${replacementID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(true);
     // Read projection only. Stop, cancellation and inactive work do not promise an automatic start.
     const checksStopID = crypto.randomUUID();
     await f.database

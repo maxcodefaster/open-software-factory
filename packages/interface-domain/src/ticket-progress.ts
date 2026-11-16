@@ -59,6 +59,7 @@ export type TicketProgressInput = {
   verificationFailureKind?: string | undefined;
   verificationSummary?: string | undefined;
   verificationPreparationFailure?: string | undefined;
+  verificationComputeWait?: boolean | undefined;
   correctionState?: string | undefined;
   reviewState?: string | undefined;
   checksPaused?: boolean | undefined;
@@ -184,7 +185,12 @@ export function ticketProgress(input: TicketProgressInput): string {
   if (["pending", "runner-starting"].includes(input.verificationState ?? ""))
     return input.verificationPreparationFailure
       ? "Check preparation needs attention. Open checks for the recorded setup issue. The submitted version is retained."
-      : "Implementation is submitted. Factory is preparing fresh checks for that exact version.";
+      : input.verificationComputeWait &&
+          input.changeState === "active" &&
+          !input.checksRetryable &&
+          !input.reviewState
+        ? "Checks will start automatically when capacity is available. No action needed."
+        : "Implementation is submitted. Factory is preparing fresh checks for that exact version.";
   if (input.verificationState === "running")
     return "Implementation is submitted. Factory is running fresh checks on that exact version. No action needed.";
   if (input.verificationState === "cancelled")

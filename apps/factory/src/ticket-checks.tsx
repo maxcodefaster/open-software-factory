@@ -23,7 +23,7 @@ export type TicketCheckDetails = {
   cleanupError?: string | undefined;
 };
 
-export function checksWaitingForCapacity(details: TicketCheckDetails | undefined) {
+function checksWaitingForCapacity(details: TicketCheckDetails | undefined) {
   return Boolean(
     details?.verificationComputeWait &&
       ["pending", "runner-starting"].includes(details.verificationState ?? "") &&
