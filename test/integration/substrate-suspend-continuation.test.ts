@@ -1,14 +1,45 @@
 import { expect, test } from "bun:test";
+import {
+  createSubstrateExecution,
+  type SubstrateConfiguration,
+} from "../../apps/factory/src/runtime/substrate";
 import { intendActorRPCIn } from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import {
   type NativeActor,
+  type SubstrateCall,
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
+async function recoverOriginal(
+  f: Awaited<ReturnType<typeof substrateFixture>>,
+  call: SubstrateCall,
+) {
+  const [saved] = await f.database.client<
+    { intent: SubstrateConfiguration & { actorSelector: Record<string, string> } }[]
+  >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+  if (!saved) throw Error("Original binding is unavailable");
+  const { actorSelector, ...configuration } = saved.intent;
+  expect(actorSelector).toEqual(f.config.workerSelector);
+  return createSubstrateExecution(
+    f.database,
+    f.hub,
+    "owned-native-secret",
+    configuration,
+    call,
+  ).recover();
+}
+
 test.each([
   { label: "pending capture", durability: "PENDING", fault: null },
   { label: "durable capture", durability: "COMPLETED", fault: null },
+  { label: "startup recovery of pending capture", durability: "PENDING", fault: "recover" },
+  { label: "startup recovery of durable capture", durability: "COMPLETED", fault: "recover" },
+  {
+    label: "startup recovery after native finalization",
+    durability: "COMPLETED",
+    fault: "recover-completed",
+  },
   { label: "background durability progress", durability: "PENDING", fault: "advance" },
   { label: "foreign Actor", durability: "PENDING", fault: "actor" },
   { label: "foreign template", durability: "PENDING", fault: "template" },
@@ -42,7 +73,7 @@ test.each([
       if (!row) throw Error("Original Suspend dispatch is unavailable");
       return row;
     };
-    const runtime = await f.controller(async (method, request) => {
+    const call: SubstrateCall = async (method, request) => {
       if (method === "GetAtespace") return f.space;
       if (method === "GetActorTemplate") return f.template;
       if (method === "GetActor") {
@@ -132,7 +163,8 @@ test.each([
         return { actor: structuredClone(actor) };
       }
       throw Error(`Uncommissioned native operation ${method}`);
-    });
+    };
+    const runtime = await f.controller(call);
     try {
       await runtime.start(f.projectID, f.userID);
       await runtime.pause(f.attemptID);
@@ -148,7 +180,7 @@ test.each([
         latest.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_COMPLETED";
         actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
       }
-      if (fault && fault !== "advance") {
+      if (fault && !["advance", "recover", "recover-completed"].includes(fault)) {
         await runtime.get(f.attemptID);
         if (!actor) throw Error("Original Actor is unavailable");
         const latest = actor.status.snapshots?.at(-1) as {
@@ -221,8 +253,23 @@ test.each([
         }
         return;
       }
-      expect((await runtime.pause(f.attemptID))?.state).toBe("paused");
-      expect({ creates, resumes, suspends }).toEqual({ creates: 1, resumes: 2, suspends: 3 });
+      const recoveredCompletion = fault === "recover-completed";
+      if (fault === "recover" || recoveredCompletion) {
+        f.hub.revoke(f.attemptID);
+        if (recoveredCompletion) {
+          if (!actor) throw Error("Original Actor is unavailable");
+          actor.status.state = "ACTOR_STATE_SUSPENDED";
+          actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
+        }
+        await recoverOriginal(f, call);
+        expect((await runtime.get(f.attemptID))?.state).toBe("paused");
+      } else expect((await runtime.pause(f.attemptID))?.state).toBe("paused");
+      const expectedSuspends = recoveredCompletion ? 2 : 3;
+      expect({ creates, resumes, suspends }).toEqual({
+        creates: 1,
+        resumes: 2,
+        suspends: expectedSuspends,
+      });
       expect(actor?.metadata.uid).toBe(identity);
       expect(minted).toHaveLength(2);
       const observed = await fact();
@@ -239,7 +286,9 @@ test.each([
           WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`,
       ).toHaveLength(2);
       await runtime.pause(f.attemptID);
-      expect(suspends).toBe(3);
+      expect(suspends).toBe(expectedSuspends);
+      await recoverOriginal(f, call);
+      expect(suspends).toBe(expectedSuspends);
       await runtime.resumeForApp(f.attemptID, f.userID);
       expect(resumes).toBe(3);
     } finally {
@@ -255,7 +304,7 @@ test.each(["missing", "undispatched"] as const)(
     const f = await substrateFixture();
     let actor: NativeActor | undefined;
     let suspends = 0;
-    const runtime = await f.controller(async (method) => {
+    const call: SubstrateCall = async (method) => {
       if (method === "GetAtespace") return f.space;
       if (method === "GetActorTemplate") return f.template;
       if (method === "GetActor") {
@@ -274,7 +323,8 @@ test.each(["missing", "undispatched"] as const)(
       }
       if (method === "SuspendActor") suspends++;
       throw Error(`Uncommissioned native operation ${method}`);
-    });
+    };
+    const runtime = await f.controller(call);
     try {
       await runtime.start(f.projectID, f.userID);
       if (!actor) throw Error("Original Actor is unavailable");
@@ -306,6 +356,7 @@ test.each(["missing", "undispatched"] as const)(
       await f.database
         .client`UPDATE factory.runtime_attempt SET state='pausing' WHERE id=${f.attemptID}`;
       await expect(runtime.pause(f.attemptID)).rejects.toThrow("original dispatched");
+      await expect(recoverOriginal(f, call)).rejects.toThrow("original dispatched");
       expect(suspends).toBe(0);
       const [saved] = await f.database.client`SELECT checkpoint FROM factory.substrate_binding
         WHERE runtime_attempt_id=${f.attemptID}`;

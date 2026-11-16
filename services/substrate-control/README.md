@@ -33,7 +33,8 @@ UUID. Lost replies in the preceding native state are observed, not replayed. Onl
 recorded SUSPENDING Actor may re-enter the official workflow with the original dispatched
 operation and exact persisted snapshot identity. This continues that snapshot rather
 than capturing a new one; PENDING progress never permits Source handoff or Resume.
-A new confirmed checkpoint permits a later deliberate
+Normal startup recovery can continue that recorded Pause or finish its independently
+completed handoff. A new confirmed checkpoint permits a later deliberate
 Resume; an unresolved Pause never reopens Connector authority. These are execution
 facts, not a second lifecycle controller.
 

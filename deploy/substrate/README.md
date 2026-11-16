@@ -617,7 +617,9 @@ which reuses its persisted snapshot rather than taking a new one. Factory requir
 the original dispatched Actor, matching template/runtime, exact next snapshot generation
 and storage identity, and its retained Source fence. The first dispatch facts remain
 immutable; a `PENDING` capture permits only that native continuation, never Source handoff
-or Resume. A positive `SUSPENDED` observation of the exact completed durable snapshot
+or Resume. Normal Factory startup recovery uses the same guarded continuation for a
+recorded pausing Attempt, without starting inference or resuming compute.
+A positive `SUSPENDED` observation of the exact completed durable snapshot
 can finish Source handoff. Only that confirmed checkpoint permits the next deliberate
 Resume. Reading an already RUNNING allocation does not dispatch Resume or reset READY;
 an unresolved Pause does not reopen Connector authority. Pending/local-only snapshots

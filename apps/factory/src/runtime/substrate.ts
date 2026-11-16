@@ -935,6 +935,15 @@ export function createSubstrateExecution(
         const saved = await binding(sql);
         if (saved.deleting || saved.deleted || !saved.attemptedAt) return;
         const actor = await observe(sql, saved);
+        if (["ACTOR_STATE_SUSPENDING", "ACTOR_STATE_SUSPENDED"].includes(actor.status.state)) {
+          const [pausing] = await sql`SELECT id FROM factory.runtime_attempt
+            WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+          // Continue only the recorded native Pause, not an uncertain Resume or
+          // inference. suspendIn requires its original dispatch and snapshot,
+          // and still independently confirms durability before Source handoff.
+          if (pausing) await suspendIn(sql);
+          return;
+        }
         if (actor.status.state !== "ACTOR_STATE_RUNNING") return;
         if (await nativeInputStopIn(sql, attemptID)) {
           allow(actor.metadata.uid);
