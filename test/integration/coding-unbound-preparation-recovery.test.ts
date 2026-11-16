@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
+import {
+  type AgentTurnTransaction,
+  createAgentTurnStore,
+} from "../../apps/factory/src/agent/turn-store";
 import { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
@@ -205,10 +208,12 @@ async function heldPreparation() {
       WHERE id=${owned.attemptID}`;
     let runtimeStarts = 0;
     let preparing = false;
+    let startupFailure: Error | undefined;
     const controller = owned.controller(async () => {
       runtimeStarts++;
       preparing = true;
       await release.promise;
+      if (startupFailure) throw startupFailure;
       return null;
     });
     const commandID = crypto.randomUUID();
@@ -274,6 +279,17 @@ async function heldPreparation() {
           async () => preparationExited,
           Boolean,
           "The expired preparation did not return after its same runtime became ready",
+        );
+        detach?.();
+        detach = undefined;
+      },
+      async rejectStartup(message: string) {
+        startupFailure = new Error(message);
+        release.resolve();
+        await eventually(
+          async () => preparationExited,
+          Boolean,
+          "The rejected startup attempt did not return",
         );
         detach?.();
         detach = undefined;
@@ -347,6 +363,131 @@ test("periodic dispatch recovers the exact unbound pending input after preparati
     await held.dispose();
   }
 }, 30_000);
+
+test.each(["live", "expired"] as const)(
+  "a returned startup rejection settles the %s unbound Turn without replay or Session replacement",
+  async (lease) => {
+    const held = await heldPreparation();
+    const { owned, controller, commandID, admitted } = held;
+    const summary = "Owned runtime startup canceled before input binding";
+    try {
+      if (lease === "expired") await held.expire();
+      expect(await owned.turn(commandID)).toMatchObject({
+        id: admitted.turnID,
+        state: "pending",
+        summary: null,
+      });
+      await held.rejectStartup(summary);
+      await controller.dispatchReadyPending();
+      const rejected = await pendingInput(owned, commandID);
+      await writeFile(
+        `${evidence}/unbound-startup-rejection-${lease}.json`,
+        JSON.stringify(rejected, null, 2),
+      );
+      expect(await retainedSession(owned)).toEqual(held.priorSession);
+      expect(held.mutations).toHaveLength(held.priorMutations);
+      expect(owned.requests()).toBe(held.priorRequests);
+      expect(held.runtimeStarts()).toBe(1);
+      expect(owned.commitCalls).toEqual([]);
+      expect(rejected).toMatchObject({
+        ...admitted,
+        state: "failed",
+        summary,
+        hasOwner: false,
+        live: false,
+        attemptID: null,
+        runtimeState: "starting",
+      });
+      await controller.dispatchReadyPending();
+      await controller.dispatchRuntimePending(owned.attemptID);
+      expect(held.runtimeStarts()).toBe(1);
+      expect(held.mutations).toHaveLength(held.priorMutations);
+      expect(owned.requests()).toBe(held.priorRequests);
+    } finally {
+      await held.dispose();
+    }
+  },
+  30_000,
+);
+
+test.each([
+  "another owner",
+  "bound intent",
+  "assigned Session",
+  "pending Stop",
+  "completed Stop",
+  "revoked Project membership",
+  "current writer changed",
+  "latest Requirements changed",
+] as const)(
+  "expired startup rejection cannot overwrite %s",
+  async (boundary) => {
+    const held = await heldPreparation();
+    const { owned, controller, commandID, admitted } = held;
+    const turns = createAgentTurnStore(owned.database);
+    try {
+      await held.expire();
+      if (boundary === "another owner") {
+        expect(await turns.claimPending(admitted.turnID)).not.toBeNull();
+      } else if (boundary === "bound intent") {
+        await owned.database.client`UPDATE factory.change_agent_turn_intent
+          SET runtime_attempt_id=${owned.attemptID} WHERE turn_id=${admitted.turnID}`;
+      } else if (boundary === "assigned Session") {
+        await owned.database.client`UPDATE factory.change_agent_session
+          SET active_turn_id=${admitted.turnID} WHERE change_id=${owned.changeID}`;
+      } else if (boundary === "pending Stop") {
+        await owned.database.client`UPDATE factory.change_agent_session
+          SET stop_pending=true WHERE change_id=${owned.changeID}`;
+      } else if (boundary === "completed Stop") {
+        await controller.stop(owned.changeID);
+      } else if (boundary === "revoked Project membership") {
+        expect(
+          await owned.database
+            .client`SELECT user_id FROM factory.administrator WHERE user_id=${owned.userID}`,
+        ).toHaveLength(0);
+        expect(
+          await owned.database.client`DELETE FROM factory.project_membership
+            WHERE project_id=${owned.projectID} AND user_id=${owned.userID} RETURNING user_id`,
+        ).toHaveLength(1);
+      } else if (boundary === "current writer changed") {
+        await owned.database.client`UPDATE factory.change_writer SET state='human',
+          user_id=${owned.userID},turn_id=NULL,epoch=epoch+1
+          WHERE change_id=${owned.changeID} AND turn_id=${admitted.turnID}`;
+      } else {
+        await owned.database.client`INSERT INTO factory.requirement_revision(
+          id,ticket_id,ordinal,canonical_content,content_digest,created_by)
+          SELECT ${crypto.randomUUID()},ticket_id,ordinal+1,canonical_content,content_digest,created_by
+          FROM factory.requirement_revision WHERE id=${owned.revisionID}`;
+      }
+      const before = await turns.get(admitted.turnID);
+      const sessionBefore = await retainedSession(owned);
+      await held.rejectStartup("Owned late startup rejection must not cross this boundary");
+      expect(await turns.get(admitted.turnID)).toEqual(before);
+      expect(await retainedSession(owned)).toEqual(sessionBefore);
+      expect(held.mutations).toHaveLength(held.priorMutations);
+      expect(owned.requests()).toBe(held.priorRequests);
+      expect(held.runtimeStarts()).toBe(1);
+      expect(owned.commitCalls).toEqual([]);
+      expect(await owned.turn(commandID)).toMatchObject({
+        state: boundary === "completed Stop" ? "stopped" : "pending",
+      });
+    } finally {
+      try {
+        // Restore only the mutable Session injections before fixture Stop.
+        // Keep the bound intent immutable through normal owned cleanup.
+        if (boundary === "assigned Session")
+          await owned.database.client`UPDATE factory.change_agent_session
+            SET active_turn_id=${held.priorSession.activeTurnID} WHERE change_id=${owned.changeID}`;
+        if (boundary === "pending Stop")
+          await owned.database.client`UPDATE factory.change_agent_session
+            SET stop_pending=false WHERE change_id=${owned.changeID}`;
+      } finally {
+        await held.dispose();
+      }
+    }
+  },
+  30_000,
+);
 
 test.each(["live", "expired"] as const)(
   "Stop cancels %s unbound preparation without reopening the previous Session's confirmed Stop",

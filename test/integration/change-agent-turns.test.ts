@@ -1,14 +1,19 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createAgentController } from "../../apps/factory/src/agent/controller";
+import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import {
   type AgentTurnTransaction,
   createAgentTurnStore,
 } from "../../apps/factory/src/agent/turn-store";
+import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { ownedPostgresServer } from "../fixtures/postgres-server";
 
 test("Build waits for OpenCode after IDE readiness without repeating a prompt", async () => {
   const owned = await fixture();
@@ -773,31 +778,219 @@ test("execution validation rejects a lease that expires during an authority lock
   }
 });
 
-test("pending recovery checks authority before starting compute", async () => {
-  const owned = await fixture();
-  let starts = 0;
-  try {
-    const conversationID = await buildConversation(owned);
-    const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
-      owned.changeID,
-      owned.userID,
-      { kind: "change-start", commandId: crypto.randomUUID() },
-    );
-    await modeRoundTrip(owned, conversationID);
-    await owned.database
-      .client`UPDATE factory.change SET runtime_attempt_id = NULL WHERE id = ${owned.changeID}`;
-    await owned
-      .controller(async () => {
-        starts += 1;
-        return null;
-      })
-      .recover();
-    await until(async () => (await owned.turn(turn.commandId))?.state === "failed");
-    expect(starts).toBe(0);
-    expect(owned.requests()).toBe(0);
-  } finally {
-    await owned.dispose();
+describe("pending preparation authority", () => {
+  let postgres: Awaited<ReturnType<typeof ownedPostgresServer>> | undefined;
+  beforeAll(async () => {
+    postgres = await ownedPostgresServer();
+  }, 60_000);
+  afterAll(async () => {
+    await postgres?.dispose();
+  }, 60_000);
+
+  async function preparationFixture() {
+    if (!postgres) throw new Error("Owned preparation database is unavailable");
+    const previousURL = process.env["DATABASE_URL"];
+    let database: ReturnType<typeof createDatabase>;
+    try {
+      process.env["DATABASE_URL"] = postgres.identity.url;
+      database = createDatabase(3);
+    } finally {
+      if (previousURL === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = previousURL;
+    }
+    return fixture(undefined, undefined, database);
   }
+
+  test("pending recovery checks authority before starting compute", async () => {
+    const owned = await preparationFixture();
+    let starts = 0;
+    try {
+      const conversationID = await buildConversation(owned);
+      const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+        owned.changeID,
+        owned.userID,
+        { kind: "change-start", commandId: crypto.randomUUID() },
+      );
+      await modeRoundTrip(owned, conversationID);
+      await owned.database
+        .client`UPDATE factory.change SET runtime_attempt_id = NULL WHERE id = ${owned.changeID}`;
+      await owned
+        .controller(async () => {
+          starts += 1;
+          return null;
+        })
+        .recover();
+      await until(async () => (await owned.turn(turn.commandId))?.state === "failed");
+      expect(await createAgentTurnStore(owned.database).get(turn.id)).toMatchObject({
+        state: "failed",
+        outcomeSummary: "Build authority changed before Source preparation",
+        ownerToken: null,
+        ownerExpiresAt: null,
+      });
+      expect(starts).toBe(0);
+      expect(owned.requests()).toBe(0);
+    } finally {
+      await owned.dispose();
+    }
+  });
+
+  test.each(["new Requirements", "revoked Project membership"] as const)(
+    "pending preparation rejects %s without runtime creation",
+    async (boundary) => {
+      const owned = await preparationFixture();
+      let starts = 0;
+      try {
+        await buildConversation(owned);
+        const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+          owned.changeID,
+          owned.userID,
+          { kind: "change-start", commandId: crypto.randomUUID() },
+        );
+        if (boundary === "new Requirements") {
+          await owned.database.client`INSERT INTO factory.requirement_revision(
+            id,ticket_id,ordinal,canonical_content,content_digest,created_by)
+            SELECT ${crypto.randomUUID()},ticket_id,ordinal+1,canonical_content,content_digest,created_by
+            FROM factory.requirement_revision WHERE id=${owned.revisionID}`;
+        } else {
+          await owned.database.client`DELETE FROM factory.project_membership
+            WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+        }
+        await owned.database.client`UPDATE factory.change SET runtime_attempt_id=NULL
+          WHERE id=${owned.changeID}`;
+        await owned
+          .controller(async () => {
+            starts++;
+            return null;
+          })
+          .recover();
+        await until(async () => (await owned.turn(turn.commandId))?.state === "failed");
+        expect(starts).toBe(0);
+        expect(owned.requests()).toBe(0);
+        expect(owned.commitCalls).toEqual([]);
+        expect<unknown>(
+          await owned.database
+            .client`SELECT runtime_attempt_id FROM factory.change_agent_turn_intent
+            WHERE turn_id=${turn.id}`,
+        ).toEqual([{ runtime_attempt_id: null }]);
+      } finally {
+        await owned.dispose();
+      }
+    },
+  );
+
+  test.each(["Source fence", "predecessor Stop fence"] as const)(
+    "pending preparation preserves a waiting %s",
+    async (boundary) => {
+      const owned = await preparationFixture();
+      let controller: ReturnType<typeof createAgentController> | undefined;
+      const connected = owned.hub.connected;
+      let starts = 0;
+      let refused = false;
+      try {
+        await buildConversation(owned);
+        const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+          owned.changeID,
+          owned.userID,
+          { kind: "change-start", commandId: crypto.randomUUID() },
+        );
+        await owned.database.client`UPDATE factory.change_writer
+          SET fence_required=true,fence_attempt_id=${owned.attemptID}
+          WHERE change_id=${owned.changeID} AND turn_id=${turn.id}`;
+        if (boundary === "predecessor Stop fence") {
+          await owned.database.client`UPDATE factory.change_agent_session
+            SET state='stopped',stop_pending=true,stop_id=${crypto.randomUUID()}
+            WHERE change_id=${owned.changeID}`;
+          owned.hub.connected = () => false;
+        }
+        const sessionBefore = await owned.database.client`SELECT * FROM factory.change_agent_session
+          WHERE change_id=${owned.changeID}`;
+        const writers = createChangeWriterController({
+          database: owned.database,
+          agentUsername: "owned-control",
+          runtime: { stop: async () => {}, get: async () => ({ state: "stopping" }) },
+          stopDeadlineMs: 0,
+          stopAgent: async () => {},
+          protect: async () => {},
+          fenceSource: async () => {},
+        });
+        controller = createAgentController(
+          owned.database,
+          owned.hub,
+          {
+            startPersisted: async () => {
+              starts++;
+              return null;
+            },
+          },
+          undefined,
+          {
+            confirmSource: writers.confirmSource,
+            prepareAgent: async (...args) => {
+              const ready = await writers.prepareAgent(...args);
+              refused = !ready;
+              return ready;
+            },
+          },
+        );
+        await controller.recover();
+        await until(async () => refused);
+        const turns = createAgentTurnStore(owned.database);
+        await until(async () => (await turns.get(turn.id))?.ownerToken === null);
+        expect(await turns.get(turn.id)).toMatchObject({
+          state: "pending",
+          outcomeSummary: null,
+          ownerToken: null,
+          ownerExpiresAt: null,
+        });
+        expect(
+          await owned.database.client`SELECT * FROM factory.change_agent_session
+            WHERE change_id=${owned.changeID}`,
+        ).toEqual(sessionBefore);
+        expect(starts).toBe(0);
+        expect(owned.requests()).toBe(0);
+        expect(owned.commitCalls).toEqual([]);
+      } finally {
+        await controller?.shutdown();
+        owned.hub.connected = connected;
+        await owned.dispose();
+      }
+    },
+  );
+
+  test("a published Stop wins over revoked pending preparation", async () => {
+    const owned = await preparationFixture();
+    try {
+      const conversationID = await buildConversation(owned);
+      const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+        owned.changeID,
+        owned.userID,
+        { kind: "change-start", commandId: crypto.randomUUID() },
+      );
+      await modeRoundTrip(owned, conversationID);
+      const turns = createAgentTurnStore(owned.database);
+      const owner = await turns.claimPending(turn.id);
+      if (!owner?.ownerToken) throw new Error("Owned preparation claim required");
+      await owned.database.client`UPDATE factory.change_agent_session
+        SET state='stopped',stop_pending=true,stop_id=${crypto.randomUUID()},stop_turn_id=${turn.id}
+        WHERE change_id=${owned.changeID}`;
+      expect(
+        await turns.failRevokedPendingPreparation(turn.id, owner.ownerToken, "Must not win Stop"),
+      ).toBe(false);
+      expect(await turns.get(turn.id)).toEqual(owner);
+      await createChangeAgentStop(owned.database, owned.hub).persist(owned.changeID);
+      // The retained Stop predates this caller, so its recovered origin is
+      // neutral rather than fabricated as a new human Stop decision.
+      expect(await turns.get(turn.id)).toMatchObject({
+        state: "stopped",
+        outcomeSummary: "Execution stopped",
+        ownerToken: null,
+      });
+      expect(owned.requests()).toBe(0);
+      expect(owned.commitCalls).toEqual([]);
+    } finally {
+      await owned.dispose();
+    }
+  });
 });
 
 test("Build rechecks authority after Session lookup and before prompt submission", async () => {

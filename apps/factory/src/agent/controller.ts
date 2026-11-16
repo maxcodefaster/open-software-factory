@@ -318,6 +318,7 @@ export function createAgentController(
     let renew: ReturnType<typeof setInterval> | undefined;
     let pendingRenewal: Promise<void> | undefined;
     let dispatched = false;
+    let startupRejected = false;
     try {
       // Branch creation is independently recovered. A recorded bootstrap waits
       // for that outcome without claiming a lease or dispatching any inference.
@@ -347,6 +348,11 @@ export function createAgentController(
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
       if (!(await writers.prepareAgent(changeID, turnID, ownerToken))) {
+        await turns.failRevokedPendingPreparation(
+          turnID,
+          ownerToken,
+          "Build authority changed before Source preparation",
+        );
         await turns.releasePending(turnID, ownerToken);
         return;
       }
@@ -357,7 +363,12 @@ export function createAgentController(
         throw new Error("The recorded runtime generation changed before Build dispatch");
       }
       if (!current.runtimeAttemptID || current.runtimeState !== "ready") {
-        await runtime.startPersisted(changeID, userID);
+        try {
+          await runtime.startPersisted(changeID, userID);
+        } catch (cause) {
+          startupRejected = true;
+          throw cause;
+        }
         current = await currentChange(changeID);
       }
       if (!current.runtimeAttemptID) throw new Error("Ticket Sandbox was not created");
@@ -541,9 +552,11 @@ export function createAgentController(
       if (closed) return;
       if (owned?.ownerToken && "changeId" in owned.command) {
         const summary = bounded(readableError(cause), 2_000);
-        const changed = dispatched
+        let changed = dispatched
           ? await turns.settle(turnID, owned.ownerToken, "uncertain", summary)
           : await turns.failPending(turnID, owned.ownerToken, summary);
+        if (!changed && startupRejected)
+          changed = await turns.failUnboundStartup(turnID, owned.ownerToken, summary);
         if (changed)
           await database.client`UPDATE factory.change_agent_session SET state = 'failed',
           last_error = ${dispatched ? `Execution outcome uncertain. Stop or resolve this turn before new Build work. ${summary}` : summary},

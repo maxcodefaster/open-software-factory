@@ -379,6 +379,33 @@ export function createAgentTurnStore(database: Database) {
         WHERE id=${id} AND state='pending' AND owner_token=${ownerToken}`;
     },
 
+    async failRevokedPendingPreparation(id: string, ownerToken: string, summary: string) {
+      if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
+      return database.client.begin(async (sql) => {
+        const [owned] = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
+          WHERE id=${id} AND state='pending' AND owner_token=${ownerToken}
+            AND owner_expires_at>clock_timestamp() FOR UPDATE`;
+        if (!owned) return false;
+        const record = turn(owned);
+        if (
+          record.authority.mode !== "build" ||
+          !("changeId" in record.command) ||
+          (await currentAuthorityIn(database, sql, record, true))
+        )
+          return false;
+        // A Source/predecessor fence can legitimately wait. Record only revoked
+        // admission authority, and let every published Stop settle its own Turn.
+        const failed = await sql<{ id: string }[]>`UPDATE factory.agent_turn turn
+          SET state='failed',outcome_summary=${summary},owner_token=NULL,owner_expires_at=NULL,updated_at=now()
+          WHERE turn.id=${id} AND turn.state='pending' AND turn.owner_token=${ownerToken}
+            AND turn.owner_expires_at>clock_timestamp()
+            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session
+              WHERE session.change_id=${record.command.changeId} AND session.stop_pending)
+          RETURNING turn.id`;
+        return failed.length === 1;
+      });
+    },
+
     async beginDispatch(id: string, ownerToken: string) {
       return database.client.begin(async (sql) => {
         const owned = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
@@ -477,6 +504,44 @@ export function createAgentTurnStore(database: Database) {
           AND owner_expires_at > clock_timestamp() RETURNING id
       `;
       return rows.length === 1;
+    },
+
+    // Only the worker whose runtime startup has rejected may record this
+    // never-bound input's failure after lease loss. This grants no execution
+    // authority, renews no lease and cannot settle another owner's preparation.
+    async failUnboundStartup(id: string, ownerToken: string, summary: string) {
+      if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
+      return database.client.begin(async (sql) => {
+        const [owned] = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
+          WHERE id=${id} AND state='pending' AND owner_token=${ownerToken}
+            AND owner_expires_at<=clock_timestamp() FOR UPDATE`;
+        if (!owned) return false;
+        const record = turn(owned);
+        if (
+          record.authority.mode !== "build" ||
+          !("changeId" in record.command) ||
+          !(await currentAuthorityIn(database, sql, record))
+        )
+          return false;
+        // Authority may wait on Change/Stop. A fresh statement after those
+        // locks must still prove that no intent or Session was bound.
+        const failed = await sql<{ id: string }[]>`UPDATE factory.agent_turn turn
+          SET state='failed',outcome_summary=${summary},owner_token=NULL,owner_expires_at=NULL,updated_at=now()
+          WHERE turn.id=${id} AND turn.change_id=${record.command.changeId}
+            AND turn.state='pending' AND turn.owner_token=${ownerToken}
+            AND turn.owner_expires_at<=clock_timestamp()
+            AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
+              WHERE intent.turn_id=turn.id AND intent.change_id=turn.change_id
+                AND intent.runtime_attempt_id IS NULL)
+            AND EXISTS(SELECT 1 FROM factory.change_writer writer
+              WHERE writer.change_id=turn.change_id AND writer.turn_id=turn.id
+                AND writer.state='agent' AND NOT writer.fence_required)
+            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session
+              WHERE session.change_id=turn.change_id
+                AND (session.active_turn_id=turn.id OR session.stop_pending))
+          RETURNING turn.id`;
+        return failed.length === 1;
+      });
     },
 
     async markRunning(
