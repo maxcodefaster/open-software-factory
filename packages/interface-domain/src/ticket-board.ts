@@ -79,6 +79,9 @@ export function ticketBoardStatus(input: TicketBoardInput): string {
   }
   if (hasCurrentImplementation(input)) {
     if (input.buildTurnState === "uncertain") return "Needs attention";
+    // The latest turn can be preparing while this Session's implementation copy is still stopped.
+    if (["pending", "dispatching", "running"].includes(input.buildTurnState ?? ""))
+      return "Implementation";
     if (input.buildTurnState === "failed" || input.implementationState === "failed")
       return "Implementation paused";
     if (input.buildTurnState === "stopped" || input.implementationState === "stopped")

@@ -954,10 +954,13 @@ test.describe("retained Coding successor", () => {
       { activity: true },
     );
     await selectProject(page);
-    await page
-      .getByRole("region", { name: "implementation", exact: true })
-      .getByRole("button")
-      .click();
+    const boardCard = page
+      .getByRole("region", { name: "Ticket board", exact: true, includeHidden: true })
+      .locator('.lane[aria-label="implementation"] .ticket-card-body')
+      .filter({ hasText: title });
+    await expect(boardCard).toBeVisible();
+    await expect(boardCard).not.toContainText(/Stopped|Implementation paused/);
+    await boardCard.click();
     const ticketDocument = page.locator(".ticket-document");
     const progress = ticketDocument.getByRole("status", { name: "Ticket progress", exact: true });
     const checks = ticketDocument.locator(".ticket-checks");
@@ -979,6 +982,8 @@ test.describe("retained Coding successor", () => {
           if (narrow) await minimize.tap();
           else await minimize.click();
         }
+        await expect(boardCard).toHaveCount(1);
+        await expect(boardCard).not.toContainText(/Stopped|Implementation paused/);
         await expect(summary).toHaveText(
           working ? "Implementation in progress" : "Preparing implementation",
         );
@@ -1023,6 +1028,14 @@ test.describe("retained Coding successor", () => {
           await toggle.focus();
           await page.keyboard.press("Enter");
         }
+        await expect(toggle).toHaveAttribute("aria-expanded", "true");
+        await expect(panel).toHaveAttribute("aria-hidden", "false");
+        await expect(panel).toHaveAttribute("data-closing", "false");
+        await expect(panel).toBeVisible();
+        await expect(panel).toBeInViewport({ ratio: 1 });
+        await expect(panel).toHaveCSS("opacity", "1");
+        await expect(panel.locator(".agent-state")).toBeVisible();
+        await expect(panel.locator(".agent-state")).toBeInViewport();
         await expect(panel.locator(".agent-state")).toHaveText(working ? "Working" : "Starting");
         await expect(panel.locator(".runtime-presence")).toHaveText(
           working ? "Implementation running" : "Workspace starting",

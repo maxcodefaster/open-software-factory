@@ -138,4 +138,89 @@ describe("Ticket board stages", () => {
       expect(ticketBoardStatus(input)).not.toBe("Verified");
     },
   );
+
+  test.each(
+    ["pending", "dispatching", "running"].flatMap((buildTurnState) =>
+      ["stopped", "failed"].map((implementationState) => ({
+        buildTurnState,
+        implementationState,
+      })),
+    ),
+  )(
+    "an active $buildTurnState successor outranks the retained Session's $implementationState copy",
+    ({ buildTurnState, implementationState }) => {
+      const input = {
+        ticketState: "in-progress" as const,
+        changeState: "active",
+        buildTurnState,
+        implementationState,
+      };
+      expect(ticketBoardStage(input)).toBe("implementation");
+      expect(ticketBoardStatus(input)).toBe("Implementation");
+    },
+  );
+
+  test.each(["stopped", "failed"])(
+    "a retained %s implementation keeps its status without an active successor",
+    (implementationState) => {
+      for (const buildTurnState of [undefined, "completed"]) {
+        const input = {
+          ticketState: "in-progress" as const,
+          changeState: "active",
+          buildTurnState,
+          implementationState,
+        };
+        expect(ticketBoardStage(input)).toBe("implementation");
+        expect(ticketBoardStatus(input)).toBe(
+          implementationState === "stopped" ? "Stopped" : "Implementation paused",
+        );
+      }
+    },
+  );
+
+  test.each([
+    ["uncertain", "Needs attention"],
+    ["failed", "Implementation paused"],
+    ["stopped", "Stopped"],
+  ])("a latest %s turn keeps its own status", (buildTurnState, label) => {
+    const input = {
+      ticketState: "in-progress" as const,
+      changeState: "active",
+      buildTurnState,
+      implementationState: "working",
+    };
+    expect(ticketBoardStage(input)).toBe("implementation");
+    expect(ticketBoardStatus(input)).toBe(label);
+  });
+
+  test("a successor does not override terminal, review or Delivery precedence", () => {
+    const input = {
+      ticketState: "in-progress" as const,
+      changeState: "active",
+      buildTurnState: "pending",
+      implementationState: "stopped",
+    };
+    for (const [changeState, stage, status] of [
+      ["cancelled", "history", "Cancelled"],
+      ["delivered", "history", "Delivered"],
+      ["delivering", "review", "Delivering"],
+      ["cancelling", "implementation", "Cancelling"],
+    ]) {
+      expect(ticketBoardStage({ ...input, changeState })).toBe(stage);
+      expect(ticketBoardStatus({ ...input, changeState })).toBe(status);
+    }
+    for (const ticketState of ["done", "cancelled"] as const) {
+      expect(ticketBoardStage({ ...input, ticketState })).toBe("history");
+      expect(ticketBoardStatus({ ...input, ticketState })).toBe(
+        ticketState === "done" ? "Completed" : "Cancelled",
+      );
+    }
+    const review = {
+      ...input,
+      buildTurnPurpose: "review",
+      verificationState: "succeeded",
+    };
+    expect(ticketBoardStage(review)).toBe("review");
+    expect(ticketBoardStatus(review)).toBe("Independent review");
+  });
 });
