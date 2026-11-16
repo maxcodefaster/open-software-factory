@@ -135,7 +135,9 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		return fmt.Errorf("report startup: %w", err)
 	}
 	finishCheckout := startupPhase("checkout")
-	checkoutErr := checkoutProject(ctx, assignment)
+	checkoutErr := withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
+		return checkoutProject(ctx, assignment)
+	})
 	finishCheckout()
 	if err := checkoutErr; err != nil {
 		return retainParentStartupFailure(ctx, assignment, token, &control, err)
@@ -143,7 +145,12 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	if assignment.Prebuild != nil {
 		return runPrebuildAttempt(ctx, assignment, token, control)
 	}
-	cleanup, err := prepareFreshDevcontainer(ctx, &assignment, token)
+	cleanup := func() {}
+	err = withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
+		var err error
+		cleanup, err = prepareFreshDevcontainer(ctx, &assignment, token)
+		return err
+	})
 	defer cleanup()
 	if err != nil {
 		return retainParentStartupFailure(ctx, assignment, token, &control, err)
@@ -153,7 +160,12 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	})
 	defer preparation.stop()
 	finishDevcontainer := startupPhase("devcontainer-start")
-	result, err := startDevcontainer(ctx, assignment)
+	var result devcontainerResult
+	err = withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
+		var err error
+		result, err = startDevcontainer(ctx, assignment)
+		return err
+	})
 	finishDevcontainer()
 	if err != nil {
 		err = cleanupFailedParentStartup(assignment, err)
@@ -202,7 +214,9 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		}
 	}()
 	finishInjection := startupPhase("tool-injection")
-	injectionErr := injectChild(ctx, assignment, result, childToken)
+	injectionErr := withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
+		return injectChild(ctx, assignment, result, childToken)
+	})
 	finishInjection()
 	if err := injectionErr; err != nil {
 		retainingFailure = true
