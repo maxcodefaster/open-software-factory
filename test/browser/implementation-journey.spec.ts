@@ -853,6 +853,203 @@ test("a queued first Build shows preparation after reconnect, not active impleme
   expect(errors).toEqual([]);
 });
 
+test.describe("retained Coding successor", () => {
+  test.use({ hasTouch: true });
+
+  test("a retained Session shows successor preparation instead of stale stopped implementation", async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const changeID = crypto.randomUUID();
+    const turnID = crypto.randomUUID();
+    const commandID = crypto.randomUUID();
+    const errors: string[] = [];
+    let working = false;
+    let executionWrites = 0;
+    const executionCommands = await Promise.all(
+      [
+        "implementTicket",
+        "startTicketChange",
+        "startCoding",
+        "sendCodingPrompt",
+        "resumeCoding",
+        "stopCoding",
+        "startTicketWorkspace",
+        "startFreshRuntimeAttempt",
+        "stopRuntimeAttempt",
+      ].map(factoryFunctionMatcher),
+    );
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        executionCommands.some((matches) => matches(new URL(request.url())))
+      )
+        executionWrites++;
+    });
+    await mockCodingConversation(page);
+    const writer = async () =>
+      writerViewSchema.parse({
+        state: working ? "agent" : "agent-preparing",
+        epoch: 5,
+        canWrite: false,
+        yours: false,
+        commandID: null,
+        actor: null,
+        requester: null,
+      });
+    await mockFactoryFunctions(page, {
+      runtime: {
+        changes: async () =>
+          changesResponseSchema.parse({
+            changes: [
+              {
+                id: changeID,
+                projectId: projectID,
+                ticketId: ticketID,
+                branchName: "factory/owned-retained-successor",
+                baseSha: "a".repeat(40),
+                state: "active",
+                branchState: "succeeded",
+                runtimeState: working ? "ready" : "starting",
+                // This cached copy still describes the old confirmed Session.
+                implementationState: "stopped",
+                buildTurnState: working ? "running" : "pending",
+              },
+            ],
+          }),
+      },
+      writer: { status: writer, observe: writer },
+      delivery: {
+        async get(_actor, id) {
+          if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+          return deliveryViewSchema.parse({});
+        },
+      },
+    });
+    await mockAgentView(
+      page,
+      changeID,
+      async () => ({
+        state: working ? "working" : "starting",
+        runtimeState: working ? "ready" : "starting",
+        // Confirmation of the retained Session is not proof its successor is ready.
+        sessionAvailable: true,
+        runtimeConnected: working,
+        messagesAvailable: working,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+        turn: {
+          id: turnID,
+          commandId: commandID,
+          mode: "build",
+          engine: "opencode",
+          modelId: "owned-coding-model",
+          codingReasoning: "medium",
+          skills: [],
+          state: working ? "running" : "pending",
+        },
+      }),
+      { activity: true },
+    );
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button")
+      .click();
+    const ticketDocument = page.locator(".ticket-document");
+    const progress = ticketDocument.getByRole("status", { name: "Ticket progress", exact: true });
+    const checks = ticketDocument.locator(".ticket-checks");
+    const summary = checks.locator(":scope > summary");
+    const panel = page.locator(".agent-panel");
+    const toggle = page.getByRole("button", { name: "Toggle Agent panel", exact: true });
+    const minimize = panel.getByRole("button", { name: "Minimize Agent panel", exact: true });
+    const actions = page.getByRole("button", { name: "Ticket actions", exact: true });
+    const captures = ".factory/test-results/implementation-preparation";
+    await mkdir(captures, { recursive: true });
+    for (const phase of ["pending", "running"] as const) {
+      working = phase === "running";
+      await wakeFactoryReads(page);
+      for (const width of [1440, 390]) {
+        const narrow = width === 390;
+        const layout = narrow ? "narrow" : "wide";
+        await page.setViewportSize({ width, height: narrow ? 844 : 900 });
+        if (await panel.isVisible()) {
+          if (narrow) await minimize.tap();
+          else await minimize.click();
+        }
+        await expect(summary).toHaveText(
+          working ? "Implementation in progress" : "Preparing implementation",
+        );
+        await expect(progress).toHaveText(
+          working
+            ? "The approved requirements are being implemented. Checks and independent review follow submission. No action needed."
+            : "Factory is preparing the implementation. Approved requirements and existing code are retained. No action needed.",
+        );
+        await expect(
+          ticketDocument.getByText("Implementation is stopped.", { exact: false }),
+        ).toHaveCount(0);
+        if ((await checks.getAttribute("open")) === null) {
+          if (narrow) await summary.tap();
+          else {
+            await summary.focus();
+            await page.keyboard.press("Enter");
+          }
+        }
+        await expect(
+          checks.getByText(
+            working
+              ? "The coding agent is implementing the approved requirements. Checks and independent review follow source submission."
+              : "Work starts automatically when preparation finishes. Your requirements and existing code are retained.",
+          ),
+        ).toBeVisible();
+        if (narrow) await actions.tap();
+        else {
+          await actions.focus();
+          await page.keyboard.press("Enter");
+        }
+        await expect(
+          page.getByRole("menuitem", { name: "Stop implementation", exact: true }),
+        ).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(actions).toBeFocused();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          width,
+        );
+        await page.screenshot({ path: `${captures}/retained-${phase}-${layout}-ticket.png` });
+        if (narrow) await toggle.tap();
+        else {
+          await toggle.focus();
+          await page.keyboard.press("Enter");
+        }
+        await expect(panel.locator(".agent-state")).toHaveText(working ? "Working" : "Starting");
+        await expect(panel.locator(".runtime-presence")).toHaveText(
+          working ? "Implementation running" : "Workspace starting",
+        );
+        await expect(panel.getByText("Workspace stopped", { exact: true })).toHaveCount(0);
+        await expect(
+          panel.getByText("Stopped. Your next message resumes the session.", { exact: true }),
+        ).toHaveCount(0);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          width,
+        );
+        await page.screenshot({ path: `${captures}/retained-${phase}-${layout}-coding.png` });
+      }
+      if (!working) {
+        await page.reload();
+        await expect(page).toHaveURL(
+          new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`),
+        );
+        await expect(summary).toHaveText("Preparing implementation");
+        await expect(progress).toContainText("Factory is preparing the implementation.");
+      }
+    }
+    expect(executionWrites).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
 test.describe("check recovery", () => {
   test.use({ contextOptions: { reducedMotion: "reduce", hasTouch: true } });
   for (const recoveryMode of ["stop", "bootstrap"] as const) {
