@@ -1,0 +1,433 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createDatabase } from "../../packages/db/src/client";
+import { fixture } from "../fixtures/change-agent-turns";
+import { eventually } from "../fixtures/factory-process";
+import {
+  ownedPostgresServer,
+  ownedTestDatabase,
+  type PostgresIdentity,
+} from "../fixtures/postgres-server";
+
+const evidence = ".factory/test-results/coding-unbound-preparation-recovery";
+let databaseURL: string;
+let disposeDatabase: (() => Promise<void>) | undefined;
+let postgresOwner: string;
+
+beforeAll(async () => {
+  await mkdir(evidence, { recursive: true });
+  const supplied = process.env["FACTORY_TEST_POSTGRES"];
+  if (supplied) {
+    const identity = JSON.parse(supplied) as PostgresIdentity;
+    const database = await ownedTestDatabase(identity, crypto.randomUUID());
+    databaseURL = database.url;
+    disposeDatabase = database.dispose;
+    postgresOwner = identity.owner;
+  } else {
+    const server = await ownedPostgresServer();
+    databaseURL = server.identity.url;
+    disposeDatabase = server.dispose;
+    postgresOwner = server.identity.owner;
+  }
+  await writeFile(
+    `${evidence}/postgres.json`,
+    JSON.stringify({ owner: postgresOwner, disposed: false }),
+  );
+}, 60_000);
+
+afterAll(async () => {
+  await disposeDatabase?.();
+  if (postgresOwner)
+    await writeFile(
+      `${evidence}/postgres.json`,
+      JSON.stringify({ owner: postgresOwner, disposed: true }),
+    );
+}, 60_000);
+
+type Owned = Awaited<ReturnType<typeof fixture>>;
+
+async function retainedSession(owned: Owned) {
+  const [session] = await owned.database.client<
+    {
+      state: string;
+      attemptID: string;
+      sessionID: string;
+      activeTurnID: string | null;
+      stopID: string | null;
+      stopTurnID: string | null;
+      stopPending: boolean;
+      stopDispatched: boolean;
+      confirmed: boolean;
+    }[]
+  >`SELECT state,runtime_attempt_id AS "attemptID",opencode_session_id AS "sessionID",
+    active_turn_id AS "activeTurnID",stop_id AS "stopID",stop_turn_id AS "stopTurnID",
+    stop_pending AS "stopPending",stop_dispatched AS "stopDispatched",
+    native_session_confirmed_at IS NOT NULL AS confirmed
+    FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
+  if (!session) throw new Error("Owned retained Session is missing");
+  return session;
+}
+
+async function pendingInput(owned: Owned, commandID: string) {
+  const [input] = await owned.database.client<
+    {
+      turnID: string;
+      state: string;
+      summary: string | null;
+      hasOwner: boolean;
+      live: boolean;
+      attemptID: string | null;
+      sessionID: string;
+      promptID: string;
+      text: string;
+      writerState: string;
+      writerTurnID: string | null;
+      writerEpoch: string;
+      fenceRequired: boolean;
+      currentAttemptID: string;
+      runtimeState: string;
+    }[]
+  >`SELECT turn.id AS "turnID",turn.state,turn.outcome_summary AS summary,
+    turn.owner_token IS NOT NULL AS "hasOwner",
+    COALESCE(turn.owner_expires_at>clock_timestamp(),false) AS live,
+    intent.runtime_attempt_id AS "attemptID",intent.session_id AS "sessionID",
+    intent.prompt_id AS "promptID",intent.prompt_text AS text,
+    writer.state AS "writerState",writer.turn_id AS "writerTurnID",
+    writer.epoch::text AS "writerEpoch",writer.fence_required AS "fenceRequired",
+    change.runtime_attempt_id AS "currentAttemptID",attempt.state AS "runtimeState"
+    FROM factory.agent_turn turn
+    JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
+    JOIN factory.change change ON change.id=turn.change_id
+    JOIN factory.change_writer writer ON writer.change_id=change.id
+    JOIN factory.runtime_attempt attempt ON attempt.id=change.runtime_attempt_id
+    WHERE turn.command_id=${commandID} AND change.id=${owned.changeID}`;
+  if (!input) throw new Error("Owned admitted input is missing");
+  return input;
+}
+
+async function heldPreparation() {
+  const previousURL = process.env["DATABASE_URL"];
+  let database: ReturnType<typeof createDatabase>;
+  try {
+    process.env["DATABASE_URL"] = databaseURL;
+    database = createDatabase(3);
+  } finally {
+    if (previousURL === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = previousURL;
+  }
+  const owned = await fixture(undefined, undefined, database);
+  const release = Promise.withResolvers<void>();
+  const mutations: string[] = [];
+  let detach: (() => void) | undefined;
+  try {
+    const request = owned.hub.request.bind(owned.hub);
+    let history: unknown[] | undefined;
+    let observedPrevious = false;
+    owned.hub.request = async (...args) => {
+      // Keep the production transport's before-send authority fence even though
+      // its external peer is fake. Never submit to a model or native runtime.
+      let sent = !args[4];
+      await args[4]?.(() => {
+        sent = true;
+      });
+      if (!sent) throw new Error("Owned external request was not admitted");
+      const input = args[2];
+      const path = new URL(input.url).pathname;
+      if (!["GET", "HEAD"].includes(input.method)) mutations.push(`${input.method} ${path}`);
+      if (path.endsWith("/active")) {
+        observedPrevious = true;
+        return Response.json({
+          data:
+            owned.requests() > owned.interrupts() ? { [owned.sessionID]: { type: "running" } } : {},
+        });
+      }
+      if (history && input.method === "GET" && path.endsWith("/message"))
+        return Response.json({ data: history });
+      return request(...args);
+    };
+
+    // Establish the prior stopped input through the actual controller, including
+    // native acceptance, ordered interrupt, queue cancellation and confirmation.
+    const previous = owned.controller();
+    const previousCommandID = crypto.randomUUID();
+    owned.acceptResponse();
+    owned.release();
+    await previous.prompt(
+      owned.changeID,
+      "Retained work belongs to the previous input",
+      owned.userID,
+      previousCommandID,
+    );
+    await eventually(
+      () => owned.turn(previousCommandID),
+      (turn) => turn?.state === "running",
+      "The previous owned input did not reach running",
+    );
+    await eventually(
+      async () => observedPrevious,
+      Boolean,
+      "The previous owned input did not enter monitoring",
+    );
+    expect(await previous.stop(owned.changeID)).toMatchObject({
+      state: "stopped",
+      stopPending: false,
+    });
+    await previous.shutdown();
+    const previousTurn = await owned.turn(previousCommandID);
+    if (!previousTurn) throw new Error("Owned prior Turn is missing");
+    const priorSession = await retainedSession(owned);
+    expect(priorSession).toMatchObject({
+      state: "stopped",
+      activeTurnID: previousTurn.id,
+      stopTurnID: previousTurn.id,
+      stopPending: false,
+      stopDispatched: false,
+      confirmed: true,
+    });
+    const [priorPrompt] = owned.payloads as { id: string; text: string }[];
+    if (!priorPrompt) throw new Error("Owned prior input was never accepted");
+    history = [
+      { id: priorPrompt.id, type: "user", time: { created: 1 }, text: priorPrompt.text },
+      {
+        id: `${priorPrompt.id}_retained`,
+        type: "assistant",
+        time: { created: 2, completed: 3 },
+        finish: "stop",
+        content: [{ type: "text", text: "Retained implementation from the stopped input." }],
+      },
+    ];
+    await owned.nextInput();
+    owned.acceptResponse();
+    owned.release();
+
+    await database.client`UPDATE factory.runtime_attempt SET state='starting'
+      WHERE id=${owned.attemptID}`;
+    let runtimeStarts = 0;
+    let preparing = false;
+    const controller = owned.controller(async () => {
+      runtimeStarts++;
+      preparing = true;
+      await release.promise;
+      return null;
+    });
+    const commandID = crypto.randomUUID();
+    await controller.start(owned.changeID, owned.userID, commandID);
+    await eventually(
+      async () => preparing,
+      Boolean,
+      "The new admitted input did not enter runtime preparation",
+    );
+    const admitted = await pendingInput(owned, commandID);
+    expect(admitted).toMatchObject({
+      state: "pending",
+      hasOwner: true,
+      live: true,
+      attemptID: null,
+      writerState: "agent",
+      writerTurnID: admitted.turnID,
+      fenceRequired: false,
+      currentAttemptID: owned.attemptID,
+      runtimeState: "starting",
+    });
+    expect(await retainedSession(owned)).toEqual(priorSession);
+    const priorRequests = owned.requests();
+    const priorMutations = mutations.length;
+    expect(priorRequests).toBe(1);
+    // Only the held execute is background work on this controller. Its public
+    // activity notification joins that invocation without closing/restarting it
+    // or exposing the private starters Set.
+    let preparationExited = false;
+    detach = controller.subscribeActivity(owned.changeID, () => {
+      preparationExited = true;
+    });
+    return {
+      owned,
+      controller,
+      commandID,
+      admitted,
+      priorSession,
+      priorRequests,
+      mutations,
+      priorMutations,
+      runtimeStarts: () => runtimeStarts,
+      async expire() {
+        // Model the observed control-plane interruption in this owned DB only.
+        // Production lease duration, renewal timer and authority checks stay real.
+        const expired = await database.client`UPDATE factory.agent_turn
+          SET owner_expires_at=clock_timestamp()-interval '1 millisecond'
+          WHERE id=${admitted.turnID} AND state='pending' AND owner_token IS NOT NULL
+          RETURNING id`;
+        expect(expired).toHaveLength(1);
+        expect(await pendingInput(owned, commandID)).toMatchObject({
+          state: "pending",
+          hasOwner: true,
+          live: false,
+          attemptID: null,
+        });
+      },
+      async ready() {
+        await database.client`UPDATE factory.runtime_attempt SET state='ready'
+          WHERE id=${owned.attemptID}`;
+        release.resolve();
+        await eventually(
+          async () => preparationExited,
+          Boolean,
+          "The expired preparation did not return after its same runtime became ready",
+        );
+        detach?.();
+        detach = undefined;
+      },
+      async dispose() {
+        detach?.();
+        release.resolve();
+        await owned.dispose();
+      },
+    };
+  } catch (cause) {
+    detach?.();
+    release.resolve();
+    await owned.dispose();
+    throw cause;
+  }
+}
+
+test("periodic dispatch recovers the exact unbound pending input after preparation loses its lease", async () => {
+  const held = await heldPreparation();
+  const { owned, controller, commandID, admitted } = held;
+  try {
+    await held.expire();
+    await held.ready();
+    const stranded = await pendingInput(owned, commandID);
+    expect(stranded).toMatchObject({
+      ...admitted,
+      live: false,
+      runtimeState: "ready",
+    });
+    expect(owned.requests()).toBe(held.priorRequests);
+    expect(held.mutations).toHaveLength(held.priorMutations);
+    await writeFile(`${evidence}/unbound-ready.json`, JSON.stringify(stranded, null, 2));
+
+    // This is the periodic entry point on the same live controller. In
+    // particular, do not call recover(), which would mask the missing selector.
+    await controller.dispatchReadyPending();
+    await eventually(
+      () => owned.turn(commandID),
+      (turn) => ["running", "failed", "stopped", "uncertain"].includes(turn?.state ?? ""),
+      "dispatchReadyPending stranded the expired unbound input despite its current runtime being ready",
+      2_000,
+    );
+    const recovered = await pendingInput(owned, commandID);
+    expect(recovered).toMatchObject({
+      ...admitted,
+      state: "running",
+      attemptID: owned.attemptID,
+      live: true,
+      runtimeState: "ready",
+    });
+    expect(owned.payloads.at(-1)).toMatchObject({
+      id: admitted.promptID,
+      text: admitted.text,
+    });
+    await controller.dispatchReadyPending();
+    await controller.dispatchRuntimePending(owned.attemptID);
+    expect(owned.requests()).toBe(held.priorRequests + 1);
+    expect(held.runtimeStarts()).toBe(1);
+    expect(
+      await owned.database.client`SELECT id,generation::int AS generation
+      FROM factory.runtime_attempt WHERE project_id=${owned.projectID}`,
+    ).toEqual([{ id: owned.attemptID, generation: 1 }]);
+    expect(await retainedSession(owned)).toMatchObject({
+      activeTurnID: admitted.turnID,
+      state: "working",
+      stopPending: false,
+    });
+    expect(owned.commitCalls).toEqual([]);
+  } finally {
+    await held.dispose();
+  }
+}, 30_000);
+
+test("Stop cancels unbound preparation without reopening the previous Session's confirmed Stop", async () => {
+  const held = await heldPreparation();
+  const { owned, controller, commandID, admitted } = held;
+  try {
+    await held.expire();
+    await controller.stop(owned.changeID);
+    expect(await owned.turn(commandID)).toMatchObject({
+      id: admitted.turnID,
+      state: "stopped",
+      summary: "Stopped by the user",
+    });
+    const stopped = await retainedSession(owned);
+    await writeFile(`${evidence}/unbound-stop.json`, JSON.stringify(stopped, null, 2));
+    // The old Session has no new native input to cancel. A locally canceled
+    // admission must not replace its proven Stop with an unconfirmable target.
+    expect(stopped).toEqual(held.priorSession);
+    expect(held.mutations).toHaveLength(held.priorMutations);
+    await held.ready();
+    await controller.dispatchReadyPending();
+    await controller.recover();
+    await controller.shutdown();
+    expect(await retainedSession(owned)).toEqual(held.priorSession);
+    expect(await pendingInput(owned, commandID)).toMatchObject({
+      state: "stopped",
+      attemptID: null,
+      hasOwner: false,
+    });
+    expect(owned.requests()).toBe(held.priorRequests);
+    expect(held.runtimeStarts()).toBe(1);
+    expect(owned.commitCalls).toEqual([]);
+  } finally {
+    await held.dispose();
+  }
+}, 30_000);
+
+test.each(["current writer changed", "latest Requirements changed"] as const)(
+  "unbound preparation recovery cannot dispatch after %s",
+  async (boundary) => {
+    const held = await heldPreparation();
+    const { owned, controller, commandID, admitted } = held;
+    try {
+      await held.expire();
+      if (boundary === "current writer changed") {
+        await owned.database.client`UPDATE factory.change_writer SET state='human',
+          user_id=${owned.userID},turn_id=NULL,epoch=epoch+1
+          WHERE change_id=${owned.changeID} AND turn_id=${admitted.turnID}`;
+      } else {
+        await owned.database.client.begin(async (sql) => {
+          const revisionID = crypto.randomUUID();
+          await sql`INSERT INTO factory.requirement_revision(
+            id,ticket_id,ordinal,canonical_content,content_digest,created_by)
+            SELECT ${revisionID},ticket_id,ordinal+1,canonical_content,content_digest,created_by
+            FROM factory.requirement_revision WHERE id=${owned.revisionID}`;
+          // Approval is immutable and unique per Ticket. A newer saved revision
+          // invalidates execution without fabricating a replacement approval.
+        });
+      }
+      await held.ready();
+      await controller.dispatchReadyPending();
+      // Also exercise the existing broader startup recovery so these negative
+      // controls reach execute's authority guards even before the selector fix.
+      await controller.recover();
+      await eventually(
+        () => owned.turn(commandID),
+        (turn) => turn?.state === "failed",
+        "Recovery did not reject the revoked unbound input",
+      );
+      await controller.shutdown();
+      expect(await pendingInput(owned, commandID)).toMatchObject({
+        state: "failed",
+        attemptID: null,
+        hasOwner: false,
+      });
+      expect(await retainedSession(owned)).toEqual(held.priorSession);
+      expect(held.mutations).toHaveLength(held.priorMutations);
+      expect(owned.requests()).toBe(held.priorRequests);
+      expect(held.runtimeStarts()).toBe(1);
+      expect(owned.commitCalls).toEqual([]);
+    } finally {
+      await held.dispose();
+    }
+  },
+  30_000,
+);
