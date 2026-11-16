@@ -117,7 +117,12 @@ export function createChangeAgentStop(
   observeRuntime?: (attemptID: string) => Promise<RuntimeAttemptView | null>,
 ) {
   const usage = createRecordedOpenCodeUsage(database);
-  async function settleTarget(changeID: string, target: StopTarget, origin?: StopOrigin) {
+  async function settleTarget(
+    changeID: string,
+    target: StopTarget,
+    origin?: StopOrigin,
+    sql: Database["client"] | AgentTurnTransaction = database.client,
+  ) {
     if (!target.turnID) return;
     const summary =
       origin === "user"
@@ -127,7 +132,7 @@ export function createChangeAgentStop(
           : "Execution stopped";
     // Never hold Change while waiting on Turn: execution locks Turn first.
     // A delayed caller can affect only the Turn captured when its Stop began.
-    await database.client`UPDATE factory.agent_turn SET state = 'stopped',
+    await sql`UPDATE factory.agent_turn SET state = 'stopped',
       owner_token = NULL, owner_expires_at = NULL,
       outcome_summary = ${summary}, updated_at = now()
       WHERE id = ${target.turnID} AND change_id = ${changeID}
@@ -157,10 +162,58 @@ export function createChangeAgentStop(
           // A pending admission may not yet have prepared the Session. With no
           // active turn, retain this exact Session's last assigned input: a failed
           // outcome does not prove that its native Inbox entry was removed.
-          const turns = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
-          WHERE change_id = ${changeID} AND state IN ('pending', 'dispatching', 'running', 'uncertain')
-            AND id IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid
-          ORDER BY created_at DESC LIMIT 1`;
+          const turns = await sql<Array<{ id: string; unbound: boolean }>>`
+          SELECT turn.id,turn.state='pending' AND EXISTS(
+            SELECT 1 FROM factory.change_agent_turn_intent intent
+            WHERE intent.turn_id=turn.id AND intent.change_id=turn.change_id
+              AND intent.runtime_attempt_id IS NULL) AS unbound
+          FROM factory.agent_turn turn
+          WHERE turn.change_id = ${changeID} AND turn.state IN ('pending', 'dispatching', 'running', 'uncertain')
+            AND turn.id IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid
+          ORDER BY turn.created_at DESC LIMIT 1`;
+          const pending = turns[0];
+          if (!handoff && pending?.unbound) {
+            const [settled] = await sql`SELECT session.change_id
+              FROM factory.change_agent_session session
+              WHERE session.change_id=${changeID} AND session.state='stopped' AND NOT session.stop_pending
+                AND session.active_turn_id IS DISTINCT FROM ${pending.id}::uuid
+                AND NOT EXISTS(SELECT 1 FROM factory.agent_turn other
+                  WHERE other.change_id=session.change_id AND other.id<>${pending.id}
+                    AND other.state IN ('pending','dispatching','running','uncertain'))`;
+            if (settled) {
+              // Never wait on Turn while holding Change. If execute already
+              // owns it, publish the normal Stop barrier below. Otherwise this
+              // lock makes cancellation atomic with runtime binding/dispatch.
+              const [unbound] = await sql`SELECT turn.id FROM factory.agent_turn turn
+                WHERE turn.id=${pending.id} AND turn.change_id=${changeID} AND turn.state='pending'
+                  AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
+                    WHERE intent.turn_id=turn.id AND intent.change_id=turn.change_id
+                      AND intent.runtime_attempt_id IS NULL)
+                FOR UPDATE OF turn SKIP LOCKED`;
+              if (unbound) {
+                // Binding can commit after the locking statement took its
+                // snapshot without updating Turn itself. Recheck both records
+                // in a fresh statement, now that the Turn lock excludes it.
+                const [cancellable] = await sql`SELECT session.change_id
+                  FROM factory.change_agent_session session
+                  JOIN factory.change_agent_turn_intent intent ON intent.turn_id=${pending.id}
+                    AND intent.change_id=session.change_id
+                  JOIN factory.agent_turn turn ON turn.id=intent.turn_id AND turn.state='pending'
+                  WHERE session.change_id=${changeID} AND session.state='stopped'
+                    AND NOT session.stop_pending AND intent.runtime_attempt_id IS NULL
+                    AND session.active_turn_id IS DISTINCT FROM turn.id
+                    AND NOT EXISTS(SELECT 1 FROM factory.agent_turn other
+                      WHERE other.change_id=session.change_id AND other.id<>turn.id
+                        AND other.state IN ('pending','dispatching','running','uncertain'))`;
+                if (cancellable) {
+                  await settleTarget(changeID, { stopID: null, turnID: pending.id }, origin, sql);
+                  // There is no new native input. Preserve the previous
+                  // Session's confirmed Stop instead of inventing a target.
+                  return { stopID: null, turnID: pending.id, pendingTurnID: null };
+                }
+              }
+            }
+          }
           const rows = await sql<
             StopTarget[]
           >`UPDATE factory.change_agent_session session SET state = 'stopped',

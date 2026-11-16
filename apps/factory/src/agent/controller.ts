@@ -1455,6 +1455,14 @@ export function createAgentController(
           attempt.state='ready'
           OR (intent.runtime_attempt_id IS NULL AND EXISTS(
             SELECT 1 FROM factory.change_writer writer
+            JOIN factory.change change ON change.id=writer.change_id
+            JOIN factory.runtime_attempt prepared ON prepared.id=change.runtime_attempt_id
+              AND prepared.change_id=change.id AND prepared.project_id=change.project_id
+            WHERE writer.change_id=turn.change_id AND writer.turn_id=turn.id
+              AND writer.state='agent' AND NOT writer.fence_required AND prepared.state='ready'
+          ))
+          OR (intent.runtime_attempt_id IS NULL AND EXISTS(
+            SELECT 1 FROM factory.change_writer writer
             JOIN factory.runtime_attempt previous ON previous.id=writer.fence_attempt_id
             WHERE writer.change_id=turn.change_id AND writer.turn_id=turn.id
               AND writer.state='agent-preparing' AND writer.fence_required

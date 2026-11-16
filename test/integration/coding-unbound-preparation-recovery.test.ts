@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
+import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
@@ -347,37 +348,143 @@ test("periodic dispatch recovers the exact unbound pending input after preparati
   }
 }, 30_000);
 
-test("Stop cancels unbound preparation without reopening the previous Session's confirmed Stop", async () => {
+test.each(["live", "expired"] as const)(
+  "Stop cancels %s unbound preparation without reopening the previous Session's confirmed Stop",
+  async (lease) => {
+    const held = await heldPreparation();
+    const { owned, controller, commandID, admitted } = held;
+    try {
+      if (lease === "expired") await held.expire();
+      await controller.stop(owned.changeID);
+      expect(await owned.turn(commandID)).toMatchObject({
+        id: admitted.turnID,
+        state: "stopped",
+        summary: "Stopped by the user",
+      });
+      const stopped = await retainedSession(owned);
+      await writeFile(`${evidence}/unbound-stop-${lease}.json`, JSON.stringify(stopped, null, 2));
+      // The old Session has no new native input to cancel. A locally canceled
+      // admission must not replace its proven Stop with an unconfirmable target.
+      expect(stopped).toEqual(held.priorSession);
+      expect(held.mutations).toHaveLength(held.priorMutations);
+      await held.ready();
+      await controller.dispatchReadyPending();
+      await controller.recover();
+      await controller.shutdown();
+      expect(await retainedSession(owned)).toEqual(held.priorSession);
+      expect(await pendingInput(owned, commandID)).toMatchObject({
+        state: "stopped",
+        attemptID: null,
+        hasOwner: false,
+      });
+      expect(owned.requests()).toBe(held.priorRequests);
+      expect(held.runtimeStarts()).toBe(1);
+      expect(owned.commitCalls).toEqual([]);
+    } finally {
+      await held.dispose();
+    }
+  },
+  30_000,
+);
+
+test("Stop publishes its normal barrier instead of waiting on a locked unbound Turn under Change", async () => {
   const held = await heldPreparation();
-  const { owned, controller, commandID, admitted } = held;
+  const { owned, controller, admitted } = held;
+  const locked = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let stopping: Promise<unknown> | undefined;
+  const transaction = owned.database.client.begin(async (sql) => {
+    await sql`SELECT id FROM factory.agent_turn WHERE id=${admitted.turnID} FOR UPDATE`;
+    locked.resolve();
+    await release.promise;
+  });
   try {
-    await held.expire();
-    await controller.stop(owned.changeID);
-    expect(await owned.turn(commandID)).toMatchObject({
-      id: admitted.turnID,
+    await locked.promise;
+    stopping = controller.stop(owned.changeID);
+    await eventually(
+      () => retainedSession(owned),
+      (session) => session.stopPending,
+      "Stop waited on Turn while holding Change instead of publishing its barrier",
+      2_000,
+    );
+    expect(await retainedSession(owned)).toMatchObject({
       state: "stopped",
-      summary: "Stopped by the user",
+      activeTurnID: held.priorSession.activeTurnID,
+      stopTurnID: admitted.turnID,
+      stopPending: true,
+      stopDispatched: false,
     });
-    const stopped = await retainedSession(owned);
-    await writeFile(`${evidence}/unbound-stop.json`, JSON.stringify(stopped, null, 2));
-    // The old Session has no new native input to cancel. A locally canceled
-    // admission must not replace its proven Stop with an unconfirmable target.
-    expect(stopped).toEqual(held.priorSession);
     expect(held.mutations).toHaveLength(held.priorMutations);
+    release.resolve();
+    await transaction;
+    await stopping;
     await held.ready();
-    await controller.dispatchReadyPending();
-    await controller.recover();
     await controller.shutdown();
-    expect(await retainedSession(owned)).toEqual(held.priorSession);
-    expect(await pendingInput(owned, commandID)).toMatchObject({
+    // Taking the nonblocking fallback is not proof of native cancellation.
+    // This fake peer has no ordered outcome for the unassigned new prompt.
+    expect(await retainedSession(owned)).toMatchObject({
       state: "stopped",
-      attemptID: null,
-      hasOwner: false,
+      stopPending: true,
     });
     expect(owned.requests()).toBe(held.priorRequests);
-    expect(held.runtimeStarts()).toBe(1);
     expect(owned.commitCalls).toEqual([]);
   } finally {
+    release.resolve();
+    await transaction;
+    await stopping;
+    await held.dispose();
+  }
+}, 30_000);
+
+test("local cancellation rechecks the intent and Session in a fresh statement after locking Turn", async () => {
+  const held = await heldPreparation();
+  const { owned, controller, admitted } = held;
+  const original = owned.database.client;
+  const statements: string[] = [];
+  owned.database.client = new Proxy(original, {
+    get(target, property, receiver) {
+      if (property === "begin")
+        return (callback: (sql: AgentTurnTransaction) => unknown) =>
+          original.begin((sql) =>
+            Reflect.apply(callback, undefined, [
+              new Proxy(sql, {
+                apply(query, context, args) {
+                  statements.push((args[0] as TemplateStringsArray).join(""));
+                  return Reflect.apply(query, context, args);
+                },
+              }),
+            ]),
+          );
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  try {
+    await controller.stop(owned.changeID);
+    const locked = statements.findIndex((sql) => sql.includes("FOR UPDATE OF turn SKIP LOCKED"));
+    const canceled = statements.findIndex((sql) => sql.includes("UPDATE factory.agent_turn"));
+    const rechecked = statements.findIndex(
+      (sql, index) =>
+        index > locked &&
+        sql.includes("FROM factory.change_agent_session") &&
+        sql.includes("factory.change_agent_turn_intent") &&
+        sql.includes("intent.runtime_attempt_id IS NULL") &&
+        sql.includes("session.state='stopped'") &&
+        sql.includes("NOT session.stop_pending"),
+    );
+    // SKIP LOCKED alone does not refresh its statement snapshot if binding
+    // commits just before the tuple lock. This separate statement is required.
+    expect(locked).toBeGreaterThanOrEqual(0);
+    expect(rechecked).toBeGreaterThan(locked);
+    expect(canceled).toBeGreaterThan(rechecked);
+    expect(await retainedSession(owned)).toEqual(held.priorSession);
+    expect(await owned.turn(held.commandID)).toMatchObject({
+      id: admitted.turnID,
+      state: "stopped",
+    });
+    expect(held.mutations).toHaveLength(held.priorMutations);
+    await held.ready();
+  } finally {
+    owned.database.client = original;
     await held.dispose();
   }
 }, 30_000);
