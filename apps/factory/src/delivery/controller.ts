@@ -1525,6 +1525,16 @@ export function createDeliveryController(
           CASE WHEN verification.state IN ('pending','runner-starting')
             AND verification_runtime.state IN ('create-intended','starting')
             THEN left(nullif(verification_runtime.failure,''),1000) END AS "verificationPreparationFailure",
+          EXISTS(SELECT 1 FROM factory.runtime_compute_wait waiting
+            WHERE waiting.attempt_id=verification_runtime.id AND waiting.reason='compute-capacity'
+              AND verification_runtime.verification_id=verification.id
+              AND verification_runtime.state='starting' AND nullif(verification_runtime.failure,'') IS NULL
+              AND verification.state IN ('pending','runner-starting')
+              AND change.state='active' AND change.cancel_requested_at IS NULL
+              AND session.state='committed' AND NOT session.stop_pending
+              AND writer.state IN ('agent','unassigned')
+              AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id
+                AND state<>'cancelled' AND trashed_at IS NULL)) AS "verificationComputeWait",
           CASE WHEN failed_verification.id IS NOT NULL THEN 'execution-failed'
             WHEN verification.state='failed' THEN verification.diagnosis->>'kind' END AS "verificationFailureKind",
           CASE WHEN latest_turn.input->>'kind'='change-repair' THEN latest_turn.state::text END AS "correctionState",

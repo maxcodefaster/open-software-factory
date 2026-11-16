@@ -9,6 +9,7 @@ export type TicketCheckDetails = {
   verificationState?: string | undefined;
   verificationSummary?: string | undefined;
   verificationPreparationFailure?: string | undefined;
+  verificationComputeWait?: boolean | undefined;
   verificationFailureKind?: string | undefined;
   correctionState?: string | undefined;
   actionRunUrl?: string | undefined;
@@ -22,12 +23,28 @@ export type TicketCheckDetails = {
   cleanupError?: string | undefined;
 };
 
+export function checksWaitingForCapacity(details: TicketCheckDetails | undefined) {
+  return Boolean(
+    details?.verificationComputeWait &&
+      ["pending", "runner-starting"].includes(details.verificationState ?? "") &&
+      !details.verificationPreparationFailure &&
+      !details.checksStopId &&
+      !details.checksRetryAttemptId &&
+      !details.reviewState &&
+      !["pending", "dispatching", "running"].includes(details.correctionState ?? ""),
+  );
+}
+
+const checkCapacityMessage =
+  "Factory will start checks automatically when capacity is available. The submitted version is retained. Delivery stays blocked until checks and independent review pass.";
+
 export function TicketChecks(props: {
   details: TicketCheckDetails | undefined;
   building: boolean;
   preparing?: boolean | undefined;
   paused?: boolean | undefined;
   unsubmitted?: boolean | undefined;
+  inactive?: boolean | undefined;
   fallback?: string | undefined;
 }) {
   const unsubmitted = () =>
@@ -39,6 +56,12 @@ export function TicketChecks(props: {
     !unsubmitted() &&
     props.details?.verificationState === "succeeded" &&
     props.details?.reviewState === "passed";
+  const waitingForCapacity = () =>
+    !unsubmitted() &&
+    !props.building &&
+    !props.paused &&
+    !props.inactive &&
+    checksWaitingForCapacity(props.details);
   const label = () => {
     if (props.details?.checksStopId) return "Checks paused";
     if (props.paused) return "Coding paused";
@@ -70,7 +93,9 @@ export function TicketChecks(props: {
       case "pending":
         return props.details?.verificationPreparationFailure
           ? "Check preparation needs attention"
-          : "Preparing checks";
+          : waitingForCapacity()
+            ? "Waiting for check capacity"
+            : "Preparing checks";
       case "cancelled":
         return "Checks stopped";
       default:
@@ -116,7 +141,9 @@ export function TicketChecks(props: {
                           ? "Checks and independent review assessed the exact submitted version. Delivery is approved."
                           : passed()
                             ? "Checks and independent review assess the exact submitted version. Delivery still needs your approval."
-                            : "Checks and independent review assess the exact submitted version. Delivery stays blocked until both pass."}
+                            : waitingForCapacity()
+                              ? checkCapacityMessage
+                              : "Checks and independent review assess the exact submitted version. Delivery stays blocked until both pass."}
                 </p>
               </Show>
             }

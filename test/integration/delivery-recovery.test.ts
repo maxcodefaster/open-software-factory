@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { retryVerificationBootstrap } from "../../apps/factory/src/delivery/verification-retry";
@@ -258,6 +259,84 @@ test("failed Verification compute is visible while human editing fences reconcil
       verificationPreparationFailure: null,
     });
     expect((await changes.get(f.owned.changeID))?.verificationState).toBe("runner-starting");
+    const deliveryRead = async () => deliveryViewSchema.parse(await delivery.get(f.owned.changeID));
+    // A predecessor's wait never describes the current exact Verification Attempt.
+    await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
+      VALUES(${attemptID},'compute-capacity')`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
+      VALUES(${replacementID},'compute-capacity')`;
+    // Taking over editing makes an automatic check wait inactive.
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`UPDATE factory.change_writer SET state='agent',user_id=NULL,
+      turn_id=${f.owned.initial.id} WHERE change_id=${f.owned.changeID}`;
+    for (const state of ["pending", "runner-starting"] as const) {
+      await f.database
+        .client`UPDATE factory.verification SET state=${state}::factory.verification_state WHERE id=${verificationID}`;
+      expect(await deliveryRead()).toMatchObject({
+        verificationId: verificationID,
+        verificationState: state,
+        verificationComputeWait: true,
+        verificationPreparationFailure: undefined,
+        verificationFailureKind: undefined,
+        verificationSummary: undefined,
+        checksStopId: undefined,
+        checksRetryAttemptId: undefined,
+        approvedAt: undefined,
+      });
+    }
+    // Read projection only. Stop, cancellation and inactive work do not promise an automatic start.
+    const checksStopID = crypto.randomUUID();
+    await f.database
+      .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true,stop_id=${checksStopID}
+      WHERE change_id=${f.owned.changeID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database
+      .client`UPDATE factory.change_agent_session SET stop_pending=false WHERE change_id=${f.owned.changeID}`;
+    expect(await deliveryRead()).toMatchObject({
+      verificationComputeWait: false,
+      checksStopId: checksStopID,
+    });
+    await f.database.client`UPDATE factory.change_agent_session SET state='committed',stop_id=NULL
+      WHERE change_id=${f.owned.changeID}`;
+    await f.database
+      .client`UPDATE factory.change SET cancel_requested_at=now() WHERE id=${f.owned.changeID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database
+      .client`UPDATE factory.change SET cancel_requested_at=NULL,state='failed' WHERE id=${f.owned.changeID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`UPDATE factory.change SET state='active' WHERE id=${f.owned.changeID}`;
+    await f.database
+      .client`UPDATE factory.ticket SET trashed_at=now() WHERE id=${f.owned.ticketID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`UPDATE factory.ticket SET trashed_at=NULL WHERE id=${f.owned.ticketID}`;
+    await f.database.client`UPDATE factory.runtime_compute_wait SET reason='accounting-incomplete'
+      WHERE attempt_id=${replacementID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`UPDATE factory.runtime_compute_wait SET reason='compute-capacity'
+      WHERE attempt_id=${replacementID}`;
+    for (const state of ["running", "cancelled", "succeeded"] as const) {
+      await f.database
+        .client`UPDATE factory.verification SET state=${state}::factory.verification_state,
+        completed_at=CASE WHEN ${state !== "running"} THEN now() END WHERE id=${verificationID}`;
+      expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    }
+    await f.database
+      .client`UPDATE factory.verification SET state='runner-starting',completed_at=NULL WHERE id=${verificationID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(true);
+    for (const state of ["failed", "cleanup-failed", "stopped"] as const) {
+      await f.database.client`UPDATE factory.runtime_attempt
+        SET state=${state}::factory.runtime_attempt_state,failure='Check environment could not start'
+        WHERE id=${replacementID}`;
+      expect(await deliveryRead()).toMatchObject({
+        verificationState: "failed",
+        verificationComputeWait: false,
+        verificationFailureKind: "execution-failed",
+        verificationSummary: "Check environment could not start",
+      });
+    }
+    await f.database.client`UPDATE factory.runtime_attempt SET state='starting',failure=NULL
+      WHERE id=${replacementID}`;
     const preparationIssue = "Native WorkerPool capacity refused preparation before dispatch";
     await f.database
       .client`UPDATE factory.runtime_attempt SET failure=${preparationIssue} WHERE id=${replacementID}`;
@@ -265,6 +344,7 @@ test("failed Verification compute is visible while human editing fences reconcil
       verificationState: "runner-starting",
       verificationFailureKind: null,
       verificationPreparationFailure: preparationIssue,
+      verificationComputeWait: false,
     });
     // Historical diagnostics must not override actual readiness or check outcomes.
     await f.database
@@ -272,6 +352,7 @@ test("failed Verification compute is visible while human editing fences reconcil
     expect(await delivery.get(f.owned.changeID)).toMatchObject({
       verificationState: "runner-starting",
       verificationPreparationFailure: null,
+      verificationComputeWait: false,
     });
     // A native check result remains authoritative even if cleanup later fails.
     await f.database
@@ -282,11 +363,15 @@ test("failed Verification compute is visible while human editing fences reconcil
       verificationState: "succeeded",
       verificationSummary: "Exact checks passed",
       verificationFailureKind: null,
+      verificationComputeWait: false,
     });
     expect((await changes.get(f.owned.changeID))?.verificationState).toBe("succeeded");
     expect((await changes.list(f.owned.projectID, f.owned.userID))[0]?.verificationState).toBe(
       "succeeded",
     );
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.owned.userID},turn_id=NULL
+      WHERE change_id=${f.owned.changeID}`;
     const [writer] = await f.database
       .client`SELECT state,user_id FROM factory.change_writer WHERE change_id=${f.owned.changeID}`;
     expect(writer).toEqual({ state: "human", user_id: f.owned.userID });

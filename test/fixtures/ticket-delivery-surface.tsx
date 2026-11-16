@@ -44,7 +44,12 @@ function Surface() {
                 title: "Export invoices as CSV",
                 description:
                   "Customers need a portable record of the invoices in a billing period.",
-                state: state.change.state === "delivered" ? "done" : "in-progress",
+                state:
+                  state.change.state === "delivered"
+                    ? "done"
+                    : state.change.state === "cancelled"
+                      ? "cancelled"
+                      : "in-progress",
                 version: 1,
               },
               revisions: [

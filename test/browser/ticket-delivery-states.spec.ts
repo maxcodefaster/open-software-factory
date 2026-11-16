@@ -17,6 +17,7 @@ const actions = [
   "Retry review",
   "Retry Main Preview",
   "Resume checks",
+  "Retry checks",
   "Create follow-up",
 ];
 let server: ViteDevServer;
@@ -87,6 +88,14 @@ for (const width of [1440, 390]) {
     }) => {
       await open(page, name, width);
       await expect(page.locator(".ticket-checks > summary")).toContainText(state.summary);
+      if (state.capacityWait) {
+        await expect(page.locator(".check-indicator")).toHaveCount(0);
+        await expect(page.locator(".ticket-checks > summary")).not.toContainText("passed");
+      } else {
+        await expect(page.locator(".ticket-checks > summary")).not.toContainText(
+          "Waiting for check capacity",
+        );
+      }
       for (const label of actions) {
         const button = page.getByRole("button", { name: label, exact: true });
         if (label === state.primary) await expect(button).toBeVisible();
@@ -106,6 +115,10 @@ for (const width of [1440, 390]) {
       await expect(page.locator(".ticket-check-details")).toBeVisible();
       if (state.detail)
         await expect(page.locator(".ticket-check-details")).toContainText(state.detail);
+      if (!state.capacityWait)
+        await expect(page.locator(".ticket-check-details")).not.toContainText(
+          "Factory will start checks automatically when capacity is available.",
+        );
       for (const finding of fixtureValue(state.delivery["reviewFindings"] ?? [], "findings") as {
         title: string;
       }[])
@@ -128,14 +141,43 @@ test("the primary Delivery action reports exactly one command", async ({ page })
   await open(page, "promotion-failed", 1440);
   await page.getByRole("button", { name: "Retry Main Preview", exact: true }).click();
   await expect(page.getByLabel("Fixture action")).toHaveText("retry-promotion");
+  for (const name of ["checks-paused", "checks-retryable"]) {
+    await open(page, name, 1440);
+    await page
+      .getByRole("button", { name: name === "checks-paused" ? "Resume checks" : "Retry checks" })
+      .click();
+    await expect(page.getByLabel("Fixture action")).toHaveText("resume-checks");
+  }
+});
+
+test("capacity wait details open and close with the keyboard without dispatching work", async ({
+  page,
+}) => {
+  await open(page, "check-capacity-starting", 390);
+  const summary = page.locator(".ticket-checks > summary");
+  await summary.focus();
+  await expect(summary).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".ticket-check-details")).toBeVisible();
+  await expect(summary).toBeFocused();
+  await page.screenshot({ path: `${directory}/check-capacity-keyboard-390.png` });
+  await page.keyboard.press("Space");
+  await expect(page.locator(".ticket-check-details")).not.toBeVisible();
+  await expect(page.getByLabel("Fixture action")).toBeEmpty();
 });
 
 test.describe("touch", () => {
   test.use({ hasTouch: true, isMobile: true });
-  for (const name of ["deliverable", "review-defects", "promotion-failed"]) {
+  for (const name of [
+    "deliverable",
+    "review-defects",
+    "promotion-failed",
+    "check-capacity-starting",
+  ]) {
     test(`${name} keeps Delivery controls at least 44px`, async ({ page }) => {
       await open(page, name, 390);
-      await page.locator(".ticket-checks > summary").click();
+      await page.locator(".ticket-checks > summary").tap();
+      await expect(page.locator(".ticket-check-details")).toBeVisible();
       const small = await page.evaluate(() => {
         const found: string[] = [];
         for (const element of document.querySelectorAll(
@@ -149,6 +191,12 @@ test.describe("touch", () => {
         return found;
       });
       expect(small).toEqual([]);
+      if (name === "check-capacity-starting") {
+        await page.screenshot({ path: `${directory}/check-capacity-touch-390.png` });
+        await page.locator(".ticket-checks > summary").tap();
+        await expect(page.locator(".ticket-check-details")).not.toBeVisible();
+        await expect(page.getByLabel("Fixture action")).toBeEmpty();
+      }
     });
   }
 });

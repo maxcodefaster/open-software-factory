@@ -22,6 +22,8 @@ export type DeliveryFixtureState = {
   };
   /** Sentence the Ticket progress line must contain. */
   progress?: string;
+  /** Capacity wait must stay informational and must not imply a check result. */
+  capacityWait?: boolean;
 };
 
 const passed = { verificationState: "succeeded", reviewState: "passed", reviewCurrent: true };
@@ -44,7 +46,11 @@ const finding = (
 export const deliveryStates: Record<string, DeliveryFixtureState> = {
   deliverable: {
     change: active,
-    delivery: { ...passed, verificationSummary: "Forgejo Actions passed ae257b465220." },
+    delivery: {
+      ...passed,
+      verificationComputeWait: true,
+      verificationSummary: "Forgejo Actions passed ae257b465220.",
+    },
     primary: "Deliver",
     summary: "Checks and independent review passed",
     detail: "Delivery still needs your approval.",
@@ -82,14 +88,64 @@ export const deliveryStates: Record<string, DeliveryFixtureState> = {
   },
   "checks-running": {
     change: active,
-    delivery: { verificationState: "running" },
+    delivery: { verificationState: "running", verificationComputeWait: true },
     primary: null,
     summary: "Checks running",
+  },
+  "check-capacity-pending": {
+    change: active,
+    delivery: { verificationState: "pending", verificationComputeWait: true },
+    primary: null,
+    summary: "Waiting for check capacity",
+    detail: "Factory will start checks automatically when capacity is available.",
+    progress: "Checks will start automatically when capacity is available. No action needed.",
+    capacityWait: true,
+  },
+  "check-capacity-starting": {
+    change: active,
+    delivery: { verificationState: "runner-starting", verificationComputeWait: true },
+    primary: null,
+    summary: "Waiting for check capacity",
+    detail: "The submitted version is retained.",
+    progress: "Checks will start automatically when capacity is available. No action needed.",
+    capacityWait: true,
+  },
+  "check-capacity-contributor": {
+    change: active,
+    delivery: { verificationState: "runner-starting", verificationComputeWait: true },
+    contributor: true,
+    primary: null,
+    summary: "Waiting for check capacity",
+    detail: "Delivery stays blocked until checks and independent review pass.",
+    progress: "Checks will start automatically when capacity is available. No action needed.",
+    capacityWait: true,
+  },
+  "checks-preparing-without-capacity-wait": {
+    change: active,
+    delivery: { verificationState: "pending" },
+    primary: null,
+    summary: "Preparing checks",
+  },
+  "check-capacity-inactive": {
+    change: { ...active, state: "cancelled" },
+    delivery: { verificationState: "pending", verificationComputeWait: true },
+    primary: null,
+    summary: "Preparing checks",
+    progress: "Work was cancelled.",
+  },
+  "check-capacity-unsubmitted": {
+    change: { ...active, implementationState: "waiting" },
+    delivery: { verificationState: "pending", verificationComputeWait: true },
+    primary: null,
+    summary: "Corrections not submitted",
+    detail: "Earlier checks do not verify the retained corrections.",
+    progress: "Implementation needs an answer.",
   },
   "checks-preparing": {
     change: active,
     delivery: {
       verificationState: "pending",
+      verificationComputeWait: true,
       verificationPreparationFailure: "The check environment image is still being prepared.",
     },
     primary: null,
@@ -99,6 +155,7 @@ export const deliveryStates: Record<string, DeliveryFixtureState> = {
     change: active,
     delivery: {
       verificationState: "failed",
+      verificationComputeWait: true,
       verificationSummary:
         "Forgejo Actions failed ae257b465220: 3 of 41 tests failed in apps/billing. See the Forgejo run for the retained log.",
       actionRunUrl: "https://forge.example/runs/7",
@@ -111,6 +168,7 @@ export const deliveryStates: Record<string, DeliveryFixtureState> = {
     change: active,
     delivery: {
       verificationState: "failed",
+      verificationComputeWait: true,
       verificationFailureKind: "execution-failed",
       verificationSummary: "The check environment stopped before the workflow finished.",
     },
@@ -120,7 +178,8 @@ export const deliveryStates: Record<string, DeliveryFixtureState> = {
   "checks-paused": {
     change: active,
     delivery: {
-      verificationState: "succeeded",
+      verificationState: "runner-starting",
+      verificationComputeWait: true,
       checksStopId: "10000000-0000-4000-8000-0000000000bb",
     },
     primary: "Resume checks",
@@ -128,9 +187,20 @@ export const deliveryStates: Record<string, DeliveryFixtureState> = {
   },
   "checks-stopped": {
     change: active,
-    delivery: { verificationState: "cancelled" },
+    delivery: { verificationState: "cancelled", verificationComputeWait: true },
     primary: null,
     summary: "Checks stopped",
+  },
+  "checks-retryable": {
+    change: active,
+    delivery: {
+      verificationState: "failed",
+      verificationComputeWait: true,
+      verificationFailureKind: "execution-failed",
+      checksRetryAttemptId: "10000000-0000-4000-8000-0000000000dd",
+    },
+    primary: "Retry checks",
+    summary: "Check environment failed",
   },
   "review-pending": {
     change: active,
