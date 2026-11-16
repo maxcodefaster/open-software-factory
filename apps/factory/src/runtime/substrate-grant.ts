@@ -46,6 +46,8 @@ export async function substrateBootstrapRetentionIn(
 // Cleanup authority for one already frozen Ticket handoff, never execution
 // authority for its current Change writer. The storage and Change epochs are
 // separate; a failed Retry cannot replace this original Source checkpoint.
+// Application readiness is not Source liveness: a failed first startup must
+// reconnect its exact Parent before the saved checkpoint can be confirmed.
 export async function substrateTicketSourcePauseIn(sql: AgentTurnTransaction, attemptID: string) {
   const [pause] = await sql<{ userID: string; projectID: string }[]>`
     SELECT original.created_by AS "userID",a.project_id AS "projectID"
@@ -80,7 +82,7 @@ export async function substrateTicketSourcePauseIn(sql: AgentTurnTransaction, at
     JOIN factory.substrate_actor_rpc resumed ON resumed.runtime_attempt_id=a.id AND resumed.action='resume'
       AND resumed.origin_key=pause.origin_key AND resumed.actor_uid=b.actor_uid
       AND resumed.attempted_at IS NOT NULL AND resumed.outcome->>'state'='ACTOR_STATE_RUNNING'
-    WHERE a.id=${attemptID} AND a.substrate AND a.state='pausing' AND a.ready_at IS NOT NULL
+    WHERE a.id=${attemptID} AND a.substrate AND a.state='pausing'
       AND a.stop_intended_at IS NULL AND b.observation#>>'{status,state}'='ACTOR_STATE_RUNNING'
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
         WHERE newer.workspace_id=w.id AND newer.generation>a.generation)

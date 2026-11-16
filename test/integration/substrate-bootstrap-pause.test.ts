@@ -39,7 +39,7 @@ async function handoffEvent<T>(promise: Promise<T>, name: string) {
   }
 }
 
-async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
+async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everReady = true) {
   const f = await substrateFixture("a".repeat(40), "ticket");
   f.config.deployment = "fresh-workspaces";
   let actor: NativeActor | null = null;
@@ -160,8 +160,12 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
     await f.database
       .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID} WHERE change_id=${f.changeID}`;
     await controller.startPersisted(f.changeID, f.userID);
-    await f.database
-      .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
+    if (everReady)
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
+    else
+      await f.database.client`UPDATE factory.runtime_attempt SET state='failed',
+        failure='Owned initial bootstrap did not finish' WHERE id=${f.attemptID}`;
     const store = createAgentTurnStore(f.database);
     const [approval] = await f.database.client<{ revision: string }[]>`
       SELECT requirement_revision_id AS revision FROM factory.requirement_approval WHERE ticket_id=${f.ticketID}`;
@@ -294,10 +298,15 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk") {
   }
 }
 
-test.each(["checkpoint", "chunk"] as const)(
-  "lost Ticket Source %s response continues the same frozen handoff on original Parent reconnect",
-  async (operation) => {
-    const t = await frozenTicketPause(operation);
+test.each([
+  ["checkpoint", true],
+  ["chunk", true],
+  ["checkpoint", false],
+  ["chunk", false],
+] as const)(
+  "lost Ticket Source %s response continues the same frozen handoff on original Parent reconnect, previously ready=%s",
+  async (operation, everReady) => {
+    const t = await frozenTicketPause(operation, everReady);
     try {
       const { f, controller, source } = t;
       expect(t.effects).toEqual(["CreateActor", "ResumeActor"]);
@@ -385,55 +394,64 @@ test.each(["checkpoint", "chunk"] as const)(
   60_000,
 );
 
-test("Ticket handoff reconnect rejects wrong identity, intent, epochs and revoked authority without new native effects", async () => {
-  const t = await frozenTicketPause("checkpoint");
-  try {
-    const { f, controller } = t;
-    expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
-    const wrongIdentity: Array<Record<string, string>> = [
-      { "x-factory-runtime-actor-uid": crypto.randomUUID() },
-      { "x-factory-runtime-generation": "2" },
-      { "x-factory-runtime-attempt": crypto.randomUUID() },
-    ];
-    for (const override of wrongIdentity)
-      expect(await controller.authorizeConnector(t.request("parent", override))).toBe(false);
-    const frozen = await t.source.lease(f.workspaceID);
-    const changeCheckpoint = async () =>
-      await f.database.client`
+test.each([true, false])(
+  "Ticket handoff reconnect rejects wrong identity, intent, epochs and revoked authority without new native effects, previously ready=%s",
+  async (everReady) => {
+    const t = await frozenTicketPause("checkpoint", everReady);
+    try {
+      const { f, controller } = t;
+      expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
+      const wrongIdentity: Array<Record<string, string>> = [
+        { "x-factory-runtime-actor-uid": crypto.randomUUID() },
+        { "x-factory-runtime-generation": "2" },
+        { "x-factory-runtime-attempt": crypto.randomUUID() },
+      ];
+      for (const override of wrongIdentity)
+        expect(await controller.authorizeConnector(t.request("parent", override))).toBe(false);
+      const frozen = await t.source.lease(f.workspaceID);
+      const changeCheckpoint = async () =>
+        await f.database.client`
       UPDATE factory.substrate_source SET checkpoint_id=${crypto.randomUUID()} WHERE workspace_id=${f.workspaceID}`;
-    const changeEpoch = async () =>
-      await f.database.client`
+      const changeEpoch = async () =>
+        await f.database.client`
       UPDATE factory.substrate_source SET writer_epoch=3 WHERE workspace_id=${f.workspaceID}`;
-    await expect(changeCheckpoint()).rejects.toThrow("Source lease facts");
-    await expect(changeEpoch()).rejects.toThrow("Source lease facts");
-    expect(await t.source.lease(f.workspaceID)).toEqual(frozen);
-    const changeOrigin = async () =>
-      await f.database.client`
+      await expect(changeCheckpoint()).rejects.toThrow("Source lease facts");
+      await expect(changeEpoch()).rejects.toThrow("Source lease facts");
+      expect(await t.source.lease(f.workspaceID)).toEqual(frozen);
+      const changeOrigin = async () =>
+        await f.database.client`
       UPDATE factory.substrate_actor_rpc SET native_version='99'
       WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`;
-    await expect(changeOrigin()).rejects.toThrow("immutable");
-    const version = f.template.metadata.version;
-    f.template.metadata.version = "99";
-    expect(await controller.authorizeConnector(t.request("parent"))).toBe(false);
-    f.template.metadata.version = version;
-    const changed = await t.retainedExecution(async () => {
-      throw Error("Changed intent must not reach native API");
-    }, true);
-    expect(await changed.authorizeConnector(t.request("parent"))).toBe(false);
-    expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
-    await f.database.client`DELETE FROM factory.project_membership
+      await expect(changeOrigin()).rejects.toThrow("immutable");
+      const version = f.template.metadata.version;
+      f.template.metadata.version = "99";
+      expect(await controller.authorizeConnector(t.request("parent"))).toBe(false);
+      f.template.metadata.version = version;
+      const changed = await t.retainedExecution(async () => {
+        throw Error("Changed intent must not reach native API");
+      }, true);
+      expect(await changed.authorizeConnector(t.request("parent"))).toBe(false);
+      expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
+      await f.database.client`DELETE FROM factory.project_membership
       WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
-    expect(await controller.authorizeConnector(t.request("parent"))).toBe(false);
-    expect(t.effects).toEqual(["CreateActor", "ResumeActor"]);
-  } finally {
-    await t.dispose();
-  }
-}, 60_000);
+      expect(await controller.authorizeConnector(t.request("parent"))).toBe(false);
+      expect(t.effects).toEqual(["CreateActor", "ResumeActor"]);
+    } finally {
+      await t.dispose();
+    }
+  },
+  60_000,
+);
 
-test.each(["active-turn", "suspend-dispatched"] as const)(
-  "Ticket frozen handoff does not admit a Parent or continue when %s",
-  async (scenario) => {
-    const t = await frozenTicketPause("checkpoint");
+test.each([
+  ["active-turn", true],
+  ["suspend-dispatched", true],
+  ["active-turn", false],
+  ["suspend-dispatched", false],
+] as const)(
+  "Ticket frozen handoff does not admit a Parent or continue when %s, previously ready=%s",
+  async (scenario, everReady) => {
+    const t = await frozenTicketPause("checkpoint", everReady);
     try {
       const { f, controller } = t;
       expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
