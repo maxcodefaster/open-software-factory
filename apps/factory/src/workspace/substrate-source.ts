@@ -617,10 +617,23 @@ export function createSubstrateSources(
       epoch: string,
       writable: boolean,
       sql: SQL,
+      requireLiveRole = false,
     ) {
       const row = await lease(workspaceID, sql);
       // Initial bootstrap reads the saved Change role before exposing Source.
-      if (!row) return;
+      if (!row) {
+        if (requireLiveRole)
+          throw new CommandError("unavailable", "Current Source role is unavailable");
+        return;
+      }
+      if (
+        requireLiveRole &&
+        (row.owner !== "actor" ||
+          !row.writable ||
+          !hub.ready(attemptID) ||
+          !hub.sourceConnected(attemptID))
+      )
+        throw new CommandError("unavailable", "Current Source role cannot be confirmed");
       if (!row.writable) {
         if (!writable && row.checkpoint?.id === row.checkpointID) return;
         throw new CommandError(

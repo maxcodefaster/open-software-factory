@@ -11,6 +11,7 @@ import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
 import { boundedSourceBody } from "./source-body";
+import { initialSourceRoleIn, type SourceRoleFence } from "./source-role-fence";
 import type { createSubstrateSources } from "./substrate-source";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -28,7 +29,7 @@ export interface SourceWorkspaceView {
 // Workspaces, start compute or prepare a second Kubernetes execution path.
 export function createWorkspaceSourceController(
   database: Database,
-  hub: Pick<RuntimeHub, "sourceConnected">,
+  hub: Pick<RuntimeHub, "sourceConnected" | "parentConnected">,
   sources: ReturnType<typeof createSubstrateSources>,
 ) {
   const streams = new Map<
@@ -142,11 +143,20 @@ export function createWorkspaceSourceController(
       });
       return ensure(workspaceID, userID);
     },
-    async fenceChange(changeID: string, epoch: string, writable: boolean) {
-      const [workspace] = await database.client<{ id: string }[]>`
-        SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND substrate`;
-      if (!workspace) return;
-      await database.client.begin(async (sql) => {
+    async fenceChange(
+      changeID: string,
+      epoch: string,
+      writable: boolean,
+      commission?: SourceRoleFence,
+    ) {
+      const fence = async (sql: AgentTurnTransaction) => {
+        const [workspace] = await sql<{ id: string }[]>`
+          SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND substrate`;
+        if (!workspace) {
+          if (commission?.mode === "dispatch")
+            throw new CommandError("unavailable", "Current Source Workspace is unavailable");
+          return;
+        }
         // Handoff can hold Change elsewhere. Do not wait behind a save that is
         // itself waiting for that Change row.
         const [lock] = await sql<{ acquired: boolean }[]>`
@@ -157,9 +167,51 @@ export function createWorkspaceSourceController(
             "Source owner is busy; writing fence is unconfirmed",
           );
         const current = await nativeRow(workspace.id, sql);
+        if (commission?.mode === "dispatch") {
+          const [binding] = await sql`SELECT a.id FROM factory.runtime_attempt a
+            JOIN factory.change change ON change.id=a.change_id AND change.runtime_attempt_id=a.id
+              AND change.project_id=a.project_id
+            JOIN factory.change_writer writer ON writer.change_id=change.id AND writer.state='agent'
+              AND writer.turn_id=${commission.turnID} AND writer.epoch=${epoch}::bigint
+            JOIN factory.agent_turn turn ON turn.id=writer.turn_id AND turn.state='pending'
+              AND turn.change_id=change.id AND turn.project_id=a.project_id
+              AND turn.owner_token=${commission.ownerToken} AND turn.owner_expires_at>clock_timestamp()
+            JOIN factory.change_agent_turn_intent input ON input.turn_id=writer.turn_id
+              AND input.change_id=change.id
+              AND input.runtime_attempt_id=a.id AND input.session_id=${commission.sessionID}
+            JOIN factory.change_agent_session session ON session.change_id=change.id
+              AND session.runtime_attempt_id=a.id AND session.opencode_session_id=input.session_id
+              AND session.active_turn_id=input.turn_id AND session.state='starting' AND NOT session.stop_pending
+            JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=a.id
+              AND binding.actor_uid IS NOT NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+            JOIN factory.substrate_source source ON source.workspace_id=a.workspace_id
+              AND source.actor_uid=binding.actor_uid AND source.owner='actor' AND source.writable
+            WHERE a.id=${commission.attemptID} AND a.workspace_id=${workspace.id}
+              AND a.state='ready' AND a.stop_intended_at IS NULL AND a.substrate
+              AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+                WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
+          if (writable || !binding || current?.attemptID !== commission.attemptID || !current.ready)
+            throw new CommandError("conflict", "Current Source dispatch identity changed");
+          await sources.fence(workspace.id, commission.attemptID, epoch, false, sql, true);
+          return;
+        }
+        if (
+          commission?.mode === "initial-bootstrap" &&
+          !writable &&
+          current?.attemptID &&
+          !hub.parentConnected(current.attemptID) &&
+          !hub.sourceConnected(current.attemptID) &&
+          (await initialSourceRoleIn(sql, workspace.id, current.attemptID, epoch, commission))
+        )
+          // There was no admitted human Source writer or dispatched input.
+          // Authenticated cold restore initializes the read-only API role.
+          // This is not a real fence ACK: dispatch must confirm it separately.
+          return;
         if (current?.attemptID)
           await sources.fence(workspace.id, current.attemptID, epoch, writable, sql);
-      });
+      };
+      if (commission) await fence(commission.sql);
+      else await database.client.begin(fence);
     },
     async forward(
       workspaceID: string,

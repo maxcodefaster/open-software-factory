@@ -122,7 +122,7 @@ export function createAgentController(
   hub: RuntimeHub,
   runtime: RuntimeController,
   browser?: ReturnType<typeof createBuildBrowserController>,
-  writers?: Pick<ReturnType<typeof createChangeWriterController>, "prepareAgent">,
+  writers?: Pick<ReturnType<typeof createChangeWriterController>, "prepareAgent" | "confirmSource">,
   settleRetainedStop?: (target: RetainedStopTarget, signal: AbortSignal) => Promise<boolean>,
 ) {
   const monitors = new Set<string>();
@@ -346,7 +346,7 @@ export function createAgentController(
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
-      if (!(await writers.prepareAgent(changeID, turnID))) {
+      if (!(await writers.prepareAgent(changeID, turnID, ownerToken))) {
         await turns.releasePending(turnID, ownerToken);
         return;
       }
@@ -441,6 +441,10 @@ export function createAgentController(
         }
         if (!ready) throw new Error("Native skills do not match the exact admitted packages");
       }
+      // Initial role initialization may have preceded the first Source Parent.
+      // A real current-epoch read-only fence is mandatory here, including when
+      // the runtime was already ready or a previous restore used an old epoch.
+      await writers.confirmSource(changeID, turnID, ownerToken, attemptID, intent.sessionID);
       if (!(await turns.beginDispatch(turnID, ownerToken))) {
         if (
           (

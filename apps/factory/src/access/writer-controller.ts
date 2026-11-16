@@ -1,8 +1,10 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { forgeUsername } from "../../../../packages/forge/src/access";
 import type { PendingWriterHandoff } from "../agent/stop";
+import { type AgentTurnTransaction, createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { RuntimeAttemptView } from "../runtime/types";
+import type { SourceRoleFence } from "../workspace/source-role-fence";
 import { lockChangeWriterIn } from "./change-writer";
 import { projectDevelopmentAuthorityIn } from "./controller";
 import { type WriterActivity, writerActivity } from "./writer-activity";
@@ -39,12 +41,18 @@ export function createChangeWriterController(options: {
   runtime: RuntimeBoundary;
   stopAgent(changeID: string): Promise<unknown>;
   protect(changeID: string, writers: readonly string[]): Promise<void>;
-  fenceSource?(changeID: string, epoch: string, writable: boolean): Promise<void>;
+  fenceSource?(
+    changeID: string,
+    epoch: string,
+    writable: boolean,
+    commission?: SourceRoleFence,
+  ): Promise<void>;
   agentUsername: string;
   stopDeadlineMs?: number;
   activity?: WriterActivity;
 }) {
   const { database } = options;
+  const turns = createAgentTurnStore(database);
   const activity = options.activity ?? writerActivity;
   async function exclusive<T>(changeID: string, work: () => Promise<T>): Promise<T> {
     const connection = database.coordination();
@@ -351,7 +359,7 @@ export function createChangeWriterController(options: {
       if (release) return this.release(changeID, userID, release.commandID, release.epoch);
       return readView(changeID, userID);
     },
-    async prepareAgent(changeID: string, turnID: string) {
+    async prepareAgent(changeID: string, turnID: string, ownerToken?: string) {
       return exclusive(changeID, async () => {
         const writer = await database.client.begin((sql) => lockChangeWriterIn(sql, changeID));
         if (writer.turnID !== turnID || !["agent-preparing", "agent"].includes(writer.state))
@@ -359,7 +367,7 @@ export function createChangeWriterController(options: {
         if (writer.state === "agent") return true;
         // An old interactive shell can retain child jobs, Docker execs and services.
         // Confirm full compute teardown rather than pretending shell-PID kill fences it.
-        await database.client.begin(async (sql) => {
+        const prepare = async (sql: AgentTurnTransaction) => {
           const current = await lockChangeWriterIn(sql, changeID);
           if (
             current.state !== "agent-preparing" ||
@@ -367,9 +375,21 @@ export function createChangeWriterController(options: {
             current.turnID !== turnID
           )
             throw new CommandError("conflict", "Agent writer changed before fencing");
-          await options.fenceSource?.(changeID, current.epoch, false);
+          await options.fenceSource?.(
+            changeID,
+            current.epoch,
+            false,
+            ownerToken && !current.fenceRequired
+              ? { mode: "initial-bootstrap", sql, turnID, ownerToken }
+              : undefined,
+          );
           await options.protect(changeID, []);
-        });
+        };
+        if (ownerToken && !writer.fenceRequired) {
+          // Take the operation lock before Turn/Change validation, then share
+          // its SQL with Source. A nested Change lock would deadlock startup.
+          if (!(await turns.validateExecution(turnID, ownerToken, prepare))) return false;
+        } else await database.client.begin(prepare);
         if (
           writer.fenceRequired &&
           !(await stopped(writer.fenceAttemptID, { turnID, epoch: writer.epoch }))
@@ -392,6 +412,39 @@ export function createChangeWriterController(options: {
         });
         return true;
       });
+    },
+    async confirmSource(
+      changeID: string,
+      turnID: string,
+      ownerToken: string,
+      attemptID: string,
+      sessionID: string,
+    ) {
+      const fenceSource = options.fenceSource;
+      if (!fenceSource)
+        throw new CommandError("unavailable", "Source role confirmation is not configured");
+      const confirmed = await turns.validateExecution(turnID, ownerToken, async (sql) => {
+        const writer = await lockChangeWriterIn(sql, changeID);
+        if (!writer.available || writer.state !== "agent" || writer.turnID !== turnID)
+          throw new CommandError(
+            "conflict",
+            "Agent writing authority changed before Source confirmation",
+          );
+        await fenceSource(changeID, writer.epoch, false, {
+          mode: "dispatch",
+          sql,
+          turnID,
+          ownerToken,
+          attemptID,
+          sessionID,
+        });
+        // The real RPC can outlast the lease. Its read-only role change grants
+        // no prompt authority; reject expiry before reporting confirmation.
+        if (!(await turns.validateExecutionIn(sql, turnID, ownerToken)))
+          throw new CommandError("conflict", "Build authority changed during Source confirmation");
+      });
+      if (!confirmed)
+        throw new CommandError("conflict", "Build authority changed before Source confirmation");
     },
     async takeOver(
       changeID: string,

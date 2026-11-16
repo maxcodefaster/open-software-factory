@@ -40,6 +40,8 @@ test.each(["continue", "stop"] as const)(
         get: async () => ({ state: stopped ? "stopped" : "stopping" }),
       },
       stopAgent: async () => {},
+      // Controlled Source peer for this writer/dispatch composition fixture.
+      fenceSource: async () => {},
       protect: async (_changeID, writers) => {
         grants.push([...writers]);
       },

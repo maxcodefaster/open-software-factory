@@ -381,6 +381,9 @@ export async function fixture(
     return { commitSHA: "d".repeat(40), remoteSHA: "d".repeat(40) };
   };
   const controllers = new Set<ReturnType<typeof createAgentController>>();
+  // This controller fixture substitutes its external Source peer just as it
+  // substitutes OpenCode. It is not a native Source fencing qualification.
+  const fenceSource = async () => {};
   async function shutdown() {
     release.resolve();
     const joined = await Promise.allSettled(
@@ -396,6 +399,7 @@ export async function fixture(
       runtime: { stop: async () => {}, get: async () => ({ state: "stopped" }) },
       stopAgent: async () => {},
       protect: async () => {},
+      fenceSource,
     });
     const active = createAgentController(database, hub, { startPersisted }, undefined, writers);
     controllers.add(active);
@@ -441,6 +445,7 @@ export async function fixture(
       runtime: { stop: async () => {}, get: async () => ({ state: "stopped" }) },
       stopAgent: async () => {},
       protect: async () => {},
+      fenceSource,
     }),
     acceptResponse: () => {
       loseResponse = false;

@@ -263,7 +263,13 @@ test.each([
       scope.source.release();
       await scope.owned.requested;
       expect((await scope.turns.get(turn.id))?.state).toBe("dispatching");
-      expect(scope.events.slice(-4)).toEqual(
+      // Session activation may legitimately probe the model again. Those
+      // read-only probes do not replace the first readiness barrier or alter
+      // the required confirmation -> dispatch -> native mutation order.
+      const dispatchEvents = scope.events.filter(
+        (event) => !["model-ready", "skills-ready"].includes(event),
+      );
+      expect(dispatchEvents.slice(-4)).toEqual(
         bootstrap
           ? ["source-confirmed", "begin-dispatch", "session-create", "prompt"]
           : ["confirm-source", "source-confirmed", "begin-dispatch", "prompt"],
