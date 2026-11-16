@@ -568,12 +568,13 @@ test.each(["explicit", "automatic", "recovered"] as const)(
       await controller.start(owned.changeID, owned.userID, commandID);
       await entered.promise;
       const before = await ownership(owned, commandID);
+      if (!before) throw new Error("Owned running turn is unavailable");
       const stop = createChangeAgentStop(owned.database, owned.hub);
       if (origin === "recovered") {
         // Persist exactly the pre-settlement Stop barrier. Its caller/origin
         // was not retained across the crash, so recovery cannot invent one.
         await owned.database.client`UPDATE factory.change_agent_session
-          SET state='stopped',stop_id=${crypto.randomUUID()},stop_turn_id=${before?.id},
+          SET state='stopped',stop_id=${crypto.randomUUID()},stop_turn_id=${before.id},
             stop_pending=true,active_inbox_id=NULL WHERE change_id=${owned.changeID}`;
         expect((await ownership(owned, commandID))?.state).toBe("running");
       } else

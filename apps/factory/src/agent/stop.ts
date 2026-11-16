@@ -16,6 +16,9 @@ import type { AgentTurnTransaction } from "./turn-store";
 type Database = ReturnType<typeof createDatabase>;
 type StopTarget = { stopID: string | null; turnID: string | null };
 type StopOrigin = "user" | "authority-loss";
+// Caller attribution is available only while its exact publication is in flight.
+// A process restart loses this context; recovery must then remain neutral.
+const publishingOrigins = new Map<string, { changeID: string; origin: StopOrigin }>();
 export type PendingWriterHandoff = { turnID: string; epoch: string };
 export type RetainedStopTarget = {
   changeID: string;
@@ -133,32 +136,35 @@ export function createChangeAgentStop(
 
   return {
     async persist(changeID: string, handoff?: PendingWriterHandoff, origin: StopOrigin = "user") {
-      // Admission locks Change/Ticket before reading the barrier. Publish it
-      // without waiting for any Turn lock: execution locks Turn before Change.
-      const target = await database.client.begin(async (sql) => {
-        const [change] = await sql<{ attemptID: string | null }[]>`
+      const stopID = crypto.randomUUID();
+      publishingOrigins.set(stopID, { changeID, origin });
+      try {
+        // Admission locks Change/Ticket before reading the barrier. Publish it
+        // without waiting for any Turn lock: execution locks Turn before Change.
+        const target = await database.client.begin(async (sql) => {
+          const [change] = await sql<{ attemptID: string | null }[]>`
           SELECT change.runtime_attempt_id AS "attemptID" FROM factory.change change
           JOIN factory.ticket ticket ON ticket.id = change.ticket_id
           WHERE change.id = ${changeID} FOR UPDATE OF change, ticket`;
-        if (handoff) {
-          if (!change?.attemptID)
-            throw new CommandError(
-              "conflict",
-              "Pending writer handoff no longer owns cleanup of the original Workspace.",
-            );
-          await requirePendingWriterHandoffIn(sql, change.attemptID, handoff);
-        }
-        // A pending admission may not yet have prepared the Session. With no
-        // active turn, retain this exact Session's last assigned input: a failed
-        // outcome does not prove that its native Inbox entry was removed.
-        const turns = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
+          if (handoff) {
+            if (!change?.attemptID)
+              throw new CommandError(
+                "conflict",
+                "Pending writer handoff no longer owns cleanup of the original Workspace.",
+              );
+            await requirePendingWriterHandoffIn(sql, change.attemptID, handoff);
+          }
+          // A pending admission may not yet have prepared the Session. With no
+          // active turn, retain this exact Session's last assigned input: a failed
+          // outcome does not prove that its native Inbox entry was removed.
+          const turns = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
           WHERE change_id = ${changeID} AND state IN ('pending', 'dispatching', 'running', 'uncertain')
             AND id IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid
           ORDER BY created_at DESC LIMIT 1`;
-        const rows = await sql<
-          StopTarget[]
-        >`UPDATE factory.change_agent_session session SET state = 'stopped',
-          stop_id = CASE WHEN stop_pending THEN stop_id ELSE ${crypto.randomUUID()}::uuid END,
+          const rows = await sql<
+            StopTarget[]
+          >`UPDATE factory.change_agent_session session SET state = 'stopped',
+          stop_id = CASE WHEN stop_pending THEN stop_id ELSE ${stopID}::uuid END,
           stop_turn_id = CASE WHEN stop_pending THEN stop_turn_id ELSE COALESCE(
             ${turns[0]?.id ?? null}::uuid,
             (SELECT intent.turn_id FROM factory.change_agent_turn_intent intent
@@ -169,17 +175,25 @@ export function createChangeAgentStop(
           stop_pending = true, active_inbox_id = NULL, updated_at = now()
           WHERE change_id = ${changeID} AND (stop_pending OR state <> 'stopped' OR ${turns[0]?.id ?? null}::uuid IS NOT NULL)
           RETURNING stop_id AS "stopID", stop_turn_id AS "turnID"`;
-        return {
-          ...(rows[0] ?? { stopID: null, turnID: turns[0]?.id ?? null }),
-          pendingTurnID: handoff ? null : (turns[0]?.id ?? null),
-        };
-      });
-      await settleTarget(changeID, target, origin);
-      // A writer handoff may already be settling its old Session. An explicit
-      // Stop must also cancel the captured new admission, without replacing
-      // that original native-input Stop identity.
-      if (target.pendingTurnID && target.pendingTurnID !== target.turnID)
-        await settleTarget(changeID, { stopID: null, turnID: target.pendingTurnID }, origin);
+          return {
+            ...(rows[0] ?? { stopID: null, turnID: turns[0]?.id ?? null }),
+            pendingTurnID: handoff ? null : (turns[0]?.id ?? null),
+          };
+        });
+        const caller = target.stopID ? publishingOrigins.get(target.stopID) : { changeID, origin };
+        await settleTarget(
+          changeID,
+          target,
+          caller?.changeID === changeID ? caller.origin : undefined,
+        );
+        // A writer handoff may already be settling its old Session. An explicit
+        // Stop must also cancel the captured new admission, without replacing
+        // that original native-input Stop identity.
+        if (target.pendingTurnID && target.pendingTurnID !== target.turnID)
+          await settleTarget(changeID, { stopID: null, turnID: target.pendingTurnID }, origin);
+      } finally {
+        publishingOrigins.delete(stopID);
+      }
     },
 
     async recordUnconfirmed(
@@ -256,9 +270,14 @@ export function createChangeAgentStop(
       const current = rows[0];
       if (!current) return true;
       // Recovery fences the captured Turn after a crash between publication
-      // and settlement. Admission remains blocked throughout. Stop intent has
-      // no persisted caller origin, so this settlement must stay neutral.
-      await settleTarget(changeID, current);
+      // and settlement. An in-flight publisher can supply its known origin;
+      // recovery without that exact caller context must stay neutral.
+      const caller = current.stopID ? publishingOrigins.get(current.stopID) : undefined;
+      await settleTarget(
+        changeID,
+        current,
+        caller?.changeID === changeID ? caller.origin : undefined,
+      );
       if (current.currentAttemptID !== current.attemptID) return false;
       // A fresh Session cannot receive its prompt before native confirmation
       // is durable. Stop fences late confirmation. With exact compute teardown,

@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
+import { ensureConversationIn } from "../../apps/factory/src/project-agent/conversation-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
-import { ensureConversationIn } from "../../apps/factory/src/project-agent/conversation-store";
 
 type Owned = Awaited<ReturnType<typeof fixture>>;
 
@@ -230,6 +230,63 @@ test("a delayed Stop persistence phase cannot stop newly admitted work", async (
     await owned.dispose();
   }
 });
+
+test.each([
+  ["user", "confirmation"],
+  ["authority-loss", "confirmation"],
+  ["user", "automatic persistence"],
+  ["authority-loss", "explicit persistence"],
+] as const)(
+  "the published %s Stop retains attribution through concurrent %s",
+  async (origin, concurrent) => {
+    const owned = await fixture();
+    const original = await admit(owned, "Stop this exact attributed turn");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const delayed = afterPublication(owned, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const stopping = createChangeAgentStop(delayed, owned.hub).persist(
+      owned.changeID,
+      undefined,
+      origin,
+    );
+    try {
+      await entered.promise;
+      const target = await pendingStop(owned);
+      const observer = createChangeAgentStop(owned.database, owned.hub);
+      if (concurrent === "confirmation") await observer.confirm(owned.changeID, target.id);
+      else
+        await observer.persist(
+          owned.changeID,
+          undefined,
+          concurrent === "automatic persistence" ? "authority-loss" : "user",
+        );
+      release.resolve();
+      await stopping;
+      expect(await owned.turn(original.turn.commandId)).toMatchObject({
+        state: "stopped",
+        summary:
+          origin === "user"
+            ? "Stopped by the user"
+            : "Stopped because execution authority could not be renewed",
+      });
+      await observer.confirm(owned.changeID, target.id);
+      expect((await owned.turn(original.turn.commandId))?.summary).toBe(
+        origin === "user"
+          ? "Stopped by the user"
+          : "Stopped because execution authority could not be renewed",
+      );
+      expect((await pendingStop(owned)).id).toBe(target.id);
+    } finally {
+      release.resolve();
+      await stopping.catch(() => undefined);
+      await owned.dispose();
+    }
+  },
+  15_000,
+);
 
 test("concurrent Stop confirmations coalesce and preserve the pending Stop identity", async () => {
   const owned = await fixture();
