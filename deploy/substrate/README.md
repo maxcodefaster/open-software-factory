@@ -324,6 +324,15 @@ provisioning generation when the existing explicit queued-bootstrap
 retry decision has confirmed exact predecessor cleanup; a lost or still-live
 outcome cannot select a successor. Controller regressions remain separate from real
 native CI qualification; the live ARM coverage is listed above.
+
+An initial Verification refused native worker capacity waits on the same Actor.
+The existing owner may re-enter official Resume only while the original UID and
+dispatch version are unchanged, with no assignment, checkpoint, snapshot or canonical Source.
+It rechecks the current submitted commit, exact job, permissions and Stop before
+dispatch, without clearing the original lifecycle facts or creating another Actor.
+The capacity hint clears only after validated native progress. A suspended state
+alone never authorizes continuation of an already-started or superseded execution.
+
 Ticket bootstrap repository reads recheck the current commissioned writer and live
 execution lease. Isolated Verification reads use their exact-job provisioning grant,
 not a personal Developer Workspace grant, and reject a retargeted repository or

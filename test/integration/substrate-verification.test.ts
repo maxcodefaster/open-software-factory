@@ -13,7 +13,7 @@ import {
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
-test("native Verification uses a separate exact-job Actor and retained create outcomes, never canonical Source or legacy capacity", async () => {
+test("native Verification continues initial capacity rejection on its exact-job Actor, never canonical Source or legacy capacity", async () => {
   const f = await substrateFixture("a".repeat(40), "ticket");
   const directory = await mkdtemp(join(tmpdir(), "native-verification-"));
   const ca = join(directory, "ca.pem");
@@ -49,6 +49,8 @@ test("native Verification uses a separate exact-job Actor and retained create ou
   let provisioningAttemptID = attemptID;
   const creates = new Map<string, number>();
   let lose = "CreateAtespace";
+  let rejectInitialResume = true;
+  let resumeCalls = 0;
   let resumes = 0;
   let deletes = 0;
   const call: SubstrateCall = async (method, input) => {
@@ -118,6 +120,11 @@ test("native Verification uses a separate exact-job Actor and retained create ou
       return structuredClone(value);
     }
     if (method === "ResumeActor") {
+      resumeCalls++;
+      if (rejectInitialResume) {
+        rejectInitialResume = false;
+        throw new SubstrateRPCError("ResourceExhausted", "no worker has room for the actor");
+      }
       resumes++;
       const actor = nativeActor.parse(activeObjects.get("Actor"));
       actor.metadata.version = "2";
@@ -216,6 +223,14 @@ test("native Verification uses a separate exact-job Actor and retained create ou
       ],
     });
     const retainedCoding = await codingState();
+    const submittedID = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.change_commit_operation(
+      id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,
+      commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
+      SELECT ${submittedID},id,runtime_attempt_id,1,branch_name,base_sha,
+        ${"d".repeat(40)},${"d".repeat(40)},'Owned submitted Verification candidate',
+        ${`owned-verification:${submittedID}`},'succeeded',created_by,now()
+      FROM factory.change WHERE id=${f.changeID}`;
     await f.database
       .client`UPDATE factory.project SET repository_url='http://forgejo.cluster.svc:3000/owned/native-verification.git' WHERE id=${f.projectID}`;
     await f.database
@@ -243,7 +258,49 @@ test("native Verification uses a separate exact-job Actor and retained create ou
       );
       lose = next;
     }
-    const started = await runtime.startVerification(verificationID, f.userID);
+    await expect(runtime.startVerification(verificationID, f.userID)).rejects.toThrow(
+      "no worker has room for the actor",
+    );
+    const [originalResume] = await f.database.client`
+      SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
+        intended_at::text,attempted_at::text,outcome
+      FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${attemptID} AND action='resume'`;
+    expect(originalResume).toMatchObject({
+      native_version: "1",
+      origin_key: "initial",
+      origin_checkpoint: null,
+      stop_id: null,
+      outcome: null,
+    });
+    const capacityWait = await f.database.client`
+      SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`;
+    // The pinned native workflow rejected assignment before advancing the Actor.
+    // A current exact-job commission continues that same idempotent native Resume,
+    // not another Actor or an edited/cleared immutable dispatch fact.
+    runtime = controller(configuration);
+    const [started, coalesced] = await Promise.all([
+      runtime.startVerification(verificationID, f.userID),
+      runtime.startVerification(verificationID, f.userID),
+    ]);
+    expect(coalesced?.id).toBe(attemptID);
+    expect(resumeCalls).toBe(2);
+    expect(capacityWait).toEqual([{ reason: "compute-capacity" }]);
+    expect(
+      await f.database.client`
+        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`,
+    ).toEqual([]);
+    const [completedResume] = await f.database.client`
+      SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
+        intended_at::text,attempted_at::text,outcome
+      FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${attemptID} AND action='resume'`;
+    expect(completedResume).toEqual({
+      ...originalResume,
+      outcome: {
+        actorUID: originalResume?.["actor_uid"],
+        state: "ACTOR_STATE_RUNNING",
+        version: "2",
+      },
+    });
     expect(started).toMatchObject({
       id: attemptID,
       state: "starting",
@@ -263,6 +320,7 @@ test("native Verification uses a separate exact-job Actor and retained create ou
     expect((await scoped.startVerification(verificationID, f.userID))?.id).toBe(attemptID);
     expect(retainedOwnerCalls).toBe(0);
     expect(resumes).toBe(1);
+    expect(resumeCalls).toBe(2);
     const policy = objects.get("AtespaceAccessPolicy");
     if (!policy) throw new Error("Original Verification policy missing");
     objects.set("AtespaceAccessPolicy", { ...policy, bindings: [] });
@@ -459,4 +517,4 @@ test("native Verification uses a separate exact-job Actor and retained create ou
     await f.dispose();
     await rm(directory, { recursive: true, force: true });
   }
-}, 60_000);
+}, 180_000);

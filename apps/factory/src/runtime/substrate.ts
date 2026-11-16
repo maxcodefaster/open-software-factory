@@ -519,6 +519,15 @@ export function createSubstrateExecution(
       if (resumed?.attempted && !resumed.outcome)
         await observeActorRPCIn(sql, attemptID, resumed, actor);
     }
+    if (
+      verificationID &&
+      ["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"].includes(actor.status.state)
+    )
+      await sql`DELETE FROM factory.runtime_compute_wait waiting
+        USING factory.runtime_attempt attempt
+        WHERE waiting.attempt_id=${attemptID} AND waiting.reason='compute-capacity'
+          AND attempt.id=waiting.attempt_id AND attempt.state IN ('starting','ready')
+          AND attempt.stop_intended_at IS NULL`;
     return actor;
   }
   async function currentGrant(sql: Database["client"], userID: string, newExecution = false) {
@@ -567,6 +576,58 @@ export function createSubstrateExecution(
           (await substrateUnsettledBootstrapIn(sql, workspaceID, attemptID))))
     )
       throw new CommandError("conflict", substrateBootstrapContinuationBlocked);
+  }
+  async function requireInitialVerificationResumeIn(
+    sql: AgentTurnTransaction,
+    saved: Binding,
+    actor: NativeActor,
+    operation: ActorRPC,
+    userID: string,
+  ) {
+    if (
+      !verificationID ||
+      workspaceID ||
+      saved.deleting ||
+      saved.deleted ||
+      saved.checkpoint !== null ||
+      operation.action !== "resume" ||
+      !operation.attempted ||
+      operation.outcome ||
+      operation.originKey !== "initial" ||
+      operation.originCheckpoint !== null ||
+      operation.stopID !== null ||
+      operation.actorUID !== saved.actorUID ||
+      actor.metadata.uid !== operation.actorUID ||
+      actor.metadata.version !== operation.nativeVersion ||
+      actor.status.state !== "ACTOR_STATE_SUSPENDED" ||
+      actor.status.workerAssignment ||
+      actor.status.lastAssignedGeneration ||
+      actor.status.snapshots?.length ||
+      actor.sourceTag !== undefined ||
+      (await actorRPCIn(sql, attemptID, "suspend", "initial"))
+    )
+      throw new CommandError(
+        "unavailable",
+        "Initial native Verification Resume differs from its original unassigned Actor",
+      );
+    await substrateVerificationGrantIn(sql, config.projectID, verificationID, attemptID, userID);
+    const [current] = await sql`SELECT attempt.id FROM factory.runtime_attempt attempt
+      JOIN factory.verification verification ON verification.id=attempt.verification_id
+      JOIN factory.change change ON change.id=verification.change_id
+      WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
+        AND attempt.verification_id=${verificationID} AND attempt.isolated_kind='verification'
+        AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
+        AND attempt.generation=${config.generation} AND attempt.revision=verification.commit_sha
+        AND attempt.state='starting' AND attempt.ready_at IS NULL AND attempt.stop_intended_at IS NULL
+        AND verification.state IN ('pending','runner-starting')
+        AND verification.runtime_attempt_id=attempt.id
+        AND verification.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
+          WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)`;
+    if (!current)
+      throw new CommandError(
+        "conflict",
+        "Current never-started exact-commit Verification is required for native continuation",
+      );
   }
   async function resumeActorIn(
     sql: Database["client"],
@@ -657,11 +718,18 @@ export function createSubstrateExecution(
       before,
       stopID,
     );
-    if (operation.attempted)
+    if (operation.attempted && !verificationID)
       throw new CommandError(
         "unavailable",
         "Recorded native Resume remains unconfirmed; its RPC was not repeated",
       );
+    if (operation.attempted) {
+      if (!userID || stopID)
+        throw new CommandError("conflict", "Current Verification authority is required");
+      await sql.begin((tx) =>
+        requireInitialVerificationResumeIn(tx, saved, before, operation, userID),
+      );
+    }
     if (userID) await currentGrant(sql, userID, true);
     if (workspaceID) await sources?.resume(workspaceID, attemptID, sql);
     await egress();
@@ -678,12 +746,44 @@ export function createSubstrateExecution(
         await tx`UPDATE factory.substrate_input_stop SET source_checkpoint_id=${source.id},source_writer_epoch=${source.epoch},
           resume_attempted_at=now() WHERE stop_id=${stopID} AND resume_attempted_at IS NULL`;
       }
-      await dispatchActorRPCIn(tx, attemptID, operation);
+      if (operation.attempted) {
+        if (!userID)
+          throw new CommandError("conflict", "Current Verification authority is required");
+        // The official workflow can reject worker assignment without advancing
+        // the Actor. Re-enter only that original, never-assigned Verification
+        // under its current exact-commit grant. Keep the first dispatch fact.
+        await requireInitialVerificationResumeIn(tx, saved, before, operation, userID);
+      } else await dispatchActorRPCIn(tx, attemptID, operation);
       await tx`UPDATE factory.runtime_attempt SET state='starting',failure=NULL,updated_at=now()
         WHERE id=${attemptID} AND stop_intended_at IS NULL`;
     });
     allow(before.metadata.uid);
-    await call("ResumeActor", { actor: ref });
+    try {
+      await call("ResumeActor", { actor: ref });
+    } catch (cause) {
+      if (
+        verificationID &&
+        userID &&
+        cause instanceof SubstrateRPCError &&
+        cause.code === "ResourceExhausted"
+      ) {
+        try {
+          const currentBinding = await binding(sql);
+          const actor = await observe(sql, currentBinding);
+          await sql.begin(async (tx) => {
+            const dispatched = await actorRPCIn(tx, attemptID, "resume", "initial");
+            if (!dispatched) return;
+            await requireInitialVerificationResumeIn(tx, currentBinding, actor, dispatched, userID);
+            await tx`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
+              VALUES(${attemptID},'compute-capacity') ON CONFLICT(attempt_id) DO NOTHING`;
+          });
+        } catch {
+          // A lost observation, newer candidate, callback or Stop cannot turn
+          // the rejected call into success or overwrite its original failure.
+        }
+      }
+      throw cause;
+    }
     return observe(sql, await binding(sql));
   }
   async function suspendIn(sql: Database["client"]) {
