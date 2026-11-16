@@ -15,7 +15,7 @@ test.each([
   "running-resume",
   "fresh-cycle",
 ] as const)(
-  "native lifecycle dispatch is not replayed after %s",
+  "native lifecycle facts preserve their original identity after %s",
   async (scenario) => {
     const f = await substrateFixture();
     let actor: NativeActor | undefined;
@@ -115,6 +115,13 @@ test.each([
       if (method === "SuspendActor") {
         await requireDispatch("suspend");
         suspends++;
+        if (actor?.status.state === "ACTOR_STATE_SUSPENDING") {
+          // Official v1 continues the persisted capture; it does not mint a
+          // second snapshot when re-entering this native workflow.
+          actor.status.state = "ACTOR_STATE_SUSPENDED";
+          actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
+          return { actor: structuredClone(actor) };
+        }
         if (loseSuspend && scenario === "suspend-before-visible") {
           loseSuspend = false;
           throw Error("Owned lost Suspend reply");
@@ -178,7 +185,16 @@ test.each([
           expect({ resumes, suspends }).toEqual({ resumes: 3, suspends: 2 });
         } else {
           await expect(runtime.pause(f.attemptID)).rejects.toThrow("Owned lost Suspend");
-          if (scenario !== "suspend-completed") {
+          if (scenario === "suspend-finalizing") {
+            const snapshots = structuredClone(actor?.status.snapshots);
+            await expect(runtime.resumeForApp(f.attemptID, f.userID)).rejects.toThrow(
+              "not repeated",
+            );
+            await expect(runtime.start(f.projectID, f.userID)).rejects.toThrow("not repeated");
+            expect(resumes).toBe(1);
+            expect((await runtime.pause(f.attemptID))?.state).toBe("paused");
+            expect(actor?.status.snapshots).toEqual(snapshots);
+          } else if (scenario !== "suspend-completed") {
             await expect(runtime.pause(f.attemptID)).rejects.toThrow("not repeated");
             expect(suspends).toBe(1);
             await expect(runtime.resumeForApp(f.attemptID, f.userID)).rejects.toThrow(
@@ -186,14 +202,10 @@ test.each([
             );
             await expect(runtime.start(f.projectID, f.userID)).rejects.toThrow("not repeated");
             expect(resumes).toBe(1);
-            if (scenario === "suspend-finalizing") {
-              if (!actor) throw Error("Owned finalizing Actor missing");
-              actor.status.state = "ACTOR_STATE_SUSPENDED";
-              actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
-            } else suspended();
+            suspended();
           }
           expect((await runtime.pause(f.attemptID))?.state).toBe("paused");
-          expect(suspends).toBe(1);
+          expect(suspends).toBe(scenario === "suspend-finalizing" ? 2 : 1);
           await runtime.resumeForApp(f.attemptID, f.userID);
           expect(resumes).toBe(2);
         }
@@ -209,7 +221,9 @@ test.each([
           origin_key AS origin,actor_uid::text AS uid
         FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${f.attemptID}`;
       expect(facts.filter((fact) => fact.action === "resume")).toHaveLength(resumes);
-      expect(facts.filter((fact) => fact.action === "suspend")).toHaveLength(suspends);
+      expect(facts.filter((fact) => fact.action === "suspend")).toHaveLength(
+        suspends - (scenario === "suspend-finalizing" ? 1 : 0),
+      );
       expect(
         facts.every(
           (fact) =>

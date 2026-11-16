@@ -222,6 +222,12 @@ export function requireDurableROOTFS(
   return { actorUID: actor.metadata.uid, templateUID: binding.intent.templateUID, ...snapshot };
 }
 
+const recordedPauseSnapshot = nativeSnapshot.extend({
+  durableSnapshot: nativeSnapshot.shape.durableSnapshot.extend({
+    state: z.enum(["SNAPSHOT_STORAGE_STATE_PENDING", "SNAPSHOT_STORAGE_STATE_COMPLETED"]),
+  }),
+});
+
 function requireRecordedPause(actor: NativeActor, saved: Binding) {
   const snapshots = (actor.status.snapshots ?? []).filter(
     (value) =>
@@ -229,15 +235,15 @@ function requireRecordedPause(actor: NativeActor, saved: Binding) {
       actor.status.lastAssignedGeneration,
   );
   if (snapshots.length !== 1) throw new Error("Recorded ROOTFS pause generation is unconfirmed");
-  // A persisted workflow/snapshot UUID alone does not establish that the
-  // original checkpoint RPC has ended. Never repeat an uncertain checkpoint.
-  const committed = nativeSnapshot.safeParse(snapshots[0]);
-  if (!committed.success)
+  // Pinned Substrate resumes a SUSPENDING workflow using this same persisted
+  // snapshot. PENDING permits that continuation, never Source handoff or Resume.
+  const progress = recordedPauseSnapshot.safeParse(snapshots[0]);
+  if (!progress.success)
     throw new CommandError(
       "unavailable",
-      "Recorded native pause is not confirmed durable; no operation was repeated",
+      "Recorded native pause identity is unconfirmed; no operation was repeated",
     );
-  const snapshot = committed.data;
+  const snapshot = progress.data;
   const uri = new URL(snapshot.durableSnapshot.object.snapshotUri);
   const previous = saved.checkpoint ? nativeSnapshot.parse(saved.checkpoint) : null;
   if (
@@ -252,7 +258,7 @@ function requireRecordedPause(actor: NativeActor, saved: Binding) {
     !uri.pathname.endsWith(
       `/atespaces/${saved.atespace}/actors/${actor.metadata.uid}/snapshots/${snapshot.uuid}`,
     ) ||
-    (previous && snapshot.generation <= previous.generation)
+    snapshot.generation !== (previous?.generation ?? 0) + 1
   )
     throw new Error("Recorded ROOTFS pause identity/generation differs from its original binding");
   return snapshot;
@@ -584,16 +590,17 @@ export function createSubstrateExecution(
         "unavailable",
         "Native pause outcome is unsettled; no operation was repeated",
       );
-    if (reentering) {
-      requireRecordedPause(before, saved);
-      throw new CommandError(
-        "unavailable",
-        "Native pause finalization is unsettled; its RPC was not repeated",
-      );
-    }
     const completing =
       before.status.state === "ACTOR_STATE_SUSPENDED" &&
       (recorded?.state === "pausing" || recorded?.state === "paused");
+    const observed = nativeActor.safeParse(saved.observation);
+    const retainedProgress =
+      (reentering || completing) &&
+      observed.success &&
+      observed.data.status.state === "ACTOR_STATE_SUSPENDING"
+        ? requireRecordedPause(observed.data, saved)
+        : undefined;
+    const continuation = reentering ? requireRecordedPause(before, saved) : retainedProgress;
     // A disconnected initial Parent cannot prove workload liveness. An already
     // completed durable pause can be reconciled without another checkpoint.
     const bootstrap = await retainedBootstrap(sql);
@@ -611,14 +618,38 @@ export function createSubstrateExecution(
       );
     const retainBootstrap = bootstrap && completing;
     const inputStop = workspaceID ? await nativeInputStopIn(sql, attemptID) : null;
-    if (inputStop?.snapshotAttempted && !completing)
+    if (inputStop?.snapshotAttempted && !completing && !reentering)
       throw new CommandError(
         "unavailable",
         "Recorded Stop-only native pause is unconfirmed; its snapshot RPC was not repeated",
       );
     const origin = actorRPCOrigin(saved.checkpoint);
     let operation = await actorRPCIn(sql, attemptID, "suspend", origin);
-    if (!completing) {
+    if (reentering) {
+      if (
+        !continuation ||
+        !operation?.attempted ||
+        operation.outcome ||
+        operation.actorUID !== before.metadata.uid ||
+        operation.stopID !== (inputStop?.stopID ?? null) ||
+        BigInt(before.metadata.version) <= BigInt(operation.nativeVersion)
+      )
+        throw new CommandError(
+          "unavailable",
+          "Native pause continuation requires its original dispatched Actor and checkpoint",
+        );
+      if (retainedProgress) {
+        if (
+          retainedProgress.uuid !== continuation.uuid ||
+          retainedProgress.generation !== continuation.generation ||
+          retainedProgress.durableSnapshot.object.snapshotUri !==
+            continuation.durableSnapshot.object.snapshotUri ||
+          (retainedProgress.durableSnapshot.state === "SNAPSHOT_STORAGE_STATE_COMPLETED" &&
+            continuation.durableSnapshot.state !== "SNAPSHOT_STORAGE_STATE_COMPLETED")
+        )
+          throw new Error("Recorded native pause snapshot changed during continuation");
+      }
+    } else if (!completing) {
       if (operation?.attempted)
         throw new CommandError(
           "unavailable",
@@ -638,10 +669,12 @@ export function createSubstrateExecution(
     }
     if (completing && !operation?.attempted)
       requireDurableROOTFS(before, saved, nativeSnapshot.parse(saved.checkpoint));
+    if (completing && operation?.attempted && !operation.outcome)
+      requireRecordedPause(before, saved);
     await sql`UPDATE factory.runtime_attempt SET state='pausing',updated_at=now() WHERE id=${attemptID} AND stop_intended_at IS NULL`;
     if (workspaceID && !retainBootstrap) await sources?.freezeActor(workspaceID, attemptID, sql);
     hub.revoke(attemptID);
-    if (!completing) {
+    if (!completing && !reentering) {
       if (!operation) throw new Error("Native Pause dispatch intent is unavailable");
       const dispatch = operation;
       await sql.begin(async (tx) => {
@@ -652,7 +685,9 @@ export function createSubstrateExecution(
       });
       operation = { ...dispatch, attempted: true };
     }
-    // Reconcile a lost but completed Suspend, never make another snapshot.
+    // A completed observation needs no RPC. Only a pinned server-side
+    // SUSPENDING workflow may re-enter native Suspend, which continues its
+    // existing snapshot under Substrate's Actor lease rather than minting one.
     const returned = completing
       ? before
       : requireSubstrateActor(
@@ -664,10 +699,11 @@ export function createSubstrateExecution(
           ).actor,
           { ...saved, actorUID: before.metadata.uid },
         );
-    const returnedSnapshot = requireDurableROOTFS(returned, {
-      ...saved,
-      actorUID: before.metadata.uid,
-    });
+    const returnedSnapshot = requireDurableROOTFS(
+      returned,
+      { ...saved, actorUID: before.metadata.uid },
+      continuation,
+    );
     if (operation?.attempted && completing && returnedSnapshot.uuid === operation.originKey)
       throw new Error("Native Pause did not produce its next ROOTFS checkpoint");
     const actor = await observe(sql, await binding(sql));
@@ -683,12 +719,12 @@ export function createSubstrateExecution(
       throw new Error("Suspend did not produce the next snapshot generation");
     // Independent Get established COMPLETED. Keep the last good checkpoint
     // on every rejection; a native reply alone cannot release Source.
-    const observed = operation;
+    const dispatched = operation;
     await sql.begin(async (tx) => {
       await tx`UPDATE factory.substrate_binding SET checkpoint=${JSON.stringify(checkpoint)}::text::jsonb WHERE runtime_attempt_id=${attemptID}`;
       await tx`UPDATE factory.runtime_attempt SET state='paused',failure=CASE WHEN ready_at IS NULL THEN failure ELSE NULL END,updated_at=now() WHERE id=${attemptID} AND stop_intended_at IS NULL`;
-      if (observed?.attempted && !observed.outcome)
-        await observeActorRPCIn(tx, attemptID, observed, actor, checkpoint);
+      if (dispatched?.attempted && !dispatched.outcome)
+        await observeActorRPCIn(tx, attemptID, dispatched, actor, checkpoint);
     });
     if (workspaceID && !retainBootstrap) await sources?.paused(workspaceID, sql);
   }

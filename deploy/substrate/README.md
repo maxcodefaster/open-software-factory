@@ -610,11 +610,15 @@ RootlessKit namespace. It changes neither canonical Source's mount nor normal
 development-UID CRUD. The service receives no mount capability; archive traversal
 stays beneath that pinned descriptor and needs no timestamp repair.
 Factory records immutable Resume/Suspend intent and dispatch facts for the original
-Actor and its preceding confirmed ROOTFS UUID. A lost reply never authorizes another
-RPC for that operation, even when Get still shows the preceding native state.
-SUSPENDING remains unsettled until Substrate itself completes finalization. A positive
-SUSPENDED observation of the exact new durable snapshot can finish Source handoff
-without another Suspend. Only that confirmed checkpoint permits the next deliberate
+Actor and its preceding confirmed ROOTFS UUID. A lost reply while Get still shows the
+preceding native state does not authorize another dispatch. A recorded `SUSPENDING`
+Actor may continue the [pinned official Suspend workflow](https://github.com/agent-substrate/substrate/blob/b34fbee742906494b5eb4f1f36987176bf8770a4/cmd/ateapi/internal/controlapi/workflow_suspend.go),
+which reuses its persisted snapshot rather than taking a new one. Factory requires
+the original dispatched Actor, matching template/runtime, exact next snapshot generation
+and storage identity, and its retained Source fence. The first dispatch facts remain
+immutable; a `PENDING` capture permits only that native continuation, never Source handoff
+or Resume. A positive `SUSPENDED` observation of the exact completed durable snapshot
+can finish Source handoff. Only that confirmed checkpoint permits the next deliberate
 Resume. Reading an already RUNNING allocation does not dispatch Resume or reset READY;
 an unresolved Pause does not reopen Connector authority. Pending/local-only snapshots
 never authorize Source release. These dispatch guards have controlled PostgreSQL and
@@ -874,10 +878,11 @@ Use the observed-object procedure below with `get daemonset atelet`, this patch
 and `rollout status daemonset/atelet`. Withhold new workload admission and account
 for in-flight native calls before rolling the daemon. The patch prevents neither
 all host stalls nor every daemon failure, and it does not repair an Actor already
-left `SUSPENDING`. Preserve that Actor and its Source fence, observe its original
-native operation, and do not replay Suspend or mark Source independent merely
-because a probe configuration changed. Live checkpoint qualification is still
-required after applying the operator configuration.
+left `SUSPENDING`. Preserve that Actor and its Source fence. A probe configuration
+change alone does not confirm its checkpoint or permit Source release. Factory can
+continue only its matching persisted native Suspend as described above; do not clear
+its dispatch facts, edit native metadata or substitute another Actor. Live checkpoint
+qualification is still required after applying the operator configuration.
 
 The pinned router also needs
 [`router-health-patch.yaml`](router-health-patch.yaml) before admitting traffic.

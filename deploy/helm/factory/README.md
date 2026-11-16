@@ -591,8 +591,12 @@ independent Source handoff. Stop requires independent Source and exact-UID nativ
 unconfirmed pause or lost Delete response is not a successful Stop. A subsequent explicit Start
 selects a new immutable generation only after cleanup and the latest confirmed Source export.
 Resume and Pause dispatch facts are immutable for the original Actor and preceding ROOTFS
-checkpoint. Unknown replies are not replayed, and SUSPENDING finalization belongs to Substrate.
-Only a newly confirmed checkpoint permits the next deliberate Resume.
+checkpoint. A lost reply while the Actor still shows its preceding state does not authorize
+another dispatch. A `SUSPENDING` Actor with the original dispatched intent and exact next
+snapshot may continue Substrate's idempotent Suspend workflow. Substrate reuses that snapshot;
+Factory neither clears dispatch facts nor requests a new capture. Only an independently observed
+`SUSPENDED` Actor with that exact completed durable snapshot permits Source handoff or the next
+deliberate Resume.
 
 For active Coding, Compute Stop must first confirm the existing Agent Stop, including queued
 work in its verified child-Session tree. It retains unrelated root Inbox entries and refuses
