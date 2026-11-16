@@ -1,13 +1,14 @@
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { NativeActor } from "../../../../packages/runtime-kubernetes/src/substrate-control";
-import { CommandError } from "../command-error";
 import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
 
 type SQL = ReturnType<typeof createDatabase>["client"] | AgentTurnTransaction;
 export type ActorRPC = {
   action: "resume" | "suspend";
   originKey: string;
+  originCheckpoint: unknown;
   actorUID: string;
   nativeVersion: string;
   stopID: string | null;
@@ -26,7 +27,7 @@ export async function actorRPCIn(
   originKey: string,
 ) {
   const [row] = await sql<ActorRPC[]>`
-    SELECT action,origin_key AS "originKey",actor_uid::text AS "actorUID",
+    SELECT action,origin_key AS "originKey",origin_checkpoint AS "originCheckpoint",actor_uid::text AS "actorUID",
       native_version AS "nativeVersion",stop_id::text AS "stopID",attempted_at IS NOT NULL AS attempted,outcome
     FROM factory.substrate_actor_rpc
     WHERE runtime_attempt_id=${attemptID} AND action=${action} AND origin_key=${originKey}`;

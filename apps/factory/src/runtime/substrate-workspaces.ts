@@ -227,8 +227,17 @@ export function createSubstrateWorkspaces(
     async recover() {
       const attempts = await database.client<
         { id: string }[]
-      >`SELECT a.id FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.project_id=${config.projectID} AND a.substrate`;
-      for (const attempt of attempts) await (await this.forAttempt(attempt.id))?.recover();
+      >`SELECT a.id FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation
+        WHERE a.project_id=${config.projectID} AND a.substrate ORDER BY a.created_at,a.id`;
+      for (const attempt of attempts) {
+        try {
+          await (await this.forAttempt(attempt.id))?.recover();
+        } catch (cause) {
+          // A revoked writer, Stop or superseded generation fences this
+          // Workspace, not recovery of later Workspaces in the same Project.
+          if (!(cause instanceof CommandError)) throw cause;
+        }
+      }
     },
     async start(userID: string, changeID?: string, selectedWorkspaceID?: string) {
       if (changeID && !sources)

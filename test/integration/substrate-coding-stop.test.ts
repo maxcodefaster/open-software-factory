@@ -187,6 +187,7 @@ test.each([false, true])(
       expect(await actorRPCIn(f.database.client, f.attemptID, "resume", "initial")).toEqual({
         action: "resume",
         originKey: "initial",
+        originCheckpoint: null,
         actorUID,
         nativeVersion: "1",
         stopID: null,

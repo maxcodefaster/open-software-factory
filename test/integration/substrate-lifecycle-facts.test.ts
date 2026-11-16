@@ -144,15 +144,14 @@ test.each([
         await expect(runtime.start(f.projectID, f.userID)).rejects.toThrow("Owned lost Resume");
         if (scenario === "resume-cancelled-resuming") {
           // A cancelled native RPC can leave its original Actor assigned and
-          // RESUMING. That is neither readiness nor permission to replay it.
+          // RESUMING. Continue that same official workflow, preserving the
+          // first dispatch fact; this is not another Actor or Resume origin.
           expect((await runtime.start(f.projectID, f.userID))?.native?.state).toBe(
-            "ACTOR_STATE_RESUMING",
+            "ACTOR_STATE_RUNNING",
           );
           await runtime.resumeForApp(f.attemptID, f.userID);
-          await requireDispatch("resume");
           expect(f.hub.ready(f.attemptID)).toBe(false);
-          expect({ creates, resumes, suspends }).toEqual({ creates: 1, resumes: 1, suspends: 0 });
-          running();
+          expect({ creates, resumes, suspends }).toEqual({ creates: 1, resumes: 2, suspends: 0 });
         }
         if (scenario === "resume-before-visible") {
           await expect(
@@ -167,7 +166,7 @@ test.each([
         }
         await runtime.start(f.projectID, f.userID);
         await runtime.resumeForApp(f.attemptID, f.userID);
-        expect(resumes).toBe(1);
+        expect(resumes).toBe(scenario === "resume-cancelled-resuming" ? 2 : 1);
       } else {
         await runtime.start(f.projectID, f.userID);
         if (scenario === "running-resume") {
@@ -220,7 +219,9 @@ test.each([
       >`SELECT action,attempted_at IS NOT NULL AS attempted,outcome->>'state' AS state,
           origin_key AS origin,actor_uid::text AS uid
         FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${f.attemptID}`;
-      expect(facts.filter((fact) => fact.action === "resume")).toHaveLength(resumes);
+      expect(facts.filter((fact) => fact.action === "resume")).toHaveLength(
+        resumes - (scenario === "resume-cancelled-resuming" ? 1 : 0),
+      );
       expect(facts.filter((fact) => fact.action === "suspend")).toHaveLength(
         suspends - (scenario === "suspend-finalizing" ? 1 : 0),
       );

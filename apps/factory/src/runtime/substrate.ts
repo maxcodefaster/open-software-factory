@@ -50,6 +50,7 @@ import { substrateIsolatedGrantIn, substrateIsolatedPrincipalIn } from "./substr
 import { substratePrebuildGrantIn, substratePrebuildPrincipalIn } from "./substrate-prebuild-grant";
 import { substrateResourceReservation, substrateResources } from "./substrate-resources";
 import {
+  type ActorRPC,
   actorRPCIn,
   actorRPCOrigin,
   dispatchActorRPCIn,
@@ -199,6 +200,20 @@ export function requireDurableROOTFS(
 ) {
   if (actor.metadata.uid !== binding.actorUID || actor.status.state !== "ACTOR_STATE_SUSPENDED")
     throw new Error("Original native Actor is not suspended");
+  return requireROOTFSSnapshot(actor, binding, expected);
+}
+
+function requireROOTFSSnapshot(
+  actor: NativeActor,
+  binding: Pick<Binding, "intent" | "atespace" | "actorUID">,
+  expected?: {
+    uuid: string;
+    generation: number;
+    durableSnapshot?: { object: { snapshotUri: string } };
+  },
+) {
+  if (actor.metadata.uid !== binding.actorUID)
+    throw new Error("ROOTFS snapshot belongs to another native Actor");
   const generation = actor.status.lastAssignedGeneration;
   const snapshots = (actor.status.snapshots ?? []).filter(
     (s) => z.object({ generation: z.number() }).parse(s).generation === generation,
@@ -229,6 +244,28 @@ export function requireDurableROOTFS(
       "Durable ROOTFS snapshot identity differs from the original Actor/template/runtime/generation",
     );
   return { actorUID: actor.metadata.uid, templateUID: binding.intent.templateUID, ...snapshot };
+}
+
+function requireResumeContinuity(actor: NativeActor, saved: Binding, operation: ActorRPC) {
+  if (
+    !["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"].includes(actor.status.state) ||
+    !actor.status.workerAssignment ||
+    operation.action !== "resume" ||
+    !operation.attempted ||
+    operation.outcome ||
+    operation.actorUID !== saved.actorUID ||
+    operation.actorUID !== actor.metadata.uid ||
+    operation.originKey !== actorRPCOrigin(saved.checkpoint) ||
+    !isDeepStrictEqual(operation.originCheckpoint, saved.checkpoint) ||
+    BigInt(actor.metadata.version) <= BigInt(operation.nativeVersion)
+  )
+    throw new Error("Native Resume continuation differs from its original dispatched allocation");
+  if (saved.checkpoint === null) {
+    if (actor.status.lastAssignedGeneration || actor.status.snapshots?.length)
+      throw new Error("Initial native Resume acquired an unrecorded checkpoint");
+  } else {
+    requireROOTFSSnapshot(actor, saved, nativeSnapshot.parse(saved.checkpoint));
+  }
 }
 
 const recordedPauseSnapshot = nativeSnapshot.extend({
@@ -448,6 +485,10 @@ export function createSubstrateExecution(
     // Validate before replacing the retained observation. A rejected native
     // substitution must not become the next read's trusted progress.
     requirePauseContinuity(actor, saved);
+    if (["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"].includes(actor.status.state)) {
+      const resumed = await actorRPCIn(sql, attemptID, "resume", actorRPCOrigin(saved.checkpoint));
+      if (resumed?.attempted && !resumed.outcome) requireResumeContinuity(actor, saved, resumed);
+    }
     const result =
       await sql`UPDATE factory.substrate_binding SET actor_uid=COALESCE(actor_uid,${actor.metadata.uid}::uuid),observation=${JSON.stringify(actor)}::text::jsonb
       WHERE runtime_attempt_id=${attemptID} AND deleted_at IS NULL AND (actor_uid IS NULL OR actor_uid=${actor.metadata.uid}::uuid)`;
@@ -569,6 +610,34 @@ export function createSubstrateExecution(
           "unavailable",
           "Native allocation has no recorded Resume; no operation was repeated",
         );
+      if (before.status.state === "ACTOR_STATE_RESUMING" && userID && !stopID) {
+        requireResumeContinuity(before, saved, recorded);
+        if (recorded.stopID)
+          throw new CommandError(
+            "conflict",
+            "A Stop-only Resume cannot authorize ordinary execution",
+          );
+        const requireCurrentStart = async () => {
+          const [current] = await sql`SELECT id FROM factory.runtime_attempt a
+            WHERE a.id=${attemptID} AND a.state='starting' AND a.stop_intended_at IS NULL
+              AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+                WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
+          if (!current)
+            throw new CommandError("conflict", "Original native startup is no longer current");
+        };
+        await requireCurrentStart();
+        await currentGrant(sql, userID, true);
+        await egress();
+        if (signal?.aborted) return before;
+        await currentGrant(sql, userID, true);
+        await requireCurrentStart();
+        // The pinned official workflow re-enters under its native Actor lease.
+        // Keep the original dispatch/checkpoint/Source facts; do not transfer
+        // Source again or issue a Create, hook or inference request here.
+        allow(before.metadata.uid);
+        await call("ResumeActor", { actor: ref });
+        return observe(sql, await binding(sql));
+      }
       if (saved.actorUID) allow(saved.actorUID);
       return before;
     }
@@ -935,6 +1004,19 @@ export function createSubstrateExecution(
         const saved = await binding(sql);
         if (saved.deleting || saved.deleted || !saved.attemptedAt) return;
         const actor = await observe(sql, saved);
+        if (actor.status.state === "ACTOR_STATE_RESUMING") {
+          const principal = await sql.begin((tx) =>
+            preparationID
+              ? substratePrebuildPrincipalIn(tx, attemptID)
+              : verificationID
+                ? substrateVerificationPrincipalIn(tx, attemptID)
+                : isolated
+                  ? substrateIsolatedPrincipalIn(tx, attemptID)
+                  : substrateRuntimePrincipalIn(tx, attemptID, Boolean(workspaceID && sources)),
+          );
+          await resumeActorIn(sql, saved, actor, principal);
+          return;
+        }
         if (["ACTOR_STATE_SUSPENDING", "ACTOR_STATE_SUSPENDED"].includes(actor.status.state)) {
           const [pausing] = await sql`SELECT id FROM factory.runtime_attempt
             WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;

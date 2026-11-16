@@ -624,6 +624,17 @@ and storage identity, and its retained Source fence. The first dispatch facts re
 immutable; a `PENDING` capture permits only that native continuation, never Source handoff
 or Resume. Normal Factory startup recovery uses the same guarded continuation for a
 recorded pausing Attempt, without starting inference or resuming compute.
+A recorded `RESUMING` allocation can re-enter the pinned official Resume workflow
+under its native lease. Factory requires the original unresolved Resume dispatch,
+Actor/template/runtime, current execution authority and unchanged preceding ROOTFS
+checkpoint, or no snapshot for an initial start. Stop, superseded generations and
+revoked or expired execution authority refuse continuation. The existing dispatch
+facts stay immutable; Source is not transferred again and no Create, hook or prompt
+is dispatched by this continuation. The independent final `RUNNING` observation
+must preserve that same checkpoint identity before Factory records completion.
+Startup recovery uses those guards and skips expected authority fences without
+preventing recovery of other Workspaces. This has controlled controller coverage;
+an interrupted native product start still needs its separate live proof.
 A positive `SUSPENDED` observation of the exact completed durable snapshot
 can finish Source handoff. Only that confirmed checkpoint permits the next deliberate
 Resume. Reading an already RUNNING allocation does not dispatch Resume or reset READY;
