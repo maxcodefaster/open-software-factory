@@ -1534,6 +1534,14 @@ export function createDeliveryController(
               AND change.state='active' AND change.cancel_requested_at IS NULL
               AND session.state='committed' AND NOT session.stop_pending
               AND writer.state IN ('agent','unassigned')
+              AND EXISTS(SELECT 1 FROM auth."user" principal
+                JOIN factory.account_access access ON access.user_id=principal.id
+                WHERE principal.id=verification.created_by
+                  AND access.disabled_at IS NULL AND access.directory_disabled_at IS NULL
+                  AND (EXISTS(SELECT 1 FROM factory.project_membership membership
+                    WHERE membership.project_id=change.project_id AND membership.user_id=principal.id)
+                    OR EXISTS(SELECT 1 FROM factory.administrator administrator
+                      WHERE administrator.user_id=principal.id)))
               AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id
                 AND state<>'cancelled' AND trashed_at IS NULL)) AS "verificationComputeWait",
           CASE WHEN failed_verification.id IS NOT NULL THEN 'execution-failed'

@@ -194,7 +194,8 @@ export async function factoryProcess(
         container,
       );
       if (owner !== id) throw new Error("Retained Factory database ownership differs");
-    } else
+    } else {
+      console.info(`Owned Factory PostgreSQL intended: ${container}`);
       await docker(
         "run",
         "--detach",
@@ -217,6 +218,7 @@ export async function factoryProcess(
         "-c",
         "wal_level=logical",
       );
+    }
     created = !shared;
     const databasePort = shared
       ? ""

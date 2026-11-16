@@ -285,6 +285,29 @@ test("failed Verification compute is visible while human editing fences reconcil
         approvedAt: undefined,
       });
     }
+    // A capacity-only wait promises continuation only while its commissioning
+    // principal still has current account and Project authority.
+    await f.database.client`DELETE FROM factory.project_membership
+      WHERE project_id=${f.owned.projectID} AND user_id=${f.owned.userID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`INSERT INTO factory.administrator(user_id) VALUES(${f.owned.userID})`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(true);
+    await f.database.client`UPDATE factory.account_access SET disabled_at=now()
+      WHERE user_id=${f.owned.userID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database
+      .client`UPDATE factory.account_access SET disabled_at=NULL,directory_disabled_at=now()
+      WHERE user_id=${f.owned.userID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database.client`UPDATE factory.account_access SET directory_disabled_at=NULL
+      WHERE user_id=${f.owned.userID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(true);
+    await f.database.client`DELETE FROM factory.administrator WHERE user_id=${f.owned.userID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    await f.database
+      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${f.owned.projectID},${f.owned.userID},'developer',${f.owned.userID})`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(true);
     // A retained wait row cannot promise a fresh start after readiness or Stop intent.
     await f.database
       .client`UPDATE factory.runtime_attempt SET ready_at=now() WHERE id=${replacementID}`;
@@ -400,7 +423,7 @@ test("failed Verification compute is visible while human editing fences reconcil
   } finally {
     await f.close();
   }
-}, 60_000);
+}, 180_000);
 
 test("failed exact Verification requests one bounded repair on the same Change", async () => {
   const f = await deliveryFixture();
