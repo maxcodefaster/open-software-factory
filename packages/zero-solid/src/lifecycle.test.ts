@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectionState } from "@rocicorp/zero";
-import { ZeroClientLifecycle } from "./lifecycle";
+import { ZeroClientLifecycle, zeroStorageKey } from "./lifecycle";
 
 function recoveringClient() {
   let state: ConnectionState = { name: "connected" };
@@ -66,6 +66,37 @@ const transportFailure: ConnectionState = {
 };
 
 describe("Zero client lifecycle", () => {
+  test("persistent storage separates installation and schema without delimiter collisions", () => {
+    const first = { cacheScope: "installation", schemaVersion: "a:b" };
+    expect(zeroStorageKey(first)).toBe(zeroStorageKey({ ...first }));
+    expect(zeroStorageKey(first)).not.toBe(
+      zeroStorageKey({ cacheScope: "installation:a", schemaVersion: "b" }),
+    );
+    expect(zeroStorageKey(first)).not.toBe(zeroStorageKey({ ...first, cacheScope: "replacement" }));
+  });
+
+  test("a replacement installation cannot reuse the same user's cached client", () => {
+    const first = recoveringClient();
+    const second = recoveringClient();
+    const identity = {
+      userId: "bootstrap-admin",
+      schemaVersion: "1",
+      cacheScope: "installation-a",
+    };
+    first.lifecycle.select(identity, () => first.client);
+    first.emit(transportFailure);
+    try {
+      expect(
+        first.lifecycle.select({ ...identity, cacheScope: "installation-b" }, () => second.client),
+      ).toBe(second.client);
+      expect(first.closed()).toBe(1);
+      expect(first.pending()).toBe(0);
+      expect(first.listeners()).toBe(0);
+    } finally {
+      first.lifecycle.dispose();
+    }
+  });
+
   test.each([
     transportFailure,
     { name: "error", reason: "Fetch from API server returned non-OK status 503" } as const,

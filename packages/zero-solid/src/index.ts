@@ -31,6 +31,7 @@ import {
   isTransientAPIConnectionError,
   listenToMaterializedView,
   ZeroClientLifecycle,
+  zeroStorageKey,
 } from "./lifecycle";
 import { createQueryData } from "./query-data";
 import { createQuerySelection } from "./query-selection";
@@ -52,23 +53,26 @@ export function ZeroProvider<
 ) {
   const lifecycle = new ZeroClientLifecycle<Zero<S, MD, C>>();
   const client = createMemo(() =>
-    lifecycle.select(props.identity, (identity) => {
-      return new Zero<S, MD, C>({
-        ...Object.fromEntries(
-          Object.keys(props)
-            .filter((key) => key !== "children" && key !== "identity")
-            .map((key) => [key, Reflect.get(props, key)]),
-        ),
-        cacheURL: props.cacheURL,
-        schema: props.schema,
-        mutators: props.mutators,
-        context: props.context,
-        userID: identity.userId,
-        auth: identity.auth,
-        storageKey: `${props.storageKey ?? "factory"}:${identity.schemaVersion}`,
-        batchViewUpdates: (update) => update(),
-      } as ZeroOptions<S, MD, C>);
-    }),
+    lifecycle.select(
+      props.identity ? { ...props.identity, cacheScope: props.storageKey ?? "factory" } : null,
+      (identity) => {
+        return new Zero<S, MD, C>({
+          ...Object.fromEntries(
+            Object.keys(props)
+              .filter((key) => key !== "children" && key !== "identity")
+              .map((key) => [key, Reflect.get(props, key)]),
+          ),
+          cacheURL: props.cacheURL,
+          schema: props.schema,
+          mutators: props.mutators,
+          context: props.context,
+          userID: identity.userId,
+          auth: identity.auth,
+          storageKey: zeroStorageKey(identity),
+          batchViewUpdates: (update) => update(),
+        } as ZeroOptions<S, MD, C>);
+      },
+    ),
   );
   onCleanup(() => lifecycle.dispose());
   return ZeroContext({

@@ -108,6 +108,7 @@ export function AuthenticatedFactory(props: Bootstrap & { session: Session }) {
   return (
     <ZeroProvider
       identity={{ userId: props.session.user.id, schemaVersion: "factory-read-projections-v1" }}
+      storageKey={props.planningCacheScope}
       cacheURL={props.zeroCacheURL}
       schema={zeroSchema}
       mutators={zeroMutators}

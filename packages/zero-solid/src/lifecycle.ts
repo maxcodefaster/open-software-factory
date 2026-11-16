@@ -65,7 +65,14 @@ function recoverAPIConnection(connection: Connection, schedule: ReconnectSchedul
 export interface ZeroLifecycleIdentity {
   readonly userId: string;
   readonly schemaVersion: string;
+  readonly cacheScope?: string;
   readonly auth?: string;
+}
+
+export function zeroStorageKey(
+  identity: Pick<ZeroLifecycleIdentity, "cacheScope" | "schemaVersion">,
+) {
+  return JSON.stringify([identity.cacheScope ?? "factory", identity.schemaVersion]);
 }
 export interface ZeroLifecycleClient {
   readonly connection: Connection;
@@ -84,7 +91,7 @@ export class ZeroClientLifecycle<T extends ZeroLifecycleClient> {
   }
 
   select(identity: ZeroLifecycleIdentity | null, create: (identity: ZeroLifecycleIdentity) => T) {
-    const key = identity ? `${identity.userId}:${identity.schemaVersion}` : undefined;
+    const key = identity ? JSON.stringify([identity.userId, zeroStorageKey(identity)]) : undefined;
     if (!identity || !key) {
       this.dispose();
       return undefined;

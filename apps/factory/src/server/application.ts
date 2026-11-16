@@ -727,6 +727,7 @@ export async function createFactoryApplication() {
     policy: () => factoryAuth.policy,
     preference: uiPreferenceController.get,
     planningCacheURL,
+    signingKey: runtimeSecret,
     forgeOrigins: { browser: forgePublicOrigin, transport: forgeTransportOrigin },
     async modelAvailability() {
       return Boolean(

@@ -8,6 +8,7 @@ test("only development rewrites planning transport locally, without rewriting th
     identity: { companySignIn: false, sessionDays: 7 },
     uiPreference: { desktopBackgroundKey: "river-landscape" },
     zeroCacheURL: "http://127.0.0.1:4948/planning/",
+    planningCacheScope: "a".repeat(64),
     modelRelayConfigured: false,
   };
   expect(browserBootstrap(input, false, "https://factory.test")).toBe(input);

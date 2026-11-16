@@ -6,10 +6,11 @@ import { expect, type WebSocketRoute } from "@playwright/test";
 import { z } from "zod";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { zeroStorageKey } from "../../packages/zero-solid/src/lifecycle";
 import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { browserFunction } from "../fixtures/server-functions";
+import { browserFunction, factoryFunctionMatcher } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("Zero drives shared reads without idle polling, preserves drafts through recovery, and fences revoked readers", async ({
@@ -58,8 +59,10 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     let socket: WebSocketRoute | undefined;
+    let holdSync = false;
     await page.routeWebSocket("**/*", (route) => {
       socket = route;
+      if (holdSync) return;
       const upstream = route.connectToServer();
       route.onMessage((message) => upstream.send(message));
       upstream.onMessage((message) => route.send(message));
@@ -98,6 +101,26 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     await expect(page.getByRole("button", { name: /open project menu$/i })).toHaveText(
       "Shared Zero proof",
     );
+    const readLocalCache = () =>
+      page.evaluate(async () => {
+        // Zero's documented inspector reads the initialized local DAG. Waiting
+        // for its read prevents an empty first render from passing this check.
+        const client = Reflect.get(globalThis, "__zero") as {
+          storageKey: string;
+          idbName: string;
+          clientGroupID: Promise<string>;
+          inspector: { client: { map(): Promise<Map<string, unknown>> } };
+        };
+        await client.clientGroupID;
+        const data = await client.inspector.client.map();
+        return {
+          storageKey: client.storageKey,
+          idbName: client.idbName,
+          hasOldProject: JSON.stringify([...data.values()]).includes("Shared Zero proof"),
+        };
+      });
+    const retainedCache = await readLocalCache();
+    expect(retainedCache.hasOldProject).toBe(true);
     await expect(
       page.locator(".ticket-card-body").filter({ hasText: "Shared invoice flow" }),
     ).toBeVisible();
@@ -378,6 +401,55 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
       await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
     ).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `${evidence}/recovered-draft-390.png`, fullPage: true });
+
+    // Same browser, origin and bootstrap administrator. The old installation's
+    // cached work must remain usable offline, but never leak into a replacement.
+    const bootstrap = await serverCall(browserFunction(page, "getBootstrap", []));
+    expect(bootstrap.planningCacheScope).toMatch(/^[a-f0-9]{64}$/);
+    holdSync = true;
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(fixture.fixtureBase);
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toHaveText(
+      "Shared Zero proof",
+    );
+    const replacementScope = "e".repeat(64);
+    expect(replacementScope).not.toBe(bootstrap.planningCacheScope);
+    let replacements = 0;
+    await page.route(await factoryFunctionMatcher("getBootstrap"), async (route) => {
+      const response = await route.fetch();
+      const body = await response.text();
+      expect(body).toContain(bootstrap.planningCacheScope);
+      replacements++;
+      await route.fulfill({
+        response,
+        body: body.replaceAll(bootstrap.planningCacheScope, replacementScope),
+      });
+    });
+    await page.reload();
+    await expect(page.getByRole("button", { name: /open project menu$/i })).toHaveText(
+      "Choose project",
+    );
+    await expect(page.getByRole("status", { name: "Shared work sync" })).toContainText(
+      "Connecting to shared updates",
+    );
+    const replacementCache = await readLocalCache();
+    expect(replacementCache.storageKey).toBe(
+      zeroStorageKey({
+        cacheScope: replacementScope,
+        schemaVersion: "factory-read-projections-v1",
+      }),
+    );
+    expect(replacementCache.idbName).not.toBe(retainedCache.idbName);
+    expect(replacementCache.hasOldProject).toBe(false);
+    expect(replacements).toBeGreaterThan(0);
+    await expect(page.getByText("Shared Zero proof", { exact: true })).toHaveCount(0);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 960 });
+      await page.screenshot({
+        path: `${evidence}/replacement-installation-offline-${width}.png`,
+        fullPage: true,
+      });
+    }
     expect(errors).toEqual([]);
   } catch (cause) {
     console.error("Owned Zero browser proof failed", cause);

@@ -8,6 +8,7 @@ test("Bootstrap projects only public session fields and reads private preference
     preference,
     policy: () => ({ companySignIn: false, sessionDays: 7 }),
     planningCacheURL: "http://127.0.0.1:4948",
+    signingKey: "owned-installation-signing-key",
     forgeOrigins: { browser: "https://forge.test", transport: "http://forge.internal" },
     modelAvailability: availability,
   });
@@ -31,4 +32,25 @@ test("Bootstrap projects only public session fields and reads private preference
   expect(JSON.stringify(result)).not.toContain("privateField");
   expect(preference).toHaveBeenCalledWith("request-user");
   expect(availability).toHaveBeenCalledTimes(2);
+});
+
+test("offline planning is scoped to the retained installation key, not its origin or administrator", async () => {
+  const options = {
+    preference: async () => ({ desktopBackgroundKey: "river-landscape" as const }),
+    policy: () => ({ companySignIn: false, sessionDays: 7 }),
+    planningCacheURL: "https://factory.test/planning",
+    forgeOrigins: { browser: "https://forge.test", transport: "http://forge.internal" },
+    modelAvailability: async () => false,
+    signingKey: "owned-first-installation-signing-key",
+  };
+  const first = await createBootstrapService(options).get(null);
+  const restarted = await createBootstrapService(options).get(null);
+  const replacement = await createBootstrapService({
+    ...options,
+    signingKey: "owned-new-installation-signing-key",
+  }).get(null);
+  expect(first.planningCacheScope).toMatch(/^[a-f0-9]{64}$/);
+  expect(restarted.planningCacheScope).toBe(first.planningCacheScope);
+  expect(replacement.planningCacheScope).not.toBe(first.planningCacheScope);
+  expect(JSON.stringify(first)).not.toContain(options.signingKey);
 });
