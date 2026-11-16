@@ -531,7 +531,7 @@ export function createAgentController(
         // a late response must never interrupt the Session's newer work.
         throw new CommandError("conflict", "Build authority changed after prompt acceptance");
       }
-      // monitor owns renewal until this exact turn settles.
+      // Keep the independent renewal timer alive while monitoring this exact turn.
       await monitor(changeID, userID, owned.id, ownerToken);
     } catch (cause) {
       if (closed) return;
@@ -1173,6 +1173,9 @@ export function createAgentController(
               throw new Error(
                 "OpenCode reported a final answer but its execution tree or queued input is not settled",
               );
+            // Shutdown can start during the final native settlement reads.
+            // Join that observation without publishing its late result.
+            if (closed) return;
             await usageJournal.settle(turnID, "completed");
             const reviewTurn = await turns.get(turnID);
             if (reviewTurn?.authority.mode === "build" && reviewTurn.authority.review) {
