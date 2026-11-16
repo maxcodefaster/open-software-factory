@@ -63,8 +63,21 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
         };
         await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,
           checkpoint_id=${sourceID} WHERE workspace_id=${workspaceID}`;
+        const [frozen] =
+          await sql`SELECT workspace_id::text AS "workspaceID",actor_uid::text AS "actorUID",
+          owner,writer_epoch::float8 AS "writerEpoch",writable,generation::float8 AS generation,
+          checkpoint_id::text AS "checkpointID" FROM factory.substrate_source WHERE workspace_id=${workspaceID}`;
+        expect(frozen).toMatchObject({
+          workspaceID,
+          actorUID: actor.metadata.uid,
+          owner: "actor",
+          writerEpoch: 2,
+          writable: false,
+          generation: 0,
+          checkpointID: sourceID,
+        });
         await sql`UPDATE factory.substrate_source SET generation=1,
-          checkpoint=${JSON.stringify(checkpoint)}::jsonb WHERE workspace_id=${workspaceID}`;
+          checkpoint=${JSON.stringify(checkpoint)}::text::jsonb WHERE workspace_id=${workspaceID}`;
         effects.push("source-frozen");
       },
       async paused(workspaceID, sql) {
@@ -156,7 +169,7 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
           environment: { version: 0, secretKey: null },
           declaredApps: ["app"],
           egressHosts: f.config.egressHosts ?? [],
-        })}::jsonb,${original.metadata.uid},${original.metadata.createTime},${JSON.stringify(original)}::jsonb)`;
+        })}::text::jsonb,${original.metadata.uid},${original.metadata.createTime},${JSON.stringify(original)}::text::jsonb)`;
       const resume = await intendActorRPCIn(sql, f.attemptID, "resume", null, original);
       await dispatchActorRPCIn(sql, f.attemptID, resume);
       original.metadata.version = "2";
@@ -165,7 +178,7 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
         lastAssignedGeneration: 0,
         workerAssignment: { sandboxRuntime: f.config.runtime },
       };
-      await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(original)}::jsonb
+      await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(original)}::text::jsonb
         WHERE runtime_attempt_id=${f.attemptID}`;
       await observeActorRPCIn(sql, f.attemptID, resume, original);
       await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;

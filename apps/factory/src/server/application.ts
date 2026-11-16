@@ -286,10 +286,10 @@ export async function createFactoryApplication() {
       : undefined;
   runtimeController = createRuntimeController(database, runtimeHub, runtimeSecret, {
     configuration: nativeSetup,
-    stopCoding: async (changeID) => {
+    stopCoding: async (changeID, handoff) => {
       if (!agentController)
         throw new CommandError("unavailable", "Coding Stop is not ready; compute was retained");
-      await agentController.stop(changeID);
+      await agentController.stop(changeID, handoff);
     },
     ...(workspaceSources.substrate ? { sources: workspaceSources.substrate } : {}),
     ...(nativeCapacity ? { capacity: nativeCapacity } : {}),

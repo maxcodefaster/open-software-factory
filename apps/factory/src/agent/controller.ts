@@ -43,7 +43,7 @@ import { observeOpenCodeUsage } from "./opencode-usage";
 import { createReviewAdmission } from "./review-admission";
 import { waitForBuildSandbox } from "./runtime-readiness";
 import { createSessionArchives } from "./session-archive-store";
-import { createChangeAgentStop, type RetainedStopTarget } from "./stop";
+import { createChangeAgentStop, type PendingWriterHandoff, type RetainedStopTarget } from "./stop";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
 import {
@@ -1620,8 +1620,8 @@ export function createAgentController(
       return this.get(changeID, accepted.turn.id);
     },
 
-    async stop(changeID: string) {
-      await stop.persist(changeID);
+    async stop(changeID: string, handoff?: PendingWriterHandoff) {
+      await stop.persist(changeID, handoff);
       notifyActivity(changeID);
       await browser?.closeChange(changeID);
       try {
@@ -1897,6 +1897,11 @@ export function createAgentController(
         ORDER BY sequence DESC LIMIT 1
       `;
       const failed = turn?.state === "uncertain" || turn?.state === "failed";
+      const preparingNewTurn = Boolean(
+        turn &&
+          turn.id !== session.activeTurnID &&
+          (turn.state === "pending" || turn.state === "dispatching"),
+      );
       const pendingCommits = await database.client<
         Array<{
           id: string;
@@ -1910,8 +1915,9 @@ export function createAgentController(
         codingPause: codingPause ?? null,
         computeWait: waiting?.reason ?? null,
         transcriptArchive,
-        state:
-          session.state === "stopped"
+        state: preparingNewTurn
+          ? "starting"
+          : session.state === "stopped"
             ? "stopped"
             : failed
               ? "failed"
@@ -1925,7 +1931,7 @@ export function createAgentController(
             ? `Execution outcome uncertain. Stop or resolve this turn before new Build work. ${turn.summary ?? ""}`
             : failed
               ? (turn?.summary ?? session.lastError)
-              : turn?.state === "pending" && turn.id !== session.activeTurnID
+              : preparingNewTurn
                 ? null
                 : session.lastError,
         commitSHA: operations[0]?.commitSHA ?? null,
@@ -1937,8 +1943,8 @@ export function createAgentController(
           session.implementationSessionID && session.implementationSessionConfirmed,
         ),
         runtimeConnected: hub.connected(activityAttemptID),
-        stopPending: session.stopPending,
-        stopId: session.stopPending ? session.stopID : null,
+        stopPending: !preparingNewTurn && session.stopPending,
+        stopId: !preparingNewTurn && session.stopPending ? session.stopID : null,
       };
     },
   };

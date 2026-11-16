@@ -20,7 +20,11 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
 import { createOpenCodeClient } from "../agent/opencode-client";
-import { type RetainedStopTarget, requireStoppedAgentInputsIn } from "../agent/stop";
+import {
+  type PendingWriterHandoff,
+  type RetainedStopTarget,
+  requireStoppedAgentInputsIn,
+} from "../agent/stop";
 import { CommandError } from "../command-error";
 import { admitComputeIn } from "../usage/compute";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
@@ -1149,11 +1153,11 @@ export function createSubstrateExecution(
     async suspend() {
       return locked(suspendIn);
     },
-    async stop() {
+    async stop(handoff?: PendingWriterHandoff) {
       return locked(async (sql) => {
         let saved = await binding(sql);
         if (saved.deleted) return;
-        if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID);
+        if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
         // Terminal turns can still receive auxiliary consumption. Retain their
         // bounded native log replay before Pause/Stop revokes the live channel.
         // A missing log is unknown coverage, never evidence of zero usage.
@@ -1184,7 +1188,7 @@ export function createSubstrateExecution(
         await sql`UPDATE factory.substrate_binding SET delete_intended_at=COALESCE(delete_intended_at,now()) WHERE runtime_attempt_id=${attemptID}`;
         hub.revoke(attemptID);
         saved = await binding(sql);
-        if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID);
+        if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
         await profile();
         const value = await getActor();
         if (value) {

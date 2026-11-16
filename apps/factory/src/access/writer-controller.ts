@@ -1,5 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { forgeUsername } from "../../../../packages/forge/src/access";
+import type { PendingWriterHandoff } from "../agent/stop";
 import { CommandError } from "../command-error";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { lockChangeWriterIn } from "./change-writer";
@@ -30,7 +31,7 @@ type WriterView = {
   requests: { id: string; requester: { id: string; name: string }; epoch: number }[];
 };
 type RuntimeBoundary = {
-  stop(attemptID: string): Promise<unknown>;
+  stop(attemptID: string, handoff?: PendingWriterHandoff): Promise<unknown>;
   get(attemptID: string): Promise<Pick<RuntimeAttemptView, "state" | "native"> | null>;
 };
 export function createChangeWriterController(options: {
@@ -59,9 +60,9 @@ export function createChangeWriterController(options: {
       }
     }
   }
-  async function stopped(attemptID: string | null) {
+  async function stopped(attemptID: string | null, handoff?: PendingWriterHandoff) {
     if (!attemptID) return true;
-    await options.runtime.stop(attemptID);
+    await options.runtime.stop(attemptID, handoff);
     const deadline = performance.now() + (options.stopDeadlineMs ?? 45_000);
     for (;;) {
       const attempt = await options.runtime.get(attemptID);
@@ -369,7 +370,11 @@ export function createChangeWriterController(options: {
           await options.fenceSource?.(changeID, current.epoch, false);
           await options.protect(changeID, []);
         });
-        if (writer.fenceRequired && !(await stopped(writer.fenceAttemptID))) return false;
+        if (
+          writer.fenceRequired &&
+          !(await stopped(writer.fenceAttemptID, { turnID, epoch: writer.epoch }))
+        )
+          return false;
         await database.client.begin(async (sql) => {
           const current = await lockChangeWriterIn(sql, changeID);
           if (

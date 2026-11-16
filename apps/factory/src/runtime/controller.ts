@@ -12,7 +12,9 @@ import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import {
   createChangeAgentStop,
+  type PendingWriterHandoff,
   type RetainedStopTarget,
+  requirePendingWriterHandoffIn,
   requireStoppedAgentInputsIn,
 } from "../agent/stop";
 import { CommandError } from "../command-error";
@@ -41,7 +43,7 @@ export type RuntimeControllerOptions = {
   provisionerCall?: SubstrateCall;
   sources?: SubstrateSourceHandoff;
   capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "ensure" | "requireReady">;
-  stopCoding?: (changeID: string) => Promise<unknown>;
+  stopCoding?: (changeID: string, handoff?: PendingWriterHandoff) => Promise<unknown>;
 };
 
 // Factory owns commands, authority and persisted intent. There is exactly one
@@ -386,8 +388,9 @@ export function createRuntimeController(
       }
       return this.get(attemptID);
     },
-    async stop(attemptID: string) {
+    async stop(attemptID: string, handoff?: PendingWriterHandoff) {
       clearReconnect(attemptID);
+      if (handoff) await requirePendingWriterHandoffIn(database.client, attemptID, handoff);
       const [coding] = await database.client<{ changeID: string }[]>`
         SELECT change.id AS "changeID" FROM factory.runtime_attempt attempt
         JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
@@ -400,17 +403,17 @@ export function createRuntimeController(
         ? createChangeAgentStop(database, hub, undefined, (id) => this.get(id))
         : undefined;
       if (coding && codingStop) {
-        if (options.stopCoding) await options.stopCoding(coding.changeID);
+        if (options.stopCoding) await options.stopCoding(coding.changeID, handoff);
         else {
-          await codingStop.persist(coding.changeID);
+          await codingStop.persist(coding.changeID, handoff);
           await codingStop.confirm(coding.changeID);
         }
       }
       // Do not hold the native Workspace lock while taking Turn locks or
       // waiting for ordered engine HTTP. The adapter checks this barrier again
       // under its own lifecycle lock before snapshot or deletion.
-      await requireStoppedAgentInputsIn(database.client, attemptID);
-      await (await execution(attemptID)).stop();
+      await requireStoppedAgentInputsIn(database.client, attemptID, handoff);
+      await (await execution(attemptID)).stop(handoff);
       if (coding && codingStop && !(await codingStop.confirm(coding.changeID)))
         throw new CommandError("unavailable", "Compute stopped but Coding Stop is not confirmed");
       return this.get(attemptID);

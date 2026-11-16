@@ -1,8 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
-import { CommandError } from "../command-error";
-import type { AgentTurnTransaction } from "./turn-store";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import {
   cancelQueuedOpenCodeInput,
@@ -12,6 +11,7 @@ import {
   interruptOpenCodeSession,
 } from "./opencode-client";
 import { createStopTransport } from "./stop-transport";
+import type { AgentTurnTransaction } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type StopTarget = { stopID: string | null; turnID: string | null };
@@ -162,9 +162,17 @@ export function createChangeAgentStop(
           stop_pending = true, active_inbox_id = NULL, updated_at = now()
           WHERE change_id = ${changeID} AND (stop_pending OR state <> 'stopped' OR ${turns[0]?.id ?? null}::uuid IS NOT NULL)
           RETURNING stop_id AS "stopID", stop_turn_id AS "turnID"`;
-        return rows[0] ?? { stopID: null, turnID: turns[0]?.id ?? null };
+        return {
+          ...(rows[0] ?? { stopID: null, turnID: turns[0]?.id ?? null }),
+          pendingTurnID: handoff ? null : (turns[0]?.id ?? null),
+        };
       });
       await settleTarget(changeID, target);
+      // A writer handoff may already be settling its old Session. An explicit
+      // Stop must also cancel the captured new admission, without replacing
+      // that original native-input Stop identity.
+      if (target.pendingTurnID && target.pendingTurnID !== target.turnID)
+        await settleTarget(changeID, { stopID: null, turnID: target.pendingTurnID });
     },
 
     async recordUnconfirmed(

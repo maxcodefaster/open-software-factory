@@ -64,6 +64,7 @@ async function currentAuthorityIn(
   database: Database,
   sql: AgentTurnTransaction,
   record: AgentTurnRecord,
+  renewingPreparation = false,
 ) {
   const { command, authority } = record;
   if (authority.mode === "build" && "changeId" in command) {
@@ -148,8 +149,21 @@ async function currentAuthorityIn(
     if (!candidate) return false;
   }
   const stopping = await sql<Array<{ id: string }>>`
-    SELECT change_id AS id FROM factory.change_agent_session
-      WHERE change_id = ${command.changeId} AND stop_pending`;
+    SELECT session.change_id AS id FROM factory.change_agent_session session
+      WHERE session.change_id = ${command.changeId} AND session.stop_pending
+        AND NOT (${renewingPreparation && record.state === "pending"}
+          AND session.stop_turn_id IS DISTINCT FROM ${record.id}::uuid
+          AND EXISTS(
+            SELECT 1 FROM factory.change_writer writer
+            JOIN factory.change change ON change.id=writer.change_id
+              AND change.runtime_attempt_id=session.runtime_attempt_id
+            JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
+              AND attempt.change_id=change.id AND attempt.substrate
+            JOIN factory.change_agent_turn_intent intent ON intent.turn_id=writer.turn_id
+              AND intent.change_id=change.id AND intent.runtime_attempt_id IS NULL
+            WHERE writer.change_id=change.id AND writer.turn_id=${record.id}
+              AND writer.state='agent-preparing' AND writer.fence_required
+              AND writer.fence_attempt_id=attempt.id))`;
   if (stopping[0]) return false;
   const conversations = await sql<
     Array<{ id: string; mode: string; version: number; contextID: string | null }>
@@ -441,7 +455,9 @@ export function createAgentTurnStore(database: Database) {
         const [owned] = await sql<
           TurnRow[]
         >`SELECT * FROM factory.agent_turn WHERE id=${id} AND owner_token=${ownerToken} FOR UPDATE`;
-        if (!owned || !(await currentAuthorityIn(database, sql, turn(owned)))) return false;
+        // Renew only the current pending preparation while its previous input
+        // settles. Ordinary execution validation still rejects that Stop.
+        if (!owned || !(await currentAuthorityIn(database, sql, turn(owned), true))) return false;
         const rows = await sql<Array<{ id: string }>>`
         UPDATE factory.agent_turn SET owner_expires_at = clock_timestamp() + ${duration} * interval '1 millisecond',
           updated_at = now()
