@@ -15,6 +15,7 @@ import type { AgentTurnTransaction } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type StopTarget = { stopID: string | null; turnID: string | null };
+type StopOrigin = "user" | "authority-loss";
 export type PendingWriterHandoff = { turnID: string; epoch: string };
 export type RetainedStopTarget = {
   changeID: string;
@@ -113,19 +114,25 @@ export function createChangeAgentStop(
   observeRuntime?: (attemptID: string) => Promise<RuntimeAttemptView | null>,
 ) {
   const usage = createRecordedOpenCodeUsage(database);
-  async function settleTarget(changeID: string, target: StopTarget) {
+  async function settleTarget(changeID: string, target: StopTarget, origin?: StopOrigin) {
     if (!target.turnID) return;
+    const summary =
+      origin === "user"
+        ? "Stopped by the user"
+        : origin === "authority-loss"
+          ? "Stopped because execution authority could not be renewed"
+          : "Execution stopped";
     // Never hold Change while waiting on Turn: execution locks Turn first.
     // A delayed caller can affect only the Turn captured when its Stop began.
     await database.client`UPDATE factory.agent_turn SET state = 'stopped',
       owner_token = NULL, owner_expires_at = NULL,
-      outcome_summary = 'Stopped by the user', updated_at = now()
+      outcome_summary = ${summary}, updated_at = now()
       WHERE id = ${target.turnID} AND change_id = ${changeID}
         AND state IN ('pending', 'dispatching', 'running', 'uncertain')`;
   }
 
   return {
-    async persist(changeID: string, handoff?: PendingWriterHandoff) {
+    async persist(changeID: string, handoff?: PendingWriterHandoff, origin: StopOrigin = "user") {
       // Admission locks Change/Ticket before reading the barrier. Publish it
       // without waiting for any Turn lock: execution locks Turn before Change.
       const target = await database.client.begin(async (sql) => {
@@ -167,12 +174,12 @@ export function createChangeAgentStop(
           pendingTurnID: handoff ? null : (turns[0]?.id ?? null),
         };
       });
-      await settleTarget(changeID, target);
+      await settleTarget(changeID, target, origin);
       // A writer handoff may already be settling its old Session. An explicit
       // Stop must also cancel the captured new admission, without replacing
       // that original native-input Stop identity.
       if (target.pendingTurnID && target.pendingTurnID !== target.turnID)
-        await settleTarget(changeID, { stopID: null, turnID: target.pendingTurnID });
+        await settleTarget(changeID, { stopID: null, turnID: target.pendingTurnID }, origin);
     },
 
     async recordUnconfirmed(
@@ -249,7 +256,8 @@ export function createChangeAgentStop(
       const current = rows[0];
       if (!current) return true;
       // Recovery fences the captured Turn after a crash between publication
-      // and settlement. Admission remains blocked throughout.
+      // and settlement. Admission remains blocked throughout. Stop intent has
+      // no persisted caller origin, so this settlement must stay neutral.
       await settleTarget(changeID, current);
       if (current.currentAttemptID !== current.attemptID) return false;
       // A fresh Session cannot receive its prompt before native confirmation

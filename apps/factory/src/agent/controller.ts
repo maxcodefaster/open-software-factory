@@ -1049,7 +1049,9 @@ export function createAgentController(
 
   async function renewExecution(turnID: string, ownerToken: string) {
     const renewed = await turns.renew(turnID, ownerToken);
-    if (renewed) await browser?.renewTurn(turnID, ownerToken);
+    // Browser renewal coalesces per turn and can await slow owned cleanup.
+    // Join it as background work without occupying the owner keepalive.
+    if (renewed && !closed && browser) run(browser.renewTurn(turnID, ownerToken));
     return renewed;
   }
 
@@ -1078,11 +1080,26 @@ export function createAgentController(
         }
         if (session.state !== "working") return;
         if (!(await renewExecution(turnID, ownerToken))) {
-          const current = await turns.get(turnID);
+          const [current] = await database.client<
+            { ownerExpiresAt: string | null; observedAt: string; expired: boolean }[]
+          >`WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS at)
+            SELECT turn.owner_expires_at::text AS "ownerExpiresAt",
+              observation.at::text AS "observedAt",
+              COALESCE(turn.owner_expires_at <= observation.at,false) AS expired
+            FROM factory.agent_turn turn CROSS JOIN observation
+            WHERE turn.id=${turnID} AND turn.change_id=${changeID}
+              AND turn.owner_token=${ownerToken} AND turn.state='running'`;
           // A completed Stop or another owner is not a new Stop request. Actual
           // revoked execution is fenced before asking the engine to settle.
-          if (current?.ownerToken === ownerToken && current.state === "running") {
-            await stop.persist(changeID);
+          if (current) {
+            console.warn("[factory] Coding ownership renewal refused", {
+              turnID,
+              changeID,
+              ownerExpiresAt: current.ownerExpiresAt,
+              observedAt: current.observedAt,
+              expired: current.expired,
+            });
+            await stop.persist(changeID, undefined, "authority-loss");
             run(reconcileStop(changeID));
           }
           return;
