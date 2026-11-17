@@ -164,7 +164,8 @@ export async function createFactoryApplication() {
           token: forgeAdminToken,
         }),
         owner: forgeOwner,
-        origin: new URL(forgeAPIURL).origin,
+        origin: forgeTransportOrigin,
+        publicOrigin: forgePublicOrigin,
       })
     : undefined;
   let runtimeController: ReturnType<typeof createRuntimeController>;

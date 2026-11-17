@@ -7,9 +7,11 @@ export function createForgeAccessReconciliation(options: {
   database: Database;
   forge: ReturnType<typeof createForgejoAccess>;
   owner: string;
-  origin?: string;
+  origin: string;
+  publicOrigin: string;
 }) {
   const { database, forge, owner } = options;
+  const origins = new Set([new URL(options.origin).origin, new URL(options.publicOrigin).origin]);
   async function protectMain(projectID: string, repository: string, branch: string) {
     const sql = database.coordination();
     try {
@@ -119,8 +121,8 @@ export function createForgeAccessReconciliation(options: {
           FROM factory.project project ORDER BY project.id`;
         // A Project hosted elsewhere has no repository here to grant on. It must not stop the
         // grants of the Projects that are.
-        const projects = everyProject.filter(
-          (project) => !options.origin || new URL(project.repositoryURL).origin === options.origin,
+        const projects = everyProject.filter((project) =>
+          origins.has(new URL(project.repositoryURL).origin),
         );
         await forge.removeAlternativeGrants(
           userID,
@@ -136,7 +138,7 @@ export function createForgeAccessReconciliation(options: {
               repository.password ||
               repository.search ||
               repository.hash ||
-              (options.origin && repository.origin !== options.origin) ||
+              !origins.has(repository.origin) ||
               repository.pathname.replace(/\.git$/, "") !== `/${owner}/${project.slug}`)
           )
             throw new Error("Factory Project repository differs from its recorded forge identity");

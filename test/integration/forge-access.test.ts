@@ -222,6 +222,8 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       database,
       forge: access,
       owner: repository.owner,
+      origin,
+      publicOrigin: origin,
     });
     await reconcile.reconcile(id);
     // Both clone URL spellings identify the same exact Factory-owned repository.
