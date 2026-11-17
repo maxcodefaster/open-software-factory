@@ -977,10 +977,11 @@ await fs.chmod("/forgejo/data/forgejo.db", 0o600);`,
       // No server, hooks, migrations or restored executable files are started.
       await exec(
         "forgejo",
-        `set -eu
-export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
-${f.witnesses.forgejo.repositories.map((repo) => `git --git-dir=${shellQuote(`/var/lib/gitea/git/repositories/${repo.slice(6)}`)} fsck --full --strict >/dev/null 2>&1`).join("\n")}
-`,
+        forgejoWitnessProgram(
+          f.witnesses.forgejo.repositories.map(
+            (repo) => `/var/lib/gitea/git/repositories/${repo.slice(6)}`,
+          ),
+        ),
         "sh",
       );
     });
@@ -1110,6 +1111,22 @@ bao operator raft snapshot restore -force /control/openbao.snap >/dev/null 2>&1
 
 function shellQuote(value: string) {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+export function forgejoWitnessProgram(repositories: string[]) {
+  return `set -eu
+export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
+${repositories
+  .map(
+    (repo) => `# Restored config, including includes, must not weaken the independent check.
+if git --git-dir=${shellQuote(repo)} config --includes --get-regexp '^fsck\\.' >/dev/null 2>&1; then
+  exit 1
+else
+  test "$?" -eq 1
+fi
+git --git-dir=${shellQuote(repo)} fsck --full --strict >/dev/null 2>&1`,
+  )
+  .join("\n")}
+`;
 }
 export function postgresWitnessProgram(tables: Record<string, Digest>, foreignKeys: string) {
   const names = Object.keys(tables).sort();
@@ -1301,6 +1318,7 @@ export async function restoreFiles(config: {
         .replace(/\0.*$/, "");
     const wanted = new Map(expected.map((entry) => [entry.path, entry]));
     const seen = new Set<string>();
+    const symlinks = new Map<string, Map<string, string>>();
     const snapshotHashes = new Map<string, string>();
     let sums = "";
     let extensions: Record<string, string> = {};
@@ -1416,6 +1434,9 @@ export async function restoreFiles(config: {
           const root = target?.root ?? "/checked-archive";
           const rel = path.relative(root, path.resolve(path.dirname(base), link));
           if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) fail();
+          const links = symlinks.get(root) ?? new Map<string, string>();
+          links.set(path.relative(root, base), link);
+          symlinks.set(root, links);
         }
         const output =
           target && !config.verifyOnly ? path.join(target.root, target.relative) : null;
@@ -1467,6 +1488,30 @@ export async function restoreFiles(config: {
           )
             fail();
       } else if (seen.size !== wanted.size) fail();
+      // Resolve components in filesystem order, not with path.resolve: a/.. can escape
+      // when a itself points to ".". Check forward references too, before extraction.
+      for (const links of symlinks.values())
+        for (const name of links.keys()) {
+          let pending = name.split("/");
+          const resolved: string[] = [];
+          let hops = 0;
+          while (pending.length) {
+            const component = pending.shift();
+            if (!component || component === ".") continue;
+            if (component === "..") {
+              if (!resolved.length) fail();
+              resolved.pop();
+              continue;
+            }
+            resolved.push(component);
+            const target = links.get(resolved.join("/"));
+            if (target !== undefined) {
+              if (!target || ++hops > 40) fail();
+              resolved.pop();
+              pending = [...target.split("/"), ...pending];
+            }
+          }
+        }
       for (const entry of directories.reverse()) {
         await fs.chown(entry.file, entry.uid, entry.gid);
         await fs.chmod(entry.file, entry.mode);

@@ -258,14 +258,14 @@ test("isolated restore launches only quarantined data services and offline clien
     tools: ["node", upstream.node.image, "-e", "setInterval(()=>{},2147483647)"],
     postgres: [
       "docker-entrypoint.sh",
-      images.postgres ?? "",
+      images["postgres"] ?? "",
       "postgres",
       "-c",
       "listen_addresses=",
       "-c",
       "wal_level=logical",
     ],
-    forgejo: ["sh", images.forgejo ?? "", "-c", "while :; do sleep 3600; done"],
+    forgejo: ["sh", images["forgejo"] ?? "", "-c", "while :; do sleep 3600; done"],
     garage: [
       "/garage",
       upstream.garage.image,
@@ -363,6 +363,12 @@ test("isolated restore launches only quarantined data services and offline clien
       if (role === "forgejo")
         expect(input).toBe(`set -eu
 export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
+# Restored config, including includes, must not weaken the independent check.
+if git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' config --includes --get-regexp '^fsck\\.' >/dev/null 2>&1; then
+  exit 1
+else
+  test "$?" -eq 1
+fi
 git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --strict >/dev/null 2>&1
 `);
     }
