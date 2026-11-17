@@ -145,7 +145,7 @@ stall_exec() {
 if [ "$container" = postgres ]; then
   case "$*" in
     *'exec pg_dump '*) phase=postgres.dump ;;
-    'pg_restore --list') phase=postgres.validate ;;
+    *'pg_restore --list'*) phase=postgres.validate ;;
     *'exec psql '*) phase=postgres.orphans ;;
     *) exit 2 ;;
   esac
@@ -153,6 +153,15 @@ if [ "$container" = postgres ]; then
     POSTGRES_PASSWORD=fixture-postgres-password "$@" || exit $?
     stall_exec
     exit 0
+  fi
+  if [ "$phase" = postgres.validate ] && [ "\${REQUIRE_VALIDATION_EOF:-0}" = 1 ]; then
+    POSTGRES_PASSWORD=fixture-postgres-password "$@"
+    status=$?
+    if [ -n "$(cat)" ]; then
+      echo "CONTROL validation left unread input; exec completion is unconfirmed" >&2
+      exit 124
+    fi
+    exit "$status"
   fi
   POSTGRES_PASSWORD=fixture-postgres-password exec "$@"
 fi
@@ -176,6 +185,12 @@ printf 'fixture postgres dump'
   await executable(
     "pg_restore",
     `#!/bin/sh
+if [ "\${EARLY_RESTORE_READER:-0}" = 1 ]; then
+  # pg_restore --list reads the header/TOC, not all archive data.
+  dd bs=1 count=5 of=/dev/null 2>/dev/null
+  [ "\${FAIL_POSTGRES_RESTORE:-0}" = 0 ]
+  exit $?
+fi
 [ "\${FAIL_POSTGRES_RESTORE:-0}" = 0 ] && [ "$(cat)" = 'fixture postgres dump' ]
 `,
   );
@@ -357,6 +372,29 @@ test("runner termination signals its step and leaves an incomplete set without u
     await f.close();
   }
 }, 15_000);
+
+test.each([false, true])(
+  "validation drains early-reader stdin without hiding pg_restore failure=%p",
+  async (fail) => {
+    const f = await fixture();
+    try {
+      const [code, , diagnostics] = await f.start("first", {
+        REQUIRE_VALIDATION_EOF: "1",
+        EARLY_RESTORE_READER: "1",
+        FAIL_POSTGRES_RESTORE: fail ? "1" : "0",
+      }).result;
+      expect(diagnostics).not.toContain("CONTROL validation left unread input");
+      expect(code === 0).toBe(!fail);
+      expect(await f.exists(`${firstSet}/postgres.ok`)).toBe(!fail);
+      expect(await f.exists(`${firstSet}/postgres.failed`)).toBe(fail);
+      expect(await f.exists(`${firstSet}/COMPLETE`)).toBe(!fail);
+      await f.unlocked();
+    } finally {
+      await f.close();
+    }
+  },
+  10_000,
+);
 
 test.each([
   ["postgres.dump", "postgres", 5],

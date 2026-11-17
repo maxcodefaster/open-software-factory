@@ -10,8 +10,14 @@ dump() {
     'export PGPASSWORD="$POSTGRES_PASSWORD"
      exec pg_dump --format=custom --no-password --username=factory --dbname=factory' \
     > "$DIR/postgres.dump.part" &&
-    sh /scripts/run.sh exec postgres.validate kubectl exec --stdin --namespace "$BACKUP_NAMESPACE" "$POSTGRES_POD" --container postgres -- \
-      pg_restore --list < "$DIR/postgres.dump.part" > /dev/null &&
+    # Listing reads only the archive header/TOC. Keep the remote stdin consumer alive
+    # until all bytes arrive, or exec can wait forever after pg_restore has exited.
+    # Drain even after a validation error, without replacing that error with cat's status.
+    sh /scripts/run.sh exec postgres.validate kubectl exec --stdin --namespace "$BACKUP_NAMESPACE" "$POSTGRES_POD" --container postgres -- sh -c \
+      'pg_restore --list > /dev/null
+       status=$?
+       cat > /dev/null || exit 1
+       exit "$status"' < "$DIR/postgres.dump.part" > /dev/null &&
     mv "$DIR/postgres.dump.part" "$DIR/postgres.dump"
 }
 
