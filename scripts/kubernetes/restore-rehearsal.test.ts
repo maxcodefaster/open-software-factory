@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Execute,
+  forgejoWitnessProgram,
   images,
   invocation,
   loadFixture,
@@ -305,6 +306,11 @@ test.each([
   "valid",
   "traversal",
   "absolute symlink",
+  "confined symlink chain",
+  "escaping symlink chain",
+  "cyclic symlink",
+  "40-link chain",
+  "41-link chain",
   "hash",
   "snapshot",
   "extra member",
@@ -328,6 +334,40 @@ test.each([
           sha256: hash("/original/native"),
           link: "/original/native",
         });
+      }
+      if (
+        boundary === "confined symlink chain" ||
+        boundary === "escaping symlink chain" ||
+        boundary === "cyclic symlink" ||
+        boundary === "40-link chain" ||
+        boundary === "41-link chain"
+      ) {
+        const count = boundary === "40-link chain" ? 40 : 41;
+        const links =
+          boundary === "40-link chain" || boundary === "41-link chain"
+            ? Array.from({ length: count }, (_, i) => [
+                `link-${i}`,
+                i === count - 1 ? "kubernetes-installation.json" : `link-${i + 1}`,
+              ])
+            : boundary === "confined symlink chain"
+              ? [
+                  ["nested/second", "first"],
+                  ["nested/first", "../kubernetes-installation.json"],
+                ]
+              : boundary === "escaping symlink chain"
+                ? [
+                    ["second", "first/../outside"],
+                    ["first", "."],
+                  ]
+                : [
+                    ["second", "first"],
+                    ["first", "second"],
+                  ];
+        for (const [name, link] of links) {
+          if (!name || !link) throw Error("Missing synthetic link");
+          stateEntries.push({ name, type: "2", link });
+          f.witness.state.files.push({ path: name, bytes: 0, sha256: hash(link), link });
+        }
       }
       if (boundary === "hash")
         stateEntries[0] = { name: "./kubernetes-installation.json", content: "modified" };
@@ -381,11 +421,83 @@ test.each([
         diskBytes: 1,
         verifyOnly: true,
       });
-      if (boundary === "valid") await checked;
+      if (
+        boundary === "valid" ||
+        boundary === "confined symlink chain" ||
+        boundary === "40-link chain"
+      )
+        await checked;
       else await expect(checked).rejects.toThrow();
       for (const directory of ["control", "state", "forgejo", "forgejo-config"])
         expect(await Array.fromAsync(new Bun.Glob("**/*").scan(join(root, directory)))).toEqual([]);
       expect(await Bun.file(join(f.root, "escape")).exists()).toBe(false);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["valid", "fsck override", "included fsck override", "invalid config"] as const)(
+  "the exact Forgejo Git validator handles %s without trusting restored fsck policy",
+  async (boundary) => {
+    const f = await fixture();
+    try {
+      const repo = join(f.root, "repository.git");
+      const env = {
+        PATH: process.env["PATH"] ?? "",
+        HOME: f.root,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      };
+      const git = async (args: string[], input = "") => {
+        const child = Bun.spawn(["git", ...args], {
+          env,
+          stdin: new Blob([input]),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect(code, stderr).toBe(0);
+        return stdout.trim();
+      };
+      await git(["init", "--bare", repo]);
+      const prefix = [`--git-dir=${repo}`];
+      const tree = await git([...prefix, "mktree"]);
+      if (boundary === "fsck override" || boundary === "included fsck override") {
+        const commit = await git(
+          [...prefix, "hash-object", "-w", "--literally", "-t", "commit", "--stdin"],
+          `tree ${tree}\nauthor MissingEmail 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nsynthetic malformed commit\n`,
+        );
+        await git([...prefix, "update-ref", "refs/heads/main", commit]);
+        const config = "[fsck]\nmissingEmail = ignore\n";
+        if (boundary === "fsck override") {
+          await git([...prefix, "config", "fsck.missingEmail", "ignore"]);
+        } else {
+          const included = join(f.root, "included-config");
+          await writeFile(included, config);
+          await git([...prefix, "config", "include.path", included]);
+        }
+        // The old command accepts this damaged repository because its restored policy wins.
+        await git([...prefix, "fsck", "--full", "--strict"]);
+      }
+      if (boundary === "invalid config") await writeFile(join(repo, "config"), "[invalid");
+      const child = Bun.spawn(["sh", "-s"], {
+        env,
+        stdin: new Blob([forgejoWitnessProgram([repo])]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(code === 0, stderr).toBe(boundary === "valid");
+      expect(stdout).toBe("");
     } finally {
       await f.close();
     }
@@ -628,7 +740,7 @@ test.each([
 ] as const)("refuses %s before creating any evidence or destination", async (boundary) => {
   const f = await fixture();
   try {
-    if (boundary === "pin") f.value.images.postgres = "postgres:16";
+    if (boundary === "pin") f.value.images["postgres"] = "postgres:16";
     if (boundary === "owner") f.value.owner = "b".repeat(32);
     if (boundary === "overlap") f.value.retained.paths.push(f.value.evidenceDirectory);
     if (boundary === "witness") delete f.witness.postgres["factory.substrate_binding"];

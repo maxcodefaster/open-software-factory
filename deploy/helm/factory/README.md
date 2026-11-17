@@ -704,6 +704,8 @@ has `"link": "relative target"`, zero `bytes`, and the SHA-256 of its target tex
 no inventory entry. The streaming verifier refuses traversal, duplicate files, unlisted files,
 missing witnesses, bad checksums, truncation, escaping symlinks, hard links, sparse files, devices,
 FIFOs and unknown tar extensions. USTAR, GNU long names and supported per-file PAX fields work.
+Symlink chains are checked in filesystem resolution order, including forward references.
+Escaping, cyclic or longer-than-40-link chains fail the archive scan rather than being extracted.
 Unsupported retained file metadata or archive types require separate implementation and proof;
 they are not silently dropped or counted as restored.
 
@@ -730,7 +732,10 @@ The actual restore operations are the normal ones:
    digests and FK integrity. Historical namespace, Actor, pool, UID and Writer identities stay intact.
 2. Extract Forgejo files into fresh volumes, discard the archived live SQLite copy, execute
    `forgejo-db.sql`, run `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, and compare all SQL
-   witnesses. The pinned Forgejo image runs only `git fsck --full --strict` for every bare repository.
+   witnesses. The pinned Forgejo image runs only read-only Git configuration checks and
+   `git fsck --full --strict` for every bare repository. The Git check refuses restored `fsck.*`
+   configuration, including included configuration files, so repository-local policy cannot
+   suppress integrity errors.
    Neither its server nor restored hooks or application code run.
 3. Start empty Garage with fresh rehearsal-only credentials. Run `rclone copy` and
    `rclone check --download` against its internal bucket. Input object contents are independently
