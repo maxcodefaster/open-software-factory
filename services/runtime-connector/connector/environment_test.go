@@ -258,6 +258,10 @@ func TestEnvironmentFilesColdRecoveryRejectsUnconfirmedPointers(t *testing.T) {
 				if err := os.Mkdir(oldRoot, 0755); err != nil {
 					t.Fatal(err)
 				}
+				// Creation respects umask; this fixture must actually be public.
+				if err := os.Chmod(oldRoot, 0755); err != nil {
+					t.Fatal(err)
+				}
 			case "regular-pointer":
 				if err := os.WriteFile(build, []byte("not ours"), 0600); err != nil {
 					t.Fatal(err)

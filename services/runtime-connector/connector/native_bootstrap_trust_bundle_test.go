@@ -145,6 +145,10 @@ func TestNativeBootstrapTrustRefusesUnsafeRetainedPathsWithoutRepair(t *testing.
 				err = os.Symlink(target, path)
 			case "public-file":
 				err = os.WriteFile(path, certificate, 0644)
+				// Do not let a private test runner's umask repair the unsafe fixture.
+				if err == nil {
+					err = os.Chmod(path, 0644)
+				}
 			case "file-directory":
 				err = os.Mkdir(path, 0600)
 			case "hardlink":
