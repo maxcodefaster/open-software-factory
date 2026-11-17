@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -75,6 +76,11 @@ func runNativeLifecycle(ctx context.Context, assignment Assignment, result devco
 	args := []string{"run-user-commands", "--container-id", result.ContainerID,
 		"--workspace-folder", assignment.WorkspaceFolder,
 		"--config", filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath),
+		// Match up's identity labels. Without them CLI 0.89.0 infers its
+		// default labels and appends the Project hooks to the same hooks
+		// already stored in this container's devcontainer.metadata.
+		"--id-label", attemptLabel + "=" + assignment.RuntimeAttemptID,
+		"--id-label", generationLabel + "=" + strconv.FormatUint(assignment.Generation, 10),
 		"--log-format", "text"}
 	if assignment.EffectiveConfiguration != "" {
 		args = append(args, "--override-config", assignment.EffectiveConfiguration)

@@ -162,7 +162,7 @@ func TestNativeStartupInspectsPrimaryBeforeOneExactContainerLifecycleDispatch(t 
 				t.Fatal("user hooks ran before bridge observation")
 			}
 			if !blocked {
-				for _, required := range []string{"run-user-commands --container-id " + strings.Repeat("b", 64), "--override-config /private/generated/devcontainer.json", "--secrets-file /private/grants --oci-auth-hardening", "--remote-env HTTPS_PROXY=http://172.18.0.1:8888", "--remote-env NODE_EXTRA_CA_CERTS=" + nativeDependencyCA} {
+				for _, required := range []string{"run-user-commands --container-id " + strings.Repeat("b", 64), "--id-label " + attemptLabel + "=owned-attempt", "--id-label " + generationLabel + "=1", "--override-config /private/generated/devcontainer.json", "--secrets-file /private/grants --oci-auth-hardening", "--remote-env HTTPS_PROXY=http://172.18.0.1:8888", "--remote-env NODE_EXTRA_CA_CERTS=" + nativeDependencyCA} {
 					if !strings.Contains(lines[1], required) {
 						t.Fatalf("missing lifecycle boundary: %s", required)
 					}
