@@ -253,8 +253,15 @@ export function createDesktopReads(dependencies: DesktopReadsDependencies) {
           body.ticket.version < (dependencies.detail()?.ticket.version ?? 0))
       )
         return;
-      if (body.ticket.projectId !== projectID) throw new Error(unavailableLink);
-      if (generation === dependencies.ticketReadGeneration) dependencies.setDetail(body);
+      if (body.ticket.id !== ticketID || body.ticket.projectId !== projectID)
+        throw new Error(unavailableLink);
+      if (generation === dependencies.ticketReadGeneration) {
+        dependencies.setDetail(body);
+        // Labels follow the saved Ticket, never an editor draft or proposal.
+        for (const tab of dependencies.workspaceTabs())
+          if (tab.view === "ticket" && tab.ticketID === ticketID && tab.label !== body.ticket.title)
+            dependencies.workspaces.update({ ...tab, label: body.ticket.title }, projectID);
+      }
       return body;
     }
   }
