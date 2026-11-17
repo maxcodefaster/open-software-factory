@@ -249,15 +249,27 @@ These are example DNS names, not an automatic resolver configuration. Supply the
 hostname verification. Never copy `rootCA-key.pem` into the cluster, images or evidence.
 On OrbStack, assign the names and wildcard to the fresh Ingress-hosting container through its
 [`dev.orbstack.domains` label](https://docs.orbstack.dev/docker/domains#custom-domains).
-Keep its HTTPS listener on port 443 to
-[serve the supplied certificate](https://docs.orbstack.dev/features/https#redirect-port-443),
-rather than relying on OrbStack's automatic certificate proxy.
+OrbStack documents ports 443/8443 and `dev.orbstack.https-port` for
+[serving your own certificate](https://docs.orbstack.dev/features/https#redirect-port-443).
+Verify the actual peer certificate rather than assuming that a listener or label selected
+that route. A local-domain request can still terminate at OrbStack's automatic certificate proxy.
 Configure cluster DNS for the same local zone, including Runtime subdomains, to resolve directly
 to the private Ingress listener. The owned Kind fixture can use a
-[CoreDNS template](https://coredns.io/plugins/template/) scoped to that zone. Forwarding those
-clients through OrbStack's automatic HTTPS proxy can present a different certificate chain.
-Check the supplied CA from inside the cluster as well as from the Mac; do not disable verification
-or change global trust to conceal a routing mismatch.
+[CoreDNS template](https://coredns.io/plugins/template/) scoped to that zone.
+
+Qualify both client routes with hostname verification and their intended CA. If the Mac route
+deliberately uses OrbStack's existing TLS proxy, give the Mac acceptance client its existing
+public OrbStack root certificate. Keep the mkcert bundle for the cluster's direct Ingress route
+and native workloads. Record the two TLS termination paths explicitly; do not claim that they
+serve the same certificate. This requires neither global trust changes nor a CA private key.
+The maintained clean-room command uses the native fixture's CA for its public readiness check.
+It does not qualify a separate Mac CA; use the documented Helm operator path and separate
+route checks for that topology.
+
+Inspect the peer issuer or fingerprint and use a client with an explicit, isolated CA bundle.
+A macOS `curl --cacert` success can also reflect a certificate trusted by the system keychain,
+so it alone does not prove that the peer chains to the supplied mkcert root. Never disable
+verification or add an unrelated CA to make a failed route pass.
 Configure DNS and qualify HTTPS before creating the installation. Existing Workspace bindings
 retain their original origins; replacing a test hostname requires a separate fresh installation,
 not rewriting retained native identities.
