@@ -55,6 +55,22 @@ const finalizedHistory = [
   "model_role_probe",
   "knowledge_generation",
 ];
+// Independent contract, deliberately not derived from the production historyTables.
+const workflowHistory = [
+  "change_agent_session",
+  "branch_create_operation",
+  "pull_request_operation",
+  "verification",
+  "candidate_review",
+  "review_scenario",
+  "review_feedback",
+  "review_feedback_message",
+  "review_feedback_command",
+  "delivery_approval",
+  "merge_operation",
+  "promotion_operation",
+  "execution_policy_command",
+];
 function historyRow<T>(rows: T[]): T {
   const row = rows[0];
   if (!row) throw Error("Synthetic history row required");
@@ -870,6 +886,70 @@ test("the loader requires independent finalized-operation history instead of sil
   }
 });
 
+test("the loader refuses the old witness without finalized workflow and retry history", async () => {
+  const f = await fixture();
+  try {
+    for (const table of workflowHistory) delete f.expected.history[table];
+    await f.save();
+    await expect(f.load()).rejects.toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(workflowHistory)(
+  "independent workflow history requires %s even when empty",
+  async (table) => {
+    const f = await fixture();
+    try {
+      await f.load();
+      delete f.expected.history[table];
+      await f.save();
+      await expect(f.load()).rejects.toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+for (const stage of ["startup", "save", "logout"] as const)
+  test.each(workflowHistory)(
+    `${stage} cannot hide a rewritten finalized %s outcome or decision`,
+    async (table) => {
+      const f = await fixture();
+      try {
+        const loaded = await f.load();
+        const sql = applicationSQL(loaded);
+        const fake = target(f);
+        let loggedOut = false;
+        fake.httpHook((request) => {
+          if (request.url.endsWith("/sign-out")) loggedOut = true;
+          return undefined;
+        });
+        fake.dbHook((value) => {
+          const changed = stage === "startup" || (stage === "save" ? value.saved : loggedOut);
+          // A DB row rewrite is observable only if the real SQL selects that table.
+          // This catches the old omission, not just comparison of a fabricated extra key.
+          if (changed && sql.includes(`SELECT to_jsonb(t) FROM factory.${table} t`))
+            value.history[table] = {
+              ...value.history[table],
+              sha256: hash("rewritten original workflow row"),
+            };
+        });
+        const result = await checkRestoredApplication(loaded, fake);
+        expect(result.status).toBe("incomplete");
+        if (stage === "startup") expect(fake.requests).toHaveLength(0);
+        else {
+          expect(fake.saveCalls()).toHaveLength(1);
+          expect(result.save).toBe("confirmed");
+          expect(result.logout).toBe("confirmed");
+        }
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
 test.each([
   "workspace has no changes to commit",
   "workspace HEAD no longer matches the commit intent",
@@ -1539,6 +1619,10 @@ test("the SQL is read-only, scope-bounded and covers original native and require
     expect(sql).toContain("current_setting('transaction_read_only')");
     for (const table of historyTables) expect(sql).toContain(`factory.${table}`);
     for (const table of finalizedHistory) {
+      expect(historyTables).toContain(table);
+      expect(sql).toContain(`SELECT to_jsonb(t) FROM factory.${table} t`);
+    }
+    for (const table of workflowHistory) {
       expect(historyTables).toContain(table);
       expect(sql).toContain(`SELECT to_jsonb(t) FROM factory.${table} t`);
     }

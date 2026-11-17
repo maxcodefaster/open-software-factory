@@ -40,6 +40,11 @@ export const supportedSourceManifests = [
     applicationRevision: "62288627d2a5b69d5de7b6c2478199d290a5792b",
     requiredStateFiles: ["ingress-tls/identity.json"],
   },
+  {
+    chartRevision: "701ceb9258a1afd298080b0a7075c77ebe906e36",
+    applicationRevision: "701ceb9258a1afd298080b0a7075c77ebe906e36",
+    requiredStateFiles: ["ingress-tls/identity.json"],
+  },
 ] as const;
 const label = "factory.restore-rehearsal";
 const sha = /^[a-f0-9]{64}$/;

@@ -389,6 +389,22 @@ export const historyTables = [
   "change",
   "change_writer",
   "change_agent_turn_intent",
+  // Idle terminal workflow rows must not change during startup/read/save/logout.
+  // Verification retry retains its failed receipt in execution_policy_command before
+  // resetting the current Verification, so witness both, not just the latest result.
+  "change_agent_session",
+  "branch_create_operation",
+  "pull_request_operation",
+  "verification",
+  "candidate_review",
+  "review_scenario",
+  "review_feedback",
+  "review_feedback_message",
+  "review_feedback_command",
+  "delivery_approval",
+  "merge_operation",
+  "promotion_operation",
+  "execution_policy_command",
   // Complete original rows, including failed submissions, unknown outcomes and replay cursors.
   // Both source observations and every restored snapshot must match these independent digests.
   "workspace_submission",
