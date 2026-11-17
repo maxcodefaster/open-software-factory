@@ -454,152 +454,200 @@ test.each([
   30000,
 );
 
-test("a Workspace submission with no Coding turn or Agent Session enters exact Verification and independent review", async () => {
-  const f = await fixture();
-  const base = "a".repeat(40),
-    commit = "f".repeat(40);
-  let remote = base,
-    checksPassed = false;
-  await f.database.client`DELETE FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
-  await f.database
-    .client`UPDATE factory.change SET state='failed',failure='Previous Coding failed' WHERE id=${f.changeID}`;
-  await f.database
-    .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=epoch+1 WHERE change_id=${f.changeID}`;
-  const submission = createWorkspaceSubmission(
-    f.database,
-    {
-      connected: () => true,
-      parentOperation: async (_attemptID, input, beforeSend) => {
-        await beforeSend?.(() => {});
-        if (input.action === "git-push") remote = commit;
-        return { commitSHA: commit, remoteSHA: remote };
-      },
-    },
-    { assertSaved: async () => {} },
-    { getBranch: async () => ({ name: "branch", headSha: remote }) },
-    { username: "fixture", password: "fixture" },
-    writing,
-  );
-  const verificationStarts: string[] = [],
-    reviewTurns: string[] = [],
-    revokedRunners: number[] = [];
-  const forge = {
-    ensureDefaultBranchProtection: async () => {},
-    ensurePullRequest: async () => ({
-      number: 1,
-      url: "https://owned-build.factory.invalid/owned/owned-build/pulls/1",
-      headSha: commit,
-      merged: false,
-    }),
-    getPullRequest: async () => ({ number: 1, headSha: commit, merged: false }),
-    getDefaultBranch: async () => ({ headSha: base }),
-    getFile: async () => "protected workflow",
-    listFiles: async () => [],
-    listActionRuns: async () => [
-      {
-        id: 1,
-        workflowID: "factory-verification.yml",
-        event: "pull_request",
-        status: checksPassed ? "success" : "waiting",
-        url: "https://owned-build.factory.invalid/owned/owned-build/actions/runs/1",
-      },
-    ],
-    registerEphemeralRunner: async () => ({
-      id: 42,
-      uuid: "9adfd2a8-5bd3-412f-af74-7cbdc0e0a542",
-      token: "owned-fixture-token",
-    }),
-    deleteRunner: async (_repository: unknown, id: number) => {
-      revokedRunners.push(id);
-    },
-    observeVerification: async () => ({ status: "success", complete: true }),
-  } as unknown as ReturnType<typeof createForgejoClient>;
-  const delivery = createDeliveryController(
-    f.database,
-    {
-      startVerification: async (verificationID) => {
-        verificationStarts.push(verificationID);
-        // Native Verification uses a separate Actor. This controller fixture
-        // never stops or reassigns the canonical Ticket Workspace.
-        const [canonical] = await f.database.client<{ state: string }[]>`
-          SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
-        expect(canonical?.state).toBe("ready");
-        return null;
-      },
-      startStagingReplacement: async () => null,
-      stop: async () => null,
-    },
-    {
-      review: async (changeID, reviewID, userID) => {
-        const admitted = await createReviewAdmission(f.database, async (_sql, context) => {
-          expect(context).toEqual({ projectID: f.projectID, userID: f.userID });
-          return { modelId: "project-review-model" };
-        })(changeID, reviewID, userID);
-        expect(admitted.turn.authority).toMatchObject({
-          mode: "build",
-          modelId: "project-review-model",
-          requirementRevisionId: f.revisionID,
-          review: { verificationId: verificationStarts[0], commitSha: commit, baseSha: base },
-        });
-        reviewTurns.push(admitted.turn.id);
-      },
-      prompt: async () => {
-        throw new Error("Workspace submission must not fabricate a Coding turn");
-      },
-    },
-    async () => {},
-    { client: forge, owner: "owned" },
-    {
-      reconcile: async () => {
-        throw new Error("Unchanged base needs no integration");
-      },
-    },
-  );
-  try {
-    expect(
-      await f.database.client`SELECT id FROM factory.agent_turn WHERE change_id=${f.changeID}`,
-    ).toHaveLength(0);
-    await submission.submit(f.userID, {
-      requestID: crypto.randomUUID(),
-      workspaceID: f.workspaceID,
-      expectedHead: base,
-      expectedRemoteHead: base,
-      message: "Submit human implementation",
-    });
-    await delivery.sweep();
-    const [change] = await f.database.client<
-      { failure: string | null }[]
-    >`SELECT failure FROM factory.change WHERE id=${f.changeID}`;
-    expect(change?.failure).toBeNull();
-    expect(verificationStarts).toHaveLength(1);
-    const [verification] = await f.database.client<
-      { commit: string; state: string }[]
-    >`SELECT commit_sha AS commit,state FROM factory.verification WHERE change_id=${f.changeID}`;
-    expect(verification).toEqual({ commit, state: "runner-starting" });
-    checksPassed = true;
-    await delivery.sweep();
-    expect(reviewTurns).toHaveLength(1);
-    expect(revokedRunners).toEqual([42]);
-    expect(
+test.each([
+  "absent",
+  "stopped",
+  "failed",
+  "waiting",
+  "later-stop",
+  "newer-writer",
+  "pending-stop",
+] as const)(
+  "Workspace submission respects exact-candidate checks after prior Session state: %s",
+  async (previousSession) => {
+    const f = await fixture();
+    const stopID = crypto.randomUUID();
+    const base = "a".repeat(40),
+      commit = "f".repeat(40);
+    let remote = base,
+      checksPassed = false;
+    if (previousSession === "absent")
       await f.database
-        .client`SELECT change_id FROM factory.change_agent_session WHERE change_id=${f.changeID}`,
-    ).toHaveLength(0);
-    expect(
-      await f.database
-        .client`SELECT id FROM factory.agent_turn WHERE change_id=${f.changeID} AND input->>'kind'<>'change-review'`,
-    ).toHaveLength(0);
-    expect(
-      await f.database
-        .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
-    ).toHaveLength(0);
-  } finally {
-    await delivery.close();
-    await submission.close();
+        .client`DELETE FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+    else
+      await f.database.client`UPDATE factory.change_agent_session
+      SET state=${["failed", "waiting"].includes(previousSession) ? previousSession : "stopped"},
+        stop_id=${stopID},stop_pending=false,updated_at=clock_timestamp()
+      WHERE change_id=${f.changeID}`;
     await f.database
-      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
-    await f.dispose();
-  }
-}, 30000);
+      .client`UPDATE factory.change SET state='failed',failure='Previous Coding failed' WHERE id=${f.changeID}`;
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=epoch+1 WHERE change_id=${f.changeID}`;
+    const submission = createWorkspaceSubmission(
+      f.database,
+      {
+        connected: () => true,
+        parentOperation: async (_attemptID, input, beforeSend) => {
+          await beforeSend?.(() => {});
+          if (input.action === "git-push") remote = commit;
+          return { commitSHA: commit, remoteSHA: remote };
+        },
+      },
+      { assertSaved: async () => {} },
+      { getBranch: async () => ({ name: "branch", headSha: remote }) },
+      { username: "fixture", password: "fixture" },
+      writing,
+    );
+    const verificationStarts: string[] = [],
+      reviewTurns: string[] = [],
+      revokedRunners: number[] = [];
+    const forge = {
+      ensureDefaultBranchProtection: async () => {},
+      ensurePullRequest: async () => ({
+        number: 1,
+        url: "https://owned-build.factory.invalid/owned/owned-build/pulls/1",
+        headSha: commit,
+        merged: false,
+      }),
+      getPullRequest: async () => ({ number: 1, headSha: commit, merged: false }),
+      getDefaultBranch: async () => ({ headSha: base }),
+      getFile: async () => "protected workflow",
+      listFiles: async () => [],
+      listActionRuns: async () => [
+        {
+          id: 1,
+          workflowID: "factory-verification.yml",
+          event: "pull_request",
+          status: checksPassed ? "success" : "waiting",
+          url: "https://owned-build.factory.invalid/owned/owned-build/actions/runs/1",
+        },
+      ],
+      registerEphemeralRunner: async () => ({
+        id: 42,
+        uuid: "9adfd2a8-5bd3-412f-af74-7cbdc0e0a542",
+        token: "owned-fixture-token",
+      }),
+      deleteRunner: async (_repository: unknown, id: number) => {
+        revokedRunners.push(id);
+      },
+      observeVerification: async () => ({ status: "success", complete: true }),
+    } as unknown as ReturnType<typeof createForgejoClient>;
+    const delivery = createDeliveryController(
+      f.database,
+      {
+        startVerification: async (verificationID) => {
+          verificationStarts.push(verificationID);
+          // Native Verification uses a separate Actor. This controller fixture
+          // never stops or reassigns the canonical Ticket Workspace.
+          const [canonical] = await f.database.client<{ state: string }[]>`
+          SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+          expect(canonical?.state).toBe("ready");
+          return null;
+        },
+        startStagingReplacement: async () => null,
+        stop: async () => null,
+      },
+      {
+        review: async (changeID, reviewID, userID) => {
+          const admitted = await createReviewAdmission(f.database, async (_sql, context) => {
+            expect(context).toEqual({ projectID: f.projectID, userID: f.userID });
+            return { modelId: "project-review-model" };
+          })(changeID, reviewID, userID);
+          expect(admitted.turn.authority).toMatchObject({
+            mode: "build",
+            modelId: "project-review-model",
+            requirementRevisionId: f.revisionID,
+            review: { verificationId: verificationStarts[0], commitSha: commit, baseSha: base },
+          });
+          reviewTurns.push(admitted.turn.id);
+        },
+        prompt: async () => {
+          throw new Error("Workspace submission must not fabricate a Coding turn");
+        },
+      },
+      async () => {},
+      { client: forge, owner: "owned" },
+      {
+        reconcile: async () => {
+          throw new Error("Unchanged base needs no integration");
+        },
+      },
+    );
+    try {
+      expect(
+        await f.database.client`SELECT id FROM factory.agent_turn WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+      await submission.submit(f.userID, {
+        requestID: crypto.randomUUID(),
+        workspaceID: f.workspaceID,
+        expectedHead: base,
+        expectedRemoteHead: base,
+        message: "Submit human implementation",
+      });
+      if (previousSession === "later-stop")
+        await f.database.client`UPDATE factory.change_agent_session
+        SET state='stopped',stop_id=${crypto.randomUUID()},updated_at=clock_timestamp()
+        WHERE change_id=${f.changeID}`;
+      if (previousSession === "newer-writer")
+        await f.database.client`UPDATE factory.change_writer
+        SET state='human',user_id=${f.userID},epoch=epoch+1,updated_at=now()
+        WHERE change_id=${f.changeID}`;
+      if (previousSession === "pending-stop")
+        await f.database.client`UPDATE factory.change_agent_session
+        SET stop_pending=true,updated_at=clock_timestamp() WHERE change_id=${f.changeID}`;
+      await delivery.sweep();
+      if (["later-stop", "newer-writer", "pending-stop"].includes(previousSession)) {
+        expect(verificationStarts).toHaveLength(0);
+        expect(reviewTurns).toHaveLength(0);
+        const [session] = await f.database.client<{ state: string }[]>`
+        SELECT state FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+        expect(session?.state).toBe("stopped");
+        expect(
+          await f.database.client`SELECT id FROM factory.agent_turn WHERE change_id=${f.changeID}`,
+        ).toHaveLength(0);
+        return;
+      }
+      const [change] = await f.database.client<
+        { failure: string | null }[]
+      >`SELECT failure FROM factory.change WHERE id=${f.changeID}`;
+      expect(change?.failure).toBeNull();
+      expect(verificationStarts).toHaveLength(1);
+      const [verification] = await f.database.client<
+        { commit: string; state: string }[]
+      >`SELECT commit_sha AS commit,state FROM factory.verification WHERE change_id=${f.changeID}`;
+      expect(verification).toEqual({ commit, state: "runner-starting" });
+      checksPassed = true;
+      await delivery.sweep();
+      expect(reviewTurns).toHaveLength(1);
+      expect(revokedRunners).toEqual([42]);
+      const sessions = await f.database.client<
+        { state: string; session: string; attempt: string; stop: string }[]
+      >`
+      SELECT state,opencode_session_id AS session,runtime_attempt_id AS attempt,stop_id AS stop
+      FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+      expect([...sessions]).toEqual(
+        previousSession === "absent"
+          ? []
+          : [{ state: "committed", session: f.sessionID, attempt: f.attemptID, stop: stopID }],
+      );
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.agent_turn WHERE change_id=${f.changeID} AND input->>'kind'<>'change-review'`,
+      ).toHaveLength(0);
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+    } finally {
+      await delivery.close();
+      await submission.close();
+      await f.database
+        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      await f.dispose();
+    }
+  },
+  30000,
+);
 
 test("a lost native push retains its original repository and cannot be retargeted by Project edits", async () => {
   const f = await fixture();
