@@ -562,6 +562,178 @@ These data-service restore steps do not qualify restoration of native Actors, sn
 complete Factory product journey. Keep native credentials withheld until an independent native-safe
 rehearsal proves all relevant identities and Source/Writer safeguards.
 
+#### Isolated restore rehearsal
+
+`scripts/kubernetes/restore-rehearsal.ts` is an explicit **data-service acceptance lane**, not an
+installation recovery command. It restores all five backup components into disposable Docker
+volumes. It never starts Factory, Zero, a Forgejo server, a Connector or Substrate. There is no
+activation option, native credential input, identity rewrite or data-repair SQL.
+
+The operator supplies private inputs and independent witnesses. Do not generate expected values
+from the destination being tested. Missing witnesses stop preparation; they are not permission
+failures and must not be replaced with invented values. Observations must describe the selected
+backup's consistent data, not a later installation state. An independently observed source snapshot
+can supply those values. If that observation was not retained, record the missing proof rather
+than treating a second restore of the same dump as an independent product witness.
+
+Prepare a canonical, owned directory with mode `0700`. Every input file must be owned, regular,
+mode `0600`, and have no symlink ancestor or hard links. Mirror directories also use `0700`.
+Do not place native provisioner credentials in this directory.
+
+```text
+PRIVATE_ROOT/
+  fixture.json
+  witnesses.json
+  20261117T100209Z/
+    COMPLETE
+    postgres.dump
+    forgejo.tar.gz
+    state.tar.gz
+    openbao.snap
+  objects/                       complete objects mirror for this set
+  tls/{ca.crt,tls.crt,tls.key}     original OpenBao TLS Secret, supplied privately
+```
+
+Other backup markers may remain beside the four parts. `.part`, `.skipped` and `.failed` files
+refuse a full rehearsal. The tool does not read an original cluster, download objects, assemble
+Secrets or extract anything on the host. A mirror from a later backup is not automatically a mirror
+for this set; resolve its matching object versions privately before running.
+
+`Fixture` and `Witnesses` in the script are the input schema. JSON objects reject unexpected keys
+where they carry configuration. The top-level `fixture.json` fields are:
+
+| Field | Required value |
+| --- | --- |
+| `schema`, `owner` | `1`, and a fresh 32-character lowercase hexadecimal owner, also supplied on the CLI |
+| `source` | `chartRevision: "39d7969bb3acd93d0bc497a5748cce08ae435091"`, exact 40-character `applicationRevision`, original `namespace`, `namespaceUID`, `release`, HTTPS `factoryOrigin`, HTTPS `forgejoOrigin`, and `storageClass` |
+| `set` | Explicit backup timestamp, such as `20261117T100209Z` |
+| `privateRoot` | Absolute canonical path to the directory above; `fixture.json` must be its direct child |
+| `evidenceDirectory` | New absolute directory, outside private inputs and every retained path; its parent must already exist and not be group/world writable |
+| `docker` | Explicit local `host` as a `unix:///...` socket, observed `daemonID`, and `platform` as `linux/arm64` or `linux/amd64` |
+| `retained` | Nonempty `paths` denylist and explicit `containers`, `networks` and `volumes` inventory denylists for the retained installation; observed empty Docker inventories are allowed |
+| `images` | Exact copy of the script's exported `images` map, not tags substituted by the operator |
+| `limits` | Positive per-container `memoryMiB`, `cpus`, `pids`, `tmpfsMiB`; integer `commandTimeoutSeconds`, `requiredDiskBytes` and independently observed `availableDiskBytes` |
+
+Use the chart's exact PostgreSQL 16.14, Forgejo 17, Garage 2.3, OpenBao 2.7.1 and rclone 1.74.1
+digests. The tools image is the existing pinned Node 24 image in `upstream.json`; its built-in
+SQLite library rebuilds Forgejo without downloading packages. All images must already be loaded
+for the selected platform. The tool uses `--pull never`, the explicit socket, and a private empty
+Docker configuration scope, not the user's saved Docker contexts, logins or proxy environment.
+
+At most three containers run together. Reserve at least `3 × memoryMiB` and `3 × cpus`, plus Docker
+overhead, before running. Daemon totals are checked, not free CPU admission. Working disk must cover
+expanded state and Forgejo, two copies of the object mirror, the copied dump/snapshot, PostgreSQL
+expansion and restore overhead. `availableDiskBytes` is the operator's measured allowance;
+`requiredDiskBytes` is also checked against free space on the fresh volumes. It is not a Docker
+volume quota. Do not run this lane on a nearly full shared daemon.
+
+`commandTimeoutSeconds` is an explicit maximum duration for **each** daemon command, restore,
+validation or cleanup operation. Size it for the largest real part, sorting all row witnesses and
+downloading every object for comparison. There is no implicit short backup deadline. Expiry is an
+incomplete result, never successful stream completion. A lost or cancelled exec client triggers
+cleanup of its exact owned container, including daemon-owned descendants. Ordinary PostgreSQL
+restore errors still allow the independent later component checks after its container stops.
+
+`witnesses.json` contains no plaintext secret values:
+
+- `schema`, `owner`, `source` and `set` match the fixture exactly.
+  `provenance` must be `"independent-source-observation"`.
+- `parts` maps each of the four filenames to its compressed-byte SHA-256.
+- `postgres` maps **every ordinary table in `auth` and `factory`**, including empty tables, to
+  `{ "rows": integer, "sha256": "64 lowercase hex characters" }`. The script's `requiredTables`
+  includes product history, native bindings, capacity installation, Source and Writer rows.
+  `postgresWitnessProgram` defines the exact witness encoding. With PostgreSQL 16, UTC,
+  `extra_float_digits=3` and hex bytea, hash the bytes produced by
+  `COPY (SELECT row_to_json(t)::text AS row FROM SCHEMA.TABLE t ORDER BY row_to_json(t)::text COLLATE "C") TO STDOUT`.
+  This includes PostgreSQL COPY text escaping and each trailing newline. Do not hash display output
+  from a GUI. The target uses read-only SQL and the existing backup foreign-key checker as well as
+  `pg_restore --exit-on-error --single-transaction --no-owner`; any FK recreation error fails.
+- `forgejo` has `tables`, `files` and `repositories`. `tables` covers every non-`sqlite_%` SQLite
+  table. Hash sorted JSON row arrays in SQLite column order, with one LF after each row.
+  Encode integers as `{"integer":"decimal"}` and blobs as `{"hex":"lowercase hex"}`.
+  `files` is the complete archive member inventory, including `forgejo-db.sql`, original `app.ini`,
+  attachments, repositories and the ignored raw SQLite copy. `repositories` lists every
+  `repos/OWNER/REPOSITORY.git` root represented by an archived `HEAD`.
+- `state` has complete archive `files`, exact `excludedProvisionerPaths`, and
+  `credentialReview: "no-native-provisioner-material-in-included-files"`. The operator must classify
+  credential-bearing files, including arbitrary filenames; filename checks alone cannot do that.
+  Excluded files are hashed but never copied into destination state. Original
+  `kubernetes-installation.json`, `openbao/bootstrap.json` and `openbao/factory-login.json` are
+  mandatory. The original installation identity must match, without rebinding any historical row.
+- `objects` is the complete mirror file inventory, including empty objects.
+- `openbao` is a nonempty array of `{ "path": "factory/data/...", "sha256": "..." }` for real existing
+  KV-v2 values readable by the original `factory-environments` AppRole. Hash `response.data.data`
+  as compact JSON with recursively sorted object keys, unchanged array order and no trailing LF.
+  Do not put secret values, root tokens, unseal keys or AppRole credentials in the witnesses.
+
+Each `files` or `objects` entry is `{ "path": "relative/path", "bytes": integer, "sha256": "..." }`.
+Paths use normalized archive-relative names without leading `./`. A confined relative symlink also
+has `"link": "relative target"`, zero `bytes`, and the SHA-256 of its target text. Directories need
+no inventory entry. The streaming verifier refuses traversal, duplicate files, unlisted files,
+missing witnesses, bad checksums, truncation, escaping symlinks, hard links, sparse files, devices,
+FIFOs and unknown tar extensions. USTAR, GNU long names and supported per-file PAX fields work.
+Unsupported retained file metadata or archive types require separate implementation and proof;
+they are not silently dropped or counted as restored.
+
+Inspect the no-daemon, no-write plan first, then deliberately execute it:
+
+```sh
+mise exec -- bun --no-env-file scripts/kubernetes/restore-rehearsal.ts \
+  --plan --fixture "$PRIVATE_ROOT/fixture.json" --owner "$OWNER"
+mise exec -- bun --no-env-file scripts/kubernetes/restore-rehearsal.ts \
+  --run --fixture "$PRIVATE_ROOT/fixture.json" --owner "$OWNER"
+```
+
+Before any create, the lane checks private paths, compressed part hashes, required witnesses,
+pins, retained-resource non-overlap, daemon identity, image availability and fresh resource names.
+It journals each create intent before the daemon call. The archive scan then verifies all raw file
+hashes before extraction into owned volumes. PostgreSQL, OpenBao and their validation clients use
+no network, with the OpenBao client sharing only that server's loopback namespace. Garage and
+rclone alone join a new `--internal` network, with no published ports or external DNS forwarding.
+Containers have no host sockets, application authority or inherited environment. Logs are disabled.
+
+The actual restore operations are the normal ones:
+
+1. Rebuild PostgreSQL in a fresh cluster. Verify the complete table inventory, row counts, full-row
+   digests and FK integrity. Historical namespace, Actor, pool, UID and Writer identities stay intact.
+2. Extract Forgejo files into fresh volumes, discard the archived live SQLite copy, execute
+   `forgejo-db.sql`, run `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, and compare all SQL
+   witnesses. The pinned Forgejo image runs only `git fsck --full --strict` for every bare repository.
+   Neither its server nor restored hooks or application code run.
+3. Start empty Garage with fresh rehearsal-only credentials. Run `rclone copy` and
+   `rclone check --download` against its internal bucket. Input object contents are independently
+   hashed first. This proves bytes, not original S3 credentials, object metadata or version history.
+4. Start empty OpenBao over the original verified loopback TLS certificate. Temporarily initialize
+   and unseal through the same `sys/init` and `sys/unseal` APIs Factory uses. Run
+   `bao operator raft snapshot restore -force`, then unseal with the original state key, authenticate
+   with the original AppRole and compare the selected KV content digests. Sensitive requests and
+   tokens remain inside owned volumes or container memory, never command arguments or evidence.
+5. Check every retained state/Source file against its independent content witness, excluding only
+   explicitly classified native provisioner credentials. No restored Source process is activated.
+
+`result.json` and `ownership.json` remain outside raw-secret directories. Only five passing
+components **and confirmed cleanup** produce `status: "data-services-passed"` and exit 0.
+`nativeActivation` always remains `"not-run-not-qualified"`. SIGINT/SIGTERM clean up before returning
+unsuccessfully. After SIGKILL or an unavailable daemon, retry exact-label cleanup explicitly:
+
+```sh
+mise exec -- bun --no-env-file scripts/kubernetes/restore-rehearsal.ts \
+  --cleanup --fixture "$PRIVATE_ROOT/fixture.json" --owner "$OWNER"
+```
+
+Cleanup checks the original journal, owner/run/source labels, container/network IDs and volume
+creation identity. It never prunes and refuses observed replacements. Docker's named-volume
+deletion has no atomic UID precondition, so no other actor may mutate this fresh owner's resource
+names during the run or cleanup. An unconfirmed cleanup keeps the receipt incomplete and the
+journal available. Cleanup exit 0 alone is not a restore pass.
+
+Unit mocks, local synthetic SQLite checks and archive tests do not qualify native restoration.
+The operator must run this lane on the actual private set and review all component receipts and
+cleanup. Even that pass does not prove a running Factory, authenticated Forgejo behavior, all
+OpenBao secrets, official Substrate control-plane/ROOTFS recovery, cross-node restoration,
+Source/Writer admission, Editor access, Verification or Delivery. Those require separate explicit
+native qualification with original identity safeguards and controlled external-effect authority.
+
 ## Maintenance and upgrades
 
 Save human edits, finish or explicitly stop active work, then select the next built image:
