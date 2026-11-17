@@ -908,6 +908,86 @@ test("frontend review rejects missing, dirty and different-commit screenshots", 
   }
 });
 
+test("App scenarios retain compact recording positions independently of observation wall time", async () => {
+  const f = await candidateReviewFixture();
+  const controller = createCandidateReviewController(f.database, sourceFixture(true).forge);
+  const browser = createBuildBrowserController(f.database, f.hub, "owned-compact-positions");
+  try {
+    const turn = await f.activeReview();
+    const grant = await browser.prepare(turn.id, turn.ownerToken);
+    const cases = [
+      { id: "first-app", observedAt: "2020-01-01T00:00:00.000Z", positions: [0, 250] },
+      { id: "second-app", observedAt: "2026-01-01T00:00:00.000Z", positions: [750, 1000] },
+    ];
+    for (const item of cases) {
+      await controller.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_scenario",
+          arguments: {
+            id: item.id,
+            title: item.id,
+            category: "normal",
+            observationKind: "app",
+            criterion: 1,
+            expected: "The App retains the draft",
+          },
+        },
+        `start-${item.id}`,
+      );
+      for (const recordingTimeMs of item.positions)
+        await controller.observeBrowser(
+          turn.id,
+          turn.ownerToken,
+          { name: "browser_snapshot", arguments: {} },
+          `${item.id}-${recordingTimeMs}`,
+          {
+            structuredContent: {
+              sessionId: grant.sessionID,
+              turnId: turn.id,
+              runtimeAttemptId: f.attemptID,
+              generation: 1,
+              app: "app",
+              headCommit: f.commit,
+              workingTreeModified: false,
+              observedAt: item.observedAt,
+              recordingTimeMs,
+            },
+            content: [{ type: "text", text: "The draft remains visible." }],
+          },
+        );
+      await controller.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_scenario_result",
+          arguments: { id: item.id, status: "passed", observed: "The draft remains visible." },
+        },
+        `end-${item.id}`,
+      );
+    }
+    expect((await f.review())?.evidence).toMatchObject(
+      cases.flatMap((item) =>
+        item.positions.map((recordingTimeMs) => ({
+          scenarioId: item.id,
+          context: { sessionId: grant.sessionID, observedAt: item.observedAt, recordingTimeMs },
+        })),
+      ),
+    );
+    const scenarios = await f.database.client<
+      { id: string; position: number; session: string }[]
+    >`SELECT id,media_started_ms::float8 AS position,media_session_id AS session
+      FROM factory.review_scenario WHERE review_id=${f.reviewID} ORDER BY started_at,id`;
+    expect(scenarios).toEqual([
+      { id: "first-app", position: 0, session: grant.sessionID },
+      { id: "second-app", position: 750, session: grant.sessionID },
+    ]);
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("a frontend review can cover protected checks with an observed source-only case", async () => {
   const f = await candidateReviewFixture(
     canonicalRequirementContent({

@@ -46,13 +46,17 @@ test("native review settlement publishes every recording chunk before closing it
         }),
       };
     if (operation.action === "browser-recording-start")
-      return { data: JSON.stringify({ startedAt: new Date().toISOString() }) };
+      return { data: JSON.stringify({ startedAt: "2020-01-01T00:00:00.000Z" }) };
     if (operation.action === "browser-recording-finish")
       return {
         data: JSON.stringify(
           operations.filter((action) => action === "browser-recording-finish").length < 3
             ? { state: "pending" }
-            : { bytes: data.length, durationMs: 12_000 },
+            : {
+                bytes: data.length,
+                durationMs: 1500,
+                note: "Unchanged frames shortened.",
+              },
         ),
       };
     if (operation.action === "browser-recording-chunk") {
@@ -109,6 +113,13 @@ test("native review settlement publishes every recording chunk before closing it
     expect(operations.at(-1)).toBe("browser-close");
     expect(f.requests()).toBe(1);
     expect(f.commitCalls).toEqual([]);
+    const view = await createVisualReviewController(f.database).get(f.changeID, f.userID);
+    expect(view.recording).toMatchObject({
+      id: grant.sessionID,
+      state: "complete",
+      durationMs: 1500,
+      reason: "Unchanged frames shortened.",
+    });
   } finally {
     f.acceptResponse();
     f.release();
@@ -460,6 +471,9 @@ test("recording publication is scoped to the current owner, indexed manifest and
     >`SELECT commit_sha AS sha,state
       FROM factory.review_media WHERE id=${grant.sessionID}`;
     expect(recording).toEqual({ sha: f.commit, state: "complete" });
+    expect(
+      (await createVisualReviewController(f.database).get(f.changeID, f.userID)).recording,
+    ).toMatchObject({ durationMs: 1000, reason: null });
     await browser.closeTurn(turn.id);
     expect((await media.read(f.changeID, f.userID, grant.sessionID, null)).status).toBe(200);
   } finally {

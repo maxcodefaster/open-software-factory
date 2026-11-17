@@ -99,7 +99,8 @@ test("native tool content includes bounded trusted checkout provenance beside th
     app: "app",
     headCommit: "a".repeat(40),
     workingTreeModified: true,
-    observedAt: new Date().toISOString(),
+    observedAt: "2020-01-01T00:00:00.000Z",
+    recordingTimeMs: 0,
   };
   const image = { type: "image" as const, mimeType: "image/jpeg" as const, data: "owned-image" };
   const result = browserMcpResult({
@@ -114,6 +115,18 @@ test("native tool content includes bounded trusted checkout provenance beside th
   expect(text.text.length).toBe(32_768);
   expect(text.text).toEndWith("[Factory truncated this App observation]");
   expect(result.content[1]).toEqual(image);
+  const laterContext = {
+    ...context,
+    observedAt: "2026-01-01T00:00:00.000Z",
+    recordingTimeMs: 750,
+  };
+  const later = browserMcpResult({ structuredContent: laterContext, content: [image] });
+  expect(buildBrowserResultInput.parse(later).structuredContent).toEqual(laterContext);
+  expect(later.content[0]).toEqual({
+    type: "text",
+    text: `Factory observation: ${JSON.stringify(laterContext)}`,
+  });
+  expect(later.content[1]).toEqual(image);
   const multilingual = browserMcpResult({
     structuredContent: context,
     content: [{ type: "text", text: "界".repeat(12_000) }],

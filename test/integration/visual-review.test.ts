@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
 import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
@@ -414,37 +415,108 @@ test("new complete video replaces annotated video but keeps stills; remaining vi
   }
 });
 
-test("source checks stay outside video chapters and do not extend the preceding App chapter", async () => {
+test("compact chapters and saved frame context use presentation time, not wall dates or source checks", async () => {
   const f = await candidateReviewFixture();
   const media = createReviewMedia(f.database, memoryPrivateObjects());
   const controller = createVisualReviewController(f.database);
   try {
+    const turn = await f.activeReview();
+    const browser = createBuildBrowserController(
+      f.database,
+      f.hub,
+      "owned-compact-chapters",
+      media,
+    );
+    const grant = await browser.prepare(turn.id, turn.ownerToken);
     const recordingID = crypto.randomUUID();
     await f.database.client`
-      INSERT INTO factory.review_media(id,change_id,review_id,kind,commit_sha,state)
-      VALUES(${recordingID},${f.changeID},${f.reviewID},'recording',${f.commit},'intended')`;
-    await media.publish(recordingID, new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]), 10000);
+      INSERT INTO factory.review_media(id,change_id,review_id,browser_session_id,kind,commit_sha,state)
+      VALUES(${recordingID},${f.changeID},${f.reviewID},${grant.sessionID},'recording',${f.commit},'intended')`;
+    await media.publish(recordingID, new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]), 1500);
     for (const [index, item] of [
-      { id: "first-app", kind: "app", position: 1000 },
+      { id: "first-app", kind: "app", position: 0 },
       { id: "source-check", kind: "source", position: null },
-      { id: "second-app", kind: "app", position: 6000 },
+      { id: "second-app", kind: "app", position: 750 },
     ].entries())
       await f.database.client`
         INSERT INTO factory.review_scenario(review_id,id,title,category,observation_kind,
-          criterion,expected,observed,status,started_at,ended_at,media_started_ms)
+          criterion,expected,observed,status,started_at,ended_at,media_started_ms,media_session_id)
         VALUES(${f.reviewID},${item.id},${item.id},'normal',${item.kind},1,'Expected','Observed','passed',
-          ${new Date(1700000000000 + index * 1000).toISOString()},${new Date(1700000000500 + index * 1000).toISOString()},${item.position})`;
+          ${new Date(Date.UTC(2000 + index * 10, 0, 1)).toISOString()},
+          ${new Date(Date.UTC(2000 + index * 10, 0, 1, 0, 0, 1)).toISOString()},
+          ${item.position},${item.kind === "app" ? grant.sessionID : null})`;
+    await f.database.client`UPDATE factory.candidate_review SET evidence=${JSON.stringify([
+      {
+        kind: "browser",
+        context: {
+          sessionId: grant.sessionID,
+          app: "app",
+          page: "/first",
+          observedAt: "2000-01-01T00:00:00.000Z",
+          recordingTimeMs: 0,
+        },
+      },
+      {
+        kind: "browser",
+        context: {
+          sessionId: grant.sessionID,
+          app: "app",
+          page: "/second",
+          observedAt: "2020-01-01T00:00:00.000Z",
+          recordingTimeMs: 750,
+        },
+      },
+      {
+        kind: "browser",
+        context: {
+          sessionId: crypto.randomUUID(),
+          app: "app",
+          page: "/another-session",
+          observedAt: "2026-01-01T00:00:00.000Z",
+          recordingTimeMs: 0,
+        },
+      },
+    ])}::jsonb WHERE id=${f.reviewID}`;
     const view = await controller.get(f.changeID, f.userID);
     expect(view.scenarios.find((item) => item.id === "first-app")).toMatchObject({
       observationKind: "app",
-      startedMs: 1000,
-      endedMs: 6000,
+      startedMs: 0,
+      endedMs: 750,
+      hasRecordingPosition: true,
+    });
+    expect(view.scenarios.find((item) => item.id === "second-app")).toMatchObject({
+      observationKind: "app",
+      startedMs: 750,
+      endedMs: 1500,
       hasRecordingPosition: true,
     });
     expect(view.scenarios.find((item) => item.id === "source-check")).toMatchObject({
       observationKind: "source",
       hasRecordingPosition: false,
     });
+    const jpeg = new Uint8Array(32);
+    jpeg.set([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1]);
+    for (const [timestampMs, page] of [
+      [0, "/first"],
+      [750, "/second"],
+    ] as const) {
+      const frame = await media.still(
+        f.changeID,
+        f.userID,
+        { source: "recording", recordingId: recordingID, timestampMs },
+        jpeg,
+      );
+      const observedPage = `Last observed page: app${page}`;
+      expect(frame.page).toBe(observedPage);
+      const [saved] = await f.database.client<{ context: unknown }[]>`
+        SELECT source_context AS context FROM factory.review_media WHERE id=${frame.id}`;
+      expect(saved?.context).toEqual({
+        source: "recording",
+        recordingId: recordingID,
+        timestampMs,
+        page: observedPage,
+      });
+    }
   } finally {
     await f.dispose();
   }

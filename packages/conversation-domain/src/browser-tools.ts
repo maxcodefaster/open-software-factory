@@ -89,6 +89,7 @@ export const buildBrowserResultInput = z.strictObject({
       headCommit: z.string().regex(/^[a-f0-9]{40}$/),
       workingTreeModified: z.boolean(),
       observedAt: z.iso.datetime(),
+      // Stable position in the published recording's presentation timeline, not elapsed wall time.
       recordingTimeMs: z.number().int().nonnegative().optional(),
       page: z.string().min(1).max(2_048).optional(),
     })
