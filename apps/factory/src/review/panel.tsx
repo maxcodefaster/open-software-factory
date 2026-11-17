@@ -411,8 +411,12 @@ export function ReviewPanel(props: {
   const seek = (seconds: number, scenarioID?: string) => {
     if (!video) return;
     video.currentTime = Math.max(0, Math.min(duration(), seconds));
-    setSelectedScenario(scenarioID ?? "");
-    syncPlayhead();
+    setPlayhead(video.currentTime);
+    // Apply the seek intent directly. A state reread in this same event can
+    // still see the preceding selection; later media events sync playback.
+    setSelectedScenario(
+      scenarioID ?? scenarioAt(view()?.scenarios ?? [], video.currentTime)?.id ?? "",
+    );
   };
   // A cancelled selection keeps no captured frame; a stale one would otherwise seed the next composer.
   const cancelMarking = () => {
