@@ -302,11 +302,12 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     );
     for (const [id, title, category] of [
       ["save", "Save a draft", "normal"],
+      ["reload-same-frame", "Reload the same frame", "boundary"],
       ["empty", "Empty title", "error"],
     ])
       await f.database
         .client`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected,status,ended_at,media_started_ms,observed)
-        VALUES(${f.reviewID},${fixtureValue(id, "id")},${fixtureValue(title, "title")},${fixtureValue(category, "category")},1,'Form state is retained','passed',now(),${id === "save" ? 0 : 1000},'Draft remains visible after the interaction.')`;
+        VALUES(${f.reviewID},${fixtureValue(id, "id")},${fixtureValue(title, "title")},${fixtureValue(category, "category")},1,'Form state is retained','passed',now(),${id === "empty" ? 1000 : 0},'Draft remains visible after the interaction.')`;
     await f.database.client`INSERT INTO factory.review_scenario(
       review_id,id,title,category,criterion,expected,status,ended_at,observed)
       VALUES(${f.reviewID},'untimed','Missing recording position','boundary',1,
@@ -391,6 +392,33 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
           .evaluate((node) => (node as HTMLVideoElement).currentTime),
       )
       .toBeCloseTo(0.1, 1);
+    const savedFrameSeek = panel()
+      .locator("video")
+      .evaluate(
+        (node) =>
+          new Promise<void>((resolve) =>
+            node.addEventListener("seeked", () => resolve(), { once: true }),
+          ),
+      );
+    await panel()
+      .getByRole("button", { name: /Save a draft/ })
+      .click();
+    await savedFrameSeek;
+    await visible(panel().getByRole("button", { name: /Save a draft/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+      { timeout: 1000 },
+    );
+    await visible(panel().getByRole("button", { name: /Reload the same frame/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await visible(panel().locator(".review-scenario-outcome")).toHaveAttribute(
+      "aria-label",
+      "Save a draft result",
+    );
+    await timeline.focus();
+    await timeline.press("ArrowRight");
     await panel().getByRole("button", { name: "Play QA recording", exact: true }).click();
     await visible
       .poll(() =>

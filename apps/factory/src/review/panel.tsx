@@ -387,13 +387,15 @@ export function ReviewPanel(props: {
   const syncPlayhead = () => {
     if (!video) return;
     setPlayhead(video.currentTime);
+    const selected = view()?.scenarios.find((item) => item.id === selectedScenario());
     if (
       video.paused &&
-      view()?.scenarios.some(
-        (item) =>
-          item.id === selectedScenario() &&
-          (item.observationKind === "source" || item.hasRecordingPosition === false),
-      )
+      selected &&
+      (selected.observationKind === "source" ||
+        selected.hasRecordingPosition === false ||
+        // Unchanged checks can share a compact frame. Keep the chosen paused
+        // result at that boundary, rather than replacing it with the last one.
+        Math.abs(selected.startedMs - video.currentTime * 1000) <= 50)
     )
       return;
     setSelectedScenario(scenarioAt(view()?.scenarios ?? [], video.currentTime)?.id ?? "");
@@ -406,10 +408,10 @@ export function ReviewPanel(props: {
         : (view()?.recording?.durationMs ?? 0) / 1000,
     );
   };
-  const seek = (seconds: number) => {
+  const seek = (seconds: number, scenarioID?: string) => {
     if (!video) return;
     video.currentTime = Math.max(0, Math.min(duration(), seconds));
-    setSelectedScenario("");
+    setSelectedScenario(scenarioID ?? "");
     syncPlayhead();
   };
   // A cancelled selection keeps no captured frame; a stale one would otherwise seed the next composer.
@@ -1139,7 +1141,7 @@ export function ReviewPanel(props: {
                               scenario().observationKind !== "source" &&
                               scenario().hasRecordingPosition !== false
                             ) {
-                              seek(scenario().startedMs / 1000);
+                              seek(scenario().startedMs / 1000, scenario().id);
                             }
                           }}
                         >
