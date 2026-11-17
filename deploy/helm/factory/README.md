@@ -252,6 +252,12 @@ On OrbStack, assign the names and wildcard to the fresh Ingress-hosting containe
 Keep its HTTPS listener on port 443 to
 [serve the supplied certificate](https://docs.orbstack.dev/features/https#redirect-port-443),
 rather than relying on OrbStack's automatic certificate proxy.
+Configure cluster DNS for the same local zone, including Runtime subdomains, to resolve directly
+to the private Ingress listener. The owned Kind fixture can use a
+[CoreDNS template](https://coredns.io/plugins/template/) scoped to that zone. Forwarding those
+clients through OrbStack's automatic HTTPS proxy can present a different certificate chain.
+Check the supplied CA from inside the cluster as well as from the Mac; do not disable verification
+or change global trust to conceal a routing mismatch.
 Configure DNS and qualify HTTPS before creating the installation. Existing Workspace bindings
 retain their original origins; replacing a test hostname requires a separate fresh installation,
 not rewriting retained native identities.
