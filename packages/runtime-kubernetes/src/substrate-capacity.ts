@@ -5,8 +5,8 @@ import pins from "../../../deploy/substrate/pins.json";
 import { runEnvironmentCommand } from "./command";
 import { kubernetesCommand, kubernetesConnectionEnvironment } from "./config";
 import {
-  nativeArchitecture,
   type NativeArchitecture,
+  nativeArchitecture,
   pinnedNativeSandboxSpec,
 } from "./substrate-profile";
 import { kubernetesResourceQuantity, selectWorkerNodeResources } from "./worker-resource-admission";
@@ -72,7 +72,11 @@ export function nativeCapacityReservedPoolResources(pool: NativeCapacityPool) {
   return { cpuMilli, memoryMiB: Math.floor(memoryBytes / (1024 * 1024)) };
 }
 
-export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCapacityNode) {
+function capacityNodeReady(
+  nodesInput: unknown,
+  original: NativeCapacityNode,
+  requireOriginalBoot: boolean,
+) {
   const nodes = z
     .object({
       items: z.array(
@@ -109,7 +113,8 @@ export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCap
       node.metadata.labels["kubernetes.io/hostname"] === original.hostname &&
       node.metadata.labels["kubernetes.io/arch"] === original.architecture &&
       node.metadata.labels["kubernetes.io/os"] === "linux" &&
-      node.status.nodeInfo.bootID === original.bootID &&
+      node.status.nodeInfo.bootID &&
+      (!requireOriginalBoot || node.status.nodeInfo.bootID === original.bootID) &&
       node.status.nodeInfo.architecture === original.architecture &&
       nativeArchitecture.safeParse(original.architecture).success &&
       node.status.nodeInfo.operatingSystem === "linux" &&
@@ -122,6 +127,17 @@ export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCap
           c.status !== "False",
       ),
   );
+}
+
+export function nativeCapacityNodeReady(nodesInput: unknown, original: NativeCapacityNode) {
+  return capacityNodeReady(nodesInput, original, true);
+}
+
+// An acknowledged pool keeps its reservation across a node reboot. Its owner
+// must still verify the original pool UID, profile, image and reserved budget.
+// Only never-dispatched capacity needs the original boot's headroom observation.
+export function nativeCapacityAdmittedNodeReady(nodesInput: unknown, original: NativeCapacityNode) {
+  return capacityNodeReady(nodesInput, original, false);
 }
 
 export function nativeCapacityOriginalNode(

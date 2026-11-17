@@ -3,10 +3,10 @@ import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   type NativeCapacityNode,
+  nativeCapacityAdmittedNodeReady,
   nativeCapacityCandidates,
-  nativeCapacityNodeReady,
-  nativeCapacityOwner,
   nativeCapacityOriginalNode,
+  nativeCapacityOwner,
   nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
@@ -14,8 +14,8 @@ import {
   requireNativeCapacitySandbox,
   runNativeCapacityKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/substrate-capacity";
-import { CommandError } from "../command-error";
 import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
+import { CommandError } from "../command-error";
 import { installationInMaintenance } from "../installation/maintenance";
 import type { SubstrateInstallationConfiguration } from "./substrate-workspaces";
 
@@ -146,7 +146,7 @@ export function createSubstrateCapacity(
         if (
           base.status?.readyReplicas === 1 &&
           base.spec.template.nodeSelector["kubernetes.io/hostname"] === original.node.hostname &&
-          nativeCapacityNodeReady(nodesInput, original.node) &&
+          nativeCapacityAdmittedNodeReady(nodesInput, original.node) &&
           isDeepStrictEqual(nativeCapacityReservedPoolResources(base), original.node.resources)
         )
           ready.push(original.node.resources);
@@ -181,7 +181,7 @@ export function createSubstrateCapacity(
           await sql`UPDATE factory.substrate_worker_capacity SET pool=${JSON.stringify({ uid: observed.metadata.uid })}::text::jsonb WHERE owner=${owner} AND node_uid=${row.nodeUID}`;
         if (
           observed.status?.readyReplicas === 1 &&
-          nativeCapacityNodeReady(nodesInput, row.intent.node)
+          nativeCapacityAdmittedNodeReady(nodesInput, row.intent.node)
         )
           ready.push(row.intent.node.resources);
       }

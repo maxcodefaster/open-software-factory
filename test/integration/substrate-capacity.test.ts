@@ -100,9 +100,11 @@ test.each(["amd64", "arm64"] as const)(
       fixture.base.status.readyReplicas = 1;
       const bootID = node.status.nodeInfo.bootID;
       node.status.nodeInfo.bootID = crypto.randomUUID();
-      await expect(restarted.requireReady(resources)).rejects.toMatchObject({
-        code: "unavailable",
-      });
+      await restarted.requireReady(resources);
+      const [retained] = await f.database
+        .client`SELECT intent FROM factory.substrate_capacity_installation`;
+      expect(retained?.["intent"].node.bootID).toBe(bootID);
+      expect(calls.every((args) => args[0] === "get")).toBe(true);
       node.status.nodeInfo.bootID = bootID;
       fixture.base.metadata.uid = crypto.randomUUID();
       await expect(restarted.requireReady(resources)).rejects.toThrow(
@@ -211,7 +213,8 @@ test.each(["amd64", "arm64"] as const)(
       fixture.base.spec.template.nodeSelector["kubernetes.io/hostname"] = "native-a";
       const bootID = node.status.nodeInfo.bootID;
       node.status.nodeInfo.bootID = crypto.randomUUID();
-      await expect(capacity.requireReady(resources)).rejects.toMatchObject({ code: "unavailable" });
+      await capacity.requireReady(resources);
+      expect(creates).toBe(1);
       node.status.nodeInfo.bootID = bootID;
       const ready = node.status.conditions.find((condition) => condition.type === "Ready");
       if (!ready) throw Error("No original Ready condition");
@@ -346,6 +349,16 @@ test.each(["amd64", "arm64"] as const)(
       for (const pool of pools.values()) pool["status"] = { readyReplicas: 1 };
       expect((await capacity.ensure()).ready).toHaveLength(1);
       await capacity.requireReady(resources);
+      const admittedNode = nodes[0];
+      if (!admittedNode) throw Error("No original admitted node");
+      const admittedBoot = admittedNode.status.nodeInfo.bootID;
+      admittedNode.status.nodeInfo.bootID = crypto.randomUUID();
+      await capacity.requireReady(resources);
+      expect((await capacity.ensure()).ready).toHaveLength(1);
+      const [retained] = await f.database.client`
+        SELECT intent FROM factory.substrate_worker_capacity WHERE node_uid=${admittedNode.metadata.uid}`;
+      expect(retained?.["intent"].node.bootID).toBe(admittedBoot);
+      expect(creates).toBe(1);
       const retainedSpec = structuredClone(first[1]["spec"]);
       pods.push({
         metadata: { uid: crypto.randomUUID() },

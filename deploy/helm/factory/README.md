@@ -671,6 +671,10 @@ New image/resource defaults affect fresh owners only; old Actor/template/source 
 fixed. Missing or uncertain observations remain distinct from success. Actor-level budgets are the
 current enforcement boundary; per-inner-container cgroup limits and process continuity are not
 promised.
+A node reboot does not invalidate an acknowledged WorkerPool reservation. Admission still requires
+the original node and pool UIDs, profile, image, reserved budget and current readiness. Unsubmitted
+capacity intents retain their original boot fence and are not replayed after a reboot. This permits
+new work on the same recovered node; it is not proof of restoring old Actors or replacing a node.
 Factory neither installs a cluster metrics-server nor requests its Pod metrics API. The pinned
 native API does not expose per-Actor CPU/RAM samples. Current consumption stays unavailable rather
 than substituting a shared Worker's aggregate or reporting missing measurements as zero.

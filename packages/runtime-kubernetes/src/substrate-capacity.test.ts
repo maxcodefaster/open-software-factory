@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeCapacityFixture } from "../../../test/fixtures/substrate-capacity";
 import {
+  nativeCapacityAdmittedNodeReady,
   nativeCapacityCandidates,
   nativeCapacityNodeReady,
   nativeCapacityOriginalNode,
@@ -194,6 +195,35 @@ test("native joined-node admission shares scheduler accounting without opt-in la
   const reboot = structuredClone(node);
   reboot.status.nodeInfo.bootID = crypto.randomUUID();
   expect(nativeCapacityNodeReady({ items: [reboot] }, candidate)).toBe(false);
+  expect(nativeCapacityAdmittedNodeReady({ items: [reboot] }, candidate)).toBe(true);
+  for (const change of [
+    (value: typeof reboot) => {
+      value.metadata.uid = crypto.randomUUID();
+    },
+    (value: typeof reboot) => {
+      value.metadata.name = "replacement-node";
+    },
+    (value: typeof reboot) => {
+      value.metadata.labels["kubernetes.io/hostname"] = "replacement";
+    },
+    (value: typeof reboot) => {
+      value.status.nodeInfo.architecture = "arm64";
+    },
+    (value: typeof reboot) => {
+      const ready = value.status.conditions.find((condition) => condition.type === "Ready");
+      if (!ready) throw Error("No fixture Ready condition");
+      ready.status = "False";
+    },
+  ]) {
+    const changed = structuredClone(reboot);
+    change(changed);
+    expect(nativeCapacityAdmittedNodeReady({ items: [changed] }, candidate)).toBe(false);
+  }
+  const pendingBoot = {
+    ...reboot,
+    status: { ...reboot.status, nodeInfo: { ...reboot.status.nodeInfo, bootID: "" } },
+  };
+  expect(nativeCapacityAdmittedNodeReady({ items: [pendingBoot] }, candidate)).toBe(false);
   expect(requireNativeCapacitySandbox(f.sandbox)).toBe(f.sandbox.metadata.uid);
   const changed = structuredClone(f.sandbox);
   const version = changed.spec.versions[0];
