@@ -10,7 +10,7 @@ const secondSet = "20261115T100001Z";
 
 // Use the rendered entrypoints, including the former init-container sequence, so removing
 // the runner from the chart makes the concurrent-entry control fail too.
-const entrypoints = (async () => {
+async function renderBackup(extra: string[] = []) {
   const child = Bun.spawn(
     [
       "helm",
@@ -31,6 +31,7 @@ const entrypoints = (async () => {
       "substrate.workspaceConfigurationSecret=native-workspaces",
       "--set",
       "substrate.provisionerTokenSecret=native-provisioner",
+      ...extra,
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
@@ -43,12 +44,16 @@ const entrypoints = (async () => {
   const cron = parseAllDocuments(stdout)
     .map((document) => document.toJSON())
     .find((resource) => resource.kind === "CronJob");
+  return cron;
+}
+const rendered = renderBackup();
+const entrypoints = rendered.then((cron) => {
   const pod = cron.spec.jobTemplate.spec.template.spec;
   return [...pod.initContainers, ...pod.containers]
     .map((container) => container.command as string[])
     .filter((command) => command[0] === "sh" && command[1]?.startsWith("/scripts/"))
     .map((command) => command[1] as string);
-})();
+});
 
 async function until(check: () => Promise<boolean>) {
   const deadline = Date.now() + 5_000;
@@ -128,13 +133,34 @@ while [ "$1" != -- ]; do
 done
 shift
 printf '%s\\n' "$*" >> "$FIXTURE/kubectl.calls"
+stall_exec() {
+  echo closed > "$FIXTURE/$FIXTURE_ID.exec-bytes-ended"
+  # Model closed output streams without the exec completion status. Keep an
+  # uncooperative owned descendant so killing just kubectl is insufficient.
+  exec 1>&- 2>&-
+  trap '' TERM
+  sh -c 'trap "" TERM; echo "$$" >> "$FIXTURE/$FIXTURE_ID.exec-descendant.pid"; while [ ! -f "$FIXTURE/$FIXTURE_ID.release" ]; do sleep 0.02; done' &
+  wait
+}
 if [ "$container" = postgres ]; then
+  case "$*" in
+    *'exec pg_dump '*) phase=postgres.dump ;;
+    'pg_restore --list') phase=postgres.validate ;;
+    *'exec psql '*) phase=postgres.orphans ;;
+    *) exit 2 ;;
+  esac
+  if [ "\${STALL_EXEC_PHASE:-}" = "$phase" ]; then
+    POSTGRES_PASSWORD=fixture-postgres-password "$@" || exit $?
+    stall_exec
+    exit 0
+  fi
   POSTGRES_PASSWORD=fixture-postgres-password exec "$@"
 fi
 case "$1" in
   sh)
     printf '%s' "$3" > "$FIXTURE/remote.sh"
-    if [ "\${FAIL_FORGEJO:-0}" = 1 ]; then printf invalid; else cat "$FIXTURE/forgejo.tar.gz"; fi ;;
+    if [ "\${FAIL_FORGEJO:-0}" = 1 ]; then printf invalid; else cat "$FIXTURE/forgejo.tar.gz"; fi
+    if [ "\${STALL_EXEC_PHASE:-}" = forgejo.dump ]; then stall_exec; fi ;;
   *) exit 2 ;;
 esac
 `,
@@ -331,6 +357,117 @@ test("runner termination signals its step and leaves an incomplete set without u
     await f.close();
   }
 }, 15_000);
+
+test.each([
+  ["postgres.dump", "postgres", 5],
+  ["postgres.validate", "postgres", 5],
+  ["postgres.orphans", "postgres", 1],
+  ["forgejo.dump", "forgejo", 3],
+] as const)(
+  "closed %s bytes without exec completion terminate owned descendants and fail closed",
+  async (phase, step, attempts) => {
+    const f = await fixture();
+    const unrelated = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      const first = f.start("first", {
+        STALL_EXEC_PHASE: phase,
+        BACKUP_EXEC_TIMEOUT_SECONDS: "1",
+      });
+      await until(() => Bun.file(`${f.root}/first.exec-descendant.pid`).exists());
+      const outcome = await Promise.race([first.result, Bun.sleep(8_500).then(() => null)]);
+      expect(outcome).not.toBeNull();
+      expect(outcome?.[0]).not.toBe(0);
+      const descendants = (await readFile(`${f.root}/first.exec-descendant.pid`, "utf8"))
+        .trim()
+        .split("\n")
+        .map(Number);
+      expect(descendants).toHaveLength(attempts);
+      for (const descendant of descendants) expect(() => process.kill(descendant, 0)).toThrow();
+      expect(() => process.kill(unrelated.pid, 0)).not.toThrow();
+      expect(outcome?.[2]).toContain(`Backup exec ${phase} timed out after 1s`);
+      if (attempts > 1)
+        expect(outcome?.[2]).toContain(`Attempt ${attempts - 1} of ${attempts} failed`);
+      expect(await f.exists(`${firstSet}/${step}.failed`)).toBe(true);
+      expect(await f.exists(`${firstSet}/${step}.ok`)).toBe(false);
+      if (phase === "postgres.dump" || phase === "postgres.validate") {
+        expect(await f.exists(`${firstSet}/postgres.dump`)).toBe(false);
+        expect(await readFile(`${f.backup}/${firstSet}/postgres.dump.part`, "utf8")).toBe(
+          "fixture postgres dump",
+        );
+      }
+      if (step === "postgres") expect(await f.exists(`${firstSet}/forgejo.tar.gz`)).toBe(true);
+      expect(await f.exists(`${firstSet}/state.tar.gz`)).toBe(true);
+      expect(await f.exists(`${firstSet}/COMPLETE`)).toBe(false);
+      expect(await readFile(`${f.root}/rclone.calls`, "utf8")).not.toContain("copy ");
+      await f.unlocked();
+    } finally {
+      unrelated.kill("SIGKILL");
+      await unrelated.exited;
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test("a larger exec deadline allows delayed confirmed completion without a success fallback", async () => {
+  const f = await fixture();
+  try {
+    const first = f.start("first", {
+      STALL_EXEC_PHASE: "postgres.dump",
+      BACKUP_EXEC_TIMEOUT_SECONDS: "3",
+    });
+    await until(() => Bun.file(`${f.root}/first.exec-descendant.pid`).exists());
+    await Bun.sleep(1_100);
+    expect(await f.exists(`${firstSet}/COMPLETE`)).toBe(false);
+    await f.release("first");
+    const [code, , stderr] = await first.result;
+    expect(code).toBe(0);
+    expect(stderr).toContain("Backup exec postgres.dump started; deadline 3s");
+    expect(stderr).toContain("Backup exec postgres.dump exited with status 0");
+    expect(await f.exists(`${firstSet}/COMPLETE`)).toBe(true);
+    await f.unlocked();
+  } finally {
+    await f.close();
+  }
+}, 10_000);
+
+test("runner cancellation bounds an exec with a TERM-ignoring descendant", async () => {
+  const f = await fixture();
+  try {
+    const first = f.start("first", { STALL_EXEC_PHASE: "postgres.dump" });
+    await until(() => Bun.file(`${f.root}/first.exec-descendant.pid`).exists());
+    first.child.kill("SIGTERM");
+    const outcome = await Promise.race([first.result, Bun.sleep(1_500).then(() => null)]);
+    expect(outcome?.[0]).toBe(143);
+    const descendant = Number(await readFile(`${f.root}/first.exec-descendant.pid`, "utf8"));
+    expect(() => process.kill(descendant, 0)).toThrow();
+    expect(await f.exists(`${firstSet}/COMPLETE`)).toBe(false);
+    expect(await f.exists(`${firstSet}/postgres.ok`)).toBe(false);
+    expect(await Bun.file(`${f.root}/rclone.calls`).exists()).toBe(false);
+    await f.unlocked();
+  } finally {
+    await f.close();
+  }
+}, 10_000);
+
+test("the chart exposes a positive per-exec deadline without changing the Job ceiling", async () => {
+  const job = (await rendered).spec.jobTemplate.spec;
+  expect(job.activeDeadlineSeconds).toBe(21600);
+  expect(job.template.spec.containers[0].env).toContainEqual({
+    name: "BACKUP_EXEC_TIMEOUT_SECONDS",
+    value: "1800",
+  });
+  const custom = await renderBackup(["--set", "backup.execTimeoutSeconds=7200"]);
+  expect(custom.spec.jobTemplate.spec.template.spec.containers[0].env).toContainEqual({
+    name: "BACKUP_EXEC_TIMEOUT_SECONDS",
+    value: "7200",
+  });
+  for (const invalid of ["0", "-1", "1.5", "never", ""]) {
+    await expect(
+      renderBackup(["--set-string", `backup.execTimeoutSeconds=${invalid}`]),
+    ).rejects.toThrow("backup.execTimeoutSeconds must be a positive whole number");
+  }
+});
 
 test("backup failure retains later archives but cannot complete, prune or upload", async () => {
   const f = await fixture();

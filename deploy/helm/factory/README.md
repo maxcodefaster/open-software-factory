@@ -299,6 +299,17 @@ One runner holds the lock through every step, completion, pruning and offsite co
 child processes inherit the lock descriptor, so killing the runner cannot admit another backup
 while a surviving child still writes. Termination signals reach the current step's process group.
 The lock releases when its last inherited descriptor closes; no stale-lock cleanup is needed.
+Each `kubectl exec` call logs its phase, start and exit status. `backup.execTimeoutSeconds`
+(default 1800, a positive whole number) bounds one exec attempt, including connection, command,
+archive transfer and remote exit-status completion. This is a wall-clock limit, not an idle limit.
+Size it above the longest expected dump or validation on a large installation. The existing
+six-hour deadline still bounds the whole Job, including retries, other steps and offsite copy.
+An expired call reports an unknown remote outcome, kills its owned local client and descendants,
+and fails that attempt. Existing retries still run, and exhausted retries leave the step failed
+while later steps run. Neither a timeout nor apparently complete archive bytes permit `COMPLETE`
+or upload. `kubectl --request-timeout` alone does not bound an upgraded exec stream.
+Disconnecting a client cannot confirm that its remote command stopped; inspect the named phase
+and data-service Pod when diagnosing a timeout.
 One Pod takes every part in this order, so the object mirror always contains the objects the
 database dump refers to:
 

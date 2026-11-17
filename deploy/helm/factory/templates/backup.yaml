@@ -12,6 +12,10 @@ PostgreSQL and Forgejo commands run in their existing Pods; only the runner writ
 {{- if or (ne (toString .Values.backup.retention) (printf "%d" $retention)) (lt $retention 1) }}
 {{- fail "backup.retention must be a positive whole number of backup sets to keep" }}
 {{- end }}
+{{- $execTimeout := int .Values.backup.execTimeoutSeconds }}
+{{- if or (ne (toString .Values.backup.execTimeoutSeconds) (printf "%d" $execTimeout)) (lt $execTimeout 1) }}
+{{- fail "backup.execTimeoutSeconds must be a positive whole number of seconds" }}
+{{- end }}
 {{- if not .Values.backup.schedule }}
 {{- fail "backup.schedule must be a cron expression" }}
 {{- end }}
@@ -245,6 +249,7 @@ spec:
                 - {name: BAO_ADDR, value: "https://{{ $name }}-openbao.{{ .Release.Namespace }}.svc:8200"}
                 - {name: BAO_CACERT, value: /bao/tls/ca.crt}
                 - {name: BACKUP_RETENTION, value: {{ $retention | quote }}}
+                - {name: BACKUP_EXEC_TIMEOUT_SECONDS, value: {{ $execTimeout | quote }}}
                 {{- if .Values.backup.remote.path }}
                 - {name: BACKUP_REMOTE, value: {{ .Values.backup.remote.path | quote }}}
                 - {name: RCLONE_CONFIG, value: /rclone/rclone.conf}

@@ -2,6 +2,12 @@
 # unlock it: a surviving child must keep exclusion even if this runner is killed.
 # shellcheck source=common.sh
 . /scripts/common.sh
+if [ "${1:-}" = exec ]; then
+  shift
+  exec_call "$@"
+  exit "$?"
+fi
+
 exec 9>>"$BACKUP/.lock"
 if ! flock -n 9; then
   echo "Another backup holds $BACKUP/.lock; this Job did not start a backup set" >&2

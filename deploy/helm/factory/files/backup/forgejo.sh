@@ -7,7 +7,7 @@ load_set
 # repositories, attachments and configuration.
 dump() {
   rm -f "$DIR/forgejo.tar.gz.part"
-  kubectl exec --namespace "$BACKUP_NAMESPACE" "$FORGEJO_POD" --container forgejo -- sh -c \
+  sh /scripts/run.sh exec forgejo.dump kubectl exec --namespace "$BACKUP_NAMESPACE" "$FORGEJO_POD" --container forgejo -- sh -c \
     'set -eu
      umask 077
      temporary="$(mktemp -d "/tmp/factory-backup.$1.XXXXXX")"

@@ -86,6 +86,9 @@ backup:
   retention: 7
   # Size for retention x (database + Forgejo + state) plus one copy of the object store.
   size: 40Gi
+  # Wall-clock limit for each kubectl exec attempt, including stream/status completion.
+  # Increase for large dumps or validation. The whole Job still has a six-hour deadline.
+  execTimeoutSeconds: 1800
   resources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}

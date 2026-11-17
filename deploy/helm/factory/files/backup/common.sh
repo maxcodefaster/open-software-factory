@@ -37,3 +37,57 @@ step() {
     echo "Backup step $name failed" >&2
   fi
 }
+
+# Invoked in a separate runner shell, before its lock acquisition, with fd 9 inherited.
+# kubectl's request timeout does not bound its upgraded exec streams. Missing remote
+# completion is never success.
+exec_call() {
+  name=$1
+  shift
+  seconds=${BACKUP_EXEC_TIMEOUT_SECONDS:-1800}
+  case "$seconds" in
+    ''|*[!0-9]*|0*) echo "BACKUP_EXEC_TIMEOUT_SECONDS must be a positive whole number" >&2; exit 2 ;;
+  esac
+
+  child=''
+  timer=''
+  cleanup() {
+    # The timer has its own group so its sleep cannot survive cleanup or hold fd 9.
+    if [ -n "$timer" ]; then
+      kill -KILL "$timer" 2> /dev/null || true
+      kill -KILL "-$timer" 2> /dev/null || true
+      wait "$timer" 2> /dev/null || true
+    fi
+    if [ -n "$child" ]; then
+      kill -TERM "-$child" 2> /dev/null || true
+      # A timed-out client or descendant must not keep writing into the next attempt.
+      kill -KILL "$child" 2> /dev/null || true
+      kill -KILL "-$child" 2> /dev/null || true
+      wait "$child" 2> /dev/null || true
+    fi
+  }
+  stop() {
+    trap '' TERM INT USR1
+    if [ "$1" -eq 124 ]; then
+      echo "Backup exec $name timed out after ${seconds}s; remote outcome is unknown" >&2
+    fi
+    cleanup
+    exit "$1"
+  }
+  trap 'stop 143' TERM
+  trap 'stop 130' INT
+  trap 'stop 124' USR1
+
+  echo "Backup exec $name started; deadline ${seconds}s" >&2
+  # Explicit stdin redirection preserves the archive input for background pg_restore.
+  setsid "$@" <&0 &
+  child=$!
+  setsid sh -c 'sleep "$1"; kill -USR1 "$2"' sh "$seconds" "$$" &
+  timer=$!
+  wait "$child"
+  status=$?
+  trap '' TERM INT USR1
+  cleanup
+  echo "Backup exec $name exited with status $status" >&2
+  exit "$status"
+}
