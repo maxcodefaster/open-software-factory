@@ -158,6 +158,10 @@ and separately rotated native provisioner credential in `private-values.yaml`. I
 the pinned official runtime on workers matching the selected Linux arm64 or amd64 identity first. The chart supplies the Factory data
 services and credentials. Use the exact images qualified for the selected architecture; a source-chart
 qualification is not publication of a new Factory release.
+With Ingress enabled, the chart creates its own CA and renews its HTTPS certificates automatically.
+It distributes public trust to native workloads without mkcert, OrbStack or a public DNS service.
+Clients still need to trust that CA, and the installation needs reachable DNS and an Ingress controller.
+An existing enterprise TLS Secret can replace the built-in issuer.
 The Namespace label admits trusted Factory clients through Substrate's API NetworkPolicy;
 it does not grant native authority. Keep execution and editor namespaces unlabelled.
 [Installation, backups and recovery](deploy/helm/factory/README.md).

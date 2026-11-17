@@ -13,14 +13,12 @@ spec:
   {{- with .Values.ingress.className }}
   ingressClassName: {{ . | quote }}
   {{- end }}
-  {{- with .Values.ingress.tlsSecret }}
   tls:
-    - secretName: {{ . | quote }}
+    - secretName: {{ default (printf "%s-ingress-tls" (include "factory.name" .)) .Values.ingress.tlsSecret | quote }}
       hosts:
         - {{ regexReplaceAll ":[0-9]+$" (urlParse $.Values.publicURL).host "" | quote }}
         - {{ regexReplaceAll ":[0-9]+$" (urlParse $.Values.forgejoPublicURL).host "" | quote }}
         - {{ printf "*.runtime.%s" (regexReplaceAll ":[0-9]+$" (urlParse $.Values.publicURL).host "") | quote }}
-  {{- end }}
   rules:
     {{- range $endpoint := list (dict "url" .Values.publicURL "service" "factory") (dict "url" .Values.forgejoPublicURL "service" "forgejo") }}
     - host: {{ regexReplaceAll ":[0-9]+$" (urlParse $endpoint.url).host "" | quote }}

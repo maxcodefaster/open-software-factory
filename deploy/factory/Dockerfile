@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /factory-
 
 FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tools
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
-RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates git util-linux \
+RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates git util-linux openssl \
   && rm -rf /var/lib/apt/lists/*
 
 FROM tools AS build

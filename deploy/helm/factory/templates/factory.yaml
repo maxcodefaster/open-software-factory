@@ -54,6 +54,7 @@ spec:
             - -c
             - |
               marker=/var/lib/factory/.owner-uid-1000
+              chmod 0700 /var/lib/factory
               test -e "$marker" && exit 0
               chown -R 1000:1000 /var/lib/factory
               : > "$marker"
@@ -70,6 +71,33 @@ spec:
             limits: {cpu: 250m, memory: 64Mi}
           volumeMounts:
             - {name: state, mountPath: /var/lib/factory}
+        {{- if include "factory.managedIngressTLS" . }}
+        # Renew an expired leaf before a cold installation starts, not just on the daily schedule.
+        - name: ensure-ingress-tls
+          image: {{ include "factory.image" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [bun, scripts/kubernetes/ingress-tls.ts]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
+          env:
+            - name: FACTORY_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            - {name: FACTORY_HELM_RELEASE, value: {{ .Release.Name | quote }}}
+            - {name: FACTORY_INGRESS_TLS_SECRET, value: "{{ include "factory.name" . }}-ingress-tls"}
+            - {name: FACTORY_INGRESS_TLS_HOSTS, value: {{ include "factory.ingressHosts" . | quote }}}
+            - {name: FACTORY_INGRESS_TLS_STATE_DIRECTORY, value: /var/lib/factory/ingress-tls}
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {cpu: "1", memory: 128Mi}
+          volumeMounts:
+            - {name: ingress-ca, mountPath: /run/factory/ingress-ca, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+            - {name: state, mountPath: /var/lib/factory}
+        {{- end }}
       containers:
         - name: factory
           image: {{ include "factory.image" . }}
@@ -147,9 +175,20 @@ spec:
             {{- end }}
       volumes:
         - name: substrate-configuration
+          {{- if include "factory.managedIngressTLS" . }}
+          projected:
+            sources:
+              - secret:
+                  name: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
+                  items: [{key: configuration.json, path: configuration.json}]
+              - secret:
+                  name: {{ include "factory.name" . }}-ingress-ca
+                  items: [{key: ca.crt, path: factory-ca.pem}]
+          {{- else }}
           secret:
             secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
             items: [{key: configuration.json, path: configuration.json}, {key: factory-ca.pem, path: factory-ca.pem}]
+          {{- end }}
         - name: substrate-provisioner
           secret:
             secretName: {{ required "substrate.provisionerTokenSecret is required for native Workspace provisioning" .Values.substrate.provisionerTokenSecret | quote }}
@@ -176,6 +215,12 @@ spec:
           secret:
             secretName: {{ include "factory.openbaoTLSSecret" . }}
             items: [{key: ca.crt, path: ca.crt}]
+        {{- if include "factory.managedIngressTLS" . }}
+        - name: ingress-ca
+          secret:
+            secretName: {{ include "factory.name" . }}-ingress-ca
+            items: [{key: ca.crt, path: ca.crt}, {key: ca.key, path: ca.key}]
+        {{- end }}
         {{- if .Values.registryCASecret }}
         - name: registry-ca
           secret:

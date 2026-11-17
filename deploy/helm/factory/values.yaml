@@ -116,6 +116,8 @@ networkPolicy:
 ingress:
   enabled: false
   className: ""
+  # Empty issues installation-owned TLS and renews leaves automatically. No host CA tooling.
+  # Set an operator-owned TLS Secret to opt out; then supply factory-ca.pem with native config.
   tlsSecret: ""
   annotations: {}
 
@@ -137,8 +139,9 @@ maintenance:
       cpu: "1"
       memory: 256Mi
 substrate:
-  # Required. Installation-wide native configuration (configuration.json) and
-  # the public Factory trust bundle (factory-ca.pem). No execution fallback.
+  # Required. Installation-wide native configuration (configuration.json).
+  # Managed Ingress TLS projects its public CA automatically as factory-ca.pem.
+  # Other ingress/transport owners also supply factory-ca.pem in this Secret.
   workspaceConfigurationSecret: ""
   # Separately rotated, short-lived native global-owner credential (key: token).
   # Actor calls use the application's projected editor token, never this one.

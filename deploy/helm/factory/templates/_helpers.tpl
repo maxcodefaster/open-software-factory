@@ -95,6 +95,66 @@ resources:
 {{- default (printf "%s-openbao-tls" (include "factory.name" .)) .Values.existingSecrets.openbaoTLS -}}
 {{- end -}}
 
+{{- /* An explicit operator certificate opts out of installation-owned issuance. */ -}}
+{{- define "factory.managedIngressTLS" -}}
+{{- if and .Values.ingress.enabled (not .Values.ingress.tlsSecret) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "factory.ingressHosts" -}}
+{{- $factory := regexReplaceAll ":[0-9]+$" (urlParse (include "factory.publicURL" .)).host "" -}}
+{{- $forge := regexReplaceAll ":[0-9]+$" (urlParse (include "factory.forgeURL" .)).host "" -}}
+{{- if eq $factory $forge -}}
+{{- fail "Managed Ingress TLS requires distinct Factory and Forgejo DNS hostnames" -}}
+{{- end -}}
+{{- $hosts := list $factory $forge (printf "*.runtime.%s" $factory) -}}
+{{- range $host := $hosts -}}
+{{- if or (gt (len $host) 253) (not (regexMatch "^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$" $host)) -}}
+{{- fail "Managed Ingress TLS requires lowercase DNS hostnames" -}}
+{{- end -}}
+{{- range $label := splitList "." (trimPrefix "*." $host) -}}
+{{- if gt (len $label) 63 -}}{{- fail "Managed Ingress TLS DNS labels must not exceed 63 characters" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $hosts -}}
+{{- end -}}
+
+{{- /*
+Generate once per render. The CA and leaf are separate retained Secrets; only the issuer init
+container and renewal Job mount the CA-key Secret. An online upgrade preserves the latest leaf.
+Missing or foreign identities refuse an upgrade instead of invalidating frozen Actor trust.
+*/ -}}
+{{- define "factory.ingressIdentity" -}}
+{{- if not (hasKey . "_factoryIngressIdentity") -}}
+{{- $name := include "factory.name" . -}}
+{{- $ca := lookup "v1" "Secret" .Release.Namespace (printf "%s-ingress-ca" $name) -}}
+{{- $leaf := lookup "v1" "Secret" .Release.Namespace (printf "%s-ingress-tls" $name) -}}
+{{- $hosts := include "factory.ingressHosts" . -}}
+{{- if or (ne (empty $ca) (empty $leaf)) (and .Release.IsUpgrade (not $ca)) -}}
+{{- fail "The retained managed Ingress TLS identity is missing. Restore its original Secrets; refusing to replace Factory trust." -}}
+{{- end -}}
+{{- range $previous := list $ca $leaf -}}
+{{- if $previous -}}
+{{- if or (ne (dig "metadata" "labels" "app.kubernetes.io/instance" "" $previous) $.Release.Name) (ne (dig "metadata" "labels" "app.kubernetes.io/component" "" $previous) "ingress-tls") (ne (dig "metadata" "annotations" "factory.dev/tls-hosts" "" $previous) $hosts) -}}
+{{- fail "The retained managed Ingress TLS owner or hostnames changed; existing trust was not adopted." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $identity := dict -}}
+{{- if $ca -}}
+{{- $_ := set $identity "ca" (dict "crt" (required "Retained Ingress CA certificate is missing" (index $ca.data "ca.crt")) "key" (required "Retained Ingress CA key is missing" (index $ca.data "ca.key"))) -}}
+{{- if ne (index $ca.data "ca.crt") (index $leaf.data "ca.crt") -}}{{- fail "Retained Ingress leaf trust differs from its CA" -}}{{- end -}}
+{{- $_ := set $identity "leaf" (dict "crt" (required "Retained Ingress certificate is missing" (index $leaf.data "tls.crt")) "key" (required "Retained Ingress key is missing" (index $leaf.data "tls.key"))) -}}
+{{- else -}}
+{{- $generatedCA := genCA (printf "%s.%s Factory Ingress CA" $name .Release.Namespace) 3650 -}}
+{{- $generatedLeaf := genSignedCert (first (fromJsonArray $hosts)) nil (fromJsonArray $hosts) 90 $generatedCA -}}
+{{- $_ := set $identity "ca" (dict "crt" ($generatedCA.Cert | b64enc) "key" ($generatedCA.Key | b64enc)) -}}
+{{- $_ := set $identity "leaf" (dict "crt" ($generatedLeaf.Cert | b64enc) "key" ($generatedLeaf.Key | b64enc)) -}}
+{{- end -}}
+{{- $_ := set . "_factoryIngressIdentity" $identity -}}
+{{- end -}}
+{{- toJson (get . "_factoryIngressIdentity") -}}
+{{- end -}}
+
 {{- /*
 Pod-template checksum for Secrets the operator owns. It is empty when the chart generates the
 Secret (generated values never change) and reads the live Secret through lookup, which

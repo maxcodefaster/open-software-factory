@@ -21,9 +21,10 @@ the live ARM product path from packaging, source-launcher and other architecture
   and a digest-pinned native Actor image selected in the installation configuration. Publish those
   images where the cluster and Actor-private Docker can pull them. Node image-pull trust remains
   an operator prerequisite, not a privileged installer DaemonSet.
-- Factory and Forgejo public TLS origins, DNS and an operator-owned Ingress certificate. Native Git
+- Factory and Forgejo public TLS origins and reachable DNS. Native Git
   requires a DNS Forgejo hostname on port 443, admitted by the frozen native egress configuration.
-  Factory's isolated browser hosts also need `*.runtime.<factory-hostname>` in DNS and the certificate.
+  Factory's isolated browser hosts also need `*.runtime.<factory-hostname>` in DNS.
+  The chart issues the Ingress certificate unless an operator supplies `ingress.tlsSecret`.
 
 Factory's ServiceAccount is trusted infrastructure. It manages developer-editor namespaces and
 exactly owned storage checks, bootstraps its data services and observes native capacity. Its
@@ -90,6 +91,53 @@ Factory, Zero, Garage and OpenBao carry a checksum of the Secrets they read, so 
 when a Secret changes. Argo CD cannot read the Secret, so bump `existingSecrets.revision`.
 The OpenBao certificate must cover the OpenBao Service names and `127.0.0.1`, which the startup probe uses.
 
+### Installation-owned HTTPS
+
+With `ingress.enabled: true` and no `ingress.tlsSecret`, the chart creates a private CA and
+certificates for Factory, Forgejo and `*.runtime.<factory-hostname>`. Issuance uses Kubernetes
+Secrets and OpenSSL in the Factory image. It needs no external certificate service, ACME account,
+cert-manager, mkcert, OrbStack or public wildcard DNS service.
+
+The retained immutable Secret `<release>-ingress-ca` holds the ten-year CA. Only the issuer init
+container and the daily `<release>-ingress-tls` CronJob mount its signing-key Secret. Native workloads
+receive only its public certificate. The chart projects that
+certificate as `/run/factory/substrate-configuration/factory-ca.pem`, so the native configuration
+Secret needs only `configuration.json` and its normal `factoryCAFile` path, not a manually
+prepared CA file. This does not change Substrate API trust or the node's image-pull trust.
+Before readiness, the init container also retains the original CA and an initial leaf privately
+under `/var/lib/factory/ingress-tls/identity.json`. The existing state backup includes that recovery
+copy automatically. It contains a signing key and needs the same encrypted protection as the
+OpenBao unseal key. Factory's infrastructure ServiceAccount already has Secret access; public-only
+runtime mounts do not make a compromised control plane unable to read the signing authority.
+
+The initial leaf lasts 90 days. The issuer replaces leaves with fewer than 30 days remaining,
+both before Factory starts and on the daily schedule. Ingress must reload its referenced TLS
+Secret when it changes. The issuer validates the original CA, key, exact hostnames, Secret
+ownership, UID and resource version. A lost patch reply is not retried blindly. It never replaces
+the CA, disables verification, changes global trust or renews an operator-owned certificate.
+CA replacement needs an explicitly planned trust change before its ten-year expiry, not a
+silent replacement of certificates already pinned by native workloads.
+
+Private issuance cannot make arbitrary user browsers trust a new root. Export only the public
+certificate for the client or enterprise trust policy:
+
+```sh
+mise exec -- kubectl get secret factory-ingress-ca --namespace factory \
+  -o jsonpath='{.data.ca\.crt}' | base64 --decode > factory-ca.pem
+```
+
+Verify that fingerprint through the installation administrator before trusting it. Never export
+`ca.key` to a browser, Project, runtime image or test artifact. Clients that cannot accept a
+private root need an already trusted enterprise certificate through `ingress.tlsSecret`.
+That option also retains the operator's `factory-ca.pem` in the native configuration Secret.
+It creates no built-in issuer or renewal Job. Offline GitOps renderers must use that explicit
+certificate path, just as they must provide the other retained Secrets instead of regenerating
+identities on every render.
+
+Reachable DNS and an HTTPS Ingress listener remain cluster prerequisites. Factory does not
+modify the host's resolver or install a cluster-specific controller. The same issuer runs on
+Linux arm64 and amd64, whether the cluster is local or remote.
+
 ## Install
 
 Create the trusted control-plane Namespace and opt it into Substrate's official API
@@ -114,7 +162,8 @@ needs a rollout strategy that can release the existing port.
 
 Create two operator-owned Secrets in the release Namespace:
 
-- `substrate.workspaceConfigurationSecret`, with `configuration.json` and `factory-ca.pem`.
+- `substrate.workspaceConfigurationSecret`, with `configuration.json`. Add `factory-ca.pem` only
+  when the operator owns HTTPS rather than using the built-in issuer.
 - `substrate.provisionerTokenSecret`, with the separately rotated native Owner `token`.
 
 The JSON is installation-wide and names no Project or setup draft. Use `deployment: fresh-workspaces`
@@ -143,7 +192,6 @@ storageClass: YOUR_DYNAMIC_RWO_CLASS
 ingress:
   enabled: true
   className: your-existing-ingress-class
-  tlsSecret: your-existing-certificate-secret
 ```
 
 ```sh
@@ -230,12 +278,13 @@ Native Git requires real Forge DNS/TLS and the configured native WSS endpoint, e
 browser uses a loopback listener. The source launcher is not covered by the Helm qualification.
 There is no one-image HTTP-worker installation or legacy runtime fallback.
 
-For local acceptance, use the existing `mkcert` development CA with stable, operator-managed
+For local acceptance, use the built-in issuer with stable, operator-managed
 local DNS names. Do not depend on a public wildcard DNS service or encode a disposable container
 IP in the installation origins. DNS must resolve from the Mac, the cluster and native workloads;
 a Mac-only hosts entry or a loopback name is insufficient for Actor callbacks and Git.
 
-Generate the Ingress leaf certificate locally, for example:
+The following is an optional operator-owned certificate setup for existing local fixtures, not a
+Factory installation prerequisite. Generate an Ingress leaf with an existing trusted development CA:
 
 ```sh
 mkdir -p .factory/local-tls
@@ -403,6 +452,10 @@ Limits to know before relying on this:
   yourself, for example `kubectl get secret <release>-credentials <release>-objects
   <release>-openbao-tls -o yaml`, or keep them in your own secret manager and set
   `existingSecrets.*`.
+  Built-in HTTPS retains a recovery copy in `state.tar.gz` at `ingress-tls/identity.json`.
+  Restore its original `<release>-ingress-ca` and `<release>-ingress-tls` Secret data and ownership
+  before Helm or Factory starts. An expired saved leaf is renewed by the issuer init container
+  under the same root. Do not invent another CA: that would invalidate retained workload trust.
 - **The Pod runs on Factory's node** because the state claim is ReadWriteOnce. If Factory is down
   the Job waits until it returns or hits its six-hour deadline.
 - **The Forgejo archive is taken from a running server.** The database part is a consistent SQL
@@ -1052,6 +1105,10 @@ and size settings, not retained identities. Successful packaging or control-plan
 complete clean-install qualification.
 
 ### Owned native clean-room inputs
+
+This helper currently qualifies the operator-owned certificate path below. The built-in issuer uses
+the ordinary Helm installation path; do not provide fake certificate inputs to make this helper
+claim managed-issuer acceptance.
 
 Reserve distinct, unused public Factory and Forgejo DNS names through the existing Ingress
 controller. Supply a currently valid leaf certificate and matching private key covering both
