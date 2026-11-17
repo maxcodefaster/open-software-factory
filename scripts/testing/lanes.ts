@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 const nativeNames = new Set([
+  "backup-runner.native",
   "substrate-adapter.native",
   "substrate-rootless-proxy.native",
   "substrate-workspaces.native",
@@ -25,6 +26,7 @@ const nativeNames = new Set([
   "openbao",
 ]);
 const selfContainedControllerTests = new Set([
+  "backup-runner.native.test.ts",
   "substrate-adapter.test.ts",
   "substrate-adapter.native.test.ts",
   "substrate-rootless-proxy.native.test.ts",
@@ -84,7 +86,9 @@ export function controllerNeedsDatabase(path: string) {
   return !selfContainedControllerTests.has(path.split("/").at(-1) ?? "");
 }
 export function integrationNeedsApplicationBuild(path: string) {
-  return basename(path) !== "substrate-rootless-proxy.native.test.ts";
+  return !["backup-runner.native.test.ts", "substrate-rootless-proxy.native.test.ts"].includes(
+    basename(path),
+  );
 }
 export function integrationLane(path: string) {
   const name = basename(path).replace(/\.test\.ts$/, "");

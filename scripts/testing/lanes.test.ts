@@ -8,6 +8,11 @@ import {
 } from "./lanes";
 
 test("explicit lanes keep paid calls and retained-installation restarts outside defaults", () => {
+  expect(integrationLane("test/integration/backup-runner.native.test.ts")).toBe("native");
+  expect(controllerNeedsDatabase("test/integration/backup-runner.native.test.ts")).toBe(false);
+  expect(integrationNeedsApplicationBuild("test/integration/backup-runner.native.test.ts")).toBe(
+    false,
+  );
   expect(integrationLane("test/integration/project-environment.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/native-skill-loading.test.ts")).toBe("native");
   expect(integrationLane("test/integration/substrate-adapter.native.test.ts")).toBe("native");

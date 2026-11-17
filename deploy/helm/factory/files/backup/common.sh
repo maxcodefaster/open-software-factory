@@ -79,9 +79,12 @@ exec_call() {
   trap 'stop 124' USR1
 
   echo "Backup exec $name started; deadline ${seconds}s" >&2
-  # Explicit stdin redirection preserves the archive input for background pg_restore.
-  setsid "$@" <&0 &
+  # BusyBox ash resets fd 0 for an asynchronous command before applying <&0.
+  # Save the archive input on another descriptor before starting that command.
+  exec 8<&0
+  setsid "$@" <&8 8<&- &
   child=$!
+  exec 8<&-
   setsid sh -c 'sleep "$1"; kill -USR1 "$2"' sh "$seconds" "$$" &
   timer=$!
   wait "$child"

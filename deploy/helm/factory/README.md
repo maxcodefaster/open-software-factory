@@ -310,6 +310,8 @@ while later steps run. Neither a timeout nor apparently complete archive bytes p
 or upload. `kubectl --request-timeout` alone does not bound an upgraded exec stream.
 Disconnecting a client cannot confirm that its remote command stopped; inspect the named phase
 and data-service Pod when diagnosing a timeout.
+`mise exec -- bun run test:native backup-runner.native` checks binary stdin and inherited lock
+access in the pinned Linux runner image without a cluster. It does not qualify a backup or restore.
 One Pod takes every part in this order, so the object mirror always contains the objects the
 database dump refers to:
 
