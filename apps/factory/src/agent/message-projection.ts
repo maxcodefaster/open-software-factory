@@ -22,6 +22,7 @@ type ProjectToolState = {
   input?: unknown | undefined;
   content?: ReadonlyArray<{ type: string; text?: string | undefined }> | undefined;
   metadata?: Record<string, unknown> | undefined;
+  error?: unknown | undefined;
 };
 
 type ProjectMessageContent = {
@@ -104,18 +105,14 @@ function toolSummary(name: string, input: unknown) {
   return name.replaceAll("_", " ");
 }
 
-function toolDetail(state: {
-  status: string;
-  content?: ReadonlyArray<{ type: string; text?: string | undefined }> | undefined;
-  error?: unknown | undefined;
-}) {
+function toolDetail(state: ProjectToolState, context: "tool" | "browser") {
   const output = state.content
     ?.filter((item) => item.type === "text" && item.text?.trim())
     .map((item) => item.text?.trim())
     .join("\n");
   if (output) return { text: bounded(output, 4_000), truncated: output.length > 4_000 };
   if (state.status === "error" && state.error) {
-    const error = readableError(state.error);
+    const error = readableError(state.error, context);
     return { text: bounded(error, 1_000), truncated: error.length > 1_000 };
   }
   return null;
@@ -191,7 +188,7 @@ export function projectMessages(
               ? content.name.slice(browserPrefix.length)
               : undefined;
             const input = status === "streaming" ? null : content.state.input;
-            const detail = toolDetail(content.state);
+            const detail = toolDetail(content.state, browserAction ? "browser" : "tool");
             const summary = toolSummary(browserAction ?? content.name, input);
             const navigation =
               status === "completed"

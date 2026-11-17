@@ -1,11 +1,19 @@
 import { expect, test } from "bun:test";
 import playwright from "../../playwright.config";
-import { browserLane, controllerNeedsDatabase, integrationLane } from "./lanes";
+import {
+  browserLane,
+  controllerNeedsDatabase,
+  integrationLane,
+  integrationNeedsApplicationBuild,
+} from "./lanes";
 
 test("explicit lanes keep paid calls and retained-installation restarts outside defaults", () => {
   expect(integrationLane("test/integration/project-environment.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/native-skill-loading.test.ts")).toBe("native");
   expect(integrationLane("test/integration/substrate-adapter.native.test.ts")).toBe("native");
+  expect(integrationLane("test/integration/substrate-rootless-proxy.native.test.ts")).toBe(
+    "native",
+  );
   expect(integrationLane("test/integration/substrate-workspaces.native.test.ts")).toBe("native");
   expect(integrationLane("test/integration/developer-ide-kubernetes.native.test.ts")).toBe(
     "native",
@@ -20,6 +28,17 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(browserLane("runtime-console.spec.ts")).toBe("native");
   expect(browserLane("skill-settings.spec.ts")).toBe("ui");
   expect(() => browserLane("unclassified.live.spec.ts")).toThrow("Unclassified");
+});
+
+test("the isolated rootless proxy component needs neither Factory build nor PostgreSQL", () => {
+  const component = "test/integration/substrate-rootless-proxy.native.test.ts";
+  const product = "test/integration/substrate-workspaces.native.test.ts";
+  expect(integrationNeedsApplicationBuild(component)).toBe(false);
+  expect(controllerNeedsDatabase(component)).toBe(false);
+  expect(integrationNeedsApplicationBuild(product)).toBe(true);
+  expect(controllerNeedsDatabase("test/integration/bootstrap.test.ts")).toBe(true);
+  expect([component].some(integrationNeedsApplicationBuild)).toBe(false);
+  expect([component, product].some(integrationNeedsApplicationBuild)).toBe(true);
 });
 
 test("the default browser selection excludes explicitly paid cases in mixed journey files", () => {

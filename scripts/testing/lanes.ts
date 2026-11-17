@@ -3,6 +3,7 @@ import { basename, resolve } from "node:path";
 
 const nativeNames = new Set([
   "substrate-adapter.native",
+  "substrate-rootless-proxy.native",
   "substrate-workspaces.native",
   "developer-ide-kubernetes.native",
   "substrate-coding-stop",
@@ -26,6 +27,7 @@ const nativeNames = new Set([
 const selfContainedControllerTests = new Set([
   "substrate-adapter.test.ts",
   "substrate-adapter.native.test.ts",
+  "substrate-rootless-proxy.native.test.ts",
   "developer-ide-kubernetes.native.test.ts",
   "native-project-releases.test.ts",
   "substrate-workspaces.test.ts",
@@ -80,6 +82,9 @@ const selfContainedControllerTests = new Set([
 
 export function controllerNeedsDatabase(path: string) {
   return !selfContainedControllerTests.has(path.split("/").at(-1) ?? "");
+}
+export function integrationNeedsApplicationBuild(path: string) {
+  return basename(path) !== "substrate-rootless-proxy.native.test.ts";
 }
 export function integrationLane(path: string) {
   const name = basename(path).replace(/\.test\.ts$/, "");
@@ -142,7 +147,7 @@ if (import.meta.main) {
       lane === "live" ? { ...process.env } : prerequisites.verificationEnvironment(process.env);
     if (lane !== "live") await prerequisites.prepareTestPrerequisites(selected, env);
     const buildDirectory =
-      lane === "unit"
+      lane === "unit" || !selected.some(integrationNeedsApplicationBuild)
         ? undefined
         : resolve(".factory/test-results/application-builds", crypto.randomUUID());
     let owned:

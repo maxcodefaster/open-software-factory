@@ -36,3 +36,25 @@ test("provider codes become one plain sentence with a next step", () => {
     expect(text).not.toMatch(/ECONN|529|insufficient_quota/);
   }
 });
+
+test("the default provider path keeps exact credential, quota, rate and transport guidance", () => {
+  const cases: [unknown, string][] = [
+    [
+      { message: "rate_limit_exceeded: https://provider.invalid/?token=private-token" },
+      "The model provider is limiting requests right now. Wait a minute, then retry. Retained work is kept.",
+    ],
+    [
+      new Error("401 Incorrect API key provided: sk-private-key"),
+      "The model provider rejected Factory's credentials. Ask a System Manager to check the model connection, then retry. Retained work is kept.",
+    ],
+    [
+      { data: { message: "insufficient_quota: private-account" } },
+      "The model provider reports that the account has no quota left. Ask a System Manager to check the provider account, then retry. Retained work is kept.",
+    ],
+    [
+      "TypeError: fetch failed https://user:private-password@provider.invalid",
+      "Factory lost its connection to the model provider. Wait a minute, then retry. Retained work is kept.",
+    ],
+  ];
+  for (const [error, expected] of cases) expect(readableError(error)).toBe(expected);
+});

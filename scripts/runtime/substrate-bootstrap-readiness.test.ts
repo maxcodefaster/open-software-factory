@@ -1,6 +1,24 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 
+test("the native TLS proxy does not preempt bounded quiet work or widen its network access", async () => {
+  const lines = (await Bun.file("deploy/substrate/rootless/tinyproxy.conf").text())
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  expect(lines.filter((line) => line.startsWith("Timeout "))).toEqual(["Timeout 900"]);
+  expect(lines.filter((line) => line.startsWith("ConnectPort ")).sort()).toEqual([
+    "ConnectPort 443",
+    "ConnectPort 80",
+  ]);
+  expect(lines.filter((line) => line.startsWith("Allow "))).toEqual([
+    "Allow 127.0.0.1",
+    "Allow 10.0.2.0/24",
+    "Allow 172.16.0.0/12",
+  ]);
+  expect(lines).toContain("MaxClients 32");
+});
+
 async function readiness(kind: string, readyAfter: number, mode = "docker", diesAfter = -1) {
   const child = Bun.spawn(
     [

@@ -16,6 +16,8 @@ docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
     test "$(containerd --version | awk "{print \$3}")" = v2.4.1
     test "$(node --version)" = v24.21.0
     test "$(devcontainer --version)" = 0.89.0
+    test "$(tinyproxy -v)" = "tinyproxy 1.11.2"
+    test "$(sed -n "s/^Timeout //p" /opt/factory-rootless/tinyproxy.conf)" = 900
     test -x /usr/local/bin/factory-runtime-connector
     test -x /opt/factory-rootless/start.sh
     test -x /opt/factory-rootless/connector.sh

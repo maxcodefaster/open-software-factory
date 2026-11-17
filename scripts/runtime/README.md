@@ -126,6 +126,25 @@ The commissioned registry and unrelated installation resources stay unchanged.
 
 ## Component checks
 
+The rootless proxy regression requires an explicitly selected, already cached Actor or qualified
+bootstrap image with Python 3 and Tinyproxy 1.11.2. Supply its immutable digest reference:
+
+```sh
+FACTORY_SUBSTRATE_PROXY_TEST_IMAGE='your-registry/actor@sha256:YOUR_CACHED_DIGEST' \
+  mise exec -- bun run test:native substrate-rootless-proxy.native
+```
+
+Missing input or image cache fails the test. It never pulls or builds images, starts Factory or
+acquires PostgreSQL. An exactly owned Docker container uses `--network=none`, a read-only root,
+no capabilities, no privilege escalation, one CPU and 256 MiB memory. The unchanged repository
+proxy configuration must carry a real verified-TLS HTTP 200 response after 35 silent seconds.
+Wrong CA and hostname checks must fail certificate validation. Cleanup checks the owner UUID and
+original container ID, removes that container and deletes both fixture private keys.
+Receipts default to `.factory/test-results/substrate-rootless-proxy/OWNER_UUID/`; set
+`FACTORY_SUBSTRATE_PROXY_TEST_RESULTS` to choose another evidence directory under
+`.factory/test-results/`. This is a packaged-proxy component check, not native Actor lifecycle,
+Substrate isolation or native product acceptance.
+
 `substrate-image-proof.sh` checks the Actor package on its matching native Linux architecture
 without starting an Actor. Emulated host/image mismatches are refused.
 `compose-inputs-proof.sh` and `project-compose-prebuild-proof.sh` exercise the shipped Compose,
