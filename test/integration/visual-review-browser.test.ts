@@ -296,7 +296,10 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await f.database
       .client`INSERT INTO factory.review_media(id,change_id,review_id,kind,commit_sha,runtime_attempt_id,state)
       VALUES(${recordingID},${f.changeID},${f.reviewID},'recording',${f.commit},${f.attemptID},'intended')`;
-    await media.publish(recordingID, video, durationMs);
+    const proof = await media.stage(recordingID, video);
+    await f.database.client.begin((sql) =>
+      media.complete(proof, durationMs, sql, "Unchanged frames shortened."),
+    );
     for (const [id, title, category] of [
       ["save", "Save a draft", "normal"],
       ["empty", "Empty title", "error"],
@@ -330,6 +333,27 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     failReview = false;
     await initial.getByRole("button", { name: "Reload review", exact: true }).click();
     await visible(panel().getByRole("button", { name: "Comment", exact: true })).toBeEnabled();
+    await visible(panel().locator(".review-recording-meta")).toContainText(
+      "Unchanged frames shortened.",
+    );
+    await page.screenshot({
+      path: resolve(directory, "condensed-recording-desktop.png"),
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await visible(panel().locator(".review-recording-meta")).toContainText(
+      "Unchanged frames shortened.",
+    );
+    await panel().locator(".review-recording-meta").scrollIntoViewIfNeeded();
+    await visible(panel().locator(".review-recording-meta")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await page.screenshot({
+      path: resolve(directory, "condensed-recording-narrow.png"),
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     expect(
       await panel()
         .locator("video")

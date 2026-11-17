@@ -649,6 +649,7 @@ export function createBuildBrowserController(
         const manifestInput = z.object({
           bytes: z.number().int().positive().max(maximumRecordingBytes),
           durationMs: z.number().int().nonnegative(),
+          note: z.literal("Unchanged frames shortened.").optional(),
         });
         let manifest: z.infer<typeof manifestInput>;
         for (;;) {
@@ -695,7 +696,7 @@ export function createBuildBrowserController(
         signal?.throwIfAborted();
         await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
           await currentIn(sql, session, ownerToken);
-          await media.complete(proof, manifest.durationMs, sql);
+          await media.complete(proof, manifest.durationMs, sql, manifest.note);
           await currentIn(sql, session, ownerToken);
         });
         await media.sweep();

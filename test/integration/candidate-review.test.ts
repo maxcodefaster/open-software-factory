@@ -979,7 +979,7 @@ test("App scenarios retain compact recording positions independently of observat
       { id: string; position: number; session: string }[]
     >`SELECT id,media_started_ms::float8 AS position,media_session_id AS session
       FROM factory.review_scenario WHERE review_id=${f.reviewID} ORDER BY started_at,id`;
-    expect(scenarios).toEqual([
+    expect([...scenarios]).toEqual([
       { id: "first-app", position: 0, session: grant.sessionID },
       { id: "second-app", position: 750, session: grant.sessionID },
     ]);

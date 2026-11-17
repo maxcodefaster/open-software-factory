@@ -75,6 +75,7 @@ export function createReviewMedia(
     proof: Awaited<ReturnType<typeof stage>>,
     durationMs: number | undefined,
     sql: AgentTurnTransaction,
+    note?: "Unchanged frames shortened.",
   ) {
     const [intent] = await sql<{ state: string; sha: string | null }[]>`
       SELECT state,sha256 AS sha FROM factory.review_media WHERE id=${proof.id} FOR UPDATE`;
@@ -84,7 +85,7 @@ export function createReviewMedia(
     if (!intent || !["intended", "recording"].includes(intent.state))
       throw new CommandError("conflict", "Media publication is no longer current");
     await sql`UPDATE factory.review_media SET state='complete',sha256=${proof.sha},
-      byte_length=${proof.bytes},duration_ms=${durationMs ?? null},completed_at=now() WHERE id=${proof.id}`;
+      byte_length=${proof.bytes},duration_ms=${durationMs ?? null},reason=${note ?? null},completed_at=now() WHERE id=${proof.id}`;
   }
   async function publish(id: string, data: Uint8Array, durationMs?: number) {
     const proof = await stage(id, data);

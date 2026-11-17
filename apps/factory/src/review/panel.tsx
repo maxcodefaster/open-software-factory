@@ -1197,7 +1197,8 @@ export function ReviewPanel(props: {
               <Show when={view()?.recording?.state === "complete"}>
                 <p class="review-recording-meta">
                   <Show when={view()?.recordingCurrent === false}>Earlier QA run. </Show>
-                  Reviewed version <code>{view()?.recording?.commitSha.slice(0, 8)}</code>
+                  Reviewed version <code>{view()?.recording?.commitSha.slice(0, 8)}</code>.
+                  <Show when={view()?.recording?.reason}> {view()?.recording?.reason}</Show>
                 </p>
               </Show>
             </div>

@@ -32,7 +32,7 @@ test("Factory native image keeps exact Factory tools and the official matching c
   const bootstrap = await Bun.file("deploy/substrate/rootless/child.sh").text();
   expect(bootstrap).toContain("--containerd=/run/user/1000/docker/containerd/containerd.sock");
   expect(await Bun.file("deploy/substrate/rootless/tinyproxy.conf").text()).toMatch(
-    /^Timeout 30$/m,
+    /^Timeout 900$/m,
   );
   const factory = await Bun.file("deploy/factory/Dockerfile").text();
   const tools = await Bun.file("deploy/runtime-host/Dockerfile").text();

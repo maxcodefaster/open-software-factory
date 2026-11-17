@@ -49,6 +49,8 @@ cold restart rather than promising continuity of running processes.
 ### Review and deliver
 
 Verification and independent review use the same commit. Review includes a recording of the App.
+Recordings shorten runs of identical captured frames, not the QA itself. Their playback time is
+not a performance measurement.
 Your approval promotes the change to Staging. Production deployment remains your responsibility.
 
 <img alt="Passed checks and an App QA recording before delivery" src="assets/screens/review.jpg" width="100%">

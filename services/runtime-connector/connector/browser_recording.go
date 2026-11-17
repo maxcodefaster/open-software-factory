@@ -51,7 +51,7 @@ func (manager *browserRuntimeManager) stopRecording(runtime *browserRuntime, sta
 			return nil, errors.New("recording browser authority ended")
 		case <-ticker.C:
 			probe, end := context.WithDeadline(ctx, lastProgress.Add(stallLimit))
-			position := manager.recordingPosition(probe, runtime)
+			position := manager.encoderPosition(probe, runtime)
 			end()
 			if position != nil && *position > lastPosition {
 				lastPosition = *position
@@ -66,18 +66,32 @@ func (manager *browserRuntimeManager) stopRecording(runtime *browserRuntime, sta
 	}
 }
 
-// Encoder position, not wall time: the upstream recorder can omit startup or
-// unchanged frames. Only this bounded numeric observation leaves the container.
+// The adapter publishes its next submitted presentation frame before FFmpeg's
+// asynchronous encoding. These stable offsets exclude repeated idle frames and
+// must not depend on wall time or the encoder's delayed output progress.
 func (manager *browserRuntimeManager) recordingPosition(ctx context.Context, runtime *browserRuntime) *int64 {
 	if runtime.recordingStarted.IsZero() || !runtime.recordingEnded.IsZero() {
 		return nil
 	}
+	return manager.readRecordingPosition(ctx, runtime, false)
+}
+
+// Output progress is only a liveness signal while draining the encoder. It is
+// deliberately not used for scenario/feedback positions.
+func (manager *browserRuntimeManager) encoderPosition(ctx context.Context, runtime *browserRuntime) *int64 {
+	return manager.readRecordingPosition(ctx, runtime, true)
+}
+
+func (manager *browserRuntimeManager) readRecordingPosition(ctx context.Context, runtime *browserRuntime, encoder bool) *int64 {
 	name, _ := browserRuntimeNames(runtime.scope.SessionID)
 	if _, err := manager.inspectOwned(ctx, name, runtime.scope); err != nil {
 		return nil
 	}
-	output, err := manager.docker(ctx, "exec", name, "/usr/local/bin/node", "-e",
-		`const fs=require('fs');try{const f=fs.openSync('/tmp/factory-recording-progress.txt','r');const n=fs.fstatSync(f).size;const b=Buffer.alloc(Math.min(n,4096));fs.readSync(f,b,0,b.length,Math.max(0,n-b.length));fs.closeSync(f);const m=[...b.toString().matchAll(/(?:^|\n)out_time_us=(\d+)/g)].at(-1);if(m)process.stdout.write(String(Math.floor(Number(m[1])/1000)))}catch{}`)
+	script := `const fs=require('fs');try{const f=fs.openSync('/tmp/factory-recording-position.txt','r');const b=Buffer.alloc(32);const n=fs.readSync(f,b,0,b.length,0);fs.closeSync(f);process.stdout.write(b.subarray(0,n))}catch{}`
+	if encoder {
+		script = `const fs=require('fs');try{const f=fs.openSync('/tmp/factory-recording-progress.txt','r');const n=fs.fstatSync(f).size;const b=Buffer.alloc(Math.min(n,4096));fs.readSync(f,b,0,b.length,Math.max(0,n-b.length));fs.closeSync(f);const m=[...b.toString().matchAll(/(?:^|\n)out_time_us=(\d+)/g)].at(-1);if(m)process.stdout.write(String(Math.floor(Number(m[1])/1000)))}catch{}`
+	}
+	output, err := manager.docker(ctx, "exec", name, "/usr/local/bin/node", "-e", script)
 	if err != nil {
 		return nil
 	}
@@ -225,7 +239,13 @@ func (manager *browserRuntimeManager) recordingOperation(runtime *browserRuntime
 			seconds > runtime.recordingEnded.Sub(runtime.recordingStarted).Seconds()*2+2 {
 			return "", errors.New("recording duration/index unavailable")
 		}
-		data, _ := json.Marshal(map[string]any{"bytes": size, "durationMs": int64(seconds * 1000)})
+		position := manager.readRecordingPosition(bounded, runtime, false)
+		if position == nil || math.Abs(seconds*1000-float64(*position)) > 100 {
+			return "", errors.New("recording presentation timeline unavailable")
+		}
+		data, _ := json.Marshal(map[string]any{
+			"bytes": size, "durationMs": int64(seconds * 1000), "note": "Unchanged frames shortened.",
+		})
 		return string(data), nil
 	case "browser-recording-chunk":
 		var args struct {

@@ -5,9 +5,44 @@ import (
 	"encoding/json"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestRecordingPresentationPositionDoesNotUseDelayedEncoderOutput(t *testing.T) {
+	manager, scope := browserRuntimeFixture(t)
+	runtime := &browserRuntime{scope: scope, recordingStarted: time.Now().Add(-7 * time.Minute)}
+	reads := 0
+	manager.docker = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "inspect" {
+			return json.Marshal([]map[string]any{{"Config": map[string]any{
+				"Labels": map[string]string{
+					"factory.dev/browser-session": scope.SessionID, "factory.dev/browser-turn": scope.TurnID,
+					"factory.dev/browser-owner": scope.OwnerID, attemptLabel: manager.assignment.RuntimeAttemptID,
+					generationLabel: "3", "com.docker.compose.project": manager.assignment.ComposeProjectName,
+				},
+			}}})
+		}
+		reads++
+		if strings.Contains(args[len(args)-1], "factory-recording-position.txt") {
+			return []byte("1600"), nil
+		}
+		return []byte("200"), nil
+	}
+	position := manager.recordingPosition(context.Background(), runtime)
+	if position == nil || *position != 1600 {
+		t.Fatal("chapter position followed stale encoded progress or wall time", position)
+	}
+	progress := manager.encoderPosition(context.Background(), runtime)
+	if progress == nil || *progress != 200 || reads != 2 {
+		t.Fatal("encoder liveness stopped observing actual output", progress)
+	}
+	runtime.recordingEnded = time.Now()
+	if manager.recordingPosition(context.Background(), runtime) != nil || reads != 2 {
+		t.Fatal("an ended recording emitted a new observation position")
+	}
+}
 
 type browserRecordingInput struct{ started chan struct{} }
 
