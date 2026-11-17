@@ -2,8 +2,8 @@ import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
-import { workspaceAuthorityIn } from "../access/workspace";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
+import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
@@ -46,6 +46,10 @@ export function createWorkspaceSubmission(
   collaboration: Pick<ReturnType<typeof createWorkspaceCollaboration>, "assertSaved">,
   forge: Pick<ReturnType<typeof createForgejoClient>, "getBranch">,
   credentials: { username: string; password: string },
+  writing: {
+    fenceSource(changeID: string, epoch: string, writable: false): Promise<void>;
+    protect(changeID: string, writers: readonly string[]): Promise<void>;
+  },
 ) {
   const pending = new Set<Promise<unknown>>();
   let closing = false;
@@ -114,6 +118,41 @@ export function createWorkspaceSubmission(
       action === "git-push"
         ? substrateRepositoryCloneURL(op.repositoryURL, op.nativeIntent)
         : undefined;
+    async function authorize(sql: Parameters<typeof lockChangeWriterIn>[0]) {
+      const writer = await lockChangeWriterIn(sql, op.changeID);
+      await workspaceAuthorityIn(sql, op.workspaceID, op.actorID, true);
+      if (writer.state !== "unassigned" || writer.epoch !== op.epoch || !writer.available)
+        throw new CommandError("conflict", "Shared submission authority changed");
+      const [active] = await sql<
+        { id: string; repositoryURL: string; nativeIntent: unknown }[]
+      >`SELECT operation.id,project.repository_url AS "repositoryURL",binding.intent AS "nativeIntent"
+          FROM factory.change_commit_operation operation
+          JOIN factory.change change ON change.id=operation.change_id
+          JOIN factory.project project ON project.id=change.project_id
+          JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+          WHERE operation.id=${op.id} AND operation.runtime_attempt_id=${op.attemptID}
+            AND change.runtime_attempt_id=attempt.id AND attempt.state='ready'
+            AND attempt.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id AND session.stop_pending)
+            AND operation.state=${action === "git-push" ? "push-intended" : "commit-intended"}
+          FOR SHARE OF attempt,project`;
+      if (!active)
+        throw new CommandError(
+          "conflict",
+          "Submission dispatch no longer matches its saved intent",
+        );
+      if (
+        substrateRepositoryCloneURL(active.repositoryURL, active.nativeIntent) !== op.repositoryURL
+      )
+        throw new CommandError("conflict", "Submission destination changed before dispatch");
+    }
+    await database.client.begin(authorize);
+    // Source fencing owns its transaction and may lock Change. Do not retain the
+    // admission locks across it. The actual frame rechecks the same authority.
+    await writing.fenceSource(op.changeID, op.epoch, false);
+    if (action === "git-prepare-commit")
+      await database.client`UPDATE factory.workspace_submission SET prepare_attempted_at=now() WHERE id=${op.id}`;
     return hub.parentOperation(
       op.attemptID,
       {
@@ -135,34 +174,8 @@ export function createWorkspaceSubmission(
       },
       async (send) => {
         await database.client.begin(async (sql) => {
-          const writer = await lockChangeWriterIn(sql, op.changeID);
-          await workspaceAuthorityIn(sql, op.workspaceID, op.actorID, true);
-          if (writer.state !== "unassigned" || writer.epoch !== op.epoch || !writer.available)
-            throw new CommandError("conflict", "Shared submission authority changed");
-          const [active] = await sql<
-            { id: string; repositoryURL: string; nativeIntent: unknown }[]
-          >`SELECT operation.id,project.repository_url AS "repositoryURL",binding.intent AS "nativeIntent"
-              FROM factory.change_commit_operation operation
-              JOIN factory.change change ON change.id=operation.change_id
-              JOIN factory.project project ON project.id=change.project_id
-              JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
-              JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-              WHERE operation.id=${op.id} AND operation.runtime_attempt_id=${op.attemptID}
-                AND change.runtime_attempt_id=attempt.id AND attempt.state='ready'
-                AND attempt.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-                AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id AND session.stop_pending)
-                AND operation.state=${action === "git-push" ? "push-intended" : "commit-intended"}
-              FOR SHARE OF attempt,project`;
-          if (!active)
-            throw new CommandError(
-              "conflict",
-              "Submission dispatch no longer matches its saved intent",
-            );
-          if (
-            substrateRepositoryCloneURL(active.repositoryURL, active.nativeIntent) !==
-            op.repositoryURL
-          )
-            throw new CommandError("conflict", "Submission destination changed before dispatch");
+          await authorize(sql);
+          if (action === "git-push") await writing.protect(op.changeID, [credentials.username]);
           send();
         });
       },
@@ -256,8 +269,6 @@ export function createWorkspaceSubmission(
           if (op.state === "succeeded" || op.state === "failed") return view(op);
           if (op.state === "commit-intended") {
             const action = op.attempted ? "git-observe-commit" : "git-prepare-commit";
-            if (!op.attempted)
-              await database.client`UPDATE factory.workspace_submission SET prepare_attempted_at=now() WHERE id=${op.id}`;
             const prepared = await invoke(op, action);
             const commit = sha.parse(prepared.commitSHA);
             await database.client`UPDATE factory.change_commit_operation SET commit_sha=${commit},state='push-intended',updated_at=now() WHERE id=${op.id} AND state='commit-intended'`;

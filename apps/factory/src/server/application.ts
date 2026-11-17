@@ -317,6 +317,14 @@ export async function createFactoryApplication() {
     workspaceCollaboration,
     createForgejoClient({ apiURL: forgeAPIURL, token: forgeToken }),
     { username: forgeOwner, password: forgeToken },
+    {
+      fenceSource: workspaceSources.fenceChange,
+      protect: async (changeID, writers) => {
+        if (!forgeAccess)
+          throw new CommandError("unavailable", "Forge writing authority is not configured");
+        await forgeAccess.protectChange(changeID, writers);
+      },
+    },
   );
   const workspaceTransferRoutes = createWorkspaceTransferRoutes({
     identity: factoryAuth,

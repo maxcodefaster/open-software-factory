@@ -1,9 +1,218 @@
 import { expect, test } from "bun:test";
-import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
-import { fixture } from "../fixtures/change-agent-turns";
-import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
+import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
+import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
+import { fixture } from "../fixtures/change-agent-turns";
+
+const writing = { fenceSource: async () => {}, protect: async () => {} };
+
+test("shared submission fences human Source and confirms the Factory branch writer before pushing", async () => {
+  const f = await fixture();
+  const base = "a".repeat(40),
+    commit = "d".repeat(40);
+  let remote = base,
+    controlWriter = false;
+  const calls: string[] = [];
+  await f.database
+    .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=epoch+1
+      WHERE change_id=${f.changeID}`;
+  const service = createWorkspaceSubmission(
+    f.database,
+    {
+      connected: () => true,
+      parentOperation: async (_attemptID, input, beforeSend) => {
+        await beforeSend?.(() => calls.push(input.action));
+        if (input.action === "git-push") {
+          if (!controlWriter) throw new Error("protected branch denies the Factory push: 403");
+          remote = commit;
+        }
+        return { commitSHA: commit, remoteSHA: remote };
+      },
+    },
+    { assertSaved: async () => {} },
+    { getBranch: async () => ({ name: "branch", headSha: remote }) },
+    { username: "factory-control", password: "fixture" },
+    {
+      fenceSource: async (changeID: string, epoch: string, writable: boolean) => {
+        expect(changeID).toBe(f.changeID);
+        expect(writable).toBe(false);
+        // The real Source fence owns a transaction. Submission must release its
+        // admission lock before invoking it, rather than deadlocking handoff.
+        await f.database.client.begin(async (sql) => {
+          const [writer] = await sql<{ state: string; epoch: string }[]>`
+            SELECT state,epoch::text FROM factory.change_writer
+            WHERE change_id=${changeID} FOR UPDATE NOWAIT`;
+          expect(writer).toEqual({ state: "unassigned", epoch });
+        });
+        calls.push("source-fenced");
+      },
+      protect: async (changeID: string, writers: readonly string[]) => {
+        expect(changeID).toBe(f.changeID);
+        expect(writers).toEqual(["factory-control"]);
+        controlWriter = true;
+        calls.push("control-writer-confirmed");
+      },
+    },
+  );
+  try {
+    const result = await service.submit(f.userID, {
+      requestID: crypto.randomUUID(),
+      workspaceID: f.workspaceID,
+      expectedHead: base,
+      expectedRemoteHead: base,
+      message: "Submit saved human changes",
+    });
+    expect(result.state).toBe("succeeded");
+    expect(calls).toEqual([
+      "source-fenced",
+      "git-prepare-commit",
+      "source-fenced",
+      "control-writer-confirmed",
+      "git-push",
+    ]);
+  } finally {
+    await service.close();
+    await f.database
+      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+    await f.dispose();
+  }
+}, 30000);
+
+test.each(["Source fence", "branch protection"])(
+  "shared submission waits for acknowledged %s and retries only the original commit intent",
+  async (boundary) => {
+    const f = await fixture();
+    const base = "a".repeat(40),
+      commit = "d".repeat(40);
+    let remote = base,
+      loseReply = true;
+    const sent: string[] = [];
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=epoch+1
+        WHERE change_id=${f.changeID}`;
+    const service = createWorkspaceSubmission(
+      f.database,
+      {
+        connected: () => true,
+        parentOperation: async (_attemptID, input, beforeSend) => {
+          await beforeSend?.(() => sent.push(input.action));
+          if (input.action === "git-push") remote = commit;
+          return { commitSHA: commit, remoteSHA: remote };
+        },
+      },
+      { assertSaved: async () => {} },
+      { getBranch: async () => ({ name: "branch", headSha: remote }) },
+      { username: "factory-control", password: "fixture" },
+      {
+        fenceSource: async () => {
+          if (boundary === "Source fence" && loseReply) {
+            loseReply = false;
+            throw new Error("Source fence acknowledgement lost");
+          }
+        },
+        protect: async () => {
+          if (boundary === "branch protection" && loseReply) {
+            loseReply = false;
+            throw new Error("branch protection acknowledgement lost");
+          }
+        },
+      },
+    );
+    const input = {
+      requestID: crypto.randomUUID(),
+      workspaceID: f.workspaceID,
+      expectedHead: base,
+      expectedRemoteHead: base,
+      message: "Submit saved checkout",
+    };
+    try {
+      await expect(service.submit(f.userID, input)).rejects.toThrow("acknowledgement lost");
+      expect(remote).toBe(base);
+      expect(sent).toEqual(boundary === "Source fence" ? [] : ["git-prepare-commit"]);
+      const [intent] = await f.database.client<
+        { state: string; attempted: boolean; commit: string | null }[]
+      >`SELECT operation.state,submission.prepare_attempted_at IS NOT NULL AS attempted,
+        operation.commit_sha AS commit FROM factory.workspace_submission submission
+        JOIN factory.change_commit_operation operation ON operation.id=submission.id
+        WHERE submission.id=${input.requestID}`;
+      expect(intent).toEqual(
+        boundary === "Source fence"
+          ? { state: "commit-intended", attempted: false, commit: null }
+          : { state: "push-intended", attempted: true, commit },
+      );
+      expect((await service.submit(f.userID, input)).state).toBe("succeeded");
+      expect(sent).toEqual(["git-prepare-commit", "git-push"]);
+    } finally {
+      await service.close();
+      await f.database
+        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      await f.dispose();
+    }
+  },
+  30000,
+);
+
+test.each(["writer epoch", "Project access"])(
+  "shared submission rechecks %s after Source fencing before granting control writing",
+  async (boundary) => {
+    const f = await fixture();
+    const sent: string[] = [];
+    let grants = 0;
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=epoch+1
+        WHERE change_id=${f.changeID}`;
+    const service = createWorkspaceSubmission(
+      f.database,
+      {
+        connected: () => true,
+        parentOperation: async (_attemptID, input, beforeSend) => {
+          await beforeSend?.(() => sent.push(input.action));
+          return { commitSHA: "d".repeat(40) };
+        },
+      },
+      { assertSaved: async () => {} },
+      { getBranch: async () => ({ name: "branch", headSha: "a".repeat(40) }) },
+      { username: "factory-control", password: "fixture" },
+      {
+        fenceSource: async () => {
+          if (boundary === "writer epoch")
+            await f.database.client`UPDATE factory.change_writer SET epoch=epoch+1
+              WHERE change_id=${f.changeID}`;
+          else
+            await f.database.client`UPDATE factory.project_membership SET role='product-contributor'
+              WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
+        },
+        protect: async () => {
+          grants++;
+        },
+      },
+    );
+    try {
+      await expect(
+        service.submit(f.userID, {
+          requestID: crypto.randomUUID(),
+          workspaceID: f.workspaceID,
+          expectedHead: "a".repeat(40),
+          expectedRemoteHead: "a".repeat(40),
+          message: "Submit saved checkout",
+        }),
+      ).rejects.toThrow(
+        boundary === "writer epoch"
+          ? "Shared submission authority changed"
+          : "Developer access required",
+      );
+      expect(sent).toEqual([]);
+      expect(grants).toBe(0);
+    } finally {
+      await service.close();
+      await f.database
+        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      await f.dispose();
+    }
+  },
+  30000,
+);
 
 test("a collaborator submits the saved shared Ticket checkout once without granting Delivery approval", async () => {
   const f = await fixture();
@@ -53,6 +262,7 @@ test("a collaborator submits the saved shared Ticket checkout once without grant
     { assertSaved: async () => {} },
     { getBranch: async () => ({ name: "branch", headSha: remote }) },
     { username: "fixture", password: "fixture-not-retained" },
+    writing,
   );
   const input = {
     requestID: crypto.randomUUID(),
@@ -131,6 +341,7 @@ test.each([
       { assertSaved: async () => {} },
       { getBranch: async () => ({ name: "branch", headSha: "a".repeat(40) }) },
       { username: "fixture", password: "must-not-be-forwarded" },
+      writing,
     );
     try {
       await expect(
@@ -207,6 +418,7 @@ test.each([
       { assertSaved: async () => {} },
       { getBranch: async () => ({ name: "branch", headSha: remote }) },
       { username: "fixture", password: "must-not-be-forwarded" },
+      writing,
     );
     const requestID = crypto.randomUUID();
     try {
@@ -266,6 +478,7 @@ test("a Workspace submission with no Coding turn or Agent Session enters exact V
     { assertSaved: async () => {} },
     { getBranch: async () => ({ name: "branch", headSha: remote }) },
     { username: "fixture", password: "fixture" },
+    writing,
   );
   const verificationStarts: string[] = [],
     reviewTurns: string[] = [],
@@ -421,6 +634,7 @@ test("a lost native push retains its original repository and cannot be retargete
       },
     },
     { username: "fixture", password: "fixture" },
+    writing,
   );
   const input = {
     requestID,
@@ -492,6 +706,7 @@ test("shared submission refuses unsaved buffers and recovers a lost push by obse
     },
     { getBranch: async () => ({ name: "branch", headSha: remote }) },
     { username: "fixture", password: "fixture" },
+    writing,
   );
   const input = {
     requestID: crypto.randomUUID(),
