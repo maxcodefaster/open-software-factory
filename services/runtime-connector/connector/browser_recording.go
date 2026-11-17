@@ -97,7 +97,8 @@ func (manager *browserRuntimeManager) recording(ctx context.Context, scope brows
 	if runtime == nil || !sameBrowserScope(runtime.scope, scope) {
 		return "", errors.New("recording browser is unavailable")
 	}
-	if err := runtime.renewAuthority(scope, true); err != nil {
+	// Recording requests are calls, not newer heartbeat authority.
+	if err := runtime.renewAuthority(scope, false); err != nil {
 		return "", err
 	}
 	if action == "browser-recording-finish" {

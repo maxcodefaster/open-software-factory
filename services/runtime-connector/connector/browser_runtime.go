@@ -529,7 +529,9 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 		manager.sessions[scope.SessionID] = runtime
 	}
 	manager.mu.Unlock()
-	if err := runtime.renewAuthority(scope, true); err != nil {
+	// Calls can arrive after a newer heartbeat. Only explicit renewal may
+	// replace an existing lease, including deliberately shortening it.
+	if err := runtime.renewAuthority(scope, false); err != nil {
 		return "", err
 	}
 	runtime.mu.Lock()
