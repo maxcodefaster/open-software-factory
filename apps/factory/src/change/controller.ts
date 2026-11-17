@@ -64,6 +64,52 @@ export function createChangeController(
   const cancellationObservers = new Set<string>();
   const retries = new Map<string, ReturnType<typeof setTimeout>>();
 
+  function currentBuildTurn() {
+    // A confirmed human submission can supersede terminal Coding history, not
+    // create a completed turn. Keep history and native/Stop identities untouched.
+    // Select the latest turn first so newer work or review can never fall back
+    // to an older, apparently successful input.
+    // The retained Coding Session can own an earlier runtime of this Workspace.
+    // A human Source submission does not rebind that native identity.
+    return database.client`
+      SELECT turn.state,
+        CASE WHEN turn.input->>'kind'='change-review' THEN 'review' ELSE 'implementation' END AS purpose
+      FROM (
+        SELECT id,state,input,created_at,updated_at FROM factory.agent_turn WHERE change_id=change.id
+        ORDER BY created_at DESC,id DESC LIMIT 1
+      ) turn
+      WHERE NOT EXISTS (
+        SELECT 1 FROM (
+          SELECT * FROM factory.change_commit_operation WHERE change_id=change.id
+          ORDER BY sequence DESC LIMIT 1
+        ) submitted
+        JOIN factory.workspace_submission submission ON submission.id=submitted.id
+        JOIN factory.development_workspace workspace ON workspace.id=submission.workspace_id
+          AND workspace.change_id=change.id
+        JOIN factory.change_writer writer ON writer.change_id=change.id
+          AND writer.epoch=submission.writer_epoch AND writer.state='unassigned' AND NOT writer.fence_required
+        WHERE submitted.source='workspace' AND submitted.state='succeeded'
+          AND submitted.commit_sha=submitted.observed_remote_sha AND submitted.completed_at IS NOT NULL
+          AND submitted.runtime_attempt_id=change.runtime_attempt_id
+          AND EXISTS (SELECT 1 FROM factory.runtime_attempt coding_runtime
+            WHERE coding_runtime.id=session.runtime_attempt_id
+              AND coding_runtime.workspace_id=workspace.id AND coding_runtime.change_id=change.id)
+          AND session.state='committed' AND NOT session.stop_pending
+          AND session.active_inbox_id IS NULL AND session.last_error IS NULL
+          AND (session.active_turn_id IS NULL OR session.active_turn_id=turn.id)
+          AND (session.stop_turn_id IS NULL OR session.stop_turn_id=turn.id)
+          AND session.updated_at>=submitted.completed_at
+          AND turn.input->>'kind'<>'change-review' AND turn.state IN ('completed','failed','stopped')
+          AND turn.created_at<submission.created_at AND turn.updated_at<submission.created_at
+          AND change.cancel_requested_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
+            AND state IN ('pending','dispatching','running','uncertain'))
+          AND NOT EXISTS (SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
+            AND state NOT IN ('succeeded','failed'))
+      )
+    `;
+  }
+
   function retry(changeID: string, delay: number) {
     clearTimeout(retries.get(changeID));
     const timer = setTimeout(() => {
@@ -697,11 +743,7 @@ export function createChangeController(
         JOIN factory.branch_create_operation operation ON operation.change_id = change.id
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id = change.runtime_attempt_id
         LEFT JOIN factory.change_agent_session session ON session.change_id = change.id
-        LEFT JOIN LATERAL (
-          SELECT state,CASE WHEN input->>'kind'='change-review' THEN 'review' ELSE 'implementation' END AS purpose
-          FROM factory.agent_turn WHERE change_id = change.id
-          ORDER BY created_at DESC, id DESC LIMIT 1
-        ) build ON true
+        LEFT JOIN LATERAL (${currentBuildTurn()}) build ON true
         LEFT JOIN LATERAL (
           SELECT * FROM factory.verification WHERE change_id = change.id
             AND commit_sha = (SELECT commit_sha FROM factory.change_commit_operation
@@ -743,11 +785,7 @@ export function createChangeController(
         JOIN factory.branch_create_operation operation ON operation.change_id = change.id
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id = change.runtime_attempt_id
         LEFT JOIN factory.change_agent_session session ON session.change_id = change.id
-        LEFT JOIN LATERAL (
-          SELECT state,CASE WHEN input->>'kind'='change-review' THEN 'review' ELSE 'implementation' END AS purpose
-          FROM factory.agent_turn WHERE change_id = change.id
-          ORDER BY created_at DESC, id DESC LIMIT 1
-        ) build ON true
+        LEFT JOIN LATERAL (${currentBuildTurn()}) build ON true
         LEFT JOIN LATERAL (
           SELECT * FROM factory.verification WHERE change_id = change.id
             AND commit_sha = (SELECT commit_sha FROM factory.change_commit_operation
