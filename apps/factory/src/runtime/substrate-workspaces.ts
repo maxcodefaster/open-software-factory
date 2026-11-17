@@ -247,7 +247,12 @@ export function createSubstrateWorkspaces(
         }
       }
     },
-    async start(userID: string, changeID?: string, selectedWorkspaceID?: string) {
+    async start(
+      userID: string,
+      changeID?: string,
+      selectedWorkspaceID?: string,
+      recordStart?: (sql: AgentTurnTransaction, workspaceID: string) => Promise<void>,
+    ) {
       if (changeID && !sources)
         throw new CommandError(
           "unavailable",
@@ -276,6 +281,7 @@ export function createSubstrateWorkspaces(
       let attemptID = runtimeIdentity(workspaceID, generation).attemptID;
       const sql = database.coordination();
       let row: Provision;
+      let startRecorded = false;
       try {
         await sql`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceID}`}))`;
         const [latest] = await sql<
@@ -291,6 +297,14 @@ export function createSubstrateWorkspaces(
         await sql.begin(async (tx) => {
           if (changeID) await projectAuthorityIn(tx, userID, originalConfiguration.projectID);
           else await projectDevelopmentAuthorityIn(tx, userID, originalConfiguration.projectID);
+          if (recordStart) {
+            const [existing] =
+              await tx`SELECT id FROM factory.development_workspace WHERE id=${workspaceID}`;
+            if (existing) {
+              await recordStart(tx, workspaceID);
+              startRecorded = true;
+            }
+          }
         });
         let prior = latest;
         generation = latest?.generation ?? 1;
@@ -332,7 +346,8 @@ export function createSubstrateWorkspaces(
           ? retainedConfiguration(prior.intent.configuration)
           : desiredConfiguration;
         const atespace = `fa-${attemptID.replaceAll("-", "")}`;
-        if (!prior) await capacity?.requireReady(substrateResourceReservation(config));
+        if (!prior && !recordStart)
+          await capacity?.requireReady(substrateResourceReservation(config));
         const [workspace] = await sql<
           {
             substrate: boolean;
@@ -550,7 +565,12 @@ export function createSubstrateWorkspaces(
             );
           if (!prior)
             await tx`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent) VALUES(${workspaceID},${generation},${JSON.stringify(intent)}::text::jsonb)`;
+          // An explicit first Start can now retain its command in the same commit
+          // as the real Workspace and native intent, without weakening their FK.
+          if (recordStart && !startRecorded) await recordStart(tx, workspaceID);
         });
+        if (!prior && recordStart)
+          await capacity?.requireReady(substrateResourceReservation(config));
         row = await saved(workspaceID, generation, sql);
         if (!isDeepStrictEqual(row.intent, intent))
           throw new Error("Native Workspace inputs differ from immutable provisioning intent");

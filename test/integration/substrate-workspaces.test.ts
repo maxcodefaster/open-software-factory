@@ -1014,6 +1014,7 @@ test("product Stop without independent Source refuses deletion rather than repor
       return actor;
     }
     if (method === "ResumeActor" && actor) {
+      actor.metadata.version = "2";
       actor.status = {
         state: "ACTOR_STATE_RUNNING",
         workerAssignment: { sandboxRuntime: f.config.runtime },

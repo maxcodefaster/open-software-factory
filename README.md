@@ -68,9 +68,13 @@ interactive terminals run as the development user inside the selected Workspace'
 
 Use `listProjects`, `listWorkspaces` and `openWorkspace` to select an existing Project or Workspace.
 Personal development does not require a Ticket. `startWorkspace`, `pauseWorkspace` and
-`stopWorkspace` control that Workspace's compute. Commands, terminals and container-file access
-resume paused compute, but never silently restart explicitly stopped or failed compute. A laptop
-disconnect does not cancel admitted remote commands. Use their returned IDs to observe outcomes.
+`stopWorkspace` control that Workspace's compute. For a fresh Project with no Workspace row, call
+`startWorkspace` with `projectID` and a new `requestID` to explicitly initialize and start your personal
+Workspace. Start accepts exactly one of `projectID` or `workspaceID`; Pause and Stop require
+`workspaceID` and `requestID`. List and Open never perform this first Start.
+Commands, terminals and container-file access resume paused compute, but never silently restart
+explicitly stopped or failed compute. A laptop disconnect does not cancel admitted remote commands.
+Use their returned IDs to observe outcomes.
 
 For Ticket work, `listTicketWorkspaces` returns retained Changes and `openWorkspace` accepts their
 `changeID`. `getWorkspaceEditing` reports the current editing phase. An explicit

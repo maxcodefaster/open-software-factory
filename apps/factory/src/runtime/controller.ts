@@ -310,7 +310,12 @@ export function createRuntimeController(
         }
       };
     },
-    async start(projectID: string, userID: string, selectedWorkspaceID?: string) {
+    async start(
+      projectID: string,
+      userID: string,
+      selectedWorkspaceID?: string,
+      recordStart?: (sql: AgentTurnTransaction, workspaceID: string) => Promise<void>,
+    ) {
       await createAccessController(database).requireDevelopment(userID, projectID);
       await requireSetupReady(database.client, projectID);
       if (selectedWorkspaceID) {
@@ -328,7 +333,12 @@ export function createRuntimeController(
           );
       }
       return this.get(
-        await project(projectID).workspaces.start(userID, undefined, selectedWorkspaceID),
+        await project(projectID).workspaces.start(
+          userID,
+          undefined,
+          selectedWorkspaceID,
+          recordStart,
+        ),
       );
     },
     async startPersisted(changeID: string, userID: string) {

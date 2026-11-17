@@ -1,31 +1,33 @@
-import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { createHash } from "node:crypto";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   workspaceCommandInput,
   workspaceCommandRead,
 } from "../../../../packages/workspace-domain/src/commands";
-import { workspaceShareInput } from "../../../../packages/workspace-domain/src/sharing";
 import { workspaceTransferInput } from "../../../../packages/workspace-domain/src/files";
+import { workspaceShareInput } from "../../../../packages/workspace-domain/src/sharing";
+import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
-import { workspaceAuthorityIn } from "../access/workspace";
-import { CommandError } from "../command-error";
-import { json } from "../http";
-import { appRuntimeOrigin } from "../runtime-origins";
-import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createIdentityConfiguration } from "../access/identity-configuration";
 import type { createRuntimeAccess } from "../access/runtime";
+import { workspaceAuthorityIn } from "../access/workspace";
+import type { createChangeWriterController } from "../access/writer-controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
+import { json } from "../http";
+import type { createProjectService } from "../projects/service";
 import type { createRuntimeController } from "../runtime/controller";
 import type { RuntimeHub } from "../runtime/hub";
+import { appRuntimeOrigin } from "../runtime-origins";
+import type { createWorkspaceCollaboration } from "../workspace/collaboration";
 import type { createWorkspaceCommands } from "../workspace/commands";
 import type { createWorkspaceContainerFiles } from "../workspace/container-files";
-import type { createWorkspaceCollaboration } from "../workspace/collaboration";
-import type { createChangeWriterController } from "../access/writer-controller";
-import { type createWorkspaceSubmission, workspaceSubmissionInput } from "../workspace/submission";
 import type { createWorkspaceSharing } from "../workspace/sharing";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
-import type { createProjectService } from "../projects/service";
+import { type createWorkspaceSubmission, workspaceSubmissionInput } from "../workspace/submission";
 
 type Services = {
   database: ReturnType<typeof createDatabase>;
@@ -46,6 +48,21 @@ type Services = {
 
 const workspaceInput = z.strictObject({ workspaceID: z.uuid() });
 const lifecycleInput = workspaceInput.extend({ requestID: z.uuid() });
+const startInput = z
+  .strictObject({
+    workspaceID: z.uuid().optional(),
+    projectID: z.uuid().optional(),
+    requestID: z.uuid(),
+  })
+  .refine(
+    (value) => [value.workspaceID, value.projectID].filter(Boolean).length === 1,
+    "Choose exactly one Workspace or Project",
+  );
+class LifecycleReplay extends Error {
+  constructor(readonly result: unknown) {
+    super("This lifecycle request was already dispatched");
+  }
+}
 const fileInput = workspaceInput.extend({
   path: z.string().max(4096),
   location: z.enum(["checkout", "container"]).default("checkout"),
@@ -70,6 +87,80 @@ export function createExternalFactoryMCP(services: Services) {
       SELECT id,state FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} ORDER BY generation DESC LIMIT 1`;
     return attempt;
   }
+  async function claimLifecycle(
+    sql: AgentTurnTransaction,
+    userID: string,
+    input: z.infer<typeof lifecycleInput>,
+    action: "start" | "pause" | "stop",
+    targetID?: string,
+  ) {
+    await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
+    await sql`INSERT INTO factory.workspace_lifecycle_command(id,workspace_id,runtime_attempt_id,actor_id,action)
+      VALUES(${input.requestID},${input.workspaceID},${targetID ?? null},${userID},${action}) ON CONFLICT(id) DO NOTHING`;
+    const [record] = await sql<
+      {
+        workspaceID: string;
+        actorID: string;
+        action: string;
+        attempted: boolean;
+        result: unknown;
+      }[]
+    >`
+      SELECT workspace_id AS "workspaceID",actor_id AS "actorID",action,dispatch_attempted_at IS NOT NULL AS attempted,result
+      FROM factory.workspace_lifecycle_command WHERE id=${input.requestID} FOR UPDATE`;
+    if (
+      !record ||
+      record.workspaceID !== input.workspaceID ||
+      record.actorID !== userID ||
+      record.action !== action
+    )
+      throw new CommandError(
+        "conflict",
+        "This lifecycle request already records another operation",
+      );
+    if (record.attempted) return { claimed: false, result: record.result };
+    await sql`UPDATE factory.workspace_lifecycle_command SET dispatch_attempted_at=now() WHERE id=${input.requestID}`;
+    return { claimed: true, result: null };
+  }
+  async function completeLifecycle(
+    userID: string,
+    input: z.infer<typeof lifecycleInput>,
+    result: unknown,
+  ) {
+    const retained = JSON.stringify(result ?? { state: "uncertain" });
+    await database.client`UPDATE factory.workspace_lifecycle_command SET result=${retained}::text::jsonb,completed_at=now() WHERE id=${input.requestID}`;
+    await database.client.begin((sql) => workspaceAuthorityIn(sql, input.workspaceID, userID));
+    return result;
+  }
+  async function start(userID: string, input: z.infer<typeof startInput>) {
+    if (input.workspaceID)
+      return lifecycle(userID, { ...input, workspaceID: input.workspaceID }, "start");
+    const projectID = input.projectID ?? "";
+    await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, projectID));
+    const { workspaceID } = personalWorkspaceIdentity(projectID, userID);
+    const command = { workspaceID, requestID: input.requestID };
+    const [retained] = await database.client`SELECT id FROM factory.workspace_lifecycle_command
+      WHERE id=${input.requestID} AND workspace_id=${workspaceID} AND actor_id=${userID}
+        AND action='start' AND dispatch_attempted_at IS NOT NULL`;
+    if (retained) return lifecycle(userID, command, "start");
+    try {
+      const result = await runtimeController.start(
+        projectID,
+        userID,
+        undefined,
+        async (sql, initializedID) => {
+          if (initializedID !== workspaceID)
+            throw new CommandError("conflict", "Personal Workspace identity changed");
+          const claimed = await claimLifecycle(sql, userID, command, "start");
+          if (!claimed.claimed) throw new LifecycleReplay(claimed.result);
+        },
+      );
+      return completeLifecycle(userID, command, result);
+    } catch (cause) {
+      if (!(cause instanceof LifecycleReplay)) throw cause;
+      return cause.result ?? { requestID: input.requestID, state: "uncertain" };
+    }
+  }
   async function lifecycle(
     userID: string,
     input: z.infer<typeof lifecycleInput>,
@@ -81,35 +172,9 @@ export function createExternalFactoryMCP(services: Services) {
     const target = action === "start" ? undefined : await current(input.workspaceID);
     if (action !== "start" && !target)
       throw new CommandError("not-found", "No execution exists for this Workspace");
-    const claimed = await database.client.begin(async (sql) => {
-      await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
-      await sql`INSERT INTO factory.workspace_lifecycle_command(id,workspace_id,runtime_attempt_id,actor_id,action)
-        VALUES(${input.requestID},${input.workspaceID},${target?.id ?? null},${userID},${action}) ON CONFLICT(id) DO NOTHING`;
-      const [record] = await sql<
-        {
-          workspaceID: string;
-          actorID: string;
-          action: string;
-          attempted: boolean;
-          result: unknown;
-        }[]
-      >`
-        SELECT workspace_id AS "workspaceID",actor_id AS "actorID",action,dispatch_attempted_at IS NOT NULL AS attempted,result
-        FROM factory.workspace_lifecycle_command WHERE id=${input.requestID} FOR UPDATE`;
-      if (
-        !record ||
-        record.workspaceID !== input.workspaceID ||
-        record.actorID !== userID ||
-        record.action !== action
-      )
-        throw new CommandError(
-          "conflict",
-          "This lifecycle request already records another operation",
-        );
-      if (record.attempted) return { claimed: false, result: record.result };
-      await sql`UPDATE factory.workspace_lifecycle_command SET dispatch_attempted_at=now() WHERE id=${input.requestID}`;
-      return { claimed: true, result: null };
-    });
+    const claimed = await database.client.begin((sql) =>
+      claimLifecycle(sql, userID, input, action, target?.id),
+    );
     if (!claimed.claimed)
       return claimed.result ?? { requestID: input.requestID, state: "uncertain" };
     let result: unknown;
@@ -128,10 +193,7 @@ export function createExternalFactoryMCP(services: Services) {
       }
       result = result ?? (await runtimeController.get(attempt.id));
     }
-    const retained = JSON.stringify(result ?? { state: "uncertain" });
-    await database.client`UPDATE factory.workspace_lifecycle_command SET result=${retained}::text::jsonb,completed_at=now() WHERE id=${input.requestID}`;
-    await database.client.begin((sql) => workspaceAuthorityIn(sql, input.workspaceID, userID));
-    return result;
+    return completeLifecycle(userID, input, result);
   }
   async function source(userID: string, workspaceID: string, operation: string, body: unknown) {
     const response = await workspaceSources.forward(
@@ -500,7 +562,14 @@ export function createExternalFactoryMCP(services: Services) {
             };
           },
         );
-        for (const action of ["start", "pause", "stop"] as const)
+        tool(
+          "startWorkspace",
+          "Explicitly start your personal Project Workspace, including its first native initialization, or an existing Workspace. Choose exactly one projectID or workspaceID. Use one requestID per new operation; reuse it only to observe that operation.",
+          startInput,
+          true,
+          (input) => start(userID, input),
+        );
+        for (const action of ["pause", "stop"] as const)
           tool(
             `${action}Workspace`,
             `${action} the shared Workspace compute. Use one requestID per new operation; reuse it only to observe that operation. Stop affects all participants, not retained source.`,
