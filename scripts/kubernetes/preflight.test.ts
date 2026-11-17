@@ -269,7 +269,7 @@ test.each([
       await writeFile(operatorFile, operatorConfiguration, { mode: 0o600 });
       await writeFile(
         join(directory, "kubectl"),
-        `#!${process.execPath}
+        `#!${process.execPath} --no-env-file
 import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
@@ -308,6 +308,7 @@ console.log(JSON.stringify(resources[args[4]]));
       const child = Bun.spawn(
         [
           process.execPath,
+          "--no-env-file",
           "scripts/kubernetes/preflight.ts",
           ...(serviceAccount ? ["--service-account"] : []),
           "--json",

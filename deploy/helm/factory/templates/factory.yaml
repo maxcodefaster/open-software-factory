@@ -175,20 +175,7 @@ spec:
             {{- end }}
       volumes:
         - name: substrate-configuration
-          {{- if include "factory.managedIngressTLS" . }}
-          projected:
-            sources:
-              - secret:
-                  name: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
-                  items: [{key: configuration.json, path: configuration.json}]
-              - secret:
-                  name: {{ include "factory.name" . }}-ingress-ca
-                  items: [{key: ca.crt, path: factory-ca.pem}]
-          {{- else }}
-          secret:
-            secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
-            items: [{key: configuration.json, path: configuration.json}, {key: factory-ca.pem, path: factory-ca.pem}]
-          {{- end }}
+          {{- include "factory.substrateConfigurationVolume" . | nindent 10 }}
         - name: substrate-provisioner
           secret:
             secretName: {{ required "substrate.provisionerTokenSecret is required for native Workspace provisioning" .Values.substrate.provisionerTokenSecret | quote }}

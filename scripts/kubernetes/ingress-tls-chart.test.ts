@@ -173,6 +173,33 @@ test("an operator certificate keeps external trust ownership and adds no issuer 
   });
 });
 
+test("the read-only preflight mounts managed public trust without an operator CA key", async () => {
+  const all = await render();
+  const consumers = all.filter(
+    (item) =>
+      (item.kind === "Deployment" && item.metadata.name === "portable") ||
+      (item.kind === "Job" && item.metadata.name === "portable-preflight"),
+  );
+  expect(consumers).toHaveLength(2);
+  for (const consumer of consumers) {
+    const volume = consumer.spec?.template?.spec.volumes.find(
+      (item) => item.name === "substrate-configuration",
+    );
+    expect(volume?.projected?.sources).toEqual([
+      {
+        secret: {
+          name: "native-workspaces",
+          items: [{ key: "configuration.json", path: "configuration.json" }],
+        },
+      },
+      {
+        secret: { name: "portable-ingress-ca", items: [{ key: "ca.crt", path: "factory-ca.pem" }] },
+      },
+    ]);
+    expect(volume?.secret).toBeUndefined();
+  }
+});
+
 test("managed issuance rejects two origins that collapse to the same Ingress hostname", async () => {
   await expect(render(["--set", "publicURL=https://git.example.com:444"])).rejects.toThrow(
     "distinct Factory and Forgejo DNS hostnames",

@@ -113,6 +113,4 @@ spec:
         - name: tmp
           emptyDir: {sizeLimit: 64Mi}
         - name: substrate-configuration
-          secret:
-            secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
-            items: [{key: configuration.json, path: configuration.json}, {key: factory-ca.pem, path: factory-ca.pem}]
+          {{- include "factory.substrateConfigurationVolume" . | nindent 10 }}

@@ -100,6 +100,24 @@ resources:
 {{- if and .Values.ingress.enabled (not .Values.ingress.tlsSecret) -}}true{{- end -}}
 {{- end -}}
 
+{{- /* All native-configuration consumers must use the same public trust projection. */ -}}
+{{- define "factory.substrateConfigurationVolume" -}}
+{{- if include "factory.managedIngressTLS" . -}}
+projected:
+  sources:
+    - secret:
+        name: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
+        items: [{key: configuration.json, path: configuration.json}]
+    - secret:
+        name: {{ include "factory.name" . }}-ingress-ca
+        items: [{key: ca.crt, path: factory-ca.pem}]
+{{- else -}}
+secret:
+  secretName: {{ .Values.substrate.workspaceConfigurationSecret | quote }}
+  items: [{key: configuration.json, path: configuration.json}, {key: factory-ca.pem, path: factory-ca.pem}]
+{{- end -}}
+{{- end -}}
+
 {{- define "factory.ingressHosts" -}}
 {{- $factory := regexReplaceAll ":[0-9]+$" (urlParse (include "factory.publicURL" .)).host "" -}}
 {{- $forge := regexReplaceAll ":[0-9]+$" (urlParse (include "factory.forgeURL" .)).host "" -}}
