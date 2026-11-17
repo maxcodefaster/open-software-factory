@@ -51,6 +51,11 @@ const upgradedChartSource = {
   ...managedSource,
   chartRevision: "5609f4cd76bd5203c6ad17ae33a330e65614bb9f",
 };
+const humanSubmissionSource = {
+  ...managedSource,
+  chartRevision: "62288627d2a5b69d5de7b6c2478199d290a5792b",
+  applicationRevision: "62288627d2a5b69d5de7b6c2478199d290a5792b",
+};
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "factory-restore-test-")));
@@ -273,6 +278,99 @@ test("the loader admits an independently witnessed upgraded chart without relabe
   }
 });
 
+test("the loader admits the independently witnessed 62288627 chart and application without relabeling backups", async () => {
+  const f = await fixture();
+  try {
+    f.value.source = { ...humanSubmissionSource };
+    f.witness.source = { ...humanSubmissionSource };
+    f.witness.state.files.push({
+      path: "ingress-tls/identity.json",
+      bytes: 19,
+      sha256: hash("managed CA identity"),
+    });
+    await f.save();
+    const fixtureBefore = await readFile(f.path, "utf8");
+    const witnessPath = join(f.value.privateRoot, "witnesses.json");
+    const witnessBefore = await readFile(witnessPath, "utf8");
+    const partsBefore = await Promise.all(
+      Object.keys(f.witness.parts).map((name) =>
+        readFile(join(f.value.privateRoot, f.value.set, name)),
+      ),
+    );
+    const loaded = await f.load();
+    expect(loaded.source).toEqual(humanSubmissionSource);
+    expect(loaded.witnesses.source).toEqual(humanSubmissionSource);
+    expect(loaded.witnessDigest).toBe(hash(JSON.stringify(f.witness)));
+    expect(await readFile(f.path, "utf8")).toBe(fixtureBefore);
+    expect(await readFile(witnessPath, "utf8")).toBe(witnessBefore);
+    expect(
+      await Promise.all(
+        Object.keys(f.witness.parts).map((name) =>
+          readFile(join(f.value.privateRoot, f.value.set, name)),
+        ),
+      ),
+    ).toEqual(partsBefore);
+    expect(await lstat(f.value.evidenceDirectory).catch(() => null)).toBeNull();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "new chart old application",
+  "old chart new application",
+  "unreviewed chart",
+  "unreviewed application",
+  "relabeled old witness",
+  "changed namespace identity",
+  "changed witness owner",
+  "changed backup set",
+  "destination provenance",
+  "missing CA",
+  "empty CA",
+  "symlink CA",
+  "excluded CA",
+  "changed part",
+] as const)("the 62288627 source profile refuses %s", async (boundary) => {
+  const f = await fixture();
+  try {
+    f.value.source = { ...humanSubmissionSource };
+    f.witness.source = { ...humanSubmissionSource };
+    const ca: Witnesses["state"]["files"][number] = {
+      path: "ingress-tls/identity.json",
+      bytes: 19,
+      sha256: hash("managed CA identity"),
+    };
+    if (boundary !== "missing CA") f.witness.state.files.push(ca);
+    if (boundary === "new chart old application")
+      f.value.source.applicationRevision = f.witness.source.applicationRevision =
+        managedSource.applicationRevision;
+    if (boundary === "old chart new application")
+      f.value.source.chartRevision = f.witness.source.chartRevision =
+        upgradedChartSource.chartRevision;
+    if (boundary === "unreviewed chart")
+      f.value.source.chartRevision = f.witness.source.chartRevision = "f".repeat(40);
+    if (boundary === "unreviewed application")
+      f.value.source.applicationRevision = f.witness.source.applicationRevision = "f".repeat(40);
+    if (boundary === "relabeled old witness") f.witness.source = { ...upgradedChartSource };
+    if (boundary === "changed namespace identity")
+      f.witness.source.namespaceUID = "365f92d0-2e7c-4f76-8728-6e7295cfc84b";
+    if (boundary === "changed witness owner") f.witness.owner = "b".repeat(32);
+    if (boundary === "changed backup set") f.witness.set = "20261117T100210Z";
+    if (boundary === "destination provenance")
+      Object.assign(f.witness, { provenance: "destination-observation" });
+    if (boundary === "empty CA") ca.bytes = 0;
+    if (boundary === "symlink CA") ca.link = "../another-identity.json";
+    if (boundary === "excluded CA") f.witness.state.excludedProvisionerPaths.push(ca.path);
+    if (boundary === "changed part") f.witness.parts["state.tar.gz"] = "0".repeat(64);
+    await f.save();
+    await expect(f.load()).rejects.toThrow();
+    expect(await lstat(f.value.evidenceDirectory).catch(() => null)).toBeNull();
+  } finally {
+    await f.close();
+  }
+});
+
 test.each([
   "unknown chart",
   "unknown application",
@@ -455,6 +553,9 @@ test.each([
   "valid",
   "managed CA",
   "managed CA upgraded chart",
+  "managed CA human submission",
+  "managed CA human submission omitted",
+  "managed CA human submission mismatch",
   "managed CA omitted",
   "managed CA mismatch",
   "traversal",
@@ -479,8 +580,11 @@ test.each([
         { name: "./openbao/factory-login.json", content: "login" },
       ];
       if (boundary.startsWith("managed CA")) {
-        const observed =
-          boundary === "managed CA upgraded chart" ? upgradedChartSource : managedSource;
+        const observed = boundary.includes("human submission")
+          ? humanSubmissionSource
+          : boundary === "managed CA upgraded chart"
+            ? upgradedChartSource
+            : managedSource;
         f.value.source = { ...observed };
         f.witness.source = { ...observed };
         const content = "synthetic managed CA state";
@@ -489,10 +593,10 @@ test.each([
           bytes: Buffer.byteLength(content),
           sha256: hash(content),
         });
-        if (boundary !== "managed CA omitted")
+        if (!boundary.endsWith("omitted"))
           stateEntries.push({
             name: "./ingress-tls/identity.json",
-            content: boundary === "managed CA mismatch" ? "changed retained CA state" : content,
+            content: boundary.endsWith("mismatch") ? "changed retained CA state" : content,
           });
       }
       if (boundary === "traversal") stateEntries[0] = { name: "../escape", content: "identity" };
@@ -596,6 +700,7 @@ test.each([
         boundary === "valid" ||
         boundary === "managed CA" ||
         boundary === "managed CA upgraded chart" ||
+        boundary === "managed CA human submission" ||
         boundary === "confined symlink chain" ||
         boundary === "40-link chain"
       )
