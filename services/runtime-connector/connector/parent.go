@@ -943,11 +943,29 @@ func validateCompose(
 				Target string `json:"target"`
 			} `json:"volumes"`
 		} `json:"services"`
+		Volumes map[string]struct {
+			Driver     string            `json:"driver"`
+			DriverOpts map[string]string `json:"driver_opts"`
+			External   bool              `json:"external"`
+		} `json:"volumes"`
 		Secrets map[string]composeFileResource `json:"secrets"`
 		Configs map[string]composeFileResource `json:"configs"`
 	}
 	if err := json.Unmarshal(output, &compose); err != nil {
 		return nil, fmt.Errorf("decode Compose configuration: %w", err)
+	}
+	// A service's type=volume can hide an Actor-host bind in its top-level
+	// driver options. Check every definition before any service can be created.
+	for name, volume := range compose.Volumes {
+		if volume.External {
+			return nil, fmt.Errorf("Compose volume %q cannot be external", name)
+		}
+		if volume.Driver != "" && volume.Driver != "local" {
+			return nil, fmt.Errorf("Compose volume %q must use the default local driver", name)
+		}
+		if len(volume.DriverOpts) != 0 {
+			return nil, fmt.Errorf("Compose volume %q driver options are not allowed", name)
+		}
 	}
 	// A Compose secret or config file is mounted into a service. It must not
 	// reach the Runtime credentials under /factory/assignment.

@@ -532,7 +532,13 @@ containers use the same authenticated exception; their network, mounts and capab
 remain unchanged. The Parent has
 authenticated that Actor-bound capability before container inspection. A Project
 JSON field or environment variable alone cannot enable it. Every other container,
-mount and capability fence remains unchanged. There is **no qualified per-inner-container cgroup/resource
+mount and capability fence remains unchanged. Compose admission checks resolved
+top-level volume definitions before image preparation or `devcontainer up`.
+Named volumes may use only the default or explicit `local` driver, with no
+nonempty `driver_opts` and no external volumes. Ordinary Compose-managed local
+data volumes, including PostgreSQL data, remain supported; a service mount's
+`type: volume` alone does not establish confinement.
+There is **no qualified per-inner-container cgroup/resource
 enforcement** in this profile; Actor-level native limits remain the boundary.
 
 Factory persists provisioning intent and external dispatch/outcomes before each
