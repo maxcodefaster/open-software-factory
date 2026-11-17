@@ -1012,6 +1012,9 @@ so its bootstrap clears the maintenance fence after a successful same-image upgr
 Its replacement uses the same retained data, signing credentials and public identities.
 Recovery does not commission another inference. Missing retained credentials or a changed
 installation identity refuses startup instead of silently generating replacements.
+Background observations wait for CA-verified public HTTPS readiness from this exact startup
+before dispatching work. A listening process alone does not prove that the Ingress can route
+an Actor's Source or Connector callbacks.
 
 Chart rollback is not a database rollback. The native baseline fingerprint must match the image. If startup or upgrade fails, retain the installation and inspect its exact failed
 bootstrap or maintenance Job; do not delete PVCs to make readiness pass.

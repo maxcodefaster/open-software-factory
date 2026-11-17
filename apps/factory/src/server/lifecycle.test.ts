@@ -1,6 +1,96 @@
 import { expect, test } from "bun:test";
 import { startFactoryLifecycle } from "./lifecycle";
 
+function startupFixture() {
+  const calls: string[] = [];
+  const work = async () => {
+    calls.push("work");
+  };
+  const idle = async () => {};
+  const observer = {
+    start: work,
+    close: idle,
+    recover: work,
+    sweep: work,
+    drain: work,
+    repair: work,
+    reconcile: work,
+    admitNativeCapacity: work,
+    dispatchReadyPending: work,
+    recoverRetainedStops: work,
+    reconcileCleanup: work,
+    shutdown: idle,
+    renew: work,
+  };
+  return {
+    calls,
+    application: {
+      ...Object.fromEntries(
+        [
+          "agentController",
+          "attachmentStore",
+          "buildBrowserController",
+          "developerIDEEdge",
+          "deliveryController",
+          "environmentController",
+          "environmentSecrets",
+          "idleCompute",
+          "implementationOrders",
+          "knowledgeController",
+          "learningWorker",
+          "mcpConnections",
+          "monitoringWorker",
+          "projectPreparation",
+          "projectAgentController",
+          "projectSetup",
+          "setupReadiness",
+          "releaseController",
+          "reviewMedia",
+          "runtimeAccess",
+          "runtimeController",
+          "wikiSourceUpdates",
+          "accessRevocation",
+          "workspaceCommands",
+          "workspaceFiles",
+          "workspaceCollaboration",
+          "workspaceSubmission",
+        ].map((name) => [name, observer]),
+      ),
+      observeRecoveredRuntimes() {
+        calls.push("runtime-recovery");
+      },
+    } as unknown as Parameters<typeof startFactoryLifecycle>[0],
+  };
+}
+
+test("startup never dispatches recovery before its own public callback route is ready", async () => {
+  const f = startupFixture();
+  let ready = false;
+  const close = startFactoryLifecycle(f.application, async () => ready);
+  try {
+    await Bun.sleep(20);
+    expect(f.calls).toEqual([]);
+    ready = true;
+    const deadline = Date.now() + 2_500;
+    while (!f.calls.length && Date.now() < deadline) await Bun.sleep(10);
+    expect(f.calls).toContain("runtime-recovery");
+    expect(f.calls.filter((value) => value === "runtime-recovery")).toHaveLength(1);
+  } finally {
+    await close();
+  }
+});
+
+test("shutdown while callback readiness is pending cannot start delayed recovery", async () => {
+  const f = startupFixture();
+  const ready = Promise.withResolvers<boolean>();
+  const close = startFactoryLifecycle(f.application, () => ready.promise);
+  await Bun.sleep(10);
+  const closing = close();
+  ready.resolve(true);
+  await closing;
+  expect(f.calls).toEqual([]);
+});
+
 test("the process owns Delivery and Monitoring observations and drains them before shutdown", async () => {
   const finish = Promise.withResolvers<void>();
   const finishSetup = Promise.withResolvers<void>();

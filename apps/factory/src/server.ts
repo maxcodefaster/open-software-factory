@@ -1,10 +1,20 @@
+import { configuredSubstrateInstallation } from "./runtime/substrate-workspaces";
 import { createFactoryApplication } from "./server/application";
 import { startFactoryLifecycle } from "./server/lifecycle";
+import { createStartupDispatchGate } from "./server/startup-dispatch";
 import { startFactoryTransport } from "./server/transport";
 
 const application = await createFactoryApplication();
 const servers = startFactoryTransport(application);
-const closeBackgroundWork = startFactoryLifecycle(application);
+const closeBackgroundWork = startFactoryLifecycle(
+  application,
+  createStartupDispatchGate({
+    required: Boolean(process.env["FACTORY_HELM_RELEASE"]),
+    origin: application.factoryOrigin,
+    startupID: application.startupID,
+    caFile: configuredSubstrateInstallation()?.factoryCAFile,
+  }),
+);
 for (const server of servers) console.log(`Factory listening on ${server.url}`);
 
 let stopping = false;

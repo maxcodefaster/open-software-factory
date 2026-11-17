@@ -35,7 +35,10 @@ type LifecycleServices = Pick<
 > &
   Partial<Pick<FactoryApplication, "workspaceSources">>;
 
-export function startFactoryLifecycle(application: LifecycleServices) {
+export function startFactoryLifecycle(
+  application: LifecycleServices,
+  dispatchReady: () => Promise<boolean> = async () => true,
+) {
   const {
     agentController,
     attachmentStore,
@@ -60,9 +63,17 @@ export function startFactoryLifecycle(application: LifecycleServices) {
     runtimeController,
     wikiSourceUpdates,
   } = application;
-  const jobs = createBackgroundJobs();
-  observeRecoveredRuntimes();
-  idleCompute.start();
+  let stopping = false;
+  let activated = false;
+  const jobs = createBackgroundJobs(async () => {
+    if (stopping || !(await dispatchReady()) || stopping) return false;
+    if (!activated) {
+      activated = true;
+      observeRecoveredRuntimes();
+      idleCompute.start();
+    }
+    return true;
+  });
   jobs.every(
     "Native worker capacity admission is unavailable",
     () => runtimeController.admitNativeCapacity(),
@@ -131,6 +142,7 @@ export function startFactoryLifecycle(application: LifecycleServices) {
   );
   let closing: Promise<void> | undefined;
   return () => {
+    stopping = true;
     closing ??= (async () => {
       // Stop admitting ticks synchronously, then abort and join owned work.
       // An irreversible Delivery already in flight is observed, never replayed.

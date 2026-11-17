@@ -1,7 +1,7 @@
 import { logFailure } from "../failure-log";
 
 // One process owns these observations. Skipped ticks are not queued or replayed.
-export function createBackgroundJobs() {
+export function createBackgroundJobs(ready: () => Promise<boolean> = async () => true) {
   const timers = new Set<ReturnType<typeof setInterval>>();
   const running = new Set<Promise<void>>();
   let stopping = false;
@@ -18,7 +18,10 @@ export function createBackgroundJobs() {
       if (stopping || active) return;
       active = true;
       const task = Promise.resolve()
-        .then(operation)
+        .then(async () => {
+          if (stopping || !(await ready()) || stopping) return;
+          await operation();
+        })
         .then(
           () => {},
           (cause) => logFailure(failure, cause),
