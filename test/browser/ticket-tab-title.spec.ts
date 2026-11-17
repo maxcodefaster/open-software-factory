@@ -336,3 +336,72 @@ test("a late response stays fenced after switching Projects, even with the same 
     release.resolve();
   }
 });
+
+for (const identical of [true, false]) {
+  test(`read-only history ${identical ? "suppresses an identical" : "retains a distinct"} description and summary`, async ({
+    page,
+  }) => {
+    const description =
+      "A disposable manual specification for testing revision and approval pinning.";
+    const summary = identical
+      ? description
+      : "The approved summary has additional product context.";
+    const earlier = {
+      id: "10000000-0000-4000-8000-000000000006",
+      ordinal: 1,
+      title: "Original approved title",
+      description,
+      canonicalContent: JSON.stringify({
+        summary,
+        acceptanceCriteria: ["The planned test phrase is exactly alpha."],
+        nonGoals: ["No AI work, implementation or Delivery for this exercise."],
+      }),
+      contentDigest: "a".repeat(64),
+      requirementRevisionId: null,
+      author: "Fixture contributor",
+      authorKind: "human" as const,
+      createdAt: "2026-11-17T10:57:00Z",
+    };
+    saved = {
+      ...titleDetail(savedTitle, 3),
+      documentRevisions: [
+        { ...earlier, id: "10000000-0000-4000-8000-000000000007", ordinal: 2, title: savedTitle },
+        earlier,
+      ],
+    };
+    const retained = structuredClone(saved);
+    await open(page, savedTitle);
+    await expect(tab(page)).toHaveText(savedTitle);
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "History", exact: true }).click();
+    const history = page.getByRole("complementary", { name: "Specification history", exact: true });
+    await history.getByRole("button", { name: /^Version 1 / }).click();
+    const revision = page.getByRole("article", {
+      name: "Selected specification revision",
+      exact: true,
+    });
+    await expect(revision.getByRole("heading", { name: earlier.title, exact: true })).toBeVisible();
+    await expect(revision).toContainText("Version 1 · Read only");
+    const kind = identical ? "identical" : "distinct";
+    await page.screenshot({ path: `${evidence}/history-${kind}-desktop.png` });
+    await expect(revision.locator(":scope > .markdown-body")).toHaveCount(identical ? 1 : 2);
+    await expect(revision.getByText(description, { exact: true })).toHaveCount(1);
+    if (!identical) await expect(revision.getByText(summary, { exact: true })).toHaveCount(1);
+    await expect(revision).toContainText("The planned test phrase is exactly alpha.");
+    await expect(revision).toContainText(
+      "No AI work, implementation or Delivery for this exercise.",
+    );
+    await expect(revision.locator('[contenteditable="true"], input, textarea')).toHaveCount(0);
+    await expect(tab(page)).toHaveText(savedTitle);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(revision.locator(":scope > .markdown-body")).toHaveCount(identical ? 1 : 2);
+    await page.screenshot({ path: `${evidence}/history-${kind}-narrow.png` });
+    await history.getByRole("button", { name: "Close history", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+      savedTitle,
+    );
+    await expect(tab(page)).toHaveText(savedTitle);
+    expect(saved).toEqual(retained);
+    expect(writes).toBe(0);
+  });
+}

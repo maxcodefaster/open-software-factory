@@ -28,7 +28,9 @@ export function RequirementDocument(props: {
       >
         {(content) => (
           <>
-            <div class="markdown-body" innerHTML={markdownHTML(content().summary)} />
+            <Show when={content().summary !== props.description}>
+              <div class="markdown-body" innerHTML={markdownHTML(content().summary)} />
+            </Show>
             <section class="specification-block">
               <h3>Acceptance criteria</h3>
               <ul class="requirement-checklist">
