@@ -771,6 +771,156 @@ OpenBao secrets, official Substrate control-plane/ROOTFS recovery, cross-node re
 Source/Writer admission, Editor access, Verification or Delivery. Those require separate explicit
 native qualification with original identity safeguards and controlled external-effect authority.
 
+##### Check an already restored application
+
+`scripts/kubernetes/restore-application-check.ts` adds a separate, test-only application check.
+It requires an **already restored and running**, exclusively owned Kubernetes target. It creates
+no cluster resources, restores no data, repairs no rows and starts no Factory server. The
+data-service lane above does not create this target or qualify application usability.
+
+The target owner must first establish these prerequisites without resetting the retained
+installation:
+
+- Distinct explicit source/target contexts, API endpoints and `kube-system` Namespace UIDs.
+  The original source Namespace and Ingress remain readable. Preserve the backed-up Namespace
+  name, Helm release, public Factory/Forgejo HTTPS origins, storage class and installation file.
+  The isolated target Namespace UID must differ from the original.
+- The target runs the exact backed-up immutable Factory image and its independently recorded
+  platform digest. All restored data services, original Factory credentials, state, Source
+  materializations and matching objects must already be usable. Normal startup must finish.
+  This helper does not disable startup recovery. Establish a quiescent backup before starting
+  its application, not by cancelling or deleting historical work after startup.
+- The standard chart's Factory/Forgejo/PostgreSQL Services route only to the supplied target
+  Pod UIDs. The target Ingress has a literal IP address disjoint from the source Ingress
+  addresses, original HTTPS host rules and a valid certificate for both original hostnames.
+  No other Ingress may overlap them. No rewrites, mirrors, external authentication, snippets
+  or unknown Ingress annotations are accepted. The narrow annotation allowlist permits only
+  matching Helm release metadata, the matching ingress class and enabled NGINX TLS redirects.
+- Apply the already-owned target's `factory.restore-application.owner: OWNER` label to its
+  Namespace, Factory Deployment and Ingress. Its Deployment annotation
+  `factory.restore-application.backup` must equal the SHA-256 of the successful data-service
+  `result.json`. Supply the exact UIDs observed by the target owner. The probe never adds them.
+- An owned restored email/password account has normal Project, Ticket and Source read/edit
+  authority. Supply a restored Forge token authorized to read the selected repository.
+  No bypass, password reset, new account or access grant is performed.
+- The selected Source lease is already service-owned, writable and independently checkpointed.
+  Its original Actor binding records confirmed deletion and its runtime attempt is stopped.
+  Preserve the original materialization and object manifest. A Git file or ROOTFS snapshot is
+  not a substitute for this Source witness. A backup with no initialized independent Source
+  cannot satisfy this check.
+
+Normal native startup prerequisites still apply. If the original upstream is separately
+operated, its authenticated access and identity/trust checks must already work for this target.
+Copied Kubernetes ServiceAccount tokens or a different issuer are not equivalent credentials.
+This helper neither supplies native credentials nor rewrites historical identities. Do not copy
+a CA private key. The only TLS input to the probe is a public CA bundle.
+
+Prepare a separate owned `0700` directory. Every input must be an owned `0600` regular file,
+with no symlink ancestor or hard links. Keep it outside the new evidence directory.
+
+```text
+PRIVATE_APP_ROOT/
+  application.json
+  kubeconfig.json
+  ca.pem
+  password
+  forge-token
+  backup-result.json
+  image-build.json
+  application-witnesses.json
+```
+
+`ApplicationFixture` and `ApplicationWitnesses` in the script define the exact JSON shapes.
+Configuration objects reject extra keys. Required `application.json` inputs are:
+
+| Field | Private input |
+| --- | --- |
+| `schema`, `owner`, `exclusiveTarget` | `1`, the data-service receipt's 32-character lowercase hexadecimal owner, and `true` |
+| `privateRoot`, `evidenceDirectory` | Canonical absolute input root, and a fresh absolute evidence directory outside it; its existing parent must be owned and not group/world writable |
+| `kubeconfig`, `ca`, `password`, `forgeToken` | Absolute paths beneath the input root |
+| `account` | Original restored `id` UUID and `email` |
+| `backup`, `build`, `witnesses` | Each has `file` and the exact file-byte `sha256`; all are private files beneath the input root |
+| `source` | Explicit `context`, expected `kubeSystemUID`, and original `ingress: {name, uid}` |
+| `target` | Explicit `context`, `kubeSystemUID`, literal ingress `address`, and `{name, uid}` for `namespace`, `deployment`, `applicationPod`, `postgresPod`, `forgejoPod`, `ingress`, `factoryService`, `postgresService`, `forgejoService`, `configuration` ConfigMap and `credentials` Secret |
+| `credentialHashes` | Independently observed SHA-256 of the original decoded `auth-secret`, `admin-password`, `database-password`, `zero-password` and `webhook-secret` Secret bytes, bound to this backup |
+| `save` | Fresh UUID `commandID` and deliberately authorized new `description`, at most 10,000 characters, different from the restored description |
+| `limits` | Positive per-command/request `seconds`, at most 3600, and `responseBytes`, at most 16 MiB; choose bounds for the actual history inventory |
+
+Use a self-contained JSON kubeconfig with embedded public `certificate-authority-data` and
+embedded client credentials for both selected contexts. Export it privately through the normal
+Kubernetes tooling. Credential plugins, auth providers, external file references, proxy settings,
+insecure TLS and a shared API endpoint are refused. The source credential needs read-only access
+to the observed Namespaces and Ingress. The target credential needs those reads plus Deployment,
+Pod, ReplicaSet, Service, EndpointSlice, ConfigMap and Secret reads, cluster-wide Ingress listing
+and `pods/exec` for the supplied Factory and PostgreSQL Pods. Exec runs only the helper's fixed
+read-only SQL and compiled-build inspection, not caller-supplied commands.
+
+`image-build.json` has `schema: 1`, `image` as the original immutable `@sha256:` reference,
+`platformDigest` as 64 lowercase hexadecimal characters without the prefix, the backed-up
+`applicationRevision`, `treeSHA256`, and `functions` mapping exactly `getProjects`,
+`getTicketDetail` and `saveTicketDocument` to their actual compiled IDs. Retain this evidence
+independently from that exact image/build, not guessed function names or another local build.
+The tree hash covers every regular file under `/opt/factory/apps/factory/dist`: sort relative
+paths and hash `path + NUL + SHA256(file bytes) + LF` for every file. Symlinks refuse inspection.
+After matching that complete tree and the Pod image digest, the probe imports only its fixed
+`server/entry.js` for the existing `factoryFunctions`/`compiledFunctionID` introspection. It
+compares all three IDs before making any application request and never invokes those functions
+inside the inspection process.
+It also compares hashes of the inherited container credentials, original origins and database
+route with the supplied Secret/configuration, so merely replacing a Secret after Pod startup
+does not pass.
+
+`application-witnesses.json` must come from an independent consistent source observation for the
+selected backup. Set `schema: 1`, `provenance: "independent-source-observation"` and
+`backupWitnessDigest` equal to the data-service receipt's `witnessDigest`. Supply:
+
+- `schemaDigest` from the baseline migration, exact `project`/`ticket` projections, descending
+  `documents`/`requirements` arrays and `requirementRevisionID` using the script's field names.
+  The safe save supports either a null requirement with no revision, or a complete unchanged
+  canonical requirement matching the existing scope on a Ticket already past Inbox/Backlog.
+  Partial documents, new requirement revisions, cancelled Tickets and state transitions refuse
+  preparation rather than being repaired.
+- `history` for every exported `historyTables` entry plus `other_tickets`, `old_documents` and
+  `protected_ticket`, each `{rows, sha256}`. `applicationSQL` defines the projections. On
+  PostgreSQL 16 with UTC, `extra_float_digits=3` and hex bytea, aggregate `to_jsonb` rows sorted
+  by `row::text COLLATE "C"`, then hash the UTF-8 bytes of the resulting JSONB array text,
+  or `[]` for no rows, without a trailing LF. This is not the earlier COPY witness encoding.
+- `source` with original `workspaceID`, `leaseSHA256` of the complete Source row's JSONB text,
+  exact relative `path`, byte count and file-byte SHA-256. `git` separately specifies `owner`,
+  `repository`, exact 40-character `commit` and `blob` IDs, relative `path`, byte count and
+  file-byte SHA-256. Keep expected Source bytes independent of the Git witness.
+
+The read-only database preflight refuses pending or uncertain work through `idleRules`, including
+inference, runtime creation, access/credential recovery, external operations and enabled
+automation. Some unsupported historical cases are also refused conservatively, including
+retained learning trials and Workspace submission intents. No other user or process may mutate
+this target during the check. These observations are not a global concurrency fence.
+
+Once the owner has supplied these prerequisites, run deliberately:
+
+```sh
+mise exec -- bun --no-env-file scripts/kubernetes/restore-application-check.ts \
+  --run --fixture "$PRIVATE_APP_ROOT/application.json" --owner "$OWNER"
+```
+
+Every HTTP request connects to the literal target IP, with the original public Host header,
+SNI and explicit certificate hostname verification. The probe does not resolve or edit machine DNS or
+follow redirects. It rechecks target ownership, routes and critical configuration before each
+request, including logout. Complete readiness must match the target Pod's startup marker.
+It then logs in, reads the known Project/Ticket and their document/requirement histories, reads
+the exact Forge file at the known commit, and reads the exact independent file through the normal
+public Source API. It journals one `saveTicketDocument` intent without `proposalEntryId`, changes
+only that Ticket's description, reads it back and compares protected history and Source again.
+There are no inference, compute, Verification or Delivery requests.
+
+`result.json` includes probe/input hashes, target identities and save/logout outcomes, without
+raw credentials, content or command errors. It reports `restored-application-passed` only after
+the scoped checks and confirmed logout/session removal. An uncertain save is never retried.
+An interrupted run, changed owner or unconfirmed logout remains incomplete; the helper does not
+delete resources or repair the result. A successful scoped receipt proves those application
+reads and one new human save, not browser usability, old Actor recovery or new compute.
+`oldActors` and `newCompute` always remain `"not-run-not-qualified"`.
+
 ## Maintenance and upgrades
 
 Save human edits, finish or explicitly stop active work, then select the next built image:

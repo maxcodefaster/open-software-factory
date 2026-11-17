@@ -1,0 +1,1231 @@
+import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import type { IncomingMessage, OutgoingHttpHeaders } from "node:http";
+import type * as https from "node:https";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { DetailedPeerCertificate } from "node:tls";
+import {
+  type ApplicationFixture,
+  type ApplicationWitnesses,
+  applicationBuildTree,
+  applicationSQL,
+  type Command,
+  checkRestoredApplication,
+  type HTTPRequest,
+  type HTTPResponse,
+  historyTables,
+  idleRules,
+  loadApplicationFixture,
+  pinnedApplicationRequest,
+  type Wire,
+} from "./restore-application-check";
+
+const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const uid = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+const owner = "a".repeat(32);
+const ownerLabel = "factory.restore-application.owner";
+const binding = "factory.restore-application.backup";
+const identity = (name: string, n: number) => ({ name, uid: uid(n) });
+const image = `registry.example/factory@sha256:${"b".repeat(64)}`;
+const response = (
+  body: unknown,
+  headers: HTTPResponse["headers"] = {},
+  status = 200,
+): HTTPResponse => ({ status, headers, body: Buffer.from(JSON.stringify(body)) });
+const clone = <T>(value: T): T => structuredClone(value);
+async function fixture() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "factory-restored-application-")));
+  const privateRoot = join(root, "private");
+  await mkdir(privateRoot, { mode: 0o700 });
+  const account = { id: uid(30), email: "restored@example.invalid" };
+  const project = {
+    id: uid(31),
+    name: "Retained project",
+    slug: "retained",
+    repositoryUrl: "https://git.example.invalid/owned/retained.git",
+    defaultBranch: "main",
+    devcontainerPath: ".devcontainer/devcontainer.json",
+  };
+  const ticket = {
+    id: uid(32),
+    projectId: project.id,
+    title: "Retained ticket",
+    description: "Original human text",
+    state: "backlog",
+    version: 7,
+  };
+  const documents = [
+    {
+      id: uid(33),
+      ordinal: 1,
+      title: ticket.title,
+      description: ticket.description,
+      canonicalContent: "null",
+      contentDigest: hash("null"),
+      requirementRevisionId: null,
+    },
+  ];
+  const expected: ApplicationWitnesses = {
+    schema: 1,
+    provenance: "independent-source-observation",
+    backupWitnessDigest: hash("independent backup witnesses"),
+    schemaDigest: hash("native baseline"),
+    project,
+    ticket,
+    documents,
+    requirements: [],
+    requirementRevisionID: null,
+    history: Object.fromEntries(
+      [...historyTables, "other_tickets", "old_documents", "protected_ticket"].map((table) => [
+        table,
+        { rows: 1, sha256: hash(`independent ${table}`) },
+      ]),
+    ),
+    source: {
+      workspaceID: uid(34),
+      leaseSHA256: hash("immutable service-owned source"),
+      path: "src/unsaved-in-git.txt",
+      bytes: 6,
+      sha256: hash("Source"),
+    },
+    git: {
+      owner: "owned",
+      repository: "retained",
+      commit: "c".repeat(40),
+      path: "README.md",
+      bytes: 3,
+      sha256: hash("Git"),
+      blob: "d".repeat(40),
+    },
+  };
+  const backup = {
+    schema: 1,
+    owner,
+    source: {
+      chartRevision: "39d7969bb3acd93d0bc497a5748cce08ae435091",
+      applicationRevision: "e".repeat(40),
+      namespace: "factory",
+      namespaceUID: uid(3),
+      release: "factory",
+      factoryOrigin: "https://factory.example.invalid",
+      forgejoOrigin: "https://git.example.invalid",
+      storageClass: "retained-storage",
+    },
+    set: "20261117T100209Z",
+    status: "data-services-passed",
+    components: {
+      postgres: "passed",
+      forgejo: "passed",
+      state: "passed",
+      objects: "passed",
+      openbao: "passed",
+    },
+    cleanup: "confirmed",
+    nativeActivation: "not-run-not-qualified",
+    limits: {},
+    witnessDigest: expected.backupWitnessDigest,
+  };
+  const build = {
+    schema: 1,
+    image,
+    platformDigest: "f".repeat(64),
+    applicationRevision: backup.source.applicationRevision,
+    treeSHA256: hash("complete compiled tree"),
+    functions: {
+      getProjects: "opaque-projects",
+      getTicketDetail: "opaque-ticket",
+      saveTicketDocument: "opaque-save",
+    },
+  };
+  const secrets: Record<string, string> = {
+    "auth-secret": "retained-auth",
+    "admin-password": "retained-admin",
+    "database-password": "retained-database",
+    "zero-password": "retained-zero",
+    "webhook-secret": "retained-hook",
+  };
+  const value: ApplicationFixture = {
+    schema: 1,
+    owner,
+    exclusiveTarget: true,
+    privateRoot,
+    evidenceDirectory: join(root, "evidence"),
+    kubeconfig: join(privateRoot, "kubeconfig"),
+    ca: join(privateRoot, "ca.pem"),
+    password: join(privateRoot, "password"),
+    forgeToken: join(privateRoot, "forge-token"),
+    account,
+    backup: { file: join(privateRoot, "backup.json"), sha256: "" },
+    build: { file: join(privateRoot, "build.json"), sha256: "" },
+    witnesses: { file: join(privateRoot, "witnesses.json"), sha256: "" },
+    source: { context: "retained-source", kubeSystemUID: uid(1), ingress: identity("factory", 4) },
+    target: {
+      context: "isolated-target",
+      kubeSystemUID: uid(2),
+      namespace: identity("factory", 5),
+      deployment: identity("factory", 6),
+      applicationPod: identity("factory-pod", 7),
+      postgresPod: identity("factory-postgres-0", 8),
+      forgejoPod: identity("factory-forgejo-0", 9),
+      ingress: identity("factory", 10),
+      factoryService: identity("factory-factory", 11),
+      forgejoService: identity("factory-forgejo", 12),
+      postgresService: identity("factory-postgres", 16),
+      configuration: identity("factory-config", 13),
+      credentials: identity("restore-credentials", 14),
+      address: "192.0.2.20",
+    },
+    credentialHashes: Object.fromEntries(Object.entries(secrets).map(([key, v]) => [key, hash(v)])),
+    save: { commandID: uid(35), description: "One deliberate restored-application save" },
+    limits: { seconds: 10, responseBytes: 1024 ** 2 },
+  };
+  const path = join(privateRoot, "application.json");
+  const save = async () => {
+    for (const [file, body] of [
+      [value.backup, backup],
+      [value.build, build],
+      [value.witnesses, expected],
+    ] as const) {
+      const bytes = JSON.stringify(body);
+      file.sha256 = hash(bytes);
+      await writeFile(file.file, bytes, { mode: 0o600 });
+    }
+    await writeFile(path, JSON.stringify(value), { mode: 0o600 });
+  };
+  const kubeconfig = {
+    apiVersion: "v1",
+    kind: "Config",
+    contexts: [value.source, value.target].map((c) => ({
+      name: c.context,
+      context: { cluster: c.context, user: "owned" },
+    })),
+    clusters: [value.source, value.target].map((c, i) => ({
+      name: c.context,
+      cluster: {
+        server: `https://192.0.2.${30 + i}:6443`,
+        "certificate-authority-data": Buffer.from(
+          "-----BEGIN CERTIFICATE-----\npublic only",
+        ).toString("base64"),
+      },
+    })),
+    users: [{ name: "owned", user: { token: "private-kubernetes-credential" } }],
+  };
+  for (const [file, bytes] of [
+    [value.kubeconfig, JSON.stringify(kubeconfig)],
+    [value.ca, "-----BEGIN CERTIFICATE-----\nsynthetic public CA\n-----END CERTIFICATE-----"],
+    [value.password, "private-restored-password"],
+    [value.forgeToken, "private-restored-forge-token-123456"],
+  ])
+    await writeFile(file ?? "", bytes ?? "", { mode: 0o600 });
+  await save();
+  return {
+    root,
+    path,
+    value,
+    expected,
+    backup,
+    build,
+    kubeconfig,
+    secrets,
+    save,
+    load: () => loadApplicationFixture(path, owner),
+    close: () => rm(root, { recursive: true, force: true }),
+  };
+}
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+function target(f: Fixture) {
+  const calls: { args: string[]; input: string | undefined }[] = [],
+    requests: HTTPRequest[] = [];
+  // biome-ignore lint/suspicious/noExplicitAny: These observations deliberately include malformed Kubernetes objects.
+  const objects = new Map<string, any>();
+  const ns = f.value.target.namespace.name;
+  const meta = (id: { name: string; uid: string }, namespaced = true) => ({
+    ...id,
+    ...(namespaced ? { namespace: ns } : {}),
+    labels: { [ownerLabel]: owner },
+  });
+  const put = (context: string, kind: string, key: string, value: unknown) =>
+    objects.set(`${context}/${kind}/${key}`, value);
+  const source = f.value.source.context,
+    to = f.value.target.context;
+  put(source, "namespace", "kube-system", { metadata: meta(identity("kube-system", 1), false) });
+  put(to, "namespace", "kube-system", { metadata: meta(identity("kube-system", 2), false) });
+  put(source, "namespace", ns, { metadata: meta(identity(ns, 3), false) });
+  put(to, "namespace", ns, { metadata: meta(f.value.target.namespace, false) });
+  const env = [
+    ...[
+      ["FACTORY_AUTH_SECRET", "auth-secret"],
+      ["FACTORY_ADMIN_PASSWORD", "admin-password"],
+      ["FACTORY_DATABASE_PASSWORD", "database-password"],
+      ["FACTORY_WIKI_WEBHOOK_SECRET", "webhook-secret"],
+    ].map(([key, v]) => ({
+      name: key,
+      valueFrom: { secretKeyRef: { name: f.value.target.credentials.name, key: v } },
+    })),
+    {
+      name: "DATABASE_URL",
+      value: `postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@factory-postgres.${ns}.svc:5432/factory`,
+    },
+  ];
+  const container = {
+    name: "factory",
+    image,
+    command: [
+      "flock",
+      "--nonblock",
+      "--no-fork",
+      "/var/lib/factory/bootstrap.lock",
+      "bun",
+      "scripts/kubernetes/start.ts",
+    ],
+    env,
+    envFrom: [{ configMapRef: { name: f.value.target.configuration.name } }],
+  };
+  put(to, "deployment", "factory", {
+    metadata: {
+      ...meta(f.value.target.deployment),
+      generation: 1,
+      annotations: { [binding]: f.value.backup.sha256 },
+    },
+    spec: { replicas: 1, template: { spec: { containers: [clone(container)] } } },
+    status: { observedGeneration: 1, readyReplicas: 1, updatedReplicas: 1 },
+  });
+  put(to, "replicaset", "factory-rs", {
+    metadata: {
+      ...meta(identity("factory-rs", 15)),
+      ownerReferences: [
+        { controller: true, kind: "Deployment", uid: f.value.target.deployment.uid },
+      ],
+    },
+  });
+  for (const [pod, role, ip] of [
+    [f.value.target.applicationPod, "factory", "10.0.0.10"],
+    [f.value.target.forgejoPod, "forgejo", "10.0.0.11"],
+    [f.value.target.postgresPod, "postgres", "10.0.0.12"],
+  ] as const)
+    put(to, "pod", pod.name, {
+      metadata: {
+        ...meta(pod),
+        labels: { "app.kubernetes.io/instance": "factory", "app.kubernetes.io/component": role },
+        ownerReferences:
+          role === "factory"
+            ? [{ controller: true, kind: "ReplicaSet", name: "factory-rs", uid: uid(15) }]
+            : [],
+      },
+      spec: { containers: role === "factory" ? [clone(container)] : [] },
+      status: {
+        phase: "Running",
+        podIP: ip,
+        containerStatuses:
+          role === "factory"
+            ? [
+                {
+                  name: "factory",
+                  ready: true,
+                  imageID: `registry.example/factory@sha256:${f.build.platformDigest}`,
+                },
+              ]
+            : [],
+      },
+    });
+  for (const [svc, pod, role, ip, port] of [
+    [f.value.target.factoryService, f.value.target.applicationPod, "factory", "10.0.0.10", 3000],
+    [f.value.target.forgejoService, f.value.target.forgejoPod, "forgejo", "10.0.0.11", 3000],
+    [identity("factory-postgres", 16), f.value.target.postgresPod, "postgres", "10.0.0.12", 5432],
+  ] as const) {
+    put(to, "service", svc.name, {
+      metadata: meta(svc),
+      spec: {
+        type: "ClusterIP",
+        ports: [
+          { name: port === 5432 ? "postgres" : "http", port, targetPort: port, protocol: "TCP" },
+        ],
+        selector: { "app.kubernetes.io/instance": "factory", "app.kubernetes.io/component": role },
+      },
+    });
+    put(to, "endpointslices", svc.name, {
+      items: [
+        {
+          metadata: {
+            namespace: ns,
+            ownerReferences: [{ kind: "Service", uid: svc.uid, controller: true }],
+          },
+          ports: [{ name: port === 5432 ? "postgres" : "http", port, protocol: "TCP" }],
+          endpoints: [
+            {
+              conditions: { ready: true },
+              addresses: [ip],
+              targetRef: { kind: "Pod", uid: pod.uid, name: pod.name, namespace: ns },
+            },
+          ],
+        },
+      ],
+    });
+  }
+  const rules = [
+    {
+      host: "factory.example.invalid",
+      http: {
+        paths: [
+          {
+            path: "/",
+            pathType: "Prefix",
+            backend: {
+              service: { name: f.value.target.factoryService.name, port: { number: 3000 } },
+            },
+          },
+        ],
+      },
+    },
+    {
+      host: "git.example.invalid",
+      http: {
+        paths: [
+          {
+            path: "/",
+            pathType: "Prefix",
+            backend: {
+              service: { name: f.value.target.forgejoService.name, port: { number: 3000 } },
+            },
+          },
+        ],
+      },
+    },
+  ];
+  for (const [ctx, id, ip] of [
+    [source, f.value.source.ingress, "192.0.2.10"],
+    [to, f.value.target.ingress, f.value.target.address],
+  ] as const)
+    put(ctx, "ingress", "factory", {
+      metadata: meta(id),
+      spec: {
+        rules: clone(rules),
+        tls: [{ secretName: "leaf-only", hosts: rules.map((r) => r.host) }],
+      },
+      status: { loadBalancer: { ingress: [{ ip }] } },
+    });
+  put(to, "ingresses", "--all-namespaces", { items: [objects.get(`${to}/ingress/factory`)] });
+  put(to, "configmap", f.value.target.configuration.name, {
+    metadata: meta(f.value.target.configuration),
+    data: {
+      FACTORY_BASE_URL: f.backup.source.factoryOrigin,
+      FACTORY_FORGEJO_PUBLIC_URL: f.backup.source.forgejoOrigin,
+      FACTORY_HELM_RELEASE: "factory",
+      FACTORY_FORGEJO_API_URL: `http://factory-forgejo.${ns}.svc:3000/api/v1/`,
+    },
+  });
+  put(to, "secret", f.value.target.credentials.name, {
+    metadata: meta(f.value.target.credentials),
+    data: Object.fromEntries(
+      Object.entries(f.secrets).map(([key, v]) => [key, Buffer.from(v).toString("base64")]),
+    ),
+  });
+  let saved = false,
+    authenticated = false;
+  // biome-ignore lint/suspicious/noExplicitAny: Negative cases deliberately corrupt every shape of a database observation.
+  let dbHook: ((snapshot: any) => void) | undefined,
+    httpHook: ((request: HTTPRequest) => HTTPResponse | undefined) | undefined;
+  const newDoc = () => ({
+    ...f.expected.documents[0],
+    id: f.value.save.commandID,
+    ordinal: 2,
+    description: f.value.save.description,
+  });
+  const snapshot = () => {
+    const value = {
+      readOnly: "on",
+      database: "factory",
+      schema: f.expected.schemaDigest,
+      busy: Object.fromEntries(Object.keys(idleRules).map((key) => [key, 0])),
+      history: clone(f.expected.history),
+      project: clone(f.expected.project),
+      ticket: {
+        ...f.expected.ticket,
+        ...(saved
+          ? { description: f.value.save.description, version: f.expected.ticket.version + 1 }
+          : {}),
+      },
+      documents: saved ? [newDoc(), ...clone(f.expected.documents)] : clone(f.expected.documents),
+      requirements: clone(f.expected.requirements),
+      scope: f.expected.requirementRevisionID,
+      source: { eligible: true, sha256: f.expected.source.leaseSHA256 },
+      account: clone(f.value.account),
+      sessions: authenticated ? ["new-session"] : [],
+      saved: saved
+        ? {
+            id: f.value.save.commandID,
+            ticketID: f.expected.ticket.id,
+            createdBy: f.value.account.id,
+            authorKind: "human",
+            proposalEntryID: null,
+          }
+        : null,
+    };
+    dbHook?.(value);
+    return value;
+  };
+  const command: Command = async (args, input) => {
+    calls.push({ args, input });
+    expect(args.slice(0, 4)).toEqual(["kubectl", "--kubeconfig", f.value.kubeconfig, "--context"]);
+    const ctx = args[4],
+      operation = args[7];
+    if (operation === "get") {
+      const kind = args[8];
+      const key =
+        kind === "endpointslices"
+          ? (args[args.indexOf("--selector") + 1] ?? "").split("=")[1]
+          : args[9];
+      const value = objects.get(`${ctx}/${kind}/${key}`);
+      if (!value) throw Error(`Unrecorded unit command ${ctx}/${kind}/${key}`);
+      return { code: 0, stdout: JSON.stringify(value) };
+    }
+    expect(ctx).toBe(to);
+    expect(operation).toBe("exec");
+    if (args.includes("psql")) {
+      expect(args).toContain(f.value.target.postgresPod.name);
+      expect(input).toBe(
+        applicationSQL({ ...f.value, expected: f.expected } as Parameters<
+          typeof applicationSQL
+        >[0]),
+      );
+      return { code: 0, stdout: JSON.stringify(snapshot()) };
+    }
+    expect(args).toContain(f.value.target.applicationPod.name);
+    expect(args).toContain("bun");
+    return {
+      code: 0,
+      stdout: JSON.stringify({
+        treeSHA256: f.build.treeSHA256,
+        functions: clone(f.build.functions),
+        environmentHashes: Object.fromEntries(
+          Object.entries({
+            FACTORY_BASE_URL: f.backup.source.factoryOrigin,
+            FACTORY_FORGEJO_PUBLIC_URL: f.backup.source.forgejoOrigin,
+            FACTORY_FORGEJO_API_URL: `http://factory-forgejo.${ns}.svc:3000/api/v1/`,
+            FACTORY_HELM_RELEASE: "factory",
+            FACTORY_STATE_DIRECTORY: "/var/lib/factory",
+            FACTORY_AUTH_SECRET: f.secrets["auth-secret"] ?? "",
+            FACTORY_ADMIN_PASSWORD: f.secrets["admin-password"] ?? "",
+            FACTORY_DATABASE_PASSWORD: f.secrets["database-password"] ?? "",
+            FACTORY_WIKI_WEBHOOK_SECRET: f.secrets["webhook-secret"] ?? "",
+            DATABASE_URL: `postgresql://factory:${f.secrets["database-password"]}@factory-postgres.${ns}.svc:5432/factory`,
+          }).map(([key, value]) => [key, hash(value)]),
+        ),
+        startupID: uid(40),
+        installation: {
+          runtime: "substrate",
+          namespace: ns,
+          release: "factory",
+          factoryURL: f.backup.source.factoryOrigin,
+          forgeURL: f.backup.source.forgejoOrigin,
+          storageClass: "retained-storage",
+        },
+      }),
+    };
+  };
+  const wire: Wire = {
+    serialize: async (args) => JSON.stringify([{ method: "POST", data: args }]),
+    decode: async (r) => ((await r.json()) as { result: unknown }).result,
+  };
+  const http = async (request: HTTPRequest) => {
+    requests.push(request);
+    expect(request.address).toBe(f.value.target.address);
+    expect(request.ca).not.toContain("PRIVATE KEY");
+    const override = httpHook?.(request);
+    if (override) return override;
+    const url = new URL(request.url),
+      path = url.pathname;
+    const forge = url.origin === f.backup.source.forgejoOrigin;
+    if (forge) {
+      expect(request.method).toBe("GET");
+      expect(request.headers["cookie"]).toBeUndefined();
+      expect(request.headers["authorization"]).toBe("Bearer private-restored-forge-token-123456");
+      if (path.includes("/git/commits/")) return response({ sha: f.expected.git.commit });
+      expect(url.searchParams.get("ref")).toBe(f.expected.git.commit);
+      return response({
+        type: "file",
+        path: f.expected.git.path,
+        sha: f.expected.git.blob,
+        content: Buffer.from("Git").toString("base64"),
+        encoding: "base64",
+        size: 3,
+      });
+    }
+    expect(url.origin).toBe(f.backup.source.factoryOrigin);
+    expect(request.headers["authorization"]).toBeUndefined();
+    if (path === "/health/ready")
+      return response(
+        { ready: true },
+        { "x-open-factory": "ready", "x-open-factory-startup": uid(40) },
+      );
+    if (path === "/api/auth/sign-in/email") {
+      expect(JSON.parse(request.body ?? "").password).toBe("private-restored-password");
+      authenticated = true;
+      return response(
+        { user: f.value.account },
+        {
+          "set-cookie": [
+            "__Secure-owned.session_token=private-session-token; Path=/; Secure; HttpOnly; SameSite=Lax",
+          ],
+        },
+      );
+    }
+    if (path === "/api/auth/sign-out") {
+      authenticated = false;
+      return response(
+        { success: true },
+        { "set-cookie": ["__Secure-owned.session_token=; Path=/; Secure; HttpOnly; Max-Age=0"] },
+      );
+    }
+    expect(request.headers["cookie"]).toBe("__Secure-owned.session_token=private-session-token");
+    if (path === "/api/auth/get-session") return response({ user: f.value.account });
+    if (path.includes("/source/read")) {
+      expect(JSON.parse(request.body ?? "")).toEqual({ path: f.expected.source.path });
+      return response({
+        kind: "file",
+        size: 6,
+        content: Buffer.from("Source").toString("base64"),
+        version: "restored-source-cas",
+      });
+    }
+    expect(request.headers["x-server-function-format"]).toBe("0");
+    expect(request.headers["content-type"]).toBe("text/plain");
+    const args = JSON.parse(request.body ?? "")[0].data;
+    const id = path.split("/").at(-1);
+    if (id === f.build.functions.getProjects)
+      return response({ result: { ok: true, value: { projects: [f.expected.project] } } });
+    if (id === f.build.functions.saveTicketDocument) {
+      expect(saved).toBe(false);
+      expect(args[0]).toBe(f.expected.ticket.id);
+      expect(args[1]).toEqual({
+        commandId: f.value.save.commandID,
+        expectedVersion: 7,
+        expectedDocumentId: uid(33),
+        requirementRevisionId: f.expected.requirementRevisionID,
+        title: f.expected.ticket.title,
+        description: f.value.save.description,
+        requirement: JSON.parse(f.expected.documents[0]?.canonicalContent ?? "null"),
+      });
+      saved = true;
+      return response({
+        result: {
+          ok: true,
+          value: {
+            id: f.value.save.commandID,
+            ticketVersion: 8,
+            requirementRevisionId: f.expected.requirementRevisionID,
+          },
+        },
+      });
+    }
+    expect(id).toBe(f.build.functions.getTicketDetail);
+    const value = snapshot();
+    return response({
+      result: {
+        ok: true,
+        value: {
+          ticket: value.ticket,
+          documentRevisions: value.documents,
+          revisions: value.requirements,
+        },
+      },
+    });
+  };
+  return {
+    objects,
+    calls,
+    requests,
+    command,
+    http,
+    wire,
+    snapshot,
+    dbHook: (next: typeof dbHook) => {
+      dbHook = next;
+    },
+    httpHook: (next: typeof httpHook) => {
+      httpHook = next;
+    },
+    saveCalls: () => requests.filter((r) => r.url.endsWith(f.build.functions.saveTicketDocument)),
+  };
+}
+
+test("the already-restored application proof performs one fenced save, reads exact Git and independent Source, logs out and keeps credentials out of evidence", async () => {
+  const f = await fixture();
+  try {
+    const fake = target(f),
+      result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("restored-application-passed");
+    expect(result.save).toBe("confirmed");
+    expect(result.logout).toBe("confirmed");
+    expect(result.oldActors).toBe("not-run-not-qualified");
+    expect(result.newCompute).toBe("not-run-not-qualified");
+    expect(fake.saveCalls()).toHaveLength(1);
+    expect(fake.calls.every(({ args }) => ["get", "exec"].includes(args[7] ?? ""))).toBe(true);
+    expect(
+      fake.calls
+        .filter((c) => c.args[7] === "exec")
+        .every((c) => c.args.includes("psql") || c.args.includes("bun")),
+    ).toBe(true);
+    expect(fake.requests.filter((r) => r.url.includes("/source/read"))).toHaveLength(2);
+    expect(fake.requests.map((r) => [r.method, new URL(r.url).pathname])).toEqual([
+      ["GET", "/health/ready"],
+      ["POST", "/api/auth/sign-in/email"],
+      ["GET", "/api/auth/get-session"],
+      ["POST", "/_server/data/opaque-projects"],
+      ["POST", "/_server/data/opaque-ticket"],
+      ["GET", `/api/v1/repos/owned/retained/git/commits/${f.expected.git.commit}`],
+      ["GET", "/api/v1/repos/owned/retained/contents/README.md"],
+      ["POST", `/api/workspaces/${f.expected.source.workspaceID}/source/read`],
+      ["POST", "/_server/data/opaque-save"],
+      ["POST", "/_server/data/opaque-ticket"],
+      ["POST", `/api/workspaces/${f.expected.source.workspaceID}/source/read`],
+      ["POST", "/api/auth/sign-out"],
+    ]);
+    const receipt = await readFile(join(f.value.evidenceDirectory, "result.json"), "utf8");
+    for (const secret of [
+      "private-restored-password",
+      "private-restored-forge-token",
+      "private-session-token",
+      "Original human text",
+      "Source",
+    ])
+      expect(receipt).not.toContain(secret);
+    for (const r of fake.requests)
+      expect(r.url).not.toMatch(
+        /implement|Runtime|Compute|Delivery|startWorkspace|native|model|interview/i,
+      );
+  } finally {
+    await f.close();
+  }
+});
+
+test("an unchanged complete requirement keeps its existing scope and historical revisions", async () => {
+  const f = await fixture();
+  try {
+    const canonicalContent = JSON.stringify({
+      acceptanceCriteria: ["Owned acceptance"],
+      nonGoals: [],
+      summary: "Retained scope",
+    });
+    f.expected.ticket.state = "ready";
+    f.expected.requirementRevisionID = uid(36);
+    f.expected.requirements = [
+      { id: uid(36), ordinal: 1, canonicalContent, contentDigest: hash(canonicalContent) },
+    ];
+    Object.assign(f.expected.documents[0] ?? {}, {
+      canonicalContent,
+      contentDigest: hash(canonicalContent),
+      requirementRevisionId: uid(36),
+    });
+    await f.save();
+    const fake = target(f);
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("restored-application-passed");
+    expect(fake.saveCalls()).toHaveLength(1);
+    expect(JSON.parse(fake.saveCalls()[0]?.body ?? "")[0].data[1]).not.toHaveProperty(
+      "proposalEntryId",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "partial requirement",
+  "new requirement revision",
+  "state transition",
+  "reordered history",
+] as const)("private preparation refuses an uncertain save prerequisite: %s", async (boundary) => {
+  const f = await fixture();
+  try {
+    const doc = f.expected.documents[0];
+    expect(doc).toBeDefined();
+    if (!doc) throw Error("missing fixture document");
+    if (boundary === "partial requirement")
+      doc.canonicalContent = JSON.stringify({ summary: "", acceptanceCriteria: [], nonGoals: [] });
+    if (boundary === "new requirement revision" || boundary === "state transition") {
+      doc.canonicalContent = JSON.stringify({
+        acceptanceCriteria: ["Old scope"],
+        nonGoals: [],
+        summary: "Scope",
+      });
+      if (boundary === "state transition") {
+        f.expected.requirementRevisionID = uid(36);
+        doc.requirementRevisionId = uid(36);
+        f.expected.requirements = [
+          {
+            id: uid(36),
+            ordinal: 1,
+            canonicalContent: doc.canonicalContent,
+            contentDigest: hash(doc.canonicalContent),
+          },
+        ];
+      }
+    }
+    if (boundary === "reordered history")
+      f.expected.documents.push({ ...doc, id: uid(36), ordinal: 2 });
+    doc.contentDigest = hash(doc.canonicalContent);
+    await f.save();
+    await expect(f.load()).rejects.toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "same context",
+  "same cluster UID",
+  "public input",
+  "CA key",
+  "backup failed",
+  "build image",
+  "wrong witness binding",
+  "unowned input",
+  "source traversal",
+  "kubeconfig plugin",
+  "insecure Kubernetes TLS",
+  "Kubernetes proxy",
+] as const)("private preparation refuses %s before running any command", async (boundary) => {
+  const f = await fixture();
+  try {
+    if (boundary === "same context") f.value.target.context = f.value.source.context;
+    if (boundary === "same cluster UID")
+      f.value.target.kubeSystemUID = f.value.source.kubeSystemUID;
+    if (boundary === "backup failed") f.backup.status = "incomplete";
+    if (boundary === "build image") f.build.image = "factory:latest";
+    if (boundary === "wrong witness binding") f.expected.backupWitnessDigest = hash("other backup");
+    if (boundary === "source traversal") f.expected.source.path = "../source";
+    await f.save();
+    if (
+      boundary === "kubeconfig plugin" ||
+      boundary === "insecure Kubernetes TLS" ||
+      boundary === "Kubernetes proxy"
+    ) {
+      // biome-ignore lint/suspicious/noExplicitAny: Add fields the private kubeconfig schema must reject.
+      const kubeconfig: any = clone(f.kubeconfig);
+      if (boundary === "kubeconfig plugin")
+        kubeconfig.users[0].user.exec = { command: "do-not-execute" };
+      if (boundary === "insecure Kubernetes TLS")
+        kubeconfig.clusters[0].cluster["insecure-skip-tls-verify"] = true;
+      if (boundary === "Kubernetes proxy")
+        kubeconfig.clusters[0].cluster["proxy-url"] = "https://retained.example.invalid";
+      await writeFile(f.value.kubeconfig, JSON.stringify(kubeconfig));
+    }
+    if (boundary === "public input") await chmod(f.path, 0o644);
+    if (boundary === "CA key")
+      await writeFile(f.value.ca, "-----BEGIN CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----", {
+        mode: 0o600,
+      });
+    if (boundary === "unowned input") {
+      await rm(f.value.password);
+      await symlink(f.value.forgeToken, f.value.password);
+    }
+    await expect(f.load()).rejects.toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "source cluster UID",
+  "target namespace UID",
+  "target deployment UID",
+  "ownership label",
+  "image",
+  "platform image",
+  "shared ingress",
+  "IPv4-mapped ingress",
+  "rewritten route",
+  "mirrored credentials",
+  "overlapping ingress",
+  "foreign endpoint",
+  "wrong port",
+  "wrong postgres service",
+  "wrong database",
+  "credential",
+  "tree",
+  "function mapping",
+  "inherited credentials",
+  "public origins",
+] as const)("target observations refuse %s before HTTP or a save", async (boundary) => {
+  const f = await fixture();
+  try {
+    const fake = target(f),
+      to = f.value.target.context;
+    const obj = (kind: string, key: string) => fake.objects.get(`${to}/${kind}/${key}`);
+    if (boundary === "source cluster UID")
+      fake.objects.get(`${f.value.source.context}/namespace/kube-system`).metadata.uid = uid(90);
+    if (boundary === "target namespace UID") obj("namespace", "factory").metadata.uid = uid(90);
+    if (boundary === "target deployment UID") obj("deployment", "factory").metadata.uid = uid(90);
+    if (boundary === "ownership label")
+      delete obj("namespace", "factory").metadata.labels[ownerLabel];
+    if (boundary === "image")
+      obj("deployment", "factory").spec.template.spec.containers[0].image =
+        "registry.example/factory:mutable";
+    if (boundary === "platform image")
+      obj("pod", "factory-pod").status.containerStatuses[0].imageID =
+        `image@sha256:${"0".repeat(64)}`;
+    if (boundary === "shared ingress")
+      obj("ingress", "factory").status.loadBalancer.ingress[0].ip = "192.0.2.10";
+    if (boundary === "IPv4-mapped ingress") {
+      f.value.target.address = "::ffff:192.0.2.10";
+      obj("ingress", "factory").status.loadBalancer.ingress[0].ip = f.value.target.address;
+    }
+    if (boundary === "rewritten route")
+      obj("ingress", "factory").metadata.annotations = {
+        "nginx.ingress.kubernetes.io/rewrite-target": "/elsewhere",
+      };
+    if (boundary === "mirrored credentials")
+      obj("ingress", "factory").metadata.annotations = {
+        "nginx.ingress.kubernetes.io/mirror-target": "https://retained.example.invalid",
+      };
+    if (boundary === "overlapping ingress")
+      obj("ingresses", "--all-namespaces").items.push({
+        metadata: { uid: uid(99) },
+        spec: { rules: [{ host: "*.example.invalid" }] },
+      });
+    if (boundary === "foreign endpoint")
+      obj("endpointslices", "factory-factory").items[0].endpoints[0].addresses = ["10.0.0.99"];
+    if (boundary === "wrong port")
+      obj("service", "factory-factory").spec.ports[0].targetPort = 3001;
+    if (boundary === "wrong postgres service")
+      obj("service", "factory-postgres").metadata.uid = uid(99);
+    if (boundary === "wrong database") {
+      for (const c of [
+        obj("pod", "factory-pod").spec.containers[0],
+        obj("deployment", "factory").spec.template.spec.containers[0],
+      ])
+        c.env.find((e: { name: string }) => e.name === "DATABASE_URL").value =
+          "postgresql://retained-source/factory";
+    }
+    if (boundary === "credential")
+      obj("secret", "restore-credentials").data["auth-secret"] =
+        Buffer.from("different").toString("base64");
+    if (boundary === "public origins")
+      obj("configmap", "factory-config").data.FACTORY_BASE_URL = "https://another.example.invalid";
+    const command: Command =
+      boundary === "tree" || boundary === "function mapping" || boundary === "inherited credentials"
+        ? async (args, input, signal) => {
+            const result = await fake.command(args, input, signal);
+            if (!args.includes("bun")) return result;
+            const observed = JSON.parse(result.stdout);
+            if (boundary === "tree") observed.treeSHA256 = hash("other build");
+            if (boundary === "inherited credentials")
+              observed.environmentHashes.FACTORY_AUTH_SECRET = hash("old environment");
+            if (boundary === "function mapping")
+              observed.functions.saveTicketDocument = "prohibited-inference";
+            return { code: 0, stdout: JSON.stringify(observed) };
+          }
+        : fake.command;
+    await f.save();
+    const result = await checkRestoredApplication(await f.load(), { ...fake, command });
+    expect(result.status).toBe("incomplete");
+    expect(fake.requests).toHaveLength(0);
+    expect(fake.saveCalls()).toHaveLength(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(Object.keys(idleRules))(
+  "preflight refuses pending work in %s without login",
+  async (table) => {
+    const f = await fixture();
+    try {
+      const fake = target(f);
+      fake.dbHook((value) => {
+        value.busy[table] = 1;
+      });
+      const result = await checkRestoredApplication(await f.load(), fake);
+      expect(result.status).toBe("incomplete");
+      expect(result.stage).toBe("quiescence");
+      expect(fake.requests).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each([
+  "history",
+  "source owner",
+  "Project",
+  "Ticket",
+  "document history",
+  "requirement history",
+  "schema",
+  "command already exists",
+] as const)("preflight refuses a changed %s witness", async (boundary) => {
+  const f = await fixture();
+  try {
+    const fake = target(f);
+    fake.dbHook((value) => {
+      if (boundary === "history")
+        value.history.substrate_binding.sha256 = hash("rewritten native IDs");
+      if (boundary === "source owner") value.source.eligible = false;
+      if (boundary === "Project")
+        value.project.repositoryUrl = "https://wrong.example.invalid/repo.git";
+      if (boundary === "Ticket") value.ticket.version++;
+      if (boundary === "document history") value.documents[0].description = "changed";
+      if (boundary === "requirement history") value.requirements = [{ id: uid(50) }];
+      if (boundary === "schema") value.schema = hash("old schema");
+      if (boundary === "command already exists") value.saved = { id: f.value.save.commandID };
+    });
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("incomplete");
+    expect(fake.requests).toHaveLength(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "readiness",
+  "readiness target",
+  "login identity",
+  "Git commit",
+  "Git bytes",
+  "Source bytes",
+  "Source size",
+  "redirect",
+  "lost save",
+  "changed old history",
+  "changed Source after save",
+  "logout",
+] as const)("a failed %s cannot pass or repeat the single save", async (boundary) => {
+  const f = await fixture();
+  try {
+    const fake = target(f);
+    let sources = 0;
+    fake.httpHook((r) => {
+      if (boundary === "readiness" && r.url.includes("/health/")) return response({ ready: false });
+      if (boundary === "readiness target" && r.url.includes("/health/"))
+        return response(
+          { ready: true },
+          { "x-open-factory": "ready", "x-open-factory-startup": uid(99) },
+        );
+      if (boundary === "login identity" && r.url.endsWith("/get-session"))
+        return response({ user: { ...f.value.account, id: uid(99) } });
+      if (boundary === "Git commit" && r.url.includes("/git/commits/"))
+        return response({ sha: "0".repeat(40) });
+      if (boundary === "Git bytes" && r.url.includes("/contents/"))
+        return response({ sha: f.expected.git.blob, content: "Tm8=", size: 3, encoding: "base64" });
+      if (boundary === "Source bytes" && r.url.includes("/source/read"))
+        return response({ kind: "file", content: "Tm8=", version: "cas" });
+      if (boundary === "Source size" && r.url.includes("/source/read"))
+        return response({ kind: "file", size: 9, content: "U291cmNl", version: "cas" });
+      if (boundary === "redirect" && r.url.includes("/git/"))
+        return response({}, { location: "https://retained.example.invalid" }, 302);
+      if (boundary === "lost save" && r.url.endsWith("opaque-save"))
+        throw Error("private-restored-password sensitive transport error");
+      if (boundary === "changed old history" && r.url.endsWith("opaque-save"))
+        fake.dbHook((value) => {
+          if (value.saved) value.history.change_writer.sha256 = hash("unrelated write");
+        });
+      if (
+        boundary === "changed Source after save" &&
+        r.url.includes("/source/read") &&
+        ++sources > 1
+      )
+        return response({ kind: "file", content: "U291cmNl", version: "new-writer" });
+      if (boundary === "logout" && r.url.endsWith("/sign-out")) throw Error("uncertain logout");
+    });
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("incomplete");
+    expect(fake.saveCalls().length).toBeLessThanOrEqual(1);
+    if (boundary === "lost save") {
+      expect(result.save).toBe("unconfirmed");
+      expect(fake.saveCalls()).toHaveLength(1);
+    }
+    if (!["readiness", "readiness target", "logout"].includes(boundary))
+      expect(result.logout).toBe("confirmed");
+    expect(await readFile(join(f.value.evidenceDirectory, "result.json"), "utf8")).not.toContain(
+      "sensitive transport error",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("the target must remain owned before credentials or logout are sent", async () => {
+  const f = await fixture();
+  try {
+    const fake = target(f);
+    fake.httpHook((r) => {
+      if (r.url.endsWith("/sign-in/email"))
+        fake.objects.get(`${f.value.target.context}/namespace/factory`).metadata.uid = uid(99);
+    });
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("incomplete");
+    expect(result.logout).toBe("unconfirmed");
+    expect(fake.requests.map((r) => new URL(r.url).pathname)).toEqual([
+      "/health/ready",
+      "/api/auth/sign-in/email",
+    ]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a save applied before a lost reply remains unconfirmed and is never replayed", async () => {
+  const f = await fixture();
+  try {
+    const fake = target(f);
+    const result = await checkRestoredApplication(await f.load(), {
+      ...fake,
+      http: async (request) => {
+        const observed = await fake.http(request);
+        if (request.url.endsWith(f.build.functions.saveTicketDocument))
+          throw Error("Lost response after commit");
+        return observed;
+      },
+    });
+    expect(result.status).toBe("incomplete");
+    expect(result.save).toBe("unconfirmed");
+    expect(result.logout).toBe("confirmed");
+    expect(fake.saveCalls()).toHaveLength(1);
+    expect(fake.snapshot().saved?.id).toBe(f.value.save.commandID);
+    await expect(f.load()).rejects.toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(["configuration", "credentials", "cancellation"] as const)(
+  "a changed %s stops the journey before the save without redirecting logout",
+  async (boundary) => {
+    const f = await fixture();
+    try {
+      const fake = target(f),
+        controller = new AbortController();
+      fake.httpHook((r) => {
+        if (!r.url.endsWith("/get-session")) return;
+        if (boundary === "configuration")
+          fake.objects.get(
+            `${f.value.target.context}/configmap/factory-config`,
+          ).data.FACTORY_FORGEJO_API_URL = "https://retained.example.invalid/api/v1/";
+        if (boundary === "credentials")
+          fake.objects.get(`${f.value.target.context}/secret/restore-credentials`).data[
+            "auth-secret"
+          ] = Buffer.from("changed").toString("base64");
+        if (boundary === "cancellation") controller.abort();
+      });
+      const result = await checkRestoredApplication(await f.load(), {
+        ...fake,
+        signal: controller.signal,
+      });
+      expect(result.status).toBe("incomplete");
+      expect(fake.saveCalls()).toHaveLength(0);
+      expect(result.logout).toBe(boundary === "cancellation" ? "confirmed" : "unconfirmed");
+      expect(fake.requests.filter((r) => r.url.endsWith("/sign-out"))).toHaveLength(
+        boundary === "cancellation" ? 1 : 0,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("the SQL is read-only, scope-bounded and covers original native and requirement history", async () => {
+  const f = await fixture();
+  try {
+    const sql = applicationSQL(await f.load());
+    expect(sql).toContain("REPEATABLE READ READ ONLY");
+    expect(sql).toContain("current_setting('transaction_read_only')");
+    for (const table of historyTables) expect(sql).toContain(`factory.${table}`);
+    expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|CALL|DO)\b/);
+    expect(sql).toContain(`id<>'${f.value.save.commandID}'::uuid`);
+    const code = `(${applicationBuildTree.toString()})()`;
+    const child = Bun.spawn(["node", "--check", "--input-type=module"], {
+      stdin: new Blob([code]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(["success", "TLS rejection", "redirect", "oversize"] as const)(
+  "the real HTTPS adapter pins the IP and preserves public Host/SNI and certificate verification: %s",
+  async (boundary) => {
+    const url = "https://factory.example.invalid/api/auth/get-session";
+    let options: https.RequestOptions & { autoSelectFamily?: boolean } = {};
+    const send = ((input: https.RequestOptions, receive: (response: IncomingMessage) => void) => {
+      options = input;
+      const request = new EventEmitter() as EventEmitter & { end: (body?: string) => void };
+      request.end = () => {
+        queueMicrotask(() => {
+          if (boundary === "TLS rejection") {
+            request.emit("error", Error("certificate verification failed"));
+            return;
+          }
+          const response = new EventEmitter() as EventEmitter & {
+            statusCode: number;
+            headers: object;
+            destroy: (error: Error) => void;
+          };
+          response.statusCode = boundary === "redirect" ? 302 : 200;
+          response.headers = {};
+          response.destroy = (error) => response.emit("error", error);
+          receive(response as unknown as IncomingMessage);
+          response.emit("data", Buffer.from(boundary === "oversize" ? "123456789" : "{}"));
+          response.emit("end");
+        });
+      };
+      return request;
+    }) as typeof https.request;
+    const promise = pinnedApplicationRequest(
+      {
+        url,
+        address: "192.0.2.20",
+        ca: "public-ca-only",
+        method: "GET",
+        headers: {},
+        limit: 4,
+        signal: AbortSignal.timeout(1000),
+      },
+      send,
+    );
+    if (boundary === "TLS rejection" || boundary === "oversize")
+      await expect(promise).rejects.toThrow();
+    else expect((await promise).status).toBe(boundary === "redirect" ? 302 : 200);
+    expect(options.hostname).toBe("192.0.2.20");
+    expect(options.servername).toBe("factory.example.invalid");
+    expect((options.headers as OutgoingHttpHeaders)["host"]).toBe("factory.example.invalid");
+    expect(options.rejectUnauthorized).toBe(true);
+    expect(options.agent).toBe(false);
+    expect(options.autoSelectFamily).toBe(false);
+    expect(options.ca).toBe("public-ca-only");
+    expect(options.family).toBe(4);
+    if (!options.checkServerIdentity) throw Error("Public hostname verification missing");
+    expect(
+      options.checkServerIdentity("192.0.2.20", {
+        subjectaltname: "DNS:factory.example.invalid",
+      } as DetailedPeerCertificate),
+    ).toBeUndefined();
+    expect(
+      options.checkServerIdentity("192.0.2.20", {
+        subjectaltname: "DNS:retained.example.invalid",
+      } as DetailedPeerCertificate),
+    ).toBeInstanceOf(Error);
+    expect(
+      options.checkServerIdentity("192.0.2.20", {
+        subjectaltname: "IP Address:192.0.2.20",
+      } as DetailedPeerCertificate),
+    ).toBeInstanceOf(Error);
+  },
+);
