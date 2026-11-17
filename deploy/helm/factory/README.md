@@ -230,6 +230,32 @@ Native Git requires real Forge DNS/TLS and the configured native WSS endpoint, e
 browser uses a loopback listener. The source launcher is not covered by the Helm qualification.
 There is no one-image HTTP-worker installation or legacy runtime fallback.
 
+For local acceptance, use the existing `mkcert` development CA with stable, operator-managed
+local DNS names. Do not depend on a public wildcard DNS service or encode a disposable container
+IP in the installation origins. DNS must resolve from the Mac, the cluster and native workloads;
+a Mac-only hosts entry or a loopback name is insufficient for Actor callbacks and Git.
+
+Generate the Ingress leaf certificate locally, for example:
+
+```sh
+mkdir -p .factory/local-tls
+(umask 077; mise exec -- mkcert \
+  -cert-file .factory/local-tls/ingress.pem -key-file .factory/local-tls/ingress-key.pem \
+  factory.acceptance.local '*.runtime.factory.acceptance.local' git.acceptance.local)
+```
+
+These are example DNS names, not an automatic resolver configuration. Supply the public
+`rootCA.pem` from `mise exec -- mkcert -CAROOT` as the Factory CA bundle and retain normal
+hostname verification. Never copy `rootCA-key.pem` into the cluster, images or evidence.
+On OrbStack, assign the names and wildcard to the fresh Ingress-hosting container through its
+[`dev.orbstack.domains` label](https://docs.orbstack.dev/docker/domains#custom-domains).
+Keep its HTTPS listener on port 443 to
+[serve the supplied certificate](https://docs.orbstack.dev/features/https#redirect-port-443),
+rather than relying on OrbStack's automatic certificate proxy.
+Configure DNS and qualify HTTPS before creating the installation. Existing Workspace bindings
+retain their original origins; replacing a test hostname requires a separate fresh installation,
+not rewriting retained native identities.
+
 For local browser transport, combine the small local preset with private values supplying the
 required native Secret names and public TLS origins:
 
