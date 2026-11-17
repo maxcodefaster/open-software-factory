@@ -3,6 +3,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
+import { submittedCandidate } from "./submitted-candidate";
 
 // Retry only a queued workflow whose environment failed before accepting work.
 // Forgejo still owns the original run; this does not retry executed checks.
@@ -45,30 +46,23 @@ export async function retryVerificationBootstrap(
         verification.action_run_id AS "actionRunID",verification.completed_at AS "completedAt"
       FROM factory.verification verification
       JOIN factory.change change ON change.id=verification.change_id
-      JOIN factory.change_agent_session session ON session.change_id=change.id
+      LEFT JOIN factory.change_agent_session session ON session.change_id=change.id
+      JOIN factory.change_writer writer ON writer.change_id=change.id
       JOIN LATERAL (
         SELECT id,commit_sha FROM factory.change_commit_operation
         WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1
       ) commit ON commit.commit_sha=verification.commit_sha
-      JOIN LATERAL (
-        SELECT id FROM factory.change_commit_operation
-        WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
-        ORDER BY sequence DESC LIMIT 1
-      ) submitted ON submitted.id=session.active_turn_id
-      JOIN factory.agent_turn turn ON turn.id=session.active_turn_id AND turn.state='completed'
       JOIN factory.runtime_attempt attempt ON attempt.id=verification.runtime_attempt_id
         AND attempt.verification_id=verification.id AND attempt.state='stopped'
       WHERE verification.id=${verificationID} AND change.id=${changeID}
-        AND change.state='active' AND session.state='committed' AND NOT session.stop_pending
+        AND change.state='active'
+        AND (session.change_id IS NULL OR (session.state='committed' AND NOT session.stop_pending))
+        AND ${submittedCandidate(sql)}
         AND verification.state='failed' AND verification.runtime_attempt_id=${runtimeAttemptID}
         AND verification.runner_id IS NULL AND verification.action_run_id IS NOT NULL
         AND verification.repair_prompted_at IS NULL AND verification.completed_at IS NOT NULL
         AND EXISTS(SELECT 1 FROM factory.substrate_binding binding
           WHERE binding.runtime_attempt_id=attempt.id AND binding.deleted_at IS NOT NULL)
-        AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
-          AND state IN ('pending','dispatching','running','uncertain'))
-        AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
-          AND state NOT IN ('succeeded','failed'))
         AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE change_id=change.id
           AND kind='thread' AND state<>'resolved')
       FOR UPDATE OF verification`;

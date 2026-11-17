@@ -28,6 +28,7 @@ import { createDeliveryCoordination, deliveryDelegationIn } from "./coordination
 import type { createChangeIntegration } from "./integration";
 import { createDeliveryPromotion } from "./promotion";
 import { retryPromotion } from "./promotion-retry";
+import { submittedCandidate } from "./submitted-candidate";
 import { retryVerificationBootstrap } from "./verification-retry";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -1357,38 +1358,30 @@ export function createDeliveryController(
           { state: string; stopping: boolean; stopID: string | null; submitted: boolean }[]
         >`
           SELECT session.state,session.stop_pending AS stopping,session.stop_id AS "stopID",
-            (session.active_turn_id=(SELECT id FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
-              ORDER BY sequence DESC LIMIT 1) AND turn.state='completed') AS submitted
+            ${submittedCandidate(sql)} AS submitted
           FROM factory.verification verification
           JOIN factory.change change ON change.id=verification.change_id
           JOIN factory.change_agent_session session ON session.change_id=change.id
+          JOIN factory.change_writer writer ON writer.change_id=change.id
           JOIN LATERAL (
             SELECT id,commit_sha FROM factory.change_commit_operation
             WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1
           ) commit ON commit.commit_sha=verification.commit_sha
-          LEFT JOIN factory.agent_turn turn ON turn.id=session.active_turn_id
           WHERE verification.id=${verificationID} AND change.id=${changeID}
             AND verification.state<>'cancelled' AND change.state='active'`;
-        const [active] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
-          AND state IN ('pending','dispatching','running','uncertain')`;
-        const [committing] = await sql`SELECT id FROM factory.change_commit_operation
-          WHERE change_id=${changeID} AND state NOT IN ('succeeded','failed')`;
         if (
           !writer.available ||
           !["agent", "unassigned"].includes(writer.state) ||
           !candidate?.submitted ||
           candidate.state !== "stopped" ||
           candidate.stopping ||
-          candidate.stopID !== stopID ||
-          active ||
-          committing
+          candidate.stopID !== stopID
         )
           throw new CommandError(
             "conflict",
             "Resume checks only after Stop is confirmed and the current implementation is submitted",
           );
-        // Restore only the completed candidate's delivery eligibility. No turn,
+        // Restore only the submitted candidate's delivery eligibility. No turn,
         // prompt, source edit or Stop confirmation is created or replayed here.
         await sql`UPDATE factory.change_agent_session SET state='committed',last_error=NULL,
           updated_at=now() WHERE change_id=${changeID}`;
@@ -1512,19 +1505,13 @@ export function createDeliveryController(
           verification.id AS "verificationId",
           CASE WHEN session.state='stopped' AND NOT session.stop_pending
             AND writer.state IN ('agent','unassigned') AND change.cancel_requested_at IS NULL
-            AND session.active_turn_id=(SELECT id FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
-              ORDER BY sequence DESC LIMIT 1)
-            AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=session.active_turn_id AND state='completed')
-            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
-              AND state IN ('pending','dispatching','running','uncertain'))
-            AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
-              AND state NOT IN ('succeeded','failed'))
+            AND ${submittedCandidate(database.client)}
             AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id AND trashed_at IS NULL)
             AND verification.state<>'cancelled' AND change.state='active'
             THEN session.stop_id END AS "checksStopId",
           CASE WHEN verification.state='failed' AND change.state='active'
-            AND change.cancel_requested_at IS NULL AND session.state='committed' AND NOT session.stop_pending
+            AND change.cancel_requested_at IS NULL
+            AND (session.change_id IS NULL OR (session.state='committed' AND NOT session.stop_pending))
             AND writer.state IN ('agent','unassigned')
             AND verification.runner_id IS NULL AND verification.action_run_id IS NOT NULL
             AND verification.completed_at IS NOT NULL AND verification.repair_prompted_at IS NULL
@@ -1532,14 +1519,7 @@ export function createDeliveryController(
             AND verification.diagnosis->>'kind'='execution-failed'
             AND verification.diagnosis->>'runtimeAttemptId'=verification_runtime.id::text
             AND verification.diagnosis->'jobs'='[]'::jsonb
-            AND session.active_turn_id=(SELECT id FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
-              ORDER BY sequence DESC LIMIT 1)
-            AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=session.active_turn_id AND state='completed')
-            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
-              AND state IN ('pending','dispatching','running','uncertain'))
-            AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
-              AND state NOT IN ('succeeded','failed'))
+            AND ${submittedCandidate(database.client)}
             AND EXISTS(SELECT 1 FROM factory.substrate_binding binding
               WHERE binding.runtime_attempt_id=verification_runtime.id AND binding.deleted_at IS NOT NULL)
             AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE change_id=change.id

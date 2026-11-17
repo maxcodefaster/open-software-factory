@@ -3,12 +3,17 @@ import { createAccessController } from "../../apps/factory/src/access/controller
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createDeliveryService } from "../../apps/factory/src/delivery/service";
+import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
+import type { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
-import { buildModelID } from "../fixtures/change-agent-turns";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
 import {
@@ -17,26 +22,123 @@ import {
   factoryFunctionRequest,
 } from "../fixtures/server-functions";
 
-async function setup(integrations = 0) {
+async function stoppedCodingCandidate(database: ReturnType<typeof createDatabase>) {
+  const f = await fixture(undefined, undefined, database);
+  const turns = createAgentTurnStore(database);
+  const admitted = await createChangeAdmission(database, buildModelID).admit(f.changeID, f.userID, {
+    kind: "change-start",
+    commandId: crypto.randomUUID(),
+  });
+  const claimed = await turns.claimPending(admitted.turn.id);
+  if (!claimed?.ownerToken) throw new Error("Missing owned Coding lease");
+  await f.writers.prepareAgent(f.changeID, claimed.id);
+  await turns.beginDispatch(claimed.id, claimed.ownerToken);
+  await database.client`UPDATE factory.agent_turn SET state='stopped',
+    outcome_summary='Owned G1 Coding stopped',owner_token=NULL,owner_expires_at=NULL
+    WHERE id=${claimed.id} AND owner_token=${claimed.ownerToken} AND state='dispatching'`;
+  await database.client`UPDATE factory.change_agent_session SET active_turn_id=${claimed.id}
+    WHERE change_id=${f.changeID}`;
+  return {
+    ...f,
+    turns,
+    initial: admitted.turn,
+    commit: "a".repeat(40),
+    verificationID: crypto.randomUUID(),
+    reviewID: crypto.randomUUID(),
+  };
+}
+
+async function setup(integrations = 0, human?: "retained-session" | "absent-session") {
   const host = await factoryProcess();
   const database = host.connect();
-  let owned: Awaited<ReturnType<typeof candidateReviewFixture>> | undefined;
+  let owned: { restoreEnvironment(): void } | undefined;
   let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
   try {
-    const f = await candidateReviewFixture(undefined, database);
+    const f = human
+      ? await stoppedCodingCandidate(database)
+      : await candidateReviewFixture(undefined, database);
     owned = f;
     let commit = f.commit;
+    let submittedID = f.initial.id;
+    const stopID = crypto.randomUUID();
+    const workspaceAttemptID = human ? runtimeIdentity(f.workspaceID, 2).attemptID : f.attemptID;
+    if (human) {
+      await database.client`DELETE FROM factory.candidate_review WHERE id=${f.reviewID}`;
+      await database.client`DELETE FROM factory.verification WHERE id=${f.verificationID}`;
+      await database.client`UPDATE factory.change_agent_session SET state='stopped',
+        stop_id=${stopID},stop_turn_id=${f.initial.id},stop_pending=false,updated_at=clock_timestamp()
+        WHERE change_id=${f.changeID}`;
+      await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${f.attemptID}`;
+      await database.client`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
+        WHERE runtime_attempt_id=${f.attemptID}`;
+      await database.client.begin(async (sql) => {
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,
+          generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${workspaceAttemptID},${f.projectID},${f.changeID},${f.workspaceID},2,${f.commit},
+            'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
+        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+          SELECT ${workspaceAttemptID},${`fa-${workspaceAttemptID.replaceAll("-", "")}`},
+            ${`runtime-${workspaceAttemptID.replaceAll("-", "")}`},intent
+          FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+        await freezeRuntimeEnvironment(sql, workspaceAttemptID);
+        await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${workspaceAttemptID}`;
+        await sql`UPDATE factory.change SET runtime_attempt_id=${workspaceAttemptID} WHERE id=${f.changeID}`;
+      });
+      await database.client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},
+        turn_id=NULL,epoch=epoch+1,fence_required=false,fence_attempt_id=NULL WHERE change_id=${f.changeID}`;
+      if (human === "absent-session")
+        await database.client`DELETE FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+      commit = "e".repeat(40);
+      submittedID = crypto.randomUUID();
+      let remote = f.commit;
+      const submission = createWorkspaceSubmission(
+        database,
+        {
+          connected: (id) => id === workspaceAttemptID,
+          parentOperation: async (_id, input, beforeSend) => {
+            await beforeSend?.(() => {});
+            if (input.action === "git-push") remote = commit;
+            return { commitSHA: commit, remoteSHA: remote };
+          },
+        },
+        { assertSaved: async () => {} },
+        { getBranch: async () => ({ name: "branch", headSha: remote }) },
+        { username: "factory-control", password: "owned-fixture" },
+        { fenceSource: async () => {}, protect: async () => {} },
+      );
+      try {
+        expect(
+          await submission.submit(f.userID, {
+            requestID: submittedID,
+            workspaceID: f.workspaceID,
+            expectedHead: f.commit,
+            expectedRemoteHead: f.commit,
+            message: "Submit saved G2 human implementation",
+          }),
+        ).toMatchObject({ state: "succeeded", commitSHA: commit, attemptID: workspaceAttemptID });
+      } finally {
+        await submission.close();
+      }
+      // Initial Delivery publication has already admitted this human candidate.
+      // Keep G1 native/turn/Stop identity while seeding that recorded state.
+      await database.client`UPDATE factory.change_agent_session SET state='committed'
+        WHERE change_id=${f.changeID}`;
+      await database.client`INSERT INTO factory.verification(
+        id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by)
+        VALUES(${f.verificationID},${f.changeID},${commit},1,'owned-human-bootstrap',1,${f.userID})`;
+    }
     for (let index = 0; index < integrations; index++) {
       const next = String(index + 3).repeat(40);
       await database.client`INSERT INTO factory.change_commit_operation(
         id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,
         integration_base_sha,merge_parent_sha,commit_sha,observed_remote_sha,
         commit_message,idempotency_key,state,created_by,completed_at,source)
-        SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,${index + 2},branch_name,
+        SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,
+          (SELECT max(sequence)+1 FROM factory.change_commit_operation WHERE change_id=${f.changeID}),branch_name,
           ${commit},${String(index + 5).repeat(40)},${String(index + 5).repeat(40)},
           ${next},${next},'Integrate current main',${crypto.randomUUID()},'succeeded',
           created_by,now(),'integration'
-        FROM factory.change_commit_operation WHERE id=${f.initial.id}`;
+        FROM factory.change_commit_operation WHERE id=${submittedID}`;
       commit = next;
     }
     await database.client`DELETE FROM factory.candidate_review WHERE id=${f.reviewID}`;
@@ -154,6 +256,9 @@ async function setup(integrations = 0) {
       commit,
       host,
       controller,
+      submittedID,
+      workspaceAttemptID,
+      stopID,
       bootstrapAttemptID: attemptID,
       stopped,
       removed,
@@ -183,6 +288,29 @@ async function setup(integrations = 0) {
             ]),
           ),
         );
+      },
+      async nativeResume(commandId: string, targetStopID = stopID) {
+        return decodeFactoryResponse(
+          await endpoint(
+            await factoryFunctionRequest(origin, "resumeVerification", [
+              f.changeID,
+              { commandId, verificationId: f.verificationID, stopId: targetStopID },
+            ]),
+          ),
+        );
+      },
+      async identities() {
+        const [identity] = await database.client`
+          SELECT
+            (SELECT jsonb_agg(to_jsonb(session)-'updated_at'-'state'-'last_error')
+              FROM factory.change_agent_session session WHERE change_id=${f.changeID}) AS session,
+            (SELECT jsonb_agg(to_jsonb(submission)) FROM factory.workspace_submission submission
+              WHERE id=${submittedID}) AS submission,
+            (SELECT jsonb_agg(to_jsonb(operation)) FROM factory.change_commit_operation operation
+              WHERE id=${submittedID}) AS operation,
+            (SELECT jsonb_agg(to_jsonb(turn)) FROM factory.agent_turn turn
+              WHERE change_id=${f.changeID}) AS turns`;
+        return identity;
       },
       async row() {
         const [row] = await database.client<
@@ -219,6 +347,236 @@ async function setup(integrations = 0) {
     throw cause;
   }
 }
+
+test.each(["retained-session", "absent-session"] as const)(
+  "human Workspace bootstrap retry reaches the authenticated endpoint with %s",
+  async (session) => {
+    const f = await setup(2, session);
+    try {
+      await f.controller.reconcile(f.changeID);
+      const identity = await f.identities();
+      const commandID = crypto.randomUUID();
+      expect(await f.nativeRetry(commandID)).toMatchObject({ ok: true });
+      expect(await f.nativeRetry(commandID)).toMatchObject({ ok: true });
+      expect(await f.row()).toMatchObject({ state: "runner-starting", runner: "17" });
+      expect((await f.row()).runtime).not.toBe(f.bootstrapAttemptID);
+      expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
+      expect(await f.identities()).toEqual(identity);
+      const [receipt] = await f.database.client<{ result: unknown }[]>`
+        SELECT result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
+      expect(receipt?.result).toMatchObject({
+        verificationID: f.verificationID,
+        runtimeAttemptID: f.bootstrapAttemptID,
+        actionRunID: "1",
+        diagnosis: { kind: "execution-failed", jobs: [] },
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["retained-session", "absent-session"] as const)(
+  "human Workspace bootstrap retry is projected with %s",
+  async (session) => {
+    const f = await setup(0, session);
+    try {
+      await f.controller.reconcile(f.changeID);
+      expect(await f.controller.get(f.changeID)).toMatchObject({
+        verificationCommitSha: f.commit,
+        checksRetryAttemptId: f.bootstrapAttemptID,
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("human Workspace checks resume requires the exact confirmed Stop without rebinding Coding", async () => {
+  const f = await setup(2, "retained-session");
+  try {
+    await f.controller.reconcile(f.changeID);
+    await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+      updated_at=clock_timestamp() WHERE change_id=${f.changeID}`;
+    const identity = await f.identities();
+    const commandID = crypto.randomUUID();
+    expect(await f.nativeResume(commandID, crypto.randomUUID())).toMatchObject({
+      ok: false,
+      status: 409,
+    });
+    expect(await f.nativeResume(commandID)).toMatchObject({ ok: true });
+    expect(await f.nativeResume(commandID)).toMatchObject({ ok: true });
+    expect(await f.identities()).toEqual(identity);
+    expect(await f.controller.get(f.changeID)).toMatchObject({
+      checksStopId: null,
+      checksRetryAttemptId: f.bootstrapAttemptID,
+    });
+    expect(f.counts()).toEqual({ registrations: 0, starts: 0, prompts: 0 });
+  } finally {
+    await f.close();
+  }
+});
+
+test("human Workspace confirmed checks Stop is projected independently of the stopped Coding turn", async () => {
+  const f = await setup(0, "retained-session");
+  try {
+    await f.controller.reconcile(f.changeID);
+    await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+      updated_at=clock_timestamp() WHERE change_id=${f.changeID}`;
+    expect(await f.controller.get(f.changeID)).toMatchObject({
+      checksStopId: f.stopID,
+      checksRetryAttemptId: null,
+    });
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "missing-receipt",
+  "newer-writer-epoch",
+  "human-writer",
+  "handoff",
+  "writer-fence",
+  "dirty-buffer",
+  "conflicted-buffer",
+  "pending-stop",
+  "unfinished-commit",
+  "later-origin-same-sha",
+] as const)("human Workspace retry and checks resume refuse %s", async (condition) => {
+  const f = await setup(2, "retained-session");
+  try {
+    await f.controller.reconcile(f.changeID);
+    if (condition === "missing-receipt")
+      await f.database.client`DELETE FROM factory.workspace_submission WHERE id=${f.submittedID}`;
+    if (condition === "newer-writer-epoch")
+      await f.database.client`UPDATE factory.change_writer SET epoch=epoch+1
+        WHERE change_id=${f.changeID}`;
+    if (condition === "human-writer")
+      await f.database.client`UPDATE factory.change_writer SET state='human',user_id=${f.userID}
+        WHERE change_id=${f.changeID}`;
+    if (condition === "handoff")
+      await f.database.client`UPDATE factory.change_writer SET state='handoff',
+        requested_by=${f.userID},request_id=${crypto.randomUUID()} WHERE change_id=${f.changeID}`;
+    if (condition === "writer-fence")
+      await f.database.client`UPDATE factory.change_writer SET fence_required=true,
+        fence_attempt_id=${f.workspaceAttemptID} WHERE change_id=${f.changeID}`;
+    if (condition === "dirty-buffer" || condition === "conflicted-buffer")
+      await f.database.client`INSERT INTO factory.workspace_shared_document(
+        workspace_id,path,y_state,disk_version,dirty,conflict)
+        VALUES(${f.workspaceID},'src/owned.ts',decode('','hex'),'owned-saved-version',
+          ${condition === "dirty-buffer"},${condition === "conflicted-buffer"})`;
+    if (condition === "pending-stop")
+      await f.database
+        .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true
+        WHERE change_id=${f.changeID}`;
+    if (condition === "unfinished-commit" || condition === "later-origin-same-sha")
+      await f.database.client`INSERT INTO factory.change_commit_operation(
+        id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
+        observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
+        SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,
+          (SELECT max(sequence)+1 FROM factory.change_commit_operation WHERE change_id=${f.changeID}),
+          branch_name,commit_sha,${f.commit},
+          ${condition === "later-origin-same-sha" ? f.commit : null},
+          'Owned later origin',${crypto.randomUUID()},
+          ${condition === "later-origin-same-sha" ? "succeeded" : "commit-intended"}::factory.change_commit_state,
+          created_by,CASE WHEN ${condition === "later-origin-same-sha"} THEN now() END
+        FROM factory.change_commit_operation WHERE id=${f.submittedID}`;
+    const before = await f.row();
+    expect(await f.nativeRetry(crypto.randomUUID())).toMatchObject({ ok: false, status: 409 });
+    expect(await f.controller.get(f.changeID)).toMatchObject({ checksRetryAttemptId: null });
+    await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+      updated_at=clock_timestamp() WHERE change_id=${f.changeID}`;
+    expect(await f.nativeResume(crypto.randomUUID())).toMatchObject({ ok: false, status: 409 });
+    expect(await f.controller.get(f.changeID)).toMatchObject({
+      checksStopId: null,
+      checksRetryAttemptId: null,
+    });
+    expect(await f.row()).toEqual(before);
+    expect(f.counts()).toEqual({ registrations: 0, starts: 0, prompts: 0 });
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(["failed", "stopped"] as const)(
+  "human Workspace receipt cannot authorize checks after a newer %s unsubmitted Coding turn",
+  async (state) => {
+    const f = await setup(2, "retained-session");
+    try {
+      await f.controller.reconcile(f.changeID);
+      // Retain the same settled writer epoch to prove the submission itself
+      // does not authorize later unsubmitted Coding, even after its Stop settles.
+      const newer = await f.database.client.begin(async (sql) => {
+        const admitted = await f.turns.admitIn(
+          sql,
+          {
+            kind: "change-prompt",
+            commandId: crypto.randomUUID(),
+            projectId: f.projectID,
+            ticketId: f.ticketID,
+            conversationId: f.initial.command.conversationId,
+            changeId: f.changeID,
+            createdBy: f.userID,
+            text: "Later unsubmitted Coding",
+          },
+          f.initial.authority,
+        );
+        await sql`UPDATE factory.agent_turn SET state=${state}
+          WHERE id=${admitted.turn.id} AND state='pending'`;
+        await sql`UPDATE factory.change_agent_session SET active_turn_id=${admitted.turn.id},
+          updated_at=clock_timestamp() WHERE change_id=${f.changeID}`;
+        return admitted.turn.id;
+      });
+      const before = await f.row();
+      expect(await f.nativeRetry(crypto.randomUUID())).toMatchObject({ ok: false, status: 409 });
+      expect(await f.controller.get(f.changeID)).toMatchObject({ checksRetryAttemptId: null });
+      const newerStopID = crypto.randomUUID();
+      await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+        stop_id=${newerStopID},stop_turn_id=${newer},updated_at=clock_timestamp()
+        WHERE change_id=${f.changeID}`;
+      const identity = await f.identities();
+      expect(await f.nativeResume(crypto.randomUUID(), newerStopID)).toMatchObject({
+        ok: false,
+        status: 409,
+      });
+      expect(await f.controller.get(f.changeID)).toMatchObject({ checksStopId: null });
+      expect(await f.identities()).toEqual(identity);
+      expect(await f.row()).toEqual(before);
+      expect(f.counts()).toEqual({ registrations: 0, starts: 0, prompts: 0 });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["absent-session", "unknown-stop", "newer-stop"] as const)(
+  "human Workspace checks resume cannot invent or replace %s authority",
+  async (condition) => {
+    const f = await setup(
+      0,
+      condition === "absent-session" ? "absent-session" : "retained-session",
+    );
+    try {
+      await f.controller.reconcile(f.changeID);
+      if (condition !== "absent-session")
+        await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+          stop_id=${condition === "unknown-stop" ? null : crypto.randomUUID()},
+          updated_at=clock_timestamp() WHERE change_id=${f.changeID}`;
+      const identity = await f.identities();
+      expect(await f.nativeResume(crypto.randomUUID())).toMatchObject({
+        ok: false,
+        status: 409,
+      });
+      expect(await f.identities()).toEqual(identity);
+      if (condition !== "newer-stop")
+        expect(await f.controller.get(f.changeID)).toMatchObject({ checksStopId: null });
+      expect(f.counts()).toEqual({ registrations: 0, starts: 0, prompts: 0 });
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test("a failed bootstrap is retained and cleaned up without silently starting another runner", async () => {
   const f = await setup();
