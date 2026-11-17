@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 const generated = new Set([
   ".factory",
@@ -44,10 +44,6 @@ const paths = documents(root).sort();
 let links = 0;
 for (const path of paths) {
   const name = relative(root, path);
-  requireValid(
-    basename(path) === "README.md" || basename(path) === "AGENTS.md" || name === "SECURITY.md",
-    `${name}: Markdown is limited to README.md, AGENTS.md and SECURITY.md`,
-  );
   const document = readFileSync(path, "utf8");
   requireValid((document.match(/^```/gm) ?? []).length % 2 === 0, `${name}: unbalanced fences`);
   for (const [, asset] of document.matchAll(/\b(?:src|srcset)="([^"]+)"/g)) {

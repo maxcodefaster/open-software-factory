@@ -8,27 +8,21 @@ separate [runtime coding policy](deploy/opencode-server/config/AGENTS.md).
 - Implement the requested scope without speculative APIs or unrelated redesigns.
 - Use the root README for orientation, commands and test lanes, and `deploy/helm/factory/README.md`
   for installation and operation. Read existing code and tests before changing behavior.
-- Maintained Markdown is limited to READMEs, `AGENTS.md` and `SECURITY.md`. Task plans, design
-  specifications and status belong in the task or issue; generated evidence belongs under
-  `.factory/test-results/`.
+- Update existing documentation owners instead of creating parallel descriptions. Keep task-only
+  plans and status in the task or issue; generated evidence belongs under `.factory/test-results/`.
 - Preserve unrelated work and keep reference checkouts read-only. Port only requested behavior,
   with its tests. Use `apply_patch` for manual edits.
 
 ## Autonomous execution and collaboration
 
-- Within an authorized implementation or acceptance task, perform routine inspection, fixes,
-  configured paid-model calls and owned disposable test setup/cleanup without repeated confirmation.
-  Commit and push when authorized; never force-push shared history or publish secrets.
-- Respect explicit budgets, platform approvals and product authorization. Do not invent extra
-  spending approvals, token limits or deadlines. Ask only when required authority, information or
-  access is genuinely missing and cannot be resolved within the task.
-- Use one integration owner. When delegation is authorized, give subagents bounded tasks and
-  disjoint write scopes or worktrees. Never let agents mutate the same checkout files, browser
-  session or test resources concurrently.
-- Schedule heavy builds and live/browser tests against measured host capacity. Parallelize
-  independent preparation and isolated checks; do not increase test workers blindly.
-- Acceptance tests may use explicitly owned test accounts to exercise normal authenticated
-  approvals. This does not authorize bypassing Factory's gates or fabricating decisions/results.
+- Perform authorized inspection, fixes, configured paid-model calls and owned test setup/cleanup
+  without repeated confirmation. Commit and push when authorized; never force-push shared history
+  or publish secrets.
+- Respect explicit budgets, platform approvals and product authorization; do not invent extra
+  spending approvals, limits or deadlines. Ask only for genuinely missing authority or information.
+- Use one integration owner and bounded delegated tasks with separate write scopes, browser sessions
+  and test resources. Coordinate heavy builds and live tests against measured host capacity.
+- Owned test accounts may exercise normal authenticated approvals, never bypass product gates.
 
 ## Product boundaries
 
@@ -46,50 +40,42 @@ separate [runtime coding policy](deploy/opencode-server/config/AGENTS.md).
   Retain source, history, approvals, immutable runtime identities, external outcomes, Verification
   and merge results and compact Evidence. Logs, heartbeats and resource samples stay ephemeral.
 
-## Product and design brief
+## Product authority
 
-- Product Contributors define requirements, research Projects and give feedback. Developers also
-  use source, Workspaces and Coding. Project managers control access/defaults; administrators manage
-  the installation. Management permission and Developer status are separate.
-- A Project combines a repository, Tickets, revisioned Knowledge, shared development and a promoted
-  Preview. People approve requirements and the exact verified commit, or explicitly delegate
-  eligible monitoring fixes and Delivery. Record which decision authorized the work.
-- Requirements are manual by default. AI Interview and technical planning require an explicit request;
-  reading/saving never starts inference. Implement approves saved requirements. Exact-commit
-  Verification and independent review precede deliberate human Delivery approval.
+- Contributors define requirements and research; Developers also use source, Workspaces and Coding.
+  Project management controls access/defaults and is separate from Developer status. Administrators
+  manage the installation.
+- Requirements are manual by default; Interview and technical planning require an explicit request.
+  Reading/saving never starts inference. Implement approves saved requirements. Exact-commit
+  Verification and independent review precede human Delivery approval or eligible explicit delegation.
+  Retain the decision authorizing each operation.
 - Background work never inherits personal configuration. Edits after approval create a new revision
   without changing the pinned approved requirements.
-- Design for product contributors without requiring runtime or agent-engine knowledge. Settings show
-  one scope at a time: Project, Libraries, Personal or Factory administration. Small screens use a
-  grouped title menu. Show saved progress and distinguish unknown outcomes from success.
+- Explain user actions without requiring runtime knowledge. Keep Settings scopes distinct and show
+  saved progress; never present unknown outcomes as success.
 
-## Interface
+## When changing the interface
 
-- Read existing control owners before UI changes. Preserve one semantic token system, three bundled
-  public-domain paintings with fixed contrast-tested accents, Sansita for display and Inter for
-  interface/documents. Document windows use one subtly translucent blurred base; nested editors stay
-  transparent, menus readable, IDE/Terminal/Preview bodies opaque. Use solid surfaces for reduced
-  transparency or unsupported backdrop filters, and respect OS motion preferences.
-- Keep frequent actions adjacent, overflow at the far right and focus returning to the opener.
-  Use the existing `WorkspaceActionBar` for page/header actions.
-- `apps/factory/src/style.css` loads `ui/controls.css` once. Use native controls with its defaults:
-  `workspace-action`/`data-primary` for quiet document actions; `quiet-button`, `primary-button` and
-  `danger-button` for standalone actions; `control-field`, `control-check`, `control-actions` for forms.
-- Feature CSS owns layout and genuine variations, not duplicated control styles. Extend shared
-  owners when needed; isolated features must load their controls without another feature mounted.
+- Read the existing control owners and preserve the current tokens, public-domain art, Sansita/Inter,
+  contrast and material rules, accessibility and OS preferences. Do not start unrelated redesigns,
+  audits or polish passes.
+- Use `WorkspaceActionBar` and native controls from `ui/controls.css`, loaded once by `style.css`.
+  Feature CSS owns layout and genuine variations, not duplicate controls. Keep related actions
+  together, overflow right, focus returning to the opener and isolated features independently styled.
 
 ## Verification
 
 - Use `mise exec --` and README test lanes. Reuse existing tests; after fixes run affected checks first,
   then the relevant combined regression/acceptance suite on the final candidate.
+- Reuse owned test installations. Fresh installs qualify installation changes and final release
+  candidates; they are not required after every commit.
 - Documentation uses `bun run check:docs`; Connector changes use `bun run connector:check`.
   UI changes require affected browser checks and actually inspected screenshots. Shared controls also
   require `test/browser/ui-controls.spec.ts`; inspect desktop, narrow, keyboard and touch behavior.
 - Runtime changes require native proof. Fixture/controller tests are not live product acceptance.
   Keep paid calls in explicit live lanes, not default tests. Bind evidence to the tested source and
   installation; report unsupported or untested cases without counting them as passes.
-- Measure before optimizing. Use actual production CSS/transfer sizes for frontend size claims and
-  observed workload timings/resource use for runtime performance claims.
+- Measure before optimizing; use actual production sizes and observed workload timings/resource use.
 - Live fixtures own separate resources. Cleanup requires exact ownership; never reset a retained
   installation to pass a test. Cancellation cleans up owned subprocesses/containers, and interrupted
   checks remain incomplete. Honor explicit takeover; do not leave continuations or log followers running.
