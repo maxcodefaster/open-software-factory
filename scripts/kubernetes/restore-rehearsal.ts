@@ -15,7 +15,27 @@ export const images: Record<string, string> = {
   rclone: upstream.rclone.image,
   tools: upstream.node.image,
 };
-const chartRevision = "39d7969bb3acd93d0bc497a5748cce08ae435091";
+// Reviewed source profiles, not a caller-supplied revision allowlist. These pairs share the
+// pinned backup formats, schema and data-service images. Managed-TLS profiles retain their CA.
+// Chart and application commits are independent; only the explicitly reviewed pairs qualify.
+// The complete source identity must still match the independent witness manifest below.
+export const supportedSourceManifests = [
+  {
+    chartRevision: "39d7969bb3acd93d0bc497a5748cce08ae435091",
+    applicationRevision: "089ca64dbc9ab48f3b452151a2d694d7aabe3a10",
+    requiredStateFiles: [],
+  },
+  {
+    chartRevision: "4438e7580db77df3d861e0bcbd5b1f77c914c365",
+    applicationRevision: "4438e7580db77df3d861e0bcbd5b1f77c914c365",
+    requiredStateFiles: ["ingress-tls/identity.json"],
+  },
+  {
+    chartRevision: "5609f4cd76bd5203c6ad17ae33a330e65614bb9f",
+    applicationRevision: "4438e7580db77df3d861e0bcbd5b1f77c914c365",
+    requiredStateFiles: ["ingress-tls/identity.json"],
+  },
+] as const;
 const label = "factory.restore-rehearsal";
 const sha = /^[a-f0-9]{64}$/;
 const identifier = /^[a-z_][a-z0-9_]*$/;
@@ -224,9 +244,13 @@ export async function loadFixture(
     f.source,
     "chartRevision applicationRevision namespace namespaceUID release factoryOrigin forgejoOrigin storageClass",
   );
+  const sourceManifest = supportedSourceManifests.find(
+    (entry) =>
+      entry.chartRevision === f.source.chartRevision &&
+      entry.applicationRevision === f.source.applicationRevision,
+  );
   requireThat(
-    f.source.chartRevision === chartRevision &&
-      /^[a-f0-9]{40}$/.test(f.source.applicationRevision) &&
+    sourceManifest &&
       /^[a-f0-9-]{36}$/.test(f.source.namespaceUID) &&
       [f.source.namespace, f.source.release].every((v) => /^[a-z0-9][a-z0-9-]{0,62}$/.test(v)) &&
       typeof f.source.storageClass === "string",
@@ -412,6 +436,12 @@ export async function loadFixture(
       w.state.files.some((v) => v.path === path && !v.link) &&
         !w.state.excludedProvisionerPaths.includes(path),
       "Original installation identity and OpenBao material must be present",
+    );
+  for (const path of sourceManifest.requiredStateFiles)
+    requireThat(
+      w.state.files.some((v) => v.path === path && !v.link && v.bytes > 0) &&
+        !w.state.excludedProvisionerPaths.includes(path),
+      "Supported source requires its original witnessed retained state",
     );
   fileWitnesses(w.objects);
   requireThat(

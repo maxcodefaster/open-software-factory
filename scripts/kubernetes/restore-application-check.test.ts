@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -45,6 +46,114 @@ const response = (
   status = 200,
 ): HTTPResponse => ({ status, headers, body: Buffer.from(JSON.stringify(body)) });
 const clone = <T>(value: T): T => structuredClone(value);
+const finalizedHistory = [
+  "workspace_submission",
+  "change_commit_operation",
+  "usage_operation",
+  "usage_entry",
+  "usage_replay_cursor",
+  "model_role_probe",
+  "knowledge_generation",
+];
+function historyRow<T>(rows: T[]): T {
+  const row = rows[0];
+  if (!row) throw Error("Synthetic history row required");
+  return row;
+}
+function historyRows() {
+  return {
+    workspace_submission: [
+      {
+        id: uid(60),
+        workspace_id: uid(61),
+        actor_id: uid(30),
+        prepare_attempted_at: "2026-11-17T10:00:00Z",
+      },
+    ],
+    change_commit_operation: [
+      {
+        id: uid(60),
+        runtime_attempt_id: uid(62),
+        change_id: uid(63),
+        created_by: uid(30),
+        idempotency_key: `workspace:${uid(60)}`,
+        source: "workspace",
+        state: "succeeded",
+        completed_at: "2026-11-17T10:01:00Z",
+        commit_sha: "a".repeat(40),
+        observed_remote_sha: "a".repeat(40),
+        last_error: null as string | null,
+      },
+    ],
+    runtime_attempt: [{ id: uid(62), workspace_id: uid(61) }],
+    development_workspace: [{ id: uid(61), change_id: uid(63), kind: "ticket" }],
+    usage_operation: [
+      {
+        id: `probe:${uid(64)}`,
+        settled_at: "2026-11-17T10:01:00Z",
+        outcome: "unknown",
+        purpose: "probe",
+        engine: "mastra",
+        project_id: null as string | null,
+        user_id: uid(30),
+        model: "recorded-model",
+      },
+    ],
+    usage_entry: [
+      {
+        operation_id: `probe:${uid(64)}`,
+        event_id: "unobserved",
+        source: "unobserved",
+        outcome: "unknown",
+      },
+    ],
+    model_role_probe: [
+      {
+        command_id: uid(64),
+        state: "uncertain",
+        finished_at: "2026-11-17T10:01:00Z",
+        role: "planning",
+        created_by: uid(30),
+        model_id: "recorded-model",
+        result: "{}",
+      },
+    ],
+    knowledge_generation: [
+      {
+        id: uid(65),
+        state: "failed",
+        completed_at: "2026-11-17T10:01:00Z",
+        project_id: uid(31),
+        created_by: uid(30),
+      },
+    ],
+  };
+}
+function historyBusy(
+  table: "workspace_submission" | "usage_operation",
+  rows: ReturnType<typeof historyRows>,
+) {
+  const db = new Database(":memory:");
+  try {
+    // Evaluate the production predicate with SELECT-only synthetic CTEs, not a second
+    // eligibility implementation. CTE names need no PostgreSQL schema qualifier.
+    const ctes = Object.keys(rows).map((name) => {
+      const columns = Object.keys(historyRows()[name as keyof typeof rows][0] ?? {});
+      if (!columns.length) throw Error("Synthetic history columns required");
+      return `"${name}" AS (SELECT ${columns.map((key) => `json_extract(value,'$.${key}') AS "${key}"`).join(",")} FROM json_each(?))`;
+    });
+    const predicate = idleRules[table];
+    if (!predicate) throw Error("Production idle predicate required");
+    const result = db
+      .query(
+        `WITH ${ctes.join(",")} SELECT count(*) AS busy FROM ${table} WHERE ${predicate.replaceAll("factory.", "")}`,
+      )
+      .get(...Object.values(rows).map((values) => JSON.stringify(values))) as { busy: number };
+    return result.busy;
+  } finally {
+    db.close();
+  }
+}
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "factory-restored-application-")));
   const privateRoot = join(root, "private");
@@ -742,6 +851,290 @@ test("an unchanged complete requirement keeps its existing scope and historical 
   }
 });
 
+test("finalized submission history is not pending external work", () => {
+  expect(historyBusy("workspace_submission", historyRows())).toBe(0);
+});
+
+test("settled historical unknown probe usage retains its outcome without becoming pending", () => {
+  expect(historyBusy("usage_operation", historyRows())).toBe(0);
+});
+
+test("the loader requires independent finalized-operation history instead of silently omitting it", async () => {
+  const f = await fixture();
+  try {
+    for (const table of finalizedHistory) delete f.expected.history[table];
+    await f.save();
+    await expect(f.load()).rejects.toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "workspace has no changes to commit",
+  "workspace HEAD no longer matches the commit intent",
+  "an ordinary commit cannot accept an unadmitted merge",
+])("only a recorded definite pre-push failure is finalized submission history: %s", (error) => {
+  const rows = historyRows();
+  Object.assign(historyRow(rows.change_commit_operation), {
+    state: "failed",
+    commit_sha: null,
+    observed_remote_sha: null,
+    last_error: error,
+  });
+  expect(historyBusy("workspace_submission", rows)).toBe(0);
+});
+
+test.each(["commit-intended", "commit-uncertain", "committed", "push-intended", "push-uncertain"])(
+  "submission history still refuses %s even with a claimed completion timestamp",
+  (state) => {
+    const rows = historyRows();
+    historyRow(rows.change_commit_operation).state = state;
+    expect(historyBusy("workspace_submission", rows)).toBe(1);
+  },
+);
+
+test.each([
+  "missing operation",
+  "missing completion",
+  "missing prepare",
+  "missing commit",
+  "unconfirmed push",
+  "wrong actor",
+  "wrong workspace",
+  "wrong change",
+  "wrong attempt",
+  "wrong source",
+  "wrong request",
+  "failed after commit",
+  "unclassified failure",
+  "uncertain push error",
+  "missing state",
+  "success with error",
+  "unprepared failure",
+] as const)("submission finality refuses %s", (boundary) => {
+  const rows = historyRows(),
+    op = historyRow(rows.change_commit_operation);
+  if (boundary === "missing operation") rows.change_commit_operation = [];
+  if (boundary === "missing completion") Object.assign(op, { completed_at: null });
+  if (boundary === "missing prepare")
+    Object.assign(historyRow(rows.workspace_submission), { prepare_attempted_at: null });
+  if (boundary === "missing commit")
+    Object.assign(op, { commit_sha: null, observed_remote_sha: null });
+  if (boundary === "unconfirmed push") op.observed_remote_sha = "b".repeat(40);
+  if (boundary === "wrong actor") op.created_by = uid(99);
+  if (boundary === "wrong workspace") historyRow(rows.runtime_attempt).workspace_id = uid(99);
+  if (boundary === "wrong change") historyRow(rows.development_workspace).change_id = uid(99);
+  if (boundary === "wrong attempt") op.runtime_attempt_id = uid(99);
+  if (boundary === "wrong source") op.source = "agent";
+  if (boundary === "wrong request") op.idempotency_key = `workspace:${uid(99)}`;
+  if (boundary === "failed after commit")
+    Object.assign(op, { state: "failed", last_error: "workspace has no changes to commit" });
+  if (boundary === "unclassified failure" || boundary === "uncertain push error")
+    Object.assign(op, {
+      state: "failed",
+      commit_sha: null,
+      observed_remote_sha: null,
+      last_error: boundary === "uncertain push error" ? "push response lost" : "another failure",
+    });
+  if (boundary === "missing state") Object.assign(op, { state: null });
+  if (boundary === "success with error") op.last_error = "unresolved observation";
+  if (boundary === "unprepared failure") {
+    Object.assign(op, {
+      state: "failed",
+      commit_sha: null,
+      observed_remote_sha: null,
+      last_error: "workspace has no changes to commit",
+    });
+    Object.assign(historyRow(rows.workspace_submission), { prepare_attempted_at: null });
+  }
+  expect(historyBusy("workspace_submission", rows)).toBe(1);
+});
+
+test.each(["planning", "build"])(
+  "a finalized %s probe keeps historical unknown accounting unchanged",
+  (role) => {
+    const rows = historyRows();
+    historyRow(rows.model_role_probe).role = role;
+    historyRow(rows.model_role_probe).state = "finished";
+    historyRow(rows.usage_operation).engine = role === "build" ? "opencode" : "mastra";
+    const before = JSON.stringify(rows);
+    expect(historyBusy("usage_operation", rows)).toBe(0);
+    expect(JSON.stringify(rows)).toBe(before);
+  },
+);
+
+test.each([
+  "unsettled",
+  "missing outcome",
+  "unsupported outcome",
+  "missing probe",
+  "probing owner",
+  "unfinished probe",
+  "missing result",
+  "wrong request",
+  "wrong user",
+  "wrong model",
+  "wrong engine",
+  "probe project",
+  "Coding unknown",
+  "learning unknown",
+  "orphan unknown",
+  "missing gap entry",
+  "wrong gap owner",
+  "gap outcome overwritten",
+] as const)("historical unknown usage refuses %s", (boundary) => {
+  const rows = historyRows(),
+    usage = historyRow(rows.usage_operation),
+    probe = historyRow(rows.model_role_probe);
+  if (boundary === "unsettled") Object.assign(usage, { settled_at: null });
+  if (boundary === "missing outcome") Object.assign(usage, { outcome: null });
+  if (boundary === "unsupported outcome") usage.outcome = "pending";
+  if (boundary === "missing probe") rows.model_role_probe = [];
+  if (boundary === "probing owner") probe.state = "probing";
+  if (boundary === "unfinished probe") Object.assign(probe, { finished_at: null });
+  if (boundary === "missing result") Object.assign(probe, { result: null });
+  if (boundary === "wrong request") usage.id = `probe:${uid(99)}`;
+  if (boundary === "wrong user") usage.user_id = uid(99);
+  if (boundary === "wrong model") usage.model = "different-model";
+  if (boundary === "wrong engine") usage.engine = "opencode";
+  if (boundary === "probe project") usage.project_id = uid(31);
+  if (boundary === "Coding unknown")
+    Object.assign(usage, { id: `turn:${uid(64)}`, purpose: "coding", engine: "opencode" });
+  if (boundary === "learning unknown") usage.purpose = "learning";
+  if (boundary === "orphan unknown")
+    Object.assign(usage, { id: `orphan:${uid(64)}`, purpose: "research" });
+  if (boundary === "missing gap entry") rows.usage_entry = [];
+  if (boundary === "wrong gap owner")
+    historyRow(rows.usage_entry).operation_id = `probe:${uid(99)}`;
+  if (boundary === "gap outcome overwritten") historyRow(rows.usage_entry).outcome = "completed";
+  expect(historyBusy("usage_operation", rows)).toBe(1);
+});
+
+test.each(["succeeded", "failed"])(
+  "a finalized %s Wiki retains old unknown usage alongside a successful retry",
+  (state) => {
+    const rows = historyRows();
+    Object.assign(historyRow(rows.usage_operation), {
+      id: `wiki:${uid(65)}:${uid(66)}:call-1`,
+      purpose: "wiki",
+      project_id: uid(31),
+    });
+    historyRow(rows.usage_entry).operation_id = historyRow(rows.usage_operation).id;
+    historyRow(rows.knowledge_generation).state = state;
+    rows.knowledge_generation.push({
+      ...historyRow(rows.knowledge_generation),
+      id: uid(99),
+      state: "succeeded",
+    });
+    const before = JSON.stringify(rows);
+    expect(historyBusy("usage_operation", rows)).toBe(0);
+    expect(JSON.stringify(rows)).toBe(before);
+  },
+);
+
+test.each([
+  "running",
+  "pending",
+  "missing completion",
+  "missing owner",
+  "wrong owner",
+  "wrong project",
+  "wrong user",
+  "wrong engine",
+  "missing attempt",
+  "missing call",
+  "different successful retry",
+] as const)("historical Wiki unknown usage refuses %s", (boundary) => {
+  const rows = historyRows(),
+    usage = historyRow(rows.usage_operation),
+    generation = historyRow(rows.knowledge_generation);
+  Object.assign(usage, {
+    id: `wiki:${uid(65)}:${uid(66)}:call-1`,
+    purpose: "wiki",
+    project_id: uid(31),
+  });
+  historyRow(rows.usage_entry).operation_id = usage.id;
+  if (boundary === "running" || boundary === "pending") generation.state = boundary;
+  if (boundary === "missing completion") Object.assign(generation, { completed_at: null });
+  if (boundary === "missing owner") rows.knowledge_generation = [];
+  if (boundary === "wrong owner") generation.id = uid(99);
+  if (boundary === "wrong project") usage.project_id = uid(99);
+  if (boundary === "wrong user") usage.user_id = uid(99);
+  if (boundary === "wrong engine") usage.engine = "opencode";
+  if (boundary === "missing attempt") usage.id = `wiki:${uid(65)}::call-1`;
+  if (boundary === "missing call") usage.id = `wiki:${uid(65)}:${uid(66)}:`;
+  if (boundary === "different successful retry") {
+    generation.state = "running";
+    rows.knowledge_generation.push({ ...generation, id: uid(99), state: "succeeded" });
+  }
+  expect(historyBusy("usage_operation", rows)).toBe(1);
+});
+
+test.each(finalizedHistory)(
+  "independent history must include %s, even when empty",
+  async (table) => {
+    const f = await fixture();
+    try {
+      for (const name of finalizedHistory)
+        f.expected.history[name] = { rows: 0, sha256: hash("[]") };
+      await f.save();
+      await f.load();
+      delete f.expected.history[table];
+      await f.save();
+      await expect(f.load()).rejects.toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(finalizedHistory)(
+  "restored startup cannot rewrite or replay witnessed %s before login",
+  async (table) => {
+    const f = await fixture();
+    try {
+      const fake = target(f);
+      fake.dbHook((value) => {
+        value.history[table].sha256 = hash("overwritten outcome or replayed event");
+      });
+      const result = await checkRestoredApplication(await f.load(), fake);
+      expect(result.status).toBe("incomplete");
+      expect(fake.requests).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(finalizedHistory)(
+  "the guarded save cannot rewrite or replay witnessed %s",
+  async (table) => {
+    const f = await fixture();
+    try {
+      const fake = target(f);
+      fake.dbHook((value) => {
+        if (value.saved) value.history[table].sha256 = hash("changed after authorized save");
+      });
+      const result = await checkRestoredApplication(await f.load(), fake);
+      expect(result.status).toBe("incomplete");
+      expect(fake.saveCalls()).toHaveLength(1);
+      expect(result.logout).toBe("confirmed");
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("finalized history does not admit learning trials or drop active operation guards", () => {
+  expect(idleRules["learning_trial"]).toBe("true");
+  expect(idleRules["change_commit_operation"]).toBe("state::text NOT IN ('succeeded','failed')");
+  expect(idleRules["model_role_probe"]).toBe("state = 'probing'");
+  expect(idleRules["knowledge_generation"]).toBe("state::text NOT IN ('succeeded','failed')");
+  expect(idleRules["substrate_actor_rpc"]).toBe("outcome IS NULL");
+  expect(idleRules["substrate_input_stop"]).toBe("completed_at IS NULL");
+});
+
 test.each([
   "partial requirement",
   "new requirement revision",
@@ -1145,6 +1538,10 @@ test("the SQL is read-only, scope-bounded and covers original native and require
     expect(sql).toContain("REPEATABLE READ READ ONLY");
     expect(sql).toContain("current_setting('transaction_read_only')");
     for (const table of historyTables) expect(sql).toContain(`factory.${table}`);
+    for (const table of finalizedHistory) {
+      expect(historyTables).toContain(table);
+      expect(sql).toContain(`SELECT to_jsonb(t) FROM factory.${table} t`);
+    }
     expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|CALL|DO)\b/);
     expect(sql).toContain(`id<>'${f.value.save.commandID}'::uuid`);
     const code = `(${applicationBuildTree.toString()})()`;

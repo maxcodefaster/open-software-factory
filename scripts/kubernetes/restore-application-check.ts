@@ -258,7 +258,8 @@ function origin(value: string) {
 }
 
 // Deliberately conservative eligibility, not a general recovery classifier.
-// Unknown/nonterminal states fail closed, even if an operator believes them harmless.
+// Unknown/nonterminal external work fails closed. Historical unknown accounting is
+// admitted only for the finalized owners audited below, with complete history witnesses.
 export const idleRules: Record<string, string> = {
   agent_turn: "state::text NOT IN ('completed','failed','stopped')",
   knowledge_generation: "state::text NOT IN ('succeeded','failed')",
@@ -320,14 +321,51 @@ export const idleRules: Record<string, string> = {
   workspace_file_transfer: "state <> 'released'",
   workspace_terminal_operation: "completed_at IS NULL",
   workspace_lifecycle_command: "completed_at IS NULL",
-  workspace_submission: "true",
+  // workspace/submission.ts recovers only commit-intended/push-intended operations.
+  // Admit confirmed pushes or its exact definite pre-push failures, never an uncertain push.
+  workspace_submission: `NOT EXISTS (
+    SELECT 1 FROM factory.change_commit_operation operation
+    JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+    JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+    WHERE operation.id=workspace_submission.id AND operation.source='workspace'
+      AND operation.created_by=workspace_submission.actor_id
+      AND operation.idempotency_key='workspace:'||CAST(workspace_submission.id AS text)
+      AND workspace.id=workspace_submission.workspace_id AND workspace.kind='ticket'
+      AND workspace.change_id=operation.change_id AND operation.completed_at IS NOT NULL
+      AND workspace_submission.prepare_attempted_at IS NOT NULL
+      AND ((operation.state='succeeded' AND operation.last_error IS NULL
+        AND operation.commit_sha IS NOT NULL AND operation.observed_remote_sha=operation.commit_sha)
+      OR (operation.state='failed' AND operation.commit_sha IS NULL AND operation.observed_remote_sha IS NULL
+        AND operation.last_error IN ('workspace has no changes to commit',
+          'workspace HEAD no longer matches the commit intent',
+          'an ordinary commit cannot accept an unadmitted merge'))))`,
   workspace_share_decision: "access_reconciled_at IS NULL",
   developer_ide: "state <> 'stopped'",
   candidate_review: "state NOT IN ('passed','changes-requested','failed')",
   session_archive: "state <> 'saved'",
   access_revocation: "processed_version <> version",
   wiki_source_update: "hook_state <> 'ready' OR event_version <> handled_version",
-  usage_operation: "settled_at IS NULL OR outcome='unknown'",
+  // Model recovery touches only probing rows; Wiki recovery touches only running generations.
+  // Neither replays a finalized owner. Do not generalize this to turn:* Coding journals:
+  // usage/record-opencode.ts can still drain or markUnavailable after settlement.
+  usage_operation: `settled_at IS NULL OR outcome IS NULL
+    OR outcome NOT IN ('completed','failed','interrupted','unknown')
+    OR (outcome='unknown' AND (NOT EXISTS (
+      SELECT 1 FROM factory.usage_entry entry WHERE entry.operation_id=usage_operation.id
+        AND entry.source='unobserved' AND entry.outcome='unknown') OR NOT (
+      (purpose='probe' AND project_id IS NULL AND EXISTS (
+        SELECT 1 FROM factory.model_role_probe probe
+        WHERE usage_operation.id='probe:'||CAST(probe.command_id AS text)
+          AND probe.state IN ('finished','uncertain') AND probe.finished_at IS NOT NULL
+          AND probe.result IS NOT NULL AND usage_operation.user_id=probe.created_by
+          AND usage_operation.model=probe.model_id
+          AND usage_operation.engine=CASE WHEN probe.role='build' THEN 'opencode' ELSE 'mastra' END))
+      OR (purpose='wiki' AND engine='mastra' AND EXISTS (
+        SELECT 1 FROM factory.knowledge_generation generation
+        WHERE usage_operation.id LIKE 'wiki:'||CAST(generation.id AS text)||':_%:_%'
+          AND generation.state IN ('succeeded','failed') AND generation.completed_at IS NOT NULL
+          AND usage_operation.project_id=generation.project_id
+          AND usage_operation.user_id=generation.created_by)))))`,
   installation_maintenance: "enabled",
   ticket: "trash_stop_pending",
 };
@@ -351,6 +389,15 @@ export const historyTables = [
   "change",
   "change_writer",
   "change_agent_turn_intent",
+  // Complete original rows, including failed submissions, unknown outcomes and replay cursors.
+  // Both source observations and every restored snapshot must match these independent digests.
+  "workspace_submission",
+  "change_commit_operation",
+  "usage_operation",
+  "usage_entry",
+  "usage_replay_cursor",
+  "model_role_probe",
+  "knowledge_generation",
 ];
 export async function loadApplicationFixture(
   path: string,

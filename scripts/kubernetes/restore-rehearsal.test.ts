@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -40,6 +41,15 @@ const source = {
   factoryOrigin: "https://factory.example.invalid",
   forgejoOrigin: "https://git.example.invalid",
   storageClass: "retained",
+};
+const managedSource = {
+  ...source,
+  chartRevision: "4438e7580db77df3d861e0bcbd5b1f77c914c365",
+  applicationRevision: "4438e7580db77df3d861e0bcbd5b1f77c914c365",
+};
+const upgradedChartSource = {
+  ...managedSource,
+  chartRevision: "5609f4cd76bd5203c6ad17ae33a330e65614bb9f",
 };
 
 async function fixture() {
@@ -216,6 +226,145 @@ test("private inputs, pins, scope and witnesses are checked without writes or co
   }
 });
 
+test("the loader admits the independently witnessed managed-TLS source without relabeling identities", async () => {
+  const f = await fixture();
+  try {
+    f.value.source = { ...managedSource };
+    f.witness.source = { ...managedSource };
+    f.witness.state.files.push({
+      path: "ingress-tls/identity.json",
+      bytes: 19,
+      sha256: hash("managed CA identity"),
+    });
+    await f.save();
+    const loaded = await f.load();
+    expect(loaded.source).toEqual(managedSource);
+    expect(loaded.witnesses.source).toEqual(managedSource);
+    expect(loaded.witnessDigest).toBe(hash(JSON.stringify(f.witness)));
+    expect(await Bun.file(join(f.value.evidenceDirectory, "result.json")).exists()).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("the loader admits an independently witnessed upgraded chart without relabeling its application", async () => {
+  const f = await fixture();
+  try {
+    f.value.source = { ...upgradedChartSource };
+    f.witness.source = { ...upgradedChartSource };
+    f.witness.state.files.push({
+      path: "ingress-tls/identity.json",
+      bytes: 19,
+      sha256: hash("managed CA identity"),
+    });
+    await f.save();
+    const fixtureBefore = await readFile(f.path, "utf8");
+    const witnessBefore = await readFile(join(f.value.privateRoot, "witnesses.json"), "utf8");
+    const loaded = await f.load();
+    expect(loaded.source).toEqual(upgradedChartSource);
+    expect(loaded.source.chartRevision).not.toBe(loaded.source.applicationRevision);
+    expect(loaded.witnesses.source).toEqual(upgradedChartSource);
+    expect(loaded.witnessDigest).toBe(hash(JSON.stringify(f.witness)));
+    expect(await readFile(f.path, "utf8")).toBe(fixtureBefore);
+    expect(await readFile(join(f.value.privateRoot, "witnesses.json"), "utf8")).toBe(witnessBefore);
+    expect(await lstat(f.value.evidenceDirectory).catch(() => null)).toBeNull();
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "unknown chart",
+  "unknown application",
+  "old chart new application",
+  "new chart old application",
+  "caller allowlist",
+  "witness chart",
+  "witness application",
+  "witness namespace",
+  "witness owner",
+  "witness set",
+  "destination provenance",
+  "missing CA",
+  "excluded CA",
+  "symlink CA",
+  "empty CA",
+  "image pin",
+  "part digest",
+  "chart commit as application",
+  "reversed upgraded pair",
+  "relabeled upgraded witness",
+  "upgraded chart missing CA",
+] as const)(
+  "the supported source manifest refuses %s before any evidence or destination",
+  async (boundary) => {
+    const f = await fixture();
+    try {
+      f.value.source = { ...managedSource };
+      f.witness.source = { ...managedSource };
+      const ca: Witnesses["state"]["files"][number] = {
+        path: "ingress-tls/identity.json",
+        bytes: 19,
+        sha256: hash("managed CA identity"),
+      };
+      if (boundary !== "missing CA") f.witness.state.files.push(ca);
+      if (boundary === "unknown chart" || boundary === "caller allowlist")
+        f.value.source.chartRevision = f.witness.source.chartRevision = "f".repeat(40);
+      if (boundary === "unknown application")
+        f.value.source.applicationRevision = f.witness.source.applicationRevision = "e".repeat(40);
+      if (boundary === "old chart new application")
+        f.value.source.chartRevision = f.witness.source.chartRevision = source.chartRevision;
+      if (boundary === "new chart old application")
+        f.value.source.applicationRevision = f.witness.source.applicationRevision =
+          source.applicationRevision;
+      if (boundary === "caller allowlist")
+        Object.assign(f.value.source, { supportedChartRevisions: ["f".repeat(40)] });
+      if (boundary === "witness chart") f.witness.source.chartRevision = source.chartRevision;
+      if (boundary === "witness application")
+        f.witness.source.applicationRevision = source.applicationRevision;
+      if (boundary === "witness namespace")
+        f.witness.source.namespaceUID = "365f92d0-2e7c-4f76-8728-6e7295cfc84b";
+      if (boundary === "witness owner") f.witness.owner = "b".repeat(32);
+      if (boundary === "witness set") f.witness.set = "20261117T100210Z";
+      if (boundary === "destination provenance")
+        Object.assign(f.witness, { provenance: "destination-observation" });
+      if (boundary === "excluded CA") f.witness.state.excludedProvisionerPaths.push(ca.path);
+      if (boundary === "symlink CA") ca.link = "../another-identity.json";
+      if (boundary === "empty CA") ca.bytes = 0;
+      if (boundary === "image pin") f.value.images["postgres"] = "postgres:16";
+      if (boundary === "part digest") f.witness.parts["state.tar.gz"] = "0".repeat(64);
+      if (boundary === "chart commit as application") {
+        f.value.source = {
+          ...upgradedChartSource,
+          applicationRevision: upgradedChartSource.chartRevision,
+        };
+        f.witness.source = { ...f.value.source };
+      }
+      if (boundary === "reversed upgraded pair") {
+        f.value.source = {
+          ...managedSource,
+          applicationRevision: upgradedChartSource.chartRevision,
+        };
+        f.witness.source = { ...f.value.source };
+      }
+      if (boundary === "relabeled upgraded witness") {
+        f.value.source = { ...upgradedChartSource };
+        f.witness.source = { ...managedSource };
+      }
+      if (boundary === "upgraded chart missing CA") {
+        f.value.source = { ...upgradedChartSource };
+        f.witness.source = { ...upgradedChartSource };
+        f.witness.state.files = f.witness.state.files.filter((v) => v.path !== ca.path);
+      }
+      await f.save();
+      await expect(f.load()).rejects.toThrow();
+      expect(await lstat(f.value.evidenceDirectory).catch(() => null)).toBeNull();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
 test("the data-service pins match the chart and never include a Factory application image", async () => {
   for (const [component, path] of [
     ["postgres", "postgres.yaml"],
@@ -304,6 +453,10 @@ function archiveBytes(entries: TarEntry[]) {
 
 test.each([
   "valid",
+  "managed CA",
+  "managed CA upgraded chart",
+  "managed CA omitted",
+  "managed CA mismatch",
   "traversal",
   "absolute symlink",
   "confined symlink chain",
@@ -325,6 +478,23 @@ test.each([
         { name: "./openbao/bootstrap.json", content: "bootstrap" },
         { name: "./openbao/factory-login.json", content: "login" },
       ];
+      if (boundary.startsWith("managed CA")) {
+        const observed =
+          boundary === "managed CA upgraded chart" ? upgradedChartSource : managedSource;
+        f.value.source = { ...observed };
+        f.witness.source = { ...observed };
+        const content = "synthetic managed CA state";
+        f.witness.state.files.push({
+          path: "ingress-tls/identity.json",
+          bytes: Buffer.byteLength(content),
+          sha256: hash(content),
+        });
+        if (boundary !== "managed CA omitted")
+          stateEntries.push({
+            name: "./ingress-tls/identity.json",
+            content: boundary === "managed CA mismatch" ? "changed retained CA state" : content,
+          });
+      }
       if (boundary === "traversal") stateEntries[0] = { name: "../escape", content: "identity" };
       if (boundary === "absolute symlink") {
         stateEntries.push({ name: "source-link", type: "2", link: "/original/native" });
@@ -399,6 +569,7 @@ test.each([
         f.witness.parts[name] = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
       }
       await f.save();
+      const loaded = await f.load();
       const root = join(f.root, "container");
       await mkdir(root, { mode: 0o700 });
       // The exact verifier only reads synthetic inputs here. The symlink represents a Docker mount.
@@ -417,12 +588,14 @@ test.each([
       const checked = restoreFiles({
         root,
         set: f.value.set,
-        source,
+        source: loaded.source,
         diskBytes: 1,
         verifyOnly: true,
       });
       if (
         boundary === "valid" ||
+        boundary === "managed CA" ||
+        boundary === "managed CA upgraded chart" ||
         boundary === "confined symlink chain" ||
         boundary === "40-link chain"
       )
