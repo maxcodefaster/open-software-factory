@@ -161,6 +161,36 @@ export function EpicProposalWorkspace(props: {
                       </div>
                     )}
                   </For>
+                  <h3>Non-goals</h3>
+                  <For
+                    each={item().requirement.nonGoals.map((_, i) => i)}
+                    fallback={<p class="muted">None specified</p>}
+                  >
+                    {(nonGoalIndex) => (
+                      <div class="specification-list-item">
+                        <span class="requirement-marker" aria-hidden="true">
+                          ·
+                        </span>
+                        <textarea
+                          class="specification-rich-text"
+                          rows={1}
+                          aria-label={`Member ${index() + 1} non-goal ${nonGoalIndex + 1}`}
+                          placeholder="Add an explicit exclusion"
+                          value={item().requirement.nonGoals[nonGoalIndex] ?? ""}
+                          onInput={(event) =>
+                            member(item().key, {
+                              requirement: {
+                                ...item().requirement,
+                                nonGoals: item().requirement.nonGoals.map((value, i) =>
+                                  i === nonGoalIndex ? event.currentTarget.value : value,
+                                ),
+                              },
+                            })
+                          }
+                        />
+                      </div>
+                    )}
+                  </For>
                 </Show>
                 <Show when={item().dependsOn.length}>
                   <p class="epic-dependencies">
