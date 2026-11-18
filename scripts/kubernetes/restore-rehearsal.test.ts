@@ -61,6 +61,11 @@ const startupDispatchSource = {
   chartRevision: "701ceb9258a1afd298080b0a7075c77ebe906e36",
   applicationRevision: "701ceb9258a1afd298080b0a7075c77ebe906e36",
 };
+const wikiFeedbackSource = {
+  ...managedSource,
+  chartRevision: "37db8559833c59925bca477fb1a4d1b29feb15d1",
+  applicationRevision: "37db8559833c59925bca477fb1a4d1b29feb15d1",
+};
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "factory-restore-test-")));
@@ -286,6 +291,7 @@ test("the loader admits an independently witnessed upgraded chart without relabe
 test.each([
   ["62288627", humanSubmissionSource],
   ["701ceb92", startupDispatchSource],
+  ["37db8559", wikiFeedbackSource],
 ] as const)(
   "the loader admits the independently witnessed %s chart and application without relabeling backups",
   async (_revision, observed) => {
@@ -330,6 +336,7 @@ test.each([
 for (const [revision, observed] of [
   ["62288627", humanSubmissionSource],
   ["701ceb92", startupDispatchSource],
+  ["37db8559", wikiFeedbackSource],
 ] as const)
   test.each([
     "new chart old application",
@@ -348,6 +355,8 @@ for (const [revision, observed] of [
     "changed part",
     "new chart previous application",
     "previous chart new application",
+    "missing native witness",
+    "missing writer witness",
   ] as const)(`the ${revision} source profile refuses %s`, async (boundary) => {
     const f = await fixture();
     try {
@@ -379,7 +388,10 @@ for (const [revision, observed] of [
         f.value.source.chartRevision = f.witness.source.chartRevision = "f".repeat(40);
       if (boundary === "unreviewed application")
         f.value.source.applicationRevision = f.witness.source.applicationRevision = "f".repeat(40);
-      if (boundary === "relabeled old witness") f.witness.source = { ...upgradedChartSource };
+      if (boundary === "relabeled old witness")
+        f.witness.source = {
+          ...(revision === "37db8559" ? startupDispatchSource : upgradedChartSource),
+        };
       if (boundary === "changed namespace identity")
         f.witness.source.namespaceUID = "365f92d0-2e7c-4f76-8728-6e7295cfc84b";
       if (boundary === "changed witness owner") f.witness.owner = "b".repeat(32);
@@ -390,6 +402,9 @@ for (const [revision, observed] of [
       if (boundary === "symlink CA") ca.link = "../another-identity.json";
       if (boundary === "excluded CA") f.witness.state.excludedProvisionerPaths.push(ca.path);
       if (boundary === "changed part") f.witness.parts["state.tar.gz"] = "0".repeat(64);
+      if (boundary === "missing native witness")
+        delete f.witness.postgres["factory.substrate_binding"];
+      if (boundary === "missing writer witness") delete f.witness.postgres["factory.change_writer"];
       await f.save();
       await expect(f.load()).rejects.toThrow();
       expect(await lstat(f.value.evidenceDirectory).catch(() => null)).toBeNull();
@@ -586,6 +601,9 @@ test.each([
   "managed CA startup dispatch",
   "managed CA startup dispatch omitted",
   "managed CA startup dispatch mismatch",
+  "managed CA wiki feedback",
+  "managed CA wiki feedback omitted",
+  "managed CA wiki feedback mismatch",
   "managed CA omitted",
   "managed CA mismatch",
   "traversal",
@@ -610,13 +628,15 @@ test.each([
         { name: "./openbao/factory-login.json", content: "login" },
       ];
       if (boundary.startsWith("managed CA")) {
-        const observed = boundary.includes("startup dispatch")
-          ? startupDispatchSource
-          : boundary.includes("human submission")
-            ? humanSubmissionSource
-            : boundary === "managed CA upgraded chart"
-              ? upgradedChartSource
-              : managedSource;
+        const observed = boundary.includes("wiki feedback")
+          ? wikiFeedbackSource
+          : boundary.includes("startup dispatch")
+            ? startupDispatchSource
+            : boundary.includes("human submission")
+              ? humanSubmissionSource
+              : boundary === "managed CA upgraded chart"
+                ? upgradedChartSource
+                : managedSource;
         f.value.source = { ...observed };
         f.witness.source = { ...observed };
         const content = "synthetic managed CA state";
@@ -734,6 +754,7 @@ test.each([
         boundary === "managed CA upgraded chart" ||
         boundary === "managed CA human submission" ||
         boundary === "managed CA startup dispatch" ||
+        boundary === "managed CA wiki feedback" ||
         boundary === "confined symlink chain" ||
         boundary === "40-link chain"
       )
@@ -1075,39 +1096,54 @@ test.each([
   }
 });
 
-test("all five components use only pinned quarantined clients; no Factory/native activation", async () => {
-  const f = await fixture();
-  try {
-    const docker = fakeDocker(f);
-    const result = await rehearse(await f.load(), docker.execute);
-    expect(result.status).toBe("data-services-passed");
-    expect(result.nativeActivation).toBe("not-run-not-qualified");
-    expect(Object.values(result.components)).toEqual(Array(5).fill("passed"));
-    expect(result.cleanup).toBe("confirmed");
-    const commands = docker.calls.map((call) => call.command.join(" ")).join("\n");
-    expect(commands).toContain("--internal");
-    expect(commands).toContain("--network none");
-    expect(commands).toContain("--network container:");
-    expect(commands).toContain("--pull never");
-    expect(commands).not.toMatch(
-      /kubectl|prune|--privileged|--publish|--network host|docker\.sock:/,
-    );
-    const inputs = docker.calls.map((call) => String(call.input ?? "")).join("\n");
-    expect(inputs).toContain("pg_restore --exit-on-error --single-transaction --no-owner");
-    expect(inputs).toContain("PG_WITNESS");
-    expect(inputs).toContain("PRAGMA integrity_check");
-    expect(inputs).toContain("snapshot restore -force");
-    expect(inputs).toContain("auth/approle/login");
-    expect(inputs).toContain("--download");
-    expect(inputs).toContain("fsck --full --strict");
-    expect(docker.resources.size).toBe(0);
-    expect(await readFile(join(f.value.evidenceDirectory, "result.json"), "utf8")).not.toContain(
-      "private-witness",
-    );
-  } finally {
-    await f.close();
-  }
-});
+test.each([
+  ["original", source],
+  ["37db8559", wikiFeedbackSource],
+] as const)(
+  "all five components use only pinned quarantined clients for %s; no Factory/native activation",
+  async (_revision, observed) => {
+    const f = await fixture();
+    try {
+      f.value.source = { ...observed };
+      f.witness.source = { ...observed };
+      if (observed === wikiFeedbackSource)
+        f.witness.state.files.push({
+          path: "ingress-tls/identity.json",
+          bytes: 19,
+          sha256: hash("managed CA identity"),
+        });
+      await f.save();
+      const docker = fakeDocker(f);
+      const result = await rehearse(await f.load(), docker.execute);
+      expect(result.status).toBe("data-services-passed");
+      expect(result.nativeActivation).toBe("not-run-not-qualified");
+      expect(Object.values(result.components)).toEqual(Array(5).fill("passed"));
+      expect(result.cleanup).toBe("confirmed");
+      const commands = docker.calls.map((call) => call.command.join(" ")).join("\n");
+      expect(commands).toContain("--internal");
+      expect(commands).toContain("--network none");
+      expect(commands).toContain("--network container:");
+      expect(commands).toContain("--pull never");
+      expect(commands).not.toMatch(
+        /kubectl|prune|--privileged|--publish|--network host|docker\.sock:/,
+      );
+      const inputs = docker.calls.map((call) => String(call.input ?? "")).join("\n");
+      expect(inputs).toContain("pg_restore --exit-on-error --single-transaction --no-owner");
+      expect(inputs).toContain("PG_WITNESS");
+      expect(inputs).toContain("PRAGMA integrity_check");
+      expect(inputs).toContain("snapshot restore -force");
+      expect(inputs).toContain("auth/approle/login");
+      expect(inputs).toContain("--download");
+      expect(inputs).toContain("fsck --full --strict");
+      expect(docker.resources.size).toBe(0);
+      expect(await readFile(join(f.value.evidenceDirectory, "result.json"), "utf8")).not.toContain(
+        "private-witness",
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test.each([
   "restore failure",
