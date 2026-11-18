@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type {
+  WikiGenerationOutput,
   WikiGenerationProgress,
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
@@ -8,6 +9,7 @@ import { generateWiki } from "./generation-workflow";
 type Role = "planner" | "coverage" | "additional" | "investigator" | "writer" | "checker";
 type Seen = {
   role: Role;
+  system: string;
   prompt: Record<string, unknown> & { input?: Record<string, unknown>; correction?: string };
   toolChoice?: string;
   maxTokens?: number;
@@ -45,8 +47,11 @@ async function scenario(options: {
   files?: number;
   pages?: WikiPageSnapshot[];
   changedPaths?: string[];
+  commit?: string;
   sources?: Array<{ path: string; content: string }>;
   inventory?: Array<{ path: string; sha: string; size: number }>;
+  readFiles?(paths: string[]): Promise<Array<{ path: string; content: string }>>;
+  onPublish?(output: WikiGenerationOutput): void;
 }) {
   const seen: Seen[] = [];
   const published: Array<{
@@ -57,6 +62,8 @@ async function scenario(options: {
     parentSlug: string | null;
   }> = [];
   const progress: WikiGenerationProgress[] = [];
+  const reads: string[][] = [];
+  const commit = options.commit ?? "a".repeat(40);
   let pages = options.pages ? [...options.pages] : [];
   const files = options.inventory ?? fileList(options.files ?? 12);
   const server = Bun.serve({
@@ -91,6 +98,7 @@ async function scenario(options: {
                 : "checker";
       const entry: Seen = {
         role,
+        system,
         prompt: JSON.parse(user.slice(user.indexOf("{"), user.lastIndexOf("}") + 1)),
         ...(incoming.tool_choice ? { toolChoice: incoming.tool_choice } : {}),
         ...((incoming.max_completion_tokens ?? incoming.max_tokens)
@@ -150,7 +158,7 @@ async function scenario(options: {
   try {
     const outcome = await generateWiki({
       name: "Speed fixture",
-      commit: "a".repeat(40),
+      commit,
       modelId: "controlled-wiki",
       connection: {
         provider: "openai",
@@ -166,9 +174,14 @@ async function scenario(options: {
       progress: async (value) => {
         progress.push(value);
       },
-      readFiles: async (paths) =>
-        paths.map((path) => ({ path, content: `export const value = "${path}";` })),
+      readFiles: async (paths) => {
+        reads.push([...paths]);
+        return options.readFiles
+          ? options.readFiles(paths)
+          : paths.map((path) => ({ path, content: `export const value = "${path}";` }));
+      },
       publish: async (output) => {
+        options.onPublish?.(output);
         for (const page of output.pages) {
           published.push({
             slug: page.slug,
@@ -187,7 +200,7 @@ async function scenario(options: {
             revisionId: crypto.randomUUID(),
             parentId: null,
             state: "active",
-            citations: page.sources.map((path) => ({ path, commitSha: "a".repeat(40) })),
+            citations: page.sources.map((path) => ({ path, commitSha: commit })),
           };
           if (index >= 0) pages[index] = next;
           else pages = [...pages, next];
@@ -195,7 +208,7 @@ async function scenario(options: {
         return pages;
       },
     });
-    return { outcome, seen, published, progress, requests };
+    return { outcome, seen, published, progress, requests, reads, pages };
   } finally {
     await server.stop(true);
   }
@@ -225,6 +238,339 @@ test("a small topic without a parent is investigated and written by one agent ru
   expect(seeded.map((file) => file.path)).toEqual(paths);
   expect(result.published.map((entry) => entry.slug)).toEqual(["overview"]);
 });
+
+test.each(["seeded", "cached tool read"] as const)(
+  "a merged existing Wiki update accepts %s evidence, preserves human context and checks the pinned candidate",
+  async (mode) => {
+    const commit = "8689987fd9f9d05fe8485a41e3e52cca069a9c3e";
+    const id = crypto.randomUUID();
+    const human = "Human note: ask the team before changing the release window.";
+    const current: WikiPageSnapshot = {
+      id,
+      slug: "application-and-tests",
+      title: "Application and tests",
+      body: `Existing application guidance.\n\n${human}`,
+      version: 3,
+      revisionId: crypto.randomUUID(),
+      parentId: null,
+      state: "active",
+      citations: [{ path: "src/file-0.ts", commitSha: "b".repeat(40) }],
+    };
+    const cited = mode === "seeded" ? "src/file-0.ts" : "src/file-1.ts";
+    const source = { path: cited, content: `export const deliveredBehavior = "${commit}";` };
+    const body = `The application exposes deliveredBehavior.\n\n${human}`;
+    const result = await scenario({
+      pages: [current],
+      commit,
+      sources: mode === "seeded" ? [source] : [],
+      readFiles: async (paths) =>
+        paths.map((path) =>
+          path === cited ? source : { path, content: "export const entrypoint = true;" },
+        ),
+      reply: ({ role, prompt, index }) => {
+        if (role === "planner") {
+          if (mode === "cached tool read" && index === 0) return { tool: [cited] };
+          return {
+            output: {
+              topics: [topic("application-and-tests", ["src/file-0.ts"], null, [id])],
+            },
+          };
+        }
+        if (role === "writer") {
+          expect(prompt["findings"]).toBeUndefined();
+          expect(prompt["currentPages"]).toMatchObject([{ id, body: current.body }]);
+          if (mode === "cached tool read" && index === 0) return { tool: [cited] };
+          if (mode === "seeded") expect(prompt["sources"]).toMatchObject([source]);
+          return {
+            output: { pages: [{ id, title: current.title, body, sources: [cited] }] },
+          };
+        }
+        if (role === "checker") {
+          expect(prompt["sources"]).toEqual([source]);
+          expect(prompt["draft"]).toMatchObject({
+            pages: [{ id, slug: current.slug, body, sources: [cited] }],
+          });
+        }
+        return { output: { issues: [] } };
+      },
+    });
+    expect(count(result.seen, "investigator")).toBe(0);
+    expect(count(result.seen, "writer")).toBe(mode === "seeded" ? 1 : 2);
+    expect(count(result.seen, "checker")).toBe(1);
+    expect(result.reads.flat().filter((path) => path === cited)).toHaveLength(1);
+    expect(result.pages).toMatchObject([
+      { id, slug: current.slug, body, citations: [{ path: cited, commitSha: commit }] },
+    ]);
+    expect(current.body).toBe(`Existing application guidance.\n\n${human}`);
+  },
+);
+
+test.each([
+  ["empty", []],
+  ["known but not read in this topic", ["src/file-1.ts"]],
+  ["unknown", ["src/not-in-the-inventory.ts"]],
+  ["noncanonical", ["./src/file-0.ts"]],
+  ["mixed read and unread", ["src/file-0.ts", "src/file-1.ts"]],
+] as const)(
+  "a merged existing Wiki update still rejects %s citations after three rounds",
+  async (_name, citations) => {
+    const id = crypto.randomUUID();
+    const human = "Human release-window note.";
+    const seen: Seen[] = [];
+    let published = 0;
+    await expect(
+      scenario({
+        pages: [
+          {
+            id,
+            slug: "application-and-tests",
+            title: "Application and tests",
+            body: human,
+            version: 3,
+            revisionId: crypto.randomUUID(),
+            parentId: null,
+            state: "active",
+            citations: [],
+          },
+        ],
+        // Planner evidence and the generation content cache are not permission
+        // for a writer to cite a file it never received or read in this topic.
+        reply: (entry) => {
+          seen.push(entry);
+          if (entry.role === "planner") {
+            if (entry.index === 0) return { tool: ["src/file-1.ts"] };
+            return {
+              output: { topics: [topic("application-and-tests", ["src/file-0.ts"], null, [id])] },
+            };
+          }
+          if (entry.role === "writer")
+            return {
+              output: {
+                pages: [
+                  {
+                    id,
+                    title: "Application and tests",
+                    body: `${human}\n\nNew behavior.`,
+                    sources: [...citations],
+                  },
+                ],
+              },
+            };
+          return { output: { issues: [] } };
+        },
+        onPublish: () => {
+          published++;
+        },
+      }),
+    ).rejects.toThrow("Wiki topic failed bounded quality checks");
+    expect(count(seen, "writer")).toBe(3);
+    expect(count(seen, "checker")).toBe(0);
+    expect(published).toBe(0);
+  },
+);
+
+test("a source repair gives exact citation choices and admits a new successful readSource result", async () => {
+  const id = crypto.randomUUID();
+  const seed = "src/file-0.ts";
+  const added = "src/file-1.ts";
+  const commit = "8689987fd9f9d05fe8485a41e3e52cca069a9c3e";
+  const human = "Human note: coordinate release windows with the team.";
+  const current: WikiPageSnapshot = {
+    id,
+    slug: "application-and-tests",
+    title: "Application and tests",
+    body: `Existing guidance.\n\n${human}`,
+    version: 3,
+    revisionId: crypto.randomUUID(),
+    parentId: null,
+    state: "active",
+    citations: [{ path: seed, commitSha: "b".repeat(40) }],
+  };
+  const source = { path: added, content: "export const submittedBehavior = true;" };
+  const body = `The application exposes submittedBehavior.\n\n${human}`;
+  const result = await scenario({
+    pages: [current],
+    commit,
+    readFiles: async (paths) =>
+      paths.map((path) =>
+        path === added ? source : { path, content: "export const entrypoint = true;" },
+      ),
+    reply: ({ role, index }) => {
+      if (role === "planner")
+        return { output: { topics: [topic(current.slug, [seed], null, [id])] } };
+      if (role === "writer") {
+        if (index === 1) return { tool: [added] };
+        return {
+          output: {
+            pages: [
+              {
+                id,
+                title: current.title,
+                body: index === 2 ? `${body}\n\nAn unsupported claim.` : body,
+                sources: index === 0 ? [] : [added],
+              },
+            ],
+          },
+        };
+      }
+      if (role === "checker")
+        return {
+          output: { issues: index === 0 ? ["Remove the unsupported claim."] : [] },
+        };
+      return { output: { issues: [] } };
+    },
+  });
+  const writers = result.seen.filter((entry) => entry.role === "writer");
+  expect(writers).toHaveLength(4);
+  expect(writers[1]?.system).toContain("Every page.sources must be a nonempty array");
+  expect(writers[1]?.prompt).toMatchObject({
+    readPaths: [seed],
+    issues: ["Wiki update must cite sources actually read"],
+    previousDraft: { pages: [{ id, sources: [] }] },
+  });
+  for (const writer of writers) {
+    expect(writer.system).toContain("repository-relative path strings copied exactly");
+    expect(writer.system).toContain("readPaths");
+    expect(writer.system).toContain("sources[].path");
+    expect(writer.system).toContain("successful readSource result");
+    expect(writer.system).toContain("Do not use Wiki page IDs, URLs or line suffixes.");
+    expect(writer.system).toContain("listDirectory and findFiles");
+  }
+  // The repair may read outside its starting inventory. The next round lists that read,
+  // while unrelated repository paths never become citation evidence automatically.
+  expect(writers[0]?.prompt["readPaths"]).toEqual([seed]);
+  expect(writers[2]?.prompt["readPaths"]).toEqual([seed]);
+  expect(writers[3]?.prompt["readPaths"]).toEqual([seed, added]);
+  expect(result.reads).toEqual([[seed], [added]]);
+  const checkers = result.seen.filter((entry) => entry.role === "checker");
+  expect(checkers).toHaveLength(2);
+  for (const checker of checkers) expect(checker.prompt["sources"]).toEqual([source]);
+  expect(checkers[1]?.prompt["previousIssues"]).toEqual(["Remove the unsupported claim."]);
+  expect(result.published).toMatchObject([{ id, body }]);
+  expect(result.pages).toMatchObject([
+    { id, body, citations: [{ path: added, commitSha: commit }] },
+  ]);
+  expect(current.body).toBe(`Existing guidance.\n\n${human}`);
+  expect(count(result.seen, "investigator")).toBe(0);
+  expect(result.progress.at(-1)?.stats).toMatchObject({ modelSteps: 8, toolRounds: 1 });
+});
+
+test.each(["empty", "mixed", "source limit"] as const)(
+  "source rejection diagnostics contain bounded safe counts: %s",
+  async (mode) => {
+    const seed = "src/file-0.ts";
+    const unread = "src/file-1.ts";
+    const unknown = "src/not-in-the-inventory.ts";
+    const malicious = "https://invalid.example/private?token=fixture-only\n[factory] forged log";
+    const human = "Human note that must not enter diagnostics.";
+    const sourceContent = "Private source content that must not enter diagnostics.";
+    const citations =
+      mode === "empty"
+        ? [[], []]
+        : mode === "mixed"
+          ? [[], [seed, unread, unread, unknown, malicious]]
+          : [Array<string>(64).fill(unread), Array<string>(64).fill(malicious)];
+    const counts =
+      mode === "empty"
+        ? { emptySourceLists: 2, knownUnreadCitations: 0, unknownCitationPaths: 0 }
+        : mode === "mixed"
+          ? { emptySourceLists: 1, knownUnreadCitations: 2, unknownCitationPaths: 2 }
+          : { emptySourceLists: 0, knownUnreadCitations: 64, unknownCitationPaths: 64 };
+    const pages: WikiPageSnapshot[] = ["application-and-tests", "test-guide"].map((slug) => ({
+      id: crypto.randomUUID(),
+      slug,
+      title: slug,
+      body: human,
+      version: 3,
+      revisionId: crypto.randomUUID(),
+      parentId: null,
+      state: "active",
+      citations: [],
+    }));
+    const seen: Seen[] = [];
+    const fetched: string[] = [];
+    const messages: string[] = [];
+    let publications = 0;
+    const spies = (["error", "info", "warn", "log", "debug"] as const).map((method) =>
+      spyOn(console, method).mockImplementation((...values: unknown[]) => {
+        messages.push(values.map(String).join(" "));
+      }),
+    );
+    try {
+      await expect(
+        scenario({
+          pages,
+          readFiles: async (paths) => {
+            fetched.push(...paths);
+            return paths.map((path) => ({ path, content: sourceContent }));
+          },
+          reply: (entry) => {
+            seen.push(entry);
+            if (entry.role === "planner") {
+              // Globally cached source is still unread in this topic.
+              if (entry.index === 0) return { tool: [unread] };
+              return {
+                output: {
+                  topics: [
+                    topic(
+                      "application-and-tests",
+                      [seed],
+                      null,
+                      pages.map((page) => page.id),
+                    ),
+                  ],
+                },
+              };
+            }
+            if (entry.role === "writer")
+              return {
+                output: {
+                  pages: pages.map((page, index) => ({
+                    id: page.id,
+                    title: page.title,
+                    body: `${human}\n\nUpdated guidance.`,
+                    sources: citations[index],
+                  })),
+                },
+              };
+            return { output: { issues: [] } };
+          },
+          onPublish: () => {
+            publications++;
+          },
+        }),
+      ).rejects.toThrow("Wiki topic failed bounded quality checks");
+      const diagnostics = messages.filter((message) =>
+        message.includes("rejected before the check:"),
+      );
+      expect(diagnostics).toEqual(
+        [1, 2, 3].map(
+          (round) =>
+            `[factory] Wiki topic application-and-tests round ${round} rejected before the check: Wiki update must cite sources actually read | sourceRejections emptySourceLists=${counts.emptySourceLists} knownUnreadCitations=${counts.knownUnreadCitations} unknownCitationPaths=${counts.unknownCitationPaths}`,
+        ),
+      );
+      expect(diagnostics.every((message) => message.length < 400)).toBe(true);
+      for (const value of [
+        seed,
+        unread,
+        unknown,
+        malicious,
+        "fixture-only",
+        "forged log",
+        human,
+        sourceContent,
+      ])
+        expect(messages.join("\n")).not.toContain(value);
+      expect(count(seen, "writer")).toBe(3);
+      expect(count(seen, "checker")).toBe(0);
+      expect(publications).toBe(0);
+      expect(fetched).toEqual([unread, seed]);
+      expect(pages.every((page) => page.body === human && page.version === 3)).toBe(true);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  },
+);
 
 test("a larger topic keeps its own investigator and a child researches under its unpublished parent", async () => {
   const many = fileList(9).map((file) => file.path);

@@ -987,6 +987,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                 currentPages: ownPages(),
                 otherPages: otherPages(),
                 sources: promptSources(evidence, writerSources),
+                readPaths: [...sources.read.keys()],
                 // An empty first draft in the prompt invites an empty answer, so only a repair has one.
                 ...(inputData.round
                   ? {
@@ -1008,7 +1009,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                 ...(inputData.advisory?.length ? { advisory: inputData.advisory } : {}),
               },
               sources,
-              `${merged ? "No separate research was done for this topic: sources holds its seed files. Read further files with readSource only when a claim needs them. " : ""}Write only this topic package. pages:[] is valid only when updating existing pages without material change; a new topic always returns its one page. For a new topic return exactly one page containing body and sources only; Factory supplies its planned identity, title and parent. Existing updates contain only id, title, body and sources, using only this topic's pageIDs and at most two pages. Do not return slugs or parents. Preserve complete human context. A new root overview is at most 1200 characters, concise reader orientation without code examples or a catalogue of interfaces/tests. Child guides will publish later, so do not add or link them now. No sources footer. When issues are listed, resolve each by removing the claim or narrowing it to exactly what the sources state; add no new claims, so the next check finds nothing new. advisory lists readability, density and structure suggestions: apply them when they fit without adding claims. Omit unchanged existing pages. Never edit another topic's published page to resolve duplication; shorten this package instead.${inputData.round >= maximumWriteRounds - 1 ? " This is the last repair: delete every flagged passage instead of rewriting it, and add no new sentences or claims." : ""}`,
+              `${merged ? "No separate research was done for this topic: sources holds files already read for it. Read further files with readSource only when a claim needs them. " : ""}Write only this topic package. pages:[] is valid only when updating existing pages without material change; a new topic always returns its one page. For a new topic return exactly one page containing body and sources only; Factory supplies its planned identity, title and parent. Existing updates contain only id, title, body and sources, using only this topic's pageIDs and at most two pages. Every page.sources must be a nonempty array of repository-relative path strings copied exactly from readPaths, supplied sources[].path or a successful readSource result's path. readPaths lists this topic's already read paths, not all repository paths. A newly read path can be cited even if it was absent from readPaths at the start of this round. listDirectory and findFiles offer read choices, not citation evidence; use readSource for genuinely missing evidence before citing it. Do not use Wiki page IDs, URLs or line suffixes. Cite only files that support the page's claims. Do not return slugs or parents. Preserve complete human context. A new root overview is at most 1200 characters, concise reader orientation without code examples or a catalogue of interfaces/tests. Child guides will publish later, so do not add or link them now. No sources footer. When issues are listed, resolve each by removing the claim or narrowing it to exactly what the sources state; add no new claims, so the next check finds nothing new. advisory lists readability, density and structure suggestions: apply them when they fit without adding claims. Omit unchanged existing pages. Never edit another topic's published page to resolve duplication; shorten this package instead.${inputData.round >= maximumWriteRounds - 1 ? " This is the last repair: delete every flagged passage instead of rewriting it, and add no new sentences or claims." : ""}`,
               undefined,
               merged ? { toolRounds: 3 } : {},
             ),
@@ -1080,9 +1081,23 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             issues.push(...wikiLinkIssues(page.body, pages));
           }
           if (issues.length) {
+            // Count occurrences, including duplicates across pages. The writing schema bounds
+            // these at two empty lists and 128 citations; never include the rejected strings.
+            const sourceRejections = {
+              emptySourceLists: 0,
+              knownUnreadCitations: 0,
+              unknownCitationPaths: 0,
+            };
+            for (const page of output.pages) {
+              if (!page.sources.length) sourceRejections.emptySourceLists++;
+              for (const path of page.sources) {
+                if (!known.has(path)) sourceRejections.unknownCitationPaths++;
+                else if (!sources.read.has(path)) sourceRejections.knownUnreadCitations++;
+              }
+            }
             // Factory-authored messages only; a checker's issues are model prose and stay out.
             console.error(
-              `[factory] Wiki topic ${topic.slug} round ${inputData.round + 1} rejected before the check: ${[...new Set(issues)].join(" | ").slice(0, 600)}`,
+              `[factory] Wiki topic ${topic.slug} round ${inputData.round + 1} rejected before the check: ${[...new Set(issues)].join(" | ").slice(0, 600)} | sourceRejections emptySourceLists=${sourceRejections.emptySourceLists} knownUnreadCitations=${sourceRejections.knownUnreadCitations} unknownCitationPaths=${sourceRejections.unknownCitationPaths}`,
             );
             return { round: inputData.round + 1, issues, output };
           }
