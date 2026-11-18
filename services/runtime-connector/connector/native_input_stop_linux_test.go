@@ -9,7 +9,46 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestNativeInputStopPrivateBindRestrictions(t *testing.T) {
+	if os.Getenv("FACTORY_NATIVE_INPUT_STOP_MOUNT_PROOF") != "1" {
+		t.Skip("explicit owned read/write, non-executable metadata mount proof only")
+	}
+	if _, err := os.Stat("/run/ate/identity/uid"); !os.IsNotExist(err) {
+		t.Fatal("never use a retained native Actor for the private mount fixture")
+	}
+	var before unix.Statfs_t
+	if err := unix.Statfs(inputStopGit, &before); err != nil {
+		t.Fatal(err)
+	}
+	const restrictions = unix.ST_NOSUID | unix.ST_NODEV | unix.ST_NOEXEC
+	if before.Flags&restrictions != restrictions || before.Flags&unix.ST_RDONLY != 0 {
+		t.Fatal("fixture requires writable metadata with inherited nosuid,nodev,noexec")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "metadata")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Unmount(target, unix.MNT_DETACH); err != nil && err != unix.EINVAL {
+			t.Error(err)
+		}
+	})
+	if err := mountInputStopPath(root, inputStopGit, "/metadata", false, false); err != nil {
+		t.Fatal(err)
+	}
+	var after unix.Statfs_t
+	if err := unix.Statfs(target, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Flags&restrictions != restrictions || after.Flags&unix.ST_RDONLY != 0 {
+		t.Fatal("private bind weakened original restrictions or made metadata read-only")
+	}
+}
 
 func TestNativeInputStopDirectoriesIgnorePrivateUmask(t *testing.T) {
 	root := t.TempDir()

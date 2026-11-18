@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -48,23 +49,35 @@ func executeNativeInputStop(ctx context.Context, input nativeInputStop, binary s
 	}
 	childContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	parentReader, parentWriter, err := os.Pipe()
+	if err != nil {
+		return nativeInputStopResult{}, err
+	}
+	defer parentReader.Close()
+	defer parentWriter.Close()
 	command := exec.CommandContext(childContext, binary, "native-input-stop-worker")
 	command.Dir = "/"
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
 	command.Stdin = bytes.NewReader(encoded)
+	command.ExtraFiles = []*os.File{parentReader}
 	output := &inputStopOutput{cancel: cancel}
 	command.Stdout = output
 	command.Stderr = io.Discard
 	command.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWPID,
 		Setpgid:    true,
-		Pdeathsig:  syscall.SIGKILL,
 	}
 	command.Cancel = func() error {
 		StopAssignedProcess(command)
 		return nil
 	}
 	command.WaitDelay = 5 * time.Second
+	// Go's pre-exec Pdeathsig check compares the Parent's outer PID with
+	// getppid(), which is zero for this private namespace init. Arm that signal
+	// in the trusted child instead, with its anonymous liveness pipe.
+	// Retain the creating thread until joined because the signal is thread-bound.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := command.Run(); err != nil || ctx.Err() != nil {
 		return nativeInputStopResult{}, errors.New("native input Stop process exit is unconfirmed; original Source was retained")
 	}
@@ -77,6 +90,10 @@ func executeNativeInputStop(ctx context.Context, input nativeInputStop, binary s
 func mountInputStopPath(root, source, destination string, readOnly, device bool) error {
 	info, err := os.Stat(source)
 	if err != nil {
+		return err
+	}
+	var inherited unix.Statfs_t
+	if err := unix.Statfs(source, &inherited); err != nil {
 		return err
 	}
 	target := filepath.Join(root, destination)
@@ -94,11 +111,16 @@ func mountInputStopPath(root, source, destination string, readOnly, device bool)
 		return err
 	}
 	flags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_NOSUID)
-	if !device {
+	if !device || inherited.Flags&unix.ST_NODEV != 0 {
 		flags |= unix.MS_NODEV
 	}
-	if readOnly {
+	if readOnly || inherited.Flags&unix.ST_RDONLY != 0 {
 		flags |= unix.MS_RDONLY
+	}
+	// RootlessKit inherits locked mount restrictions. Retain them rather than
+	// trying to make non-executable metadata or fixed devices executable.
+	if inherited.Flags&unix.ST_NOEXEC != 0 {
+		flags |= unix.MS_NOEXEC
 	}
 	return unix.Mount("", target, "", flags, "")
 }
@@ -140,6 +162,11 @@ func inputStopLoopback() error {
 	if err := unix.IoctlIfreq(socket, unix.SIOCGIFFLAGS, request); err != nil {
 		return err
 	}
+	if request.Uint16()&unix.IFF_UP != 0 {
+		// The pinned native stack already enables its private loopback and
+		// rejects a redundant SIOCSIFFLAGS. Do not mutate an enabled interface.
+		return nil
+	}
 	request.SetUint16(request.Uint16() | unix.IFF_UP)
 	return unix.IoctlIfreq(socket, unix.SIOCSIFFLAGS, request)
 }
@@ -150,6 +177,16 @@ func inputStopLoopback() error {
 func RunNativeInputStopWorker() error {
 	if os.Geteuid() != 0 || os.Getpid() != 1 {
 		return errors.New("native input Stop worker requires its private namespace init")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	parent := os.NewFile(inputStopParentFD, "native input Stop Parent")
+	if parent == nil {
+		return errors.New("native input Stop Parent liveness is unavailable")
+	}
+	defer parent.Close()
+	if err := armNativeInputStopParent(parent); err != nil {
+		return err
 	}
 	var input nativeInputStop
 	if readInputStopJSON(os.Stdin, &input) != nil || input.validate() != nil {
@@ -231,6 +268,9 @@ func RunNativeInputStopWorker() error {
 	if err := syscall.Setuid(1000); err != nil {
 		return err
 	}
+	if err := armNativeInputStopParent(parent); err != nil {
+		return err
+	}
 	// Read stdin once, before entering the restricted root. Bun receives only
 	// that validated assignment through a new pipe, never the Parent's stdin.
 	encoded, _ := json.Marshal(input)
@@ -249,6 +289,9 @@ func RunNativeInputStopWorker() error {
 		return err
 	}
 	reader.Close()
+	if err := parent.Close(); err != nil {
+		return err
+	}
 	return syscall.Exec(inputStopBun, []string{inputStopBun, "--no-env-file", inputStopServer + "/input-stop.mjs"},
 		[]string{"PATH=/usr/bin:/bin", "HOME=/tmp", "TMPDIR=/tmp"})
 }
