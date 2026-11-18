@@ -831,6 +831,12 @@ deletion has no atomic UID precondition, so no other actor may mutate this fresh
 names during the run or cleanup. An unconfirmed cleanup keeps the receipt incomplete and the
 journal available. Cleanup exit 0 alone is not a restore pass.
 
+Use `--inspect` instead of `--plan` to revalidate the same private inputs after a rehearsal has
+created its evidence directory. Inspection checks all witnesses and part hashes without Docker
+calls, writes or a new restore. It does not validate the receipt as successful or permit rerunning
+`--run` into existing evidence. The application-target preparation checks the successful receipt
+separately.
+
 Unit mocks, local synthetic SQLite checks and archive tests do not qualify native restoration.
 The operator must run this lane on the actual private set and review all component receipts and
 cleanup. Even that pass does not prove a running Factory, authenticated Forgejo behavior, all

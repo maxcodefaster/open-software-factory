@@ -241,6 +241,169 @@ test("private inputs, pins, scope and witnesses are checked without writes or co
   }
 });
 
+test("read-only inspection validates complete witnesses with existing evidence without changing inputs or receipts", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.value.evidenceDirectory, { mode: 0o700 });
+    const receipt = join(f.value.evidenceDirectory, "result.json");
+    const retainedReceipt = '{"synthetic":"completed-receipt-must-not-be-rewritten"}\n';
+    await writeFile(receipt, retainedReceipt, { mode: 0o600 });
+    const fixtureBefore = await readFile(f.path);
+    const witnessBefore = await readFile(join(f.value.privateRoot, "witnesses.json"));
+    const partsBefore = await Promise.all(
+      Object.keys(f.witness.parts).map((name) =>
+        readFile(join(f.value.privateRoot, f.value.set, name)),
+      ),
+    );
+    const inspected = await loadFixture(f.path, owner, "inspect");
+    expect(inspected.witnesses).toEqual(f.witness);
+    expect(inspected.witnessDigest).toBe(hash(JSON.stringify(f.witness)));
+    expect(inspected.source).toEqual(f.value.source);
+    expect(await readFile(f.path)).toEqual(fixtureBefore);
+    expect(await readFile(join(f.value.privateRoot, "witnesses.json"))).toEqual(witnessBefore);
+    expect(
+      await Promise.all(
+        Object.keys(f.witness.parts).map((name) =>
+          readFile(join(f.value.privateRoot, f.value.set, name)),
+        ),
+      ),
+    ).toEqual(partsBefore);
+    expect(await readFile(receipt, "utf8")).toBe(retainedReceipt);
+    await expect(f.load()).rejects.toThrow("Evidence destination already exists");
+  } finally {
+    await f.close();
+  }
+});
+
+test("inspection CLI is read-only and default plan/run still refuse an existing evidence directory", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.value.evidenceDirectory, { mode: 0o700 });
+    const receipt = join(f.value.evidenceDirectory, "result.json");
+    await writeFile(receipt, '{"synthetic":"unchanged"}', { mode: 0o600 });
+    for (const mode of ["--inspect", "--plan", "--run"]) {
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          join(import.meta.dirname, "restore-rehearsal.ts"),
+          mode,
+          "--fixture",
+          f.path,
+          "--owner",
+          owner,
+        ],
+        { env: { PATH: "" }, stdout: "pipe", stderr: "pipe" },
+      );
+      const stdout = await new Response(child.stdout).text();
+      const stderr = await new Response(child.stderr).text();
+      expect(await child.exited).toBe(mode === "--inspect" ? 0 : 1);
+      if (mode === "--inspect") {
+        expect(JSON.parse(stdout).kind).toBe("isolated-data-service-restore-inspection");
+        expect(JSON.parse(stdout).witnessDigest).toBe(hash(JSON.stringify(f.witness)));
+        expect(stderr).toBe("");
+      } else {
+        expect(stdout).toBe("");
+        expect(stderr).toContain("Restore rehearsal refused or incomplete");
+      }
+      expect(await readFile(receipt, "utf8")).toBe('{"synthetic":"unchanged"}');
+      expect(await Bun.file(join(f.value.evidenceDirectory, "ownership.json")).exists()).toBe(
+        false,
+      );
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test("cleanup loads metadata after missing inputs without fabricating a validated witness", async () => {
+  const f = await fixture();
+  try {
+    await rm(join(f.value.privateRoot, "witnesses.json"));
+    const metadata = await loadFixture(f.path, owner, "cleanup");
+    expect(metadata.owner).toBe(owner);
+    expect(Object.hasOwn(metadata, "witnesses")).toBe(false);
+    expect(Object.hasOwn(metadata, "witnessDigest")).toBe(false);
+    await expect(loadFixture(f.path, owner, "inspect")).rejects.toThrow(
+      "Private fixture inputs are incomplete",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "missing witnesses",
+  "missing part",
+  "changed part",
+  "missing COMPLETE",
+  "skipped component",
+  "witness owner",
+  "witness source",
+  "witness set",
+  "destination witness",
+  "native table",
+  "writer table",
+  "credential exclusion",
+  "object inventory",
+  "managed CA",
+  "unknown input",
+  "public evidence",
+  "evidence symlink",
+  "unknown mode",
+] as const)("read-only inspection refuses %s even with existing evidence", async (boundary) => {
+  const f = await fixture();
+  try {
+    f.value.source = { ...wikiFeedbackSource };
+    f.witness.source = { ...wikiFeedbackSource };
+    f.witness.state.files.push({
+      path: "ingress-tls/identity.json",
+      bytes: 19,
+      sha256: hash("original CA"),
+    });
+    await mkdir(f.value.evidenceDirectory, { mode: 0o700 });
+    if (boundary === "witness owner") f.witness.owner = "b".repeat(32);
+    if (boundary === "witness source")
+      f.witness.source.namespaceUID = "d4262638-6225-4915-b1bb-eff6ad2aaed2";
+    if (boundary === "witness set") f.witness.set = "20261118T100209Z";
+    if (boundary === "destination witness")
+      (f.witness as { provenance: string }).provenance = "restored-destination";
+    if (boundary === "native table") delete f.witness.postgres["factory.substrate_binding"];
+    if (boundary === "writer table") delete f.witness.postgres["factory.change_writer"];
+    if (boundary === "managed CA") f.witness.state.files.pop();
+    if (boundary === "credential exclusion")
+      f.witness.state.files.push({
+        path: "native/provisioner-token",
+        bytes: 3,
+        sha256: hash("not-copied"),
+      });
+    await f.save();
+    if (boundary === "missing witnesses") await rm(join(f.value.privateRoot, "witnesses.json"));
+    if (boundary === "missing part")
+      await rm(join(f.value.privateRoot, f.value.set, "postgres.dump"));
+    if (boundary === "changed part")
+      await writeFile(join(f.value.privateRoot, f.value.set, "state.tar.gz"), "changed");
+    if (boundary === "missing COMPLETE")
+      await rm(join(f.value.privateRoot, f.value.set, "COMPLETE"));
+    if (boundary === "skipped component")
+      await writeFile(join(f.value.privateRoot, f.value.set, "openbao.skipped"), "");
+    if (boundary === "object inventory")
+      await writeFile(join(f.value.privateRoot, "objects", "unlisted"), "", { mode: 0o600 });
+    if (boundary === "unknown input")
+      await writeFile(join(f.value.privateRoot, "unclassified"), "", { mode: 0o600 });
+    if (boundary === "public evidence") await chmod(f.value.evidenceDirectory, 0o755);
+    if (boundary === "evidence symlink") {
+      await rm(f.value.evidenceDirectory, { recursive: true });
+      await symlink(f.value.privateRoot, f.value.evidenceDirectory);
+    }
+    await expect(
+      loadFixture(f.path, owner, (boundary === "unknown mode" ? "arbitrary" : "inspect") as never),
+    ).rejects.toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
 test("the loader admits the independently witnessed managed-TLS source without relabeling identities", async () => {
   const f = await fixture();
   try {

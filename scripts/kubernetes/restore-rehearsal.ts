@@ -244,11 +244,18 @@ function tableWitnesses(value: Record<string, Digest>, postgres = false) {
 }
 
 /** Reads only explicit private input metadata and compressed-byte hashes. No daemon or writes. */
+export function loadFixture(
+  path: string,
+  owner: string,
+  mode?: "run" | "inspect",
+): Promise<LoadedFixture>;
+export function loadFixture(path: string, owner: string, mode: "cleanup"): Promise<Fixture>;
 export async function loadFixture(
   path: string,
   owner: string,
-  cleanup = false,
-): Promise<LoadedFixture> {
+  mode: "run" | "inspect" | "cleanup" = "run",
+): Promise<LoadedFixture | Fixture> {
+  requireThat(["run", "inspect", "cleanup"].includes(mode), "Unknown fixture load mode");
   const raw = await privateJSON(path);
   keys(raw, "schema owner source set privateRoot evidenceDirectory docker retained images limits");
   const f = raw as unknown as Fixture;
@@ -355,12 +362,21 @@ export async function loadFixture(
     privateEntries.every((name) => allowedInputs.includes(name)),
     "Private fixture root must contain only declared inputs, no Docker config or provisioner files",
   );
-  if (cleanup) return { ...f, witnesses: undefined as unknown as Witnesses, witnessDigest: "" };
+  // Cleanup must remain possible after a failed/incomplete input transfer. Its return type
+  // deliberately has no witness fields, so it cannot masquerade as a validated restore input.
+  if (mode === "cleanup") return f;
   requireThat(same(privateEntries, allowedInputs), "Private fixture inputs are incomplete");
+  const evidence = await lstat(f.evidenceDirectory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   requireThat(
-    !(await lstat(f.evidenceDirectory).catch(() => null)),
+    mode === "inspect" || !evidence,
     "Evidence destination already exists; use explicit cleanup, not reuse",
   );
+  // Inspection only relaxes absence of an owned evidence directory. Every input/witness/part
+  // check below is identical to a new run; no receipt or archive is created or overwritten.
+  if (evidence) await ownedPath(f.evidenceDirectory, true);
   const w = (await privateJSON(join(f.privateRoot, "witnesses.json"))) as Witnesses;
   keys(w, "schema owner source set provenance parts postgres forgejo state objects openbao");
   requireThat(
@@ -1932,20 +1948,34 @@ export async function openBaoRequest(config: { action: "initialize" | "validate"
 }
 
 async function main(args: string[]) {
-  const mode = args.includes("--run") ? "run" : args.includes("--cleanup") ? "cleanup" : "plan";
+  const mode =
+    args[0] === "--run"
+      ? "run"
+      : args[0] === "--cleanup"
+        ? "cleanup"
+        : args[0] === "--inspect"
+          ? "inspect"
+          : "plan";
   requireThat(
     args.length === 5 &&
-      ["--run", "--cleanup", "--plan"].includes(args[0] ?? "") &&
+      ["--run", "--cleanup", "--plan", "--inspect"].includes(args[0] ?? "") &&
       args[1] === "--fixture" &&
       args[3] === "--owner",
-    "Usage: restore-rehearsal.ts --plan|--run|--cleanup --fixture /private/fixture.json --owner <32 hex>",
+    "Usage: restore-rehearsal.ts --plan|--inspect|--run|--cleanup --fixture /private/fixture.json --owner <32 hex>",
   );
-  const f = await loadFixture(args[2] ?? "", args[4] ?? "", mode === "cleanup");
-  if (mode === "plan") {
+  if (mode === "plan" || mode === "inspect") {
+    const f = await loadFixture(
+      args[2] ?? "",
+      args[4] ?? "",
+      mode === "inspect" ? "inspect" : "run",
+    );
     console.log(
       JSON.stringify(
         {
-          kind: "isolated-data-service-restore-plan",
+          kind:
+            mode === "inspect"
+              ? "isolated-data-service-restore-inspection"
+              : "isolated-data-service-restore-plan",
           owner: f.owner,
           source: f.source,
           set: f.set,
@@ -1975,6 +2005,7 @@ async function main(args: string[]) {
   process.on("SIGTERM", terminate);
   try {
     if (mode === "cleanup") {
+      const f = await loadFixture(args[2] ?? "", args[4] ?? "", "cleanup");
       await ownedPath(f.evidenceDirectory, true);
       const raw = (await privateJSON(join(f.evidenceDirectory, "ownership.json"))) as Journal;
       requireThat(
@@ -2009,6 +2040,7 @@ async function main(args: string[]) {
       await persist(f.evidenceDirectory, "cleanup.json", { owner: f.owner, confirmed });
       return interrupted || (confirmed ? 0 : 1);
     }
+    const f = await loadFixture(args[2] ?? "", args[4] ?? "");
     const result = await rehearse(f, safeExecute, controller.signal);
     console.log(
       `Isolated restore: ${result.status}; cleanup ${result.cleanup}; native activation not qualified`,
