@@ -22,6 +22,7 @@ import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { createLearningAutomation } from "./automation";
 import { calibrationCases, calibrationPassed } from "./calibration";
 import { reviewWork, workReviewInstructions } from "./judge";
+import { type PriorProposal, priorProposalEvidence } from "./prior-proposals";
 import type { replayPlanning } from "./replay";
 import { pendingReviewRequests, type ReviewRequest } from "./requests";
 import { collectLearningCases, type LearningSourceCursor } from "./sources";
@@ -173,14 +174,7 @@ export function createLearningWorker(
       const kind = calibration?.calibrated ? "work" : "calibration";
       const admittedCases = kind === "work" ? cases : calibrationCases;
       if (kind === "work" && admittedCases[0] && admittedCases[0].evidence.length < 24) {
-        const previous = await sql<
-          {
-            id: string;
-            state: string;
-            content: { title: string; change: string; target: string };
-            applicationState: string | null;
-          }[]
-        >`
+        const previous = await sql<PriorProposal[]>`
           SELECT proposal.id,proposal.state,proposal.content,application.state AS "applicationState" FROM factory.learning_proposal proposal
           JOIN factory.learning_review review ON review.id=proposal.review_id
           LEFT JOIN factory.learning_application application ON application.proposal_id=proposal.id
@@ -189,21 +183,7 @@ export function createLearningWorker(
             AND (${managerOnly} OR NOT(review.input @> '[{"activity":"setup"}]'::jsonb))
           ORDER BY review.created_at DESC,proposal.ordinal LIMIT 12`;
         if (previous.length)
-          admittedCases[0].evidence.push({
-            id: `learning:prior-proposals:${judgeKey}`,
-            kind: "configuration",
-            truncated: true,
-            body: JSON.stringify(
-              previous.map((item) => ({
-                id: item.id,
-                state: item.state,
-                applicationState: item.applicationState,
-                title: item.content.title,
-                target: item.content.target,
-                change: item.content.change.slice(0, 400),
-              })),
-            ),
-          });
+          admittedCases[0].evidence.push(priorProposalEvidence(previous, judgeKey));
       }
       const id = crypto.randomUUID();
       const token = crypto.randomUUID();

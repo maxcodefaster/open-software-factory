@@ -32,6 +32,12 @@ adding more rules. Propose nothing when evidence is weak or the process worked a
 When the packet lists prior proposals, do not repeat the same proposed, commissioned or dismissed
 change, including an applied or reverted edit. Revisit a dismissed or reverted cause only with
 materially new observed evidence; never oscillate between the same two methods.
+Compare the exact target kind, id and field, its revision/version context and the wrong passage
+or observed cause. A shared target category, title, topic or desired outcome does not establish
+a duplicate across independent targets or different wrong passages. A new revision/version alone
+does not make the same cause new. Prior edits retain their original target; never retarget them
+to the current case. When passages are explicitly omitted, their digest identifies the exact
+before/after pair, not its meaning. Missing details do not establish that two causes are the same.
 Targets may include Skills, Project knowledge, saved Input instructions, repository instructions,
 tests and CI. Factory defects must be named as product defects, not hidden with prompt rules.
 Proposals must name one change, expected benefit, and a falsifiable validation including a healthy

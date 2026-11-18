@@ -3,7 +3,7 @@ import { createLearningService } from "../../apps/factory/src/learning/service";
 import { learningEditDigest } from "../../apps/factory/src/learning/targets";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { editKnowledgeIn } from "../../apps/factory/src/knowledge/edit";
-import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
+import type { LearningCase, LearningEdit } from "../../packages/conversation-domain/src/learning";
 import { retainedEditProposal } from "../fixtures/learning-edit";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -12,6 +12,7 @@ import { createLearningWorker } from "../../apps/factory/src/learning/worker";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
 import { calibratedResult } from "../fixtures/learning";
 import { fixtureValue } from "../fixtures/value";
+import { createWorkReviewOutput } from "../../apps/factory/src/learning/judge-output";
 
 const before = "Ask for a hostname before looking at repository sources.";
 const after = "Inspect repository sources before asking for a hostname.";
@@ -312,6 +313,115 @@ async function skillExample(database: ReturnType<typeof createDatabase>) {
   };
   return { ...owned, skills, libraryId, revisionId, content, edit, proposal, service, apply };
 }
+
+test("work review retains a reverted proposal's exact edit separately from a different Skill target", async () => {
+  const host = await factoryProcess(),
+    database = host.connect();
+  const previous = {
+    url: process.env["FACTORY_MODEL_BASE_URL"],
+    key: process.env["FACTORY_MODEL_API_KEY"],
+  };
+  let worker: ReturnType<typeof createLearningWorker> | undefined;
+  try {
+    const value = await skillExample(database);
+    const applied = (await value.service.decide(value.userID, value.apply)) as {
+      applicationId: string;
+      revisionId: string;
+    };
+    await value.service.rollback(value.userID, {
+      commandId: crypto.randomUUID(),
+      applicationId: applied.applicationId,
+      expectedRevisionId: applied.revisionId,
+    });
+    const target = {
+      ...value.edit.target,
+      id: crypto.randomUUID(),
+      revisionId: crypto.randomUUID(),
+    };
+    await value.skills.library.save(
+      {
+        libraryId: target.id,
+        revisionId: target.revisionId,
+        expectedRevision: 0,
+        scope: "project",
+        projectId: value.projectID,
+        content: { ...value.content, key: "owned-distinct-method" },
+      },
+      value.userID,
+    );
+    const source: LearningCase = {
+      ...value.proposal.source,
+      id: "owned:distinct-target",
+      settledAt: new Date(Date.now() - 25 * 60 * 60_000).toISOString(),
+      targets: value.proposal.source.targets.map((item) => ({ ...item, target })),
+      evidence: value.proposal.source.evidence.map((item) =>
+        item.kind === "configuration" ? { ...item, body: JSON.stringify(target) } : item,
+      ),
+    };
+    await database.client`INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
+      VALUES(${source.id},${value.projectID},NULL,${value.userID},false,'research','completed',
+        ${source.settledAt},${JSON.stringify(source)}::jsonb,true)`;
+    process.env["FACTORY_MODEL_BASE_URL"] = "https://owned.invalid/v1";
+    process.env["FACTORY_MODEL_API_KEY"] = "owned-not-a-real-key";
+    const packets: LearningCase[][] = [];
+    worker = createLearningWorker(database, {
+      signingKey: "owned",
+      review: async (input) => {
+        if (input.cases[0]?.id.startsWith("calibration:")) return calibratedResult();
+        packets.push(input.cases);
+        // Inspect the admitted context, not a simulated model decision or proposal.
+        return {
+          cases: input.cases.map((item) => ({
+            caseId: item.id,
+            fulfillment: "unknown",
+            rework: "unknown",
+            verification: "unknown",
+            explanation: "Owned packet inspection only.",
+            evidenceIds: [],
+          })),
+          findings: [],
+          proposals: [],
+        };
+      },
+    });
+    await worker.sweep();
+    await worker.sweep();
+    await worker.sweep();
+    expect(packets).toHaveLength(1);
+    const cases = fixtureValue(packets[0], "packets[0]");
+    const [review] = await database.client<{ input: LearningCase[]; state: string }[]>`
+      SELECT input,state FROM factory.learning_review WHERE kind='work' AND input->0->>'id'=${source.id}`;
+    expect(review?.state).toBe("completed");
+    expect(review?.input).toEqual(cases);
+    const wire = createWorkReviewOutput(cases).cases;
+    expect(wire[0]?.targets[0]?.target).toEqual(target);
+    const prior = fixtureValue(
+      wire[0]?.evidence.find((item) => item.body.includes(value.proposal.id)),
+      "prior proposal evidence",
+    );
+    expect(JSON.parse(prior.body)).toEqual([
+      {
+        id: value.proposal.id,
+        state: "applied",
+        applicationState: "reverted",
+        title: value.proposal.content.title,
+        target: "skill",
+        change: value.proposal.content.change,
+        edit: value.edit,
+      },
+    ]);
+    expect(prior.body).not.toContain(target.id);
+    expect(prior.body).not.toContain(target.revisionId);
+  } finally {
+    worker?.close();
+    if (previous.url === undefined) delete process.env["FACTORY_MODEL_BASE_URL"];
+    else process.env["FACTORY_MODEL_BASE_URL"] = previous.url;
+    if (previous.key === undefined) delete process.env["FACTORY_MODEL_API_KEY"];
+    else process.env["FACTORY_MODEL_API_KEY"] = previous.key;
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
 
 test("a confirmed Skill edit atomically publishes, adopts for new work, and rolls back without rewriting admitted intent", async () => {
   const host = await factoryProcess(),

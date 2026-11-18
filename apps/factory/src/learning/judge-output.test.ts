@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   type LearningCase,
   type LearningResult,
+  learningEvidence,
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
 import {
@@ -16,6 +18,7 @@ import {
 } from "../../../../test/fixtures/learning-comparison";
 import { fixtureValue } from "../../../../test/fixtures/value";
 import { createWorkReviewOutput } from "./judge-output";
+import { type PriorProposal, priorProposalEvidence } from "./prior-proposals";
 
 const cases: LearningCase[] = ["alpha", "beta", "empty"].map((id) => ({
   id: `case:${id}`,
@@ -38,6 +41,91 @@ const cases: LearningCase[] = ["alpha", "beta", "empty"].map((id) => ({
         ],
   targets: [],
 }));
+
+function priorProposal(index: number): PriorProposal {
+  return {
+    id: crypto.randomUUID(),
+    state: ["proposed", "commissioned", "dismissed", "applied"][index % 4] ?? "proposed",
+    applicationState: index % 4 === 3 ? (index % 8 === 3 ? "applied" : "reverted") : null,
+    content: {
+      title: "Correct the source-backed method",
+      target: "skill",
+      change: "Read the source before answering.",
+      edit: {
+        target: {
+          kind: "skill",
+          id: "10000000-0000-4000-8000-000000000003",
+          revisionId: crypto.randomUUID(),
+          version: index + 1,
+          field: index % 2 ? "description" : "instructions",
+        },
+        before: `Use the cached value ${index}.`,
+        after: `Use the pinned source ${index}.`,
+      },
+    },
+  };
+}
+
+test("prior proposal context preserves complete edit identity and passages across decision states", () => {
+  const previous = Array.from({ length: 8 }, (_, index) => priorProposal(index));
+  const advisory = priorProposal(8);
+  delete advisory.content.edit;
+  previous.push(advisory, {
+    ...advisory,
+    id: crypto.randomUUID(),
+    content: { ...advisory.content, edit: null },
+  });
+  const original = structuredClone(previous);
+  const evidence = learningEvidence.parse(priorProposalEvidence(previous, "owned-judge"));
+  expect(previous).toEqual(original);
+  const history = JSON.parse(evidence.body);
+  expect(history).toEqual(
+    previous.map(({ content, ...item }) => ({ ...item, ...content, edit: content.edit ?? null })),
+  );
+  const packet = createWorkReviewOutput([
+    { ...fixtureValue(cases[0], "cases[0]"), evidence: [evidence] },
+  ]).cases;
+  expect(packet[0]?.evidence[0]?.body).toBe(evidence.body);
+  // Historical edit targets are context only, never newly editable current targets.
+  expect(packet[0]?.targets).toEqual([]);
+});
+
+test("bounded prior proposal context retains all twelve targets and cause fingerprints", () => {
+  const previous = Array.from({ length: 12 }, (_, index) => {
+    const item = priorProposal(index);
+    const edit = fixtureValue(item.content.edit, "prior edit");
+    item.content.title = "\0".repeat(200);
+    item.content.change = "\0".repeat(4_000);
+    edit.before = `${index}${"\0".repeat(2_990)}`;
+    edit.after = `${index}${"\0".repeat(5_990)}`;
+    return item;
+  });
+  const original = structuredClone(previous);
+  const evidence = learningEvidence.parse(priorProposalEvidence(previous, "owned-judge"));
+  expect(previous).toEqual(original);
+  expect(evidence.truncated).toBe(true);
+  expect(evidence.body.length).toBeLessThanOrEqual(12_000);
+  expect(JSON.parse(evidence.body)).toEqual(
+    previous.map((item) => {
+      const { target, before, after } = fixtureValue(item.content.edit, "prior edit");
+      return {
+        id: item.id,
+        state: item.state,
+        applicationState: item.applicationState,
+        title: expect.any(String),
+        target: item.content.target,
+        change: expect.any(String),
+        edit: {
+          target,
+          passagesOmitted: true,
+          passagesDigest: createHash("sha256")
+            .update(JSON.stringify({ before, after }))
+            .digest("hex"),
+        },
+      };
+    }),
+  );
+});
 
 type Verdict = Omit<LearningResult["cases"][number], "caseId">;
 type Output = {
