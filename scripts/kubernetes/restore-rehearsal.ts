@@ -15,8 +15,8 @@ export const images: Record<string, string> = {
   rclone: upstream.rclone.image,
   tools: upstream.node.image,
 };
-// Reviewed source profiles, not a caller-supplied revision allowlist. These pairs share the
-// pinned backup formats, schema and data-service images. Managed-TLS profiles retain their CA.
+// Reviewed native source profiles, not a caller-supplied revision allowlist. Every archive
+// must satisfy the current lossless snapshot format. Managed-TLS profiles retain their CA.
 // Chart and application commits are independent; only the explicitly reviewed pairs qualify.
 // The complete source identity must still match the independent witness manifest below.
 export const supportedSourceManifests = [
@@ -48,6 +48,11 @@ export const supportedSourceManifests = [
   {
     chartRevision: "37db8559833c59925bca477fb1a4d1b29feb15d1",
     applicationRevision: "37db8559833c59925bca477fb1a4d1b29feb15d1",
+    requiredStateFiles: ["ingress-tls/identity.json"],
+  },
+  {
+    chartRevision: "09e348648f3169555275ae5d9a039f35cdf39bc6",
+    applicationRevision: "09e348648f3169555275ae5d9a039f35cdf39bc6",
     requiredStateFiles: ["ingress-tls/identity.json"],
   },
 ] as const;

@@ -67,6 +67,11 @@ const wikiFeedbackSource = {
   chartRevision: "37db8559833c59925bca477fb1a4d1b29feb15d1",
   applicationRevision: "37db8559833c59925bca477fb1a4d1b29feb15d1",
 };
+const sqliteSnapshotSource = {
+  ...managedSource,
+  chartRevision: "09e348648f3169555275ae5d9a039f35cdf39bc6",
+  applicationRevision: "09e348648f3169555275ae5d9a039f35cdf39bc6",
+};
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "factory-restore-test-")));
@@ -470,6 +475,7 @@ test.each([
   ["62288627", humanSubmissionSource],
   ["701ceb92", startupDispatchSource],
   ["37db8559", wikiFeedbackSource],
+  ["09e34864", sqliteSnapshotSource],
 ] as const)(
   "the loader admits the independently witnessed %s chart and application without relabeling backups",
   async (_revision, observed) => {
@@ -515,6 +521,7 @@ for (const [revision, observed] of [
   ["62288627", humanSubmissionSource],
   ["701ceb92", startupDispatchSource],
   ["37db8559", wikiFeedbackSource],
+  ["09e34864", sqliteSnapshotSource],
 ] as const)
   test.each([
     "new chart old application",
@@ -1555,6 +1562,7 @@ test.each([
 test.each([
   ["original", source],
   ["37db8559", wikiFeedbackSource],
+  ["09e34864", sqliteSnapshotSource],
 ] as const)(
   "all five components use only pinned quarantined clients for %s; no Factory/native activation",
   async (_revision, observed) => {
@@ -1562,7 +1570,7 @@ test.each([
     try {
       f.value.source = { ...observed };
       f.witness.source = { ...observed };
-      if (observed === wikiFeedbackSource)
+      if (observed !== source)
         f.witness.state.files.push({
           path: "ingress-tls/identity.json",
           bytes: 19,
