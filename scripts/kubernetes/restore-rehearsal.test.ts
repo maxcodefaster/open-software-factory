@@ -1053,7 +1053,7 @@ test("PostgreSQL witnesses preserve quoted authentication table names and reject
   }
 });
 
-test.each(["valid", "row digest", "foreign key"] as const)(
+test.each(["valid", "row digest", "foreign key", "foreign key table order"] as const)(
   "Forgejo SQL really rebuilds SQLite and checks %s in a synthetic local unit fixture",
   async (boundary) => {
     const f = await fixture();
@@ -1070,6 +1070,15 @@ test.each(["valid", "row digest", "foreign key"] as const)(
       };
       let sql =
         "CREATE TABLE repository(id INTEGER PRIMARY KEY,name TEXT); INSERT INTO repository VALUES(1,'owned');";
+      if (boundary === "foreign key table order") {
+        sql =
+          "CREATE TABLE access(id INTEGER PRIMARY KEY,repo_id INTEGER REFERENCES repository(id)); INSERT INTO access VALUES(1,1);" +
+          sql;
+        f.witness.forgejo.tables["access"] = {
+          rows: 1,
+          sha256: hash('[{"integer":"1"},{"integer":"1"}]\n'),
+        };
+      }
       if (boundary === "foreign key") {
         sql =
           "PRAGMA foreign_keys=OFF; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE repository(id INTEGER PRIMARY KEY REFERENCES parent(id),name TEXT); INSERT INTO repository VALUES(1,'owned');";
@@ -1085,9 +1094,9 @@ test.each(["valid", "row digest", "foreign key"] as const)(
       });
       const code = await child.exited;
       const stderr = await new Response(child.stderr).text();
-      expect(code === 0, stderr).toBe(boundary === "valid");
-      if (boundary === "valid")
-        expect(await Bun.file(join(root, "forgejo/data/forgejo.db")).exists()).toBe(true);
+      const valid = boundary === "valid" || boundary === "foreign key table order";
+      expect(code === 0, stderr).toBe(valid);
+      if (valid) expect(await Bun.file(join(root, "forgejo/data/forgejo.db")).exists()).toBe(true);
     } finally {
       await f.close();
     }

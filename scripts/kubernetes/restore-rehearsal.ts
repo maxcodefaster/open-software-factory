@@ -1753,7 +1753,12 @@ export async function validateForgejoSQL(config: { root: string }) {
   };
   await fs.mkdir(at("/forgejo/data"), { recursive: true, mode: 0o750 });
   // `forgejo-db.sql` is the authoritative consistent copy. Never open the archived raw SQLite DB.
-  const db = new DatabaseSync(at("/forgejo/data/forgejo.db"), { allowExtension: false });
+  // Forgejo dumps child tables before some referenced tables. Rebuild the complete dump
+  // before checking every foreign key below; Node enables immediate FK enforcement by default.
+  const db = new DatabaseSync(at("/forgejo/data/forgejo.db"), {
+    allowExtension: false,
+    enableForeignKeyConstraints: false,
+  });
   try {
     db.exec(await fs.readFile(at("/control/forgejo.sql"), "utf8"));
     if (
