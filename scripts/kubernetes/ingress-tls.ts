@@ -439,7 +439,9 @@ export async function renewIngressTLS(input: RenewIngressTLSInput) {
       "Ingress TLS leaf signing failed",
     );
     const [nextPEM, nextKey] = await Promise.all([readFile(certFile), readFile(keyFile)]);
-    const next = validateLeaf(nextPEM, nextKey, root, hosts, now);
+    // Signing can cross a certificate notBefore second. Validate the new leaf
+    // at completion, not at the older observation used for renewal eligibility.
+    const next = validateLeaf(nextPEM, nextKey, root, hosts, (input.now ?? new Date()).getTime());
     const patch = [
       { op: "test", path: "/metadata/uid", value: metadata["uid"] },
       { op: "test", path: "/metadata/resourceVersion", value: metadata["resourceVersion"] },

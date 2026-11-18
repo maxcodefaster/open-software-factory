@@ -335,6 +335,29 @@ async function fixture() {
   return { directory, ca, root, leaf, secret, options, execute, calls, behavior, useLeaf, cleaned };
 }
 
+function delayedSigning(f: Awaited<ReturnType<typeof fixture>>, started = Date.now()) {
+  return async (args: readonly string[], input?: string) => {
+    if (args[0] !== "openssl" || args[1] !== "x509") return f.execute(args, input);
+    // Make the real signer's second-resolution notBefore later than the
+    // renewal's initial observation, without changing either clock.
+    await Bun.sleep(1_100);
+    const result = await f.execute(args, input);
+    const path = args[args.indexOf("-out") + 1] as string;
+    const cert = new X509Certificate(await readFile(path));
+    const root = new X509Certificate(f.ca.cert);
+    expect(Date.parse(cert.validFrom)).toBeGreaterThan(started);
+    expect(Date.parse(cert.validFrom)).toBeLessThanOrEqual(Date.now());
+    expect(cert.ca).toBe(false);
+    expect(cert.verify(root.publicKey)).toBe(true);
+    expect(cert.checkIssued(root)).toBe(true);
+    expect(
+      cert.checkPrivateKey(createPrivateKey(await readFile(join(dirname(path), "tls.key")))),
+    ).toBe(true);
+    expect(cert.subjectAltName).toBe(hosts.map((host) => `DNS:${host}`).join(", "));
+    return result;
+  };
+}
+
 test("real kubectl local patch reads the module-produced private patch through runCommand", async () => {
   const f = await fixture();
   const source = join(f.directory, "observed-secret.json");
@@ -486,6 +509,32 @@ test("renews a real 90-day EC leaf under the fixed CA and rejects wrong trust/ho
   expect(Object.keys(result).sort()).toEqual(["expiresAt", "fingerprint256", "status"]);
   await f.cleaned();
   await handshakes(cert, key, f.ca.cert, other.cert);
+});
+
+test("a leaf signed after the observation second is validated at signing completion", async () => {
+  const f = await fixture();
+  const retainedCA = f.secret.data["ca.crt"];
+  const result = await renewIngressTLS({ ...f.options, execute: delayedSigning(f) });
+  expect(result.status).toBe("renewed");
+  expect(f.secret.data["ca.crt"]).toBe(retainedCA);
+  expect(f.calls.filter(({ args }) => args[8] === "get")).toHaveLength(1);
+  expect(f.calls.filter(({ args }) => args[8] === "patch")).toHaveLength(1);
+  await f.cleaned();
+});
+
+test("an explicit observation time still rejects a newly signed future leaf", async () => {
+  const f = await fixture();
+  const now = new Date(
+    new X509Certificate(Buffer.from(f.secret.data["tls.crt"], "base64")).validFrom,
+  );
+  const retained = { ...f.secret.data };
+  await expect(
+    renewIngressTLS({ ...f.options, now, execute: delayedSigning(f, now.getTime()) }),
+  ).rejects.toThrow("without a future start date");
+  expect(f.secret.data).toEqual(retained);
+  expect(f.calls.filter(({ args }) => args[8] === "get")).toHaveLength(1);
+  expect(f.calls.filter(({ args }) => args[8] === "patch")).toHaveLength(0);
+  await f.cleaned();
 });
 
 test("a current leaf is observed once without OpenSSL, patching or host configuration changes", async () => {
@@ -893,7 +942,9 @@ test.each(["uid", "resourceVersion"] as const)(
     f.behavior.beforePatch = () => {
       f.secret.metadata[field] = "replaced";
     };
-    await expect(renewIngressTLS(f.options)).rejects.toThrow("not confirmed");
+    await expect(renewIngressTLS({ ...f.options, execute: delayedSigning(f) })).rejects.toThrow(
+      "not confirmed",
+    );
     expect(f.secret.data["tls.crt"] === retained["tls.crt"]).toBe(true);
     expect(f.secret.data["tls.key"] === retained["tls.key"]).toBe(true);
     expect(f.secret.data["ca.crt"] === retained["ca.crt"]).toBe(true);
