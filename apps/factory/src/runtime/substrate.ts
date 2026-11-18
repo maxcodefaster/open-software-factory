@@ -1002,25 +1002,27 @@ export function createSubstrateExecution(
             return "pending";
           requireDurableROOTFS(actor, saved, nativeSnapshot.parse(saved.checkpoint));
           await sources.requireIndependent(workspaceID, saved.actorUID, sql);
-          const [scope] = await sql<{ modelID: string; template: unknown }[]>`
-            SELECT turn.authority->>'modelId' AS "modelID",provision.template
+          const [scope] = await sql<{ modelID: string }[]>`
+            SELECT turn.authority->>'modelId' AS "modelID"
             FROM factory.change_agent_session session
             JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
             JOIN factory.agent_turn turn ON turn.id=intent.turn_id
             JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
-            JOIN factory.substrate_workspace provision ON provision.workspace_id=attempt.workspace_id AND provision.generation=attempt.generation
             WHERE session.change_id=${target.changeID} AND session.state='stopped' AND session.stop_pending
               AND session.stop_id=${target.stopID} AND session.runtime_attempt_id=${attemptID}
               AND session.opencode_session_id=${target.sessionID}
               AND intent.runtime_attempt_id=${attemptID} AND intent.session_id=${target.sessionID} AND intent.prompt_id=${target.promptID}`;
           if (!scope) return "pending";
+          // Provisioning retains metadata only. Read bootstrap capability from
+          // the native owner after its exact UID/version/spec-hash checks,
+          // without persisting or returning its credential-bearing environment.
           const template = z
             .object({
               containers: z.array(
                 z.object({ env: z.array(z.object({ name: z.string(), value: z.string() })) }),
               ),
             })
-            .safeParse(scope.template);
+            .safeParse(await profile());
           const entries = template.success
             ? template.data.containers
                 .flatMap((container) => container.env)

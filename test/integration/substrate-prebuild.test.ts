@@ -126,6 +126,7 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
     }
     if (method === "ResumeActor" && actor) {
       resumes++;
+      actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
       actor.status = {
         state: "ACTOR_STATE_RUNNING",
         workerAssignment: { sandboxRuntime: f.config.runtime },

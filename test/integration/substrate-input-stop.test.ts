@@ -4,14 +4,14 @@ import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { substrateTemplateSHA256 } from "../../apps/factory/src/runtime/substrate";
 import { nativeInputStopIn } from "../../apps/factory/src/runtime/substrate-input-stop";
 import { objectDigest, type PrivateObjects } from "../../apps/factory/src/storage/objects";
-import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
+import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
 import {
-  SubstrateRPCError,
   type SubstrateCall,
+  SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
 
 test.each([
   "settled",
@@ -22,7 +22,7 @@ test.each([
   "foreign-result",
   "unsupported-bootstrap",
 ] as const)(
-  "offline input Stop retains original native intent, Source and exact outcomes: %s",
+  "offline input Stop retains metadata-only native intent, Source and exact outcomes: %s",
   async (scenario) => {
     const f = await substrateFixture("a".repeat(40), "ticket");
     const modelID = "owned-stop-model",
@@ -245,6 +245,9 @@ test.each([
       await f.database
         .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=2 WHERE change_id=${f.changeID}`;
       const runtime = await f.controller(rpc, sources);
+      const [provision] = await f.database
+        .client`SELECT template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+      expect(provision?.["template"]).toEqual({ metadata: f.template.metadata });
       const execution = f.execution(rpc, sources);
       await execution.start(f.userID);
       await f.database

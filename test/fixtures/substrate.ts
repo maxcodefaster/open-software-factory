@@ -208,13 +208,14 @@ export async function substrateFixture(
           ],
         },
       };
+      // Real provisioning retains metadata only, never credential-bearing bootstrap env.
       await database.client`INSERT INTO factory.substrate_workspace(
         workspace_id,intent,atespace_attempted_at,atespace,
         policy_attempted_at,policy,template_attempted_at,template)
         VALUES(${workspaceID},${JSON.stringify(intent)}::text::jsonb,
           ${space.metadata.createTime},${JSON.stringify(space)}::text::jsonb,
           ${policy.metadata.createTime},${JSON.stringify(policy)}::text::jsonb,
-          ${template.metadata.createTime},${JSON.stringify(template)}::text::jsonb)`;
+          ${template.metadata.createTime},${JSON.stringify({ metadata: template.metadata })}::text::jsonb)`;
       const withEgress: SubstrateCall = async (method, request) => {
         if (method === "GetAtespaceAccessPolicy") return structuredClone(policy);
         if (method === "GetActorEgressPolicy")
