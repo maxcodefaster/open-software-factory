@@ -1094,7 +1094,8 @@ export function createDeliveryController(
       const change = await changeRow(changeID);
       if (change)
         await createAccessController(database).requireDevelopment(userID, change.projectID);
-      if (!change?.commitSHA) throw new Error("Change has no delivered commit candidate");
+      if (!change?.commitSHA)
+        throw new CommandError("conflict", "Change has no delivered commit candidate");
       if (integration)
         await database.client`UPDATE factory.change SET delivery_waiting_sha=NULL,delivery_waiting_policy_id=NULL
           WHERE id=${changeID} AND state='active' AND delivery_waiting_sha=${change.commitSHA}`;
@@ -1156,7 +1157,7 @@ export function createDeliveryController(
             WHERE id=${changeID} AND state='active'`;
           void reconcile(changeID);
         }
-        throw new Error("Current commit is not eligible for delivery");
+        throw new CommandError("conflict", "Current commit is not eligible for delivery");
       }
       const approvalID = crypto.randomUUID();
       const mergeID = crypto.randomUUID();

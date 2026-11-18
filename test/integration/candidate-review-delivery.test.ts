@@ -199,6 +199,9 @@ async function setup(autofix = false) {
     setHead: (value: string) => {
       head = value;
     },
+    setBase: (value: string) => {
+      base = value;
+    },
   };
 }
 const passed = candidateReviewResultInput.parse({
@@ -572,6 +575,49 @@ test("successful CI alone cannot deliver and admits just one independent review"
     await f.dispose();
   }
 });
+test.each([
+  "missing-candidate",
+  "pending-review",
+  "failed-verification",
+  "changed-head",
+  "changed-base",
+])(
+  "normal Delivery approval returns a conflict for %s without recording approval or merging",
+  async (condition) => {
+    const f = await setup();
+    try {
+      if (!["missing-candidate", "pending-review"].includes(condition)) await f.complete(passed);
+      if (condition === "missing-candidate")
+        await f.database.client`UPDATE factory.change_commit_operation SET state='failed'
+          WHERE change_id=${f.changeID}`;
+      if (condition === "failed-verification")
+        await f.database.client`UPDATE factory.verification SET state='failed'
+          WHERE id=${f.verificationID}`;
+      if (condition === "changed-head") f.setHead("e".repeat(40));
+      if (condition === "changed-base") f.setBase("b".repeat(40));
+      await expect(f.native("approveDelivery", [f.changeID])).rejects.toMatchObject({
+        status: 409,
+        message:
+          condition === "missing-candidate"
+            ? "Change has no delivered commit candidate"
+            : "Current commit is not eligible for delivery",
+      });
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+      expect(f.merges()).toBe(0);
+      expect(f.reviews).toHaveLength(0);
+      expect(f.corrections).toHaveLength(0);
+    } finally {
+      await f.dispose();
+    }
+  },
+);
 test("human approval records the exact completed review and newer source cannot reuse it", async () => {
   const f = await setup();
   try {
