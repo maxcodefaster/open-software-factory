@@ -59,8 +59,17 @@ The same fresh Helm installation covers:
   the normal approval/Verification/review/Delivery path. Actual downloaded artifact bytes
   and SHA-256 match the recorded release; temporary access and compute are revoked afterward.
 
+A separate fresh Linux arm64 installation also covers Stop-only cold settlement of a
+previously completed Coding input after normal idle Pause. The same original Actor produced
+an exact joined worker result, a new completed durable ROOTFS and independent writable Source.
+A deliberate follow-up continued Coding. An ordinary Starter change on that installation
+passed generated exact-commit Verification, independent browser review, explicit Delivery
+approval and replacement Staging, including a real Staging signup and logout. Historical
+failed Stops and paused inputs with running or queued work are not qualified.
+
 Local qualification receipts and inspected media copies stay under
-`.factory/test-results/substrate-only/`, not in the source distribution. Factory retains
+`.factory/test-results/substrate-only/` and `.factory/test-results/product-acceptance/`,
+not in the source distribution. Factory retains
 its normal approvals, exact-commit results and review media in the installation.
 Failed or interrupted receipts remain failed; later explicit fixture runs do not relabel them.
 Controller, package and ordinary Docker checks retain their narrower meaning below.
@@ -268,8 +277,9 @@ the same native events or repeating Stop does not add another charge.
 
 The old Kubernetes-only offline OpenCode Stop runner has also been removed. A confirmed or reused
 Session whose queued input cannot be observed still keeps Stop pending. Source durability and Actor
-deletion alone do not confirm input cancellation. Its native-only offline settlement and the full
-manual-Continue journey remain required work, not a completed recovery feature.
+deletion alone do not confirm input cancellation. Live ARM coverage of paused-input settlement
+and subsequent explicit Coding is limited to the previously completed input described above;
+it does not establish recovery of running or queued inputs.
 
 The Actor tool bundle includes `input-stop.mjs`, a fixed metadata executor rather
 than a runtime controller. It opens only the private native Session database,

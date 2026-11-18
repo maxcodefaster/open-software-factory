@@ -303,4 +303,32 @@ export const deliveryStates: Record<string, DeliveryFixtureState> = {
     primary: "Create follow-up",
     summary: "Checks and independent review passed",
   },
+  "delivery-cleanup-pending": {
+    change: { state: "delivered", implementationState: "committed" },
+    delivery: {
+      ...passed,
+      approvedAt: "2026-11-04T10:00:00Z",
+      mergeState: "succeeded",
+      promotionState: "succeeded",
+      cleanupError: "Delivery cleanup pending",
+    },
+    primary: "Create follow-up",
+    summary: "Checks and independent review passed",
+    progress: "Factory is cleaning up temporary resources. No action needed.",
+    detail: "Factory is cleaning up temporary resources. No action needed.",
+  },
+  "delivery-cleanup-failed": {
+    change: { state: "delivered", implementationState: "committed" },
+    delivery: {
+      ...passed,
+      approvedAt: "2026-11-04T10:00:00Z",
+      mergeState: "succeeded",
+      promotionState: "succeeded",
+      cleanupError: "Original Actor Delete remains unconfirmed",
+    },
+    primary: "Create follow-up",
+    summary: "Checks and independent review passed",
+    progress: "Resource cleanup needs attention; the delivered version is retained.",
+    detail: "Resource cleanup needs attention; the delivered version is retained.",
+  },
 };

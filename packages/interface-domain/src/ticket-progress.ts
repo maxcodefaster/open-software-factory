@@ -47,6 +47,14 @@ function deliveryBlockMessage(block: DeliveryBlock) {
   }
 }
 
+export function deliveryCleanupProgress(cleanupError: string | undefined) {
+  if (!cleanupError) return undefined;
+  // Promotion retains this marker until its automatic resource cleanup settles.
+  return cleanupError === "Delivery cleanup pending"
+    ? "Delivery is complete. Factory is cleaning up temporary resources. No action needed."
+    : "Delivery is complete. Resource cleanup needs attention; the delivered version is retained.";
+}
+
 export type TicketProgressInput = {
   ticketState: string;
   changeState?: string | undefined;
@@ -78,9 +86,10 @@ export type TicketProgressInput = {
 // A read projection of known state, never an inferred result or a work command.
 export function ticketProgress(input: TicketProgressInput): string {
   if (input.changeState === "delivered")
-    return input.cleanupError
-      ? "Delivery is complete. Resource cleanup needs attention; the delivered version is retained."
-      : "The verified version was delivered to Staging. No action needed.";
+    return (
+      deliveryCleanupProgress(input.cleanupError) ??
+      "The verified version was delivered to Staging. No action needed."
+    );
   if (input.ticketState === "cancelled" || input.changeState === "cancelled")
     return "Work was cancelled. Source and history are retained; nothing restarts automatically.";
   if (input.changeState === "cancelling")

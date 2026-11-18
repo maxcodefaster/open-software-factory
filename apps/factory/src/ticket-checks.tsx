@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import type { CandidateReviewResult } from "../../../packages/conversation-domain/src/candidate-review";
+import { deliveryCleanupProgress } from "../../../packages/interface-domain/src/ticket-progress";
 
 export type TicketCheckDetails = {
   deliveryPolicyId?: string | undefined;
@@ -213,7 +214,7 @@ export function TicketChecks(props: {
           <Show when={props.details?.cleanupError}>
             <p>
               {props.details?.promotionState === "succeeded"
-                ? "Delivery is complete. Resource cleanup needs attention."
+                ? deliveryCleanupProgress(props.details?.cleanupError)
                 : "Main Preview did not become ready. The previous Preview is retained."}
             </p>
           </Show>

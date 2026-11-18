@@ -115,6 +115,8 @@ for (const width of [1440, 390]) {
       await expect(page.locator(".ticket-check-details")).toBeVisible();
       if (state.detail)
         await expect(page.locator(".ticket-check-details")).toContainText(state.detail);
+      if (name === "delivery-cleanup-pending")
+        await expect(page.locator(".ticket-document")).not.toContainText("needs attention");
       if (!state.capacityWait)
         await expect(page.locator(".ticket-check-details")).not.toContainText(
           "Factory will start checks automatically when capacity is available.",
@@ -173,6 +175,8 @@ test.describe("touch", () => {
     "review-defects",
     "promotion-failed",
     "check-capacity-starting",
+    "delivery-cleanup-pending",
+    "delivery-cleanup-failed",
   ]) {
     test(`${name} keeps Delivery controls at least 44px`, async ({ page }) => {
       await open(page, name, 390);

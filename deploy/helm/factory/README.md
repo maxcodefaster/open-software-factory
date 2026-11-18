@@ -1092,8 +1092,10 @@ Offline Stop now has a bound Stop-only cold path for a paused original Actor wit
 independent Source and the declared bootstrap capability. It does not use ordinary
 Resume, replay an uncertain Resume, or create a recovery Actor for an already
 deleted fixture. Settlement still requires its exact joined SDK result, a new
-durable ROOTFS and independent Source handoff. This path still needs full native
-qualification; package and controlled coordination checks are not a shipped journey.
+durable ROOTFS and independent Source handoff. Live Linux arm64 coverage includes
+a previously completed input after normal idle Pause and a subsequent explicit
+Coding follow-up. Running or queued-input variants, historical failed Stops and
+the full amd64 journey remain unqualified; package checks do not extend that scope.
 
 An upgrade can retain an unconfirmed Coding Stop only after re-observing its original
 suspended Actor, exact completed durable ROOTFS, native template and recorded independent Source handoff

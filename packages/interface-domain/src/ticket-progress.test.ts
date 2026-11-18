@@ -324,6 +324,36 @@ test("automatic correction names the observed failed check, without inventing a 
   ).toContain("Validate invoice. Automatic correction");
 });
 
+test("known pending Delivery cleanup does not ask the user to repair a successful Delivery", () => {
+  const text = ticketProgress({
+    ticketState: "done",
+    changeState: "delivered",
+    cleanupError: "Delivery cleanup pending",
+  });
+  expect(text).toContain("Delivery is complete");
+  expect(text).toContain("cleaning up temporary resources");
+  expect(text).toContain("No action needed");
+  expect(text).not.toContain("needs attention");
+});
+
+test.each([
+  "Original Actor Delete remains unconfirmed",
+  "Delivery cleanup failed",
+  "Delivery cleanup pending: Source could not be retained",
+])("an actual cleanup failure still requests attention: %s", (cleanupError) => {
+  const text = ticketProgress({ ticketState: "done", changeState: "delivered", cleanupError });
+  expect(text).toContain("cleanup needs attention");
+  expect(text).toContain("delivered version is retained");
+  expect(text).not.toContain("No action needed");
+});
+
+test("completed cleanup no longer claims work is pending", () => {
+  const text = ticketProgress({ ticketState: "done", changeState: "delivered" });
+  expect(text).toContain("delivered to Staging");
+  expect(text).not.toContain("cleaning up");
+  expect(text).not.toContain("needs attention");
+});
+
 const queued: TicketProgressInput = { ...submitted, changeState: "delivering" };
 test("an approved Delivery names the Ticket whose failed promotion pauses the queue", () => {
   const text = ticketProgress({
