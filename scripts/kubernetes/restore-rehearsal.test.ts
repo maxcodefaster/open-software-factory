@@ -1408,6 +1408,8 @@ function openBaoTestCertificates() {
 test.each([
   ["validate", "valid"],
   ["initialize", "valid"],
+  ["initialize", "slow init"],
+  ["initialize", "inherited timeout control"],
   ["initialize", "wrong signer"],
   ["initialize", "CA leaf"],
   ["initialize", "non-CA root"],
@@ -1418,6 +1420,15 @@ test.each([
   "the exact OpenBao %s client checks %s original same-DN trust on real Node HTTPS",
   async (action, boundary) => {
     const certificates = await openBaoTestCertificates();
+    const slowInit = boundary === "slow init" || boundary === "inherited timeout control";
+    let programCode = invocation(openBaoRequest, { action });
+    if (boundary === "inherited timeout control") {
+      // Negative control changes only the serialized test invocation, never maintained code.
+      const inheritedAgent = programCode.replace(/\bagent:\s*(?:false|!1),/, "");
+      expect(inheritedAgent).not.toBe(programCode);
+      programCode = inheritedAgent.replace(/\btimeout:\s*0,/, "");
+      expect(programCode).not.toBe(inheritedAgent);
+    }
     const code = `
 import assert from "node:assert/strict";
 import vm from "node:vm";
@@ -1430,7 +1441,10 @@ assert.equal(root.ca,true);assert.equal(leaf.ca,false);
 assert.equal(leaf.verify(root.publicKey),true);
 assert.equal(leaf.verify(leaf.publicKey),false);
 const paths=[], authorized=[], tlsErrors=[];
-let readinessWaits=0;
+const requestOptions=[];
+let readinessWaits=0,initDelayMs=0;
+// This mutation is confined to this owned Node test process.
+if(${slowInit})https.globalAgent.options.timeout=50;
 let initialized=${action === "validate"},unsealed=false;
 const server=https.createServer({
  cert:certs[${JSON.stringify(boundary === "peer replacement" ? "replacement" : "leaf")}],
@@ -1444,6 +1458,11 @@ const server=https.createServer({
   if(req.url==="/v1/sys/health"){code=unsealed?200:503;value={initialized,sealed:!unsealed};}
   else if(req.url==="/v1/sys/init"){
    assert.equal(initialized,false);assert.deepEqual(body,{secret_shares:1,secret_threshold:1});
+   if(${slowInit}){
+    const start=performance.now();
+    await new Promise(resolve=>setTimeout(resolve,150));
+    initDelayMs=performance.now()-start;
+   }
    initialized=true;value={keys_base64:["temporary-key"],root_token:"temporary-root"};
   } else if(req.url==="/v1/sys/unseal"){
    assert.equal(body.key,${JSON.stringify(action === "validate" ? "original-key" : "temporary-key")});
@@ -1500,14 +1519,16 @@ const fs={
 const transport={request(options,receive){
  assert.equal(options.hostname,"127.0.0.1");assert.equal(options.port,8200);
  assert.notEqual(options.rejectUnauthorized,false);assert.notEqual(options.allowPartialTrustChain,true);
- const req=https.request({...options,port,agent:false},res=>{
+ requestOptions.push({agent:options.agent,timeout:options.timeout});
+ // Change only the destination port. Do not mask inherited-agent/timeout bugs.
+ const req=https.request({...options,port},res=>{
   authorized.push(res.socket.authorized);receive(res);
  });
  req.on("error",error=>tlsErrors.push(error.code??error.message));return req;
 }};
 const context=vm.createContext({Buffer,setTimeout:()=>{readinessWaits++;throw Error("unexpected readiness retry");}});
 const modules={"node:fs/promises":fs,"node:https":transport,"node:crypto":crypto,"node:tls":await import("node:tls")};
-const program=new vm.SourceTextModule(${JSON.stringify(invocation(openBaoRequest, { action }))},{
+const program=new vm.SourceTextModule(${JSON.stringify(programCode)},{
  context,importModuleDynamically:async name=>{
   assert.ok(name in modules);const values=modules[name];
   const m=new vm.SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);},{context});
@@ -1517,8 +1538,8 @@ const program=new vm.SourceTextModule(${JSON.stringify(invocation(openBaoRequest
 let passed=false;
 try {await program.link(()=>{throw Error("unexpected static import")});await program.evaluate();passed=true;}
 catch {}
-finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
-console.log(JSON.stringify({passed,paths,authorized,tlsErrors,baselineCA,baselineRootFirst,writes,readinessWaits}));
+finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));https.globalAgent.destroy();}
+console.log(JSON.stringify({passed,paths,authorized,tlsErrors,baselineCA,baselineRootFirst,writes,readinessWaits,requestOptions,initDelayMs,globalTimeout:https.globalAgent.options.timeout}));
 `;
     const child = Bun.spawn(["node", "--experimental-vm-modules", "--input-type=module"], {
       stdin: new Blob([code]),
@@ -1528,7 +1549,18 @@ console.log(JSON.stringify({passed,paths,authorized,tlsErrors,baselineCA,baselin
     const stdout = await new Response(child.stdout).text();
     expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
     const result = JSON.parse(stdout);
-    if (boundary !== "valid") {
+    if (boundary === "inherited timeout control") {
+      expect(result, stdout).toMatchObject({
+        passed: false,
+        paths: ["/v1/sys/health", "/v1/sys/init"],
+        tlsErrors: ["ETIMEDOUT"],
+        writes: [],
+        readinessWaits: 0,
+        globalTimeout: 50,
+      });
+      return;
+    }
+    if (boundary !== "valid" && boundary !== "slow init") {
       expect(result, stdout).toMatchObject({
         passed: false,
         paths: [],
@@ -1548,9 +1580,18 @@ console.log(JSON.stringify({passed,paths,authorized,tlsErrors,baselineCA,baselin
       } else expect(result.tlsErrors).toEqual([]);
       return;
     }
-    expect(result.baselineCA).toBe("DEPTH_ZERO_SELF_SIGNED_CERT");
-    expect(result.baselineRootFirst).toBe("DEPTH_ZERO_SELF_SIGNED_CERT");
+    if (boundary === "valid") {
+      expect(result.baselineCA).toBe("DEPTH_ZERO_SELF_SIGNED_CERT");
+      expect(result.baselineRootFirst).toBe("DEPTH_ZERO_SELF_SIGNED_CERT");
+    }
     expect(result, stdout).toMatchObject({ passed: true, tlsErrors: [], readinessWaits: 0 });
+    if (boundary === "slow init") {
+      expect(result.globalTimeout).toBe(50);
+      expect(result.initDelayMs).toBeGreaterThanOrEqual(100);
+      expect(result.requestOptions).toEqual(
+        Array.from({ length: 4 }, () => ({ agent: false, timeout: 0 })),
+      );
+    }
     expect(result.authorized.length).toBeGreaterThan(0);
     expect(result.authorized.every((value: boolean) => value)).toBe(true);
     expect(result.paths).toEqual(
@@ -1819,6 +1860,19 @@ test.each([
       expect(commands).not.toMatch(
         /kubectl|prune|--privileged|--publish|--network host|docker\.sock:/,
       );
+      const baoClient =
+        docker.calls.find(
+          (call) =>
+            call.command.includes("create") &&
+            call.command.some((argument) => argument.endsWith("-bao-client")),
+        )?.command ?? [];
+      expect(baoClient).toContain("--cap-drop=ALL");
+      // Initialization must hand its exclusive 0600 token to the UID 100 server
+      // before snapshot restore. DAC_OVERRIDE alone cannot perform that chown.
+      expect(baoClient.filter((argument) => argument.startsWith("--cap-add=")).sort()).toEqual([
+        "--cap-add=CHOWN",
+        "--cap-add=DAC_OVERRIDE",
+      ]);
       const inputs = docker.calls.map((call) => String(call.input ?? "")).join("\n");
       expect(inputs).toContain("pg_restore --exit-on-error --single-transaction --no-owner");
       expect(inputs).toContain("PG_WITNESS");

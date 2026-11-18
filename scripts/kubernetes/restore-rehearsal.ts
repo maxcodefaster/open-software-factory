@@ -1144,6 +1144,7 @@ rclone check /objects-input objects:factory --download --retries 1 >/dev/null 2>
         [
           "--network",
           `container:${get("openbao").id}`,
+          "--cap-add=CHOWN",
           "--cap-add=DAC_OVERRIDE",
           ...control,
           ...volume("state", "/state", true),
@@ -1912,6 +1913,7 @@ export async function openBaoRequest(config: { action: "initialize" | "validate"
           port: 8200,
           path: `/v1/${path}`,
           ca,
+          agent: false,
           rejectUnauthorized: true,
           checkServerIdentity: (hostname, peer) =>
             checkServerIdentity(hostname, peer) ??
@@ -1919,7 +1921,9 @@ export async function openBaoRequest(config: { action: "initialize" | "validate"
               ? undefined
               : Error("OpenBao peer differs from the original TLS certificate")),
           method: encoded === undefined ? "GET" : "POST",
-          timeout: 5000,
+          // Raft initialization/unseal can exceed a short idle-socket timeout. The
+          // owned exec already has the operator's explicit wall-clock deadline.
+          timeout: 0,
           headers: {
             ...(encoded ? { "content-type": "application/json" } : {}),
             ...(token ? { "X-Vault-Token": token } : {}),
