@@ -955,6 +955,11 @@ selected backup. Set `schema: 1`, `provenance: "independent-source-observation"`
   `repository`, exact 40-character `commit` and `blob` IDs, relative `path`, byte count and
   file-byte SHA-256. Keep expected Source bytes independent of the Git witness.
 
+The original Project repository URL may use the installation's public Forgejo origin or its exact
+`http://<release>-forgejo.<namespace>.svc:3000` service origin, with or without `.git`. The check
+preserves that saved URL. Independent Git reads still use verified public HTTPS and the witnessed
+owner/repository; a different service, namespace, port or repository refuses preparation.
+
 The read-only database preflight refuses pending or uncertain work through `idleRules`, including
 inference, runtime creation, access/credential recovery, external operations and enabled
 automation. Some unsupported historical cases are also refused conservatively, including

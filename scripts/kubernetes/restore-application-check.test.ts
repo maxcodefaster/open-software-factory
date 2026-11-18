@@ -836,6 +836,50 @@ test("the already-restored application proof performs one fenced save, reads exa
   }
 });
 
+test.each([
+  "https://git.example.invalid/owned/retained",
+  "http://factory-forgejo.factory.svc:3000/owned/retained",
+  "http://factory-forgejo.factory.svc:3000/owned/retained.git",
+])("restore preserves a supported original repository URL: %s", async (repositoryUrl) => {
+  const f = await fixture();
+  try {
+    f.expected.project.repositoryUrl = repositoryUrl;
+    await f.save();
+    const fake = target(f);
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("restored-application-passed");
+    const gitRequests = fake.requests.filter((r) => r.url.includes("/api/v1/repos/"));
+    expect(gitRequests).toHaveLength(2);
+    expect(gitRequests.every((r) => r.url.startsWith(f.backup.source.forgejoOrigin))).toBe(true);
+    expect(f.expected.project.repositoryUrl).toBe(repositoryUrl);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "http://factory-forgejo.other.svc:3000/owned/retained",
+  "http://other-forgejo.factory.svc:3000/owned/retained",
+  "http://factory-forgejo.factory.svc:3001/owned/retained",
+  "http://factory-forgejo.factory.svc:3000/owned/wrong",
+  "https://git.example.invalid/other/retained",
+  "https://git.example.invalid/owned/retained?token=private",
+  "https://user:private@git.example.invalid/owned/retained",
+  "https://git.example.invalid/owned/ignored/../retained",
+])(
+  "restore refuses a repository URL outside its original Forge identity: %s",
+  async (repositoryUrl) => {
+    const f = await fixture();
+    try {
+      f.expected.project.repositoryUrl = repositoryUrl;
+      await f.save();
+      await expect(f.load()).rejects.toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
 test("an unchanged complete requirement keeps its existing scope and historical revisions", async () => {
   const f = await fixture();
   try {

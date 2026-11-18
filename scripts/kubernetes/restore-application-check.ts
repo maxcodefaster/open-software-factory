@@ -204,6 +204,23 @@ const digest = (bytes: string | Uint8Array) => createHash("sha256").update(bytes
 function check(value: unknown): asserts value {
   if (!value) throw Error("Restore application prerequisite or observation refused");
 }
+export function originalRepository(
+  repositoryURL: string,
+  source: Pick<BackupReceipt["source"], "release" | "namespace" | "forgejoOrigin">,
+) {
+  check(name.test(source.release) && name.test(source.namespace));
+  const url = new URL(repositoryURL);
+  const internal = `http://${source.release}-forgejo.${source.namespace}.svc:3000`;
+  check(
+    [source.forgejoOrigin, internal].includes(url.origin) &&
+      repositoryURL === `${url.origin}${url.pathname}`,
+  );
+  const match = /^\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(url.pathname);
+  const owner = match?.[1],
+    repository = match?.[2];
+  check(owner && repository && repository !== "." && repository !== "..");
+  return { owner, repository };
+}
 function object(value: unknown): asserts value is Record<string, unknown> {
   check(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -676,9 +693,9 @@ export async function loadApplicationFixture(
       /^[a-f0-9]{40}$/.test(expected.git.commit) &&
       /^[a-f0-9]{40}$/.test(expected.git.blob),
   );
+  const repository = originalRepository(expected.project.repositoryUrl, backupReceipt.source);
   check(
-    expected.project.repositoryUrl ===
-      `${backupReceipt.source.forgejoOrigin}/${expected.git.owner}/${expected.git.repository}.git`,
+    repository.owner === expected.git.owner && repository.repository === expected.git.repository,
   );
   keys(
     f.credentialHashes,
