@@ -73,6 +73,15 @@ test("documented reader areas combine README sections and documentation files", 
   expect(documentedReaderAreas([{ path: "src/a.ts" }], [])).toEqual([]);
 });
 
+test("extensionless README sections retain the same coverage floor as Markdown READMEs", () => {
+  const content = "# Product\n## Installation\n## Usage\n## Verification\n## License\n";
+  expect(documentedReaderAreas([{ path: "README" }], [{ path: "README", content }])).toEqual([
+    "Installation",
+    "Usage",
+    "Verification",
+  ]);
+});
+
 test("wording-only needs no new fact, little growth and unchanged cited files", () => {
   const current = "Run `npm test` in src/app.ts. It takes 5 minutes. See [Setup](#wiki/setup).";
   const input = { cited: ["src/app.ts"], changedPaths: ["other.ts"] };

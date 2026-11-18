@@ -66,6 +66,7 @@ export function readableCodePath(path: string) {
     (/\.(?:mdx?|tsx?|jsx?|mjs|cjs|json|ya?ml|toml|go|py|rs|java|kt|cs|sh|sql|html|css|astro|svelte|vue|rb|php|exs?|tf)$/i.test(
       path,
     ) ||
+      /(?:^|\/)readme$/i.test(path) ||
       /(?:^|\/)(?:Dockerfile|Containerfile)(?:\.[^/]+)?$/i.test(path))
   );
 }

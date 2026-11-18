@@ -16,7 +16,7 @@ const generic = new Set([
   "acknowledgements",
   "acknowledgments",
 ]);
-const readme = /(^|\/)readme(?:\.[a-z]+)?\.mdx?$/i;
+const readme = /(^|\/)readme(?:(?:\.[a-z]+)?\.mdx?)?$/i;
 const documentation = /^(?:docs?|documentation|dokumentation)\/.+\.mdx?$/i;
 const skipped = /(^|\/)(?:readme|index|changelog|license|licence|contributing|security)\.mdx?$/i;
 

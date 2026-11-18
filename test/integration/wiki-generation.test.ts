@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
+import { generateWiki } from "../../apps/factory/src/knowledge/generation-agent";
 import {
   WikiSourceEvidenceError,
   WikiTopicPlanError,
@@ -8,6 +9,142 @@ import {
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
+
+test.each(["README", "README.md"])(
+  "extensionless README reaches the real checked Wiki bootstrap without inventing a source path: %s",
+  async (path) => {
+    // Pinned Hello-World input from the two failed fresh-install generations.
+    // The local provider returns exact observed references, not historical model output.
+    const commit = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d";
+    const blob = "980a0d5f19a64b4b30a87d4206aade58726b60e3";
+    const text = "Hello World!\n";
+    const owned = await factoryProcess();
+    const db = owned.connect();
+    const user = crypto.randomUUID();
+    const project = crypto.randomUUID();
+    const keys = [
+      "FACTORY_FORGEJO_API_URL",
+      "FACTORY_FORGEJO_TOKEN",
+      "FACTORY_FORGEJO_OWNER",
+      "FACTORY_MODEL_BASE_URL",
+      "FACTORY_MODEL_API_KEY",
+      "FACTORY_PROJECT_AGENT_MODEL",
+    ];
+    const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    Object.assign(process.env, {
+      FACTORY_FORGEJO_API_URL: "http://127.0.0.1:9/api/v1/",
+      FACTORY_FORGEJO_TOKEN: "controlled",
+      FACTORY_FORGEJO_OWNER: "owned",
+      FACTORY_MODEL_BASE_URL: "http://127.0.0.1:9/v1",
+      FACTORY_MODEL_API_KEY: "controlled",
+      FACTORY_PROJECT_AGENT_MODEL: "controlled-wiki",
+    });
+    const packets: Array<{ paths: string[]; sources: Array<{ path: string; content: string }> }> =
+      [];
+    const plannerPackets: unknown[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const input = (await request.json()) as {
+          messages: Array<{ role: string; content: string }>;
+        };
+        const system = input.messages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content)
+          .join("\n");
+        let output: unknown;
+        if (system.includes("Research manifests and core flows")) {
+          plannerPackets.push(input);
+          output = {
+            topics: [
+              {
+                slug: "overview",
+                title: "Hello World",
+                purpose: "Introduce the greeting documented by the repository.",
+                paths: [path],
+                pageIDs: [],
+                parentSlug: null,
+              },
+            ],
+          };
+        } else if (system.includes("Review the whole proposed Wiki topic plan"))
+          output = { findings: [] };
+        else if (system.includes("Write only this topic"))
+          output = { pages: [{ body: "The repository says Hello World!", sources: [path] }] };
+        else output = { issues: [], advisory: [] };
+        return Response.json({
+          id: "owned-readme-bootstrap",
+          object: "chat.completion",
+          created: 1,
+          model: "controlled-wiki",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: JSON.stringify(output) },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    const wiki = createKnowledgeController(
+      db,
+      {
+        getDefaultBranch: async () => ({ name: "master", headSha: commit }),
+        listFiles: async () => [{ path, sha: blob, size: 13 }],
+        getFileInfo: async (_repository, requestedPath, ref) => {
+          expect(requestedPath).toBe(path);
+          expect(ref).toBe(commit);
+          return { sha: blob, content: text };
+        },
+      },
+      async (input) => {
+        packets.push({
+          paths: input.inventory.map((file) => file.path),
+          sources: input.sources,
+        });
+        return generateWiki({
+          ...input,
+          connection: {
+            provider: "openai",
+            baseURL: `http://127.0.0.1:${server.port}/v1`,
+            apiKey: "owned-test-not-a-secret",
+          },
+        });
+      },
+    );
+    try {
+      await db.client`INSERT INTO auth."user"(id,name,email,email_verified)
+        VALUES(${user},'Wiki owner',${`readme-${user}@factory.invalid`},true)`;
+      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${project},${`readme-${project}`},'Hello World','http://127.0.0.1:9/owned/wiki','master','.devcontainer/devcontainer.json',${user})`;
+      await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+        VALUES(${project},${user},'developer',${user})`;
+      await wiki.generate(project, user);
+      await wiki.settle();
+      expect(packets).toEqual([{ paths: [path], sources: [{ path, content: text }] }]);
+      expect(plannerPackets).toHaveLength(1);
+      expect((await wiki.generation(project))?.["state"]).toBe("succeeded");
+      const [page] = await db.client<
+        Array<{ body: string; citations: Array<{ path: string; commitSha: string }> }>
+      >`SELECT current_body AS body,citations FROM factory.knowledge_page WHERE project_id=${project}`;
+      expect(page?.body).toBe("The repository says Hello World!");
+      expect(page?.citations).toEqual([{ path, commitSha: commit }]);
+    } finally {
+      await wiki.settle();
+      await server.stop(true);
+      await db.client.end();
+      await owned.dispose();
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+  30_000,
+);
 
 test.each([false, true])(
   "Wiki generation fences concurrent human revisions, preserves organization and deduplicates no-op updates, progressive=%s",
@@ -57,6 +194,13 @@ test.each([false, true])(
         { path: ".env.development.mjs", sha: commit, size: 32 },
         { path: "src/credentials.sql", sha: commit, size: 32 },
         { path: "src/credentials.cjs", sha: commit, size: 32 },
+        { path: ".factory/README", sha: commit, size: 13 },
+        { path: "nested/.factory/README", sha: commit, size: 13 },
+        { path: "node_modules/README", sha: commit, size: 13 },
+        { path: "secrets/README", sha: commit, size: 13 },
+        { path: "../README", sha: commit, size: 13 },
+        { path: "/README", sha: commit, size: 13 },
+        { path: "large/README", sha: commit, size: 80_001 },
       ],
       getFileInfo: async (_repo: unknown, path: string) => ({
         sha: path === "package.json" ? "b".repeat(40) : commit,
@@ -83,6 +227,13 @@ test.each([false, true])(
         ".env.development.mjs",
         "src/credentials.sql",
         "src/credentials.cjs",
+        ".factory/README",
+        "nested/.factory/README",
+        "node_modules/README",
+        "secrets/README",
+        "../README",
+        "/README",
+        "large/README",
       ])
         expect(paths).not.toContain(path);
       await input.readFiles([

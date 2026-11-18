@@ -11,6 +11,16 @@ const files = [
   { path: "docs/guide.md", size: 500 },
 ];
 
+test("the map names exact extensionless READMEs without guessing Markdown filenames", () => {
+  expect(
+    repositoryMap([
+      { path: "README", size: 13 },
+      { path: "docs/readme", size: 30 },
+      { path: "README.backup", size: 20 },
+    ]).documents,
+  ).toEqual(["README", "docs/readme"]);
+});
+
 test("the map orients without listing every file", () => {
   const map = repositoryMap(files);
   expect(map.files).toBe(7);

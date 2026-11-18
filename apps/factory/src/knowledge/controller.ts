@@ -180,7 +180,8 @@ export function createKnowledgeController(
     const candidates = current.files.filter(
       (file) =>
         file.size <= 80_000 &&
-        sourceExtensions.has(extension(file.path)) &&
+        (sourceExtensions.has(extension(file.path)) ||
+          (/(^|\/)readme$/i.test(file.path) && readableCodePath(file.path))) &&
         !file.path
           .split("/")
           .some((part) => ["node_modules", "vendor", "dist", "build", ".git"].includes(part)) &&
@@ -238,7 +239,7 @@ export function createKnowledgeController(
     }
     const initial = candidates
       .filter((file) =>
-        /(^|\/)(readme\.md|package\.json|go\.mod|pyproject\.toml|cargo\.toml|system\.json|main\.[a-z]+|index\.[jt]sx?)$/i.test(
+        /(^|\/)(readme(?:\.md)?|package\.json|go\.mod|pyproject\.toml|cargo\.toml|system\.json|main\.[a-z]+|index\.[jt]sx?)$/i.test(
           file.path,
         ),
       )

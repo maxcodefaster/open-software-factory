@@ -4,7 +4,7 @@ type Directory = { files: number; bytes: number; children: Map<string, Directory
 
 const manifestPattern =
   /(^|\/)(package\.json|go\.mod|pyproject\.toml|cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?|composer\.json|gemfile|dockerfile|docker-compose\.ya?ml|astro\.config\.[mc]?[jt]s|vite\.config\.[mc]?[jt]s|next\.config\.[mc]?[jt]s|system\.json)$/i;
-const documentPattern = /\.mdx?$/i;
+const documentPattern = /(?:\.mdx?|(?:^|\/)readme)$/i;
 
 function build(files: readonly InventoryFile[]) {
   const root: Directory = { files: 0, bytes: 0, children: new Map() };

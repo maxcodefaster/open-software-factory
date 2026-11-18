@@ -4,6 +4,83 @@ import { knownModelRejection } from "../models/execution-policy";
 import { generateWiki } from "./generation-workflow";
 import { WikiPublicationConflict } from "./publication";
 
+test.each(["unknown-source", "unavailable-page", "missing-parent", "missing-root"] as const)(
+  "extensionless source support preserves exact plan refusal: %s",
+  async (scenario) => {
+    const topic = {
+      slug: "overview",
+      title: "Hello World",
+      purpose: "Introduce the documented greeting.",
+      paths: ["README"],
+      pageIDs: [] as string[],
+      parentSlug: null as string | null,
+    };
+    const topics = [topic];
+    if (scenario === "unknown-source") topic.paths = ["README.md"];
+    if (scenario === "unavailable-page") topic.pageIDs = ["00000000-0000-4000-8000-000000000001"];
+    if (scenario === "missing-parent")
+      topics.push({ ...topic, slug: "guide", parentSlug: "not-a-page" });
+    if (scenario === "missing-root") topic.parentSlug = "not-a-page";
+    let requests = 0;
+    let publications = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++;
+        return Response.json({
+          id: "owned-invalid-readme-plan",
+          object: "chat.completion",
+          created: 1,
+          model: "controlled-wiki",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: JSON.stringify({ topics }) },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    try {
+      const result = generateWiki({
+        name: "Hello World",
+        commit: "a".repeat(40),
+        modelId: "controlled-wiki",
+        connection: {
+          provider: "openai",
+          baseURL: `http://127.0.0.1:${server.port}/v1`,
+          apiKey: "owned-test-not-a-secret",
+        },
+        pages: [],
+        inventory: [{ path: "README", sha: "b".repeat(40), size: 13 }],
+        changedPaths: ["README"],
+        sources: [{ path: "README", content: "Hello World!\n" }],
+        readFiles: async () => [{ path: "README", content: "Hello World!\n" }],
+        publish: async () => {
+          publications++;
+          return [];
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      const reason = {
+        "unknown-source": "Unknown seed paths: README.md",
+        "unavailable-page": "Unavailable or repeated pageIDs",
+        "missing-parent": "Every parent must name an earlier planned topic",
+        "missing-root": "Initial Wiki needs a checked overview first",
+      }[scenario];
+      await expect(result).rejects.toThrow(reason);
+      expect(requests).toBe(2);
+      expect(publications).toBe(0);
+    } finally {
+      await server.stop(true);
+    }
+  },
+  10_000,
+);
+
 test.each([
   "success",
   "broken-link",

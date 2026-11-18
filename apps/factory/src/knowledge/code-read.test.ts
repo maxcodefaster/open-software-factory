@@ -6,6 +6,35 @@ import {
   readCodePage,
 } from "./code-read";
 
+test("exact extensionless README paths remain discoverable without admitting arbitrary or private files", () => {
+  const paths = ["README", "docs/readme", "packages/app/Readme"];
+  for (const path of paths) expect(readableCodePath(path)).toBe(true);
+  for (const path of [
+    "README.md.bak",
+    "readme-private",
+    "LICENSE",
+    "notes",
+    ".factory/README",
+    "nested/.factory/README",
+    "node_modules/README",
+    "../README",
+    "/README",
+    "secrets/README",
+    "credentials/README",
+    "dist/README",
+  ])
+    expect(readableCodePath(path)).toBe(false);
+  expect(
+    findReadableCodePaths(
+      paths.map((path) => ({ path, size: 13 })),
+      "readme",
+    ),
+  ).toEqual({
+    paths,
+    truncated: false,
+  });
+});
+
 test("Planning can discover the root System Contract without exposing Factory private files", () => {
   const paths = [
     ".factory/system.json",
