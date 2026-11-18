@@ -202,6 +202,40 @@ export async function ensureOpenCodeMessageBoundary(
   }
   const messages = await client.message.list({ sessionID, limit: 1 });
   if (messages.data.length === 0) await client.session.switchAgent({ sessionID, agent: "build" });
+  // Interview questions use Factory's own question/answer commands. Coding uses
+  // admitted text follow-ups, not native forms with no Factory reply owner.
+  // Apply this before every input, including retained/restored Sessions, without
+  // widening any existing review, Skill or tool permission.
+  const permissions = z.object({
+    id: z.literal(sessionID),
+    permissions: z.array(
+      z
+        .object({
+          action: z.string(),
+          resource: z.string(),
+          effect: z.enum(["allow", "deny", "ask"]),
+        })
+        .strict(),
+    ),
+  });
+  async function observed() {
+    const result = permissions.safeParse(
+      await client.session.get({ sessionID }, { signal: AbortSignal.timeout(5_000) }),
+    );
+    if (!result.success) throw new Error("OpenCode interaction boundary could not be confirmed");
+    return result.data.permissions;
+  }
+  const current = await observed();
+  const last = current.at(-1);
+  if (last?.action === "question" && last.resource === "*" && last.effect === "deny") return;
+  const expected = [...current, { action: "question", resource: "*", effect: "deny" as const }];
+  await client.session.update(
+    { sessionID, permissions: expected },
+    { signal: AbortSignal.timeout(5_000) },
+  );
+  const confirmed = await observed();
+  if (JSON.stringify(confirmed) !== JSON.stringify(expected))
+    throw new Error("OpenCode interaction boundary could not be confirmed");
 }
 
 const missingSession = z.object({

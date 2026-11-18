@@ -5,6 +5,7 @@ import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   decodeOpenCodeAdmission,
+  ensureOpenCodeMessageBoundary,
   interruptOpenCodeSession,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
@@ -25,6 +26,81 @@ const receipt = {
   delivery: "queue" as const,
   payload: { text: input.text },
 };
+
+describe("Factory Coding native interaction boundary", () => {
+  const denyQuestion = { action: "question", resource: "*", effect: "deny" as const };
+  const restricted = [
+    { action: "*", resource: "*", effect: "deny" as const },
+    { action: "read", resource: "*", effect: "allow" as const },
+    { action: "shell", resource: "*", effect: "ask" as const },
+  ];
+  function boundary(
+    initial = restricted,
+    behavior: {
+      lost?: boolean;
+      unconfirmed?: boolean;
+      foreign?: boolean;
+      malformed?: boolean;
+    } = {},
+  ) {
+    let permissions = structuredClone(initial);
+    let writes = 0;
+    const client = createOpenCodeClient(async (request, path) => {
+      if (path.startsWith("/api/model")) return Response.json({ data: [] });
+      if (path.includes("/message"))
+        return Response.json({ data: [{ id: "msg_existing", type: "user" }] });
+      if (path !== `/api/session/${input.sessionID}`)
+        throw new Error("Boundary preparation must not prompt, answer or cancel native forms");
+      if (request.method === "PATCH") {
+        writes++;
+        if (!behavior.unconfirmed) permissions = (await request.json()).permissions;
+        if (behavior.lost) throw new Error("Owned permission update response loss");
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({
+        data: {
+          id: behavior.foreign ? "ses_other" : input.sessionID,
+          permissions: behavior.malformed ? null : permissions,
+        },
+      });
+    });
+    return { client, permissions: () => permissions, writes: () => writes };
+  }
+  test("narrows only the unsupported builtin, including retained sessions, without changing other rules", async () => {
+    const owned = boundary();
+    await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
+    expect(owned.permissions()).toEqual([...restricted, denyQuestion]);
+    expect(restricted).toHaveLength(3);
+    expect(owned.writes()).toBe(1);
+    await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
+    expect(owned.writes()).toBe(1);
+  });
+  test("an earlier question deny cannot be reopened by a later wildcard allowance", async () => {
+    const rules = [denyQuestion, { action: "*", resource: "*", effect: "allow" as const }];
+    const owned = boundary(rules);
+    await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
+    expect(owned.permissions()).toEqual([...rules, denyQuestion]);
+  });
+  test.each(["foreign", "malformed", "unconfirmed"] as const)(
+    "refuses %s native permission evidence before input admission",
+    async (failure) => {
+      const owned = boundary(restricted, { [failure]: true });
+      await expect(ensureOpenCodeMessageBoundary(owned.client, input.sessionID)).rejects.toThrow(
+        "interaction boundary",
+      );
+    },
+  );
+  test("a lost update reply is not retried; a later preparation confirms the same restriction", async () => {
+    const behavior = { lost: true };
+    const owned = boundary(restricted, behavior);
+    await expect(ensureOpenCodeMessageBoundary(owned.client, input.sessionID)).rejects.toThrow(
+      "Transport",
+    );
+    behavior.lost = false;
+    await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
+    expect(owned.writes()).toBe(1);
+  });
+});
 
 describe("native OpenCode 2 admission", () => {
   test("validates identity and payload without inventing promotion from a receipt", () => {
