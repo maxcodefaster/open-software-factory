@@ -1311,7 +1311,7 @@ test("backups are on by default and write to one dedicated retained claim", asyn
   expect(pod?.containers[0]?.command).toEqual(["sh", "/scripts/run.sh"]);
   expect(
     pod?.initContainers?.find((container) => container.name === "stage-kubectl")?.command,
-  ).toEqual(["cp", "/usr/local/bin/kubectl", "/tools/kubectl"]);
+  ).toEqual(["cp", "/usr/local/bin/kubectl", "/usr/local/bin/factory-sqlite", "/tools/"]);
   expect(pod?.initContainers?.find((container) => container.name === "stage-bao")?.command).toEqual(
     ["cp", "/usr/bin/bao", "/tools/bao"],
   );
@@ -1370,7 +1370,7 @@ test("backup images are pinned and match the maintained service pins", async () 
   ).toBe(compose.services.postgres.image);
   expect(images.get("stage-bao")).toBe(upstream.openbao.image);
   for (const name of ["own-backup", "backup"]) expect(images.get(name)).toBe(upstream.rclone.image);
-  // Stage the existing static kubectl; do not introduce a new image or distribution build.
+  // Both static tools come from the application, not an extra image or live package install.
   expect(images.get("stage-kubectl")).toBe(applicationImage);
   for (const [name, image] of images)
     if (name !== "stage-kubectl") expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);

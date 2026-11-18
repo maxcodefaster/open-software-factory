@@ -25,11 +25,12 @@ import {
   requiredTables,
   resourcePlan,
   restoreFiles,
-  validateForgejoSQL,
+  validateForgejoDatabase,
   type Witnesses,
 } from "./restore-rehearsal";
 
-const hash = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex");
+const hash = (value: string | Uint8Array) =>
+  new Bun.CryptoHasher("sha256").update(value).digest("hex");
 const owner = "a".repeat(32);
 const daemonID = "owned-disposable-docker";
 const source = {
@@ -99,6 +100,7 @@ async function fixture() {
     forgejo: {
       tables: { repository: { rows: 0, sha256: hash("") } },
       files: [
+        { path: "forgejo.sqlite3", bytes: 8, sha256: hash("snapshot") },
         { path: "forgejo-db.sql", bytes: 3, sha256: hash("sql") },
         { path: "app.ini", bytes: 3, sha256: hash("ini") },
         { path: "repos/owned/project.git/HEAD", bytes: 4, sha256: hash("HEAD") },
@@ -344,6 +346,8 @@ test.each([
   "destination witness",
   "native table",
   "writer table",
+  "missing Forgejo snapshot witness",
+  "linked Forgejo snapshot witness",
   "credential exclusion",
   "object inventory",
   "managed CA",
@@ -370,6 +374,17 @@ test.each([
       (f.witness as { provenance: string }).provenance = "restored-destination";
     if (boundary === "native table") delete f.witness.postgres["factory.substrate_binding"];
     if (boundary === "writer table") delete f.witness.postgres["factory.change_writer"];
+    if (boundary === "missing Forgejo snapshot witness")
+      f.witness.forgejo.files = f.witness.forgejo.files.filter(
+        (entry) => entry.path !== "forgejo.sqlite3",
+      );
+    if (boundary === "linked Forgejo snapshot witness")
+      f.witness.forgejo.files[0] = {
+        path: "forgejo.sqlite3",
+        bytes: 0,
+        sha256: hash("data/data/forgejo.db"),
+        link: "data/data/forgejo.db",
+      };
     if (boundary === "managed CA") f.witness.state.files.pop();
     if (boundary === "credential exclusion")
       f.witness.state.files.push({
@@ -727,7 +742,7 @@ test.each(["daemon", "image", "occupied name", "unknown absence"] as const)(
   },
 );
 
-type TarEntry = { name: string; content?: string; type?: string; link?: string };
+type TarEntry = { name: string; content?: string | Uint8Array; type?: string; link?: string };
 function archiveBytes(entries: TarEntry[]) {
   const blocks: Buffer[] = [];
   for (const entry of entries) {
@@ -778,6 +793,10 @@ test.each([
   "41-link chain",
   "hash",
   "snapshot",
+  "missing Forgejo snapshot",
+  "unwitnessed Forgejo snapshot",
+  "changed Forgejo snapshot",
+  "Forgejo snapshot WAL sidecar",
   "extra member",
   "truncated",
 ] as const)(
@@ -863,10 +882,26 @@ test.each([
       if (boundary === "extra member")
         stateEntries.push({ name: "unknown", content: "not independently witnessed" });
       const forgejoEntries: TarEntry[] = [
+        { name: "forgejo.sqlite3", content: "snapshot" },
         { name: "forgejo-db.sql", content: "sql" },
         { name: "app.ini", content: "ini" },
         { name: "repos/owned/project.git/HEAD", content: "HEAD" },
       ];
+      if (boundary === "missing Forgejo snapshot") forgejoEntries.shift();
+      if (boundary === "unwitnessed Forgejo snapshot")
+        f.witness.forgejo.files = f.witness.forgejo.files.filter(
+          (entry) => entry.path !== "forgejo.sqlite3",
+        );
+      if (boundary === "changed Forgejo snapshot")
+        forgejoEntries[0] = { name: "forgejo.sqlite3", content: "modified" };
+      if (boundary === "Forgejo snapshot WAL sidecar") {
+        forgejoEntries.push({ name: "forgejo.sqlite3-wal", content: "wal" });
+        f.witness.forgejo.files.push({
+          path: "forgejo.sqlite3-wal",
+          bytes: 3,
+          sha256: hash("wal"),
+        });
+      }
       const snapshotEntries: TarEntry[] = [
         { name: "meta.json", content: "metadata" },
         { name: "state.bin", content: "private-state" },
@@ -888,6 +923,10 @@ test.each([
         f.witness.parts[name] = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
       }
       await f.save();
+      if (boundary === "unwitnessed Forgejo snapshot") {
+        await expect(f.load()).rejects.toThrow();
+        return;
+      }
       const loaded = await f.load();
       const root = join(f.root, "container");
       await mkdir(root, { mode: 0o700 });
@@ -1005,7 +1044,7 @@ test("embedded programs are valid module JavaScript and PostgreSQL witnesses con
     // Syntax-only local Node checks, never Docker, Kubernetes or a data service.
     for (const code of [
       invocation(restoreFiles, { root: "", set: f.value.set, source, diskBytes: 1 }),
-      invocation(validateForgejoSQL, { root: "" }),
+      invocation(validateForgejoDatabase, { root: "" }),
       invocation(openBaoRequest, { action: "validate" }),
     ]) {
       const child = Bun.spawn(["node", "--check", "--input-type=module"], {
@@ -1053,8 +1092,204 @@ test("PostgreSQL witnesses preserve quoted authentication table names and reject
   }
 });
 
-test.each(["valid", "row digest", "foreign key", "foreign key table order"] as const)(
-  "Forgejo SQL really rebuilds SQLite and checks %s in a synthetic local unit fixture",
+async function forgejoSnapshot(directory: string, orphan = false, missingMetadata = false) {
+  const file = join(directory, "snapshot.sqlite3");
+  const child = Bun.spawn(["node", "--input-type=module"], {
+    stdin: new Blob([
+      `
+import assert from "node:assert/strict";
+import { stat } from "node:fs/promises";
+import { DatabaseSync, backup } from "node:sqlite";
+const sourcePath = ${JSON.stringify(join(directory, "source.sqlite3"))};
+const source = new DatabaseSync(sourcePath, {enableForeignKeyConstraints:false});
+source.exec(\`
+ PRAGMA journal_mode=WAL;
+ PRAGMA wal_autocheckpoint=0;
+ CREATE TABLE access(id INTEGER PRIMARY KEY,repo_id INTEGER REFERENCES repository(id));
+ CREATE TABLE repository(id INTEGER PRIMARY KEY,name TEXT);
+ INSERT INTO repository VALUES(1,'owned');
+ INSERT INTO access VALUES(1,${orphan ? 999 : 1});
+ CREATE TABLE forgejo_version(id INTEGER PRIMARY KEY,version INTEGER);
+ INSERT INTO forgejo_version VALUES(1,44);
+ CREATE TABLE forgejo_migration(id TEXT PRIMARY KEY,created_unix INTEGER);
+ INSERT INTO forgejo_migration VALUES('v17a_original',1794901234);
+ CREATE TABLE wal_sentinel(id INTEGER PRIMARY KEY,payload BLOB,large INTEGER,optional TEXT,note TEXT);
+ PRAGMA wal_checkpoint(TRUNCATE);
+ INSERT INTO wal_sentinel VALUES(1,X'0001ff',9223372036854775807,NULL,'committed-only-in-WAL');
+\`);
+assert.ok((await stat(sourcePath+"-wal")).size > 0);
+${missingMetadata ? 'source.exec("DROP TABLE forgejo_migration");' : ""}
+const observer = new DatabaseSync(sourcePath, {readOnly:true,allowExtension:false});
+await backup(observer, ${JSON.stringify(file)});
+observer.close();
+const snapshot = new DatabaseSync(${JSON.stringify(file)});
+assert.equal(snapshot.prepare("PRAGMA journal_mode=DELETE").get().journal_mode,"delete");
+assert.equal(snapshot.prepare("PRAGMA integrity_check").get().integrity_check,"ok");
+snapshot.close();
+assert.equal(source.prepare("PRAGMA journal_mode").get().journal_mode,"wal");
+source.close();
+`,
+    ]),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+  return readFile(file);
+}
+
+function forgejoTableWitnesses(orphan = false): Witnesses["forgejo"]["tables"] {
+  // Independent, predeclared original values, never computed from the restored snapshot.
+  return {
+    access: {
+      rows: 1,
+      sha256: hash(`[{"integer":"1"},{"integer":"${orphan ? 999 : 1}"}]\n`),
+    },
+    repository: { rows: 1, sha256: hash('[{"integer":"1"},"owned"]\n') },
+    forgejo_version: { rows: 1, sha256: hash('[{"integer":"1"},{"integer":"44"}]\n') },
+    forgejo_migration: {
+      rows: 1,
+      sha256: hash('["v17a_original",{"integer":"1794901234"}]\n'),
+    },
+    wal_sentinel: {
+      rows: 1,
+      sha256: hash(
+        '[{"integer":"1"},{"hex":"0001ff"},{"integer":"9223372036854775807"},null,"committed-only-in-WAL"]\n',
+      ),
+    },
+  };
+}
+
+test("the actual archive extraction and Node validator roundtrip the witnessed standalone WAL backup without executing SQL or using raw main.db", async () => {
+  const f = await fixture();
+  try {
+    const snapshot = await forgejoSnapshot(f.root);
+    const forgejoEntries: TarEntry[] = [
+      { name: "forgejo.sqlite3", content: snapshot },
+      { name: "forgejo-db.sql", content: "INVALID SQL MUST NEVER EXECUTE" },
+      { name: "app.ini", content: "original-configuration" },
+      { name: "data/data/forgejo.db", content: "untrusted raw live main.db" },
+      { name: "data/data/forgejo.db-wal", content: "untrusted raw live WAL" },
+      { name: "data/data/forgejo.db-shm", content: "untrusted raw shared memory" },
+      { name: "data/data/forgejo.db-journal", content: "untrusted raw journal" },
+    ];
+    const stateEntries: TarEntry[] = [
+      {
+        name: "kubernetes-installation.json",
+        content: JSON.stringify({
+          runtime: "substrate",
+          namespace: source.namespace,
+          release: source.release,
+          factoryURL: source.factoryOrigin,
+          forgeURL: source.forgejoOrigin,
+          storageClass: source.storageClass,
+        }),
+      },
+      { name: "openbao/bootstrap.json", content: "original-bootstrap" },
+      { name: "openbao/factory-login.json", content: "original-login" },
+    ];
+    const inventory = (entries: TarEntry[]) =>
+      entries.map((entry) => ({
+        path: entry.name,
+        bytes: Buffer.byteLength(entry.content ?? ""),
+        sha256: hash(entry.content ?? ""),
+      }));
+    f.witness.forgejo = {
+      files: inventory(forgejoEntries),
+      repositories: [],
+      tables: forgejoTableWitnesses(),
+    };
+    f.witness.state.files = inventory(stateEntries);
+    for (const [name, bytes] of Object.entries({
+      "forgejo.tar.gz": archiveBytes(forgejoEntries),
+      "state.tar.gz": archiveBytes(stateEntries),
+      "openbao.snap": archiveBytes([
+        { name: "meta.json", content: "metadata" },
+        { name: "state.bin", content: "state" },
+        {
+          name: "SHA256SUMS",
+          content: `${hash("metadata")}  meta.json\n${hash("state")}  state.bin\n`,
+        },
+      ]),
+    })) {
+      await writeFile(join(f.value.privateRoot, f.value.set, name), bytes, { mode: 0o600 });
+      f.witness.parts[name] = hash(bytes);
+    }
+    await f.save();
+    const loaded = await f.load();
+    const root = join(f.root, "container");
+    await mkdir(root, { mode: 0o700 });
+    await symlink(f.value.privateRoot, join(root, "input"));
+    for (const directory of [
+      "control",
+      "state",
+      "forgejo",
+      "forgejo-config",
+      "bao-data",
+      "pg-data",
+      "objects-data",
+      "objects-input",
+    ])
+      await mkdir(join(root, directory), { mode: 0o700 });
+    const code = `
+import vm from "node:vm";
+import * as actualFS from "node:fs/promises";
+// Only privileged ownership changes are substituted on the local host.
+// Archive reads, exclusive extraction, permissions, hashes and SQLite are real.
+const fs = {...actualFS, chown:async()=>{}, lchown:async()=>{},
+ open:async(...args)=>{const handle=await actualFS.open(...args);handle.chown=async()=>{};return handle;}};
+const context=vm.createContext({Buffer});
+const program=new vm.SourceTextModule(${JSON.stringify(
+      invocation(restoreFiles, {
+        root,
+        set: f.value.set,
+        source: loaded.source,
+        diskBytes: 1,
+        witnessDigest: loaded.witnessDigest,
+      }),
+    )},{
+ context, importModuleDynamically:async name=>{
+  const values=name==="node:fs/promises"?fs:await import(name);
+  const m=new vm.SyntheticModule(Object.keys(values),function(){
+   for(const key of Object.keys(values))this.setExport(key,values[key]);
+  },{context});
+  await m.link(()=>{});await m.evaluate();return m;
+ }
+});
+await program.link(()=>{throw Error("unexpected static import")});
+await program.evaluate();
+${invocation(validateForgejoDatabase, { root })}
+`;
+    const child = Bun.spawn(["node", "--experimental-vm-modules", "--input-type=module"], {
+      stdin: new Blob([code]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+    expect(await readFile(join(root, "forgejo/data/forgejo.db"))).toEqual(snapshot);
+    expect(await Bun.file(join(root, "control/forgejo.sql")).exists()).toBe(false);
+    for (const suffix of ["-wal", "-shm", "-journal"])
+      expect(await Bun.file(join(root, `forgejo/data/forgejo.db${suffix}`)).exists()).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "valid",
+  "row digest",
+  "migration timestamp",
+  "missing metadata table",
+  "foreign key",
+  "corrupt",
+  "changed snapshot hash",
+  "missing",
+  "unwitnessed",
+  "WAL header",
+  "WAL sidecar",
+  "SHM sidecar",
+  "journal sidecar",
+] as const)(
+  "the exact read-only Forgejo database validator checks %s using a real Node Online Backup snapshot",
   async (boundary) => {
     const f = await fixture();
     try {
@@ -1062,41 +1297,62 @@ test.each(["valid", "row digest", "foreign key", "foreign key table order"] as c
       for (const dir of ["control", "forgejo/data", "forgejo-config"])
         await mkdir(join(root, dir), { recursive: true, mode: 0o700 });
       f.witness.forgejo.repositories = [];
-      f.witness.forgejo.tables = {
-        repository: {
+      f.witness.forgejo.tables = forgejoTableWitnesses(boundary === "foreign key");
+      if (boundary === "row digest")
+        f.witness.forgejo.tables["repository"] = { rows: 1, sha256: hash("wrong") };
+      if (boundary === "migration timestamp")
+        f.witness.forgejo.tables["forgejo_migration"] = {
           rows: 1,
-          sha256: hash(boundary === "row digest" ? "wrong" : '[{"integer":"1"},"owned"]\n'),
-        },
-      };
-      let sql =
-        "CREATE TABLE repository(id INTEGER PRIMARY KEY,name TEXT); INSERT INTO repository VALUES(1,'owned');";
-      if (boundary === "foreign key table order") {
-        sql =
-          "CREATE TABLE access(id INTEGER PRIMARY KEY,repo_id INTEGER REFERENCES repository(id)); INSERT INTO access VALUES(1,1);" +
-          sql;
-        f.witness.forgejo.tables["access"] = {
-          rows: 1,
-          sha256: hash('[{"integer":"1"},{"integer":"1"}]\n'),
+          sha256: hash('["v17a_original",{"integer":"1794901235"}]\n'),
         };
+      const bytes = await forgejoSnapshot(
+        root,
+        boundary === "foreign key",
+        boundary === "missing metadata table",
+      );
+      if (boundary === "corrupt") bytes[100] = 0xff; // invalid first b-tree page type
+      if (boundary === "WAL header") {
+        bytes[18] = 2;
+        bytes[19] = 2;
       }
-      if (boundary === "foreign key") {
-        sql =
-          "PRAGMA foreign_keys=OFF; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE repository(id INTEGER PRIMARY KEY REFERENCES parent(id),name TEXT); INSERT INTO repository VALUES(1,'owned');";
-        f.witness.forgejo.tables["parent"] = { rows: 0, sha256: hash("") };
-      }
-      await writeFile(join(root, "control/forgejo.sql"), sql);
+      const file = join(root, "forgejo/data/forgejo.db");
+      if (boundary !== "missing") await writeFile(file, bytes);
+      f.witness.forgejo.files = [
+        ...(boundary === "unwitnessed"
+          ? []
+          : [
+              {
+                path: "forgejo.sqlite3",
+                bytes: bytes.length,
+                sha256: hash(boundary === "changed snapshot hash" ? "wrong" : bytes),
+              },
+            ]),
+      ];
+      const suffix =
+        boundary === "WAL sidecar"
+          ? "-wal"
+          : boundary === "SHM sidecar"
+            ? "-shm"
+            : boundary === "journal sidecar"
+              ? "-journal"
+              : "";
+      if (suffix) await writeFile(`${file}${suffix}`, "");
+      // An old SQL dump is never a fallback or executable input, even when present.
+      await writeFile(join(root, "control/forgejo.sql"), "THIS MUST NEVER EXECUTE");
       await writeFile(join(root, "control/witnesses.json"), JSON.stringify(f.witness));
       await writeFile(join(root, "forgejo-config/app.ini"), "original-config-unit-fixture");
       const child = Bun.spawn(["node", "--input-type=module"], {
-        stdin: new Blob([invocation(validateForgejoSQL, { root })]),
+        stdin: new Blob([invocation(validateForgejoDatabase, { root })]),
         stdout: "pipe",
         stderr: "pipe",
       });
       const code = await child.exited;
       const stderr = await new Response(child.stderr).text();
-      const valid = boundary === "valid" || boundary === "foreign key table order";
-      expect(code === 0, stderr).toBe(valid);
-      if (valid) expect(await Bun.file(join(root, "forgejo/data/forgejo.db")).exists()).toBe(true);
+      expect(code === 0, stderr).toBe(boundary === "valid");
+      if (boundary !== "missing") expect(await readFile(file)).toEqual(bytes);
+      if (boundary === "valid")
+        for (const sidecar of ["-wal", "-shm", "-journal"])
+          expect(await Bun.file(`${file}${sidecar}`).exists()).toBe(false);
     } finally {
       await f.close();
     }

@@ -47,4 +47,21 @@ if (!(bundle === null && process.env["FACTORY_SMOKE_ARTIFACTS"] === "optional"))
   runtimeArtifactsSchema.parse(bundle);
 const kubectl = Bun.spawnSync(["kubectl", "version", "--client"], { stderr: "inherit" });
 if (kubectl.exitCode !== 0) throw new Error("kubectl does not start in the Factory image");
+const upstream = await Bun.file(resolve(root, "upstream.json")).json();
+const sqlite = Bun.spawnSync(
+  [
+    "factory-sqlite",
+    "-init",
+    "/dev/null",
+    "-batch",
+    "-bail",
+    ":memory:",
+    "SELECT sqlite_version();",
+  ],
+  {
+    stderr: "inherit",
+  },
+);
+if (sqlite.exitCode !== 0 || sqlite.stdout.toString().trim() !== upstream.sqlite.version)
+  throw new Error("The pinned static SQLite backup tool does not start in the Factory image");
 console.log(JSON.stringify({ factoryImageSmoke: "ok" }));

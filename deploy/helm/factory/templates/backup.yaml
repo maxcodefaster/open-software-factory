@@ -197,7 +197,7 @@ spec:
             - name: stage-kubectl
               image: {{ include "factory.image" . }}
               imagePullPolicy: {{ .Values.imagePullPolicy }}
-              command: [cp, /usr/local/bin/kubectl, /tools/kubectl]
+              command: [cp, /usr/local/bin/kubectl, /usr/local/bin/factory-sqlite, /tools/]
               securityContext:
                 runAsNonRoot: true
                 {{- include "factory.containerSecurity" . | nindent 16 }}

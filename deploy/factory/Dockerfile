@@ -15,6 +15,13 @@ RUN go mod download
 COPY services/runtime-connector ./
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /factory-runtime-connector ./cmd/factory-runtime-connector
 
+FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS sqlite-tools
+ARG SQLITE_SOURCE=https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz
+ARG SQLITE_SHA256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
+RUN apk add --no-cache build-base
+COPY scripts/factory/build-sqlite.sh /build-sqlite.sh
+RUN sh /build-sqlite.sh "$SQLITE_SOURCE" "$SQLITE_SHA256" /factory-sqlite
+
 FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tools
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates git util-linux openssl \
@@ -38,6 +45,7 @@ FROM tools AS factory
 COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl
 COPY --from=substrate-control /factory-substrate-control /usr/local/bin/factory-substrate-control
 COPY --from=source-service /factory-runtime-connector /usr/local/bin/factory-runtime-connector
+COPY --from=sqlite-tools /factory-sqlite /usr/local/bin/factory-sqlite
 WORKDIR /opt/factory
 COPY --from=dependencies /opt/factory/node_modules ./node_modules
 COPY package.json upstream.json LICENSE ./

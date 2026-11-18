@@ -411,7 +411,7 @@ database dump refers to:
 | Step | Tool | Result in `<timestamp>/` |
 | --- | --- | --- |
 | PostgreSQL | `pg_dump --format=custom` through exec in the existing pinned PostgreSQL Pod, checked there with `pg_restore --list` | `postgres.dump` |
-| Forgejo | `forgejo dump` run in the Forgejo container through `kubectl exec`, streamed back and checked | `forgejo.tar.gz` (`forgejo-db.sql`, repositories, attachments, configuration) |
+| Forgejo | SQLite Online Backup plus `forgejo dump` through bounded `kubectl exec`, streamed back and checked | `forgejo.tar.gz` (`forgejo.sqlite3`, portable SQL, repositories, attachments, configuration) |
 | Objects | `rclone sync` of the Garage bucket | one mirror at `objects/`; replaced or deleted objects move to `objects-changed/<timestamp>/` |
 | OpenBao | `bao operator raft snapshot save`, logged in as the `factory-backup` AppRole | `openbao.snap` |
 | State | `tar` of the Factory state claim, mounted read-only | `state.tar.gz` (unseal key, AppRole login, installation identity) |
@@ -425,15 +425,38 @@ labelled `app.kubernetes.io/component=backup` to PostgreSQL, OpenBao and Garage,
 services. Backup Pods have no egress restriction in this chart; they also need the Kubernetes API
 and, when configured, an offsite destination.
 
-Init containers stage static `kubectl` and `bao` binaries from the existing Factory and OpenBao
+Init containers stage static `kubectl`, SQLite and `bao` binaries from the existing Factory and OpenBao
 images into a tools volume; they do not mount backup data, object-store keys or OpenBao credentials.
 The rclone runner alone writes backup data. It mounts the tools, state, OpenBao TLS/login and
 optional remote configuration read-only. Its namespace-scoped Role permits exec only into the exact
 `<release>-postgres-0` and `<release>-forgejo-0` Pods. Database credentials remain in PostgreSQL.
 Every remote Forgejo dump attempt uses its own temporary directory named with the backup Pod UID.
+The runner sends the packaged, architecture-matched static SQLite CLI over that same bounded exec
+stream. It installs no package or additional service. SQLite's Online Backup API captures the live
+WAL database, including Forgejo's original migration records. The completed snapshot is finalized
+in standalone DELETE-journal mode and checked for integrity and foreign-key violations.
+Factory and Forgejo must use the same control-plane CPU architecture for this staged tool.
+Mixed-architecture control-plane scheduling is not qualified; separately selected Actor workers
+retain their native profile.
+The pinned Forgejo SQL exporter omits its own migration tables, so `forgejo-db.sql` is not an
+authoritative recovery source. The raw live database copied into the archive is not used either.
+Sets without the authoritative snapshot are refused; restore does not invent missing migration
+history or fall back to the old SQL path.
+The attempt's temporary space must hold the standalone snapshot and uncompressed Forgejo archive.
 A dump left running after an exec disconnect cannot collide with a later Job or retry.
 The remote shell removes its directory on normal exit or a handled signal. A forced kill can leave
 it for operator inspection.
+
+The explicit native tool check uses the built static CLI, not a workstation SQLite installation:
+
+```sh
+FACTORY_BACKUP_SQLITE_FILE=/absolute/path/to/built/factory-sqlite \
+  mise exec -- bun run test:native backup-runner.native
+```
+
+Without that input the WAL/snapshot case is skipped, not qualified. The separate binary-input and
+writer-lock check still runs. This component check does not replace an actual complete backup and
+restore.
 
 Limits to know before relying on this:
 
@@ -601,24 +624,25 @@ new installation and holds nothing yet.
    ```
 
    `pg_restore` must exit 0. A foreign key error means the source database held orphaned rows.
-3. Files. On your workstation, rebuild Forgejo's SQLite database from its SQL dump. The archive's raw
-   copy was taken while Forgejo ran, so never use it. Start the toolbox from the previous section,
-   then:
+3. Files. Use the authoritative `forgejo.sqlite3` Online Backup snapshot. Do not execute the
+   portable SQL dump or use the archive's raw live `data/data/forgejo.db` copy. Start the toolbox
+   from the previous section, then:
 
    ```sh
-   kubectl exec restore-toolbox -- tar -xzOf /backup/<timestamp>/forgejo.tar.gz forgejo-db.sql | sqlite3 forgejo.db
    kubectl exec restore-toolbox -- sh -ec '
      S=/backup/<timestamp>
      find /var/lib/gitea /etc/gitea /zero /bao/data /var/lib/factory -mindepth 1 -delete
      tar -xzf $S/forgejo.tar.gz -C /var/lib/gitea --strip-components=1 \
-       --exclude "repos*" --exclude app.ini --exclude forgejo-db.sql --exclude "data/data/forgejo.db*"
+       --exclude "repos*" --exclude app.ini --exclude forgejo-db.sql --exclude forgejo.sqlite3 --exclude "data/data/forgejo.db*"
      mkdir -p /var/lib/gitea/git/repositories
      tar -xzf $S/forgejo.tar.gz -C /var/lib/gitea/git/repositories --strip-components=1 \
-       --exclude "data*" --exclude app.ini --exclude forgejo-db.sql
+       --exclude "data*" --exclude app.ini --exclude forgejo-db.sql --exclude forgejo.sqlite3
      tar -xzf $S/forgejo.tar.gz -C /etc/gitea app.ini
      tar -xzf $S/state.tar.gz -C /var/lib/factory
+     mkdir -p /var/lib/gitea/data
+     tar -xzOf $S/forgejo.tar.gz forgejo.sqlite3 > /var/lib/gitea/data/forgejo.db
+     chmod 600 /var/lib/gitea/data/forgejo.db
      rclone sync /backup/objects s3:factory --create-empty-src-dirs'
-   kubectl exec -i restore-toolbox -- sh -c 'cat > /var/lib/gitea/data/forgejo.db' < forgejo.db
    kubectl exec restore-toolbox -- chown -R 1000:1000 /var/lib/gitea /etc/gitea
    ```
 
@@ -713,7 +737,7 @@ where they carry configuration. The top-level `fixture.json` fields are:
 
 Use the chart's exact PostgreSQL 16.14, Forgejo 17, Garage 2.3, OpenBao 2.7.1 and rclone 1.74.1
 digests. The tools image is the existing pinned Node 24 image in `upstream.json`; its built-in
-SQLite library rebuilds Forgejo without downloading packages. All images must already be loaded
+SQLite library validates the restored standalone snapshot without downloading packages. All images must already be loaded
 for the selected platform. The tool uses `--pull never`, the explicit socket, and a private empty
 Docker configuration scope, not the user's saved Docker contexts, logins or proxy environment.
 
@@ -750,7 +774,8 @@ restore errors still allow the independent later component checks after its cont
 - `forgejo` has `tables`, `files` and `repositories`. `tables` covers every non-`sqlite_%` SQLite
   table. Hash sorted JSON row arrays in SQLite column order, with one LF after each row.
   Encode integers as `{"integer":"decimal"}` and blobs as `{"hex":"lowercase hex"}`.
-  `files` is the complete archive member inventory, including `forgejo-db.sql`, original `app.ini`,
+  `files` is the complete archive member inventory, including authoritative `forgejo.sqlite3`,
+  portable `forgejo-db.sql`, original `app.ini`,
   attachments, repositories and the ignored raw SQLite copy. `repositories` lists every
   `repos/OWNER/REPOSITORY.git` root represented by an archived `HEAD`.
 - `state` has complete archive `files`, exact `excludedProvisionerPaths`, and
@@ -797,9 +822,11 @@ The actual restore operations are the normal ones:
 
 1. Rebuild PostgreSQL in a fresh cluster. Verify the complete table inventory, row counts, full-row
    digests and FK integrity. Historical namespace, Actor, pool, UID and Writer identities stay intact.
-2. Extract Forgejo files into fresh volumes, discard the archived live SQLite copy, execute
-   `forgejo-db.sql`, run `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, and compare all SQL
-   witnesses. The pinned Forgejo image runs only read-only Git configuration checks and
+2. Extract Forgejo files and its witnessed standalone `forgejo.sqlite3` into fresh volumes.
+   Ignore the raw live SQLite copy and never execute `forgejo-db.sql`. Open the authoritative
+   snapshot read-only, run `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, and compare
+   every table and full-row witness, including original migration timestamps. The pinned Forgejo
+   image runs only read-only Git configuration checks and
    `git fsck --full --strict` for every bare repository. The Git check refuses restored `fsck.*`
    configuration, including included configuration files, so repository-local policy cannot
    suppress integrity errors.

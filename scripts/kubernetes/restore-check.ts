@@ -61,7 +61,7 @@ async function checkArchive(
   const listed = await run(["tar", "-tzf", file], { signal, allowFailure: true });
   if (listed.code !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
   return listed.stdout.split("\n").some((line) => member.test(line))
-    ? { name, ok: true, detail: `contains ${label}` }
+    ? { name, ok: true, detail: `contains ${label}; full restore rehearsal still required` }
     : { name, ok: false, detail: `${label} is missing` };
 }
 
@@ -124,8 +124,8 @@ export async function checkSet(
     await checkDump(join(directory, "postgres.dump"), pgRestore, signal),
     await checkArchive(
       join(directory, "forgejo.tar.gz"),
-      /^(\.\/)?forgejo-db\.sql$/,
-      "forgejo-db.sql",
+      /^(\.\/)?forgejo\.sqlite3$/,
+      "forgejo.sqlite3",
       signal,
     ),
     await checkArchive(

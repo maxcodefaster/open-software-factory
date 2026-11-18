@@ -419,10 +419,12 @@ export async function loadFixture(
   tableWitnesses(w.forgejo.tables);
   fileWitnesses(w.forgejo.files);
   requireThat(
-    ["forgejo-db.sql", "app.ini"].every((name) =>
-      w.forgejo.files.some((entry) => entry.path === name && !entry.link && entry.bytes > 0),
+    ["forgejo.sqlite3", "forgejo-db.sql", "app.ini"].every((name) =>
+      w.forgejo.files.some(
+        (entry) => entry.path === name && entry.link === undefined && entry.bytes > 0,
+      ),
     ),
-    "Forgejo SQL and original configuration witnesses are required",
+    "Forgejo standalone SQLite snapshot, SQL archive and original configuration witnesses are required",
   );
   requireThat(
     Array.isArray(w.forgejo.repositories) &&
@@ -1015,7 +1017,7 @@ pg_restore --exit-on-error --single-transaction --no-owner -U factory -d factory
       );
     });
     await component("forgejo", async () => {
-      await exec("tools", invocation(validateForgejoSQL, { root: "" }));
+      await exec("tools", invocation(validateForgejoDatabase, { root: "" }));
       await exec(
         "tools",
         `const fs = await import("node:fs/promises");
@@ -1294,6 +1296,12 @@ export async function restoreFiles(config: {
       "Archive, content witness or original state identity failed; raw diagnostics suppressed",
     );
   };
+  if (
+    !w.forgejo.files.some(
+      (entry) => entry.path === "forgejo.sqlite3" && entry.link === undefined && entry.bytes > 0,
+    )
+  )
+    fail();
   if (
     config.witnessDigest &&
     createHash("sha256").update(JSON.stringify(w)).digest("hex") !== config.witnessDigest
@@ -1610,7 +1618,9 @@ export async function restoreFiles(config: {
     w.state.excludedProvisionerPaths.includes(name) ? null : { root: at("/state"), relative: name },
   );
   await archive(at(`/input/${config.set}/forgejo.tar.gz`), w.forgejo.files, (name) => {
-    if (name === "forgejo-db.sql") return { root: at("/control"), relative: "forgejo.sql" };
+    if (name === "forgejo.sqlite3") return { root: at("/forgejo"), relative: "data/forgejo.db" };
+    // Keep the SQL and live raw database in the complete inventory, but never execute or use them.
+    if (name === "forgejo-db.sql") return null;
     if (name === "app.ini") return { root: at("/forgejo-config"), relative: "app.ini" };
     if (name === "data") return null;
     if (name.startsWith("data/")) {
@@ -1742,26 +1752,61 @@ root_domain=".objects.invalid"
   await own(at("/forgejo-config"));
 }
 
-export async function validateForgejoSQL(config: { root: string }) {
+export async function validateForgejoDatabase(config: { root: string }) {
   const fs = await import("node:fs/promises");
   const { createHash } = await import("node:crypto");
   const { DatabaseSync } = await import("node:sqlite");
   const at = (name: string) => `${config.root}${name}`;
   const w: Witnesses = JSON.parse(await fs.readFile(at("/control/witnesses.json"), "utf8"));
-  const fail = () => {
-    throw Error("Forgejo SQL/files differ from private witnesses");
+  const fail = (): never => {
+    throw Error("Forgejo database/files differ from private witnesses");
   };
-  await fs.mkdir(at("/forgejo/data"), { recursive: true, mode: 0o750 });
-  // `forgejo-db.sql` is the authoritative consistent copy. Never open the archived raw SQLite DB.
-  // Forgejo dumps child tables before some referenced tables. Rebuild the complete dump
-  // before checking every foreign key below; Node enables immediate FK enforcement by default.
-  const db = new DatabaseSync(at("/forgejo/data/forgejo.db"), {
+  const file = at("/forgejo/data/forgejo.db");
+  const expectedFile = w.forgejo.files.find((entry) => entry.path === "forgejo.sqlite3") ?? fail();
+  const info = await fs.lstat(file);
+  if (
+    expectedFile.link !== undefined ||
+    !info.isFile() ||
+    info.isSymbolicLink() ||
+    info.nlink !== 1 ||
+    info.size !== expectedFile.bytes
+  )
+    fail();
+  for (const suffix of ["-wal", "-shm", "-journal"]) {
+    const sidecar = await fs.lstat(`${file}${suffix}`).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    });
+    if (sidecar) fail();
+  }
+  const { createReadStream } = await import("node:fs");
+  const fileHash = createHash("sha256");
+  for await (const chunk of createReadStream(file)) fileHash.update(chunk);
+  if (fileHash.digest("hex") !== expectedFile.sha256) fail();
+  const handle = await fs.open(file, "r");
+  try {
+    const header = Buffer.alloc(100);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    // Reject a WAL-format main file even if its required WAL was omitted from the archive.
+    if (
+      bytesRead !== header.length ||
+      header.subarray(0, 16).toString("ascii") !== "SQLite format 3\0" ||
+      header[18] !== 1 ||
+      header[19] !== 1
+    )
+      fail();
+  } finally {
+    await handle.close();
+  }
+  // Only the witnessed Online Backup snapshot is authoritative. Never run forgejo-db.sql,
+  // open the archived live main.db, start Forgejo or reconstruct migration metadata.
+  const db = new DatabaseSync(file, {
+    readOnly: true,
     allowExtension: false,
-    enableForeignKeyConstraints: false,
   });
   try {
-    db.exec(await fs.readFile(at("/control/forgejo.sql"), "utf8"));
     if (
+      db.prepare("PRAGMA journal_mode").get()?.["journal_mode"] !== "delete" ||
       db.prepare("PRAGMA integrity_check").get()?.["integrity_check"] !== "ok" ||
       db.prepare("PRAGMA foreign_key_check").all().length
     )
@@ -1803,7 +1848,7 @@ export async function validateForgejoSQL(config: { root: string }) {
   }
   const app = await fs.lstat(at("/forgejo-config/app.ini"));
   if (!app.isFile() || app.size === 0) fail();
-  // The complete archive inventory/digests were checked before the SQL database was rebuilt.
+  // The complete archive inventory/digests were checked before opening the snapshot read-only.
   // Require all operator-declared bare repositories, including repositories with no commits.
   for (const repo of w.forgejo.repositories) {
     if (!repo.startsWith("repos/")) fail();

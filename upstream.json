@@ -23,6 +23,12 @@
     "image": "docker.io/rclone/rclone:1.74.1@sha256:eb8788b795f0009324e9572b0e2acb9b56885327c2746b07d67a9d3b893a6602",
     "note": "Index digest (amd64 and arm64). Mirrors the object store and copies backup sets in the Helm chart's backup CronJob; deploy/helm/factory/templates/backup.yaml repeats this pin and a chart test compares them."
   },
+  "sqlite": {
+    "version": "3.54.1",
+    "source": "https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz",
+    "sha256": "926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e",
+    "sha3_256": "b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4"
+  },
   "docker": {
     "version": "29.9.0",
     "image": "docker.io/library/docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470"

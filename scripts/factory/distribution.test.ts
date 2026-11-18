@@ -33,6 +33,15 @@ test("application build tools match the upstream artifact pins", async () => {
   expect(dockerfile).toContain('"/var/lib/factory/bootstrap.lock"');
   expect(dockerfile).toContain('"scripts/kubernetes/start.ts"');
   expect(dockerfile).toContain("scripts/factory/native-installation.ts");
+  expect(dockerfile).toContain(`ARG SQLITE_SOURCE=${upstream.sqlite.source}`);
+  expect(dockerfile).toContain(`ARG SQLITE_SHA256=${upstream.sqlite.sha256}`);
+  expect(dockerfile).toContain(
+    "COPY --from=sqlite-tools /factory-sqlite /usr/local/bin/factory-sqlite",
+  );
+  const sqliteBuild = await readFile(new URL("./build-sqlite.sh", import.meta.url), "utf8");
+  expect(sqliteBuild).toContain("sha256sum -c -");
+  expect(sqliteBuild).toContain("-static");
+  expect(sqliteBuild).toContain("-DSQLITE_OMIT_LOAD_EXTENSION");
   const smoke = await readFile(new URL("./image-smoke.ts", import.meta.url), "utf8");
   expect(smoke).toContain('await import(resolve(root, "scripts/factory/native-installation.ts"))');
   expect(smoke).toContain('await import(resolve(root, "scripts/kubernetes/preflight.ts"))');

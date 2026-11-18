@@ -69,7 +69,14 @@ async function fixture() {
   const backup = `${root}/backup`;
   const scripts = `${root}/scripts`;
   const bin = `${root}/bin`;
-  for (const directory of [backup, scripts, bin, `${root}/state/openbao`, `${root}/tmp`])
+  for (const directory of [
+    backup,
+    scripts,
+    bin,
+    `${root}/state/openbao`,
+    `${root}/tmp`,
+    `${root}/tools`,
+  ])
     await mkdir(directory, { recursive: true });
   await writeFile(`${root}/state/openbao/bootstrap.json`, "{}");
   for (const name of await readdir(`${source}/files/backup`)) {
@@ -77,7 +84,7 @@ async function fixture() {
     await writeFile(
       `${scripts}/${name}`,
       text.replace(
-        /\/scripts\/|\/backup(?=["/\s])|\/state(?=["/\s])|\/tmp\/|\/openbao-login\/|\/openbao-token\//g,
+        /\/scripts\/|\/backup(?=["/\s])|\/state(?=["/\s])|\/tmp\/|\/tools\/|\/openbao-login\/|\/openbao-token\//g,
         (path) => (path === "/scripts/" ? `${scripts}/` : `${root}${path}`),
       ),
     );
@@ -114,6 +121,22 @@ except BlockingIOError:
       "#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n",
     );
   await writeFile(`${root}/tmp/forgejo-db.sql`, "fixture forgejo database");
+  await writeFile(`${root}/tmp/forgejo.sqlite3`, "fixture full SQLite snapshot");
+  await writeFile(`${root}/tmp/app.ini`, "fixture original configuration");
+  await writeFile(
+    `${root}/tools/factory-sqlite`,
+    `#!/bin/sh
+for last do :; done
+case "$last" in
+  ".backup "*) printf snapshot > "\${last#.backup }" ;;
+  *journal_mode*) printf delete ;;
+  *integrity_check*) printf ok ;;
+  *foreign_key_check*) ;;
+  *) exit 2 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
   const archive = Bun.spawnSync([
     "tar",
     "-C",
@@ -121,6 +144,8 @@ except BlockingIOError:
     "-czf",
     `${root}/forgejo.tar.gz`,
     "forgejo-db.sql",
+    "forgejo.sqlite3",
+    "app.ini",
   ]);
   if (archive.exitCode !== 0) throw new Error(archive.stderr.toString());
   await executable(
@@ -246,7 +271,12 @@ esac
     child: Pick<Bun.Subprocess, "exitCode" | "kill">;
     result: Promise<[number, string, string]>;
   }> = [];
-  function start(id: string, extra: Record<string, string> = {}, command?: string[]) {
+  function start(
+    id: string,
+    extra: Record<string, string> = {},
+    command?: string[],
+    input?: string,
+  ) {
     const child = Bun.spawn(command ?? ["sh", `${root}/entry.sh`], {
       env: {
         ...process.env,
@@ -265,6 +295,7 @@ esac
       },
       stdout: "pipe",
       stderr: "pipe",
+      stdin: input === undefined ? "ignore" : new Blob([input]),
     });
     let output = "";
     const stdout = (async () => {
@@ -630,27 +661,35 @@ test.each(["uid-first", "uid-second"])(
       await writeFile(
         `${f.bin}/forgejo`,
         `#!/bin/sh
-while [ "$1" != --tempdir ]; do shift; done
-temporary=$2
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+  --tempdir) temporary=$2; shift ;;
+  --file) archive=$2; shift ;;
+ esac
+ shift
+done
 printf '%s' "$temporary" > "$FIXTURE/$FIXTURE_ID.remote-dir"
 printf '%s' "$BACKUP_POD_UID" > "$temporary/forgejo-db.sql"
 if [ "$FIXTURE_ID" = first ]; then
-  echo "CONTROL blocked remote dump"
+  touch "$FIXTURE/first.remote-blocked"
   while [ ! -f "$FIXTURE/first.release" ]; do sleep 0.02; done
 fi
+tar -b 1 -cf "$archive" -C "$temporary" forgejo-db.sql
 `,
         { mode: 0o755 },
       );
-      const first = f.start("first", {}, ["sh", `${f.root}/remote.sh`, "uid-first"]);
-      await first.blocked();
+      const input = await readFile(`${f.root}/tools/factory-sqlite`, "utf8");
+      const first = f.start("first", {}, ["sh", `${f.root}/remote.sh`, "uid-first"], input);
+      await until(() => Bun.file(`${f.root}/first.remote-blocked`).exists());
       const firstDirectory = await readFile(`${f.root}/first.remote-dir`, "utf8");
       expect(
         (
-          await f.start("second", { BACKUP_POD_UID: nextUID }, [
-            "sh",
-            `${f.root}/remote.sh`,
-            nextUID,
-          ]).result
+          await f.start(
+            "second",
+            { BACKUP_POD_UID: nextUID },
+            ["sh", `${f.root}/remote.sh`, nextUID],
+            input,
+          ).result
         )[0],
       ).toBe(0);
       const nextDirectory = await readFile(`${f.root}/second.remote-dir`, "utf8");

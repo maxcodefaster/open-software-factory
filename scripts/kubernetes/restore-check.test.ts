@@ -113,7 +113,11 @@ test("a backup set is complete only with every part and the completion marker", 
     const set = join(directory, "20261104T021700Z");
     await mkdir(set);
     await writeFile(join(set, "postgres.dump"), "PGDMP-archive");
-    await tar(set, "forgejo.tar.gz", { "forgejo-db.sql": "select 1;", "data/git": "" });
+    await tar(set, "forgejo.tar.gz", {
+      "forgejo.sqlite3": "snapshot presence only; rehearsal validates the database",
+      "forgejo-db.sql": "select 1;",
+      "data/git": "",
+    });
     await tar(set, "state.tar.gz", { "openbao/bootstrap.json": "{}" });
     await tar(set, "openbao.snap", snapshotFiles());
     const partial = await checkSet(set, pgRestore);
@@ -122,6 +126,17 @@ test("a backup set is complete only with every part and the completion marker", 
     ]);
     await writeFile(join(set, "COMPLETE"), "");
     expect((await checkSet(set, pgRestore)).every((result) => result.ok)).toBe(true);
+    expect(
+      (await checkSet(set, pgRestore)).find((result) => result.name === "forgejo.tar.gz"),
+    ).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining("full restore rehearsal still required"),
+    });
+    await tar(set, "forgejo.tar.gz", { "forgejo-db.sql": "select 1;", "data/git": "" });
+    expect(
+      (await checkSet(set, pgRestore)).find((result) => result.name === "forgejo.tar.gz"),
+    ).toMatchObject({ ok: false, detail: expect.stringContaining("forgejo.sqlite3") });
+    await tar(set, "forgejo.tar.gz", { "forgejo.sqlite3": "snapshot presence only" });
     await rm(join(set, "openbao.snap"));
     expect(
       (await checkSet(set, pgRestore)).filter((result) => !result.ok).map((result) => result.name),
