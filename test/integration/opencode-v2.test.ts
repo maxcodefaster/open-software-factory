@@ -28,7 +28,11 @@ test("native OpenCode 2 retains queued work through process loss, executes once 
       location: { directory: "/workspace/project" },
       model: { providerID: "factory", id: buildModelID },
     });
+    expect((await process.client.session.get({ sessionID })).permissions).toBeUndefined();
     await ensureOpenCodeMessageBoundary(process.client, sessionID);
+    expect((await process.client.session.get({ sessionID })).permissions).toEqual([
+      { action: "question", resource: "*", effect: "deny" },
+    ]);
     expect(
       (await process.client.model.list({})).data.some(
         (model) => model.providerID === "factory" && model.id === buildModelID,

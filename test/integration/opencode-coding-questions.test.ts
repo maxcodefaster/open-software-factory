@@ -269,6 +269,44 @@ test("Factory Coding excludes native question forms while retaining text clarifi
     expect((await readFile(resolve(project, "README.md"), "utf8")).trim()).toBe(
       "# Owned clarification",
     );
+    // Native children inherit their parent's override at creation. Use an
+    // omitted-override parent to exercise an existing child with no override.
+    const omittedParentID = `${sessionID}_omitted_parent`;
+    await client.session.create({
+      id: omittedParentID,
+      location: { directory: "/workspace/project" },
+      model: { id: modelID, providerID: "factory" },
+    });
+    expect((await client.session.get({ sessionID: omittedParentID })).permissions).toBeUndefined();
+    const reusedChildID = `${sessionID}_reused_child`;
+    await client.session.create({
+      id: reusedChildID,
+      parentID: omittedParentID,
+      location: { directory: "/workspace/project" },
+      model: { id: modelID, providerID: "factory" },
+    });
+    expect((await client.session.get({ sessionID: reusedChildID })).permissions).toBeUndefined();
+    await ensureOpenCodeMessageBoundary(client, reusedChildID);
+    const reusedChild = await client.session.get({ sessionID: reusedChildID });
+    expect(reusedChild.parentID).toBe(omittedParentID);
+    expect(reusedChild.permissions).toEqual([
+      { action: "question", resource: "*", effect: "deny" },
+    ]);
+    const reusedChildInput = {
+      ...input,
+      sessionID: reusedChildID,
+      promptID: `${input.promptID}_reused_child`,
+      text: "Owned read-only child check. Follow up in this existing child Session.",
+    };
+    await promptRecordedOpenCodeInput(client, reusedChildInput, true);
+    await observe(
+      () => confirmSettledOpenCodeInput(client, reusedChildID, reusedChildInput.promptID),
+      Boolean,
+      "Reused native child without an initial permission override did not settle",
+    );
+    expect((await client.session.form.list({ sessionID: reusedChildID })).length).toBe(0);
+    expect(childTools.length).toBeGreaterThan(1);
+    expect(tools.every((names) => !names.includes("question"))).toBe(true);
     await writeFile(
       resolve(evidence, "verified.json"),
       JSON.stringify({
@@ -280,6 +318,8 @@ test("Factory Coding excludes native question forms while retaining text clarifi
         pendingForms: await client.session.form.list({ sessionID }),
         followupSettled: true,
         childSettled: true,
+        reusedChildSettled: true,
+        reusedChildPermissions: reusedChild.permissions,
       }),
     );
     await writeFile(

@@ -41,10 +41,13 @@ describe("Factory Coding native interaction boundary", () => {
       unconfirmed?: boolean;
       foreign?: boolean;
       malformed?: boolean;
+      malformedRules?: boolean;
+      omitted?: boolean;
     } = {},
   ) {
-    let permissions = structuredClone(initial);
+    let permissions = behavior.omitted ? undefined : structuredClone(initial);
     let writes = 0;
+    let reads = 0;
     const client = createOpenCodeClient(async (request, path) => {
       if (path.startsWith("/api/model")) return Response.json({ data: [] });
       if (path.includes("/message"))
@@ -57,15 +60,37 @@ describe("Factory Coding native interaction boundary", () => {
         if (behavior.lost) throw new Error("Owned permission update response loss");
         return new Response(null, { status: 204 });
       }
+      reads++;
       return Response.json({
         data: {
           id: behavior.foreign ? "ses_other" : input.sessionID,
-          permissions: behavior.malformed ? null : permissions,
+          permissions: behavior.malformed
+            ? null
+            : behavior.malformedRules
+              ? [{ ...denyQuestion, effect: "unknown" }]
+              : permissions,
         },
       });
     });
-    return { client, permissions: () => permissions, writes: () => writes };
+    return { client, permissions: () => permissions, writes: () => writes, reads: () => reads };
   }
+  test("an omitted native Session override is empty, then the question deny is confirmed", async () => {
+    const owned = boundary([], { omitted: true });
+    await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
+    expect(owned.permissions()).toEqual([denyQuestion]);
+    expect(owned.writes()).toBe(1);
+    expect(owned.reads()).toBe(2);
+    await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
+    expect(owned.writes()).toBe(1);
+  });
+  test("an omitted override after an unconfirmed update still refuses input preparation", async () => {
+    const owned = boundary([], { omitted: true, unconfirmed: true });
+    await expect(ensureOpenCodeMessageBoundary(owned.client, input.sessionID)).rejects.toThrow(
+      "interaction boundary",
+    );
+    expect(owned.writes()).toBe(1);
+    expect(owned.reads()).toBe(2);
+  });
   test("narrows only the unsupported builtin, including retained sessions, without changing other rules", async () => {
     const owned = boundary();
     await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
@@ -81,7 +106,7 @@ describe("Factory Coding native interaction boundary", () => {
     await ensureOpenCodeMessageBoundary(owned.client, input.sessionID);
     expect(owned.permissions()).toEqual([...rules, denyQuestion]);
   });
-  test.each(["foreign", "malformed", "unconfirmed"] as const)(
+  test.each(["foreign", "malformed", "malformedRules", "unconfirmed"] as const)(
     "refuses %s native permission evidence before input admission",
     async (failure) => {
       const owned = boundary(restricted, { [failure]: true });
