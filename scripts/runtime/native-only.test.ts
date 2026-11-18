@@ -298,6 +298,9 @@ test("isolated restore launches only quarantined data services and offline clien
     "exec",
   ]);
   const launched: string[] = [];
+  const scanner = new Bun.Transpiler({ loader: "ts" });
+  const tlsImport = [{ kind: "dynamic-import" as const, path: "node:tls" }];
+  let tlsClients = 0;
   for (const { command, input } of calls) {
     expect(command.slice(0, 5)).toEqual([
       "docker",
@@ -360,6 +363,22 @@ test("isolated restore launches only quarantined data services and offline clien
           : [role === "postgres" ? "bash" : "sh", "-s"],
       );
       expect(typeof input).toBe("string");
+      if (typeof input === "string" && (role === "tools" || role === "bao-client")) {
+        expect(scanner.scanImports(input).filter((entry) => entry.path === "node:tls")).toEqual(
+          role === "bao-client" ? tlsImport : [],
+        );
+        if (role === "bao-client") {
+          tlsClients++;
+          // node:tls supplies only hostname verification for this isolated
+          // loopback client. Retain normal verification and original-leaf pinning.
+          expect(input).toMatch(/\{\s*checkServerIdentity\s*\}\s*=\s*await import\("node:tls"\)/);
+          expect(input).toContain('hostname: "127.0.0.1"');
+          expect(input).toContain("port: 8200");
+          expect(input).toMatch(/rejectUnauthorized:\s*(?:true|!0),/);
+          expect(input).toContain("checkServerIdentity(hostname, peer)");
+          expect(input).toContain("peer.raw.equals(leaf.raw)");
+        }
+      }
       if (role === "forgejo")
         expect(input).toBe(`set -eu
 export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
@@ -374,8 +393,9 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
     }
   }
   expect(launched.sort()).toEqual(Object.keys(expected).sort());
+  expect(tlsClients).toBe(2); // Initialize and validate only the isolated OpenBao.
   // Check real runtime imports, including embedded clients' dynamic imports, not source keywords.
-  const imports = new Bun.Transpiler({ loader: "ts" }).scanImports(
+  const imports = scanner.scanImports(
     await readFile("scripts/kubernetes/restore-rehearsal.ts", "utf8"),
   );
   const allowed = new Set([
@@ -387,8 +407,10 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
     "node:zlib",
     "node:sqlite",
     "node:https",
+    "node:tls",
   ]);
   for (const entry of imports) expect(allowed.has(entry.path), entry.path).toBe(true);
+  expect(imports.filter((entry) => entry.path === "node:tls")).toEqual(tlsImport);
 });
 
 test.each([

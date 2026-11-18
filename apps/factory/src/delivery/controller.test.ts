@@ -33,6 +33,22 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
   const client = Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
+      if (query.includes("FOR UPDATE OF change,ticket"))
+        return [{ projectID: "project", available: state === "active" }];
+      if (query.includes("FROM factory.change_writer WHERE"))
+        return [
+          {
+            state: "unassigned",
+            epoch: "1",
+            userID: null,
+            turnID: null,
+            fenceAttemptID: null,
+            fenceRequired: false,
+            requestedBy: null,
+            requestID: null,
+            handoffKind: "takeover",
+          },
+        ];
       if (query.includes("commit_sha <>")) {
         if (
           !superseded ||
