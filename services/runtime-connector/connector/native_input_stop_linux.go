@@ -80,16 +80,11 @@ func mountInputStopPath(root, source, destination string, readOnly, device bool)
 		return err
 	}
 	target := filepath.Join(root, destination)
-	if info.IsDir() {
-		err = os.MkdirAll(target, 0755)
-	} else {
-		err = os.MkdirAll(filepath.Dir(target), 0755)
-		if err == nil {
-			var file *os.File
-			file, err = os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-			if file != nil {
-				file.Close()
-			}
+	if !info.IsDir() {
+		var file *os.File
+		file, err = os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if file != nil {
+			file.Close()
 		}
 	}
 	if err != nil {
@@ -106,6 +101,30 @@ func mountInputStopPath(root, source, destination string, readOnly, device bool)
 		flags |= unix.MS_RDONLY
 	}
 	return unix.Mount("", target, "", flags, "")
+}
+
+func createInputStopDirectories(root string) error {
+	// Construct the entire fixed skeleton before any bind mounts. Mkdir's mode
+	// is filtered by bootstrap's private umask; explicitly permit traversal
+	// after dropping to UID 1000 without changing that process-wide umask.
+	// Never chmod a mounted tool or the original retained metadata.
+	for _, directory := range []string{
+		"/lib", "/usr", "/usr/lib", "/usr/bin", "/bin",
+		"/opt", "/opt/factory", "/opt/factory/opencode",
+		"/opt/factory/opencode/musl", inputStopServer,
+		"/home", "/home/rootless", "/home/rootless/persist",
+		"/home/rootless/persist/project", inputStopGit,
+		"/dev", "/proc", "/tmp", "/workspace", "/workspace/project",
+	} {
+		path := filepath.Join(root, directory)
+		if err := os.Mkdir(path, 0755); err != nil {
+			return err
+		}
+		if err := os.Chmod(path, 0755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func inputStopLoopback() error {
@@ -163,6 +182,9 @@ func RunNativeInputStopWorker() error {
 	if err := os.Chmod(root, 0755); err != nil {
 		return err
 	}
+	if err := createInputStopDirectories(root); err != nil {
+		return err
+	}
 	// The unchanged packaged server identifies its native watcher with the
 	// image's ldd --version. Preserve that exact Alpine ldd and its interpreter;
 	// do not substitute a libc assertion or a different server build.
@@ -180,11 +202,6 @@ func RunNativeInputStopWorker() error {
 	for _, path := range []string{"/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"} {
 		if err := mountInputStopPath(root, path, path, false, true); err != nil {
 			return errors.New("native input Stop fixed devices are unavailable")
-		}
-	}
-	for _, directory := range []string{"/proc", "/tmp", "/workspace/project"} {
-		if err := os.MkdirAll(filepath.Join(root, directory), 0755); err != nil {
-			return err
 		}
 	}
 	if err := os.Chmod(filepath.Join(root, "tmp"), 0777|os.ModeSticky); err != nil {

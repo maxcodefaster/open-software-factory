@@ -6,9 +6,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestNativeInputStopDirectoriesIgnorePrivateUmask(t *testing.T) {
+	root := t.TempDir()
+	previous := syscall.Umask(0077)
+	defer syscall.Umask(previous)
+	if err := createInputStopDirectories(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != root && (!info.IsDir() || info.Mode().Perm() != 0755) {
+			t.Errorf("private worker path is not a traversable directory: %s %v", path, info.Mode())
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if retained := syscall.Umask(0077); retained != 0077 {
+		t.Fatalf("private worker changed its inherited umask: %04o", retained)
+	}
+}
 
 func TestNativeInputStopPackagedWorker(t *testing.T) {
 	if os.Getenv("FACTORY_NATIVE_INPUT_STOP_PACKAGED_PROOF") != "1" {
@@ -18,6 +42,10 @@ func TestNativeInputStopPackagedWorker(t *testing.T) {
 	if err := readInputStopJSON(os.Stdin, &input); err != nil {
 		t.Fatal(err)
 	}
+	// Native bootstrap retains a private umask. The fixed worker must still
+	// construct traversable tool/metadata ancestors before dropping to UID 1000.
+	previous := syscall.Umask(0077)
+	defer syscall.Umask(previous)
 	result, err := executeNativeInputStop(t.Context(), input, "/usr/local/bin/factory-runtime-connector")
 	if err != nil {
 		t.Fatal(err)
@@ -36,6 +64,8 @@ func TestNativeInputStopPrivateProcessBoundary(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("proof requires its owned container root")
 	}
+	previous := syscall.Umask(0077)
+	defer syscall.Umask(previous)
 	worker := inputStopServer + "/input-stop.mjs"
 	original, err := os.ReadFile(worker)
 	if err != nil {
