@@ -101,6 +101,21 @@ function findingCheck(status: "confirmed" | "dismissed" | "unresolved") {
     ],
   });
 }
+test("finding check guidance distinguishes inventory from its own candidate decision evidence", () => {
+  const tool = candidateReviewToolCatalogue.find((item) => item.name === "review_finding_report");
+  expect(tool?.description).toContain("Do not cite review_files inventory IDs");
+  expect(tool?.description).toContain("even beside valid references");
+  const instructions = findingCheckInstructions({
+    commitSHA: "d".repeat(40),
+    baseSHA: "a".repeat(40),
+    verificationID: crypto.randomUUID(),
+    specification: "Inspect the exact candidate.",
+    proposal,
+  });
+  expect(instructions).toContain("Do not cite review_files inventory IDs");
+  expect(instructions).toContain("already observed App actions need not be repeated");
+  expect(instructions).toContain("rechecked criterion");
+});
 test("confirmed findings alone commission correction, false alarms pass and material uncertainty stays incomplete", () => {
   expect(checkedReviewResult(proposal, findingCheck("confirmed")).verdict).toBe(
     "changes-requested",

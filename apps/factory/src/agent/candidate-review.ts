@@ -308,24 +308,32 @@ export function createCandidateReviewController(
             const observations = item.evidenceIds.map((id) =>
               current.evidence.find((observation) => observation["id"] === id),
             );
-            if (
-              !observations.length ||
-              observations.some(
-                (observation) =>
-                  !observation ||
-                  !(
-                    observation["kind"] === "browser" ||
-                    (observation["kind"] === "execution" &&
-                      observation["commit"] === current.commitSHA) ||
-                    (observation["kind"] === "source" &&
-                      (observation["revision"] === "candidate" || observation["diff"] === true))
-                  ),
-              )
-            )
+            const invalid = observations.findIndex(
+              (observation) =>
+                !observation ||
+                !(
+                  observation["kind"] === "browser" ||
+                  (observation["kind"] === "execution" &&
+                    observation["commit"] === current.commitSHA) ||
+                  (observation["kind"] === "source" &&
+                    (observation["revision"] === "candidate" || observation["diff"] === true))
+                ),
+            );
+            if (!observations.length || invalid !== -1) {
+              const observation = observations[invalid];
+              const reason = !observation
+                ? "was not recorded in this review"
+                : observation["kind"] === "inventory"
+                  ? "is inventory from review_files"
+                  : "is not current-candidate evidence";
+              const detail = observations.length
+                ? `${JSON.stringify(item.evidenceIds[invalid])} ${reason}.`
+                : "No evidence IDs were supplied.";
               throw new CommandError(
                 "conflict",
-                "Finding decisions need your own exact-candidate observations",
+                `Finding decisions need your own exact-candidate observations. ${detail} Cite your own candidate review_read, review_search or review_diff, permitted App observations, or exact-candidate review_execution evidence. Remove or replace ineligible references; already observed App actions need not be repeated.`,
               );
+            }
           }
           let result = checkedReviewResult(proposal, check);
           if (result.verdict === "passed") {

@@ -613,6 +613,54 @@ test.each(["confirmed", "dismissed", "unresolved"] as const)(
   },
 );
 
+test("finding evidence refusals identify inventory mixed with valid candidate reads", async () => {
+  const f = await findingFixture();
+  try {
+    const original = await f.review();
+    const call = (name: string, arguments_: unknown, id: string | number) =>
+      f.reviewer.call(f.checker.id, f.checker.ownerToken, { name, arguments: arguments_ }, id);
+    await call("review_files", {}, 5);
+    await call("review_read", { path: f.source.path }, 3);
+    await call("review_read", { path: f.source.path, revision: "base" }, 2);
+    const report = (evidenceIds: string[]) => ({
+      summary: "The independently inspected candidate confirms the proposed blocker.",
+      checks: [
+        {
+          finding: 1,
+          status: "confirmed",
+          evidence: "Relevant candidate source was read independently.",
+          evidenceIds,
+        },
+      ],
+    });
+    for (const [ids, diagnostic] of [
+      [["source:number:3", "source:number:5"], '"source:number:5" is inventory from review_files'],
+      [
+        ["source:number:3", "source:number:2"],
+        '"source:number:2" is not current-candidate evidence',
+      ],
+      [
+        ["source:number:3", "source:string:foreign"],
+        '"source:string:foreign" was not recorded in this review',
+      ],
+      [[], "No evidence IDs were supplied"],
+    ] as const) {
+      await expect(
+        call("review_finding_report", report([...ids]), `rejected-${diagnostic}`),
+      ).rejects.toThrow(diagnostic);
+      expect((await f.review(f.checkID))?.result).toBeNull();
+      expect(await f.review()).toEqual(original);
+    }
+    await call("review_finding_report", report(["source:number:3"]), "confirmed");
+    const recorded = (await f.review(f.checkID))?.result;
+    expect(recorded).toMatchObject({ verdict: "changes-requested" });
+    expect((recorded as typeof f.proposal).findings).toHaveLength(1);
+    expect(await f.review()).toEqual(original);
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("dismissing all findings cannot invent missing discovery coverage", async () => {
   const f = await findingFixture(false);
   try {
