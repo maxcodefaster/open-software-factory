@@ -57,6 +57,9 @@ COPY deploy/substrate/pins.json ./deploy/substrate/pins.json
 COPY scripts/factory/artifacts.ts scripts/factory/preflight.ts scripts/factory/forge-identity.ts scripts/factory/forge-logout.ts scripts/factory/readiness.ts scripts/factory/storage-readiness.ts scripts/factory/openbao-bootstrap.ts scripts/factory/native-installation.ts ./scripts/factory/
 COPY scripts/kubernetes ./scripts/kubernetes
 COPY templates ./templates
+# COPY retains checkout modes. Keep public code readable to the non-root
+# runtime even with umask 077, without making code writable or touching state.
+RUN chmod -R u=rwX,go=rX apps packages scripts templates deploy package.json upstream.json LICENSE
 # Every installed image embeds the exact runtime role references.
 ARG FACTORY_RUNTIME_ARTIFACTS=null
 RUN FACTORY_RUNTIME_ARTIFACTS="$FACTORY_RUNTIME_ARTIFACTS" bun -e 'await Bun.write("runtime-artifacts.json", process.env.FACTORY_RUNTIME_ARTIFACTS)'
