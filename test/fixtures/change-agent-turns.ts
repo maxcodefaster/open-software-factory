@@ -155,6 +155,10 @@ export async function fixture(
   let installedSkills: string[] = [];
   const nativeInstructions = new Map<string, unknown>();
   const nativeMCPServers = new Set<string>();
+  const nativePermissions = new Map<
+    string,
+    Array<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }>
+  >();
   const hub = new RuntimeHub(async () => {});
   const activityStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const publishActivity = () => {
@@ -230,7 +234,11 @@ export async function fixture(
         { headers: { "content-type": "text/event-stream" } },
       );
     if (path === "/api/session") {
-      if (request.method === "POST") return Response.json({ data: await request.json() });
+      if (request.method === "POST") {
+        const body = await request.json();
+        if (body.permissions) nativePermissions.set(body.id, structuredClone(body.permissions));
+        return Response.json({ data: body });
+      }
       return Response.json({ data: [], cursor: {} });
     }
     if (path.endsWith("/interrupt")) {
@@ -303,10 +311,19 @@ export async function fixture(
     if (
       path.endsWith(`/${sessionID}`) ||
       /^\/api\/session\/ses_factory_review_[a-f0-9]+$/.test(path)
-    )
+    ) {
+      const nativeID = fixtureValue(path.split("/").at(-1), "native Session ID");
+      if (request.method === "PATCH") {
+        const body = await request.json();
+        if (body.permissions) nativePermissions.set(nativeID, structuredClone(body.permissions));
+        return new Response(null, { status: 204 });
+      }
       return Response.json({
         data: {
-          id: path.split("/").at(-1),
+          id: nativeID,
+          ...(nativePermissions.has(nativeID)
+            ? { permissions: structuredClone(nativePermissions.get(nativeID)) }
+            : {}),
           location: { directory: "/workspace/project" },
           model: {
             providerID: "factory",
@@ -314,6 +331,7 @@ export async function fixture(
           },
         },
       });
+    }
     if (path.endsWith("/active")) {
       statusReads += 1;
       return Response.json({ data: {} });
