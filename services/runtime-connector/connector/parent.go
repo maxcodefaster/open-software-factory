@@ -648,7 +648,15 @@ func prepareDevcontainerProject(ctx context.Context, assignment Assignment) erro
 
 func validateDevcontainerConfiguration(ctx context.Context, assignment Assignment, merged bool) ([]string, error) {
 	if assignment.nativeActorUID != "" {
-		if err := reserveNativeDevcontainerLockfile(assignment); err != nil {
+		// Plain read-configuration returns the upstream resolved DTO without
+		// resolving Features. Learn whether a lock is needed before merged
+		// resolution can write it, including direct callers and overrides.
+		if merged {
+			if _, err := validateDevcontainerConfiguration(ctx, assignment, false); err != nil {
+				return nil, err
+			}
+		}
+		if err := checkNativeDevcontainerLockfile(assignment); err != nil {
 			return nil, err
 		}
 	}
@@ -695,10 +703,11 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 	var result struct {
 		Configuration struct {
 			settings
-			Image             string   `json:"image"`
-			DockerComposeFile any      `json:"dockerComposeFile"`
-			Service           string   `json:"service"`
-			RunServices       []string `json:"runServices"`
+			Image             string                     `json:"image"`
+			Features          map[string]json.RawMessage `json:"features"`
+			DockerComposeFile any                        `json:"dockerComposeFile"`
+			Service           string                     `json:"service"`
+			RunServices       []string                   `json:"runServices"`
 		} `json:"configuration"`
 		Merged settings `json:"mergedConfiguration"`
 	}
@@ -726,6 +735,16 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 		}
 		if err := validateDevcontainerSettings(assignment.WorkspaceFolder, configured.Privileged, configured.Mounts, configured.RunArguments, configured.CapAdd, configured.SecurityOpt); err != nil {
 			return nil, err
+		}
+	}
+	if assignment.nativeActorUID != "" {
+		if err := checkNativeDevcontainerLockfile(assignment); err != nil {
+			return nil, err
+		}
+		if len(result.Configuration.Features) != 0 {
+			if err := reserveNativeDevcontainerLockfile(assignment); err != nil {
+				return nil, err
+			}
 		}
 	}
 	images, err := validateCompose(
@@ -1228,6 +1247,10 @@ func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
 }
 
 func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainerResult, error) {
+	return startDevcontainerWithConfiguration(ctx, assignment, validateDevcontainerConfiguration)
+}
+
+func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignment, validate func(context.Context, Assignment, bool) ([]string, error)) (devcontainerResult, error) {
 	if err := requireNativeDependencyReference(ctx, assignment); err != nil {
 		return devcontainerResult{}, fmt.Errorf("%w: %w", errDevcontainerNotStarted, err)
 	}
@@ -1268,6 +1291,13 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	var diagnostic devcontainerFailureOutput
 	command.Stdout = &stdout
 	command.Stderr = &diagnostic
+	if assignment.nativeActorUID != "" {
+		// Re-read the actual effective DTO at the up boundary. Earlier
+		// validation may have used a different prebuild/dependency override.
+		if _, err := validate(ctx, assignment, false); err != nil {
+			return devcontainerResult{}, fmt.Errorf("%w: %w", errDevcontainerNotStarted, err)
+		}
+	}
 	if err := command.Run(); err != nil {
 		detail := devcontainerFailureDiagnostic(stdout.String(), diagnostic.String(), assignment)
 		for _, line := range strings.Split(stdout.String(), "\n") {

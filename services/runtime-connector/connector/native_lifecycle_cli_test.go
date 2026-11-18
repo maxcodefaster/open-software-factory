@@ -137,7 +137,10 @@ console.log('{"outcome":"success"}');
 			if err := os.WriteFile(filepath.Join(directory, "devcontainer"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := startDevcontainer(context.Background(), assignment); err != nil {
+			// This portable fixture qualifies lifecycle metadata resolution,
+			// not Linux checkout ownership or pre-up lockfile admission.
+			if _, err := startDevcontainerWithConfiguration(context.Background(), assignment,
+				func(context.Context, Assignment, bool) ([]string, error) { return nil, nil }); err != nil {
 				result, _ := os.ReadFile(filepath.Join(directory, "read-failure.json"))
 				trace, _ := os.ReadFile(filepath.Join(directory, "docker.log"))
 				t.Fatalf("%v\nresolver: %s\ndocker: %s", err, result, trace)

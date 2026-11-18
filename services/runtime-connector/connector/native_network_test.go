@@ -145,7 +145,10 @@ func TestNativeStartupInspectsPrimaryBeforeOneExactContainerLifecycleDispatch(t 
 					t.Fatal(err)
 				}
 			}
-			_, err := startDevcontainer(context.Background(), assignment)
+			// This host fixture owns container/network observations. Linux
+			// ownership and the real pre-up resolver have their separate tests.
+			_, err := startDevcontainerWithConfiguration(context.Background(), assignment,
+				func(context.Context, Assignment, bool) ([]string, error) { return nil, nil })
 			if (err == nil) != (scenario == "success") {
 				t.Fatalf("unexpected startup outcome: %v", err)
 			}

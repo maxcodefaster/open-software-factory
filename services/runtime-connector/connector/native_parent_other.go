@@ -16,6 +16,10 @@ func reserveNativeDevcontainerLockfile(Assignment) error {
 	return errors.New("native Dev Container lockfile ownership requires Linux")
 }
 
+func checkNativeDevcontainerLockfile(Assignment) error {
+	return errors.New("native Dev Container lockfile ownership requires Linux")
+}
+
 func RunSubstrateSource(context.Context) error {
 	return errors.New("native Source requires Linux")
 }

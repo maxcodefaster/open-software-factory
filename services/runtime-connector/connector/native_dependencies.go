@@ -32,6 +32,11 @@ func prepareNativeDependencies(ctx context.Context, assignment *Assignment) (str
 	if assignment.nativeActorUID != os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID") {
 		return "", "", noop, errors.New("native dependency Actor identity changed")
 	}
+	// This is another plain, non-Feature-resolving read. Check retained metadata
+	// without creating a lockfile for featureless recipes.
+	if err := checkNativeDevcontainerLockfile(*assignment); err != nil {
+		return "", "", noop, err
+	}
 	configPath := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
 	command := exec.CommandContext(ctx, "devcontainer", "read-configuration", "--workspace-folder", assignment.WorkspaceFolder, "--config", configPath, "--log-format", "json")
 	command.Env = devcontainerEnvironment(*assignment)

@@ -696,9 +696,12 @@ The Hub keeps that advertised Source/checkpoint protocol available after failure
 without marking App/Child readiness or allowing other Parent operations. Native CLI
 calls use the saved private `COMPOSE_PROJECT_NAME`, rather than the checkout path's
 derived name or a Project environment override.
-Before a native CLI call, Factory reserves a missing Feature lockfile as development
-UID/GID 1000. The pinned CLI writes that inode with its normal generation and
-verification behavior. Reservation never truncates, replaces or chowns an existing
+Before a native CLI call, Factory checks retained Feature lockfile ownership. It reads
+the resolved configuration through the pinned CLI and reserves a missing lockfile as
+development UID/GID 1000 only when Features need one. The final `up` call checks its
+current effective configuration too. Featureless recipes do not acquire an empty
+lockfile. The CLI keeps its normal generation and verification behavior.
+Reservation never truncates, replaces or chowns an existing
 lockfile; unsupported retained ownership fails closed before CLI dispatch. This prevents a
 fresh Parent from creating root-owned Source metadata. Source export and
 materialization accept only the development UID/GID 1000, including CLI lockfiles.

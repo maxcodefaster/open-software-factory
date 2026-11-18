@@ -210,12 +210,10 @@ func TestNativeDockerProxyPreservesPrivateAuthenticationWithoutExportingIt(t *te
 
 func TestNativeDependencyOverlayRetainsFeaturesHooksAndOriginalComposeSource(t *testing.T) {
 	assignment, directory := nativeDependencyFixture(t, "created")
-	assignment.WorkspaceFolder = t.TempDir()
+	source := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
+	assignment.WorkspaceFolder = source.WorkspaceFolder
 	assignment.DevcontainerPath = ".devcontainer/devcontainer.json"
 	configDirectory := filepath.Join(assignment.WorkspaceFolder, ".devcontainer")
-	if err := os.Mkdir(configDirectory, 0700); err != nil {
-		t.Fatal(err)
-	}
 	config := `{"dockerComposeFile":"compose.yaml","service":"app","remoteUser":"node","features":{"ghcr.io/devcontainers/features/git@sha256:fd75977de13a9979000e0e78baf949adb0ca71d2398995fa22e0a36d7e7e7fe2":{"version":"os-provided"}},"postCreateCommand":"npm ci && npm run db:migrate"}`
 	compose := "services:\n  app:\n    image: " + projectImage("a") + "\n    cap_drop: [ALL]\n    volumes: [..:/workspace/project]\n  postgres:\n    image: " + projectImage("c") + "\n    volumes: [private-data:/var/lib/postgresql/data]\nvolumes:\n  private-data:\n"
 	for name, text := range map[string]string{"devcontainer.json": config, "compose.yaml": compose} {

@@ -9,11 +9,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// CLI 0.89.0 writes its Feature lockfile with fs.writeFile, preserving an
-// existing inode's ownership. Reserve only a missing file before invoking it as
-// the private Parent. Never repair, truncate or replace retained Project metadata,
-// and never disable upstream lockfile generation or verification.
+func checkNativeDevcontainerLockfile(assignment Assignment) error {
+	return nativeDevcontainerLockfile(assignment, false)
+}
+
+// CLI 0.89.0 writes Feature locks with fs.writeFile, preserving an existing
+// inode's ownership. Only a resolved nonempty Feature declaration needs a new
+// inode. Retained metadata is checked, never repaired, truncated or replaced.
 func reserveNativeDevcontainerLockfile(assignment Assignment) error {
+	return nativeDevcontainerLockfile(assignment, true)
+}
+
+func nativeDevcontainerLockfile(assignment Assignment, reserve bool) error {
 	denied := errors.New("native Dev Container lockfile ownership is unavailable; existing metadata retained")
 	if os.Geteuid() != 0 && os.Geteuid() != 1000 {
 		return denied
@@ -46,24 +53,30 @@ func reserveNativeDevcontainerLockfile(assignment Assignment) error {
 	if strings.HasPrefix(filepath.Base(config), ".") {
 		name = ".devcontainer-lock.json"
 	}
-	fd, err := unix.Openat(parent, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
-	if errors.Is(err, unix.EEXIST) {
-		fd, err = unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return denied
+	fd, err := unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	created := false
+	if errors.Is(err, unix.ENOENT) {
+		if !reserve {
+			return nil
 		}
-		defer unix.Close(fd)
-		if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&07000 != 0 || stat.Uid != 1000 || stat.Gid != 1000 || stat.Nlink != 1 {
-			return denied
+		fd, err = unix.Openat(parent, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+		created = err == nil
+		if errors.Is(err, unix.EEXIST) {
+			fd, err = unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		}
-		return nil
 	}
 	if err != nil {
 		return denied
 	}
 	defer unix.Close(fd)
-	// This descriptor was created exclusively by this invocation. This is not a
-	// chown of an existing lockfile or an ownership projection during export.
+	if !created {
+		if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&07000 != 0 || stat.Uid != 1000 || stat.Gid != 1000 || stat.Nlink != 1 {
+			return denied
+		}
+		return nil
+	}
+	// Chown only the descriptor created by this exclusive open. A competing
+	// creator is checked above and can never have its metadata reowned here.
 	if unix.Fchown(fd, 1000, 1000) != nil || unix.Fsync(fd) != nil || unix.Fsync(parent) != nil {
 		return denied
 	}
