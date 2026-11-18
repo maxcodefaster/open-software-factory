@@ -742,6 +742,8 @@ restore errors still allow the independent later component checks after its cont
   `postgresWitnessProgram` defines the exact witness encoding. With PostgreSQL 16, UTC,
   `extra_float_digits=3` and hex bytea, hash the bytes produced by
   `COPY (SELECT row_to_json(t)::text AS row FROM SCHEMA.TABLE t ORDER BY row_to_json(t)::text COLLATE "C") TO STDOUT`.
+  Quote schema and table identifiers to preserve case, including authentication tables such as
+  `"auth"."oauthClient"`.
   This includes PostgreSQL COPY text escaping and each trailing newline. Do not hash display output
   from a GUI. The target uses read-only SQL and the existing backup foreign-key checker as well as
   `pg_restore --exit-on-error --single-transaction --no-owner`; any FK recreation error fails.

@@ -54,6 +54,7 @@ export const supportedSourceManifests = [
 const label = "factory.restore-rehearsal";
 const sha = /^[a-f0-9]{64}$/;
 const identifier = /^[a-z_][a-z0-9_]*$/;
+const postgresIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const partNames = ["postgres.dump", "forgejo.tar.gz", "state.tar.gz", "openbao.snap"];
 export const requiredTables = [
   "factory.project",
@@ -230,7 +231,7 @@ function tableWitnesses(value: Record<string, Digest>, postgres = false) {
       postgres
         ? parts.length === 2 &&
             ["auth", "factory"].includes(parts[0] ?? "") &&
-            identifier.test(parts[1] ?? "")
+            postgresIdentifier.test(parts[1] ?? "")
         : identifier.test(table),
       "Unsafe witness table",
     );
@@ -1174,6 +1175,7 @@ git --git-dir=${shellQuote(repo)} fsck --full --strict >/dev/null 2>&1`,
 `;
 }
 export function postgresWitnessProgram(tables: Record<string, Digest>, foreignKeys: string) {
+  tableWitnesses(tables, true);
   const names = Object.keys(tables).sort();
   return `set -euo pipefail
 # PG_WITNESS: canonical COPY bytes, no raw row leaves the owned container.
@@ -1190,11 +1192,15 @@ test -n "$fk"
 if printf '%s\\n' "$fk" | grep -qv '|0$'; then exit 1; fi
 printf '{'
 ${names
-  .map(
-    (table, i) => `count="$(psql -Atc 'SELECT count(*) FROM ${table}')"
-digest="$(psql -c 'COPY (SELECT row_to_json(t)::text AS row FROM ${table} t ORDER BY row_to_json(t)::text COLLATE "C") TO STDOUT' | sha256sum)"
-printf '${i ? "," : ""}"${table}":{"rows":%s,"sha256":"%s"}' "$count" "\${digest%% *}"`,
-  )
+  .map((table, i) => {
+    const qualified = table
+      .split(".")
+      .map((part) => `"${part}"`)
+      .join(".");
+    return `count="$(psql -Atc 'SELECT count(*) FROM ${qualified}')"
+digest="$(psql -c 'COPY (SELECT row_to_json(t)::text AS row FROM ${qualified} t ORDER BY row_to_json(t)::text COLLATE "C") TO STDOUT' | sha256sum)"
+printf '${i ? "," : ""}"${table}":{"rows":%s,"sha256":"%s"}' "$count" "\${digest%% *}"`;
+  })
   .join("\n")}
 printf '}'
 `;

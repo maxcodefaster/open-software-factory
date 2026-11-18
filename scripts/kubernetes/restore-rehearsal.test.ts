@@ -862,6 +862,34 @@ test("embedded programs are valid module JavaScript and PostgreSQL witnesses con
   }
 });
 
+test("PostgreSQL witnesses preserve quoted authentication table names and reject SQL text", async () => {
+  const f = await fixture();
+  try {
+    f.witness.postgres["auth.oauthClient"] = { rows: 0, sha256: hash("") };
+    await f.save();
+    expect((await f.load()).witnesses.postgres["auth.oauthClient"]).toEqual({
+      rows: 0,
+      sha256: hash(""),
+    });
+    const program = postgresWitnessProgram(f.witness.postgres, "-- supplied read-only query");
+    expect(program).toContain('SELECT count(*) FROM "auth"."oauthClient"');
+    expect(program).toContain('FROM "auth"."oauthClient" t ORDER BY');
+    expect(() =>
+      postgresWitnessProgram(
+        {
+          "auth.client;DROP TABLE factory.project": {
+            rows: 0,
+            sha256: hash(""),
+          },
+        },
+        "",
+      ),
+    ).toThrow();
+  } finally {
+    await f.close();
+  }
+});
+
 test.each(["valid", "row digest", "foreign key"] as const)(
   "Forgejo SQL really rebuilds SQLite and checks %s in a synthetic local unit fixture",
   async (boundary) => {
