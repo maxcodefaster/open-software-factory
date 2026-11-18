@@ -480,7 +480,11 @@ export function createSubstrateExecution(
       throw error;
     }
   }
-  async function remember(sql: Database["client"], saved: Binding, value: unknown) {
+  async function remember(
+    sql: Database["client"] | AgentTurnTransaction,
+    saved: Binding,
+    value: unknown,
+  ) {
     const actor = requireSubstrateActor(value, saved);
     const old = saved.observation ? nativeActor.parse(saved.observation) : null;
     if (old && BigInt(actor.metadata.version) < BigInt(old.metadata.version))
@@ -507,7 +511,7 @@ export function createSubstrateExecution(
       uid,
     );
   }
-  async function observe(sql: Database["client"], saved: Binding) {
+  async function observe(sql: Database["client"] | AgentTurnTransaction, saved: Binding) {
     if (saved.createRejected)
       throw new Error("Native Create was rejected; an existing Actor is never adopted");
     await profile();
@@ -529,6 +533,38 @@ export function createSubstrateExecution(
           AND attempt.id=waiting.attempt_id AND attempt.state IN ('starting','ready')
           AND attempt.stop_intended_at IS NULL`;
     return actor;
+  }
+  async function inputStopVersion() {
+    // Provisioning retains metadata only. Read bootstrap capability from the
+    // native owner after its exact UID/version/spec-hash checks. Its credential-
+    // bearing environment is never persisted or returned.
+    const template = z
+      .object({
+        containers: z.array(
+          z.object({ env: z.array(z.object({ name: z.string(), value: z.string() })) }),
+        ),
+      })
+      .safeParse(await profile());
+    const entries = template.success
+      ? template.data.containers
+          .flatMap((container) => container.env)
+          .filter((env) => env.name === "FACTORY_SUBSTRATE_BOOTSTRAP")
+      : [];
+    if (entries.length !== 1) return null;
+    try {
+      const bootstrap = z
+        .object({
+          sourceHandoff: z.literal(true),
+          inputStop: z.object({
+            version: z.literal(1),
+            openCodeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+          }),
+        })
+        .safeParse(JSON.parse(entries[0]?.value ?? "null"));
+      return bootstrap.success ? bootstrap.data.inputStop.openCodeVersion : null;
+    } catch {
+      return null;
+    }
   }
   async function currentGrant(sql: Database["client"], userID: string, newExecution = false) {
     return sql.begin(async (tx) => {
@@ -948,6 +984,52 @@ export function createSubstrateExecution(
   return {
     matchesProject: (id: string) => id === config.projectID,
     matchesAttempt: (id: string) => id === attemptID,
+    // The maintenance caller holds the installation fence and this Workspace's
+    // transaction lock. This permits retaining a paused input across an upgrade,
+    // not confirming Stop or dispatching any cleanup, lifecycle or inference.
+    async pausedStopRetainedIn(sql: AgentTurnTransaction, stopID: string) {
+      const [retained] = await sql`
+        SELECT attempt.id FROM factory.runtime_attempt attempt
+        JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+          AND workspace.project_id=attempt.project_id AND workspace.change_id=attempt.change_id
+          AND workspace.kind='ticket' AND workspace.substrate
+        JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
+        JOIN factory.change_agent_session session ON session.change_id=change.id
+          AND session.runtime_attempt_id=attempt.id
+        JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
+          AND intent.change_id=change.id AND intent.runtime_attempt_id=attempt.id
+          AND intent.session_id=session.opencode_session_id AND intent.prompt_id IS NOT NULL
+        JOIN factory.agent_turn turn ON turn.id=intent.turn_id AND turn.change_id=change.id
+        JOIN factory.substrate_source source ON source.workspace_id=workspace.id
+        WHERE attempt.id=${attemptID} AND attempt.substrate AND attempt.state='paused'
+          AND attempt.stop_intended_at IS NULL
+          AND EXISTS(SELECT 1 FROM factory.installation_maintenance WHERE singleton AND enabled)
+          AND session.state='stopped' AND session.stop_pending AND session.stop_id=${stopID}
+          AND session.native_session_confirmed_at IS NOT NULL
+          AND turn.state IN ('failed','stopped','completed')
+          AND source.owner='service' AND source.writable AND source.service_base IS NOT NULL
+          AND source.generation>0 AND source.checkpoint IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM factory.substrate_input_stop worker
+            WHERE worker.runtime_attempt_id=attempt.id)
+          AND NOT EXISTS(SELECT 1 FROM factory.substrate_actor_rpc operation
+            WHERE operation.runtime_attempt_id=attempt.id AND operation.outcome IS NULL)
+          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+            WHERE newer.workspace_id=workspace.id AND newer.generation>attempt.generation)`;
+      if (!retained) return false;
+      const saved = await binding(sql);
+      if (saved.deleting || saved.deleted || !saved.actorUID || !saved.checkpoint) return false;
+      const actor = await observe(sql, saved);
+      requireDurableROOTFS(actor, saved, nativeSnapshot.parse(saved.checkpoint));
+      const [source] = await sql`
+        SELECT workspace_id FROM factory.substrate_source
+        WHERE workspace_id=${workspaceID ?? null} AND actor_uid=${actor.metadata.uid}
+          AND owner='service' AND writable AND service_base IS NOT NULL
+          AND generation>0 AND checkpoint->>'actorUID'=${actor.metadata.uid}
+          AND checkpoint->>'workspaceID'=workspace_id::text
+          AND (checkpoint->>'generation')::bigint=generation
+          AND (checkpoint->>'writerEpoch')::bigint<writer_epoch`;
+      return Boolean(source && (await inputStopVersion()));
+    },
     async supportsInitialSourceRole(sql: AgentTurnTransaction) {
       return trackNativeOperation(
         (async () => {
@@ -1013,39 +1095,15 @@ export function createSubstrateExecution(
               AND session.opencode_session_id=${target.sessionID}
               AND intent.runtime_attempt_id=${attemptID} AND intent.session_id=${target.sessionID} AND intent.prompt_id=${target.promptID}`;
           if (!scope) return "pending";
-          // Provisioning retains metadata only. Read bootstrap capability from
-          // the native owner after its exact UID/version/spec-hash checks,
-          // without persisting or returning its credential-bearing environment.
-          const template = z
-            .object({
-              containers: z.array(
-                z.object({ env: z.array(z.object({ name: z.string(), value: z.string() })) }),
-              ),
-            })
-            .safeParse(await profile());
-          const entries = template.success
-            ? template.data.containers
-                .flatMap((container) => container.env)
-                .filter((env) => env.name === "FACTORY_SUBSTRATE_BOOTSTRAP")
-            : [];
-          if (entries.length !== 1) return "pending";
-          const bootstrap = z
-            .object({
-              sourceHandoff: z.literal(true),
-              inputStop: z.object({
-                version: z.literal(1),
-                openCodeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
-              }),
-            })
-            .safeParse(JSON.parse(entries[0]?.value ?? "null"));
-          if (!bootstrap.success) return "pending";
+          const version = await inputStopVersion();
+          if (!version) return "pending";
           const assignment = nativeInputStopAssignment.parse({
             stopID: target.stopID,
             attemptID,
             sessionID: target.sessionID,
             promptID: target.promptID,
             modelID: scope.modelID,
-            version: bootstrap.data.inputStop.openCodeVersion,
+            version,
             mode: "interrupt",
           });
           await sql`INSERT INTO factory.substrate_input_stop(stop_id,runtime_attempt_id,workspace_id,change_id,actor_uid,assignment,checkpoint)

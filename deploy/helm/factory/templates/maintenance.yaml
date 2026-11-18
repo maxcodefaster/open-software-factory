@@ -17,8 +17,10 @@ spec:
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       restartPolicy: Never
+      serviceAccountName: {{ include "factory.name" . }}
       automountServiceAccountToken: false
-      # The Job only talks to PostgreSQL and needs no state volume, so it can use the image's node user.
+      # Only the existing Editor identity is projected, for exact native pause
+      # observations. There is no provisioner token, CA signing key or state PVC.
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -32,10 +34,41 @@ spec:
             runAsNonRoot: true
             {{- include "factory.containerSecurity" . | nindent 12 }}
           env:
+            - name: FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION
+              value: /run/factory/substrate-configuration/configuration.json
+            - name: FACTORY_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            - name: FACTORY_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef: {fieldPath: spec.serviceAccountName}
+            - name: FACTORY_AUTH_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: auth-secret}
             - name: FACTORY_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
             - name: DATABASE_URL
               value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc:5432/factory"
+          volumeMounts:
+            - {name: substrate-configuration, mountPath: /run/factory/substrate-configuration, readOnly: true}
+            - {name: substrate-control, mountPath: /run/factory/substrate-control, readOnly: true}
           resources:
             {{- toYaml .Values.maintenance.resources | nindent 12 }}
+      volumes:
+        - name: substrate-configuration
+          {{- include "factory.substrateConfigurationVolume" . | nindent 10 }}
+        - name: substrate-control
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 600
+                  path: token
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: ca.pem

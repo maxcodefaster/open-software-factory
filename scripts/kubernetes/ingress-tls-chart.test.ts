@@ -173,6 +173,34 @@ test("an operator certificate keeps external trust ownership and adds no issuer 
   });
 });
 
+test("upgrade pause observation receives Editor trust but no provisioner, CA key or state claim", async () => {
+  const all = await render();
+  const pod = all.find(
+    (item) => item.kind === "Job" && item.metadata.name === "portable-maintenance",
+  )?.spec?.template?.spec;
+  expect(pod?.serviceAccountName).toBe("portable");
+  expect(pod?.volumes.map((volume) => volume.name)).toEqual([
+    "substrate-configuration",
+    "substrate-control",
+  ]);
+  expect(pod?.volumes[0]?.projected?.sources).toEqual([
+    {
+      secret: {
+        name: "native-workspaces",
+        items: [{ key: "configuration.json", path: "configuration.json" }],
+      },
+    },
+    { secret: { name: "portable-ingress-ca", items: [{ key: "ca.crt", path: "factory-ca.pem" }] } },
+  ]);
+  const serialized = JSON.stringify(pod);
+  expect(serialized).toContain('"audience":"api.ate-system.svc"');
+  expect(serialized).toContain('"expirationSeconds":600');
+  expect(serialized).toContain('"signerName":"servicedns.podcert.ate.dev/identity"');
+  expect(serialized).not.toContain("substrate-provisioner");
+  expect(serialized).not.toContain("persistentVolumeClaim");
+  expect(serialized).not.toContain('"key":"ca.key"');
+});
+
 test("the read-only preflight mounts managed public trust without an operator CA key", async () => {
   const all = await render();
   const consumers = all.filter(

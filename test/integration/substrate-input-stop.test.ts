@@ -1,8 +1,18 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
+import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
+import {
+  beginInstallationMaintenance,
+  finishInstallationMaintenance,
+  installationInMaintenance,
+} from "../../apps/factory/src/installation/maintenance";
 import { substrateTemplateSHA256 } from "../../apps/factory/src/runtime/substrate";
 import { nativeInputStopIn } from "../../apps/factory/src/runtime/substrate-input-stop";
+import {
+  dispatchActorRPCIn,
+  intendActorRPCIn,
+} from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import { objectDigest, type PrivateObjects } from "../../apps/factory/src/storage/objects";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
@@ -21,6 +31,19 @@ test.each([
   "unsettled",
   "foreign-result",
   "unsupported-bootstrap",
+  "maintenance-retained",
+  "maintenance-stop-after-fence",
+  "maintenance-running",
+  "maintenance-foreign-actor",
+  "maintenance-local-rootfs",
+  "maintenance-source-owner",
+  "maintenance-incomplete-worker",
+  "maintenance-unresolved-rpc",
+  "maintenance-busy-lock",
+  "maintenance-new-stop",
+  "maintenance-no-observer",
+  "maintenance-unsupported-bootstrap",
+  "maintenance-active-knowledge",
 ] as const)(
   "offline input Stop retains metadata-only native intent, Source and exact outcomes: %s",
   async (scenario) => {
@@ -54,7 +77,7 @@ test.each([
     const restore = createSubstrateSources(f.database, f.hub, objects);
     const bootstrap = {
       sourceHandoff: true,
-      ...(scenario === "unsupported-bootstrap"
+      ...(["unsupported-bootstrap", "maintenance-unsupported-bootstrap"].includes(scenario)
         ? {}
         : { inputStop: { version: 1, openCodeVersion: "2.0.27" } }),
     };
@@ -158,7 +181,14 @@ test.each([
       }
       if (method === "CreateActor") {
         creates++;
+        // Use the fixture server's clock for native creation and dispatch
+        // facts, not the relative wall-clock offset between the Mac and VM.
+        const [clock] = await f.database.client<
+          { now: string }[]
+        >`SELECT clock_timestamp()::text AS now`;
+        if (!clock) throw Error("Controlled native creation clock missing");
         actor = f.actor();
+        actor.metadata.createTime = new Date(clock.now).toISOString();
         return structuredClone(actor);
       }
       if (method === "ResumeActor" && actor) {
@@ -283,7 +313,7 @@ test.each([
           data: JSON.stringify({
             ...saved.assignment,
             promptID: scenario === "foreign-result" ? "msg_foreign" : saved.assignment.promptID,
-            confirmed: scenario !== "unsettled",
+            confirmed: !["unsettled", "maintenance-incomplete-worker"].includes(scenario),
             engineExited: true,
             processTreeExited: true,
           }),
@@ -293,6 +323,119 @@ test.each([
         runtime.settleRetainedInputStop(target, new AbortController().signal),
       );
       await stop.persist(f.changeID);
+      const [publishedStop] = await f.database
+        .client`SELECT stop_id FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+      if (
+        scenario.startsWith("maintenance-") &&
+        !["maintenance-retained", "maintenance-stop-after-fence"].includes(scenario)
+      ) {
+        if (!actor) throw Error("Original controlled Actor missing");
+        if (scenario === "maintenance-running") {
+          actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
+          actor.status = {
+            ...actor.status,
+            state: "ACTOR_STATE_RUNNING",
+            workerAssignment: { sandboxRuntime: f.config.runtime },
+          };
+        } else if (scenario === "maintenance-foreign-actor") {
+          actor.metadata.uid = crypto.randomUUID();
+        } else if (scenario === "maintenance-local-rootfs") {
+          const snapshot = actor.status.snapshots?.[0] as
+            | { durableSnapshot?: { state: string } }
+            | undefined;
+          if (!snapshot?.durableSnapshot) throw Error("Controlled ROOTFS missing");
+          snapshot.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_PENDING";
+        } else if (scenario === "maintenance-source-owner") {
+          await sources.resume(f.workspaceID, f.attemptID, f.database.client);
+        } else if (scenario === "maintenance-incomplete-worker") {
+          expect(await stop.confirm(f.changeID)).toBe(false);
+          expect(
+            await f.database
+              .client`SELECT stop_id FROM factory.substrate_input_stop WHERE completed_at IS NULL`,
+          ).toHaveLength(1);
+        } else if (scenario === "maintenance-unresolved-rpc") {
+          const [binding] = await f.database
+            .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+          const operation = await intendActorRPCIn(
+            f.database.client,
+            f.attemptID,
+            "resume",
+            binding?.["checkpoint"],
+            actor,
+          );
+          await dispatchActorRPCIn(f.database.client, f.attemptID, operation);
+        } else if (scenario === "maintenance-active-knowledge") {
+          await f.database.client`
+            INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
+            VALUES(${crypto.randomUUID()},${f.projectID},${"a".repeat(40)},${f.userID})`;
+        }
+        const resumesBefore = resumes;
+        const lock = scenario === "maintenance-busy-lock" ? f.database.coordination() : null;
+        try {
+          if (lock) await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+          const observation =
+            scenario === "maintenance-no-observer"
+              ? undefined
+              : async (sql: AgentTurnTransaction, target: { stopID: string }) => {
+                  const retained = await execution.pausedStopRetainedIn(sql, target.stopID);
+                  if (scenario === "maintenance-new-stop")
+                    await sql`UPDATE factory.change_agent_session SET stop_id=${crypto.randomUUID()}
+                      WHERE change_id=${f.changeID}`;
+                  return retained;
+                };
+          await expect(beginInstallationMaintenance(f.database, observation)).rejects.toThrow();
+        } finally {
+          if (lock) {
+            await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+            await lock.end({ timeout: 1 });
+          }
+        }
+        expect(await installationInMaintenance(f.database)).toBe(false);
+        const [retained] = await f.database
+          .client`SELECT stop_pending,stop_id FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+        expect(retained?.["stop_pending"]).toBe(true);
+        expect(retained?.["stop_id"]).toBe(publishedStop?.["stop_id"]);
+        expect(resumes).toBe(resumesBefore);
+        return;
+      }
+      if (["maintenance-retained", "maintenance-stop-after-fence"].includes(scenario)) {
+        await beginInstallationMaintenance(f.database, (sql, target) =>
+          execution.pausedStopRetainedIn(sql, target.stopID),
+        );
+        expect(await installationInMaintenance(f.database)).toBe(true);
+        const [retained] = await f.database
+          .client`SELECT stop_pending,stop_id FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+        expect(retained?.["stop_pending"]).toBe(true);
+        expect(retained?.["stop_id"]).toBe(publishedStop?.["stop_id"]);
+        expect(resumes).toBe(1);
+        expect(creates).toBe(1);
+        expect(suspends).toBe(1);
+        expect(
+          await f.database.client`SELECT stop_id FROM factory.substrate_input_stop`,
+        ).toHaveLength(0);
+        const newWork = async () => {
+          await f.database.client`
+            INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
+            VALUES(${crypto.randomUUID()},${f.projectID},${"a".repeat(40)},${f.userID})`;
+        };
+        await expect(newWork()).rejects.toThrow("maintenance");
+        if (scenario === "maintenance-stop-after-fence") {
+          // Stop recovery is existing cleanup, not new inference admission.
+          // Releasing maintenance's lock can let the original controller
+          // finish that exact Stop before the replacement process starts.
+          expect(await stop.confirm(f.changeID)).toBe(true);
+          expect(await installationInMaintenance(f.database)).toBe(true);
+          const [settled] = await f.database
+            .client`SELECT stop_pending FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+          expect(settled?.["stop_pending"]).toBe(false);
+          expect(creates).toBe(1);
+          expect(resumes).toBe(2);
+          expect(suspends).toBe(2);
+          await finishInstallationMaintenance(f.database);
+          return;
+        }
+        await finishInstallationMaintenance(f.database);
+      }
       expect(await stop.confirm(f.changeID, undefined, "observe")).toBe(false);
       expect(resumes).toBe(1);
       expect(
@@ -336,7 +479,9 @@ test.each([
         return;
       }
       const confirmed = await stop.confirm(f.changeID);
-      const expected = ["settled", "lost-resume", "lost-suspend"].includes(scenario);
+      const expected = ["settled", "lost-resume", "lost-suspend", "maintenance-retained"].includes(
+        scenario,
+      );
       expect(confirmed).toBe(expected);
       expect(creates).toBe(1);
       expect(resumes).toBe(scenario === "unsupported-bootstrap" ? 1 : 2);

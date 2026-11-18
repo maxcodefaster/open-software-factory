@@ -1095,6 +1095,15 @@ deleted fixture. Settlement still requires its exact joined SDK result, a new
 durable ROOTFS and independent Source handoff. This path still needs full native
 qualification; package and controlled coordination checks are not a shipped journey.
 
+An upgrade can retain an unconfirmed Coding Stop only after re-observing its original
+suspended Actor, exact completed durable ROOTFS, native template and recorded independent Source handoff
+under the Workspace lock. The maintenance Job uses the existing Editor identity for these reads;
+it has no provisioner credential, signing key or state volume. Busy Workspaces, changed or missing
+identities, unresolved lifecycle dispatches and existing Stop workers still refuse the upgrade.
+The hook does not check live Source-process health. This does not confirm Stop,
+cancel queued input or resume compute. The original Stop remains pending for the normal
+controller after startup.
+
 Native prebuild, Verification, Staging replacement and publication use the existing product owners,
 original revision/environment/job intents and Substrate operations. Verification and independent
 review name the exact commit. Delivery still requires its deliberate human approval or the explicit
