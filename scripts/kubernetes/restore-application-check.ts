@@ -237,6 +237,84 @@ function canonical(value: unknown): string {
     .join(",")}}`;
 }
 const equal = (a: unknown, b: unknown) => canonical(a) === canonical(b);
+export function restoredApplicationContainersMatch(template: unknown, pod: unknown): boolean {
+  try {
+    object(template);
+    object(pod);
+    check(
+      (pod["serviceAccountName"] ?? "default") === (template["serviceAccountName"] ?? "default"),
+    );
+    if (equal(template["containers"], pod["containers"])) return true;
+    check(
+      Array.isArray(template["containers"]) &&
+        Array.isArray(pod["containers"]) &&
+        template["automountServiceAccountToken"] !== false &&
+        pod["automountServiceAccountToken"] !== false &&
+        Array.isArray(pod["volumes"]),
+    );
+    const expectedContainers = template["containers"];
+    const podVolumes = pod["volumes"];
+    const containers = pod["containers"].map((value, index) => {
+      object(value);
+      const expected = expectedContainers[index];
+      object(expected);
+      check(Array.isArray(value["volumeMounts"]));
+      const mounts = value["volumeMounts"].filter((entry) => {
+        object(entry);
+        return entry["mountPath"] === "/var/run/secrets/kubernetes.io/serviceaccount";
+      });
+      check(mounts.length === 1);
+      const mount = mounts[0];
+      check(
+        /^kube-api-access-[a-z0-9]{5}$/.test(mount.name) &&
+          equal(mount, { name: mount.name, mountPath: mount.mountPath, readOnly: true }),
+      );
+      const volumes = podVolumes.filter((entry) => {
+        object(entry);
+        return entry["name"] === mount.name;
+      });
+      check(
+        volumes.length === 1 &&
+          equal(volumes[0], {
+            name: mount.name,
+            projected: {
+              defaultMode: 420,
+              sources: [
+                { serviceAccountToken: { expirationSeconds: 3607, path: "token" } },
+                {
+                  configMap: {
+                    name: "kube-root-ca.crt",
+                    items: [{ key: "ca.crt", path: "ca.crt" }],
+                  },
+                },
+                {
+                  downwardAPI: {
+                    items: [
+                      {
+                        path: "namespace",
+                        fieldRef: { apiVersion: "v1", fieldPath: "metadata.namespace" },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          }),
+      );
+      const normalized = {
+        ...value,
+        volumeMounts: value["volumeMounts"].filter((entry) => entry !== mount),
+      };
+      if (normalized.volumeMounts.length === 0 && expected["volumeMounts"] === undefined)
+        delete (normalized as Record<string, unknown>)["volumeMounts"];
+      return normalized;
+    });
+    // Nothing besides the API server's exact standard credential mount is ignored.
+    return equal(containers, expectedContainers);
+  } catch {
+    return false;
+  }
+}
 function select(value: unknown, example: Record<string, unknown>) {
   object(value);
   return Object.fromEntries(Object.keys(example).map((key) => [key, value[key]]));
@@ -1123,7 +1201,7 @@ export async function checkRestoredApplication(
         .find((c: Named) => c.name === "factory")
         .imageID?.endsWith(`@sha256:${f.buildEvidence.platformDigest}`),
     );
-    check(equal(app.spec.containers, deployment.spec.template.spec.containers));
+    check(restoredApplicationContainersMatch(deployment.spec.template.spec, app.spec));
     const replica = app.metadata.ownerReferences?.find(
       (r: OwnerReference) => r.controller && r.kind === "ReplicaSet",
     );

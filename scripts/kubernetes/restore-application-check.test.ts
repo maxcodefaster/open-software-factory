@@ -836,6 +836,125 @@ test("the already-restored application proof performs one fenced save, reads exa
   }
 });
 
+function admitServiceAccount(fake: ReturnType<typeof target>, f: Fixture) {
+  const to = f.value.target.context;
+  const template = fake.objects.get(`${to}/deployment/factory`).spec.template.spec;
+  const pod = fake.objects.get(`${to}/pod/factory-pod`).spec;
+  template.serviceAccountName = "factory";
+  pod.serviceAccountName = "factory";
+  const name = "kube-api-access-a1b2c";
+  pod.containers[0].volumeMounts = [
+    {
+      name,
+      mountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+      readOnly: true,
+    },
+  ];
+  const serviceAccountToken = { expirationSeconds: 3607, path: "token" };
+  const credentialSource = { serviceAccountToken };
+  const configMap = { name: "kube-root-ca.crt", items: [{ key: "ca.crt", path: "ca.crt" }] };
+  const namespaceField = { apiVersion: "v1", fieldPath: "metadata.namespace" };
+  const volume = {
+    name,
+    projected: {
+      defaultMode: 420,
+      sources: [
+        credentialSource,
+        { configMap },
+        {
+          downwardAPI: {
+            items: [
+              {
+                path: "namespace",
+                fieldRef: namespaceField,
+              },
+            ],
+          },
+        },
+      ],
+    },
+  };
+  pod.volumes = [volume];
+  return {
+    template,
+    pod,
+    volume,
+    serviceAccountToken,
+    credentialSource,
+    configMap,
+    namespaceField,
+  };
+}
+
+test("the restored application admits only Kubernetes' exact standard ServiceAccount projection without changing its execution template", async () => {
+  const f = await fixture();
+  try {
+    const fake = target(f);
+    admitServiceAccount(fake, f);
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("restored-application-passed");
+    expect(fake.saveCalls()).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  "account",
+  "automount disabled",
+  "writable",
+  "subpath",
+  "extra mount",
+  "missing volume",
+  "secret source",
+  "audience",
+  "token lifetime",
+  "token path",
+  "CA",
+  "namespace",
+  "extra source",
+] as const)(
+  "the restored application refuses a changed admitted credential projection: %s",
+  async (boundary) => {
+    const f = await fixture();
+    try {
+      const fake = target(f);
+      const {
+        template,
+        pod,
+        volume,
+        serviceAccountToken,
+        credentialSource,
+        configMap,
+        namespaceField,
+      } = admitServiceAccount(fake, f);
+      const mount = pod.containers[0].volumeMounts[0];
+      if (boundary === "account") pod.serviceAccountName = "different";
+      if (boundary === "automount disabled") template.automountServiceAccountToken = false;
+      if (boundary === "writable") mount.readOnly = false;
+      if (boundary === "subpath") mount.subPath = "token";
+      if (boundary === "extra mount")
+        pod.containers[0].volumeMounts.push({ name: "other", mountPath: "/other" });
+      if (boundary === "missing volume") pod.volumes = [];
+      if (boundary === "secret source")
+        Object.assign(credentialSource, { secret: { name: "other" } });
+      if (boundary === "audience") Object.assign(serviceAccountToken, { audience: "other" });
+      if (boundary === "token lifetime") serviceAccountToken.expirationSeconds = 86400;
+      if (boundary === "token path") serviceAccountToken.path = "other";
+      if (boundary === "CA") configMap.name = "other";
+      if (boundary === "namespace") namespaceField.fieldPath = "metadata.name";
+      if (boundary === "extra source")
+        volume.projected.sources.push({ configMap: { name: "other", items: [] } });
+      const result = await checkRestoredApplication(await f.load(), fake);
+      expect(result.status).toBe("incomplete");
+      expect(fake.requests).toHaveLength(0);
+      expect(fake.saveCalls()).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
 test.each([
   "https://git.example.invalid/owned/retained",
   "http://factory-forgejo.factory.svc:3000/owned/retained",
