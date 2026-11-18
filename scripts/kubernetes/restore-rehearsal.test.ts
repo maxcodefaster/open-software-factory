@@ -749,7 +749,15 @@ test.each(["daemon", "image", "occupied name", "unknown absence"] as const)(
   },
 );
 
-type TarEntry = { name: string; content?: string | Uint8Array; type?: string; link?: string };
+type TarEntry = {
+  name: string;
+  content?: string | Uint8Array;
+  type?: string;
+  link?: string;
+  uid?: number;
+  gid?: number;
+  mode?: number;
+};
 function archiveBytes(entries: TarEntry[]) {
   const blocks: Buffer[] = [];
   for (const entry of entries) {
@@ -760,9 +768,9 @@ function archiveBytes(entries: TarEntry[]) {
     const octal = (value: number, start: number, length: number) =>
       field(`${value.toString(8).padStart(length - 1, "0")}\0`, start, length);
     field(entry.name, 0, 100);
-    octal(0o600, 100, 8);
-    octal(process.getuid?.() ?? 1000, 108, 8);
-    octal(process.getgid?.() ?? 1000, 116, 8);
+    octal(entry.mode ?? 0o600, 100, 8);
+    octal(entry.uid ?? process.getuid?.() ?? 1000, 108, 8);
+    octal(entry.gid ?? process.getgid?.() ?? 1000, 116, 8);
     octal(body.length, 124, 12);
     octal(0, 136, 12);
     field("        ", 148, 8);
@@ -1166,7 +1174,7 @@ function forgejoTableWitnesses(orphan = false): Witnesses["forgejo"]["tables"] {
   };
 }
 
-test("the actual archive extraction and Node validator roundtrip the witnessed standalone WAL backup without executing SQL or using raw main.db", async () => {
+test("the actual archive extraction preserves retained root ownership and roundtrips the witnessed standalone WAL backup without executing SQL or using raw main.db", async () => {
   const f = await fixture();
   try {
     const snapshot = await forgejoSnapshot(f.root);
@@ -1180,6 +1188,8 @@ test("the actual archive extraction and Node validator roundtrip the witnessed s
       { name: "data/data/forgejo.db-journal", content: "untrusted raw journal" },
     ];
     const stateEntries: TarEntry[] = [
+      { name: "./", type: "5", uid: 1000, gid: 1000, mode: 0o700 },
+      { name: ".owner-uid-1000", content: "" },
       {
         name: "kubernetes-installation.json",
         content: JSON.stringify({
@@ -1195,11 +1205,13 @@ test("the actual archive extraction and Node validator roundtrip the witnessed s
       { name: "openbao/factory-login.json", content: "original-login" },
     ];
     const inventory = (entries: TarEntry[]) =>
-      entries.map((entry) => ({
-        path: entry.name,
-        bytes: Buffer.byteLength(entry.content ?? ""),
-        sha256: hash(entry.content ?? ""),
-      }));
+      entries
+        .filter((entry) => entry.type !== "5")
+        .map((entry) => ({
+          path: entry.name,
+          bytes: Buffer.byteLength(entry.content ?? ""),
+          sha256: hash(entry.content ?? ""),
+        }));
     f.witness.forgejo = {
       files: inventory(forgejoEntries),
       repositories: [],
@@ -1237,12 +1249,15 @@ test("the actual archive extraction and Node validator roundtrip the witnessed s
       "objects-input",
     ])
       await mkdir(join(root, directory), { mode: 0o700 });
+    await chmod(join(root, "state"), 0o755);
     const code = `
 import vm from "node:vm";
+import assert from "node:assert/strict";
 import * as actualFS from "node:fs/promises";
 // Only privileged ownership changes are substituted on the local host.
 // Archive reads, exclusive extraction, permissions, hashes and SQLite are real.
-const fs = {...actualFS, chown:async()=>{}, lchown:async()=>{},
+const ownership=[];
+const fs = {...actualFS, chown:async(...args)=>{ownership.push(args)}, lchown:async()=>{},
  open:async(...args)=>{const handle=await actualFS.open(...args);handle.chown=async()=>{};return handle;}};
 const context=vm.createContext({Buffer});
 const program=new vm.SourceTextModule(${JSON.stringify(
@@ -1264,6 +1279,9 @@ const program=new vm.SourceTextModule(${JSON.stringify(
 });
 await program.link(()=>{throw Error("unexpected static import")});
 await program.evaluate();
+assert(ownership.some(([file,uid,gid])=>file===${JSON.stringify(join(root, "state"))}&&uid===1000&&gid===1000),
+ "The retained ownership marker must not leave the target state root owned by the extraction user");
+assert.equal((await actualFS.stat(${JSON.stringify(join(root, "state"))})).mode&0o777,0o700);
 ${invocation(validateForgejoDatabase, { root })}
 `;
     const child = Bun.spawn(["node", "--experimental-vm-modules", "--input-type=module"], {

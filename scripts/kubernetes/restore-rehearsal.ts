@@ -1474,7 +1474,10 @@ export async function restoreFiles(config: {
           (type !== "0" && size !== 0)
         )
           fail();
-        const target = name ? destination(name) : null;
+        // The archive's "." directory owns the retained state root too. Skipping it
+        // leaves a fresh claim root-owned while the restored ownership marker
+        // correctly prevents bootstrap from recursively changing retained files.
+        const target = name || type === "5" ? destination(name) : null;
         if (type === "5") {
           if (target && !config.verifyOnly) {
             const file = path.join(target.root, target.relative);
