@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { X509Certificate } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { parse, parseAllDocuments } from "yaml";
 import upstream from "../../upstream.json";
@@ -1094,6 +1095,22 @@ test("Ingress controller access follows the Ingress setting and namespace select
 
 test("network policies can be disabled", async () => {
   expect(policies((await renderAll(["--set", "networkPolicy.enabled=false"])).all)).toHaveLength(0);
+});
+
+test("fresh OpenBao TLS has a distinct CA issuer and verifies its original leaf", async () => {
+  const { all } = await renderAll();
+  const secret = all.find(
+    (item) => item.kind === "Secret" && item.metadata.name === "portable-openbao-tls",
+  );
+  if (!secret?.data) throw new Error("Missing generated OpenBao identity");
+  const ca = new X509Certificate(Buffer.from(secret.data["ca.crt"] ?? "", "base64"));
+  const leaf = new X509Certificate(Buffer.from(secret.data["tls.crt"] ?? "", "base64"));
+  expect(ca.ca).toBe(true);
+  expect(leaf.ca).toBe(false);
+  expect(leaf.verify(ca.publicKey)).toBe(true);
+  expect(leaf.issuer).toBe(ca.subject);
+  expect(leaf.subject).not.toBe(ca.subject);
+  expect(leaf.checkIP("127.0.0.1")).toBe("127.0.0.1");
 });
 
 test("operator-owned Secrets replace generated ones and roll the pods that read them", async () => {

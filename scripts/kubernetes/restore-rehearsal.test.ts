@@ -1366,11 +1366,221 @@ test.each([
   },
 );
 
-test.each(["valid", "wrong original unseal", "AppRole denied", "secret mismatch"] as const)(
+let openBaoCertificates: Promise<Record<string, string>> | undefined;
+function openBaoTestCertificates() {
+  openBaoCertificates ??= (async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-openbao-tls-test-"));
+    try {
+      await mkdir(join(root, "templates"));
+      await writeFile(
+        join(root, "Chart.yaml"),
+        "apiVersion: v2\nname: owned-openbao-tls-test\nversion: 0.1.0\n",
+      );
+      await writeFile(
+        join(root, "templates/tls.yaml"),
+        `{{- $ca := genCA "factory-openbao" 1 -}}
+{{- $leaf := genSignedCert "factory-openbao" (list "127.0.0.1") nil 1 $ca -}}
+{{- $replacement := genSignedCert "replacement-openbao" (list "127.0.0.1") nil 1 $ca -}}
+{{- $wrongSAN := genSignedCert "factory-openbao" (list "192.0.2.1") nil 1 $ca -}}
+{{- $expired := genSignedCert "factory-openbao" (list "127.0.0.1") nil -1 $ca -}}
+{{- $otherCA := genCA "factory-openbao" 1 -}}
+{{ dict "ca" $ca.Cert "leaf" $leaf.Cert "key" $leaf.Key "replacement" $replacement.Cert "replacementKey" $replacement.Key "wrongSAN" $wrongSAN.Cert "expired" $expired.Cert "otherCA" $otherCA.Cert | toJson }}
+`,
+      );
+      const child = Bun.spawn(["helm", "template", "factory", root], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = await new Response(child.stdout).text();
+      expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+      return JSON.parse(stdout.split("\n").find((line) => line.startsWith("{")) ?? "") as Record<
+        string,
+        string
+      >;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  })();
+  return openBaoCertificates;
+}
+
+test.each([
+  ["validate", "valid"],
+  ["initialize", "valid"],
+  ["initialize", "wrong signer"],
+  ["initialize", "CA leaf"],
+  ["initialize", "non-CA root"],
+  ["initialize", "wrong SAN"],
+  ["initialize", "expired leaf"],
+  ["initialize", "peer replacement"],
+] as const)(
+  "the exact OpenBao %s client checks %s original same-DN trust on real Node HTTPS",
+  async (action, boundary) => {
+    const certificates = await openBaoTestCertificates();
+    const code = `
+import assert from "node:assert/strict";
+import vm from "node:vm";
+import * as crypto from "node:crypto";
+import * as https from "node:https";
+const certs=${JSON.stringify(certificates)};
+const root=new crypto.X509Certificate(certs.ca), leaf=new crypto.X509Certificate(certs.leaf);
+assert.equal(root.subject,leaf.subject);
+assert.equal(root.ca,true);assert.equal(leaf.ca,false);
+assert.equal(leaf.verify(root.publicKey),true);
+assert.equal(leaf.verify(leaf.publicKey),false);
+const paths=[], authorized=[], tlsErrors=[];
+let readinessWaits=0;
+let initialized=${action === "validate"},unsealed=false;
+const server=https.createServer({
+ cert:certs[${JSON.stringify(boundary === "peer replacement" ? "replacement" : "leaf")}],
+ key:certs[${JSON.stringify(boundary === "peer replacement" ? "replacementKey" : "key")}]
+},async(req,res)=>{
+ try {
+  const chunks=[];for await(const chunk of req)chunks.push(chunk);
+  const body=chunks.length?JSON.parse(Buffer.concat(chunks).toString()):null;
+  paths.push(req.url);
+  let value,code=200;
+  if(req.url==="/v1/sys/health"){code=unsealed?200:503;value={initialized,sealed:!unsealed};}
+  else if(req.url==="/v1/sys/init"){
+   assert.equal(initialized,false);assert.deepEqual(body,{secret_shares:1,secret_threshold:1});
+   initialized=true;value={keys_base64:["temporary-key"],root_token:"temporary-root"};
+  } else if(req.url==="/v1/sys/unseal"){
+   assert.equal(body.key,${JSON.stringify(action === "validate" ? "original-key" : "temporary-key")});
+   unsealed=true;value={sealed:false};
+  } else if(req.url==="/v1/auth/approle/login"){
+   assert.deepEqual(body,{role_id:"original-role",secret_id:"original-secret"});
+   value={auth:{client_token:"scoped-token"}};
+  } else if(req.url==="/v1/factory/data/models/owned-witness"){
+   assert.equal(req.headers["x-vault-token"],"scoped-token");value={data:{data:{value:"original"}}};
+  } else throw Error("unexpected endpoint");
+  res.writeHead(code,{"content-type":"application/json"});res.end(JSON.stringify(value));
+ } catch {res.writeHead(500);res.end("{}");}
+});
+await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
+const port=server.address().port;
+async function baseline(ca){
+ return new Promise(resolve=>{
+  const req=https.get({hostname:"127.0.0.1",port,path:"/v1/sys/health",ca,agent:false},res=>{
+   res.resume();resolve(res.socket.authorized);
+  });
+  req.once("error",error=>resolve(error.code));
+ });
+}
+const baselineCA=${boundary === "valid" || boundary === "peer replacement"}?await baseline(certs.ca):null;
+const baselineRootFirst=${boundary === "valid"}?await baseline([certs.ca,certs.leaf]):null;
+paths.length=0;
+const files={
+ "/control/tls/ca.crt":certs[${JSON.stringify(
+   boundary === "wrong signer" ? "otherCA" : boundary === "non-CA root" ? "leaf" : "ca",
+ )}],
+ "/control/tls/tls.crt":certs[${JSON.stringify(
+   boundary === "CA leaf"
+     ? "ca"
+     : boundary === "wrong SAN"
+       ? "wrongSAN"
+       : boundary === "expired leaf"
+         ? "expired"
+         : "leaf",
+ )}],
+ "/state/openbao/bootstrap.json":JSON.stringify({keys_base64:["original-key"]}),
+ "/state/openbao/factory-login.json":JSON.stringify({role_id:"original-role",secret_id:"original-secret"}),
+ "/control/witnesses.json":JSON.stringify({openbao:[{path:"factory/data/models/owned-witness",sha256:${JSON.stringify(hash('{"value":"original"}'))}}]})
+};
+const writes=[];
+const fs={
+ readFile:async path=>{assert.ok(path in files);return files[path];},
+ unlink:async path=>{assert.equal(path,"/control/temporary-root-token");writes.push("unlink");},
+ writeFile:async(path,value,options)=>{
+  assert.equal(path,"/control/temporary-root-token");assert.equal(value,"temporary-root");
+  assert.equal(options.mode,0o600);assert.equal(options.flag,"wx");writes.push("write");
+ },
+ chown:async(path,uid,gid)=>{assert.equal(path,"/control/temporary-root-token");assert.equal(uid,100);assert.equal(gid,1000);writes.push("chown");}
+};
+const transport={request(options,receive){
+ assert.equal(options.hostname,"127.0.0.1");assert.equal(options.port,8200);
+ assert.notEqual(options.rejectUnauthorized,false);assert.notEqual(options.allowPartialTrustChain,true);
+ const req=https.request({...options,port,agent:false},res=>{
+  authorized.push(res.socket.authorized);receive(res);
+ });
+ req.on("error",error=>tlsErrors.push(error.code??error.message));return req;
+}};
+const context=vm.createContext({Buffer,setTimeout:()=>{readinessWaits++;throw Error("unexpected readiness retry");}});
+const modules={"node:fs/promises":fs,"node:https":transport,"node:crypto":crypto,"node:tls":await import("node:tls")};
+const program=new vm.SourceTextModule(${JSON.stringify(invocation(openBaoRequest, { action }))},{
+ context,importModuleDynamically:async name=>{
+  assert.ok(name in modules);const values=modules[name];
+  const m=new vm.SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);},{context});
+  await m.link(()=>{});await m.evaluate();return m;
+ }
+});
+let passed=false;
+try {await program.link(()=>{throw Error("unexpected static import")});await program.evaluate();passed=true;}
+catch {}
+finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+console.log(JSON.stringify({passed,paths,authorized,tlsErrors,baselineCA,baselineRootFirst,writes,readinessWaits}));
+`;
+    const child = Bun.spawn(["node", "--experimental-vm-modules", "--input-type=module"], {
+      stdin: new Blob([code]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(child.stdout).text();
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+    const result = JSON.parse(stdout);
+    if (boundary !== "valid") {
+      expect(result, stdout).toMatchObject({
+        passed: false,
+        paths: [],
+        authorized: [],
+        writes: [],
+        readinessWaits: 0,
+      });
+      if (boundary === "peer replacement") {
+        expect(result.baselineCA).toBe(true);
+        // With the ambiguous original DN, OpenSSL can reject the replacement before
+        // hostname/pin checks. Either refusal must happen before any HTTP request.
+        expect(result.tlsErrors).toHaveLength(1);
+        expect([
+          "CERT_SIGNATURE_FAILURE",
+          "OpenBao peer differs from the original TLS certificate",
+        ]).toContain(result.tlsErrors[0]);
+      } else expect(result.tlsErrors).toEqual([]);
+      return;
+    }
+    expect(result.baselineCA).toBe("DEPTH_ZERO_SELF_SIGNED_CERT");
+    expect(result.baselineRootFirst).toBe("DEPTH_ZERO_SELF_SIGNED_CERT");
+    expect(result, stdout).toMatchObject({ passed: true, tlsErrors: [], readinessWaits: 0 });
+    expect(result.authorized.length).toBeGreaterThan(0);
+    expect(result.authorized.every((value: boolean) => value)).toBe(true);
+    expect(result.paths).toEqual(
+      action === "validate"
+        ? [
+            "/v1/sys/health",
+            "/v1/sys/unseal",
+            "/v1/sys/health",
+            "/v1/auth/approle/login",
+            "/v1/factory/data/models/owned-witness",
+          ]
+        : ["/v1/sys/health", "/v1/sys/init", "/v1/sys/unseal", "/v1/sys/health"],
+    );
+    expect(result.writes).toEqual(action === "validate" ? ["unlink"] : ["write", "chown"]);
+  },
+);
+
+test.each([
+  "valid",
+  "wrong original unseal",
+  "AppRole denied",
+  "secret mismatch",
+  "TLS hard error",
+  "transient health error",
+] as const)(
   "the exact OpenBao client validates %s using mocked TLS/HTTP only",
   async (boundary) => {
     const f = await fixture();
     try {
+      const certificates = await openBaoTestCertificates();
       // Node VM imports are in-memory substitutes. No listener, socket, API or original file is used.
       const code = `
 import vm from "node:vm";
@@ -1378,8 +1588,10 @@ import { EventEmitter } from "node:events";
 import * as crypto from "node:crypto";
 const calls = [];
 let unsealed = false;
+let readinessWaits = 0;
 const files = {
- "/control/tls/ca.crt": "synthetic-ca",
+ "/control/tls/ca.crt": ${JSON.stringify(certificates["ca"])},
+ "/control/tls/tls.crt": ${JSON.stringify(certificates["leaf"])},
  "/state/openbao/bootstrap.json": JSON.stringify({keys_base64:["synthetic-original-key"]}),
  "/state/openbao/factory-login.json": JSON.stringify({role_id:"synthetic-role",secret_id:"synthetic-secret"}),
  "/control/witnesses.json": JSON.stringify({openbao:[{path:"factory/data/models/owned-witness",sha256:${JSON.stringify(hash('{"value":"original"}'))}}]})
@@ -1387,12 +1599,22 @@ const files = {
 const fs = { readFile: async path => { if (!(path in files)) throw Error("unexpected file"); return files[path]; },
  unlink: async path => { if (path !== "/control/temporary-root-token") throw Error("unexpected unlink"); } };
 const https = { request(options, receive) {
- if (options.hostname !== "127.0.0.1" || options.port !== 8200 || options.ca !== "synthetic-ca" || options.rejectUnauthorized === false)
+ if (options.hostname !== "127.0.0.1" || options.port !== 8200 ||
+     options.ca[0] !== files["/control/tls/tls.crt"] || options.ca[1] !== files["/control/tls/ca.crt"] ||
+     options.rejectUnauthorized !== true || options.allowPartialTrustChain === true ||
+     options.checkServerIdentity("127.0.0.1",new crypto.X509Certificate(files["/control/tls/tls.crt"]).toLegacyObject()) ||
+     options.checkServerIdentity("127.0.0.1",new crypto.X509Certificate(${JSON.stringify(certificates["replacement"])}).toLegacyObject())?.message !== "OpenBao peer differs from the original TLS certificate" ||
+     !options.checkServerIdentity("wrong.example.invalid",new crypto.X509Certificate(files["/control/tls/tls.crt"]).toLegacyObject()))
    throw Error("TLS or destination changed");
  const req = new EventEmitter();
  req.end = data => {
   const body = data ? JSON.parse(data) : null;
   calls.push({path:options.path, body, token:options.headers["X-Vault-Token"]});
+  if (${boundary === "TLS hard error"} || (${boundary === "transient health error"} && calls.length === 1)) {
+   queueMicrotask(()=>req.emit("error",Object.assign(Error("synthetic transport failure"),{
+    code:${JSON.stringify(boundary === "TLS hard error" ? "DEPTH_ZERO_SELF_SIGNED_CERT" : "ECONNREFUSED")}
+   })));return;
+  }
   let code=200, result;
   if (options.path === "/v1/sys/health") { code=unsealed?200:503; result={initialized:true,sealed:!unsealed}; }
   else if (options.path === "/v1/sys/unseal") {
@@ -1414,8 +1636,12 @@ const https = { request(options, receive) {
  req.destroy = error => req.emit("error",error);
  return req;
 }};
-const context=vm.createContext({Buffer,setTimeout});
-const modules={ "node:fs/promises":fs, "node:https":https, "node:crypto":crypto };
+const context=vm.createContext({Buffer,setTimeout:accept=>{
+ readinessWaits++;
+ if (!${boundary === "transient health error"} || readinessWaits > 1) throw Error("unexpected readiness retry");
+ queueMicrotask(accept);
+}});
+const modules={ "node:fs/promises":fs, "node:https":https, "node:crypto":crypto,"node:tls":await import("node:tls") };
 const program=new vm.SourceTextModule(${JSON.stringify(invocation(openBaoRequest, { action: "validate" }))},{
  context, importModuleDynamically:async name => {
   if (!(name in modules)) throw Error("unexpected import");
@@ -1427,7 +1653,7 @@ const program=new vm.SourceTextModule(${JSON.stringify(invocation(openBaoRequest
 await program.link(()=>{throw Error("unexpected static import")});
 let passed=false;
 try { await program.evaluate(); passed=true; } catch {}
-process.stdout.write(JSON.stringify({passed,paths:calls.map(v=>v.path)}));
+process.stdout.write(JSON.stringify({passed,paths:calls.map(v=>v.path),readinessWaits}));
 `;
       const child = Bun.spawn(["node", "--experimental-vm-modules", "--input-type=module"], {
         stdin: new Blob([code]),
@@ -1437,7 +1663,9 @@ process.stdout.write(JSON.stringify({passed,paths:calls.map(v=>v.path)}));
       const stdout = await new Response(child.stdout).text();
       expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
       const result = JSON.parse(stdout);
-      expect(result.passed).toBe(boundary === "valid");
+      expect(result.passed).toBe(boundary === "valid" || boundary === "transient health error");
+      expect(result.readinessWaits).toBe(boundary === "transient health error" ? 1 : 0);
+      if (boundary === "TLS hard error") expect(result.paths).toEqual(["/v1/sys/health"]);
       expect(stdout).not.toContain("synthetic-original-key");
       expect(result.paths[0]).toBe("/v1/sys/health");
     } finally {

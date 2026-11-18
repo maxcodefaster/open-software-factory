@@ -1869,11 +1869,32 @@ export async function validateForgejoDatabase(config: { root: string }) {
 export async function openBaoRequest(config: { action: "initialize" | "validate" }) {
   const fs = await import("node:fs/promises");
   const https = await import("node:https");
-  const { createHash } = await import("node:crypto");
-  const ca = await fs.readFile("/control/tls/ca.crt");
+  const { createHash, X509Certificate } = await import("node:crypto");
+  const { checkServerIdentity } = await import("node:tls");
   const fail = (): never => {
     throw Error("OpenBao restore/unseal/AppRole witness failed; sensitive output suppressed");
   };
+  const originalCA = await fs.readFile("/control/tls/ca.crt");
+  const originalLeaf = await fs.readFile("/control/tls/tls.crt");
+  const root = new X509Certificate(originalCA);
+  const leaf = new X509Certificate(originalLeaf);
+  const now = Date.now();
+  if (
+    !root.ca ||
+    leaf.ca ||
+    !leaf.checkIssued(root) ||
+    !leaf.verify(root.publicKey) ||
+    leaf.checkIP("127.0.0.1") !== "127.0.0.1" ||
+    ![root, leaf].every(
+      (certificate) =>
+        certificate.validFromDate.getTime() <= now && now <= certificate.validToDate.getTime(),
+    )
+  )
+    fail();
+  // The original chart gives the CA and leaf the same DN. OpenSSL needs the original
+  // leaf first to resolve that chain. Trust only these supplied, signature-checked inputs,
+  // never a certificate learned from the peer, and retain normal chain/hostname checks.
+  const ca = [originalLeaf, originalCA];
   async function request(path: string, body?: unknown, token?: string) {
     const encoded = body === undefined ? undefined : JSON.stringify(body);
     type Body = {
@@ -1891,6 +1912,12 @@ export async function openBaoRequest(config: { action: "initialize" | "validate"
           port: 8200,
           path: `/v1/${path}`,
           ca,
+          rejectUnauthorized: true,
+          checkServerIdentity: (hostname, peer) =>
+            checkServerIdentity(hostname, peer) ??
+            (peer.raw.equals(leaf.raw)
+              ? undefined
+              : Error("OpenBao peer differs from the original TLS certificate")),
           method: encoded === undefined ? "GET" : "POST",
           timeout: 5000,
           headers: {
@@ -1919,7 +1946,9 @@ export async function openBaoRequest(config: { action: "initialize" | "validate"
           });
         },
       );
-      req.once("timeout", () => req.destroy(Error("Owned TLS request timed out")));
+      req.once("timeout", () =>
+        req.destroy(Object.assign(Error("Owned TLS request timed out"), { code: "ETIMEDOUT" })),
+      );
       req.once("error", reject);
       req.end(encoded);
     });
@@ -1943,7 +1972,15 @@ export async function openBaoRequest(config: { action: "initialize" | "validate"
     try {
       health = await request("sys/health");
       break;
-    } catch {
+    } catch (error) {
+      // Only startup transport failures are retryable. Certificate, hostname, pin and
+      // malformed-response errors must fail without replaying requests indefinitely.
+      if (
+        !["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(
+          (error as NodeJS.ErrnoException)?.code ?? "",
+        )
+      )
+        return fail();
       await new Promise((accept) => setTimeout(accept, 500));
     }
   }
