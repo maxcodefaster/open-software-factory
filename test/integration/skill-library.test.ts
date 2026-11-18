@@ -123,6 +123,40 @@ test("product authors keep a private cross-Project library; managers share exact
         async () => {},
       ),
     );
+    await expect(skills.library.inspect(revisionId, collaborator, project)).rejects.toThrow(
+      "not found",
+    );
+    expect((await skills.getLibrary(collaborator, project)).sharedVersions).toEqual([]);
+    // Private Project research never shares its owner's guidance. Only admission
+    // to real, shared Ticket work makes the exact frozen revision inspectable.
+    const ticketId = crypto.randomUUID();
+    await database.client`INSERT INTO factory.ticket(id,project_id,title,description,created_by)
+      VALUES (${ticketId},${project},'Shared Skill proof','Inspect exact shared guidance.',${author})`;
+    const sharedConversation = await createProjectAgentController(database, {
+      start: async () => null,
+    }).setMode(project, ticketId, "plan", author);
+    if (!sharedConversation) throw new Error("Owned shared conversation missing");
+    await database.client.begin((sql) =>
+      turns.admitIn(
+        sql,
+        {
+          kind: "project-message",
+          commandId: crypto.randomUUID(),
+          projectId: project,
+          createdBy: author,
+          ticketId,
+          conversationId: sharedConversation.id,
+          text: "Use the exact guidance for this shared Ticket.",
+        },
+        {
+          mode: "plan",
+          modelId: "controlled",
+          conversationVersion: sharedConversation.version,
+          skillRevisionIds: [revisionId],
+        },
+        async () => {},
+      ),
+    );
     expect(
       (await skills.library.inspect(revisionId, collaborator, project)).content.instructions,
     ).toBe(content.instructions);

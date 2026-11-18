@@ -58,6 +58,8 @@ Your approval promotes the change to Staging. Production deployment remains your
 Project Wikis keep revisions and human edits. Roles separate product work, development and
 administration. OpenBao encrypts secrets. Backups include Git, database, objects and secrets.
 Learning proposals need approval before adoption.
+Personal Skills stay private in personal Project conversations. Exact Skill versions admitted to
+shared Ticket work are inspectable by that Project's members; this does not share the private library.
 
 ## Use a local agent with Factory compute
 

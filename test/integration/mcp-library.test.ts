@@ -271,3 +271,198 @@ test("MCP library keeps private definitions private, grants exact read tools and
     await fixture.dispose();
   }
 });
+
+test("completed private Project turns do not expose personal MCP definitions and shared Ticket work retains exact revisions", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect();
+  const manager = crypto.randomUUID();
+  const author = crypto.randomUUID();
+  const reader = crypto.randomUUID();
+  const project = crypto.randomUUID();
+  const handler = createMcpHandler(() => {
+    const server = new McpServer({ name: "Owned revision fixture", version: "1.0.0" });
+    server.registerTool(
+      "read_issue",
+      { inputSchema: z.object({}), annotations: { readOnlyHint: true } },
+      async () => {
+        throw new Error("Revision inspection must not invoke an MCP tool");
+      },
+    );
+    return server;
+  });
+  const connections = createMCPConnections(
+    database,
+    {
+      configured: false,
+      read: async () => undefined,
+      create: async () => {
+        throw new Error("This public fixture does not use credentials");
+      },
+    },
+    "owned-revision-signing-key",
+    "https://factory.example",
+    async (url, init) => handler.fetch(new Request(url, init)),
+  );
+  const library = connections.library;
+  const turns = createAgentTurnStore(database);
+  async function source(scope: "personal" | "project", userId: string) {
+    const definition = {
+      libraryId: crypto.randomUUID(),
+      revisionId: crypto.randomUUID(),
+      expectedRevision: 0,
+      scope,
+      ...(scope === "project" ? { projectId: project } : {}),
+      content: {
+        name: `Owned ${scope} revision`,
+        description: `Owned ${scope} definition`,
+        endpoint: `https://${scope}.example/mcp`,
+        authentication: "none",
+        provider: "custom",
+        roles: ["planning"],
+      },
+    };
+    await library.save(definition, userId);
+    await connections.connect(definition.libraryId, userId, {
+      commandId: crypto.randomUUID(),
+      revisionId: definition.revisionId,
+      expectedVersion: 0,
+    });
+    const connection = await database.client.begin((sql) =>
+      library.connectionIn(sql, definition.libraryId),
+    );
+    const tool = fixtureValue(connection.tools[0], "owned revision fixture tool");
+    await library.review(definition.libraryId, userId, connection.version, [
+      { name: tool.name, digest: tool.digest },
+    ]);
+    await library.choose(
+      {
+        libraryId: definition.libraryId,
+        revisionId: definition.revisionId,
+        projectId: project,
+        scope,
+        role: "planning",
+        state: "enable",
+        expectedVersion: 0,
+      },
+      userId,
+    );
+    return definition;
+  }
+  async function completedTurn(conversationId: string, ticketId: string | null) {
+    const { turn } = await turns.admit(
+      {
+        kind: "project-message",
+        commandId: crypto.randomUUID(),
+        projectId: project,
+        ticketId,
+        conversationId,
+        createdBy: author,
+        text: "Inspect this owned source without inference",
+      },
+      { mode: "investigate", conversationVersion: 1, modelId: "owned-no-inference" },
+    );
+    const owner = await turns.claimPending(turn.id);
+    if (!owner?.ownerToken) throw new Error("Owned revision turn lease missing");
+    expect(await turns.beginDispatch(turn.id, owner.ownerToken)).not.toBeNull();
+    expect(
+      await turns.settle(turn.id, owner.ownerToken, "completed", "Owned no-inference turn"),
+    ).toBe(true);
+    return turn.id;
+  }
+  try {
+    for (const id of [manager, author, reader])
+      await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+        VALUES(${id},'Owned MCP revision account',${`${id}@mcp.test`},true)`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${project},${`mcp-${project}`},'Owned MCP revision Project','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+    for (const id of [manager, author, reader])
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+        VALUES(${project},${id},'product-contributor',${id === manager},${manager})`;
+    const personal = await source("personal", author);
+    const privateConversation = crypto.randomUUID();
+    await database.client`INSERT INTO factory.ticket_conversation(id,project_id,created_by)
+      VALUES(${privateConversation},${project},${author})`;
+    const privateTurnId = await completedTurn(privateConversation, null);
+    expect(await library.assignments(privateTurnId)).toMatchObject([
+      { connectionId: personal.libraryId, revisionId: personal.revisionId },
+    ]);
+    expect(
+      await database.client`SELECT ticket_id,state FROM factory.agent_turn WHERE id=${privateTurnId}`,
+    ).toMatchObject([{ ticket_id: null, state: "completed" }]);
+    for (const userId of [reader, manager]) {
+      const view = await library.view(userId, project);
+      expect(view.entries.find((entry) => entry.id === personal.libraryId)).toBeUndefined();
+      expect(JSON.stringify(view)).not.toContain(personal.revisionId);
+      expect(JSON.stringify(view)).not.toContain(personal.content.endpoint);
+    }
+    expect(
+      (await library.view(author, project)).entries
+        .find((entry) => entry.id === personal.libraryId)
+        ?.revisions.find((revision) => revision.id === personal.revisionId),
+    ).toMatchObject({ content: personal.content });
+    await library.choose(
+      {
+        libraryId: personal.libraryId,
+        revisionId: personal.revisionId,
+        projectId: project,
+        scope: "personal",
+        role: "planning",
+        state: "disable",
+        expectedVersion: 1,
+      },
+      author,
+    );
+    const shared = await source("project", manager);
+    const ticket = crypto.randomUUID();
+    const sharedConversation = crypto.randomUUID();
+    await database.client`INSERT INTO factory.ticket(id,project_id,title,created_by)
+      VALUES(${ticket},${project},'Owned shared source inspection',${author})`;
+    await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,created_by)
+      VALUES(${sharedConversation},${project},${ticket},${author})`;
+    const sharedTurnId = await completedTurn(sharedConversation, ticket);
+    expect(
+      await database.client`SELECT ticket_id,state FROM factory.agent_turn WHERE id=${sharedTurnId}`,
+    ).toMatchObject([{ ticket_id: ticket, state: "completed" }]);
+    expect(await library.assignments(sharedTurnId)).toMatchObject([
+      { connectionId: shared.libraryId, revisionId: shared.revisionId },
+    ]);
+    const newerRevisionId = crypto.randomUUID();
+    await library.save(
+      {
+        ...shared,
+        revisionId: newerRevisionId,
+        expectedRevision: 1,
+        content: { ...shared.content, endpoint: "https://newer.example/mcp" },
+      },
+      manager,
+    );
+    const view = await library.view(reader, project);
+    const inspected = fixtureValue(
+      view.entries.find((entry) => entry.id === shared.libraryId),
+      "shared MCP definition",
+    );
+    expect(inspected.editable).toBe(false);
+    expect(inspected.revisions.map((revision) => revision.id)).toEqual([
+      newerRevisionId,
+      shared.revisionId,
+    ]);
+    expect(inspected.revisions.find((revision) => revision.id === shared.revisionId)).toMatchObject(
+      { content: shared.content },
+    );
+    expect(inspected.connection).toMatchObject({ revisionId: shared.revisionId, editable: false });
+    expect(inspected.connection).not.toHaveProperty("credentialEpoch");
+    expect(inspected.connection).not.toHaveProperty("secretKey");
+    expect(view.entries.find((entry) => entry.id === personal.libraryId)).toBeUndefined();
+    expect(JSON.stringify(view)).not.toContain(personal.revisionId);
+    const proposal = crypto.randomUUID();
+    await library.propose(proposal, personal.revisionId, "project", project, author);
+    expect((await library.view(reader, project)).proposals).toHaveLength(0);
+    expect((await library.view(manager, project)).proposals).toMatchObject([
+      { id: proposal, revision: { id: personal.revisionId, content: personal.content } },
+    ]);
+  } finally {
+    await handler.close();
+    await database.client.end();
+    await fixture.dispose();
+  }
+});

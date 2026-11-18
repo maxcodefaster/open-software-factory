@@ -240,7 +240,8 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         FROM factory.skill_revision revision JOIN factory.skill_publication publication ON publication.revision_id = revision.id
         JOIN factory.skill_library_revision link ON link.revision_id = revision.id JOIN factory.skill_library library ON library.id = link.library_id
         WHERE library.scope = 'personal' AND library.owner_id != ${userId}
-          AND EXISTS (SELECT 1 FROM factory.agent_turn turn WHERE turn.project_id = ${projectId ?? nil} AND turn.authority->'skillRevisionIds' ? revision.id::text)
+          AND EXISTS (SELECT 1 FROM factory.agent_turn turn WHERE turn.project_id = ${projectId ?? nil}
+            AND turn.ticket_id IS NOT NULL AND turn.authority->'skillRevisionIds' ? revision.id::text)
         LIMIT 100`
       ).map((row) => skillRevisionInput.parse(row)),
       proposals,
@@ -493,7 +494,8 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
           FROM factory.skill_revision revision JOIN factory.skill_publication publication ON publication.revision_id = revision.id
           JOIN factory.skill_library_revision link ON link.revision_id = revision.id JOIN factory.skill_library library ON library.id = link.library_id
           WHERE revision.id = ${revisionId} AND (library.scope = 'system' OR library.owner_id = ${userId} OR library.project_id = ${projectId ?? nil}
-            OR EXISTS (SELECT 1 FROM factory.agent_turn turn WHERE turn.project_id = ${projectId ?? nil} AND turn.authority->'skillRevisionIds' ? revision.id::text)
+            OR EXISTS (SELECT 1 FROM factory.agent_turn turn WHERE turn.project_id = ${projectId ?? nil}
+              AND turn.ticket_id IS NOT NULL AND turn.authority->'skillRevisionIds' ? revision.id::text)
             OR EXISTS (SELECT 1 FROM factory.skill_share_proposal proposal WHERE proposal.revision_id = revision.id AND ((proposal.target = 'system' AND ${access.canManageSystem}) OR (proposal.project_id = ${projectId ?? nil} AND ${access.canManageProject}))))`;
         if (!row) throw new CommandError("not-found", "Skill version not found");
         return skillRevisionInput.parse(row);
