@@ -79,6 +79,8 @@ type AgentRow = {
 };
 
 const workspaceDirectory = "/workspace/project";
+const noChangesToSubmit = "This turn changed no files, so there is nothing new to submit.";
+const earlierSubmissionUnchanged = " The earlier submission is unchanged.";
 
 function opencode(hub: RuntimeHub, attemptID: string) {
   return createOpenCodeClient((request, path) => hub.request(attemptID, "agent", request, path));
@@ -943,10 +945,17 @@ export function createAgentController(
         cause.message ===
           "the exact prepared commit was not found; current files were not committed";
       if (emptyCheckout || absentPreparedCommit) {
-        const diagnostic = emptyCheckout
-          ? "This turn changed no files, so there is nothing new to submit. The earlier submission is unchanged and still needs review."
-          : "Prepared commit was not found. Files were left untouched; review the checkout before starting a new Build turn.";
         await turns.observeCommit(operation.id, async (transaction) => {
+          const [previousSubmission] = emptyCheckout
+            ? await transaction<Array<{ id: string }>>`
+                SELECT id FROM factory.change_commit_operation
+                WHERE change_id = ${operation.changeID} AND state = 'succeeded'
+                  AND sequence < (SELECT sequence FROM factory.change_commit_operation WHERE id = ${operation.id})
+                LIMIT 1`
+            : [];
+          const diagnostic = emptyCheckout
+            ? noChangesToSubmit + (previousSubmission ? earlierSubmissionUnchanged : "")
+            : "Prepared commit was not found. Files were left untouched; review the checkout before starting a new Build turn.";
           const recorded = await transaction<Array<{ id: string }>>`
             UPDATE factory.change_commit_operation SET state = 'failed',
               last_error = ${diagnostic}, completed_at = now(), updated_at = now()
@@ -1246,8 +1255,8 @@ export function createAgentController(
               ownerToken,
               "completed",
               outcome.summary
-                ? bounded(`Agent reports ready for Verification: ${outcome.summary}`, 2_000)
-                : "OpenCode ended this Build turn. Changed source is submitted for independent Verification, not approved for Delivery.",
+                ? bounded(`Agent reports completion: ${outcome.summary}`, 2_000)
+                : "OpenCode ended this Build turn. Source submission and independent Verification are separate steps; Delivery still requires approval.",
               async (sql) => {
                 const accepted = await sql<
                   Array<{ id: string }>
@@ -1792,6 +1801,15 @@ export function createAgentController(
       >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
         JOIN factory.change change ON change.runtime_attempt_id=waiting.attempt_id WHERE change.id=${changeID}`;
       const turn = await readTurnObservation(database, { changeID, ...(turnID ? { turnID } : {}) });
+      if (turn?.state === "completed") {
+        const [emptyCommit] = await database.client<Array<{ summary: string }>>`
+          SELECT last_error AS summary FROM factory.change_commit_operation
+          WHERE id = ${turn.id} AND change_id = ${changeID} AND state = 'failed' AND commit_sha IS NULL
+            AND last_error IN (${noChangesToSubmit}, ${noChangesToSubmit + earlierSubmissionUnchanged})`;
+        // Native completion precedes Git observation. Project that exact
+        // no-change result without rewriting the immutable terminal turn.
+        if (emptyCommit) turn.summary = emptyCommit.summary;
+      }
       const intents = history
         ? await database.client<
             Array<{
