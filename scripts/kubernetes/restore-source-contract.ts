@@ -8,9 +8,9 @@ const revisionPattern = /^[a-f0-9]{40}$/;
 const chartRoot = "deploy/helm/factory";
 
 export const reviewedRestoreContract = Object.freeze({
-  revision: "0a6800a0871bf9c8bc9f09f7c19e7160deacb0c1",
+  revision: "509a72684ef9961f22ad3cd857e0ac5c3062a4fa",
   chart: "66ee75748e01f963fa94bb73dc470cd2149a29a5b2d2af42576a0c4f99abfc18",
-  application: "a3faa3161c75baf61f8b57d4f12e31dda938cf607871eadae84bf4d72abbf981",
+  application: "48f400353073eb34ba67cd50ba2e81a55adce3d87bacd996a93acd66533522a6",
 });
 
 // Exact paths only. No extension, directory, test-name or README glob can hide new code.
