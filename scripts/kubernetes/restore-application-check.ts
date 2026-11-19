@@ -7,13 +7,16 @@ import { isIP } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { checkServerIdentity } from "node:tls";
 import { type Receipt as BackupReceipt, invocation, memberPath } from "./restore-rehearsal";
+import { type ProjectReader, projectRows, readRestoredProjects } from "./restore-zero-projects";
 
 const ownerLabel = "factory.restore-application.owner";
 const backupAnnotation = "factory.restore-application.backup";
 const sha = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const name = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const functions = ["getProjects", "getTicketDetail", "saveTicketDocument"] as const;
+const functions = ["getBootstrap", "getTicketDetail", "saveTicketDocument"] as const;
+const zeroImage =
+  "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437";
 type FunctionName = (typeof functions)[number];
 type Identity = { name: string; uid: string };
 type Digest = { rows: number; sha256: string };
@@ -73,7 +76,11 @@ type Snapshot = {
   } | null;
 };
 type FunctionValues = {
-  getProjects: { projects: Project[] };
+  getBootstrap: {
+    session: { user: { id: string; email: string }; systemManager: boolean } | null;
+    zeroCacheURL: string;
+    planningCacheScope: string;
+  };
   getTicketDetail: { ticket: Ticket; documentRevisions: Document[]; revisions: Revision[] };
   saveTicketDocument: { id: string; ticketVersion: number; requirementRevisionId: string | null };
 };
@@ -128,10 +135,12 @@ export type ApplicationFixture = {
     applicationPod: Identity;
     postgresPod: Identity;
     forgejoPod: Identity;
+    zeroPod: Identity;
     ingress: Identity;
     factoryService: Identity;
     postgresService: Identity;
     forgejoService: Identity;
+    zeroService: Identity;
     configuration: Identity;
     credentials: Identity;
     address: string;
@@ -197,6 +206,7 @@ export type ApplicationReceipt = {
   commandID: string;
   save: "not-sent" | "intended" | "confirmed" | "unconfirmed";
   logout: "not-needed" | "unconfirmed" | "confirmed";
+  projectRead: "not-started" | "complete" | "failed";
   oldActors: "not-run-not-qualified";
   newCompute: "not-run-not-qualified";
 };
@@ -546,7 +556,7 @@ export async function loadApplicationFixture(
   keys(f.source, "context kubeSystemUID ingress");
   keys(
     f.target,
-    "context kubeSystemUID namespace deployment applicationPod postgresPod forgejoPod ingress factoryService postgresService forgejoService configuration credentials address",
+    "context kubeSystemUID namespace deployment applicationPod postgresPod forgejoPod zeroPod ingress factoryService postgresService forgejoService zeroService configuration credentials address",
   );
   for (const cluster of [f.source, f.target]) {
     check(/^[A-Za-z0-9_.:-]+$/.test(cluster.context) && uuid.test(cluster.kubeSystemUID));
@@ -563,9 +573,11 @@ export async function loadApplicationFixture(
     "applicationPod",
     "postgresPod",
     "forgejoPod",
+    "zeroPod",
     "factoryService",
     "postgresService",
     "forgejoService",
+    "zeroService",
     "configuration",
     "credentials",
   ] as const)
@@ -865,7 +877,7 @@ export async function applicationBuildTree(expectedTree: string) {
   const entrypoint = "/opt/factory/apps/factory/dist/server/entry.js";
   const entry = await import(entrypoint);
   const functions = Object.fromEntries(
-    ["getProjects", "getTicketDetail", "saveTicketDocument"].map((name) => [
+    ["getBootstrap", "getTicketDetail", "saveTicketDocument"].map((name) => [
       name,
       entry.compiledFunctionID(entry.factoryFunctions[name]),
     ]),
@@ -1082,6 +1094,7 @@ export async function checkRestoredApplication(
     http?: typeof pinnedApplicationRequest;
     wire?: Wire;
     signal?: AbortSignal;
+    projects?: ProjectReader;
   } = {},
 ): Promise<ApplicationReceipt> {
   const command = dependencies.command ?? execute,
@@ -1105,6 +1118,7 @@ export async function checkRestoredApplication(
     commandID: f.save.commandID,
     save: "not-sent",
     logout: "not-needed",
+    projectRead: "not-started",
     oldActors: "not-run-not-qualified",
     newCompute: "not-run-not-qualified",
   };
@@ -1152,6 +1166,7 @@ export async function checkRestoredApplication(
   };
   let boundConfiguration: string | undefined;
   let boundEnvironment: Record<string, string> | undefined;
+  let boundZero: string | undefined;
   async function ownership() {
     const sourceCluster = await get(f.source.context, "namespace", "kube-system", false);
     const targetCluster = await get(f.target.context, "namespace", "kube-system", false);
@@ -1302,6 +1317,86 @@ export async function checkRestoredApplication(
             (pod === f.target.applicationPod ? "factory" : "forgejo"),
       );
       await serviceEndpoint(svc, pod, 3000);
+      if (publicOrigin === original.factoryOrigin) {
+        const zeroRoutes = paths.filter((p: { path?: string }) => p.path === "/zero");
+        check(
+          paths.length === 2 &&
+            zeroRoutes.length === 1 &&
+            zeroRoutes[0].pathType === "Prefix" &&
+            zeroRoutes[0].backend?.service?.name === f.target.zeroService.name &&
+            zeroRoutes[0].backend?.service?.port?.number === 4848,
+        );
+        const service = await get(f.target.context, "service", f.target.zeroService.name);
+        metadata(service, f.target.zeroService);
+        check(
+          service.spec.type !== "ExternalName" &&
+            !service.spec.externalName &&
+            !service.spec.externalIPs?.length &&
+            equal(service.spec.selector, {
+              "app.kubernetes.io/instance": original.release,
+              "app.kubernetes.io/component": "zero",
+            }),
+        );
+        const zero = await ownedPod(f.target.zeroPod, "zero");
+        check(
+          zero.spec?.containers?.length === 1 &&
+            zero.spec.containers[0].name === "zero" &&
+            zero.spec.containers[0].image === zeroImage &&
+            zero.status.containerStatuses?.find((c: Named) => c.name === "zero")?.ready === true,
+        );
+        const zeroContainer = zero.spec.containers[0];
+        const env = zeroContainer.env;
+        check(
+          Array.isArray(env) && new Set(env.map((e: Environment) => e.name)).size === env.length,
+        );
+        const observedEnvironment = Object.fromEntries(
+          env.map((e: Environment) => [e.name, e.value]),
+        );
+        for (const key of ["ZERO_UPSTREAM_DB", "ZERO_CVR_DB", "ZERO_CHANGE_DB"])
+          check(
+            observedEnvironment[key] ===
+              `postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@${f.target.postgresService.name}.${ns}.svc:5432/factory`,
+          );
+        check(
+          !zeroContainer.envFrom?.length &&
+            equal(
+              env.find((e: Environment) => e.name === "FACTORY_DATABASE_PASSWORD"),
+              {
+                name: "FACTORY_DATABASE_PASSWORD",
+                valueFrom: {
+                  secretKeyRef: { name: f.target.credentials.name, key: "database-password" },
+                },
+              },
+            ) &&
+            observedEnvironment["ZERO_QUERY_FORWARD_COOKIES"] === "true" &&
+            observedEnvironment["ZERO_ENABLE_CRUD_MUTATIONS"] === "false" &&
+            observedEnvironment["ZERO_QUERY_URL"] ===
+              `http://${original.release}-internal.${ns}.svc:3000/api/zero/query`,
+        );
+        const internal = await get(f.target.context, "service", `${original.release}-internal`);
+        check(
+          uuid.test(internal.metadata?.uid) &&
+            internal.spec.type !== "ExternalName" &&
+            !internal.spec.externalName &&
+            !internal.spec.externalIPs?.length &&
+            equal(internal.spec.selector, {
+              "app.kubernetes.io/instance": original.release,
+              "app.kubernetes.io/component": "factory",
+            }),
+        );
+        await serviceEndpoint(internal, f.target.applicationPod, 3000);
+        const zeroBinding = canonical({
+          podUID: zero.metadata.uid,
+          pod: zero.spec,
+          serviceUID: service.metadata.uid,
+          service: service.spec,
+          internalUID: internal.metadata.uid,
+          internal: internal.spec,
+        });
+        check(boundZero === undefined || zeroBinding === boundZero);
+        boundZero = zeroBinding;
+        await serviceEndpoint(service, f.target.zeroPod, 4848);
+      } else check(paths.length === 1);
     }
     await binding(app);
   }
@@ -1669,16 +1764,43 @@ export async function checkRestoredApplication(
     const session = json(await request(`${original.factoryOrigin}/api/auth/get-session`, "GET"));
     check(session.user?.id === f.account.id && session.user.email === f.account.email);
     receipt.stage = "reads";
-    const projects = await fn("getProjects", []);
+    const bootstrap = await fn("getBootstrap", []);
     check(
-      equal(
-        select(
-          projects.projects?.find((p: Project) => p.id === f.expected.project.id),
-          f.expected.project,
-        ),
-        f.expected.project,
-      ),
+      bootstrap.session?.user.id === f.account.id &&
+        bootstrap.session.user.email === f.account.email &&
+        typeof bootstrap.session.systemManager === "boolean" &&
+        bootstrap.zeroCacheURL === `${original.factoryOrigin}/zero` &&
+        sha.test(bootstrap.planningCacheScope),
     );
+    try {
+      await ownership();
+      const projects = projectRows(
+        await (dependencies.projects ?? readRestoredProjects)(
+          {
+            owner: f.owner,
+            factoryOrigin: original.factoryOrigin,
+            address: f.target.address,
+            ca: f.caBytes,
+            cookie: cookieHeader(),
+            accountID: f.account.id,
+            systemManager: bootstrap.session.systemManager,
+            cacheScope: bootstrap.planningCacheScope,
+            seconds: f.limits.seconds,
+            responseBytes: f.limits.responseBytes,
+          },
+          signal(),
+        ),
+      );
+      await ownership();
+      const selected = projects.filter((p) => p.id === f.expected.project.id);
+      check(
+        selected.length === 1 && equal(select(selected[0], f.expected.project), f.expected.project),
+      );
+      receipt.projectRead = "complete";
+    } catch {
+      receipt.projectRead = "failed";
+      throw Error("Completed restored Zero Project enumeration failed");
+    }
     const detail = await fn("getTicketDetail", [f.expected.ticket.id]);
     check(
       equal(select(detail.ticket, f.expected.ticket), f.expected.ticket) &&
@@ -1818,6 +1940,7 @@ export async function checkRestoredApplication(
     cookies = new Map();
     if (
       receipt.stage === "verified" &&
+      receipt.projectRead === "complete" &&
       receipt.save === "confirmed" &&
       receipt.logout === "confirmed"
     )

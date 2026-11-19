@@ -941,7 +941,7 @@ Configuration objects reject extra keys. Required `application.json` inputs are:
 | `account` | Original restored `id` UUID and `email` |
 | `backup`, `build`, `witnesses` | Each has `file` and the exact file-byte `sha256`; all are private files beneath the input root |
 | `source` | Explicit `context`, expected `kubeSystemUID`, and original `ingress: {name, uid}` |
-| `target` | Explicit `context`, `kubeSystemUID`, literal ingress `address`, and `{name, uid}` for `namespace`, `deployment`, `applicationPod`, `postgresPod`, `forgejoPod`, `ingress`, `factoryService`, `postgresService`, `forgejoService`, `configuration` ConfigMap and `credentials` Secret |
+| `target` | Explicit `context`, `kubeSystemUID`, literal ingress `address`, and `{name, uid}` for `namespace`, `deployment`, `applicationPod`, `postgresPod`, `forgejoPod`, `zeroPod`, `ingress`, `factoryService`, `postgresService`, `forgejoService`, `zeroService`, `configuration` ConfigMap and `credentials` Secret |
 | `credentialHashes` | Independently observed SHA-256 of the original decoded `auth-secret`, `admin-password`, `database-password`, `zero-password` and `webhook-secret` Secret bytes, bound to this backup |
 | `save` | Fresh UUID `commandID` and deliberately authorized new `description`, at most 10,000 characters, different from the restored description |
 | `limits` | Positive per-command/request `seconds`, at most 3600, and `responseBytes`, at most 16 MiB; choose bounds for the actual history inventory |
@@ -957,7 +957,7 @@ read-only SQL and compiled-build inspection, not caller-supplied commands.
 
 `image-build.json` has `schema: 1`, `image` as the original immutable `@sha256:` reference,
 `platformDigest` as 64 lowercase hexadecimal characters without the prefix, the backed-up
-`applicationRevision`, `treeSHA256`, and `functions` mapping exactly `getProjects`,
+`applicationRevision`, `treeSHA256`, and `functions` mapping exactly `getBootstrap`,
 `getTicketDetail` and `saveTicketDocument` to their actual compiled IDs. Retain this evidence
 independently from that exact image/build, not guessed function names or another local build.
 The tree hash covers every regular file under `/opt/factory/apps/factory/dist`: sort relative
@@ -969,6 +969,15 @@ inside the inspection process.
 It also compares hashes of the inherited container credentials, original origins and database
 route with the supplied Secret/configuration, so merely replacing a Secret after Pod startup
 does not pass.
+
+Project enumeration uses the normal `projects.list()` Zero query, not a legacy Server Function
+or a SQL product-read fallback. The authenticated bootstrap must identify the same account and
+provide its manager status, original `/zero` URL and planning cache scope. The helper runs the
+official Zero SDK in an isolated memory-only Bun child, pins its WebSocket to the verified target
+IP with the original Host/SNI and only the supplied public CA, and waits for completed rows.
+An initial empty cache or query-transform AST is not a successful Project read. The child and
+socket close before logout. The target's exact Zero Pod, Service, EndpointSlice, database route
+and `/zero` Ingress backend are checked alongside the Factory and Forgejo routes.
 
 `application-witnesses.json` must come from an independent consistent source observation for the
 selected backup. Set `schema: 1`, `provenance: "independent-source-observation"` and

@@ -269,7 +269,7 @@ async function fixture() {
     applicationRevision: backup.source.applicationRevision,
     treeSHA256: hash("complete compiled tree"),
     functions: {
-      getProjects: "opaque-projects",
+      getBootstrap: "opaque-bootstrap",
       getTicketDetail: "opaque-ticket",
       saveTicketDocument: "opaque-save",
     },
@@ -304,9 +304,11 @@ async function fixture() {
       applicationPod: identity("factory-pod", 7),
       postgresPod: identity("factory-postgres-0", 8),
       forgejoPod: identity("factory-forgejo-0", 9),
+      zeroPod: identity("factory-zero-0", 17),
       ingress: identity("factory", 10),
       factoryService: identity("factory-factory", 11),
       forgejoService: identity("factory-forgejo", 12),
+      zeroService: identity("factory-zero", 18),
       postgresService: identity("factory-postgres", 16),
       configuration: identity("factory-config", 13),
       credentials: identity("restore-credentials", 14),
@@ -439,6 +441,7 @@ function target(f: Fixture) {
     [f.value.target.applicationPod, "factory", "10.0.0.10"],
     [f.value.target.forgejoPod, "forgejo", "10.0.0.11"],
     [f.value.target.postgresPod, "postgres", "10.0.0.12"],
+    [f.value.target.zeroPod, "zero", "10.0.0.13"],
   ] as const)
     put(to, "pod", pod.name, {
       metadata: {
@@ -449,7 +452,41 @@ function target(f: Fixture) {
             ? [{ controller: true, kind: "ReplicaSet", name: "factory-rs", uid: uid(15) }]
             : [],
       },
-      spec: { containers: role === "factory" ? [clone(container)] : [] },
+      spec: {
+        containers:
+          role === "factory"
+            ? [clone(container)]
+            : role === "zero"
+              ? [
+                  {
+                    name: "zero",
+                    image:
+                      "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437",
+                    env: [
+                      ...["ZERO_UPSTREAM_DB", "ZERO_CVR_DB", "ZERO_CHANGE_DB"].map((name) => ({
+                        name,
+                        value: `postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@factory-postgres.${ns}.svc:5432/factory`,
+                      })),
+                      {
+                        name: "FACTORY_DATABASE_PASSWORD",
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: f.value.target.credentials.name,
+                            key: "database-password",
+                          },
+                        },
+                      },
+                      { name: "ZERO_QUERY_FORWARD_COOKIES", value: "true" },
+                      { name: "ZERO_ENABLE_CRUD_MUTATIONS", value: "false" },
+                      {
+                        name: "ZERO_QUERY_URL",
+                        value: `http://factory-internal.${ns}.svc:3000/api/zero/query`,
+                      },
+                    ],
+                  },
+                ]
+              : [],
+      },
       status: {
         phase: "Running",
         podIP: ip,
@@ -462,13 +499,17 @@ function target(f: Fixture) {
                   imageID: `registry.example/factory@sha256:${f.build.platformDigest}`,
                 },
               ]
-            : [],
+            : role === "zero"
+              ? [{ name: "zero", ready: true }]
+              : [],
       },
     });
   for (const [svc, pod, role, ip, port] of [
     [f.value.target.factoryService, f.value.target.applicationPod, "factory", "10.0.0.10", 3000],
     [f.value.target.forgejoService, f.value.target.forgejoPod, "forgejo", "10.0.0.11", 3000],
     [identity("factory-postgres", 16), f.value.target.postgresPod, "postgres", "10.0.0.12", 5432],
+    [f.value.target.zeroService, f.value.target.zeroPod, "zero", "10.0.0.13", 4848],
+    [identity("factory-internal", 19), f.value.target.applicationPod, "factory", "10.0.0.10", 3000],
   ] as const) {
     put(to, "service", svc.name, {
       metadata: meta(svc),
@@ -504,6 +545,11 @@ function target(f: Fixture) {
       host: "factory.example.invalid",
       http: {
         paths: [
+          {
+            path: "/zero",
+            pathType: "Prefix",
+            backend: { service: { name: f.value.target.zeroService.name, port: { number: 4848 } } },
+          },
           {
             path: "/",
             pathType: "Prefix",
@@ -729,8 +775,17 @@ function target(f: Fixture) {
     expect(request.headers["content-type"]).toBe("text/plain");
     const args = JSON.parse(request.body ?? "")[0].data;
     const id = path.split("/").at(-1);
-    if (id === f.build.functions.getProjects)
-      return response({ result: { ok: true, value: { projects: [f.expected.project] } } });
+    if (id === f.build.functions.getBootstrap)
+      return response({
+        result: {
+          ok: true,
+          value: {
+            session: { user: f.value.account, systemManager: false },
+            zeroCacheURL: `${f.backup.source.factoryOrigin}/zero`,
+            planningCacheScope: "a".repeat(64),
+          },
+        },
+      });
     if (id === f.build.functions.saveTicketDocument) {
       expect(saved).toBe(false);
       expect(args[0]).toBe(f.expected.ticket.id);
@@ -775,6 +830,7 @@ function target(f: Fixture) {
     command,
     http,
     wire,
+    projects: async () => [clone(f.expected.project)],
     snapshot,
     dbHook: (next: typeof dbHook) => {
       dbHook = next;
@@ -794,6 +850,7 @@ test("the already-restored application proof performs one fenced save, reads exa
     expect(result.status).toBe("restored-application-passed");
     expect(result.save).toBe("confirmed");
     expect(result.logout).toBe("confirmed");
+    expect(result.projectRead).toBe("complete");
     expect(result.oldActors).toBe("not-run-not-qualified");
     expect(result.newCompute).toBe("not-run-not-qualified");
     expect(fake.saveCalls()).toHaveLength(1);
@@ -808,7 +865,7 @@ test("the already-restored application proof performs one fenced save, reads exa
       ["GET", "/health/ready"],
       ["POST", "/api/auth/sign-in/email"],
       ["GET", "/api/auth/get-session"],
-      ["POST", "/_server/data/opaque-projects"],
+      ["POST", "/_server/data/opaque-bootstrap"],
       ["POST", "/_server/data/opaque-ticket"],
       ["GET", `/api/v1/repos/owned/retained/git/commits/${f.expected.git.commit}`],
       ["GET", "/api/v1/repos/owned/retained/contents/README.md"],
@@ -1798,6 +1855,136 @@ test("the SQL is read-only, scope-bounded and covers original native and require
       stderr: "pipe",
     });
     expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(["missing", "duplicate", "mismatched", "AST-only", "reader rejection"] as const)(
+  "a %s completed Zero Project read cannot reach Save and still logs out",
+  async (mode) => {
+    const f = await fixture();
+    try {
+      const fake = target(f);
+      fake.projects = async () => {
+        if (mode === "reader rejection") throw Error("owned-session-must-not-leak");
+        if (mode === "missing") return [];
+        if (mode === "duplicate") return [f.expected.project, f.expected.project];
+        if (mode === "mismatched") return [{ ...f.expected.project, name: "Changed" }];
+        return { kind: "QueryResponse", queries: [{ ast: {} }] } as never;
+      };
+      const result = await checkRestoredApplication(await f.load(), fake);
+      expect(result.status).toBe("incomplete");
+      expect(result.projectRead).toBe("failed");
+      expect(result.save).toBe("not-sent");
+      expect(result.logout).toBe("confirmed");
+      expect(fake.saveCalls()).toHaveLength(0);
+      expect(await readFile(join(f.value.evidenceDirectory, "result.json"), "utf8")).not.toContain(
+        "owned-session-must-not-leak",
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["user", "email", "manager", "cache URL", "cache scope"] as const)(
+  "a foreign/malformed bootstrap %s is not authority for the Zero client",
+  async (mode) => {
+    const f = await fixture();
+    try {
+      const fake = target(f);
+      let reads = 0;
+      fake.projects = async () => {
+        reads++;
+        return [f.expected.project];
+      };
+      fake.httpHook((request) => {
+        if (!request.url.endsWith(f.build.functions.getBootstrap)) return;
+        const value = {
+          session: { user: { ...f.value.account }, systemManager: false as unknown },
+          zeroCacheURL: `${f.backup.source.factoryOrigin}/zero`,
+          planningCacheScope: "a".repeat(64),
+        };
+        if (mode === "user") value.session.user.id = uid(99);
+        if (mode === "email") value.session.user.email = "foreign@example.invalid";
+        if (mode === "manager") value.session.systemManager = "true";
+        if (mode === "cache URL") value.zeroCacheURL = "https://foreign.invalid/zero";
+        if (mode === "cache scope") value.planningCacheScope = "";
+        return response({ result: { ok: true, value } });
+      });
+      const result = await checkRestoredApplication(await f.load(), fake);
+      expect(result.status).toBe("incomplete");
+      expect(result.save).toBe("not-sent");
+      expect(result.logout).toBe("confirmed");
+      expect(reads).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each([
+  "route",
+  "route type",
+  "Service UID",
+  "Pod UID",
+  "endpoint",
+  "not ready",
+  "image",
+  "database",
+  "callback",
+  "cookies",
+  "CRUD",
+  "internal endpoint",
+] as const)("a changed Zero %s refuses before authentication or Save", async (mode) => {
+  const f = await fixture();
+  try {
+    const fake = target(f),
+      context = f.value.target.context;
+    const get = (kind: string, name: string) => fake.objects.get(`${context}/${kind}/${name}`);
+    const zero = get("pod", f.value.target.zeroPod.name);
+    const route = get("ingress", f.value.target.ingress.name).spec.rules[0].http.paths[0];
+    if (mode === "route") route.backend.service.name = "foreign-zero";
+    if (mode === "route type") route.pathType = "ImplementationSpecific";
+    if (mode === "Service UID")
+      get("service", f.value.target.zeroService.name).metadata.uid = uid(99);
+    if (mode === "Pod UID") zero.metadata.uid = uid(99);
+    if (mode === "endpoint")
+      get("endpointslices", f.value.target.zeroService.name).items[0].endpoints[0].targetRef.uid =
+        uid(99);
+    if (mode === "not ready") zero.status.containerStatuses[0].ready = false;
+    if (mode === "image") zero.spec.containers[0].image = "foreign:latest";
+    const env: { name: string; value: string }[] = zero.spec.containers[0].env;
+    const key = {
+      database: "ZERO_UPSTREAM_DB",
+      callback: "ZERO_QUERY_URL",
+      cookies: "ZERO_QUERY_FORWARD_COOKIES",
+      CRUD: "ZERO_ENABLE_CRUD_MUTATIONS",
+    }[mode as "database"];
+    if (key) {
+      const variable = env.find((entry) => entry.name === key);
+      if (!variable) throw Error("The owned Zero fixture variable is missing");
+      variable.value = "foreign";
+    }
+    if (mode === "internal endpoint")
+      get("endpointslices", "factory-internal").items[0].endpoints[0].targetRef.uid = uid(99);
+    const result = await checkRestoredApplication(await f.load(), fake);
+    expect(result.status).toBe("incomplete");
+    expect(result.save).toBe("not-sent");
+    expect(fake.requests).toHaveLength(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("the stale getProjects manifest is refused rather than silently introspected or invoked", async () => {
+  const f = await fixture();
+  try {
+    Reflect.deleteProperty(f.build.functions, "getBootstrap");
+    Object.assign(f.build.functions, { getProjects: "obsolete-stub" });
+    await f.save();
+    await expect(f.load()).rejects.toThrow("refused");
   } finally {
     await f.close();
   }
