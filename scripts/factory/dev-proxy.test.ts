@@ -137,6 +137,21 @@ test("the actual dev config strips TypeScript, proxies authenticated commands an
     await denied.promise;
   } finally {
     socket?.close();
+    // The dependency scan can hand its build to the import crawler before close().
+    // Join the public processing promises before deleting this fixture's cache.
+    await Promise.all(
+      Object.values(server?.environments ?? {}).map(async (environment) => {
+        await environment.waitForRequestsIdle();
+        await environment.depsOptimizer?.scanProcessing;
+        const metadata = environment.depsOptimizer?.metadata;
+        await Promise.all(
+          [
+            ...Object.values(metadata?.optimized ?? {}),
+            ...Object.values(metadata?.discovered ?? {}),
+          ].map((dependency) => dependency.processing),
+        );
+      }),
+    );
     await server?.close();
     await backend.stop(true);
     await zero.stop(true);

@@ -408,9 +408,20 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
     "node:sqlite",
     "node:https",
     "node:tls",
+    "./restore-source-contract",
   ]);
   for (const entry of imports) expect(allowed.has(entry.path), entry.path).toBe(true);
   expect(imports.filter((entry) => entry.path === "node:tls")).toEqual(tlsImport);
+  // The committed-object admission helper runs local Git only. It must not
+  // introduce an application, runtime controller or another transitive module.
+  const contractImports = scanner.scanImports(
+    await readFile("scripts/kubernetes/restore-source-contract.ts", "utf8"),
+  );
+  expect(contractImports.map((entry) => entry.path).sort()).toEqual([
+    "node:child_process",
+    "node:crypto",
+    "node:util",
+  ]);
 });
 
 test.each([
