@@ -12,8 +12,9 @@ export function comparisonExample(
   projectId: string,
   edit: LearningEdit,
   ownerId: string | null = null,
+  values: readonly [number, number, number] = [3, 7, 11],
 ) {
-  const cases: LearningCase[] = [3, 7, 11].map((value, index) => ({
+  const cases: LearningCase[] = values.map((value, index) => ({
     id: `owned:comparison:${crypto.randomUUID()}`,
     projectId,
     ownerId,

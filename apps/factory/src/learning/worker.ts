@@ -7,7 +7,6 @@ import {
   learningRubric,
   legacyWikiCallPattern,
   maxCalibrationGrades,
-  validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
@@ -22,7 +21,11 @@ import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { createLearningAutomation } from "./automation";
 import { calibrationCases, calibrationPassed } from "./calibration";
 import { reviewWork, workReviewInstructions } from "./judge";
-import { type PriorProposal, priorProposalEvidence } from "./prior-proposals";
+import {
+  type PriorProposal,
+  priorProposalEvidence,
+  validateWorkReviewResult,
+} from "./prior-proposals";
 import { learningRejectionReason } from "./rejection-reason";
 import type { replayPlanning } from "./replay";
 import { pendingReviewRequests, type ReviewRequest } from "./requests";
@@ -242,7 +245,7 @@ export function createLearningWorker(
         : admitted.fallback;
       if (!connection)
         throw new CommandError("unavailable", "The admitted review model is unavailable");
-      const result = validateLearningResult(
+      const result = validateWorkReviewResult(
         await (input.review ?? reviewWork)({
           cases: admitted.cases,
           modelId: admitted.modelId,

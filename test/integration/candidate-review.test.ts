@@ -3,6 +3,7 @@ import { createBuildBrowserController } from "../../apps/factory/src/agent/brows
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
@@ -1472,30 +1473,31 @@ test.each([false, true])(
     f.hub.request = async (attempt, channel, input, path) => {
       const pathname = new URL(input.url).pathname;
       if (pathname === "/api/session" && input.method === "POST") {
-        native = await input.json();
-        return Response.json({ data: native });
+        native = await input.clone().json();
       }
-      if (native && pathname === `/api/session/${native.id}`)
-        return Response.json({
-          data: {
-            ...native,
-            location: { directory: "/workspace/project" },
-            model: { providerID: "factory", id: buildModelID },
-          },
-        });
-      if (native && pathname.endsWith("/log"))
-        return new Response(
-          `data: ${JSON.stringify({ type: "log.synced", aggregateID: native.id, seq: 1 })}\n\n`,
-          { headers: { "content-type": "text/event-stream" } },
-        );
+      // Observe creation without replacing the peer's GET/PATCH protocol or
+      // losing the native permission update required before prompt admission.
       return request(attempt, channel, input, path);
     };
     try {
       const controller = f.controller();
       await controller.review(f.changeID, f.reviewID, f.userID);
-      await f.requested;
-      expect(native?.permissions).toEqual(candidateReviewPermissions);
-      expect(native?.id).not.toBe(f.sessionID);
+      const dispatched = await observe(
+        () => f.turn(f.reviewID),
+        (turn) => f.requests() > 0 || ["failed", "uncertain"].includes(turn?.state ?? ""),
+        "Review did not reach its prompt boundary or settle",
+      );
+      expect(f.requests(), JSON.stringify(dispatched)).toBe(1);
+      if (!native) throw new Error("Missing independent review Session");
+      expect(native.permissions).toEqual(candidateReviewPermissions);
+      expect(native.id).not.toBe(f.sessionID);
+      const retained = await createOpenCodeClient((input, path) =>
+        f.hub.request(f.attemptID, "agent", input, path),
+      ).session.get({ sessionID: native.id });
+      expect(retained.permissions).toEqual([
+        ...candidateReviewPermissions,
+        { action: "question", resource: "*", effect: "deny" },
+      ]);
       f.release();
       f.acceptResponse();
       await observe(

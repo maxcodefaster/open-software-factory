@@ -5,6 +5,7 @@ import {
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createChangeWriterController } from "../access/writer-controller";
@@ -13,12 +14,14 @@ import { reportFailure } from "../failure-log";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createOpenBaoModelSecrets } from "../models/secrets";
+import type { createRuntimeController } from "../runtime/controller";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/native";
 import { codingAllowanceDenial } from "../usage/opencode";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
+import { personalGitStatus } from "../workspace/personal-git";
 import type { createBuildBrowserController } from "./browser-controller";
 import { createChangeAdmission } from "./change-admission";
 import { createChangeAgentTransport } from "./change-transport";
@@ -56,6 +59,7 @@ type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
   startPersisted(changeID: string, userID: string): Promise<RuntimeAttemptView | null>;
   get?(attemptID: string): Promise<RuntimeAttemptView | null>;
+  processAction?: ReturnType<typeof createRuntimeController>["processAction"];
 };
 type AgentRow = {
   changeID: string;
@@ -267,12 +271,16 @@ export function createAgentController(
     const rows = await database.client<
       Array<{
         changeID: string;
+        branchName: string;
+        declaredApps: string[];
         runtimeAttemptID: string | null;
         runtimeState: string | null;
         changeState: string;
       }>
     >`
       SELECT change.id AS "changeID", change.runtime_attempt_id AS "runtimeAttemptID",
+        change.branch_name AS "branchName",
+        COALESCE(attempt.declared_apps,'[]'::jsonb) AS "declaredApps",
         attempt.state AS "runtimeState", change.state AS "changeState"
       FROM factory.change change
       LEFT JOIN factory.runtime_attempt attempt ON attempt.id = change.runtime_attempt_id
@@ -468,6 +476,83 @@ export function createAgentController(
         throw new CommandError("conflict", "Build authority changed before dispatch");
       }
       dispatched = true;
+      if (owned.authority.review) {
+        const apps = current.declaredApps;
+        const advertised = hub.appChannels(attemptID);
+        if (apps.length !== advertised.length || apps.some((app) => !advertised.includes(app)))
+          throw new CommandError("unavailable", "Review declared Apps are not connected");
+        if (apps.length) {
+          if (!runtime.processAction)
+            throw new CommandError("unavailable", "Review App preparation is not configured");
+          const beforeSend = async (send: () => void) => {
+            if (
+              !(await turns.validateExecution(turnID, ownerToken, async (sql) => {
+                observationController.signal.throwIfAborted();
+                if (apps.some((app) => !hub.hasAppChannel(attemptID, app)))
+                  throw new CommandError("unavailable", "Review declared Apps are not connected");
+                const [current] = await sql`
+                  SELECT intent.turn_id FROM factory.change_agent_turn_intent intent
+                  JOIN factory.agent_turn turn ON turn.id=intent.turn_id
+                  JOIN factory.change change ON change.id=intent.change_id
+                  JOIN factory.change_agent_session session ON session.change_id=change.id
+                  JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
+                  JOIN factory.change_writer writer ON writer.change_id=change.id
+                  WHERE intent.turn_id=${turnID} AND intent.session_id=${intent.sessionID}
+                    AND intent.runtime_attempt_id=${attemptID} AND change.runtime_attempt_id=${attemptID}
+                    AND session.runtime_attempt_id=${attemptID} AND session.active_turn_id=${turnID}
+                    AND session.opencode_session_id=${intent.sessionID} AND session.state='starting'
+                    AND NOT session.stop_pending AND attempt.state='ready' AND attempt.stop_intended_at IS NULL
+                    AND writer.state='agent' AND writer.turn_id=${turnID} AND NOT writer.fence_required
+                    AND turn.owner_token=${ownerToken} AND turn.owner_expires_at>clock_timestamp()
+                  FOR SHARE OF attempt,session`;
+                if (!current)
+                  throw new CommandError(
+                    "conflict",
+                    "Review Runtime Attempt changed before App preparation",
+                  );
+                send();
+              }))
+            )
+              throw new CommandError("conflict", "Review authority changed before App preparation");
+          };
+          const candidate = owned.authority.review.commitSha;
+          const confirmCheckout = async () => {
+            const status = await hub.parentOperation(
+              attemptID,
+              {
+                operationId: crypto.randomUUID(),
+                action: "workspace-git",
+                data: JSON.stringify({ action: "status", branch: current.branchName }),
+              },
+              beforeSend,
+            );
+            const checkout = personalGitStatus.parse(JSON.parse(status.data ?? "null"));
+            if (
+              checkout.head !== candidate ||
+              checkout.branch !== current.branchName ||
+              checkout.files.length
+            )
+              throw new CommandError("conflict", "Review App needs the clean submitted candidate");
+          };
+          await confirmCheckout();
+          // Non-watch commands still hold bootstrap code after submission.
+          // Refresh before creating the independent Session. An unknown effect
+          // leaves no Session for recovery to resume and is never replayed.
+          const signal = AbortSignal.any([
+            observationController.signal,
+            AbortSignal.timeout(nativeLifecycleWindowMS),
+          ]);
+          for (const app of apps)
+            await runtime.processAction(attemptID, app, "restart", {
+              beforeSend,
+              waitForReady: true,
+              signal,
+            });
+          await confirmCheckout();
+          if (!(await turns.validateExecution(turnID, ownerToken)))
+            throw new CommandError("conflict", "Review authority changed during App preparation");
+        }
+      }
       const session = intent.bootstrap
         ? await client.session.create({
             id: intent.sessionID,

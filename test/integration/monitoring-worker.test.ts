@@ -1,9 +1,19 @@
 import { expect, test } from "bun:test";
+import { lockChangeWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
+import {
+  type AgentTurnTransaction,
+  createAgentTurnStore,
+} from "../../apps/factory/src/agent/turn-store";
+import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import { createMonitoringWorker } from "../../apps/factory/src/monitoring/worker";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
+import type { createForgejoClient } from "../../packages/forge/src/forge";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { buildModelID } from "../fixtures/change-agent-turns";
+import { eventually } from "../fixtures/factory-process";
 import { monitoringFixture } from "../fixtures/monitoring";
 import type { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
 import type { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
@@ -159,6 +169,166 @@ test("Inputs prepare one unapproved Ticket automatically without development aut
     restore();
   }
 });
+
+test.each([
+  "terminal",
+  "new-correction",
+  "new-review",
+  "concurrent-correction",
+  "concurrent-review",
+] as const)(
+  "Monitoring settles only the current completed incomplete review: %s",
+  async (continuation) => {
+    const f = await candidateReviewFixture(undefined, undefined, true);
+    let worker: ReturnType<typeof createMonitoringWorker> | undefined;
+    let admission: Promise<unknown> | undefined;
+    let work: Promise<void> | undefined;
+    const release = Promise.withResolvers<void>();
+    const forbidden = async () => {
+      throw new Error("An incomplete review must not approve Delivery or create more work");
+    };
+    try {
+      const incidentID = fixtureValue(f.monitoring, "f.monitoring").incidentID;
+      const turn = await f.activeReview();
+      await f.turns.settle(
+        turn.id,
+        turn.ownerToken,
+        "completed",
+        "App/source mismatch",
+        async (sql) => {
+          await sql`UPDATE factory.candidate_review SET state='incomplete',completed_at=now()
+            WHERE id=${f.reviewID}`;
+          await sql`UPDATE factory.change_agent_session SET state='committed' WHERE change_id=${f.changeID}`;
+        },
+      );
+      const delivery = createDeliveryController(
+        f.database,
+        { startVerification: forbidden, startStagingReplacement: forbidden, stop: forbidden },
+        { prompt: forbidden },
+        forbidden,
+        {
+          client: new Proxy({} as ReturnType<typeof createForgejoClient>, { get: () => forbidden }),
+          owner: "owned",
+        },
+      );
+      const snapshot = await delivery.get(f.changeID);
+      expect(snapshot).toMatchObject({
+        reviewId: f.reviewID,
+        reviewState: "incomplete",
+        reviewCurrent: true,
+        approvedAt: null,
+      });
+      const retained = async (
+        sql: AgentTurnTransaction | typeof f.database.client = f.database.client,
+      ) => ({
+        turns:
+          await sql`SELECT id,state FROM factory.agent_turn WHERE change_id=${f.changeID} ORDER BY created_at,id`,
+        reviews:
+          await sql`SELECT id,state,turn_id FROM factory.candidate_review WHERE change_id=${f.changeID} ORDER BY ordinal`,
+      });
+      let before = await retained();
+      let continuationTurnID: string | undefined;
+      const retryID = crypto.randomUUID();
+      const admit = async (sql: AgentTurnTransaction) => {
+        await lockChangeWriterIn(sql, f.changeID);
+        if (continuation.endsWith("correction")) {
+          const accepted = await createChangeAdmission(f.database, buildModelID).admitIn(
+            sql,
+            f.changeID,
+            f.userID,
+            {
+              kind: "change-repair",
+              commandId: crypto.randomUUID(),
+              text: "Owned newer correction",
+            },
+          );
+          continuationTurnID = accepted.turn.id;
+        } else {
+          // A retry row can be committed before its review turn is admitted.
+          await sql`INSERT INTO factory.candidate_review(
+            id,verification_id,ordinal,change_id,commit_sha,base_sha,created_by,supersedes_id)
+            SELECT ${retryID},verification_id,ordinal+1,change_id,commit_sha,base_sha,created_by,id
+            FROM factory.candidate_review WHERE id=${f.reviewID}`;
+        }
+        before = await retained(sql);
+      };
+      const concurrent = continuation.startsWith("concurrent");
+      const locked = Promise.withResolvers<number>();
+      if (concurrent) {
+        admission = f.database.client.begin(async (sql) => {
+          await admit(sql);
+          const [owner] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+          locked.resolve(fixtureValue(owner, "admission backend").pid);
+          await release.promise;
+        });
+        void admission.catch(locked.reject);
+      } else if (continuation !== "terminal") {
+        await f.database.client.begin(admit);
+      }
+      worker = createMonitoringWorker(f.database, {
+        mcp: {} as Parameters<typeof createMonitoringWorker>[1]["mcp"],
+        code: { codePaths: forbidden, code: forbidden },
+        changes: { start: forbidden },
+        agent: { admitStartIn: forbidden },
+        // A continuation admitted after get must survive a stale snapshot.
+        delivery: { get: async () => snapshot, approve: forbidden },
+        signingKey: "owned-terminal-review",
+        diagnose: forbidden,
+        prepare: forbidden,
+      });
+      if (concurrent) {
+        const owner = await locked.promise;
+        work = worker.project(f.projectID);
+        // Observe a real PostgreSQL lock wait, not just concurrent promises.
+        await eventually(
+          async () => {
+            const [row] = await f.database.client<{ waiting: number }[]>`
+              SELECT count(*)::int AS waiting FROM pg_stat_activity
+              WHERE datname=current_database() AND wait_event_type='Lock'
+                AND ${owner}::int=ANY(pg_blocking_pids(pid))`;
+            return row?.waiting ?? 0;
+          },
+          (waiting) => waiting === 1,
+          "Monitoring did not wait for the newer continuation's writer transaction",
+          5_000,
+        );
+        release.resolve();
+        await Promise.all([admission, work]);
+      } else {
+        await worker.project(f.projectID);
+      }
+      await worker.project(f.projectID);
+      const [incident] = await f.database.client<
+        { state: string; reason: string | null; settled: boolean }[]
+      >`SELECT state,reason,settled_at IS NOT NULL AS settled FROM factory.monitoring_incident WHERE id=${incidentID}`;
+      expect(incident?.state).toBe(continuation === "terminal" ? "blocked" : "implementing");
+      expect(incident?.settled).toBe(continuation === "terminal");
+      if (continuation === "terminal") expect(incident?.reason).toContain("human decision");
+      expect(await retained()).toEqual(before);
+      expect((await delivery.get(f.changeID))?.["approvedAt"]).toBeNull();
+      if (continuation !== "terminal") {
+        if (continuation.endsWith("review"))
+          continuationTurnID = (
+            await createReviewAdmission(f.database)(f.changeID, retryID, f.userID)
+          ).turn.id;
+        const id = fixtureValue(continuationTurnID, "new continuation turn");
+        const claimed = await f.turns.claimPending(id);
+        const token = fixtureValue(claimed?.ownerToken, "new continuation lease");
+        try {
+          expect(await f.turns.validateExecution(id, token)).toBe(true);
+        } finally {
+          await f.turns.releasePending(id, token);
+        }
+      }
+    } finally {
+      release.resolve();
+      await Promise.allSettled([admission, work]);
+      await worker?.close();
+      await f.dispose();
+    }
+  },
+  60_000,
+);
 
 test("Input policies freeze explicit shared sources and inherited defaults, excluding personal sources", async () => {
   const f = await monitoringFixture();

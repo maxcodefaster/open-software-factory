@@ -16,6 +16,8 @@ import type { LearningEdit } from "../../packages/conversation-domain/src/learni
 import type { ReplayInput } from "../../apps/factory/src/learning/replay";
 import type { WorkReviewInput } from "../../apps/factory/src/learning/judge";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
+import { priorProposalEvidence } from "../../apps/factory/src/learning/prior-proposals";
+import { learningEditDigest } from "../../apps/factory/src/learning/targets";
 import { fixtureValue } from "../fixtures/value";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -32,6 +34,11 @@ async function setup(
     sharedTarget?: boolean;
     roles?: ("planning" | "build")[];
     incomplete?: boolean;
+    deduplicated?: boolean;
+    renewGrant?: boolean;
+    laterEvidence?(example: ReturnType<typeof comparisonExample>): void;
+    controlVerified?: boolean;
+    uncalibrated?: boolean;
   } = {},
 ) {
   const owned = await fixture(undefined, undefined, database);
@@ -117,20 +124,93 @@ async function setup(
         VALUES(${proposalId},${id},0,${JSON.stringify(next.content)}::jsonb)`;
     return id;
   }
-  await saveReview(
-    {
+  let originalReviewId: string;
+  let originalContent = example.content;
+  if (options.deduplicated) {
+    const first = comparisonExample(
+      owned.projectID,
+      edit,
+      options.private ? owned.userID : null,
+      [17, 23, 29],
+    );
+    originalContent = {
+      ...first.content,
+      caseIds: [fixtureValue(first.cases[0], "original case").id],
+      evidenceIds: ["config:0", "artifact:0", "outcome:0"],
+    };
+    originalReviewId = await saveReview(
+      {
+        cases: first.cases.slice(0, 1),
+        content: originalContent,
+        result: {
+          cases: first.result.cases.slice(0, 1),
+          findings: first.result.findings.slice(0, 1),
+          proposals: [originalContent],
+        },
+      },
+      true,
+    );
+    if (options.renewGrant)
+      await service.set(owned.userID, {
+        commandId: crypto.randomUUID(),
+        projectId: owned.projectID,
+        scope: options.private ? "personal" : "project",
+        expectedVersion: 1,
+        enabled: true,
+        automaticSkills: true,
+      });
+    fixtureValue(example.cases[0], "later case").evidence.push(
+      priorProposalEvidence(
+        [
+          {
+            id: proposalId,
+            state: "proposed",
+            applicationState: null,
+            content: originalContent,
+          },
+        ],
+        "owned-judge",
+      ),
+    );
+    const later = {
       ...example,
       cases: example.cases.slice(0, 2),
-      result: { ...example.result, cases: example.result.cases.slice(0, 2) },
-    },
-    true,
-  );
+      result: {
+        cases: example.result.cases.slice(0, 2),
+        findings: example.result.findings.map((finding) => ({
+          ...finding,
+          relatedProposalId: proposalId,
+        })),
+        proposals: [],
+      },
+    };
+    options.laterEvidence?.(later);
+    await saveReview(later);
+  } else {
+    originalReviewId = await saveReview(
+      {
+        ...example,
+        cases: example.cases.slice(0, 2),
+        result: { ...example.result, cases: example.result.cases.slice(0, 2) },
+      },
+      true,
+    );
+  }
   await saveReview({
     ...example,
     cases: example.cases.slice(2),
-    result: { cases: example.result.cases.slice(2), findings: [], proposals: [] },
+    result: {
+      cases: example.result.cases.slice(2).map((verdict) => ({
+        ...verdict,
+        verification:
+          options.controlVerified === false ? ("unknown" as const) : verdict.verification,
+      })),
+      findings: [],
+      proposals: [],
+    },
   });
-  await database.client`INSERT INTO factory.learning_review(id,project_id,owner_id,developer_only,reviewer_id,kind,rubric,model_id,judge_key,
+  if (!options.uncalibrated)
+    await database.client`INSERT INTO factory.learning_review(id,project_id,owner_id,developer_only,reviewer_id,kind,rubric,model_id,judge_key,
     state,input,input_digest,result,calibrated,owner_token,owner_expires_at,completed_at)
     VALUES(${crypto.randomUUID()},${owned.projectID},NULL,false,${owned.userID},'calibration','work-review/v1','owned','owned-judge','completed',
       ${JSON.stringify(calibrationCases)}::jsonb,${hash(calibrationCases)},${JSON.stringify(calibratedResult())}::jsonb,true,${crypto.randomUUID()},now(),now())`;
@@ -214,6 +294,8 @@ async function setup(
     edit,
     example,
     proposalId,
+    originalContent,
+    originalReviewId,
     saveReview,
     dependencies,
     calls: () => calls,
@@ -236,6 +318,145 @@ async function setup(
     },
   };
 }
+
+test.each([false, true])(
+  "deduplicated later method evidence qualifies the immutable one-case proposal, renewed grant %s",
+  async (renewGrant) => {
+    const host = await factoryProcess(),
+      database = host.connect();
+    let worker: ReturnType<typeof createLearningAutomation> | undefined;
+    try {
+      const value = await setup(database, { private: true, deduplicated: true, renewGrant });
+      worker = createLearningAutomation(database, value.dependencies);
+      expect(await worker.sweep()).toBe(true);
+      expect(value.calls()).toBe(3);
+      const [trial] = await database.client<
+        {
+          proposal_id: string;
+          input: {
+            problemIds: string[];
+            controlId: string;
+            cases: { id: string }[];
+          };
+        }[]
+      >`SELECT proposal_id,input FROM factory.learning_trial`;
+      expect(trial?.proposal_id).toBe(value.proposalId);
+      expect(trial?.input.problemIds).toEqual(value.example.cases.slice(0, 2).map((c) => c.id));
+      expect(trial?.input.controlId).toBe(value.example.cases[2]?.id);
+      const [proposal] = await database.client<{ review_id: string; content: unknown }[]>`
+      SELECT review_id,content FROM factory.learning_proposal WHERE id=${value.proposalId}`;
+      expect(proposal?.review_id).toBe(value.originalReviewId);
+      expect(proposal?.content).toEqual(value.originalContent);
+      expect(value.originalContent.caseIds).toHaveLength(1);
+      expect(await database.client`SELECT id FROM factory.learning_proposal`).toHaveLength(1);
+      expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(1);
+      const [linked] = await database.client<{ result: unknown }[]>`
+      SELECT result FROM factory.learning_review WHERE id=(
+        SELECT batch_id FROM factory.learning_case WHERE id=${value.example.cases[0]?.id ?? ""})`;
+      expect(linked?.result).toMatchObject({
+        proposals: [],
+        findings: [
+          { relatedProposalId: value.proposalId },
+          { relatedProposalId: value.proposalId },
+        ],
+      });
+      expect(await worker.sweep()).toBe(false);
+      expect(value.calls()).toBe(3);
+    } finally {
+      worker?.close();
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  60_000,
+);
+
+test.each([
+  "historical-unlinked",
+  "one-problem",
+  "different-edit",
+  "wrong-passage",
+  "truncated-history",
+  "cross-scope",
+  "old-links-before-grant",
+  "no-supported-control",
+  "uncalibrated",
+  "dismissed",
+  "commissioned",
+  "applied",
+  "reverted",
+] as const)(
+  "deduplicated evidence fences %s before any comparison call",
+  async (fence) => {
+    const host = await factoryProcess(),
+      database = host.connect();
+    let worker: ReturnType<typeof createLearningAutomation> | undefined;
+    try {
+      const value = await setup(database, {
+        private: true,
+        deduplicated: true,
+        renewGrant: true,
+        controlVerified: fence !== "no-supported-control",
+        uncalibrated: fence === "uncalibrated",
+        laterEvidence(next) {
+          if (fence === "historical-unlinked")
+            for (const finding of next.result.findings) delete finding.relatedProposalId;
+          if (fence === "one-problem") {
+            const second = fixtureValue(next.result.cases[1], "second verdict");
+            second.fulfillment = "supported";
+            // Neither a third case nor duplicated references can stand in for two problems.
+            const first = fixtureValue(next.result.findings[0], "first finding");
+            delete first.relatedProposalId;
+          }
+          if (fence === "different-edit" || fence === "wrong-passage") {
+            const history = fixtureValue(next.cases[0]?.evidence.at(-1), "prior context");
+            const entries = JSON.parse(history.body);
+            if (fence === "different-edit")
+              entries[0].edit.after = "A different proposed replacement.";
+            else entries[0].edit.before = "An unseen wrong passage.";
+            history.body = JSON.stringify(entries);
+          }
+          if (fence === "truncated-history")
+            fixtureValue(next.cases[0]?.evidence.at(-1), "prior context").truncated = true;
+          if (fence === "cross-scope") fixtureValue(next.cases[0], "first case").ownerId = null;
+        },
+      });
+      if (fence === "old-links-before-grant")
+        await value.service.set(value.userID, {
+          commandId: crypto.randomUUID(),
+          projectId: value.projectID,
+          scope: "personal",
+          expectedVersion: 2,
+          enabled: true,
+          automaticSkills: true,
+        });
+      if (fence === "dismissed" || fence === "commissioned")
+        await value.service.decide(value.userID, {
+          commandId: crypto.randomUUID(),
+          proposalId: value.proposalId,
+          decision: fence === "dismissed" ? "dismiss" : "create-ticket",
+          releasePrivate: fence === "commissioned",
+          editDigest: learningEditDigest(value.edit),
+        });
+      if (fence === "applied" || fence === "reverted")
+        await database.client`INSERT INTO factory.learning_application(id,proposal_id,target,edit_digest,activation,
+        applied_revision_id,applied_version,applied_by,state,reverted_at,reverted_by,reverted_revision_id,reverted_version)
+        VALUES(${crypto.randomUUID()},${value.proposalId},${JSON.stringify(value.edit.target)}::jsonb,
+          ${learningEditDigest(value.edit)},'[]'::jsonb,${value.revisionId},1,${value.userID},${fence},
+          ${fence === "reverted" ? new Date().toISOString() : null},${fence === "reverted" ? value.userID : null},
+          ${fence === "reverted" ? value.revisionId : null},${fence === "reverted" ? 2 : null})`;
+      worker = createLearningAutomation(database, value.dependencies);
+      expect(await worker.sweep()).toBe(false);
+      expect(value.calls()).toBe(0);
+      expect(await database.client`SELECT id FROM factory.learning_trial`).toHaveLength(0);
+    } finally {
+      worker?.close();
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  60_000,
+);
 
 test("saved scoped permission adopts a demonstrated text fix, records real subsequent use and performs compared protected recovery", async () => {
   const host = await factoryProcess(),

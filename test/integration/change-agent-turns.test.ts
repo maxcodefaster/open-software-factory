@@ -151,8 +151,13 @@ test("a reserved native Session is not presented as resumable before acknowledge
       nativeSession = await input.json();
       return Response.json({ data: nativeSession });
     }
-    if (nativeSession && pathname === `/api/session/${nativeSession.id}`)
+    if (nativeSession && pathname === `/api/session/${nativeSession.id}`) {
+      if (input.method === "PATCH") {
+        Object.assign(nativeSession, await input.json());
+        return new Response(null, { status: 204 });
+      }
       return Response.json({ data: nativeSession });
+    }
     if (nativeSession && pathname.endsWith("/log"))
       return new Response(
         `data: ${JSON.stringify({ type: "log.synced", aggregateID: nativeSession.id, seq: 1 })}\n\n`,
@@ -1204,7 +1209,7 @@ test("a new goal submits ordinary native output for Verification without treatin
     await until(async () => (await owned.controller().get(owned.changeID)).state === "committed");
     expect(await owned.turn(commandID)).toMatchObject({
       state: "completed",
-      summary: expect.stringContaining("not approved for Delivery"),
+      summary: expect.stringContaining("Delivery still requires approval"),
     });
     expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
     expect(

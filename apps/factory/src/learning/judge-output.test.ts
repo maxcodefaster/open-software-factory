@@ -77,6 +77,7 @@ test("prior proposal context preserves complete edit identity and passages acros
   });
   const original = structuredClone(previous);
   const evidence = learningEvidence.parse(priorProposalEvidence(previous, "owned-judge"));
+  expect(evidence.truncated).toBe(false);
   expect(previous).toEqual(original);
   const history = JSON.parse(evidence.body);
   expect(history).toEqual(
@@ -130,7 +131,9 @@ test("bounded prior proposal context retains all twelve targets and cause finger
 type Verdict = Omit<LearningResult["cases"][number], "caseId">;
 type Output = {
   cases: Record<string, Verdict>;
-  findings: LearningResult["findings"];
+  findings: (Omit<LearningResult["findings"][number], "relatedProposalId"> & {
+    relatedProposalId: string | null;
+  })[];
   proposals: LearningResult["proposals"];
 };
 const unknownVerdict: Verdict = {
@@ -160,6 +163,7 @@ function observedOutput(): Output {
     {
       caseIds: ["c0"],
       evidenceIds: ["e0"],
+      relatedProposalId: null,
       dimension: "method",
       cause: "The answer used an unobserved value.",
       observation: "The retained artifact establishes a different value.",
@@ -241,6 +245,24 @@ test("maps normal verdict, finding and proposal references back to exact admitte
     expect(item.caseIds).toEqual(["case:alpha"]);
     expect(item.evidenceIds).toEqual(["outer:alpha"]);
   }
+  expect(result.findings[0]?.relatedProposalId).toBeUndefined();
+});
+
+test("the strict wire contract requires a nullable proposal link and preserves exact non-null IDs", () => {
+  const contract = createWorkReviewOutput(cases);
+  const output = observedOutput();
+  const id = crypto.randomUUID();
+  fixtureValue(output.findings[0], "finding").relatedProposalId = id;
+  expect(contract.parse(output).findings[0]?.relatedProposalId).toBe(id);
+  const missing = { ...fixtureValue(output.findings[0], "finding") };
+  Reflect.deleteProperty(missing, "relatedProposalId");
+  expect(contract.schema.safeParse({ ...output, findings: [missing] }).success).toBe(false);
+  expect(
+    contract.schema.safeParse({
+      ...output,
+      findings: [{ ...missing, relatedProposalId: "invented" }],
+    }).success,
+  ).toBe(false);
 });
 
 for (const kind of ["findings", "proposals"] as const) {
@@ -530,6 +552,7 @@ try {
         caseIds: ["c0"],
         evidenceIds: [packet[0].evidence.at(-1).id, packet[3].evidence.at(-1).id],
         dimension: "method", cause: "The replay arms differ.", observation: "Both responses were observed.",
+        relatedProposalId: null,
       }],
       proposals: [],
     };

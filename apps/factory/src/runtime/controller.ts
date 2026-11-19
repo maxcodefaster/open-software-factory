@@ -2,6 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import type { SubstrateCall } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import {
   parseSystemContract,
@@ -524,18 +525,95 @@ export function createRuntimeController(
             ],
       };
     },
-    async processAction(attemptID: string, process: string, action: "start" | "stop" | "restart") {
-      const [attempt] = await database.client<{ ready: boolean; development: boolean }[]>`
-        SELECT state='ready' AS ready,workspace_id IS NOT NULL AS development FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    async processAction(
+      attemptID: string,
+      process: string,
+      action: "start" | "stop" | "restart",
+      options?: {
+        beforeSend?: (send: () => void) => Promise<void>;
+        waitForReady?: boolean;
+        signal?: AbortSignal;
+      },
+    ) {
+      const [attempt] = await database.client<
+        { ready: boolean; development: boolean; contract: unknown }[]
+      >`
+        SELECT attempt.state='ready' AND attempt.stop_intended_at IS NULL AS ready,
+          attempt.workspace_id IS NOT NULL AS development,
+          provision.intent->'systemContract' AS contract
+        FROM factory.runtime_attempt attempt
+        LEFT JOIN factory.substrate_workspace provision ON provision.workspace_id=attempt.workspace_id
+          AND provision.generation=attempt.generation
+        WHERE attempt.id=${attemptID}`;
       if (!attempt?.ready || !attempt.development)
         throw new Error("Development Workspace is not ready");
       if (!hub.hasAppChannel(attemptID, process))
         throw new Error("Declared App process does not exist");
-      await hub.childOperation(attemptID, {
-        operationId: crypto.randomUUID(),
-        action: `process-${action}`,
-        process,
-      });
+      const app =
+        options?.waitForReady && action !== "stop"
+          ? (() => {
+              const contract = parseSystemContract(JSON.stringify(attempt.contract));
+              const app = contract.apps.find(
+                (app) => (app.id === contract.primaryApp ? "app" : `app-${app.id}`) === process,
+              );
+              if (!app) throw new Error("Declared App readiness is unavailable");
+              return app;
+            })()
+          : undefined;
+      options?.signal?.throwIfAborted();
+      await hub.childRequest(
+        attemptID,
+        { operationId: crypto.randomUUID(), action: `process-${action}`, process },
+        options
+          ? async (send) => {
+              const forward = () => {
+                options.signal?.throwIfAborted();
+                send();
+              };
+              if (options.beforeSend) await options.beforeSend(forward);
+              else forward();
+            }
+          : undefined,
+      );
+      if (app) {
+        // Use the original admitted channel and Connector readiness semantics:
+        // declared health path, elapsed lifecycle window and read-only retries.
+        // A running process or an old app_ready_at projection is not HTTP health.
+        const deadline = performance.now() + nativeLifecycleWindowMS;
+        for (;;) {
+          options?.signal?.throwIfAborted();
+          if (!hub.hasAppChannel(attemptID, process) || !hub.connected(attemptID))
+            throw new CommandError("unavailable", "App readiness lost its Runtime Attempt");
+          if (
+            hub
+              .processes(attemptID)
+              .some((item) => item.name === process && ["failed", "stopped"].includes(item.state))
+          )
+            throw new CommandError("unavailable", "Declared App stopped before readiness");
+          const remaining = deadline - performance.now();
+          if (remaining <= 0)
+            throw new CommandError("unavailable", "Declared App did not become ready");
+          const timeout = AbortSignal.timeout(Math.min(2_000, Math.ceil(remaining)));
+          const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+          try {
+            const response = await hub.request(
+              attemptID,
+              process,
+              new Request(`http://factory-runtime.internal${app.healthPath}`, { signal }),
+              app.healthPath,
+              options?.beforeSend,
+            );
+            await response.body?.cancel();
+            if (response.status >= 200 && response.status < 400) break;
+          } catch (cause) {
+            options?.signal?.throwIfAborted();
+            if (cause instanceof CommandError) throw cause;
+            // Only health reads repeat. An unknown process-operation result
+            // exits above, without dispatching another restart.
+          }
+          await Bun.sleep(Math.min(250, Math.max(0, deadline - performance.now())));
+        }
+      }
       return this.processOutput(attemptID);
     },
     async closeTerminal(attemptID: string, terminalID: string) {

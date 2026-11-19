@@ -30,6 +30,7 @@ import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { reviewWork, workReviewInstructions } from "./judge";
+import { relatedProposalEdit } from "./prior-proposals";
 import { learningRejectionReason } from "./rejection-reason";
 import { replayInstructions, replayPlanning } from "./replay";
 import { createLearningTargets, learningActivation, learningEditDigest } from "./targets";
@@ -53,6 +54,7 @@ type Candidate = Scope & {
   appliedRevisionId: string | null;
   appliedVersion: number | null;
   activation: unknown;
+  proposalAfterGrant: boolean;
 };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -160,26 +162,50 @@ export function createLearningAutomation(
       if (busy) return null;
       const baselineTarget = currentTarget(row, edit);
       const revisionId = baselineTarget.revisionId;
-      const reviews = await sql<{ input: unknown; result: unknown; laterThanProposal: boolean }[]>`
+      const reviews = await sql<
+        {
+          input: unknown;
+          result: unknown;
+          laterThanProposal: boolean;
+          afterGrant: boolean;
+        }[]
+      >`
         SELECT review.input,review.result,
-          (review.created_at>(SELECT created_at FROM factory.learning_review WHERE id=${row.reviewId})) AS "laterThanProposal"
+          (review.created_at>(SELECT created_at FROM factory.learning_review WHERE id=${row.reviewId})) AS "laterThanProposal",
+          (review.created_at>=(SELECT updated_at FROM factory.learning_policy
+            WHERE project_id=${row.projectId} AND owner_id IS NOT DISTINCT FROM ${row.ownerId}::uuid)) AS "afterGrant"
         FROM factory.learning_review review
         WHERE review.project_id=${row.projectId} AND review.owner_id IS NOT DISTINCT FROM ${row.ownerId}::uuid
           AND review.developer_only=${row.developerOnly} AND review.kind='work' AND review.state='completed'
           AND NOT(review.input @> '[{"activity":"setup"}]'::jsonb)
         ORDER BY review.created_at DESC LIMIT 12`;
       const pool: { source: LearningCase; problem: boolean; healthy: boolean }[] = [];
+      let freshLinkedProblem = false;
       for (const review of reviews) {
         const result = learningResult.parse(review.result);
-        for (const source of z.array(learningCase).parse(review.input)) {
+        const cases = z.array(learningCase).parse(review.input);
+        const linkedFindings = result.findings.filter((finding) => {
+          if (finding.relatedProposalId !== row.proposalId) return false;
+          try {
+            return digest(relatedProposalEdit(finding, cases)) === digest(edit);
+          } catch (cause) {
+            if (!(cause instanceof LearningResultRejected)) throw cause;
+            return false;
+          }
+        });
+        for (const source of cases) {
           if (pool.some((item) => item.source.id === source.id)) continue;
           if (
+            source.projectId !== row.projectId ||
+            source.ownerId !== row.ownerId ||
+            source.developerOnly !== row.developerOnly ||
             !replayableCase(source) ||
             !source.targets.some(
               (item) =>
                 item.target.kind === "skill" &&
                 item.target.id === edit.target.id &&
                 item.target.revisionId === revisionId &&
+                item.target.version === baselineTarget.version &&
                 item.target.field === "instructions" &&
                 !item.truncated &&
                 item.text === loaded.text,
@@ -197,12 +223,16 @@ export function createLearningAutomation(
                   finding.evidenceIds.includes(target.evidenceId),
               ),
           );
+          const linked = linkedFindings.some((finding) => finding.caseIds.includes(source.id));
+          const problem =
+            verdict?.fulfillment === "problem" &&
+            methodFinding &&
+            (row.phase === "recover" || proposal.caseIds.includes(source.id) || linked);
+          if (problem && linked && review.afterGrant && review.laterThanProposal)
+            freshLinkedProblem = true;
           pool.push({
             source,
-            problem:
-              verdict?.fulfillment === "problem" &&
-              methodFinding &&
-              (row.phase === "recover" || proposal.caseIds.includes(source.id)),
+            problem,
             healthy:
               review.laterThanProposal &&
               verdict?.fulfillment === "supported" &&
@@ -211,6 +241,10 @@ export function createLearningAutomation(
           });
         }
       }
+      // Renewed permission cannot activate an old proposal on old evidence alone.
+      // A new, explicitly associated problem supplies current intent without
+      // rewriting the proposal's original cases or repeating any paid review.
+      if (row.phase === "adopt" && !row.proposalAfterGrant && !freshLinkedProblem) return null;
       const problems = pool.filter((item) => item.problem).slice(0, 2);
       const control = pool.find((item) => item.healthy && !problems.includes(item));
       if (problems.length !== 2 || !control) return null;
@@ -431,14 +465,15 @@ export function createLearningAutomation(
           review.developer_only AS "developerOnly",policy.version AS "policyVersion",policy.updated_by AS "actorId",
           CASE WHEN application.id IS NULL THEN 'adopt' ELSE 'recover' END AS phase,
           application.id AS "applicationId",application.applied_revision_id AS "appliedRevisionId",
-          application.applied_version AS "appliedVersion",application.activation
+          application.applied_version AS "appliedVersion",application.activation,
+          (review.created_at>=policy.updated_at) AS "proposalAfterGrant"
         FROM factory.learning_proposal proposal JOIN factory.learning_review review ON review.id=proposal.review_id
         JOIN factory.learning_policy policy ON policy.project_id=review.project_id AND policy.owner_id IS NOT DISTINCT FROM review.owner_id
         LEFT JOIN factory.learning_application application ON application.proposal_id=proposal.id
         WHERE policy.enabled AND policy.automatic_skills AND review.kind='work' AND review.state='completed'
           AND NOT(review.input @> '[{"activity":"setup"}]'::jsonb)
           AND proposal.content->'edit'->'target'->>'kind'='skill' AND proposal.content->'edit'->'target'->>'field'='instructions'
-          AND ((proposal.state='proposed' AND review.created_at>=policy.updated_at) OR
+          AND ((proposal.state='proposed' AND application.id IS NULL) OR
             (application.state='applied' AND application.comparison_id IS NOT NULL))
           AND NOT EXISTS(SELECT 1 FROM factory.learning_trial trial WHERE trial.proposal_id=proposal.id
             AND trial.phase=CASE WHEN application.id IS NULL THEN 'adopt' ELSE 'recover' END)

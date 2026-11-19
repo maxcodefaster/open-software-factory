@@ -747,7 +747,7 @@ const reviewNow = (projectId: string, cases: number, developerOnly = false) => (
   cases,
 });
 
-test.each(["allowlisted", "unknown"] as const)(
+test.each(["allowlisted", "unknown", "proposal-link"] as const)(
   "a %s semantic rejection persists a safe reason without proposals, trials or paid retry",
   async (kind) => {
     const generic =
@@ -795,6 +795,30 @@ test.each(["allowlisted", "unknown"] as const)(
           throw new LearningResultRejected("PRIVATE-MODEL-PROSE", {
             cause: new Error("PRIVATE-CAUSE"),
           });
+        if (kind === "proposal-link") {
+          const source = fixtureValue(cases[0], "source");
+          return {
+            cases: cases.map((item) => ({
+              caseId: item.id,
+              fulfillment: "unknown",
+              rework: "unknown",
+              verification: "unknown",
+              explanation: "Observed work.",
+              evidenceIds: [],
+            })),
+            findings: [
+              {
+                caseIds: [source.id],
+                evidenceIds: ["healthy:source"],
+                dimension: "method",
+                cause: "Untrusted association.",
+                observation: "Observed work.",
+                relatedProposalId: crypto.randomUUID(),
+              },
+            ],
+            proposals: [],
+          };
+        }
         return {
           cases: cases.map((source) => ({
             caseId: source.id,
@@ -812,6 +836,24 @@ test.each(["allowlisted", "unknown"] as const)(
   },
   60_000,
 );
+
+test("a new Review now command cannot re-review retained completed cases", async () => {
+  await reviewNowFixture(async ({ database, owned, service, worker, calls, fresh }) => {
+    await fresh("reviewed:original");
+    await service.reviewNow(owned.userID, reviewNow(owned.projectID, 1));
+    for (let sweep = 0; sweep < 4; sweep++) await worker.sweep();
+    const original =
+      await database.client`SELECT id,input,result FROM factory.learning_review WHERE kind='work'`;
+    expect(original).toHaveLength(1);
+    await expect(service.reviewNow(owned.userID, reviewNow(owned.projectID, 1))).rejects.toThrow(
+      "No selected case is waiting for a review.",
+    );
+    expect(calls).toEqual(["calibration", "work"]);
+    expect(
+      await database.client`SELECT id,input,result FROM factory.learning_review WHERE kind='work'`,
+    ).toEqual(original);
+  });
+}, 60_000);
 
 test("Review now starts the calibrated batch for fresh cases once, idempotently, within the confirmed size", async () => {
   await reviewNowFixture(async ({ database, owned, service, calls, batches, worker, fresh }) => {

@@ -76,6 +76,7 @@ export type LearningCase = z.infer<typeof learningCase>;
 export const learningFinding = z.object({
   caseIds: z.array(text(400)).min(1).max(8),
   evidenceIds: z.array(text(400)).min(1).max(16),
+  relatedProposalId: z.uuid().optional(),
   dimension: z.enum(["fulfillment", "rework", "verification", "method"]),
   cause: text(1_200),
   observation: text(2_000),

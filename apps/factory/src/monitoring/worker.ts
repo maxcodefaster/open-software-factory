@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createRequirementRevision } from "../../../../packages/requirement-domain/src/requirement";
+import { lockChangeWriterIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
 import type { createChangeController } from "../change/controller";
@@ -359,6 +360,40 @@ export function createMonitoringWorker(
       return;
     }
     if (change.state === "branch-pending" || change.state === "starting") return;
+    const reviewId = delivery?.["reviewId"];
+    if (
+      typeof reviewId === "string" &&
+      delivery?.["reviewState"] === "incomplete" &&
+      delivery["reviewCurrent"] === true
+    ) {
+      // Share admission's writer lock before rechecking the exact completed
+      // review. A newer candidate or continuation keeps its own authority.
+      await database.client.begin(async (sql) => {
+        const writer = await lockChangeWriterIn(sql, change.id);
+        if (!writer.available || writer.state === "human" || writer.state === "handoff") return;
+        await sql`UPDATE factory.monitoring_incident SET state='blocked',
+        reason=${"Independent review is incomplete. The retained Change requires a human decision before retrying review or continuing Build."},
+        owner_token=NULL,owner_expires_at=NULL,settled_at=now()
+        WHERE id=${incident.id} AND state='implementing'
+          AND EXISTS(SELECT 1 FROM factory.candidate_review review
+            JOIN factory.agent_turn turn ON turn.id=review.turn_id
+            WHERE review.id=${reviewId} AND review.change_id=${change.id}
+              AND review.state='incomplete' AND turn.state='completed'
+              AND review.turn_id=(SELECT id FROM factory.agent_turn
+                WHERE change_id=review.change_id ORDER BY created_at DESC,id DESC LIMIT 1)
+              AND review.id=(SELECT id FROM factory.candidate_review
+                WHERE verification_id=review.verification_id ORDER BY ordinal DESC LIMIT 1)
+              AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
+                WHERE change_id=review.change_id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
+              AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=review.change_id
+                AND state IN ('pending','dispatching','running','uncertain'))
+              AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=review.change_id
+                AND state NOT IN ('succeeded','failed'))
+              AND NOT EXISTS(SELECT 1 FROM factory.merge_operation WHERE change_id=review.change_id
+                AND observed_default_sha IS NOT NULL))`;
+      });
+      return;
+    }
     if (
       delivery?.["verificationState"] === "succeeded" &&
       delivery["reviewState"] === "passed" &&

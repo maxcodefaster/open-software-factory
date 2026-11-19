@@ -64,7 +64,11 @@ export function createWorkReviewOutput(cases: LearningCase[]) {
         ]),
       ),
     ),
-    findings: z.array(learningFinding.extend(references).strict()).max(evidenceIds.size ? 12 : 0),
+    findings: z
+      .array(
+        learningFinding.extend({ ...references, relatedProposalId: z.uuid().nullable() }).strict(),
+      )
+      .max(evidenceIds.size ? 12 : 0),
     proposals: z
       .array(learningProposal.extend({ ...references, edit: learningEdit.nullable() }).strict())
       .max(evidenceIds.size ? 4 : 0),
@@ -83,6 +87,7 @@ export function createWorkReviewOutput(cases: LearningCase[]) {
         }),
         findings: output.findings.map((item) => ({
           ...item,
+          relatedProposalId: item.relatedProposalId ?? undefined,
           caseIds: originalIds(item.caseIds, caseIds),
           evidenceIds: originalIds(item.evidenceIds, evidenceIds),
         })),
