@@ -162,8 +162,10 @@ closed before provisioning. Registry credentials grant image pulls by default, n
 A Project manager must explicitly enable **Allow publishing prepared images for this Project**
 and save that Environment revision before a new producer can publish. Use a push-capable token
 limited to the Project's prepared-image repository. Verification access remains a separate choice.
-Without that grant, Factory records the preparation as skipped and keeps normal Dev Container
-startup available; it creates no native producer resources.
+Without an admitted registry or that grant, Factory records an unstarted preparation as skipped
+and keeps normal Dev Container startup available; it creates no native producer resources.
+Project setup reports normal startup instead of waiting for a prepared image. Existing provisioning
+intents and producers keep their original identities and still require normal observation and cleanup.
 The publication decision stays in Factory; the Connector receives only its selected registry
 credentials, not that control-plane permission. Lost replies observe the same
 names, and a published result releases the producer only after exact-UID Delete

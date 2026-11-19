@@ -167,11 +167,20 @@ export function createSubstratePrebuild(
           registry.endsWith(".localhost") ||
           (endpoint.port && endpoint.port !== "443") ||
           (registry !== endpoint.hostname && !selected.egressHosts.includes(registry))
-        )
+        ) {
+          await sql`UPDATE factory.project_image_preparation preparation
+            SET state='unsupported',
+              failure='Prepared image publication is not configured for this installation. Normal Dev Container startup remains available.',
+              updated_at=now()
+            WHERE preparation.id=${preparationID} AND preparation.project_id=${config.projectID}
+              AND preparation.state='pending' AND preparation.runtime_attempt_id IS NULL
+              AND NOT EXISTS(SELECT 1 FROM factory.substrate_prebuild provision
+                WHERE provision.preparation_id=preparation.id)`;
           throw new CommandError(
             "unavailable",
             "Native prebuild requires an explicitly admitted TLS registry on port 443. No legacy runtime was created.",
           );
+        }
         const scope = await sql.begin((tx) =>
           substratePrebuildAuthorityIn(tx, config.projectID, preparationID, attemptID),
         );

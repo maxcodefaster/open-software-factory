@@ -208,9 +208,22 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
     const workspaces = await f.database.client`SELECT * FROM factory.development_workspace`;
     const withoutRegistry = { ...configuration };
     delete withoutRegistry.prebuildRegistry;
-    await expect(controller(withoutRegistry).startProjectPrebuild(preparationID)).rejects.toThrow(
+    const unconfiguredID = crypto.randomUUID();
+    await f.database
+      .client`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version)
+      VALUES(${unconfiguredID},${f.projectID},'development',${"a".repeat(40)},0)`;
+    await expect(controller(withoutRegistry).startProjectPrebuild(unconfiguredID)).rejects.toThrow(
       "admitted TLS registry",
     );
+    const [skipped] = await f.database.client`
+      SELECT state,runtime_attempt_id,failure FROM factory.project_image_preparation WHERE id=${unconfiguredID}`;
+    expect(skipped).toEqual({
+      state: "unsupported",
+      runtime_attempt_id: null,
+      failure:
+        "Prepared image publication is not configured for this installation. Normal Dev Container startup remains available.",
+    });
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
     expect(creates.size).toBe(0);
     await expect(runtime.startProjectPrebuild(preparationID)).rejects.toThrow(
       "owned native capacity occupied",

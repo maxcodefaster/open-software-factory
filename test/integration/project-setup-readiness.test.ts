@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createEnvironmentController } from "../../apps/factory/src/environments/controller";
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createSetupReadiness } from "../../apps/factory/src/setup/readiness";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("setup coordination leaves a one-connection pool available and joins admitted work before shutdown", async () => {
@@ -183,6 +183,19 @@ test("setup readiness separates protected environments, observes exact work and 
     expect(rows.find((row) => row.task === "development")?.state).toBe("running");
     expect(rows.find((row) => row.task === "main-preview")?.state).toBe("failed");
     expect(JSON.stringify(rows)).not.toContain("private diagnostics");
+    const developmentTask = rows.find((row) => row.task === "development");
+    await database.client`UPDATE factory.project_image_preparation SET state='unsupported',
+      failure='Prepared image publication is not configured for this installation. Normal Dev Container startup remains available.'
+      WHERE id=${fixtureValue(developmentTask?.operationID, "development preparation")}`;
+    const normalStartup = await coordinator.status(projectID, manager);
+    expect(normalStartup.find((row) => row.task === "development")).toMatchObject({
+      state: "ready",
+      operationID: developmentTask?.operationID,
+      failure: "This configuration uses normal startup instead of a prebuilt image.",
+    });
+    expect(normalStartup.find((row) => row.task === "preview-image")?.state).toBe("running");
+    expect(hooks).toBe(1);
+    expect(wikis).toBe(1);
     expect(stored.size).toBe(2);
     const [development, preview] = [...stored.values()];
     expect(development?.bundle.variables.map((variable) => variable.name)).toEqual([
