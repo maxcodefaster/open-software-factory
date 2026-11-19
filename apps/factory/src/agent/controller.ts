@@ -42,11 +42,13 @@ import {
   syncOpenCodeInputGuidance,
 } from "./opencode-client";
 import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
+import { checkTerminalOpenCodeInbox } from "./opencode-terminal";
 import { observeOpenCodeUsage } from "./opencode-usage";
 import { createReviewAdmission } from "./review-admission";
 import { waitForBuildSandbox } from "./runtime-readiness";
 import { createSessionArchives } from "./session-archive-store";
 import { createChangeAgentStop, type PendingWriterHandoff, type RetainedStopTarget } from "./stop";
+import { captureTerminalOutcome, validateTerminalMessages } from "./terminal-outcome";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
 import {
@@ -741,6 +743,25 @@ export function createAgentController(
             retained.model.id !== owned.authority.modelId
           )
             throw new Error("Recovered OpenCode session does not match its recorded configuration");
+          if ((await admission.terminalObservation(intent)).terminal) {
+            // A durable terminal observation closes inference, including after
+            // process loss. Do not re-admit/wake its input or recreate grants.
+            let restored = false;
+            const allowed = await turns.validateExecution(turnID, ownerToken, async (sql) => {
+              const rows = await sql<{ id: string }[]>`
+                UPDATE factory.change_agent_session SET state='working',last_error=NULL,updated_at=now()
+                WHERE change_id=${changeID} AND active_turn_id=${turnID}
+                  AND active_inbox_id=${intent.promptID} AND state<>'stopped' AND NOT stop_pending
+                  AND runtime_attempt_id=${intent.attemptID} AND opencode_session_id=${intent.sessionID}
+                  AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=${turnID}
+                    AND state='running' AND owner_token=${ownerToken}
+                    AND owner_expires_at>clock_timestamp()) RETURNING change_id AS id`;
+              restored = rows.length === 1;
+            });
+            if (!allowed || !restored) return;
+            await monitor(changeID, owned.command.createdBy, turnID, ownerToken);
+            return;
+          }
           if (intent.skillLoading === "native") await syncOpenCodeInputGuidance(client, intent);
           if (owned.authority.review)
             await client.session.instructions.entry.put({
@@ -1176,7 +1197,9 @@ export function createAgentController(
       const intent = await admission.intent(turnID);
       const initial = await row(changeID);
       if (!initial?.sessionID) return;
-      const client = opencode(hub, initial.runtimeAttemptID);
+      const client = createOpenCodeClient(
+        createChangeAgentTransport(database, hub, initial.runtimeAttemptID, turnID, ownerToken),
+      );
       detach = nativeEvents.subscribe(initial.runtimeAttemptID, (type) => {
         // Token deltas update the panel, not durable usage/settlement reads.
         if (!type.endsWith(".delta") && type !== "session.tool.progress") wake.notify();
@@ -1226,6 +1249,9 @@ export function createAgentController(
         }
         try {
           if (session.runtimeAttemptID !== initial.runtimeAttemptID) return;
+          // Sample before native work/history. Relay dispatch advances this
+          // epoch under the same Turn lock used to persist the checkpoint.
+          const terminalObservation = await admission.terminalObservation(intent);
           const work = await observeOpenCodeWork(client, session.sessionID);
           const [, messages] = await Promise.all([
             usageJournal.drain(turnID, client, session.sessionID, work.sessionIDs),
@@ -1237,42 +1263,65 @@ export function createAgentController(
             ),
           ]);
           await recordNativeSkillLoads(turnID, ownerToken, session.activeInboxID, messages.data);
-          const outcome = classifyAgentTurn(
-            messages.data.map((message) => ({
-              id: message.id,
-              type: message.type,
-              created: message.time.created,
-              ...(message.type === "assistant"
-                ? {
-                    completed: message.time.completed,
-                    finish: message.finish,
-                    error: message.error,
-                    content: message.content,
-                  }
-                : {}),
-            })),
-            session.activeInboxID,
-            work.sessionsRunning || work.unknownShell,
-            {
-              prompt: intent.text,
-              criteria: intent.criteria,
-              ...(intent.submissionPolicy === "native" ? { policy: "native" as const } : {}),
-            },
-          );
-          if (
-            (outcome.state === "failed" || outcome.state === "succeeded") &&
-            work.shells.length > 0
-          ) {
-            // A native final answer can leave an owned background server alive.
-            // Drain that exact Session tree before settling, without another
-            // prompt. Never clean up live inference or unattributed shells.
-            if (!(await renewExecution(turnID, ownerToken))) continue;
-            if ((await interruptOpenCodeSession(client, session.sessionID)) === "unconfirmed")
-              throw new Error("OpenCode finished but its background shell cleanup is unconfirmed");
-            // Re-observe both execution and exact input after the ordered
-            // cleanup. Writer release and commit still require settled work.
-            continue;
+          const checkpoint = terminalObservation.terminal;
+          if (!checkpoint) {
+            const captured = captureTerminalOutcome(
+              intent,
+              messages.data,
+              work,
+              terminalObservation.epoch,
+            );
+            if (captured) {
+              // Persist before any interrupt/removal. A concurrent inference
+              // admission makes the observation stale and requires a new read.
+              await admission.checkpointTerminal(intent, ownerToken, captured);
+              continue;
+            }
           }
+          let outcome: ReturnType<typeof classifyAgentTurn> = { state: "pending" };
+          if (checkpoint) {
+            outcome = validateTerminalMessages(checkpoint, intent, messages.data);
+            if (
+              work.unknownShell ||
+              work.shells.some(
+                (shell) =>
+                  !checkpoint.shells.some(
+                    (recorded) =>
+                      recorded.id === shell.id && recorded.sessionID === shell.metadata.sessionID,
+                  ),
+              )
+            )
+              throw new Error("Terminal cleanup found an unknown or newly created native shell");
+            await checkTerminalOpenCodeInbox(client, session.sessionID, checkpoint.shells);
+            if (work.running) {
+              // Only the checkpoint phase may interrupt post-terminal native
+              // wakeups: its relay fence prevents further provider admission.
+              if (!(await renewExecution(turnID, ownerToken))) continue;
+              if ((await interruptOpenCodeSession(client, session.sessionID)) === "unconfirmed")
+                throw new Error(
+                  "OpenCode finished but its background shell cleanup is unconfirmed",
+                );
+              await checkTerminalOpenCodeInbox(client, session.sessionID, checkpoint.shells, true);
+              // Confirm through fresh execution/history reads on the next loop.
+              continue;
+            }
+            await checkTerminalOpenCodeInbox(client, session.sessionID, checkpoint.shells, true);
+            if (!(await confirmSettledOpenCodeInput(client, session.sessionID, intent.promptID)))
+              throw new Error("OpenCode terminal input and its execution tree are not settled");
+            // A new input can have been promoted during cleanup. Quiescence
+            // alone does not establish that the exact input still owns history.
+            const settledMessages = await readOpenCodeInputMessages(
+              client,
+              session.sessionID,
+              intent.promptID,
+              AbortSignal.any([observationController.signal, AbortSignal.timeout(5_000)]),
+            );
+            outcome = validateTerminalMessages(checkpoint, intent, settledMessages.data);
+            if (!(await confirmSettledOpenCodeInput(client, session.sessionID, intent.promptID)))
+              throw new Error("OpenCode work changed during the terminal history confirmation");
+            if (closed) return;
+          }
+          if (closed) return;
           // History can observe a terminal outcome after the earlier log watermark.
           // Drain again before settlement so the last paid step cannot be missed.
           if (outcome.state === "failed" || outcome.state === "succeeded")

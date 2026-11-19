@@ -2,7 +2,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
-import { CommandError } from "../command-error";
+import { CommandError, plainErrorMessage } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
 import { RuntimeParentOperationError } from "../runtime/hub";
@@ -180,9 +180,43 @@ export function createChangeIntegration(
       if (!op) return false;
       try {
         await runtime.startPersisted(changeID, op.userID);
-      } catch {
-        // Preparing compute has sent no Git frame. Keep the undispatched intent
-        // available rather than turning a cold start into an uncertain write.
+      } catch (cause) {
+        if (
+          cause instanceof CommandError &&
+          cause.code === "forbidden" &&
+          op.state === "commit-intended" &&
+          op.error === null &&
+          op.sha === null
+        ) {
+          const refused = op;
+          const failure =
+            `Integration did not start. Take over editing or start Coding again to continue. ${plainErrorMessage(cause.message)}`.slice(
+              0,
+              2000,
+            );
+          await database.client.begin(async (sql) => {
+            const writer = await lockChangeWriterIn(sql, changeID);
+            if (!writer.available) return;
+            // Only retire the exact still-undispatched current intent. Another
+            // reconciler may have recorded dispatch while startup was pending.
+            const [retired] = await sql`UPDATE factory.change_commit_operation operation SET
+              state='failed',last_error=${failure},completed_at=now(),updated_at=now()
+              FROM factory.change change
+              WHERE operation.id=${refused.id} AND operation.change_id=change.id
+                AND change.id=${changeID} AND change.state='active' AND operation.source='integration'
+                AND operation.runtime_attempt_id=${refused.attemptID} AND operation.created_by=${refused.userID}
+                AND operation.branch_name=${refused.branch} AND operation.expected_parent_sha=${refused.parent}
+                AND operation.integration_base_sha=${refused.base} AND operation.merge_parent_sha=${refused.base}
+                AND operation.state='commit-intended' AND operation.last_error IS NULL
+                AND operation.commit_sha IS NULL AND operation.observed_remote_sha IS NULL
+                AND operation.sequence=(SELECT MAX(sequence) FROM factory.change_commit_operation WHERE change_id=${changeID})
+              RETURNING operation.id`;
+            if (retired)
+              await sql`UPDATE factory.change SET failure=${failure} WHERE id=${changeID} AND state='active'`;
+          });
+        }
+        // Transient preparation and previously dispatched/unknown Git writes
+        // retain their original evidence. A failed Start is never a replay grant.
         return false;
       }
       const [ready] = await database.client`SELECT id FROM factory.runtime_attempt

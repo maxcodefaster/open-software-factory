@@ -679,6 +679,9 @@ CREATE FUNCTION factory.guard_change_agent_turn_intent() RETURNS trigger
     AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
+    IF NEW.terminal_outcome IS NOT NULL OR NEW.model_request_epoch <> 0 THEN
+      RAISE EXCEPTION 'Terminal checkpoint requires an existing admitted execution';
+    END IF;
     IF NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE id = NEW.turn_id
       AND change_id = NEW.change_id AND authority->>'mode' = 'build') THEN
       RAISE EXCEPTION 'Change Agent intent scope mismatch';
@@ -690,6 +693,33 @@ BEGIN
       OLD.bootstrap, OLD.session_title, OLD.created_at)
       OR (OLD.runtime_attempt_id IS NOT NULL AND NEW.runtime_attempt_id IS DISTINCT FROM OLD.runtime_attempt_id) THEN
       RAISE EXCEPTION 'Change Agent dispatch intent is immutable';
+    END IF;
+    IF NEW.model_request_epoch < OLD.model_request_epoch
+      OR NEW.model_request_epoch > OLD.model_request_epoch + 1
+      OR (OLD.terminal_outcome IS NOT NULL AND
+        ROW(NEW.terminal_outcome,NEW.model_request_epoch) IS DISTINCT FROM
+        ROW(OLD.terminal_outcome,OLD.model_request_epoch)) THEN
+      RAISE EXCEPTION 'Terminal checkpoint and closed inference epoch are immutable';
+    END IF;
+    IF NEW.terminal_outcome IS NOT NULL AND OLD.terminal_outcome IS NULL THEN
+      IF NEW.model_request_epoch <> OLD.model_request_epoch OR NOT EXISTS(
+        SELECT 1 FROM factory.agent_turn turn
+        JOIN factory.change_agent_session session ON session.active_turn_id=turn.id
+        JOIN factory.change change ON change.id=turn.change_id
+        JOIN factory.change_writer writer ON writer.change_id=change.id
+        JOIN factory.runtime_attempt attempt ON attempt.id=NEW.runtime_attempt_id
+        WHERE turn.id=NEW.turn_id AND turn.change_id=NEW.change_id
+          AND turn.state='running' AND turn.owner_token IS NOT NULL
+          AND turn.owner_expires_at>clock_timestamp()
+          AND session.change_id=NEW.change_id AND session.state='working'
+          AND session.opencode_session_id=NEW.session_id AND session.active_inbox_id=NEW.prompt_id
+          AND session.native_session_confirmed_at IS NOT NULL AND NOT session.stop_pending
+          AND session.runtime_attempt_id=NEW.runtime_attempt_id
+          AND change.runtime_attempt_id=NEW.runtime_attempt_id AND attempt.state='ready'
+          AND writer.state='agent' AND writer.turn_id=turn.id AND NOT writer.fence_required
+      ) THEN
+        RAISE EXCEPTION 'Terminal checkpoint no longer owns its current running input';
+      END IF;
     END IF;
   END IF;
   RETURN NEW;
@@ -3216,6 +3246,55 @@ CREATE TABLE factory.change_agent_turn_intent (
     skill_loading text DEFAULT 'eager'::text NOT NULL,
     skill_manifest jsonb,
     skill_attachments jsonb DEFAULT '[]'::jsonb NOT NULL,
+    model_request_epoch bigint DEFAULT 0 NOT NULL,
+    terminal_outcome jsonb,
+    CONSTRAINT change_agent_turn_intent_model_epoch_check CHECK (model_request_epoch >= 0),
+    CONSTRAINT change_agent_turn_intent_terminal_check CHECK (
+      terminal_outcome IS NULL OR (
+        jsonb_typeof(terminal_outcome)='object' AND octet_length(terminal_outcome::text)<=8192
+        AND terminal_outcome ?& ARRAY['version','turnID','attemptID','sessionID','promptID','promptDigest',
+          'assistantID','assistantDigest','completed','modelRequestEpoch','shells','outcome']
+        AND terminal_outcome - ARRAY['version','turnID','attemptID','sessionID','promptID','promptDigest',
+          'assistantID','assistantDigest','completed','modelRequestEpoch','shells','outcome']='{}'::jsonb
+        AND terminal_outcome->>'version'='1'
+        AND jsonb_typeof(terminal_outcome->'version')='number'
+        AND jsonb_typeof(terminal_outcome->'turnID')='string'
+        AND jsonb_typeof(terminal_outcome->'attemptID')='string'
+        AND jsonb_typeof(terminal_outcome->'sessionID')='string'
+        AND jsonb_typeof(terminal_outcome->'promptID')='string'
+        AND jsonb_typeof(terminal_outcome->'promptDigest')='string'
+        AND jsonb_typeof(terminal_outcome->'assistantID')='string'
+        AND jsonb_typeof(terminal_outcome->'assistantDigest')='string'
+        AND jsonb_typeof(terminal_outcome->'modelRequestEpoch')='string'
+        AND terminal_outcome->>'turnID'=turn_id::text AND runtime_attempt_id IS NOT NULL
+        AND terminal_outcome->>'attemptID'=runtime_attempt_id::text
+        AND terminal_outcome->>'sessionID'=session_id AND terminal_outcome->>'promptID'=prompt_id
+        AND terminal_outcome->>'modelRequestEpoch'=model_request_epoch::text
+        AND terminal_outcome->>'promptDigest' ~ '^[a-f0-9]{64}$'
+        AND terminal_outcome->>'assistantDigest' ~ '^[a-f0-9]{64}$'
+        AND terminal_outcome->>'assistantID' LIKE 'msg_%'
+        AND length(terminal_outcome->>'assistantID')<=200
+        AND jsonb_typeof(terminal_outcome->'completed')='number'
+        AND (terminal_outcome->>'completed')::numeric BETWEEN 1 AND 9007199254740991
+        AND jsonb_typeof(terminal_outcome->'shells')='array'
+        AND jsonb_typeof(terminal_outcome->'outcome')='object'
+        AND jsonb_typeof(terminal_outcome->'outcome'->'state')='string'
+        AND terminal_outcome->'outcome' ? 'state'
+        AND (terminal_outcome->'outcome') - ARRAY['state','summary','error']='{}'::jsonb
+        AND (
+          (terminal_outcome->'outcome'->>'state'='succeeded'
+            AND NOT (terminal_outcome->'outcome' ? 'error')
+            AND (NOT (terminal_outcome->'outcome' ? 'summary') OR
+              (jsonb_typeof(terminal_outcome->'outcome'->'summary')='string'
+                AND length(terminal_outcome->'outcome'->>'summary')<=2000)))
+          OR (terminal_outcome->'outcome'->>'state'='failed'
+            AND terminal_outcome->'outcome' ? 'error'
+            AND NOT (terminal_outcome->'outcome' ? 'summary')
+            AND jsonb_typeof(terminal_outcome->'outcome'->'error')='string'
+            AND length(terminal_outcome->'outcome'->>'error')<=2000)
+        )
+      )
+    ),
     CONSTRAINT change_agent_turn_intent_prompt_id_check CHECK (((prompt_id ~~ 'msg_%'::text) AND (length(prompt_id) <= 200))),
     CONSTRAINT change_agent_turn_intent_prompt_text_check CHECK (((length(btrim(prompt_text)) > 0) AND (octet_length(prompt_text) <= 4000000))),
     CONSTRAINT change_agent_turn_intent_session_id_check CHECK (((session_id ~~ 'ses%'::text) AND (length(session_id) <= 200))),
@@ -14177,5 +14256,5 @@ INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid
 RESET check_function_bodies;
 RESET search_path;
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'8f95d95e5d52574fbbb181320a29a98de94701069e0fe643f02b7325a4bb0200');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'33aa3951bcd6497f0d7e6f4907a5918b102c08726df8715e7b7849921d1a3019');
 COMMIT;

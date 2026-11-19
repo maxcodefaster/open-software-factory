@@ -31,6 +31,7 @@ import { createContractRates } from "../usage/contract-rates";
 import { codingBudgetIn } from "../usage/policy";
 import { buildGoalInstructions } from "./build-completion";
 import { buildKnowledgeContext } from "./knowledge-context";
+import { readTerminalOutcome, type TerminalInput, type TerminalOutcome } from "./terminal-outcome";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -436,6 +437,48 @@ export function createChangeAdmission(
   }
   return {
     admitIn,
+    async terminalObservation(input: TerminalInput) {
+      const [row] = await database.client<{ epoch: string; terminal: unknown }[]>`
+        SELECT model_request_epoch::text AS epoch, terminal_outcome AS terminal
+        FROM factory.change_agent_turn_intent
+        WHERE turn_id=${input.turnID} AND change_id=${input.changeID}
+          AND session_id=${input.sessionID} AND prompt_id=${input.promptID}
+          AND runtime_attempt_id IS NOT DISTINCT FROM ${input.attemptID}::uuid`;
+      if (!row) throw new Error("Terminal observation no longer owns its recorded intent");
+      const terminal = readTerminalOutcome(row.terminal, input);
+      if (terminal && terminal.modelRequestEpoch !== row.epoch)
+        throw new Error("Inference advanced after the terminal checkpoint");
+      return { epoch: row.epoch, terminal };
+    },
+    async checkpointTerminal(input: TerminalInput, ownerToken: string, value: TerminalOutcome) {
+      const checkpoint = readTerminalOutcome(value, input);
+      if (!checkpoint) throw new Error("A terminal checkpoint is required");
+      let saved = false;
+      const allowed = await turns.validateExecution(input.turnID, ownerToken, async (sql) => {
+        const rows = await sql<{ turn_id: string }[]>`
+          UPDATE factory.change_agent_turn_intent intent
+          SET terminal_outcome=${JSON.stringify(checkpoint)}::jsonb
+          FROM factory.change_agent_session session, factory.change change,
+            factory.runtime_attempt attempt, factory.change_writer writer
+          WHERE intent.turn_id=${input.turnID} AND intent.change_id=${input.changeID}
+            AND intent.runtime_attempt_id=${checkpoint.attemptID}
+            AND intent.session_id=${input.sessionID} AND intent.prompt_id=${input.promptID}
+            AND intent.terminal_outcome IS NULL
+            AND intent.model_request_epoch=${checkpoint.modelRequestEpoch}::bigint
+            AND session.change_id=intent.change_id AND session.active_turn_id=intent.turn_id
+            AND session.opencode_session_id=intent.session_id
+            AND session.active_inbox_id=intent.prompt_id AND session.state='working'
+            AND session.native_session_confirmed_at IS NOT NULL AND NOT session.stop_pending
+            AND session.runtime_attempt_id=intent.runtime_attempt_id
+            AND change.id=intent.change_id AND change.runtime_attempt_id=intent.runtime_attempt_id
+            AND attempt.id=intent.runtime_attempt_id AND attempt.state='ready'
+            AND writer.change_id=change.id AND writer.state='agent'
+            AND writer.turn_id=intent.turn_id AND NOT writer.fence_required
+          RETURNING intent.turn_id`;
+        saved = rows.length === 1;
+      });
+      return allowed && saved;
+    },
     async admit(changeID: string, userID: string, input: ChangeAgentInput) {
       return database.client.begin((sql) => admitIn(sql, changeID, userID, input));
     },

@@ -72,6 +72,7 @@ export function createModelRelay(
         AND change.runtime_attempt_id = ${attemptID} AND session.opencode_session_id = intent.session_id
         AND NOT session.stop_pending AND session.state IN ('starting', 'working')
         AND turn.state IN ('dispatching', 'running') AND turn.owner_expires_at > clock_timestamp()
+        AND intent.terminal_outcome IS NULL
     `;
     if (!active) return json({ error: "No active Build authority for model inference" }, 403);
     let payload: Awaited<ReturnType<typeof readModelRequest>>;
@@ -117,6 +118,7 @@ export function createModelRelay(
           AND intent.change_id = change.id AND intent.runtime_attempt_id = ${attemptID}
           AND intent.session_id = session.opencode_session_id
           AND session.state IN ('starting', 'working') AND NOT session.stop_pending
+          AND intent.terminal_outcome IS NULL
       `;
         if (!current) return;
         const budget = await codingBudgetIn(sql, active.projectID, true);
@@ -129,6 +131,19 @@ export function createModelRelay(
             ON CONFLICT(turn_id) DO UPDATE SET reason=EXCLUDED.reason,resumed_by_turn_id=NULL,created_at=now()`;
           return;
         }
+        // Checkpoint and relay dispatch share the Turn lock. Advance the
+        // observation epoch before dispatch so a stale native terminal read
+        // cannot checkpoint over a request admitted during that observation.
+        const started = performance.now();
+        const [dispatch] = await sql<{ leaseRemainingMS: number }[]>`
+          UPDATE factory.change_agent_turn_intent intent
+          SET model_request_epoch=intent.model_request_epoch+1
+          FROM factory.agent_turn turn
+          WHERE intent.turn_id=${active.id} AND intent.terminal_outcome IS NULL
+            AND turn.id=intent.turn_id AND turn.owner_token=${active.ownerToken}
+            AND turn.state IN ('dispatching','running') AND turn.owner_expires_at>clock_timestamp()
+          RETURNING EXTRACT(EPOCH FROM (turn.owner_expires_at-clock_timestamp()))::float8*1000 AS "leaseRemainingMS"`;
+        if (!dispatch || performance.now() - started >= dispatch.leaseRemainingMS) return;
         upstream = fetch(`${resolved.baseURL?.replace(/\/$/, "")}/${suffix}`, {
           method: "POST",
           headers: {

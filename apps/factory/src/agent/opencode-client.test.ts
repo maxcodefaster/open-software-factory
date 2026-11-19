@@ -11,6 +11,7 @@ import {
   readOpenCodeInputMessages,
   syncOpenCodeInputGuidance,
 } from "./opencode-client";
+import { checkTerminalOpenCodeInbox } from "./opencode-terminal";
 
 const input = {
   sessionID: "ses_owned",
@@ -26,6 +27,87 @@ const receipt = {
   delivery: "queue" as const,
   payload: { text: input.text },
 };
+
+describe("checkpointed terminal shell notifications", () => {
+  const shell = { id: "sh_owned_terminal", sessionID: input.sessionID };
+  const notification = {
+    id: "msg_owned_shell_notification",
+    sessionID: input.sessionID,
+    type: "synthetic",
+    time: { created: 4 },
+    delivery: "steer",
+    payload: {
+      text: "Owned shell failed after removal",
+      metadata: { source: "shell", jobID: shell.id, shellID: shell.id, state: "error" },
+    },
+  };
+  function peer(initial: unknown[], arriveDuringCancel = false) {
+    let inbox = initial;
+    const cancelled: string[] = [];
+    const client = createOpenCodeClient(async (request) => {
+      const path = new URL(request.url).pathname;
+      if (request.method === "GET" && path.endsWith("/inbox"))
+        return Response.json({ data: inbox });
+      if (request.method === "DELETE" && path.includes("/inbox/")) {
+        const id = decodeURIComponent(path.split("/").at(-1) ?? "");
+        cancelled.push(id);
+        inbox = inbox.filter((item) => (item as { id: string }).id !== id);
+        if (arriveDuringCancel) inbox.push(receipt);
+        return new Response(null, { status: 204 });
+      }
+      throw new Error("Terminal notification test escaped its owned Inbox");
+    });
+    return { client, cancelled };
+  }
+  test("cancels only recorded background-job notification IDs", async () => {
+    const owned = peer([notification]);
+    await checkTerminalOpenCodeInbox(owned.client, input.sessionID, [shell]);
+    expect(owned.cancelled).toEqual([]);
+    await checkTerminalOpenCodeInbox(owned.client, input.sessionID, [shell], true);
+    expect(owned.cancelled).toEqual([notification.id]);
+  });
+  test.each([
+    receipt,
+    {
+      ...notification,
+      payload: {
+        ...notification.payload,
+        metadata: { ...notification.payload.metadata, shellID: "sh_other", jobID: "sh_other" },
+      },
+    },
+    {
+      ...notification,
+      payload: {
+        ...notification.payload,
+        metadata: { source: "shell", shellID: shell.id, state: "error" },
+      },
+    },
+    {
+      ...notification,
+      payload: {
+        ...notification.payload,
+        metadata: { ...notification.payload.metadata, source: "other" },
+      },
+    },
+  ])("rejects user, foreign or user-shell input without cancelling anything", async (foreign) => {
+    const owned = peer([notification, foreign]);
+    await expect(
+      checkTerminalOpenCodeInbox(owned.client, input.sessionID, [shell], true),
+    ).rejects.toThrow("newer or unidentified");
+    expect(owned.cancelled).toEqual([]);
+  });
+  test("a user input arriving during owned notification cancellation remains queued", async () => {
+    const owned = peer([notification], true);
+    await checkTerminalOpenCodeInbox(owned.client, input.sessionID, [shell], true);
+    await expect(
+      checkTerminalOpenCodeInbox(owned.client, input.sessionID, [shell], true),
+    ).rejects.toThrow("newer or unidentified");
+    expect(owned.cancelled).toEqual([notification.id]);
+    expect((await owned.client.session.inbox.list({ sessionID: input.sessionID }))[0]?.id).toBe(
+      receipt.id,
+    );
+  });
+});
 
 describe("Factory Coding native interaction boundary", () => {
   const denyQuestion = { action: "question", resource: "*", effect: "deny" as const };

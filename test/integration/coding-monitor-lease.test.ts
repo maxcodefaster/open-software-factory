@@ -54,8 +54,13 @@ async function ownedBuild() {
     const path = new URL(input.url).pathname;
     if (path === "/api/session" && input.method === "POST")
       nativeSession = await input.clone().json();
-    if (nativeSession && path === `/api/session/${nativeSession.id}`)
-      return Response.json({ data: nativeSession });
+    if (nativeSession && path === `/api/session/${nativeSession.id}`) {
+      if (input.method === "PATCH") {
+        nativeSession = { ...nativeSession, ...(await input.json()) };
+        return new Response(null, { status: 204 });
+      }
+      if (input.method === "GET") return Response.json({ data: nativeSession });
+    }
     return request(...args);
   };
   // Exercise an actual bootstrap through execute(), not a directly invoked
@@ -365,10 +370,17 @@ test.each([
     let delayed = false;
     let finished = false;
     let messagesRead = false;
+    const interruptedWhileStopped: boolean[] = [];
     owned.hub.request = async (...args) => {
       const input = args[2];
       const url = new URL(input.url);
       const path = url.pathname;
+      if (path.endsWith("/interrupt") && input.method === "POST") {
+        const current = await ownership(owned, commandID);
+        interruptedWhileStopped.push(
+          current?.state === "stopped" && current.sessionState === "stopped" && current.stopPending,
+        );
+      }
       if (path === "/api/session" && input.method === "GET" && owned.requests() > 0 && !finished) {
         finished = true;
         owned.finish();
@@ -417,7 +429,6 @@ test.each([
       release.resolve();
       releaseClose.resolve();
       await stopping;
-      const interrupts = owned.interrupts();
       if (shutdown) {
         await shutdown;
         expect(joined).toBe(true);
@@ -448,7 +459,13 @@ test.each([
         expect(usage).toMatchObject({ outcome: null, settled_at: null });
       }
       expect(owned.requests()).toBe(1);
-      expect(owned.interrupts()).toBe(interrupts);
+      // Revocation can fence settlement as uncertain or request automatic Stop.
+      // Only that persisted Stop may interrupt, never the late monitor result.
+      expect(interruptedWhileStopped.every(Boolean)).toBe(true);
+      expect(interruptedWhileStopped.length).toBeLessThanOrEqual(1);
+      if (action === "Stop") expect(interruptedWhileStopped).toEqual([true]);
+      if (action === "shutdown") expect(interruptedWhileStopped).toEqual([]);
+      expect(owned.interrupts()).toBe(interruptedWhileStopped.length);
       expect(owned.commitCalls).toEqual([]);
       if (browser) {
         expect(browserRenewals).toBe(1);
