@@ -6,8 +6,15 @@ import {
 } from "../../../../packages/conversation-domain/src/learning";
 import { verificationReviewReasons } from "../../../../packages/conversation-domain/src/verification";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
+import {
+  nativeToolEvidenceMaximumBytes,
+  readNativeToolEvidence,
+  type SavedNativeToolArchive,
+} from "./native-tool-evidence";
 
 type Database = ReturnType<typeof createDatabase>;
 type Operation = {
@@ -20,11 +27,13 @@ type Operation = {
   cursorAt: string;
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const nativeArchiveGraceMS = 5 * 60_000;
 
 export type LearningSourceCursor = { at: string; id: string };
 export async function collectLearningCases(
   database: Database,
   cursor: LearningSourceCursor | null = null,
+  objects: PrivateObjects = createPrivateObjects(),
 ) {
   // The journal is an index into retained product evidence, not a transcript lake.
   // Never wake a Sandbox or fetch native logs to perform retrospective review.
@@ -62,8 +71,9 @@ export async function collectLearningCases(
       ORDER BY generation.completed_at,generation.id LIMIT 20)
     ) due ORDER BY due."settledAt",due.id`;
   for (const operation of operations) {
-    const snapshot = await learningSnapshot(database, operation);
-    if (!snapshot) continue; // An indexed operation can precede product settlement.
+    const source = await learningSnapshot(database, operation);
+    if (!source) continue; // An indexed operation can precede product settlement.
+    const { snapshot, nativeTurnID } = source;
     const selected =
       sampleLearningCase(snapshot.id, snapshot.outcome, snapshot.reviewReasons) &&
       ((snapshot.reviewReasons?.length ?? 0) > 0 ||
@@ -74,17 +84,56 @@ export async function collectLearningCases(
       snapshot.evidence = [];
       snapshot.targets = [];
     }
-    await database.client.begin(async (sql) => {
-      if (!(await learningEnabledIn(sql, snapshot.projectId, snapshot.ownerId))) return;
+    async function authorizedIn(sql: AgentTurnTransaction) {
+      if (!(await learningEnabledIn(sql, snapshot.projectId, snapshot.ownerId))) return false;
       try {
         await learningAuthorityIn(sql, operation.userId, {
           ...snapshot,
           managerOnly: snapshot.activity === "setup",
         });
       } catch (cause) {
-        if (cause instanceof CommandError) return;
+        if (cause instanceof CommandError) return false;
         throw cause;
       }
+      return true;
+    }
+    let nativeEvidence: LearningCase["evidence"][number] | undefined;
+    if (selected && nativeTurnID) {
+      const admitted = await database.client.begin(async (sql) => {
+        if (!(await authorizedIn(sql))) return null;
+        const [existing] = await sql`SELECT id FROM factory.learning_case WHERE id=${snapshot.id}`;
+        if (existing) return null;
+        const [saved] = await sql<SavedNativeToolArchive[]>`
+          SELECT archive.turn_id AS "turnID",archive.runtime_attempt_id AS "runtimeAttemptID",
+            archive.session_id AS "sessionID",archive.prompt_id AS "promptID",
+            archive.through_message_id AS "throughMessageID",archive.source_refs AS source,
+            archive.manifest_key AS key,archive.manifest_sha256 AS sha256,
+            archive.producer_version AS "producerVersion"
+          FROM factory.session_archive archive
+          JOIN factory.agent_turn turn ON turn.id=archive.turn_id AND turn.state='completed'
+            AND turn.authority->>'mode'='build'
+          JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
+            AND intent.runtime_attempt_id=archive.runtime_attempt_id
+            AND intent.session_id=archive.session_id AND intent.prompt_id=archive.prompt_id
+            AND intent.change_id=turn.change_id
+          JOIN factory.runtime_attempt attempt ON attempt.id=archive.runtime_attempt_id
+            AND attempt.change_id=turn.change_id AND attempt.project_id=turn.project_id
+          WHERE turn.id=${nativeTurnID} AND turn.project_id=${snapshot.projectId} AND archive.state='saved'`;
+        // Usage settles before the asynchronous archive and even before Git
+        // submission. The existing Verification wait helps once a SHA exists,
+        // but cannot cover that earlier race. Do not freeze an empty trace at
+        // first sight or wait forever for a save that may never succeed.
+        const age = Date.now() - Date.parse(snapshot.settledAt);
+        if (!saved && age >= 0 && age < nativeArchiveGraceMS) return null;
+        return { saved };
+      });
+      if (!admitted) continue;
+      // Private object I/O must not hold policy/account locks or a SQL connection.
+      nativeEvidence = await readNativeToolEvidence(nativeTurnID, admitted.saved, objects);
+    }
+    await database.client.begin(async (sql) => {
+      if (!(await authorizedIn(sql))) return;
+      if (nativeEvidence) snapshot.evidence.push(nativeEvidence);
       await sql`
       INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
       VALUES(${snapshot.id},${snapshot.projectId},${snapshot.ownerId},${operation.userId},
@@ -96,7 +145,11 @@ export async function collectLearningCases(
   const last = operations.findLast((operation) => !operation.wiki);
   // Keep PostgreSQL's microseconds. A JS Date rounds them away and can repeat
   // the same full page when several operations share one settlement instant.
-  return last ? { at: last.cursorAt, id: last.id } : cursor;
+  // Full pages advance past deferred work; a completed pass starts again so
+  // later archive/Verification settlement is observed without a worker restart.
+  return last && operations.filter((operation) => !operation.wiki).length === 100
+    ? { at: last.cursorAt, id: last.id }
+    : null;
 }
 
 async function learningSnapshot(database: Database, operation: Operation) {
@@ -104,6 +157,8 @@ async function learningSnapshot(database: Database, operation: Operation) {
   const targets: LearningCase["targets"] = [];
   const reviewReasons: string[] = [];
   let remaining = 20_000;
+  let evidenceLimit = 24;
+  let nativeTurnID: string | null = null;
   function add(
     id: string,
     kind: LearningCase["evidence"][number]["kind"],
@@ -112,7 +167,7 @@ async function learningSnapshot(database: Database, operation: Operation) {
   ) {
     if (value === null || value === undefined) return;
     const body = typeof value === "string" ? value : JSON.stringify(value);
-    if (!body?.trim() || remaining <= 0 || evidence.length >= 24) return;
+    if (!body?.trim() || remaining <= 0 || evidence.length >= evidenceLimit) return;
     let excerpt = body.slice(0, Math.min(limit, remaining));
     while (Buffer.byteLength(excerpt) > remaining)
       excerpt = excerpt.slice(0, Math.floor(excerpt.length * 0.75));
@@ -146,11 +201,14 @@ async function learningSnapshot(database: Database, operation: Operation) {
         conversationId: string | null;
         createdBy: string;
         summary: string | null;
+        state: string;
+        nativeCoding: boolean;
         createdAt: Date;
         updatedAt: Date;
       }[]
     >`SELECT id,input,authority,ticket_id AS "ticketId",conversation_id AS "conversationId",
-      created_by AS "createdBy",outcome_summary AS summary,created_at AS "createdAt",updated_at AS "updatedAt"
+      created_by AS "createdBy",outcome_summary AS summary,state,created_at AS "createdAt",updated_at AS "updatedAt",
+      EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent WHERE intent.turn_id=agent_turn.id) AS "nativeCoding"
       FROM factory.agent_turn WHERE id=${sourceID} AND project_id=${operation.projectId}
       AND state IN ('completed','failed','stopped','uncertain')`;
     if (!turn) return null;
@@ -160,6 +218,12 @@ async function learningSnapshot(database: Database, operation: Operation) {
         ? "research"
         : String(turn.input["kind"] ?? operation.purpose);
     developerOnly = turn.authority["mode"] === "build";
+    if (developerOnly && turn.state === "completed" && turn.nativeCoding) {
+      nativeTurnID = turn.id;
+      // Leave one complete, bounded JSON item for the gated archive projection.
+      remaining -= nativeToolEvidenceMaximumBytes;
+      evidenceLimit--;
+    }
     // Do not copy admission tokens, credential references or attachment bytes.
     add(`turn:${turn.id}:task`, "task", {
       kind: turn.input["kind"],
@@ -307,12 +371,14 @@ async function learningSnapshot(database: Database, operation: Operation) {
         id: string;
         digest: string;
         scope: string | null;
+        personalLoaded: boolean;
         libraryId: string | null;
         version: number;
         content: unknown;
       }[]
     >`
       SELECT revision.id,revision.revision::int AS version,revision.content_digest AS digest,library.scope,library.id AS "libraryId",
+        bool_or(library.scope='personal') OVER () AS "personalLoaded",
         jsonb_build_object('key',revision.content->'key','name',revision.content->'name',
           'description',revision.content->'description','roles',revision.content->'roles',
           'instructions',revision.content->'instructions',
@@ -322,7 +388,7 @@ async function learningSnapshot(database: Database, operation: Operation) {
       LEFT JOIN factory.skill_library library ON library.id=link.library_id WHERE loaded.turn_id=${turn.id}
       ORDER BY revision.id LIMIT 6`;
     for (const skill of skills) {
-      if (skill.scope === "personal") ownerId = turn.createdBy;
+      if (skill.scope === "personal" || skill.personalLoaded) ownerId = turn.createdBy;
       add(`skill:${skill.id}`, "configuration", skill, 2_000);
       if (skill.libraryId && skill.content && typeof skill.content === "object") {
         const content = skill.content as Record<string, unknown>;
@@ -340,8 +406,8 @@ async function learningSnapshot(database: Database, operation: Operation) {
           );
       }
     }
-    // Build summaries are deliberately not represented as native tool traces.
-    // With no exact artifact the judge must leave correctness/verification unknown.
+    // Native tools are added only after the final scope/authority checks.
+    // A summary or missing archive never stands in for an observed tool trace.
   } else if (operation.id.startsWith("monitoring:") && uuid.test(sourceID)) {
     const [incident] = await database.client<
       {
@@ -478,7 +544,7 @@ async function learningSnapshot(database: Database, operation: Operation) {
       "No supported retained work-evidence adapter is available.",
     );
   }
-  return learningCase.parse({
+  const snapshot = learningCase.parse({
     id: operation.id,
     projectId: operation.projectId,
     ownerId,
@@ -490,4 +556,5 @@ async function learningSnapshot(database: Database, operation: Operation) {
     targets,
     ...(reviewReasons.length ? { reviewReasons } : {}),
   });
+  return { snapshot, nativeTurnID };
 }
