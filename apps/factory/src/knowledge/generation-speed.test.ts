@@ -1,10 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
+import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
 import type {
   WikiGenerationOutput,
   WikiGenerationProgress,
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
 import { generateWiki } from "./generation-workflow";
+import { prepareWikiPublication } from "./publication";
 
 type Role = "planner" | "coverage" | "additional" | "investigator" | "writer" | "checker";
 type Seen = {
@@ -51,6 +53,7 @@ async function scenario(options: {
   sources?: Array<{ path: string; content: string }>;
   inventory?: Array<{ path: string; sha: string; size: number }>;
   readFiles?(paths: string[]): Promise<Array<{ path: string; content: string }>>;
+  preparePublication?(output: WikiGenerationOutput): WikiGenerationOutput;
   onPublish?(output: WikiGenerationOutput, pages: readonly WikiPageSnapshot[]): void;
 }) {
   const seen: Seen[] = [];
@@ -180,6 +183,7 @@ async function scenario(options: {
           ? options.readFiles(paths)
           : paths.map((path) => ({ path, content: `export const value = "${path}";` }));
       },
+      ...(options.preparePublication ? { preparePublication: options.preparePublication } : {}),
       publish: async (output) => {
         for (const page of output.pages) {
           published.push({
@@ -217,6 +221,164 @@ async function scenario(options: {
 const count = (seen: Seen[], role: Role) => seen.filter((entry) => entry.role === role).length;
 const page = (body: string, sources: string[] = ["src/file-0.ts"]) => ({
   pages: [{ body, sources }],
+});
+
+test("the checker reviews the human-merged material overview before publication", async () => {
+  const base = "Factory Starter is an application.";
+  const reference = "Human handover reference: KNO-4C-20261119.";
+  const human = `${reference} The demo owner is the release team; arrange the review with them.`;
+  const introduction =
+    "Final flight is the release team's account-and-session demonstration. Review the account journey with the demo owner before handover.";
+  const current: WikiPageSnapshot = {
+    id: "cc0a77f4-466c-4a9b-a3cb-5fcc967f8e8a",
+    slug: "overview",
+    title: "Final flight",
+    body: `${base}\n\n${human}`,
+    version: 3,
+    revisionId: "f1b31ecb-7bb7-498a-ba20-563a9903f797",
+    parentId: null,
+    state: "active",
+    citations: [{ path: "README.md", commitSha: "b".repeat(40) }],
+  };
+  const source = { path: "README.md", content: `# Final flight\n\n${introduction}` };
+  const publication = Promise.withResolvers<void>();
+  const checked: string[] = [];
+  let generatedBody = base;
+  let publishedBody = current.body;
+  const result = await scenario({
+    pages: [current],
+    commit: "3e221e212b256976b9835629693c2a07b4c9396e",
+    inventory: [{ path: source.path, sha: "a".repeat(40), size: source.content.length }],
+    changedPaths: [source.path],
+    sources: [source],
+    readFiles: async () => [source],
+    preparePublication: (output) => prepareWikiPublication([{ ...current, generatedBody }], output),
+    coverage: async () => {
+      await publication.promise;
+      return { output: { findings: [] } };
+    },
+    reply: ({ role, prompt, index }) => {
+      if (role === "planner")
+        return {
+          output: {
+            topics: [topic(current.slug, [source.path], null, [current.id])],
+          },
+        };
+      if (role === "writer") {
+        expect(JSON.stringify(prompt)).not.toContain('"generatedBody"');
+        if (index === 1) {
+          expect(prompt["previousDraft"]).toMatchObject({
+            pages: [{ body: `${introduction}\n\n${reference}\n\n${human}` }],
+          });
+          expect(prompt["advisory"]).toEqual([
+            "The handover reference is repeated. Keep its full original note exactly once.",
+          ]);
+        }
+        return {
+          output: {
+            pages: [
+              {
+                id: current.id,
+                title: current.title,
+                body: index === 0 ? `${introduction}\n\n${reference}` : introduction,
+                sources: [source.path],
+              },
+            ],
+          },
+        };
+      }
+      if (role !== "checker") throw new Error(`Unexpected role: ${role}`);
+      const body = (prompt["draft"] as WikiGenerationOutput).pages[0]?.body ?? "";
+      checked.push(body);
+      expect(body).toContain(human);
+      expect(body.split(reference).length - 1).toBe(index === 0 ? 2 : 1);
+      return {
+        output: {
+          issues: [],
+          advisory:
+            index === 0
+              ? ["The handover reference is repeated. Keep its full original note exactly once."]
+              : [],
+        },
+      };
+    },
+    onPublish: (output, pages) => {
+      const next = pages.find((page) => page.id === current.id);
+      if (!next || output.pages.length !== 1) throw new Error("Missing overview publication");
+      // Publication still receives the generated input, not a second human-merged body.
+      expect(output.pages[0]?.body).toBe(introduction);
+      const merged = mergeGeneratedDocument(generatedBody, publishedBody, next.body);
+      expect(merged.conflict).toBe(false);
+      generatedBody = merged.generatedBody;
+      publishedBody = merged.body;
+      next.body = merged.body;
+      publication.resolve();
+    },
+  });
+  expect(result.published).toHaveLength(1);
+  expect(publishedBody).toBe(`${introduction}\n\n${human}`);
+  expect(generatedBody).toBe(introduction);
+  expect(checked).toHaveLength(2);
+  expect(checked.at(-1)).toBe(publishedBody);
+  expect(count(result.seen, "planner")).toBe(1);
+  expect(count(result.seen, "coverage")).toBe(1);
+  expect(count(result.seen, "additional")).toBe(0);
+  expect(count(result.seen, "writer")).toBe(2);
+  expect(count(result.seen, "checker")).toBe(2);
+  expect(result.seen).toHaveLength(6);
+  expect(result.requests.remaining).toBe(54);
+  expect(current.body).toBe(`${base}\n\n${human}`);
+});
+
+test("publication preparation keeps restored human references behind the same link gate", async () => {
+  const current: WikiPageSnapshot = {
+    id: crypto.randomUUID(),
+    slug: "guide",
+    title: "Guide",
+    body: "Old guidance.\n\nHuman note: see #wiki/missing.",
+    version: 2,
+    revisionId: crypto.randomUUID(),
+    parentId: null,
+    state: "active",
+    citations: [],
+  };
+  let writers = 0;
+  let checkers = 0;
+  let publications = 0;
+  await expect(
+    scenario({
+      pages: [current],
+      preparePublication: (output) =>
+        prepareWikiPublication([{ ...current, generatedBody: "Old guidance." }], output),
+      reply: ({ role }) => {
+        if (role === "planner")
+          return { output: { topics: [topic("guide", ["src/file-0.ts"], null, [current.id])] } };
+        if (role === "writer") {
+          writers++;
+          return {
+            output: {
+              pages: [
+                {
+                  id: current.id,
+                  title: current.title,
+                  body: "Current verified guidance.",
+                  sources: ["src/file-0.ts"],
+                },
+              ],
+            },
+          };
+        }
+        checkers++;
+        return { output: { issues: [] } };
+      },
+      onPublish: () => {
+        publications++;
+      },
+    }),
+  ).rejects.toThrow("Wiki topic failed bounded quality checks");
+  expect(writers).toBe(3);
+  expect(checkers).toBe(0);
+  expect(publications).toBe(0);
 });
 
 test("a small topic without a parent is investigated and written by one agent run", async () => {

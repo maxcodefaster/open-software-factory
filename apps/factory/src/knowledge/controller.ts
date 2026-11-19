@@ -28,7 +28,12 @@ import { editKnowledgeIn } from "./edit";
 import { factoryForgeSource } from "./forge-source";
 import { generateWiki, type WikiGenerationInput } from "./generation-agent";
 import { wikiGenerationFailureMessage } from "./generation-failure";
-import { publishWikiPackage, WikiPublicationConflict } from "./publication";
+import {
+  prepareWikiPublication,
+  publishWikiPackage,
+  WikiPublicationConflict,
+  type WikiPublicationSnapshot,
+} from "./publication";
 import { createRepositoryKnowledgeCache } from "./repository-cache";
 import { searchSnippet } from "./search-snippet";
 
@@ -165,8 +170,8 @@ export function createKnowledgeController(
 
   async function snapshots(projectID: string) {
     return Array.from(
-      await database.client<WikiPageSnapshot[]>`
-      SELECT id,slug,title,current_body AS body,version::integer AS version,
+      await database.client<WikiPublicationSnapshot[]>`
+      SELECT id,slug,title,current_body AS body,generated_body AS "generatedBody",version::integer AS version,
         current_revision_id AS "revisionId",parent_id AS "parentId",state,citations
       FROM factory.knowledge_page WHERE project_id=${projectID} ORDER BY sort_order,id
     `,
@@ -378,13 +383,19 @@ export function createKnowledgeController(
         failureMessage =
           "Wiki source could not be read at this revision. Saved pages are retained; retry the update.";
         const pages = await snapshots(generation.projectID);
+        // Generated baselines belong to publication, not model context or its input-size budget.
+        const pageContext = () => pages.map(({ generatedBody: _, ...page }) => page);
         const completedPageIDs = await completedPublications(
           generationID,
           attemptId,
           generation.projectID,
           generation.commitSha,
         );
-        const bundle = await sourceBundle(generation.projectID, generation.commitSha, pages);
+        const bundle = await sourceBundle(
+          generation.projectID,
+          generation.commitSha,
+          pageContext(),
+        );
         failureMessage =
           "The Wiki model could not finish a supported update. Saved pages are retained; retry the update.";
         try {
@@ -393,7 +404,7 @@ export function createKnowledgeController(
             commit: generation.commitSha,
             modelId,
             connection,
-            pages,
+            pages: pageContext(),
             completedPageIDs,
             inventory: bundle.candidates,
             changedPaths: bundle.changedPaths,
@@ -420,6 +431,7 @@ export function createKnowledgeController(
                 provider: connection.provider ?? "openai",
                 model: modelId,
               }),
+            preparePublication: (output) => prepareWikiPublication(pages, output),
             publish: async (output) => {
               await authorize();
               validateWikiGeneration(output, pages, bundle.readPaths());
@@ -439,7 +451,7 @@ export function createKnowledgeController(
               if (!published)
                 throw new WikiPublicationConflict("Wiki changed during checked publication");
               pages.splice(0, pages.length, ...published);
-              return pages;
+              return pageContext();
             },
           });
           validateWikiGeneration(output, pages, bundle.readPaths());

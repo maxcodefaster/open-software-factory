@@ -104,6 +104,7 @@ const loopSchema = z.object({
   issues: z.array(z.string()),
   advisory: z.array(z.string()).optional(),
   output: wikiGenerationOutput,
+  publication: wikiGenerationOutput.optional(),
 });
 type Topic = z.infer<typeof topicSchema>;
 class ParentUnpublished extends Error {
@@ -996,7 +997,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                 ...(inputData.round
                   ? {
                       previousDraft: {
-                        pages: inputData.output.pages.map((page) =>
+                        pages: (inputData.publication ?? inputData.output).pages.map((page) =>
                           topic.pageIDs.length
                             ? {
                                 id: page.id,
@@ -1052,11 +1053,14 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               };
             }),
           };
+          // Check the exact human-preserving publication body. Keep the generated input separate:
+          // publication must derive its baseline from it, not merge the human edit twice.
+          const publication = input.preparePublication?.(output) ?? output;
           const issues: string[] = [];
           if (!topic.pageIDs.length && !output.pages.length)
             issues.push("A planned new topic must publish a useful checked page");
           try {
-            validateWikiGeneration(output, pages, new Set(sources.read.keys()));
+            validateWikiGeneration(publication, pages, new Set(sources.read.keys()));
           } catch (cause) {
             issues.push(cause instanceof Error ? cause.message : "Invalid Wiki output");
           }
@@ -1069,7 +1073,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             )
           )
             issues.push("Writer escaped planned topic package");
-          for (const page of output.pages) {
+          for (const page of publication.pages) {
             if (
               !page.id &&
               page.parentSlug === null &&
@@ -1103,13 +1107,13 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             console.error(
               `[factory] Wiki topic ${topic.slug} round ${inputData.round + 1} rejected before the check: ${[...new Set(issues)].join(" | ").slice(0, 600)} | sourceRejections emptySourceLists=${sourceRejections.emptySourceLists} knownUnreadCitations=${sourceRejections.knownUnreadCitations} unknownCitationPaths=${sourceRejections.unknownCitationPaths}`,
             );
-            return { round: inputData.round + 1, issues, output };
+            return { round: inputData.round + 1, issues, output, publication };
           }
           // Nothing to publish, or only rewording of checked pages whose cited files are unchanged:
           // the independent check is for new facts, so a wording pass does not pay two more calls.
           if (
             topic.pageIDs.length &&
-            output.pages.every((page) => {
+            publication.pages.every((page) => {
               const current = pages.find((candidate) => candidate.id === page.id);
               return (
                 current &&
@@ -1123,7 +1127,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             })
           ) {
             checksSkipped++;
-            return { round: inputData.round + 1, issues: [], output };
+            return { round: inputData.round + 1, issues: [], output, publication };
           }
           if (providerRequests?.remaining === 0)
             return {
@@ -1132,6 +1136,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                 "The draft remains unpublished because its independent page check needs another admitted provider request",
               ],
               output,
+              publication,
             };
           const finalCheck = inputData.round > 0;
           const review = await timed("check", () =>
@@ -1144,7 +1149,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                 ...(language ? { language } : {}),
                 currentPages: ownPages(),
                 otherPages: otherPages(),
-                draft: output,
+                draft: publication,
                 ...(finalCheck ? { previousIssues: inputData.issues } : {}),
                 // Only the files the draft cites; readSource covers anything else it must verify.
                 sources: promptSources(
@@ -1161,6 +1166,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             issues: [...issues, ...review.issues],
             advisory: review.advisory ?? [],
             output,
+            publication,
           };
         }),
     });

@@ -1,14 +1,242 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { generateWiki } from "../../apps/factory/src/knowledge/generation-agent";
 import {
+  WikiHumanEditConflict,
   WikiSourceEvidenceError,
   WikiTopicPlanError,
   WikiTopicQualityError,
 } from "../../apps/factory/src/knowledge/generation-failure";
+import { WikiPublicationConflict } from "../../apps/factory/src/knowledge/publication";
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
+import type { createDatabase } from "../../packages/db/src/client";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
+
+test.each(["version", "revision", "state"] as const)(
+  "offline Wiki publication wiring keeps baselines private and fences changed %s",
+  async (drift) => {
+    const projectID = crypto.randomUUID();
+    const userID = crypto.randomUUID();
+    const generationID = crypto.randomUUID();
+    const commit = "3e221e212b256976b9835629693c2a07b4c9396e";
+    const note = "Human handover: arrange the review with the release team.";
+    const base = "Old generated overview.";
+    const row = {
+      id: crypto.randomUUID(),
+      slug: "overview",
+      title: "Overview",
+      body: `${base}\n\n${note}`,
+      generatedBody: base,
+      version: 3,
+      revisionId: String(crypto.randomUUID()),
+      parentId: null,
+      state: "active",
+      citations: [{ path: "README.md", commitSha: "a".repeat(40) }],
+    };
+    const inline = {
+      ...row,
+      id: crypto.randomUUID(),
+      slug: "guide",
+      title: "Guide",
+      body: "The color is green.",
+      generatedBody: "The color is blue.",
+    };
+    const rows = [row, inline];
+    const revisions: unknown[][] = [];
+    let pageWrites = 0;
+    let pageCount = 0;
+    let state = "pending";
+    let calls = 0;
+    const environment = {
+      FACTORY_FORGEJO_API_URL: "https://forge.invalid/api/v1/",
+      FACTORY_FORGEJO_PUBLIC_URL: "https://forge.invalid",
+      FACTORY_FORGEJO_OWNER: "owned",
+      FACTORY_FORGEJO_TOKEN: "offline-not-a-credential",
+      FACTORY_MODEL_BASE_URL: "https://provider.invalid/v1",
+      FACTORY_MODEL_API_KEY: "offline-not-a-credential",
+      FACTORY_PLANNING_MODEL_BASE_URL: "https://provider.invalid/v1",
+      FACTORY_PLANNING_MODEL_API_KEY: "offline-not-a-credential",
+      FACTORY_PROJECT_AGENT_MODEL: "controlled-wiki",
+      FACTORY_AGENT_MODEL_ID: "controlled-wiki",
+      FACTORY_MODEL_PROVIDER: "openai",
+      FACTORY_PLANNING_MODEL_PROVIDER: "openai",
+      FACTORY_AUTH_SECRET: "offline-wiki-wiring-fixture-signing-secret",
+    };
+    const before = Object.fromEntries(
+      Object.keys(environment).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, environment);
+    const fetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network admitted"));
+    // An in-memory transaction double, not a SQL connection or interpreter.
+    const sql = async (parts: TemplateStringsArray, ...values: unknown[]) => {
+      const text = parts.join("?").replace(/\s+/g, " ").trim();
+      if (text.startsWith('SELECT id FROM auth."user"')) return [{ id: userID }];
+      if (text.includes("FROM factory.account_access"))
+        return [{ disabledAt: null, directoryDisabledAt: null }];
+      if (text.includes("FROM factory.project_membership")) return [{ manageProject: false }];
+      if (text.includes("FROM factory.administrator")) return [];
+      if (text.startsWith("SELECT pg_advisory_xact_lock")) return [];
+      if (
+        [
+          "factory.model_role_connection",
+          "factory.model_defaults",
+          "factory.project_model_settings",
+          "factory.personal_model_settings",
+          "factory.usage_operation",
+        ].some((table) => text.includes(`FROM ${table}`))
+      )
+        return [];
+      if (text.includes("FROM factory.project WHERE"))
+        return [
+          {
+            id: projectID,
+            name: "Overview",
+            repositoryURL: "https://forge.invalid/owned/wiki",
+            defaultBranch: "main",
+          },
+        ];
+      if (text.startsWith("UPDATE factory.knowledge_generation SET state = 'running'")) {
+        state = "running";
+        return [{ projectID, commitSha: commit, userID, modelId: "controlled-wiki" }];
+      }
+      if (text.startsWith("UPDATE factory.knowledge_generation SET state = 'failed'")) {
+        state = "failed";
+        throw new Error(`Unexpected generation failure: ${String(values[0])}`);
+      }
+      if (text.startsWith("UPDATE factory.knowledge_generation SET page_count")) {
+        pageCount += Number(values[0]);
+        if (values[2]) state = "succeeded";
+        return [];
+      }
+      if (text.startsWith("UPDATE factory.knowledge_generation")) return [];
+      if (text.startsWith("SELECT COALESCE(current.page_count"))
+        return [{ pageCount, previousState: null, previousCount: null, previousCommit: null }];
+      if (text.startsWith("SELECT page.id FROM factory.knowledge_page"))
+        return pageCount ? [{ id: row.id }] : [];
+      if (text.includes("FROM factory.knowledge_generation")) {
+        if (text.includes('AS "connectionID"')) return [{ connectionID: null, version: null }];
+        if (text.includes("state='pending'")) return [];
+        if (text.includes("state='succeeded'")) return [];
+        return [{ id: generationID }];
+      }
+      if (text.startsWith("SELECT COALESCE(MAX(ordinal)"))
+        return [{ ordinal: revisions.length + 4 }];
+      if (text.startsWith("INSERT INTO factory.knowledge_revision")) {
+        revisions.push(values);
+        return [];
+      }
+      if (text.startsWith("UPDATE factory.knowledge_page SET title")) {
+        pageWrites++;
+        const saved = fixtureValue(
+          rows.find((page) => page.id === values[7]),
+          "updated page",
+        );
+        saved.title = String(values[0]);
+        saved.version += Number(values[1]);
+        saved.revisionId = String(values[2]);
+        saved.body = String(values[3]);
+        saved.generatedBody = String(values[4]);
+        return [];
+      }
+      if (text.includes("FROM factory.knowledge_page"))
+        return rows.map(({ generatedBody, ...page }) =>
+          text.includes('generated_body AS "generatedBody"')
+            ? { ...page, generatedBody }
+            : { ...page },
+        );
+      throw new Error(`Unhandled offline statement: ${text}`);
+    };
+    const client = Object.assign(sql, {
+      begin: (work: (transaction: typeof sql) => unknown) => work(sql),
+    });
+    const database = { client } as unknown as ReturnType<typeof createDatabase>;
+    const wiki = createKnowledgeController(
+      database,
+      {
+        getDefaultBranch: async () => ({ name: "main", headSha: commit }),
+        listFiles: async () => [{ path: "README.md", sha: "b".repeat(40), size: 20 }],
+        getFileInfo: async () => ({
+          sha: "b".repeat(40),
+          content: "# Project\n\nCurrent guidance.",
+        }),
+      },
+      async (input) => {
+        calls++;
+        expect(input.pages).toHaveLength(2);
+        for (const page of input.pages) expect(page).not.toHaveProperty("generatedBody");
+        const prepare = fixtureValue(input.preparePublication, "publication preparation");
+        const publish = fixtureValue(input.publish, "checked publication");
+        const output = (body: string, page = row) => ({
+          pages: [
+            {
+              id: page.id,
+              slug: page.slug,
+              title: page.title,
+              body,
+              parentSlug: null,
+              sources: ["README.md"],
+            },
+          ],
+        });
+        expect(() => prepare(output("The color is red.", inline))).toThrow(WikiHumanEditConflict);
+        if (calls === 1) {
+          const first = output("Current generated overview.");
+          const checked = prepare(first);
+          expect(checked.pages[0]?.body).toBe(`Current generated overview.\n\n${note}`);
+          const published = await publish(first);
+          for (const page of published) expect(page).not.toHaveProperty("generatedBody");
+          expect(published.find((page) => page.id === row.id)?.body).toBe(checked.pages[0]?.body);
+          expect(row.generatedBody).toBe("Current generated overview.");
+          expect(revisions[0]?.[4]).toBe(checked.pages[0]?.body);
+          expect(revisions[0]?.[5]).toBe("Current generated overview.");
+          const next = output("A later generated overview.");
+          expect(prepare(next).pages[0]?.body).toBe(`A later generated overview.\n\n${note}`);
+          // The private baseline refreshed after progressive publication, but a
+          // subsequent human edit must invalidate that checked snapshot, not rebase it.
+          if (drift === "state") inline.state = "archived";
+          else {
+            row.body += "\n\nA concurrent human note.";
+            if (drift === "version") row.version++;
+            else row.revisionId = crypto.randomUUID();
+          }
+          await expect(publish(next)).rejects.toThrow(WikiPublicationConflict);
+          expect(pageWrites).toBe(1);
+          throw new WikiPublicationConflict("Retry the changed snapshot");
+        }
+        expect(calls).toBe(2);
+        expect(input.completedPageIDs).toEqual([row.id]);
+        if (drift === "state")
+          expect(input.pages.find((page) => page.id === inline.id)?.state).toBe("archived");
+        else
+          expect(input.pages.find((page) => page.id === row.id)?.body).toContain(
+            "A concurrent human note.",
+          );
+        return { pages: [] };
+      },
+    );
+    try {
+      await wiki.recover();
+      await wiki.settle();
+      expect(calls).toBe(2);
+      expect(state).toBe("succeeded");
+      expect(pageWrites).toBe(1);
+      expect(row.generatedBody).toBe("Current generated overview.");
+      expect(row.body).toBe(
+        `Current generated overview.\n\n${note}${drift === "state" ? "" : "\n\nA concurrent human note."}`,
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      await wiki.close();
+      fetch.mockRestore();
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+  10_000,
+);
 
 test.each(["README", "README.md"])(
   "extensionless README reaches the real checked Wiki bootstrap without inventing a source path: %s",

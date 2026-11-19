@@ -9,6 +9,34 @@ import { WikiHumanEditConflict } from "./generation-failure";
 
 export class WikiPublicationConflict extends Error {}
 
+export type WikiPublicationSnapshot = WikiPageSnapshot & { generatedBody: string };
+
+function mergePublicationPage(
+  previous: Pick<WikiPublicationSnapshot, "body" | "generatedBody"> | undefined,
+  body: string,
+) {
+  const merged = previous
+    ? mergeGeneratedDocument(previous.generatedBody, previous.body, body)
+    : { body, generatedBody: body, conflict: false };
+  if (merged.conflict) throw new WikiHumanEditConflict();
+  return merged;
+}
+
+export function prepareWikiPublication(
+  pages: readonly WikiPublicationSnapshot[],
+  output: WikiGenerationOutput,
+): WikiGenerationOutput {
+  return {
+    pages: output.pages.map((page) => ({
+      ...page,
+      body: mergePublicationPage(
+        pages.find((current) => current.id === page.id),
+        page.body,
+      ).body,
+    })),
+  };
+}
+
 export async function publishWikiPackage(
   database: ReturnType<typeof createDatabase>,
   input: {
@@ -72,10 +100,7 @@ export async function publishWikiPackage(
     for (const generated of input.output.pages) {
       const page = input.pages.find((page) => page.id === generated.id);
       const previous = locked.find((page) => page.id === generated.id);
-      const merged = previous
-        ? mergeGeneratedDocument(previous.generatedBody, previous.body, generated.body)
-        : { body: generated.body, generatedBody: generated.body, conflict: false };
-      if (merged.conflict) throw new WikiHumanEditConflict();
+      const merged = mergePublicationPage(previous, generated.body);
       if (page && page.title === generated.title && page.body === merged.body) continue;
       const pageID = page?.id ?? identity(generated.slug),
         revisionID = crypto.randomUUID();
@@ -102,8 +127,8 @@ export async function publishWikiPackage(
       completed_at=CASE WHEN ${input.complete} THEN now() ELSE completed_at END
       WHERE id=${input.generationID} AND attempt_id=${input.attemptID} AND state='running'`;
     return Array.from(
-      await transaction<WikiPageSnapshot[]>`
-      SELECT id,slug,title,current_body AS body,version::integer AS version,
+      await transaction<WikiPublicationSnapshot[]>`
+      SELECT id,slug,title,current_body AS body,generated_body AS "generatedBody",version::integer AS version,
         current_revision_id AS "revisionId",parent_id AS "parentId",state,citations
       FROM factory.knowledge_page WHERE project_id=${input.projectID} ORDER BY sort_order,id
     `,

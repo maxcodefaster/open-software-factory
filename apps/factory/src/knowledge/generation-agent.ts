@@ -17,6 +17,8 @@ export type WikiGenerationInput = {
   changedPaths: string[];
   sources: Array<{ path: string; content: string }>;
   readFiles(paths: string[]): Promise<Array<{ path: string; content: string }>>;
+  // A publisher that merges human edits supplies the same pure projection for checking.
+  preparePublication?(output: WikiGenerationOutput): WikiGenerationOutput;
   publish?(output: WikiGenerationOutput): Promise<WikiPageSnapshot[]>;
   providerRequests?: { remaining: number };
   authorize?(): Promise<void>;
