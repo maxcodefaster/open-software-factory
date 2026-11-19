@@ -4,6 +4,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "no
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import upstream from "../../upstream.json";
 import type { Output, RunOptions } from "../owned-client-process";
+import { matchesRestoreSourceContract } from "./restore-source-contract";
 
 export const images: Record<string, string> = {
   postgres:
@@ -17,7 +18,8 @@ export const images: Record<string, string> = {
 };
 // Reviewed native source profiles, not a caller-supplied revision allowlist. Every archive
 // must satisfy the current lossless snapshot format. Managed-TLS profiles retain their CA.
-// Chart and application commits are independent; only the explicitly reviewed pairs qualify.
+// Historical exact pairs remain supported without Git. Other exact commits must independently
+// match the pinned reviewed chart/application content through read-only local object inspection.
 // The complete source identity must still match the independent witness manifest below.
 export const supportedSourceManifests = [
   {
@@ -248,7 +250,7 @@ function tableWitnesses(value: Record<string, Digest>, postgres = false) {
   }
 }
 
-/** Reads only explicit private input metadata and compressed-byte hashes. No daemon or writes. */
+/** Reads private inputs and, for content profiles, local Git objects. No daemon or writes. */
 export function loadFixture(
   path: string,
   owner: string,
@@ -272,11 +274,19 @@ export async function loadFixture(
     f.source,
     "chartRevision applicationRevision namespace namespaceUID release factoryOrigin forgejoOrigin storageClass",
   );
-  const sourceManifest = supportedSourceManifests.find(
-    (entry) =>
-      entry.chartRevision === f.source.chartRevision &&
-      entry.applicationRevision === f.source.applicationRevision,
-  );
+  const sourceManifest =
+    supportedSourceManifests.find(
+      (entry) =>
+        entry.chartRevision === f.source.chartRevision &&
+        entry.applicationRevision === f.source.applicationRevision,
+    ) ??
+    ((await matchesRestoreSourceContract(
+      resolve(import.meta.dir, "../.."),
+      f.source.chartRevision,
+      f.source.applicationRevision,
+    ))
+      ? { requiredStateFiles: ["ingress-tls/identity.json"] }
+      : undefined);
   requireThat(
     sourceManifest &&
       /^[a-f0-9-]{36}$/.test(f.source.namespaceUID) &&

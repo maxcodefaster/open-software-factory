@@ -726,7 +726,7 @@ where they carry configuration. The top-level `fixture.json` fields are:
 | Field | Required value |
 | --- | --- |
 | `schema`, `owner` | `1`, and a fresh 32-character lowercase hexadecimal owner, also supplied on the CLI |
-| `source` | `chartRevision: "39d7969bb3acd93d0bc497a5748cce08ae435091"`, exact 40-character `applicationRevision`, original `namespace`, `namespaceUID`, `release`, HTTPS `factoryOrigin`, HTTPS `forgejoOrigin`, and `storageClass` |
+| `source` | Original exact 40-character lowercase commit SHAs for `chartRevision` and `applicationRevision`, admitted by the source profiles below; original `namespace`, `namespaceUID`, `release`, HTTPS `factoryOrigin`, HTTPS `forgejoOrigin`, and `storageClass` |
 | `set` | Explicit backup timestamp, such as `20261117T100209Z` |
 | `privateRoot` | Absolute canonical path to the directory above; `fixture.json` must be its direct child |
 | `evidenceDirectory` | New absolute directory, outside private inputs and every retained path; its parent must already exist and not be group/world writable |
@@ -734,6 +734,62 @@ where they carry configuration. The top-level `fixture.json` fields are:
 | `retained` | Nonempty `paths` denylist and explicit `containers`, `networks` and `volumes` inventory denylists for the retained installation; observed empty Docker inventories are allowed |
 | `images` | Exact copy of the script's exported `images` map, not tags substituted by the operator |
 | `limits` | Positive per-container `memoryMiB`, `cpus`, `pids`, `tmpfsMiB`; integer `commandTimeoutSeconds`, `requiredDiskBytes` and independently observed `availableDiskBytes` |
+
+The historical exact chart/application pairs in `supportedSourceManifests` remain supported.
+Other pairs qualify only when read-only local Git object inspection proves that each revision's
+respective contract matches reviewed baseline `0a6800a0871bf9c8bc9f09f7c19e7160deacb0c1`.
+Chart and application revisions may differ. The tool preserves both original SHAs in the fixture,
+independent witnesses, plan, journal and receipt. Do not relabel backups with the baseline SHA.
+Content-profile admission always requires the original, nonempty, ordinary, independently witnessed
+`ingress-tls/identity.json`, not an excluded credential or symlink.
+
+`scripts/kubernetes/restore-source-contract.ts` pins these SHA-256 digests:
+
+| Contract | Baseline SHA-256 |
+| --- | --- |
+| Chart | `66ee75748e01f963fa94bb73dc470cd2149a29a5b2d2af42576a0c4f99abfc18` |
+| Application | `a3faa3161c75baf61f8b57d4f12e31dda938cf607871eadae84bf4d72abbf981` |
+
+The chart contract covers every committed file under `deploy/helm/factory/` except the exact
+`README.md` path. This includes Helm preflight hooks, values and all backup scripts. There are no
+other chart test-only files excluded from this baseline. New files are hashed, even with test-like
+names. The application contract covers every other committed file by default. This includes
+`apps/`, `packages/`, `services/`, non-chart `deploy/`, `scripts/`, templates, patches, assets,
+`package.json`, `bun.lock`, `upstream.json`, `mise.toml`, build configuration and other tests.
+
+The only application exclusions are these exact paths:
+
+- Human docs: `AGENTS.md`, `README.md`, `SECURITY.md`, `deploy/substrate/README.md`,
+  `scripts/runtime/README.md`, `services/substrate-control/README.md`,
+  `templates/release/README.md`, `templates/starter-app/README.md` and
+  `test/fixtures/runtime-project/README.md`.
+- Operator-invoked restore-only tools and their tests under `scripts/kubernetes/`:
+  `restore-check.ts`, `restore-check.test.ts`, `restore-rehearsal.ts`,
+  `restore-rehearsal.test.ts`, `restore-application-check.ts`,
+  `restore-application-check.test.ts`, `restore-zero-projects.ts`,
+  `restore-zero-projects.test.ts`, `restore-source-contract.ts` and
+  `restore-source-contract.test.ts`.
+
+These are not extension or directory globs. Runtime instructions such as
+`deploy/opencode-server/config/AGENTS.md`, public assets, shared process clients and unknown new
+paths stay hashed. An excluded path, when present, must be a mode-`100644` regular file. Adding any other
+file, deleting a hashed file, changing its bytes or executable/symlink mode changes its contract.
+
+For each contract, sort committed paths by UTF-8 byte order. Hash the UTF-8 prefix
+`factory-restore-source-contract-v1`, NUL, contract name `chart` or `application`, NUL, then one
+compact JSON array `[gitMode, path, rawBlobSHA256]` plus LF for each selected file. Git modes are
+six-character strings. Blob SHA-256 values hash raw committed bytes, not working files or Git's
+SHA-1 IDs. The baseline has 29 chart files and 2,177 application files.
+
+Only full lowercase SHA commit objects qualify. Branches, tags, abbreviated SHAs, revision
+expressions, missing commits/contract blobs, submodules, unreadable objects and contract mismatches refuse
+before evidence or destination creation. Git reads have a 15-second per-command timeout and
+64 MiB per-output bound; exceeding either also refuses. Reads disable replacement objects,
+optional locks, lazy fetching, inherited Git configuration overrides and transport by default.
+Git must support `--no-lazy-fetch`; older versions that reject it fail closed.
+No fetch, checkout, ancestry test, current-HEAD selection or caller-supplied digest is used.
+The historical exact pairs need no local Git objects. All archive, credential, independent
+witness, native-state and image-pin checks still apply to every admitted profile.
 
 Use the chart's exact PostgreSQL 16.14, Forgejo 17, Garage 2.3, OpenBao 2.7.1 and rclone 1.74.1
 digests. The tools image is the existing pinned Node 24 image in `upstream.json`; its built-in
