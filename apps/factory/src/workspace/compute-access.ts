@@ -22,8 +22,12 @@ export function createWorkspaceComputeAccess(
         return { projectID: access.projectID, changeID: access.changeID };
       });
     const access = await authorize();
-    const [attempt] = await database.client<{ id: string; state: string }[]>`SELECT id,state
-      FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} ORDER BY generation DESC LIMIT 1`;
+    const [attempt] = await database.client<
+      { id: string; state: string; computeWait: string | null }[]
+    >`SELECT attempt.id,attempt.state,waiting.reason AS "computeWait"
+      FROM factory.runtime_attempt attempt LEFT JOIN factory.runtime_compute_wait waiting
+        ON waiting.attempt_id=attempt.id
+      WHERE attempt.workspace_id=${workspaceID} ORDER BY attempt.generation DESC LIMIT 1`;
     if (expectedAttemptID && attempt?.id !== expectedAttemptID)
       throw new CommandError(
         "conflict",
@@ -38,7 +42,11 @@ export function createWorkspaceComputeAccess(
         "Start this Workspace explicitly before accessing compute",
       );
     if (closing()) throw new CommandError("unavailable", "Factory is stopping");
-    if (attempt.state === "paused" || attempt.state === "resuming") {
+    if (
+      attempt.state === "paused" ||
+      attempt.state === "resuming" ||
+      (attempt.state === "starting" && attempt.computeWait === "compute-capacity")
+    ) {
       // Resume changes compute state and still needs current development writer authority.
       await database.client.begin((sql) => workspaceWriteAuthorityIn(sql, workspaceID, userID));
       if (access.changeID) await runtime.startPersisted(access.changeID, userID);
@@ -49,6 +57,11 @@ export function createWorkspaceComputeAccess(
       if (closing())
         throw new CommandError("unavailable", "Factory is stopping. No operation was dispatched.");
       const observed = await runtime.get(attempt.id);
+      if (observed?.state === "starting" && observed.native?.state === "ACTOR_STATE_SUSPENDED")
+        throw new CommandError(
+          "unavailable",
+          "Compute startup is unconfirmed. No operation was dispatched; observe the existing startup before retrying.",
+        );
       if (
         !observed ||
         !["create-intended", "starting", "ready", "paused", "resuming"].includes(observed.state)

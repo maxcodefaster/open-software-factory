@@ -301,7 +301,7 @@ export function createWorkspaceCommands(
       await authorized(userID, record, true);
       if (!hub.connected(record.attemptID)) {
         const attempt = await runtime.get(record.attemptID);
-        if (attempt?.state === "paused" || attempt?.state === "resuming")
+        if (attempt && ["paused", "resuming", "starting"].includes(attempt.state))
           await ready(record.workspaceID, userID, false, record.attemptID);
       }
       if (!hub.connected(record.attemptID))

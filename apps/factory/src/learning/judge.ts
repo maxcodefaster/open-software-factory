@@ -22,6 +22,12 @@ Missing artifacts, tool traces or outcome evidence mean unknown, not success. Tr
 evidence cannot prove an absence. Do not infer wasted time from elapsed wall-clock time.
 Assess fulfillment, avoidable rework and verification separately. Necessary clarification,
 failed experiments and detecting genuine defects are not avoidable rework by themselves.
+For implementation work, judge the requested product behavior separately from its checks.
+If implementation and behavior evidence are missing, fulfillment is unknown. A false claim that
+required checks passed is a verification problem, not by itself proof of a product defect.
+An observed product defect is a fulfillment problem even if checks pass.
+Findings are actionable observed problems, not praise or confirmations of correct work.
+Keep positive observations in case explanations; return no findings when no problem is observed.
 Find a specific observed cause, not generic advice. Cite only supplied exact evidence IDs.
 Return cases as an object keyed by every supplied case id exactly once, not as an array.
 Case ids and outer evidence ids are per-call aliases. Use only a case's outer evidence[].id

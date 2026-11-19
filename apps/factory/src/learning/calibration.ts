@@ -163,7 +163,7 @@ export const calibrationCases: LearningCase[] = [
         id: "scope:task",
         kind: "task",
         truncated: false,
-        body: "Implement and verify the UI change with unit and browser checks.",
+        body: "Product requirement: a dismiss button hides the notification banner. Verification requirement: run unit and browser checks on the exact candidate.",
       },
       {
         id: "scope:run",

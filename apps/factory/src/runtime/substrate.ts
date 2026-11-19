@@ -524,7 +524,7 @@ export function createSubstrateExecution(
         await observeActorRPCIn(sql, attemptID, resumed, actor);
     }
     if (
-      verificationID &&
+      (verificationID || workspaceID) &&
       ["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"].includes(actor.status.state)
     )
       await sql`DELETE FROM factory.runtime_compute_wait waiting
@@ -665,6 +665,67 @@ export function createSubstrateExecution(
         "Current never-started exact-commit Verification is required for native continuation",
       );
   }
+  async function requireCapacityWorkspaceResumeIn(
+    sql: AgentTurnTransaction,
+    saved: Binding,
+    actor: NativeActor,
+    operation: ActorRPC,
+    userID: string,
+    waiting: boolean,
+  ) {
+    const origin = actorRPCOrigin(saved.checkpoint);
+    if (
+      !workspaceID ||
+      saved.deleting ||
+      saved.deleted ||
+      operation.action !== "resume" ||
+      !operation.attempted ||
+      operation.outcome ||
+      operation.stopID !== null ||
+      operation.originKey !== origin ||
+      !isDeepStrictEqual(operation.originCheckpoint, saved.checkpoint) ||
+      operation.actorUID !== saved.actorUID ||
+      actor.metadata.uid !== operation.actorUID ||
+      actor.metadata.version !== operation.nativeVersion ||
+      actor.status.state !== "ACTOR_STATE_SUSPENDED" ||
+      actor.status.workerAssignment ||
+      actor.sourceTag !== undefined ||
+      (await actorRPCIn(sql, attemptID, "suspend", origin))
+    )
+      throw new CommandError(
+        "unavailable",
+        "Native capacity continuation differs from its original unassigned Workspace",
+      );
+    if (saved.checkpoint)
+      requireDurableROOTFS(actor, saved, nativeSnapshot.parse(saved.checkpoint));
+    else if (actor.status.lastAssignedGeneration || actor.status.snapshots?.length)
+      throw new CommandError("unavailable", "Initial Workspace acquired an unrecorded checkpoint");
+    const [current] = await sql`SELECT attempt.id FROM factory.runtime_attempt attempt
+      WHERE attempt.id=${attemptID} AND attempt.workspace_id=${workspaceID}
+        AND attempt.project_id=${config.projectID} AND attempt.generation=${config.generation}
+        AND attempt.state='starting' AND attempt.stop_intended_at IS NULL
+        AND (${saved.checkpoint !== null} OR attempt.ready_at IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+          WHERE newer.workspace_id=attempt.workspace_id AND newer.generation>attempt.generation)
+        AND (NOT ${waiting} OR EXISTS(SELECT 1 FROM factory.runtime_compute_wait waiting
+          WHERE waiting.attempt_id=attempt.id AND waiting.reason='compute-capacity'))`;
+    if (!current)
+      throw new CommandError(
+        "unavailable",
+        "Recorded native Resume remains unconfirmed; its RPC was not repeated",
+      );
+    await substrateWorkspaceGrantIn(database, sql, workspaceID, userID, true);
+    if (sources) {
+      const [source] = await sql`SELECT workspace_id FROM factory.substrate_source
+        WHERE workspace_id=${workspaceID} AND actor_uid=${operation.actorUID}
+          AND owner='actor' AND writable AND checkpoint_id IS NULL`;
+      if (!source)
+        throw new CommandError(
+          "unavailable",
+          "Capacity continuation requires its unchanged original Source owner",
+        );
+    }
+  }
   async function resumeActorIn(
     sql: Database["client"],
     saved: Binding,
@@ -754,20 +815,17 @@ export function createSubstrateExecution(
       before,
       stopID,
     );
-    if (operation.attempted && !verificationID)
-      throw new CommandError(
-        "unavailable",
-        "Recorded native Resume remains unconfirmed; its RPC was not repeated",
-      );
     if (operation.attempted) {
       if (!userID || stopID)
-        throw new CommandError("conflict", "Current Verification authority is required");
+        throw new CommandError("conflict", "Current native execution authority is required");
       await sql.begin((tx) =>
-        requireInitialVerificationResumeIn(tx, saved, before, operation, userID),
+        workspaceID
+          ? requireCapacityWorkspaceResumeIn(tx, saved, before, operation, userID, true)
+          : requireInitialVerificationResumeIn(tx, saved, before, operation, userID),
       );
     }
     if (userID) await currentGrant(sql, userID, true);
-    if (workspaceID) await sources?.resume(workspaceID, attemptID, sql);
+    if (workspaceID && !operation.attempted) await sources?.resume(workspaceID, attemptID, sql);
     await egress();
     if (signal?.aborted) return before;
     if (userID) await currentGrant(sql, userID, true);
@@ -784,11 +842,18 @@ export function createSubstrateExecution(
       }
       if (operation.attempted) {
         if (!userID)
-          throw new CommandError("conflict", "Current Verification authority is required");
+          throw new CommandError("conflict", "Current native execution authority is required");
         // The official workflow can reject worker assignment without advancing
-        // the Actor. Re-enter only that original, never-assigned Verification
-        // under its current exact-commit grant. Keep the first dispatch fact.
-        await requireInitialVerificationResumeIn(tx, saved, before, operation, userID);
+        // the Actor. Continue only the unchanged allocation under current
+        // authority, keeping the first dispatch and Source transfer facts.
+        if (workspaceID) {
+          await requireCapacityWorkspaceResumeIn(tx, saved, before, operation, userID, true);
+          // A confirmed refusal permits one continuation, not retries after an
+          // unknown later reply. Only another confirmed capacity rejection
+          // below may publish a new wait for this same dispatch.
+          await tx`DELETE FROM factory.runtime_compute_wait
+            WHERE attempt_id=${attemptID} AND reason='compute-capacity'`;
+        } else await requireInitialVerificationResumeIn(tx, saved, before, operation, userID);
       } else await dispatchActorRPCIn(tx, attemptID, operation);
       await tx`UPDATE factory.runtime_attempt SET state='starting',failure=NULL,updated_at=now()
         WHERE id=${attemptID} AND stop_intended_at IS NULL`;
@@ -798,25 +863,56 @@ export function createSubstrateExecution(
       await call("ResumeActor", { actor: ref });
     } catch (cause) {
       if (
-        verificationID &&
+        (verificationID || workspaceID) &&
         userID &&
+        !stopID &&
         cause instanceof SubstrateRPCError &&
         cause.code === "ResourceExhausted"
       ) {
+        let waiting = false;
         try {
           const currentBinding = await binding(sql);
           const actor = await observe(sql, currentBinding);
           await sql.begin(async (tx) => {
-            const dispatched = await actorRPCIn(tx, attemptID, "resume", "initial");
+            const dispatched = await actorRPCIn(
+              tx,
+              attemptID,
+              "resume",
+              actorRPCOrigin(currentBinding.checkpoint),
+            );
             if (!dispatched) return;
-            await requireInitialVerificationResumeIn(tx, currentBinding, actor, dispatched, userID);
+            if (workspaceID)
+              await requireCapacityWorkspaceResumeIn(
+                tx,
+                currentBinding,
+                actor,
+                dispatched,
+                userID,
+                false,
+              );
+            else
+              await requireInitialVerificationResumeIn(
+                tx,
+                currentBinding,
+                actor,
+                dispatched,
+                userID,
+              );
             await tx`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
               VALUES(${attemptID},'compute-capacity') ON CONFLICT(attempt_id) DO NOTHING`;
+            const [hold] = await tx<{ reason: string }[]>`
+              SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`;
+            waiting = hold?.reason === "compute-capacity";
           });
         } catch {
           // A lost observation, newer candidate, callback or Stop cannot turn
           // the rejected call into success or overwrite its original failure.
         }
+        if (waiting && workspaceID)
+          throw new CommandError(
+            "unavailable",
+            "Waiting for execution capacity; no worker has room for this Workspace yet. Its original compute and files are retained.",
+          );
       }
       throw cause;
     }

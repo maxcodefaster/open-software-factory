@@ -343,6 +343,15 @@ dispatch, without clearing the original lifecycle facts or creating another Acto
 The capacity hint clears only after validated native progress. A suspended state
 alone never authorizes continuation of an already-started or superseded execution.
 
+Workspace startup and checkpoint Resume also retain confirmed capacity refusals.
+A deliberate Start or compute demand may continue only the same unassigned Actor,
+at its original dispatch version and exact durable checkpoint, under current writer
+authority. Canonical Source must still belong to that Actor; continuation does not
+repeat its handoff. The capacity marker permits one continuation and is consumed
+before the RPC. Another confirmed capacity refusal can restore it, but a lost reply
+cannot. Unknown suspended startup refuses commands without dispatching them.
+These checks do not clear historical unknown outcomes or replace native identities.
+
 Ticket bootstrap repository reads recheck the current commissioned writer and live
 execution lease. Isolated Verification reads use their exact-job provisioning grant,
 not a personal Developer Workspace grant, and reject a retargeted repository or

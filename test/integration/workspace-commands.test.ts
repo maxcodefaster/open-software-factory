@@ -153,7 +153,62 @@ test("command intent is exact, credential-free and never dispatches twice", asyn
   }
 }, 30000);
 
-test("command output demand resumes the exact paused compute without replaying the command", async () => {
+test.each(["paused", "starting"] as const)(
+  "command output demand resumes exact %s compute without replaying the command",
+  async (state) => {
+    const f = await commandFixture();
+    let resumes = 0;
+    const baseline = await f.runtime.get(f.attemptID);
+    const commands = createWorkspaceCommands(
+      f.database,
+      f.hub,
+      {
+        ...f.runtime,
+        start: async () => {
+          resumes++;
+          await f.database
+            .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
+          f.hub.connected = () => true;
+          return f.runtime.get(f.attemptID);
+        },
+        get: async () => {
+          const [current] = await f.database.client<{ state: string }[]>`
+          SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+          return baseline && current ? { ...baseline, state: current.state } : null;
+        },
+      },
+      "command-fixture-key",
+    );
+    try {
+      const id = crypto.randomUUID();
+      await commands.start(f.owner, {
+        requestID: id,
+        workspaceID: f.workspaceID,
+        command: "owned execution",
+        env: {},
+      });
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${f.attemptID}`;
+      if (state === "starting")
+        await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
+        VALUES(${f.attemptID},'compute-capacity')`;
+      f.hub.connected = () => false;
+      await commands.status(f.owner, id);
+      expect(resumes).toBe(0);
+      expect(
+        (await commands.read(f.owner, { commandID: id, stdout: 0, stderr: 0 })).outputAvailable,
+      ).toBe(true);
+      expect(resumes).toBe(1);
+      expect(f.starts()).toBe(1);
+    } finally {
+      await commands.close();
+      await f.dispose();
+    }
+  },
+  30000,
+);
+
+test("command demand continues a capacity-waiting startup before admitting its command", async () => {
   const f = await commandFixture();
   let resumes = 0;
   const commands = createWorkspaceCommands(
@@ -168,27 +223,81 @@ test("command output demand resumes the exact paused compute without replaying t
         f.hub.connected = () => true;
         return f.runtime.get(f.attemptID);
       },
+      get: async (id) => {
+        if (!resumes)
+          throw Error("Capacity-waiting startup was polled without its authorized continuation");
+        return f.runtime.get(id);
+      },
     },
     "command-fixture-key",
   );
   try {
-    const id = crypto.randomUUID();
+    await eventually(
+      () => f.database.client`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`,
+      (rows) => rows[0]?.["state"] === "ready",
+      "Initial controlled Connector readiness was not settled",
+    );
+    f.hub.ready = () => resumes > 0;
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${f.attemptID}`;
+    await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
+      VALUES(${f.attemptID},'compute-capacity')`;
+    f.hub.connected = () => false;
     await commands.start(f.owner, {
-      requestID: id,
+      requestID: crypto.randomUUID(),
       workspaceID: f.workspaceID,
       command: "owned execution",
       env: {},
     });
-    await f.database
-      .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
-    f.hub.connected = () => false;
-    await commands.status(f.owner, id);
-    expect(resumes).toBe(0);
-    expect(
-      (await commands.read(f.owner, { commandID: id, stdout: 0, stderr: 0 })).outputAvailable,
-    ).toBe(true);
     expect(resumes).toBe(1);
     expect(f.starts()).toBe(1);
+  } finally {
+    await commands.close();
+    await f.dispose();
+  }
+}, 30000);
+
+test("unknown suspended startup refuses demand promptly without admitting a command", async () => {
+  const f = await commandFixture();
+  const commands = createWorkspaceCommands(
+    f.database,
+    f.hub,
+    {
+      ...f.runtime,
+      get: async (id) => {
+        const observed = await f.runtime.get(id);
+        return observed
+          ? {
+              ...observed,
+              state: "starting",
+              native: {
+                engine: "substrate" as const,
+                state: "ACTOR_STATE_SUSPENDED",
+                coldRestart: true as const,
+                portable: false as const,
+                sourceHandoff: "pending" as const,
+              },
+            }
+          : observed;
+      },
+    },
+    "command-fixture-key",
+  );
+  const requestID = crypto.randomUUID();
+  try {
+    f.hub.ready = () => false;
+    await expect(
+      commands.start(f.owner, {
+        requestID,
+        workspaceID: f.workspaceID,
+        command: "must not execute",
+        env: {},
+      }),
+    ).rejects.toThrow("Compute startup is unconfirmed. No operation was dispatched");
+    expect(f.starts()).toBe(0);
+    expect([
+      ...(await f.database.client`SELECT id FROM factory.workspace_command WHERE id=${requestID}`),
+    ]).toEqual([]);
   } finally {
     await commands.close();
     await f.dispose();
