@@ -23,6 +23,7 @@ import { createLearningAutomation } from "./automation";
 import { calibrationCases, calibrationPassed } from "./calibration";
 import { reviewWork, workReviewInstructions } from "./judge";
 import { type PriorProposal, priorProposalEvidence } from "./prior-proposals";
+import { learningRejectionReason } from "./rejection-reason";
 import type { replayPlanning } from "./replay";
 import { pendingReviewRequests, type ReviewRequest } from "./requests";
 import { collectLearningCases, type LearningSourceCursor } from "./sources";
@@ -282,7 +283,10 @@ export function createLearningWorker(
       await database.client`UPDATE factory.learning_review SET state=${state},
         reason=${
           rejected
-            ? "The model's review did not match the evidence it was given, so it was discarded. It will not be repeated automatically."
+            ? learningRejectionReason(
+                cause,
+                "The model's review did not match the evidence it was given, so it was discarded. It will not be repeated automatically.",
+              )
             : state === "failed"
               ? "The model rejected this review."
               : "Review outcome is unconfirmed. It will not be repeated automatically."

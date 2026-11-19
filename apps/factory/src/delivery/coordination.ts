@@ -55,11 +55,18 @@ export function createDeliveryCoordination(database: ReturnType<typeof createDat
       });
     },
     async release(changeID: string) {
-      await database.client`UPDATE factory.project_delivery_queue SET change_id=NULL,updated_at=now()
-        WHERE change_id=${changeID} AND NOT EXISTS(
-          SELECT 1 FROM factory.merge_operation merge LEFT JOIN factory.current_promotion promotion ON promotion.change_id=merge.change_id
-          WHERE merge.change_id=${changeID} AND merge.state<>'failed'
-            AND (merge.state<>'succeeded' OR promotion.state IS NULL OR promotion.state<>'succeeded'))`;
+      await database.client.begin(async (sql) => {
+        const [slot] = await sql`SELECT project_id FROM factory.project_delivery_queue
+          WHERE change_id=${changeID} FOR UPDATE`;
+        if (!slot) return;
+        // A concurrent approval can persist its merge intent while this waits.
+        // Check that intent in a fresh statement after acquiring the slot.
+        await sql`UPDATE factory.project_delivery_queue SET change_id=NULL,updated_at=now()
+          WHERE change_id=${changeID} AND NOT EXISTS(
+            SELECT 1 FROM factory.merge_operation merge LEFT JOIN factory.current_promotion promotion ON promotion.change_id=merge.change_id
+            WHERE merge.change_id=${changeID} AND merge.state<>'failed'
+              AND (merge.state<>'succeeded' OR promotion.state IS NULL OR promotion.state<>'succeeded'))`;
+      });
     },
     async activePolicy(projectID: string) {
       const [policy] = await database.client<

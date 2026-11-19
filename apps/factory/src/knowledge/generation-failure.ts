@@ -56,7 +56,7 @@ export function wikiGenerationFailureMessage(cause: unknown, fallback: string) {
   if (cause instanceof WikiTopicCoverageError)
     return "The Wiki plan did not cover essential reader guidance. Saved pages are retained; retry the update.";
   if (cause instanceof WikiTopicPlanError)
-    return "The Wiki topic plan references unavailable source or pages. Saved pages are retained; retry the update.";
+    return "The Wiki topic plan contains invalid or repeated topics or references. Saved pages are retained; retry the update.";
   if (cause instanceof WikiTopicQualityError)
     return "A Wiki draft did not pass source and quality checks. Saved pages are retained; retry the update.";
   if (cause instanceof WikiSourceEvidenceError)

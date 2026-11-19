@@ -102,6 +102,119 @@ async function retainedPR(f: Fixture) {
     FROM factory.change WHERE id=${f.changeID}`;
 }
 
+test.each(["released", "claimed-by-another-change"] as const)(
+  "Delivery slot release during manual approval: %s",
+  async (interleaving) => {
+    const f = await candidateReviewFixture();
+    let controller: ReturnType<typeof createDeliveryController> | undefined;
+    let other: Awaited<ReturnType<typeof additionalTicket>> | undefined;
+    try {
+      await passingReview(f);
+      await retainedPR(f);
+      if (interleaving === "claimed-by-another-change") other = await additionalTicket(f, true);
+      const queue = createDeliveryCoordination(f.database);
+      let released = false;
+      const forge = {
+        getPullRequest: async () => {
+          if (!released) {
+            released = true;
+            await queue.release(f.changeID);
+            if (other) expect(await queue.claim(f.projectID, other.changeID)).toBe(true);
+          }
+          return { number: 1, headSha: f.commit, merged: false };
+        },
+        getDefaultBranch: async () => ({ headSha: "a".repeat(40) }),
+        mergeFastForward: async () => ({ headSha: f.commit }),
+      } as unknown as ReturnType<typeof createForgejoClient>;
+      controller = createDeliveryController(
+        f.database,
+        {
+          startVerification: async () => null,
+          startStagingReplacement: async () => null,
+          stop: async () => null,
+        },
+        { prompt: async () => null },
+        async () => {},
+        { client: forge, owner: "owned" },
+        {
+          reconcile: async () => {
+            throw new Error("Unchanged main needs no integration");
+          },
+        },
+      );
+      if (other) {
+        await expect(controller.approve(f.changeID, f.userID)).rejects.toThrow(
+          "This candidate no longer owns the Project Delivery slot.",
+        );
+        expect(
+          await f.database
+            .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
+        ).toHaveLength(0);
+        const [slot] = await f.database.client<{ changeID: string }[]>`
+          SELECT change_id AS "changeID" FROM factory.project_delivery_queue
+          WHERE project_id=${f.projectID}`;
+        expect(slot?.changeID).toBe(other.changeID);
+      } else {
+        await controller.approve(f.changeID, f.userID);
+        expect(
+          await f.database.client`SELECT id FROM factory.delivery_approval
+            WHERE change_id=${f.changeID} AND candidate_review_id=${f.reviewID}
+              AND verification_id=${f.verificationID} AND commit_sha=${f.commit}`,
+        ).toHaveLength(1);
+        expect(
+          await f.database
+            .client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+        ).toHaveLength(1);
+      }
+      expect(released).toBe(true);
+    } finally {
+      await controller?.close();
+      await other?.dispose();
+      await f.dispose();
+    }
+  },
+  60_000,
+);
+
+test("Delivery slot release rechecks a merge intent after waiting for its row lock", async () => {
+  const f = await candidateReviewFixture();
+  let release: Promise<void> | undefined;
+  try {
+    await passingReview(f);
+    const queue = createDeliveryCoordination(f.database);
+    expect(await queue.claim(f.projectID, f.changeID)).toBe(true);
+    await f.database.client.begin(async (sql) => {
+      await sql`SELECT project_id FROM factory.project_delivery_queue
+        WHERE project_id=${f.projectID} FOR UPDATE`;
+      release = queue.release(f.changeID);
+      await eventually(
+        () => f.database.client<{ waiting: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+            WHERE datname=current_database() AND pid<>pg_backend_pid()
+              AND wait_event_type='Lock' AND query LIKE '%factory.project_delivery_queue%') AS waiting`,
+        (rows) => rows[0]?.waiting === true,
+        "The original release did not reach the locked Delivery slot",
+      );
+      const approvalID = crypto.randomUUID();
+      await sql`INSERT INTO factory.delivery_approval(
+        id,change_id,verification_id,commit_sha,approved_by,candidate_review_id)
+        VALUES(${approvalID},${f.changeID},${f.verificationID},${f.commit},${f.userID},${f.reviewID})`;
+      await sql`INSERT INTO factory.merge_operation(
+        id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,idempotency_key)
+        VALUES(${crypto.randomUUID()},${f.changeID},${approvalID},1,${"a".repeat(40)},${f.commit},
+          ${`owned-release-race:${f.changeID}`})`;
+    });
+    await release;
+    const [slot] = await f.database.client<{ changeID: string | null }[]>`
+      SELECT change_id AS "changeID" FROM factory.project_delivery_queue
+      WHERE project_id=${f.projectID}`;
+    expect(slot?.changeID).toBe(f.changeID);
+  } finally {
+    await release?.catch(() => {});
+    await f.dispose();
+  }
+}, 60_000);
+
 test.each(["open", "implemented"] as const)(
   "human feedback %s blocks integration and merge, not submitted checks or independent review",
   async (feedbackState) => {

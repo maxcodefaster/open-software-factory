@@ -48,6 +48,17 @@ test("Wiki diagnostics distinguish known failures without exposing model prose o
     expect(wikiGenerationFailureMessage(cause, fallback)).not.toContain("private");
 });
 
+test("a repeated Wiki topic is not misreported as unavailable source or pages", () => {
+  const diagnostic = wikiGenerationFailureMessage(
+    new WikiTopicPlanError("Repeated topic slug: private-topic. Keep topic slugs unique."),
+    "Existing safe failure",
+  );
+  expect(diagnostic).toBe(
+    "The Wiki topic plan contains invalid or repeated topics or references. Saved pages are retained; retry the update.",
+  );
+  expect(diagnostic).not.toContain("private-topic");
+});
+
 test("a Wiki correction receives only a recognized, complete and bounded rejected structured result", () => {
   const value = {
     findings: [{ claim: "x".repeat(1201), paths: ["src/app.ts"] }],

@@ -1167,12 +1167,13 @@ export function createDeliveryController(
           : null;
       await database.client.begin(async (transaction) => {
         await projectDevelopmentAuthorityIn(transaction, userID, change.projectID);
-        // Read scope only after the lock wait. A joined statement's earlier
-        // snapshot cannot authorize Requirements committed while it waited.
-        await transaction`SELECT change.id FROM factory.change change
-          JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-          WHERE change.id=${changeID} FOR UPDATE OF change,ticket`;
         if (integration) {
+          // A waiting reconciler may release our first claim during Forge reads.
+          // Reclaim only a vacant slot, then keep it locked through admission.
+          // Queue-before-Change matches claim's foreign-key lock order.
+          await transaction`UPDATE factory.project_delivery_queue
+            SET change_id=${changeID},updated_at=now()
+            WHERE project_id=${change.projectID} AND change_id IS NULL`;
           const [slot] = await transaction`SELECT project_id FROM factory.project_delivery_queue
             WHERE project_id=${change.projectID} AND change_id=${changeID} FOR SHARE`;
           if (!slot)
@@ -1181,6 +1182,11 @@ export function createDeliveryController(
               "This candidate no longer owns the Project Delivery slot.",
             );
         }
+        // Read scope only after the lock wait. A joined statement's earlier
+        // snapshot cannot authorize Requirements committed while it waited.
+        await transaction`SELECT change.id FROM factory.change change
+          JOIN factory.ticket ticket ON ticket.id=change.ticket_id
+          WHERE change.id=${changeID} FOR UPDATE OF change,ticket`;
         const delegated = monitoringIncidentID
           ? await monitoringChangeAuthorityIn(database, transaction, changeID, monitoringIncidentID)
           : null;

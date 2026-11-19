@@ -366,7 +366,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   async function ask<T extends z.ZodType>(
     id: string,
     schema: T,
-    prompt: unknown,
+    prompt: Record<string, unknown> | (() => Record<string, unknown>),
     sources: ReturnType<typeof sourceScope>,
     task: string,
     validate?: (value: z.output<T>) => void | Promise<void>,
@@ -410,10 +410,14 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         authorize: input.authorize,
       });
       try {
+        // A coverage repair may follow checked publications accepted during the previous attempt.
+        const currentPrompt = typeof prompt === "function" ? prompt() : prompt;
         const result = await mastra
           .getAgent("wiki")
           .generate(
-            JSON.stringify(correction ? { input: prompt, rejectedResult, correction } : prompt),
+            JSON.stringify(
+              correction ? { input: currentPrompt, rejectedResult, correction } : currentPrompt,
+            ),
             {
               maxSteps: Infinity,
               abortSignal: activeSignal,
@@ -644,7 +648,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       ? await ask(
           "topic-planner",
           z.object({ topics: z.array(topicSchema).max(room) }),
-          {
+          () => ({
             project: input.name,
             repository,
             currentPages: pages,
@@ -652,7 +656,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             plannedTopics: remaining.topics,
             documentedAreas: documentedAreas.slice(0, 12),
             missingCoverage: issues,
-          },
+          }),
           planSources,
           "Return only the additional topics that close the missing coverage, as a coverage repair of plannedTopics. Do not repeat or change plannedTopics. Plan no topic when a missing item is already covered by plannedTopics or current pages. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic.",
           (extra) => validatePlan({ topics: [...remaining.topics, ...extra.topics] }),

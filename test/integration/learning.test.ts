@@ -5,7 +5,11 @@ import { createLearningService } from "../../apps/factory/src/learning/service";
 import { collectLearningCases } from "../../apps/factory/src/learning/sources";
 import { createLearningWorker } from "../../apps/factory/src/learning/worker";
 import type { LearningCase, LearningResult } from "../../packages/conversation-domain/src/learning";
-import { learningCase, sampleLearningCase } from "../../packages/conversation-domain/src/learning";
+import {
+  LearningResultRejected,
+  learningCase,
+  sampleLearningCase,
+} from "../../packages/conversation-domain/src/learning";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { calibratedResult } from "../fixtures/learning";
@@ -662,6 +666,7 @@ async function reviewNowFixture<T>(
     worker: ReturnType<typeof createLearningWorker>;
     fresh(id: string, ownerId?: string | null): Promise<void>;
   }) => Promise<T>,
+  workResult?: (cases: LearningCase[]) => LearningResult,
 ) {
   const host = await factoryProcess();
   const database = host.connect();
@@ -689,6 +694,7 @@ async function reviewNowFixture<T>(
         }
         calls.push("work");
         batches.push(input.cases.length);
+        if (workResult) return workResult(input.cases);
         return {
           cases: input.cases.map((item) => ({
             caseId: item.id,
@@ -740,6 +746,72 @@ const reviewNow = (projectId: string, cases: number, developerOnly = false) => (
   developerOnly,
   cases,
 });
+
+test.each(["allowlisted", "unknown"] as const)(
+  "a %s semantic rejection persists a safe reason without proposals, trials or paid retry",
+  async (kind) => {
+    const generic =
+      "The model's review did not match the evidence it was given, so it was discarded. It will not be repeated automatically.";
+    const reason =
+      kind === "allowlisted"
+        ? `${generic} Diagnostic: Work review cited unobserved evidence.`
+        : generic;
+    await reviewNowFixture(
+      async ({ database, owned, service, calls, worker, fresh }) => {
+        await fresh("rejection:owned-original");
+        await service.reviewNow(owned.userID, reviewNow(owned.projectID, 1));
+        await worker.sweep(); // The existing calibration gate is unchanged.
+        await worker.sweep();
+        const view = await service.get(owned.userID, owned.projectID);
+        const failed = fixtureValue(
+          view.reviews.find((item) => item.kind === "work"),
+          "failed review",
+        );
+        expect(failed.state).toBe("failed");
+        expect(failed.result).toBeNull();
+        expect(failed.reason).toBe(reason);
+        expect(failed.reason).not.toContain("PRIVATE");
+        const [persisted] = await database.client<
+          { state: string; reason: string; result: unknown }[]
+        >`SELECT state,reason,result FROM factory.learning_review WHERE id=${failed.id}`;
+        expect(persisted).toEqual({ state: "failed", reason, result: null });
+        const [usage] = await database.client<{ outcome: string }[]>`
+          SELECT outcome FROM factory.usage_operation WHERE id=${`learning:${failed.id}`}`;
+        expect(usage?.outcome).toBe("completed");
+        expect(view.waiting).toBe(0);
+        expect(view.proposals).toHaveLength(0);
+        expect(view.comparisons).toHaveLength(0);
+        expect(view.applications).toHaveLength(0);
+        expect(await database.client`SELECT id FROM factory.learning_proposal`).toHaveLength(0);
+        expect(await database.client`SELECT id FROM factory.learning_trial`).toHaveLength(0);
+        for (let sweep = 0; sweep < 3; sweep++) await worker.sweep();
+        expect(calls).toEqual(["calibration", "work"]);
+        expect(
+          await database.client`SELECT id FROM factory.learning_review WHERE kind='work'`,
+        ).toHaveLength(1);
+      },
+      (cases) => {
+        if (kind === "unknown")
+          throw new LearningResultRejected("PRIVATE-MODEL-PROSE", {
+            cause: new Error("PRIVATE-CAUSE"),
+          });
+        return {
+          cases: cases.map((source) => ({
+            caseId: source.id,
+            fulfillment: "unknown",
+            rework: "unknown",
+            verification: "unknown",
+            explanation: "PRIVATE-REJECTED-PROSE",
+            evidenceIds: ["PRIVATE-UNOBSERVED-REFERENCE"],
+          })),
+          findings: [],
+          proposals: [],
+        };
+      },
+    );
+  },
+  60_000,
+);
 
 test("Review now starts the calibrated batch for fresh cases once, idempotently, within the confirmed size", async () => {
   await reviewNowFixture(async ({ database, owned, service, calls, batches, worker, fresh }) => {

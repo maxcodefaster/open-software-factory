@@ -51,7 +51,7 @@ async function scenario(options: {
   sources?: Array<{ path: string; content: string }>;
   inventory?: Array<{ path: string; sha: string; size: number }>;
   readFiles?(paths: string[]): Promise<Array<{ path: string; content: string }>>;
-  onPublish?(output: WikiGenerationOutput): void;
+  onPublish?(output: WikiGenerationOutput, pages: readonly WikiPageSnapshot[]): void;
 }) {
   const seen: Seen[] = [];
   const published: Array<{
@@ -181,7 +181,6 @@ async function scenario(options: {
           : paths.map((path) => ({ path, content: `export const value = "${path}";` }));
       },
       publish: async (output) => {
-        options.onPublish?.(output);
         for (const page of output.pages) {
           published.push({
             slug: page.slug,
@@ -205,6 +204,7 @@ async function scenario(options: {
           if (index >= 0) pages[index] = next;
           else pages = [...pages, next];
         }
+        options.onPublish?.(output, pages);
         return pages;
       },
     });
@@ -762,6 +762,132 @@ test("the first topic starts while the coverage review runs and its extra guides
   expect(result.published.map((entry) => entry.slug)).toEqual(["overview", "setup"]);
   expect(result.progress.at(-1)).toMatchObject({ topicsTotal: 2, topicsDone: 2 });
 });
+
+test.each(["valid root update", "repeated duplicate"] as const)(
+  "coverage planning refreshes its existing repair after progressive publication: %s",
+  async (repair) => {
+    const paths: [string] = ["src/file-0.ts"];
+    const human = "Human release-team handover note.";
+    const root: WikiPageSnapshot = {
+      id: crypto.randomUUID(),
+      slug: "overview",
+      title: "Project",
+      body: `Previous project orientation.\n\n${human}`,
+      version: 3,
+      revisionId: crypto.randomUUID(),
+      parentId: null,
+      state: "active",
+      citations: [],
+    };
+    const pages = [
+      root,
+      ...["application-and-tests", "production"].map((slug) => ({
+        ...root,
+        id: crypto.randomUUID(),
+        slug,
+        body: `Existing ${slug} guidance.`,
+        parentId: root.id,
+      })),
+    ];
+    const topics = [
+      topic("account-walkthrough", paths, root.slug),
+      topic("pre-demo-checklist", paths, root.slug),
+    ] as const;
+    const deltaStarted = Promise.withResolvers<void>();
+    const twoPublished = Promise.withResolvers<void>();
+    const deltaInputs: WikiPageSnapshot[][] = [];
+    let publications = 0;
+    let currentPages: readonly WikiPageSnapshot[] = pages;
+    const run = scenario({
+      pages,
+      sources: [{ path: paths[0], content: "Current project orientation and demo guidance." }],
+      coverage: () => ({
+        output: {
+          findings: [
+            {
+              kind: "actionable",
+              readerTask: "Project orientation",
+              requiredChange: "Update the old orientation while preserving the human handover.",
+              sourcePaths: paths,
+            },
+          ],
+        },
+      }),
+      reply: async ({ role, prompt, index }) => {
+        if (role === "planner") return { output: { topics } };
+        if (role === "additional") {
+          const input = prompt.input ?? prompt;
+          const current = input["currentPages"] as WikiPageSnapshot[];
+          deltaInputs.push(current);
+          if (index === 0) {
+            deltaStarted.resolve();
+            await twoPublished.promise;
+          } else {
+            expect(prompt.correction).toContain("Repeated topic slug: account-walkthrough");
+            expect(prompt["rejectedResult"]).toEqual({ topics: [topics[0]] });
+          }
+          return {
+            output: {
+              topics:
+                index === 1 && repair === "valid root update" && current.length === 5
+                  ? [topic(root.slug, paths, null, [root.id])]
+                  : [topics[0]],
+            },
+          };
+        }
+        if (role === "writer") {
+          await deltaStarted.promise;
+          const current = prompt["topic"] as ReturnType<typeof topic>;
+          return {
+            output:
+              current.pageIDs.length > 0
+                ? {
+                    pages: [
+                      {
+                        id: root.id,
+                        title: root.title,
+                        body: `Current project orientation.\n\n${human}`,
+                        sources: paths,
+                      },
+                    ],
+                  }
+                : page(`Use the ${current.slug} for its reader task.`, paths),
+          };
+        }
+        return { output: { issues: [] } };
+      },
+      onPublish: (_output, pages) => {
+        currentPages = pages;
+        if (++publications === 2) twoPublished.resolve();
+      },
+    });
+    if (repair === "repeated duplicate") {
+      await expect(run).rejects.toThrow("Repeated topic slug: account-walkthrough");
+      expect(publications).toBe(2);
+      expect(currentPages).toContainEqual(root);
+    } else {
+      const result = await run;
+      expect(result.published.map((entry) => entry.slug)).toEqual([
+        topics[0].slug,
+        topics[1].slug,
+        root.slug,
+      ]);
+      expect(result.pages.find((page) => page.id === root.id)?.body).toBe(
+        `Current project orientation.\n\n${human}`,
+      );
+      expect(deltaInputs.map((pages) => pages.length)).toEqual([3, 5]);
+      expect(count(result.seen, "planner")).toBe(1);
+      expect(count(result.seen, "coverage")).toBe(1);
+      expect(result.progress.at(-1)).toMatchObject({ topicsTotal: 3, topicsDone: 3 });
+    }
+    expect(deltaInputs).toHaveLength(2);
+    expect(currentPages).toHaveLength(5);
+    expect(pages.every((page) => currentPages.some((current) => current.id === page.id))).toBe(
+      true,
+    );
+    expect(root.body).toBe(`Previous project orientation.\n\n${human}`);
+  },
+);
 
 test("an empty coverage repair fails even when another topic is already planned", async () => {
   const paths = ["src/file-0.ts"];

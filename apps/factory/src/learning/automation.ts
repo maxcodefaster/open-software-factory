@@ -30,6 +30,7 @@ import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { reviewWork, workReviewInstructions } from "./judge";
+import { learningRejectionReason } from "./rejection-reason";
 import { replayInstructions, replayPlanning } from "./replay";
 import { createLearningTargets, learningActivation, learningEditDigest } from "./targets";
 
@@ -395,7 +396,10 @@ export function createLearningAutomation(
           cause instanceof CommandError
             ? cause.message
             : rejected
-              ? "The comparison grade did not match the replayed responses, so it was discarded. It will not be repeated automatically."
+              ? learningRejectionReason(
+                  cause,
+                  "The comparison grade did not match the replayed responses, so it was discarded. It will not be repeated automatically.",
+                )
               : "The comparison did not finish. It will not be repeated automatically."
         },completed_at=now()
         WHERE id=${admitted.id} AND state='running' AND owner_token=${admitted.token}`;
