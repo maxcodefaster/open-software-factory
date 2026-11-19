@@ -737,6 +737,9 @@ export async function createFactoryApplication() {
     preference: uiPreferenceController.get,
     planningCacheURL,
     signingKey: runtimeSecret,
+    ...(process.env["FACTORY_PLANNING_CACHE_EPOCH"]
+      ? { planningCacheEpoch: process.env["FACTORY_PLANNING_CACHE_EPOCH"] }
+      : {}),
     forgeOrigins: { browser: forgePublicOrigin, transport: forgeTransportOrigin },
     async modelAvailability() {
       return Boolean(

@@ -340,6 +340,22 @@ test("native Actor publication builds same-architecture bootstrap and tools, pro
   expect(workflow.jobs.chart.steps.at(-1).run).toContain("factory-runtime-artifacts-$RELEASE.json");
 });
 
+test("Kubernetes planning replicas use the observed namespace epoch without changing retained authority", async () => {
+  const startup = await readFile(new URL("../kubernetes/start.ts", import.meta.url), "utf8");
+  expect(startup).toContain(
+    'execute(["get", "namespace", namespace, "-o", "jsonpath={.metadata.uid}"])',
+  );
+  expect(startup).toContain("FACTORY_PLANNING_CACHE_EPOCH: planningCacheEpoch");
+  expect(startup.indexOf("const planningCacheEpoch")).toBeLessThan(
+    startup.indexOf("const child = Bun.spawn"),
+  );
+  const application = await readFile(
+    new URL("../../apps/factory/src/server/application.ts", import.meta.url),
+    "utf8",
+  );
+  expect(application).toContain('planningCacheEpoch: process.env["FACTORY_PLANNING_CACHE_EPOCH"]');
+});
+
 test("native startup uses the same artifact environment and checks storage with tool-image shell only", async () => {
   for (const file of ["./index.ts", "../kubernetes/start.ts"]) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");

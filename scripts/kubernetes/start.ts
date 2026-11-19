@@ -8,7 +8,7 @@ import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
 import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
 import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
-import { runtimeArtifactsSchema, runtimeArtifactEnvironment } from "../factory/artifacts";
+import { runtimeArtifactEnvironment, runtimeArtifactsSchema } from "../factory/artifacts";
 import { ensureLocalForgeIdentity } from "../factory/forge-identity";
 import { installForgeBrowserLogout } from "../factory/forge-logout";
 import {
@@ -81,6 +81,11 @@ const release = required("FACTORY_HELM_RELEASE");
 const forgePod = required("FACTORY_FORGEJO_POD");
 if (![namespace, release, forgePod].every((value) => /^[a-z0-9][a-z0-9-]{0,62}$/.test(value)))
   throw new Error("Invalid Kubernetes installation identity");
+// A restored Namespace retains product credentials and native identities, but must not
+// reuse a browser's read replica from the original Kubernetes installation.
+const planningCacheEpoch = z
+  .uuid()
+  .parse(await execute(["get", "namespace", namespace, "-o", "jsonpath={.metadata.uid}"]));
 const factoryURL = required("FACTORY_BASE_URL");
 const internalURL = required("FACTORY_INTERNAL_URL");
 const forgeURL = required("FACTORY_FORGEJO_PUBLIC_URL");
@@ -265,6 +270,7 @@ const child = Bun.spawn([process.execPath, "apps/factory/src/server.ts"], {
     FACTORY_FORGEJO_TOKEN: forgejoToken,
     FACTORY_FORGEJO_ADMIN_TOKEN: forgejoAdminToken,
     FACTORY_STARTUP_ID: startupID,
+    FACTORY_PLANNING_CACHE_EPOCH: planningCacheEpoch,
   },
   stdin: "ignore",
   stdout: "inherit",

@@ -941,6 +941,10 @@ installation:
   The original source Namespace and Ingress remain readable. Preserve the backed-up Namespace
   name, Helm release, public Factory/Forgejo HTTPS origins, storage class and installation file.
   The isolated target Namespace UID must differ from the original.
+  Normal Kubernetes startup scopes browser planning replicas to the actual Namespace UID as
+  well as the retained signing key. A restore with a new Namespace UID therefore cannot reuse
+  the original deployment's offline read replica, even with the same public origin and credentials.
+  This cache boundary does not change approvals, credentials or native runtime identities.
 - The target runs the exact backed-up immutable Factory image and its independently recorded
   platform digest. All restored data services, original Factory credentials, state, Source
   materializations and matching objects must already be usable. Normal startup must finish.

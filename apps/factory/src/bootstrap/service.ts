@@ -11,14 +11,19 @@ export function createBootstrapService(options: {
   preference(userID: string): Promise<UIPreference>;
   planningCacheURL: string;
   signingKey: string;
+  planningCacheEpoch?: string;
   forgeOrigins: NonNullable<Bootstrap["forgeOrigins"]>;
   modelAvailability(): Promise<boolean>;
 }) {
   // The bootstrap administrator ID and public origin can recur in a fresh
   // installation. Neither may select another installation's offline replica.
-  const planningCacheScope = createHmac("sha256", options.signingKey)
-    .update("factory-planning-cache-v1")
-    .digest("hex");
+  const planningCacheHmac = createHmac("sha256", options.signingKey).update(
+    "factory-planning-cache-v1",
+  );
+  // A restored deployment can retain its signing key but must use a separate replica.
+  if (options.planningCacheEpoch !== undefined)
+    planningCacheHmac.update("\0").update(options.planningCacheEpoch);
+  const planningCacheScope = planningCacheHmac.digest("hex");
   return {
     modelAvailability: options.modelAvailability,
     async get(rawSession: unknown): Promise<Bootstrap> {
