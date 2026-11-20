@@ -289,6 +289,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     ).toBe(false);
     wiredFactory = await factoryProcess(undefined, {
       FACTORY_FORGEJO_API_URL: apiURL,
+      FACTORY_FORGEJO_PUBLIC_URL: origin,
       FACTORY_FORGEJO_OWNER: repository.owner,
       FACTORY_FORGEJO_ADMIN_TOKEN: token,
     });

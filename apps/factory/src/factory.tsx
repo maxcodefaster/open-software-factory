@@ -2089,7 +2089,16 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     agentOverlay,
     setupVisible,
     selectedProject,
-    projectsLoading: () => projects.completeness() !== "complete",
+    projectsLoading: () => {
+      const destination = navigation?.location();
+      // Explicit Project links use the restore/access notice, not the chooser,
+      // including the batched gap between query completeness and selection.
+      return (
+        projects.completeness() !== "complete" ||
+        desktopNavigation.pending() ||
+        Boolean(destination && "projectID" in destination && destination.projectID)
+      );
+    },
     setProjectMenuOpen,
     narrowViewport,
     historyTickets,

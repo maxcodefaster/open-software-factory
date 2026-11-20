@@ -10,6 +10,16 @@ export function isOpenCodeObservationTransportError(error: unknown) {
   );
 }
 
+export function installedOpenCodeSkillIDs(skills: readonly { id: string; path: string }[]) {
+  // OpenCode 2's built-ins have exact virtual package URIs. Anything else is
+  // an installed package and must match the Factory admission, even when it
+  // resembles a built-in name or uses another path.
+  return skills
+    .filter((skill) => skill.path !== `skill://${skill.id}/SKILL.md`)
+    .map((skill) => skill.id)
+    .sort();
+}
+
 type RecordedInput = {
   readonly sessionID: string;
   readonly promptID: string;

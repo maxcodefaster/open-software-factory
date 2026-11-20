@@ -55,6 +55,7 @@ import {
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
   interruptOpenCodeSession,
+  installedOpenCodeSkillIDs,
   isOpenCodeObservationTransportError,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
@@ -524,12 +525,9 @@ export function createAgentController(
         const expected = skillRevisionIDs.map((id) => `factory-${id}`).sort();
         let ready = false;
         for (let probe = 0; probe < 40; probe++) {
-          const observed = (
-            await client.skill.list({ location: { directory: workspaceDirectory } })
-          ).data
-            .filter((item) => !item.path.startsWith("/builtin/"))
-            .map((item) => item.id)
-            .sort();
+          const observed = installedOpenCodeSkillIDs(
+            (await client.skill.list({ location: { directory: workspaceDirectory } })).data,
+          );
           if (JSON.stringify(observed) === JSON.stringify(expected)) {
             ready = true;
             break;

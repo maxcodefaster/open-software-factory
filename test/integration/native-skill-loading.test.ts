@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { promptRecordedOpenCodeInput } from "../../apps/factory/src/agent/opencode-client";
+import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import {
+  installedOpenCodeSkillIDs,
+  promptRecordedOpenCodeInput,
+} from "../../apps/factory/src/agent/opencode-client";
 import { nativeSkillId, nativeSkillManifest } from "../../apps/factory/src/skills/native";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import upstream from "../../upstream.json";
@@ -41,9 +47,7 @@ test("pinned native OpenCode discovers only admitted packages and retains explic
     const listed = await processFixture.client.skill.list({
       location: { directory: "/workspace/project" },
     });
-    expect(
-      listed.data.filter((skill) => !skill.path.startsWith("/builtin/")).map((skill) => skill.id),
-    ).toEqual([nativeSkillId(revision)]);
+    expect(installedOpenCodeSkillIDs(listed.data)).toEqual([nativeSkillId(revision)]);
     const admitted = listed.data.find((skill) => skill.id === nativeSkillId(revision));
     expect(admitted?.autoinvoke).toBe(false);
     expect(admitted?.content).toContain(revision.content.instructions);
@@ -102,3 +106,51 @@ test("pinned native OpenCode discovers only admitted packages and retains explic
     else process.env["FACTORY_OPENCODE_PACKAGED_SERVER"] = previous;
   }
 }, 120000);
+
+test("native OpenCode discovers exact packages installed after location activation without inference", async () => {
+  const revision = {
+    id: crypto.randomUUID(),
+    revision: 1,
+    content: { ...requirementsInterviewSkill, roles: ["build" as const] },
+    digest: "a".repeat(64),
+    published: true,
+  };
+  const owned = await pinnedOpenCode();
+  try {
+    const list = () => owned.client.skill.list({ location: { directory: "/workspace/project" } });
+    expect(installedOpenCodeSkillIDs((await list()).data)).toEqual([]);
+    const file = resolve(owned.scratch, "late-admitted-skills.json");
+    await writeFile(file, JSON.stringify(nativeSkillManifest([revision])), { mode: 0o600 });
+    const installed = await runCommand(
+      [
+        "docker",
+        "exec",
+        "--interactive",
+        owned.container,
+        "/opt/factory/opencode/musl/bun",
+        "/opt/factory/opencode/server/install-skills.mjs",
+      ],
+      await readFile(file, "utf8"),
+      { timeoutMS: 15_000, outputBytes: 1 << 20 },
+    );
+    expect(installed.exitCode).toBe(0);
+    const processBefore = await owned.control();
+    const discovered = await observe(
+      list,
+      (view) =>
+        JSON.stringify(installedOpenCodeSkillIDs(view.data)) ===
+        JSON.stringify([nativeSkillId(revision)]),
+      "Native watcher did not publish the exact newly installed package",
+      10_000,
+    );
+    expect(installedOpenCodeSkillIDs(discovered.data)).toEqual([nativeSkillId(revision)]);
+    const processAfter = await owned.control();
+    expect({ pid: processAfter.pid, generation: processAfter.generation }).toEqual({
+      pid: processBefore.pid,
+      generation: processBefore.generation,
+    });
+    expect((await owned.control()).providerRequests).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+}, 120_000);

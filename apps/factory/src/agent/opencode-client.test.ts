@@ -7,6 +7,7 @@ import {
   decodeOpenCodeAdmission,
   ensureOpenCodeMessageBoundary,
   interruptOpenCodeSession,
+  installedOpenCodeSkillIDs,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
   syncOpenCodeInputGuidance,
@@ -27,6 +28,23 @@ const receipt = {
   delivery: "queue" as const,
   payload: { text: input.text },
 };
+
+test("native built-in Skill URIs do not count as extra installed packages", () => {
+  const id = `factory-${crypto.randomUUID()}`;
+  expect(
+    installedOpenCodeSkillIDs([
+      { id: "browser", path: "skill://browser/SKILL.md" },
+      { id: "git", path: "skill://git/SKILL.md" },
+      { id, path: `/opt/factory/admitted-skills/${id}/SKILL.md` },
+    ]),
+  ).toEqual([id]);
+  expect(
+    installedOpenCodeSkillIDs([
+      { id: "browser", path: "skill://another/SKILL.md" },
+      { id: "git", path: "/workspace/project/.opencode/skills/git/SKILL.md" },
+    ]),
+  ).toEqual(["browser", "git"]);
+});
 
 describe("checkpointed terminal shell notifications", () => {
   const shell = { id: "sh_owned_terminal", sessionID: input.sessionID };

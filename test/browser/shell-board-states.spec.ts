@@ -249,7 +249,7 @@ test("an empty Board is keyboard reachable because it scrolls sideways on phones
 
 test("a Project link never flashes the choose-a-Project prompt while Projects load", async ({
   page,
-}) => {
+}, testInfo) => {
   const id = await addProject("Deep link project", "shell-deeplink");
   await page.addInitScript(() => {
     const prompt = "Choose a Project to open its Ticket board.";
@@ -264,12 +264,47 @@ test("a Project link never flashes the choose-a-Project prompt while Projects lo
       characterData: true,
     });
   });
-  await page.goto(`/projects/${id}`);
-  await expect(page.getByRole("button", { name: /Deep link project/ })).toBeVisible();
-  await expect(
-    page.getByRole("region", { name: "Ticket board" }).or(page.getByLabel("Ticket board")),
-  ).toBeVisible();
-  expect(
-    await page.evaluate(() => (window as unknown as { promptSeen?: boolean }).promptSeen),
-  ).toBeFalsy();
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    for (const visit of ["initial", "reload"]) {
+      if (visit === "initial") await page.goto(`/projects/${id}`);
+      else await page.reload();
+      if (width === 1440)
+        await expect(page.getByRole("button", { name: /Deep link project/ })).toBeVisible();
+      await expect(page).toHaveTitle("Deep link project · Open Software Factory");
+      await expect(page.getByRole("group", { name: "Ticket stages" })).toBeVisible();
+      expect(
+        await page.evaluate(() => (window as unknown as { promptSeen?: boolean }).promptSeen),
+      ).toBeFalsy();
+      await page.screenshot({
+        path: testInfo.outputPath(`project-link-${width}-${visit}.png`),
+        fullPage: true,
+      });
+    }
+  }
+});
+
+test("an unknown Project link keeps its unavailable notice and retry without choosing a Project", async ({
+  page,
+}, testInfo) => {
+  await addProject("Accessible project", "shell-accessible");
+  const path = `/projects/${crypto.randomUUID()}`;
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.goto(path);
+    const notice = page.getByRole("alert").filter({ hasText: "This link is unavailable." });
+    await expect(notice).toBeVisible();
+    const retry = notice.getByRole("button", { name: "Retry link", exact: true });
+    await expect(retry).toBeEnabled();
+    await retry.click();
+    await expect(notice).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page.locator(".desktop-empty")).toBeHidden();
+    await expect(page.getByRole("group", { name: "Ticket stages" })).toHaveCount(0);
+    await expect(page).toHaveTitle("Open Software Factory");
+    await page.screenshot({
+      path: testInfo.outputPath(`unavailable-project-link-${width}.png`),
+      fullPage: true,
+    });
+  }
 });

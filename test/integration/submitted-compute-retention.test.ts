@@ -121,7 +121,9 @@ test("failed submitted-compute Pause intent rolls back without dispatching nativ
       "CREATE FUNCTION factory.owned_pause_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned Pause intent failure'; END $$; CREATE TRIGGER owned_pause_failure BEFORE UPDATE OF state ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.owned_pause_failure()",
     );
     const before = await f.retained();
-    await expect(f.idle.sweep()).rejects.toThrow("Owned Pause intent failure");
+    await expect(f.idle.sweep()).rejects.toMatchObject({
+      cause: { message: "Owned Pause intent failure" },
+    });
     expect(f.paused).toEqual([]);
     expect(f.releases()).toBe(1);
     expect(await f.retained()).toEqual(before);
