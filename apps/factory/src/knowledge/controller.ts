@@ -11,8 +11,8 @@ import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
+import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
-import { projectModelConnection } from "../project-agent/adapter";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import {
@@ -367,7 +367,7 @@ export function createKnowledgeController(
       });
       const connection = reference
         ? await modelConnections.resolve(reference.connectionID, reference.version)
-        : projectModelConnection("knowledge");
+        : installationPlanningConnection();
       const signal = lifetime.signal;
       const authorize = async () => {
         signal.throwIfAborted();

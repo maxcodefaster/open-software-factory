@@ -98,8 +98,24 @@ export async function candidateReviewFixture(
     });
     return { ...turn, ownerToken: turn.ownerToken, sessionID: intent.session };
   }
+  // Injected Forge readers still require the owned Project's configured binding.
+  const previousOwner = process.env["FACTORY_FORGEJO_OWNER"];
+  process.env["FACTORY_FORGEJO_OWNER"] = "owned";
+  function restoreEnvironment() {
+    owned.restoreEnvironment();
+    if (previousOwner === undefined) delete process.env["FACTORY_FORGEJO_OWNER"];
+    else process.env["FACTORY_FORGEJO_OWNER"] = previousOwner;
+  }
   return {
     ...owned,
+    restoreEnvironment,
+    async dispose() {
+      try {
+        await owned.dispose();
+      } finally {
+        restoreEnvironment();
+      }
+    },
     monitoring,
     turns,
     initial: initial.turn,

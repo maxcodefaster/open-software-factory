@@ -13,8 +13,8 @@ import { CommandError } from "../command-error";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { knownModelRejection } from "../models/execution-policy";
+import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
-import { projectModelConnection } from "../project-agent/adapter";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
@@ -63,10 +63,10 @@ export function createLearningWorker(
       const modelId = await models.resolve("planning", sql, {
         projectID: scope.projectId,
         userID: actorId,
-        personal: scope.ownerId !== null,
+        personal: false,
       });
       const reference = await connections.reference("planning", sql);
-      const fallback = reference ? null : projectModelConnection();
+      const fallback = reference ? null : installationPlanningConnection();
       return {
         modelId,
         reference: reference ?? null,
@@ -143,12 +143,12 @@ export function createLearningWorker(
       const modelId = await models.resolve("planning", sql, {
         projectID: scope.projectId,
         userID: actorId,
-        personal: scope.ownerId !== null,
+        personal: false,
       });
       const reference = await connections.reference("planning", sql);
       // Missing configuration is not an uncertain paid attempt. Keep the
       // source pending until an actual model connection is available.
-      const fallback = reference ? null : projectModelConnection();
+      const fallback = reference ? null : installationPlanningConnection();
       const judgeKey = hash({
         modelId,
         reference,

@@ -153,13 +153,67 @@ test("fresh concurrent initialization and repeated startup preserve the native s
       "factory.ticket",
       "factory.ticket_dependency",
     ]);
+    const modeledColumns: string[] = [];
+    const modeledForeignKeys: string[] = [];
     for (const table of Object.values(schema)) {
       if (!is(table, PgTable)) continue;
       const config = getTableConfig(table);
+      modeledColumns.push(
+        ...config.columns.map((column) => `${config.schema}.${config.name}.${column.name}`),
+      );
+      for (const key of config.foreignKeys) {
+        const reference = key.reference();
+        const target = getTableConfig(reference.foreignTable);
+        modeledForeignKeys.push(
+          `${config.schema}.${config.name}.${key.getName()}:${reference.columns
+            .map((column) => column.name)
+            .join(",")}=>${target.schema}.${target.name}:${reference.foreignColumns
+            .map((column) => column.name)
+            .join(",")}`,
+        );
+      }
       await sql.unsafe(
         `SELECT ${config.columns.map((column) => `"${column.name}"`).join(",")} FROM "${config.schema}"."${config.name}" LIMIT 0`,
       );
     }
+    const catalogColumns = await sql<{ schema: string; table: string; name: string }[]>`
+      SELECT n.nspname AS schema,c.relname AS "table",a.attname AS name
+      FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
+      JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname IN ('auth','factory') AND c.relkind='r'
+        AND a.attnum>0 AND NOT a.attisdropped`;
+    expect(modeledColumns.sort()).toEqual(
+      catalogColumns.map((column) => `${column.schema}.${column.table}.${column.name}`).sort(),
+    );
+    const catalogForeignKeys = await sql<
+      {
+        schema: string;
+        table: string;
+        name: string;
+        columns: string[];
+        targetSchema: string;
+        targetTable: string;
+        targetColumns: string[];
+      }[]
+    >`
+      SELECT n.nspname AS schema,t.relname AS "table",c.conname AS name,
+        ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(id,ordinal)
+          JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.id ORDER BY k.ordinal) AS columns,
+        rn.nspname AS "targetSchema",rt.relname AS "targetTable",
+        ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY k(id,ordinal)
+          JOIN pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.id ORDER BY k.ordinal) AS "targetColumns"
+      FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+      JOIN pg_namespace n ON n.oid=t.relnamespace
+      JOIN pg_class rt ON rt.oid=c.confrelid JOIN pg_namespace rn ON rn.oid=rt.relnamespace
+      WHERE n.nspname IN ('auth','factory') AND c.contype='f'`;
+    expect(modeledForeignKeys.sort()).toEqual(
+      catalogForeignKeys
+        .map(
+          (key) =>
+            `${key.schema}.${key.table}.${key.name}:${key.columns.join(",")}=>${key.targetSchema}.${key.targetTable}:${key.targetColumns.join(",")}`,
+        )
+        .sort(),
+    );
     expect(await sql`SELECT singleton FROM factory.installation_maintenance`).toHaveLength(1);
     expect(await sql`SELECT id FROM factory.attachment_storage`).toHaveLength(1);
     for (const table of [

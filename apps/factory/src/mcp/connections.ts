@@ -314,6 +314,7 @@ export function createMCPConnections(
     state: string | undefined,
     expectedEpoch: string,
     beforeRequest?: () => Promise<void>,
+    signal?: AbortSignal,
   ) {
     const connection = await database.client.begin((sql) => library.connectionIn(sql, id));
     if (connection.credentialEpoch !== expectedEpoch || connection.state === "revoked")
@@ -332,7 +333,12 @@ export function createMCPConnections(
     );
     if (revision.content.authentication === "oauth") {
       const oauth = await oauthProvider(id, connection.credentialEpoch, guard, state);
-      const client = createRemoteMCP(revision.content.endpoint, oauth.provider, oauth.fetch);
+      const client = createRemoteMCP(
+        revision.content.endpoint,
+        oauth.provider,
+        oauth.fetch,
+        signal,
+      );
       return {
         ...client,
         close: async () => {
@@ -356,6 +362,7 @@ export function createMCPConnections(
           await guard();
           return fetcher(url, init);
         },
+        signal,
       ),
       redirect: () => undefined,
     };
@@ -566,7 +573,12 @@ export function createMCPConnections(
     ) {
       const expected = assignment.tools.find((tool) => tool.name === name);
       if (!expected) throw new CommandError("forbidden", "This MCP tool was not admitted");
-      const validate = () => authorizeAssignment(assignment, projectId, userId);
+      signal.throwIfAborted();
+      const validate = async () => {
+        signal.throwIfAborted();
+        await authorizeAssignment(assignment, projectId, userId);
+        signal.throwIfAborted();
+      };
       await authorize();
       await validate();
       const client = await remote(
@@ -577,6 +589,7 @@ export function createMCPConnections(
           await authorize();
           await validate();
         },
+        signal,
       );
       try {
         await client.connect();

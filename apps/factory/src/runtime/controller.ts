@@ -1,7 +1,10 @@
 import { stripVTControlCharacters } from "node:util";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+import {
+  boundForgeRepositoryFromURL,
+  forgeRepositoryFromURL,
+} from "../../../../packages/forge/src/repository";
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import type { SubstrateCall } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import {
@@ -59,9 +62,19 @@ export function createRuntimeController(
   const selected = options.configuration ?? configuredSubstrateInstallation();
   if (!selected) throw new Error("Factory requires its Substrate installation configuration");
   const installation = substrateInstallationConfiguration(selected);
-  const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
+  const {
+    FACTORY_FORGEJO_API_URL,
+    FACTORY_FORGEJO_PUBLIC_URL,
+    FACTORY_FORGEJO_TOKEN,
+    FACTORY_FORGEJO_OWNER,
+  } = process.env;
   if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER)
     throw new Error("Forgejo configuration is required");
+  const forgeBinding = {
+    apiURL: FACTORY_FORGEJO_API_URL,
+    publicURL: FACTORY_FORGEJO_PUBLIC_URL,
+    owner: FACTORY_FORGEJO_OWNER,
+  };
   const forge = createForgejoClient({
     apiURL: FACTORY_FORGEJO_API_URL,
     token: FACTORY_FORGEJO_TOKEN,
@@ -181,12 +194,10 @@ export function createRuntimeController(
         verification.commit_sha AS commit,project.repository_url AS repository
       FROM factory.verification verification JOIN factory.change change ON change.id=verification.change_id
       JOIN factory.project project ON project.id=change.project_id WHERE verification.id=${verificationID}`;
-    if (!row || row.handle || !row.runID) return row?.handle ?? undefined;
-    const handle = await forge.verificationJobHandle(
-      forgeRepositoryFromURL(row.repository),
-      Number(row.runID),
-      row.commit,
-    );
+    if (!row) return undefined;
+    const repository = boundForgeRepositoryFromURL(row.repository, forgeBinding);
+    if (row.handle || !row.runID) return row.handle ?? undefined;
+    const handle = await forge.verificationJobHandle(repository, Number(row.runID), row.commit);
     const [saved] = await database.client<{ handle: string }[]>`
       UPDATE factory.verification SET runner_job_handle=COALESCE(runner_job_handle,${handle})
       WHERE id=${verificationID} AND action_run_id=${row.runID} AND commit_sha=${row.commit}

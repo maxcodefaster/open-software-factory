@@ -12,7 +12,7 @@ import {
 } from "../../../../packages/knowledge-domain/src/generation";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../models/native";
-import { projectModelConnection } from "../project-agent/adapter";
+import { installationPlanningConnection } from "../models/resolver";
 import { isStructuredOutputFailure } from "../project-agent/structured-output";
 import { createMastraUsage } from "../usage/mastra";
 import { findReadableCodePaths } from "./code-read";
@@ -189,7 +189,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   if (!input.publish) throw new Error("Wiki workflow requires checked publication");
   const publish: NonNullable<WikiGenerationInput["publish"]> = input.publish;
   const providerRequests = input.providerRequests;
-  const connection = input.connection ?? projectModelConnection("knowledge");
+  const connection = input.connection ?? installationPlanningConnection();
   const providerOptions = modelProviderOptions(connection, input.modelId);
   // Native workflows serialize step errors, so each workflow keeps the original failure itself.
   const failureRecorder = () => {

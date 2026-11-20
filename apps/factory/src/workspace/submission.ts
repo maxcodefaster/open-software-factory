@@ -4,6 +4,7 @@ import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
+import { recordWorkspaceCandidateIn, submitWorkspaceCandidate } from "../agent/candidate";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import type { RuntimeHub } from "../runtime/hub";
@@ -254,73 +255,26 @@ export function createWorkspaceSubmission(
                   "conflict",
                   "Wait for admitted work to settle before shared submission",
                 );
-              await sql`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,integration_base_sha,
-                commit_message,idempotency_key,state,created_by,source)
-                VALUES(${input.requestID},${saved.changeID},${saved.attemptID},(SELECT COALESCE(max(sequence),0)+1 FROM factory.change_commit_operation WHERE change_id=${saved.changeID}),
-                  ${saved.branch},${input.expectedHead},${saved.base},${input.message},${`workspace:${input.requestID}`},'commit-intended',${userID},'workspace')`;
-              await sql`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,turn_id=NULL,epoch=epoch+1,updated_at=now() WHERE change_id=${saved.changeID}`;
-              await sql`INSERT INTO factory.workspace_submission(id,workspace_id,actor_id,writer_epoch,remote_head,repository_url)
-                VALUES(${input.requestID},${input.workspaceID},${userID},${writer.epoch}::bigint+1,${input.expectedRemoteHead},
-                  ${substrateRepositoryCloneURL(saved.repositoryURL, saved.nativeIntent)})`;
-            });
-          }
-          let op = await row(input.requestID);
-          sameInput(op, userID, input);
-          if (op.state === "succeeded" || op.state === "failed") return view(op);
-          if (op.state === "commit-intended") {
-            const action = op.attempted ? "git-observe-commit" : "git-prepare-commit";
-            const prepared = await invoke(op, action);
-            const commit = sha.parse(prepared.commitSHA);
-            await database.client`UPDATE factory.change_commit_operation SET commit_sha=${commit},state='push-intended',updated_at=now() WHERE id=${op.id} AND state='commit-intended'`;
-            op = await row(op.id);
-          }
-          if (op.state === "push-intended") {
-            const repository = forgeRepositoryFromURL(op.repositoryURL);
-            let remote = await forge.getBranch(repository, op.branch);
-            if (remote?.headSha !== op.commitSHA) {
-              if (remote?.headSha !== op.remoteHead)
-                throw new CommandError(
-                  "conflict",
-                  "Ticket branch changed outside this submission. Nothing was force-pushed.",
-                );
-              await invoke(op, "git-push");
-              remote = await forge.getBranch(repository, op.branch);
-            }
-            if (remote?.headSha !== op.commitSHA)
-              throw new CommandError(
-                "unavailable",
-                "Exact submitted commit is not confirmed on the Ticket branch",
-              );
-            await database.client.begin(async (sql) => {
-              const writer = await lockChangeWriterIn(sql, op.changeID);
-              await sql`UPDATE factory.change_commit_operation SET observed_remote_sha=${op.commitSHA},state='succeeded',completed_at=now(),updated_at=now(),last_error=NULL WHERE id=${op.id} AND state='push-intended'`;
-              // An explicit successful human submission can recover earlier failed Coding.
-              // A newer handoff or Stop must not be reopened by a late push observation.
-              if (writer.available && writer.state === "unassigned" && writer.epoch === op.epoch)
-                await sql`UPDATE factory.change SET state='active',failure=NULL,version=version+1
-                  WHERE id=${op.changeID} AND runtime_attempt_id=${op.attemptID} AND state IN ('starting','failed')`;
-            });
-          }
-          return view(await row(input.requestID));
-        } catch (cause) {
-          const message = cause instanceof Error ? cause.message : "";
-          if (
-            [
-              "workspace has no changes to commit",
-              "workspace HEAD no longer matches the commit intent",
-              "an ordinary commit cannot accept an unadmitted merge",
-            ].includes(message)
-          ) {
-            const op = await row(input.requestID).catch(() => undefined);
-            if (op?.state === "commit-intended")
-              await database.client.begin(async (sql) => {
-                const writer = await lockChangeWriterIn(sql, op.changeID);
-                await sql`UPDATE factory.change_commit_operation SET state='failed',last_error=${message},completed_at=now(),updated_at=now() WHERE id=${op.id} AND state='commit-intended'`;
-                if (writer.state === "unassigned" && writer.epoch === op.epoch)
-                  await sql`UPDATE factory.change_writer SET state='human',user_id=${op.actorID},epoch=epoch+1,updated_at=now() WHERE change_id=${op.changeID}`;
+              await recordWorkspaceCandidateIn(sql, {
+                id: input.requestID,
+                changeID: saved.changeID,
+                attemptID: saved.attemptID,
+                workspaceID: input.workspaceID,
+                actorID: userID,
+                branch: saved.branch,
+                base: saved.base,
+                expectedHead: input.expectedHead,
+                remoteHead: input.expectedRemoteHead,
+                message: input.message,
+                repositoryURL: substrateRepositoryCloneURL(saved.repositoryURL, saved.nativeIntent),
+                writerEpoch: writer.epoch,
               });
+            });
           }
-          throw cause;
+          const op = await row(input.requestID);
+          sameInput(op, userID, input);
+          await submitWorkspaceCandidate(database, op, invoke, forge);
+          return view(await row(input.requestID));
         } finally {
           await lock`SELECT pg_advisory_unlock_all()`.catch(() => {});
           await lock.end({ timeout: 1 });

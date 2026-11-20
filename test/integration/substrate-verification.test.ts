@@ -21,9 +21,11 @@ test("native Verification continues initial capacity rejection on its exact-job 
   const previous = {
     api: process.env["FACTORY_FORGEJO_API_URL"],
     public: process.env["FACTORY_FORGEJO_PUBLIC_URL"],
+    owner: process.env["FACTORY_FORGEJO_OWNER"],
   };
   process.env["FACTORY_FORGEJO_API_URL"] = "http://forgejo.cluster.svc:3000/api/v1/";
   process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.native.test";
+  process.env["FACTORY_FORGEJO_OWNER"] = "owned";
   let verificationID = crypto.randomUUID();
   const attemptID = runtimeIdentity(verificationID, 1).attemptID;
   const configuration: SubstrateInstallationConfiguration = {
@@ -516,6 +518,8 @@ test("native Verification continues initial capacity rejection on its exact-job 
     else process.env["FACTORY_FORGEJO_API_URL"] = previous.api;
     if (previous.public === undefined) delete process.env["FACTORY_FORGEJO_PUBLIC_URL"];
     else process.env["FACTORY_FORGEJO_PUBLIC_URL"] = previous.public;
+    if (previous.owner === undefined) delete process.env["FACTORY_FORGEJO_OWNER"];
+    else process.env["FACTORY_FORGEJO_OWNER"] = previous.owner;
     await f.dispose();
     await rm(directory, { recursive: true, force: true });
   }

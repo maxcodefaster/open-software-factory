@@ -13,8 +13,8 @@ import type { createMCPConnections } from "../mcp/connections";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { knownModelRejection } from "../models/execution-policy";
+import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
-import { projectModelConnection } from "../project-agent/adapter";
 import { ProjectContextLimitError } from "../project-agent/context";
 import {
   clarifyProjectInput,
@@ -71,6 +71,7 @@ export function createMonitoringWorker(
   let closed = false;
   let closing: Promise<void> | undefined;
   let sweeping = false;
+  let sweepCursor: string | undefined;
   const usageId = (id: string) => `monitoring:${id}`;
 
   async function block(
@@ -195,7 +196,7 @@ export function createMonitoringWorker(
       const authority = await authorize();
       const connection = admitted.reference
         ? await connections.resolve(admitted.reference.connectionID, admitted.reference.version)
-        : projectModelConnection();
+        : installationPlanningConnection();
       const common = {
         ...authority,
         title: incident.title,
@@ -469,7 +470,18 @@ export function createMonitoringWorker(
         WHERE state='diagnosing' AND owner_expires_at < now() RETURNING id`;
       for (const item of expired) await createUsageJournal(database).abandon(usageId(item.id));
       const projects = await database.client<{ id: string }[]>`SELECT DISTINCT project_id AS id
-        FROM factory.monitoring_incident WHERE state IN ('queued','implementing') ORDER BY project_id LIMIT 50`;
+        FROM factory.monitoring_incident WHERE state IN ('queued','implementing')
+          AND (${sweepCursor ?? null}::uuid IS NULL OR project_id > ${sweepCursor ?? null})
+        ORDER BY project_id LIMIT 50`;
+      if (sweepCursor && projects.length < 50)
+        projects.push(
+          ...(await database.client<{ id: string }[]>`SELECT DISTINCT project_id AS id
+            FROM factory.monitoring_incident WHERE state IN ('queued','implementing')
+              AND project_id <= ${sweepCursor}
+            ORDER BY project_id LIMIT ${50 - projects.length}`),
+        );
+      // Advance past busy owners too, otherwise a persistent prefix starves the tail.
+      sweepCursor = projects.at(-1)?.id;
       for (const row of projects)
         void project(row.id).catch(reportFailure("Monitoring project sweep"));
     } finally {

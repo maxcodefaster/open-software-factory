@@ -1,0 +1,26 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "factory-input-stop",
+      "dependencies": {
+        "@opencode/client": "2.3.2",
+        "zod": "4.6.7",
+      },
+    },
+  },
+  "packages": {
+    "@opencode/client": ["@opencode/client@2.3.2", "", { "dependencies": { "@opencode/protocol": "2.3.2", "@opencode/schema": "2.3.2" }, "peerDependencies": { "effect": "4.1.0", "solid-js": ">=1.9.0" }, "optionalPeers": ["effect", "solid-js"] }, "sha512-zwlR1Q0MQxpLJU4tILaaNyHrexNQpTbquy4Lv4i5lwkSba5MMuhK0tsPmGhyLIrqAyY+sY1qI75dOzOpsCJK7Q=="],
+
+    "@opencode/protocol": ["@opencode/protocol@2.3.2", "", { "dependencies": { "@opencode/schema": "2.3.2", "effect": "4.1.0" } }, "sha512-AEb1DZeWYrCVm+g2OUPWBLskCzGr4sXYj59Do8PzTHFb4a6jrDL0wN7kqYq65NrXGOW32alwxlnMHxJSjAfJ+w=="],
+
+    "@opencode/schema": ["@opencode/schema@2.3.2", "", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.1.0" } }, "sha512-9PqnLzPNV0QTG3HrRHTVjVEQ2Hv+zcprM6QvwxNVdQ3RUTmtdpmUD6/0y0NQnHFzHwI3hpnkNCIstjw9TVsJcg=="],
+
+    "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
+
+    "effect": ["effect@4.1.0", "", {}, "sha512-lGx2MJJyrXA8RZb2UpQ/0Nkb5Utaimby7oD92+18noBxLPE85IFOvptdzau8dvcxAOwfwHo9iqapbKeFzqQM/Q=="],
+
+    "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
+  }
+}

@@ -15,8 +15,8 @@
     "services/*"
   ],
   "scripts": {
-    "check": "bun run check:docs && bun run format:check && bun run lint && bun run typecheck && bun run test:unit && bun run connector:check && bun run substrate:check",
-    "check:integration": "bun run check && bun run test:postgres && bun run test:controllers",
+    "check": "bun run check:docs && bun run db:check && bun run zero:check && bun run format:check && bun run lint && bun run typecheck && bun run test:unit && bun run connector:check && bun run substrate:check",
+    "check:integration": "bun run check && bun run test:controllers",
     "beta:gate": "bun scripts/release/beta-gate.ts",
     "release:clean-room": "bun scripts/release/clean-room.ts",
     "check:docs": "bun scripts/check-docs.ts",
@@ -30,6 +30,10 @@
     "connector:check:linux": "bun scripts/testing/connector-linux.ts",
     "substrate:check": "cd services/substrate-control && mise exec -- go test -p 2 -race ./... && mise exec -- go vet -p 2 ./...",
     "db:migrate": "bun packages/db/src/migrate.ts",
+    "db:generate": "bun packages/db/src/generate.ts",
+    "db:check": "bun packages/db/src/generate.ts --check",
+    "zero:generate": "bun packages/zero-schema/src/generate.ts",
+    "zero:check": "bun packages/zero-schema/src/generate.ts --check",
     "factory:dev": "vite --config apps/factory/vite.config.ts",
     "factory:build": "vite build --config apps/factory/vite.config.ts && bun scripts/factory/compress-assets.ts",
     "factory:image": "bun scripts/factory/image.ts",
@@ -105,6 +109,8 @@
     "@solidjs/vite-plugin": "3.0.1",
     "@types/bun": "1.4.5",
     "@types/node": "24.19.2",
+    "drizzle-kit": "0.31.11",
+    "drizzle-zero": "0.21.0",
     "typescript": "6.0.3",
     "vite": "8.3.8"
   },

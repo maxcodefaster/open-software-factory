@@ -1,14 +1,18 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
-import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
+import {
+  browserBootstrap,
+  factoryFunctionRequest,
+  factoryFunctionRequestMatcher,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { serveChatAssets } from "../support/chat-assets";
 import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
-import { luminance, rgb } from "../support/visual-contrast";
+import { rgb } from "../support/visual-contrast";
 
 const evidence = ".factory/test-results/board-navigation-refinement";
 const materialsEvidence = ".factory/test-results/board-materials";
@@ -17,11 +21,37 @@ test.setTimeout(90_000);
 let database: ReturnType<typeof createDatabase>;
 let projectID = "";
 let otherID = "";
-let commissioned = 0;
+const commissioningFunctions = [
+  "implementTicket",
+  "startTicketChange",
+  "startCoding",
+  "resumeCoding",
+  "sendCodingPrompt",
+  "requestCodingChanges",
+  "sendConversationMessage",
+  "answerConversationQuestion",
+  "setConversationMode",
+  "startPersonalWorkspace",
+  "startTicketWorkspace",
+  "startFreshRuntimeAttempt",
+  "generateKnowledge",
+] as const;
+let commissioned: string[] = [];
 
 test.beforeEach(async ({ page }) => {
   await mkdir(evidence, { recursive: true });
   await mkdir(materialsEvidence, { recursive: true });
+  commissioned = [];
+  const commissionedRequest = await factoryFunctionRequestMatcher(commissioningFunctions);
+  page.on("request", (request) => {
+    const name = commissionedRequest(request);
+    if (name) commissioned.push(name);
+  });
+  // Unexpected admission must fail the navigation assertion without starting product work.
+  await page.route("**/_server/data/**", async (route) => {
+    if (!commissionedRequest(route.request())) return route.fallback();
+    await route.fulfill({ status: 204 });
+  });
   await serveChatAssets(page);
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
@@ -29,16 +59,6 @@ test.beforeEach(async ({ page }) => {
   database = createDatabase(1);
   projectID = crypto.randomUUID();
   otherID = crypto.randomUUID();
-  commissioned = 0;
-  page.on("request", (request) => {
-    if (
-      request.method() === "POST" &&
-      /\/(?:conversation\/(?:message|answer)|agent\/(?:start|prompt)|runtime-attempts\/[^/]+\/start)$/.test(
-        new URL(request.url()).pathname,
-      )
-    )
-      commissioned++;
-  });
   for (const id of [projectID, otherID]) {
     await mockFactoryFunctions(page, {
       workspaces: {
@@ -82,6 +102,39 @@ test.afterEach(async () => {
   await database?.client.end();
   projectID = "";
   otherID = "";
+});
+
+test("navigation observer detects intercepted compiled commands and permits POST reads", async ({
+  page,
+}) => {
+  expect(commissioned).toEqual([]);
+  const controlledFunctions = [...commissioningFunctions, "getBootstrap"];
+  const controlledRequest = await factoryFunctionRequestMatcher(controlledFunctions);
+  const intercepted: string[] = [];
+  await page.route("**/_server/data/**", async (route) => {
+    const name = controlledRequest(route.request());
+    if (!name) return route.fallback();
+    intercepted.push(name);
+    await route.fulfill({ status: 204 });
+  });
+  for (const name of controlledFunctions) {
+    const request = await factoryFunctionRequest(new URL(page.url()).origin, name, []);
+    // Native compiled IDs and argument serialization, but every probe is intercepted.
+    const status = await page.evaluate(
+      async ({ url, body }) =>
+        (
+          await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "text/plain", "x-server-function-format": "0" },
+            body,
+          })
+        ).status,
+      { url: request.url, body: await request.text() },
+    );
+    expect(status).toBe(204);
+  }
+  expect(intercepted).toEqual(controlledFunctions);
+  expect(commissioned).toEqual(commissioningFunctions);
 });
 
 test("desktop keeps compact actions, aligned stage headings and one retained draft", async ({
@@ -178,120 +231,7 @@ test("desktop keeps compact actions, aligned stage headings and one retained dra
   await expect(page.getByLabel("Ticket title", { exact: true })).toHaveValue(
     "Retain this ticket draft",
   );
-  expect(commissioned).toBe(0);
-});
-
-test("shared Board materials stay readable on all six Project backgrounds", async ({ page }) => {
-  const { session } = await browserBootstrap(page);
-  const epicID = await createPlanningEpic({
-    database,
-    projectID,
-    userID: session.user.id,
-    title: "Navigation polish",
-  });
-  await database.client`INSERT INTO factory.ticket(id,project_id,title,state,epic_id,created_by)
-    VALUES(${crypto.randomUUID()},${projectID},'Group related onboarding improvements',
-      'inbox',${epicID},${session.user.id})`;
-  const board = page.getByRole("region", { name: "Ticket board", exact: true });
-  const _stages = board.locator(".board");
-  const desktop = page.locator(".factory-desktop");
-  const card = board.locator(".ticket-card").first();
-  const epic = board.locator(".epic-stack").first();
-  await expect(epic).toBeVisible();
-  await expect(epic).toContainText("Group related onboarding improvements");
-  await page.mouse.move(0, 0);
-  const readings: { width: number; background: string; minimumContrast: number }[] = [];
-  for (const width of [1440, 390]) {
-    await page.setViewportSize({ width, height: 900 });
-    for (const background of desktopBackgroundKeys) {
-      // Presentation-only variant on this owned Project, not a persisted preference change.
-      await desktop.evaluate(async (element, key) => {
-        element.setAttribute("data-background", key);
-        const source = getComputedStyle(element).getPropertyValue("--desktop-art");
-        const path = source.match(/url\(["']?([^"')]+)["']?\)/)?.[1];
-        if (!path) throw new Error("Project artwork is absent");
-        const image = new Image();
-        image.src = path;
-        await image.decode();
-        await Promise.all(
-          element
-            .getAnimations({ subtree: true })
-            .filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity)
-            .map((animation) => animation.finished.catch(() => {})),
-        );
-      }, background);
-      const observed = await desktop.evaluate((element) => {
-        const stages = element.querySelector(".board");
-        const chrome = element.querySelector(".workspace-dock");
-        if (!stages || !chrome) throw new Error("Board navigation is absent");
-        const band = getComputedStyle(stages, "::before");
-        const material = (item: Element) => {
-          const style = getComputedStyle(item);
-          return { background: style.backgroundColor, blur: style.backdropFilter };
-        };
-        return {
-          tint: getComputedStyle(element).getPropertyValue("--surface-rgb").trim(),
-          chrome: material(chrome),
-          band: band.content,
-          surfaces: [...stages.querySelectorAll(".ticket-card, .epic-stack")].map((item) => ({
-            ...material(item),
-            colors: [...item.querySelectorAll("strong, small, .epic-stack-preview")].map(
-              (text) => ({ label: text.textContent, color: getComputedStyle(text).color }),
-            ),
-          })),
-          headings: [...stages.querySelectorAll(".lane-heading h2")].map((text) => ({
-            ...material(text),
-            colors: [{ label: text.textContent, color: getComputedStyle(text).color }],
-          })),
-        };
-      });
-      expect(observed.surfaces.length).toBeGreaterThanOrEqual(3);
-      expect(observed.band).toBe("none");
-      const tint = observed.tint.split(/\s+/).map(Number);
-      const contents = observed.surfaces[0];
-      if (!contents) throw new Error("Board content is absent");
-      expect(rgb(contents.background).alpha).toBeLessThan(0.9);
-      let minimumContrast = Infinity;
-      for (const surface of [...observed.headings, ...observed.surfaces]) {
-        expect({ background: surface.background, blur: surface.blur }).toEqual(observed.chrome);
-        const material = rgb(surface.background);
-        expect(material.channels).toEqual(tint);
-        expect(surface.blur).toBe(observed.chrome.blur);
-        // Conservative contrast floor over black, independent of a conveniently pale painting.
-        const floor = luminance(material.channels.map((channel) => channel * material.alpha));
-        for (const { label, color } of surface.colors) {
-          const text = rgb(color);
-          expect(text.alpha).toBe(1);
-          const contrast = (floor + 0.05) / (luminance(text.channels) + 0.05);
-          expect(contrast, `${background} at ${width}px: ${label}`).toBeGreaterThanOrEqual(4.5);
-          minimumContrast = Math.min(minimumContrast, contrast);
-        }
-      }
-      readings.push({ width, background, minimumContrast });
-      await page.screenshot({ path: `${materialsEvidence}/${background}-${width}.png` });
-    }
-  }
-  await writeFile(
-    `${materialsEvidence}/contrast.json`,
-    `${JSON.stringify({ conditions: "Computed materials over black, conservative floor", readings }, null, 2)}\n`,
-  );
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.mouse.move(0, 0);
-  await card.hover();
-  await expect
-    .poll(() =>
-      card
-        .evaluate((element) => getComputedStyle(element).backgroundColor)
-        .then((color) => rgb(color).alpha),
-    )
-    .toBe(0.78);
-  const hover = await card.evaluate((element) => getComputedStyle(element).backgroundColor);
-  await epic.getByRole("button").focus();
-  await expect(epic.getByRole("button")).toBeFocused();
-  await expect
-    .poll(() => epic.evaluate((element) => getComputedStyle(element).backgroundColor))
-    .toBe(hover);
-  expect(commissioned).toBe(0);
+  expect(commissioned).toEqual([]);
 });
 
 test("reduced transparency keeps Board content and interaction states opaque", async ({ page }) => {
@@ -340,7 +280,7 @@ test("reduced transparency keeps Board content and interaction states opaque", a
   await assertOpaque();
   await page.screenshot({ path: `${materialsEvidence}/reduced-transparency.png` });
   await cdp.detach();
-  expect(commissioned).toBe(0);
+  expect(commissioned).toEqual([]);
 });
 
 test("long lanes retain their headings and narrow boards scroll between stages", async ({
@@ -428,7 +368,7 @@ test("long lanes retain their headings and narrow boards scroll between stages",
   await scrollAndCheckHeading();
   await page.screenshot({ path: `${evidence}/board-scrolled-390.png` });
   expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
-  expect(commissioned).toBe(0);
+  expect(commissioned).toEqual([]);
 });
 
 test.describe("touch navigation", () => {
@@ -516,6 +456,6 @@ test.describe("touch navigation", () => {
     ).toBeVisible();
     await toggle.tap();
     await expect(draft).toHaveValue("Keep this unsent Project question.");
-    expect(commissioned).toBe(0);
+    expect(commissioned).toEqual([]);
   });
 });

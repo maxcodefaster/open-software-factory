@@ -20,6 +20,8 @@ test("the source gate includes both Connector and native control bridge checks b
   const names = gateSteps().map((step) => step.name);
   expect(names).toEqual([
     "docs",
+    "db-schema",
+    "zero-schema",
     "format",
     "lint",
     "typecheck",

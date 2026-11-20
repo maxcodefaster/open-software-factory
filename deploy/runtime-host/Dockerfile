@@ -33,24 +33,6 @@ RUN mkdir -p /opt/node-runtime/lib \
   && cp -L "$(find /usr/lib -name libstdc++.so.6 -print -quit)" /opt/node-runtime/lib/libstdc++.so.6 \
   && cp -L "$(find /usr/lib -name libgcc_s.so.1 -print -quit)" /opt/node-runtime/lib/libgcc_s.so.1
 
-FROM node AS build-tool
-ARG TARGETARCH
-COPY upstream.json /tmp/upstream.json
-RUN opencode_package="$(node -e "const value=JSON.parse(require('fs').readFileSync('/tmp/upstream.json')).openCode.packages[process.argv[1]];if(!value)throw new Error('Unsupported OpenCode architecture');process.stdout.write(value.name)" "$TARGETARCH")" \
-  && opencode_version="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/tmp/upstream.json')).openCode.version)")" \
-  && opencode_tarball="$(npm pack --ignore-scripts "$opencode_package@$opencode_version")" \
-  && node -e "const fs=require('fs'),crypto=require('crypto');const expected=JSON.parse(fs.readFileSync('/tmp/upstream.json')).openCode.packages[process.argv[2]].integrity;const actual='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64');if(actual!==expected)throw new Error('OpenCode integrity mismatch')" "$opencode_tarball" "$TARGETARCH" \
-  && mkdir -p /opt/factory/opencode \
-  && tar -xzf "$opencode_tarball" -C /opt/factory/opencode --strip-components=2 package/bin/opencode \
-  && chmod 0555 /opt/factory/opencode/opencode
-RUN opencode_package="$(node -e "const value=JSON.parse(require('fs').readFileSync('/tmp/upstream.json')).openCode.glibcPackages[process.argv[1]];if(!value)throw new Error('Unsupported OpenCode architecture');process.stdout.write(value.name)" "$TARGETARCH")" \
-  && opencode_version="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/tmp/upstream.json')).openCode.version)")" \
-  && opencode_tarball="$(npm pack --ignore-scripts "$opencode_package@$opencode_version")" \
-  && node -e "const fs=require('fs'),crypto=require('crypto');const expected=JSON.parse(fs.readFileSync('/tmp/upstream.json')).openCode.glibcPackages[process.argv[2]].integrity;const actual='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64');if(actual!==expected)throw new Error('OpenCode integrity mismatch')" "$opencode_tarball" "$TARGETARCH" \
-  && mkdir -p /opt/factory/opencode/glibc \
-  && tar -xzf "$opencode_tarball" -C /opt/factory/opencode/glibc --strip-components=2 package/bin/opencode \
-  && chmod 0555 /opt/factory/opencode/glibc/opencode
-
 FROM docker.io/oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS opencode-server
 ARG TARGETARCH
 WORKDIR /opt/factory/opencode/server
@@ -61,10 +43,9 @@ COPY deploy/opencode-server/server.mjs deploy/opencode-server/retained-events.mj
 COPY deploy/opencode-server/config ./config
 RUN chmod 0555 config && chmod 0444 config/opencode.json config/AGENTS.md
 
-FROM opencode-server AS input-stop
+FROM docker.io/oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS input-stop
 WORKDIR /src
-COPY package.json bun.lock ./
-COPY patches ./patches
+COPY deploy/input-stop/package.json deploy/input-stop/bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts --production
 COPY upstream.json ./upstream.json
 COPY apps/factory/src/agent/opencode-client.ts apps/factory/src/agent/input-stop-worker.ts ./apps/factory/src/agent/
@@ -146,8 +127,6 @@ FROM runtime-host-base AS runtime-host
 COPY --from=language-tools /opt/factory/language-tools/node_modules /opt/factory/language-tools/node_modules
 COPY --from=language-node-glibc /opt/node-runtime /opt/factory/language-tools/glibc
 COPY --from=language-node-musl /opt/node-runtime /opt/factory/language-tools/musl
-COPY --from=build-tool /opt/factory/opencode/opencode /opt/factory/opencode/opencode
-COPY --from=build-tool /opt/factory/opencode/glibc/opencode /opt/factory/opencode/glibc/opencode
 COPY --from=opencode-server /opt/factory/opencode/server /opt/factory/opencode/server
 COPY --from=input-stop /out/input-stop.mjs /opt/factory/opencode/server/input-stop.mjs
 COPY --from=bun-tool /opt/factory/opencode/glibc/bun /opt/factory/opencode/glibc/bun

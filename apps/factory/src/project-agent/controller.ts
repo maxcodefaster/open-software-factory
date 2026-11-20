@@ -52,12 +52,13 @@ import {
   modelExecutionBound,
 } from "../models/execution-policy";
 import type { ResolvedModelConnection } from "../models/native";
+import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { createSkillController } from "../skills/controller";
 import { renderArchitectureDiagrams } from "../technical-design/diagrams";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
-import { generateProjectResponse, projectModelConnection } from "./adapter";
+import { generateProjectResponse } from "./adapter";
 import { ProjectContextLimitError } from "./context";
 import { contextIn, contextsIn } from "./conversation-contexts";
 import {
@@ -623,7 +624,7 @@ export function createProjectAgentController(
             authority.modelConnection.connectionID,
             authority.modelConnection.version,
           )
-        : projectModelConnection();
+        : installationPlanningConnection();
       loadedSkills = await skills.load(authority.skillRevisionIds);
     } catch (cause) {
       await turns.failPending(

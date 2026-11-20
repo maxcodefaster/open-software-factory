@@ -8,6 +8,10 @@ import {
 } from "../../../../packages/workspace-domain/src/commands";
 import { workspaceTransferInput } from "../../../../packages/workspace-domain/src/files";
 import { workspaceShareInput } from "../../../../packages/workspace-domain/src/sharing";
+import {
+  UTF8TextPageError,
+  utf8TextPage,
+} from "../../../../packages/workspace-domain/src/text-page";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
@@ -679,7 +683,7 @@ export function createExternalFactoryMCP(services: Services) {
         );
         tool(
           "readFile",
-          "Read bounded UTF-8 pages. location=checkout uses relative canonical-source paths without waking compute. location=container uses absolute Dev Container paths as its development user and resumes paused compute. Use expectedVersion between pages. For binary files use downloads.",
+          "Read bounded UTF-8 text. offset and limit count bytes; offset must start a character. A split trailing character is deferred to nextOffset. Increase limit if the next character cannot fit. Invalid UTF-8 requires a binary download. Follow nextOffset and use expectedVersion between pages. location=checkout uses relative canonical-source paths without waking compute. location=container uses absolute Dev Container paths as its development user, resumes paused compute and never restarts explicitly stopped compute.",
           fileInput.extend({
             offset: z.number().int().nonnegative().default(0),
             limit: z.number().int().positive().max(16384).default(8192),
@@ -702,13 +706,19 @@ export function createExternalFactoryMCP(services: Services) {
               .parse(await source(userID, input.workspaceID, "read", { path: input.path }));
             if (input.expectedVersion && input.expectedVersion !== value.version)
               throw new CommandError("conflict", "File changed between pages");
-            const bytes = Buffer.from(value.content ?? "", "base64"),
-              end = Math.min(bytes.length, input.offset + input.limit);
+            const bytes = Buffer.from(value.content ?? "", "base64");
+            let page: ReturnType<typeof utf8TextPage>;
+            try {
+              page = utf8TextPage(bytes, input.offset, input.limit);
+            } catch (cause) {
+              if (cause instanceof UTF8TextPageError)
+                throw new CommandError("invalid", cause.message);
+              throw cause;
+            }
             return {
               path: input.path,
               version: value.version,
-              content: bytes.subarray(input.offset, end).toString("utf8"),
-              nextOffset: end < bytes.length ? end : null,
+              ...page,
               bytes: bytes.length,
             };
           },

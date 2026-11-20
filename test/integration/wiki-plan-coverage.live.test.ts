@@ -14,7 +14,7 @@ import {
 } from "../../apps/factory/src/knowledge/generation-workflow";
 import { nativeAgentPolicy, nativeStepGuard } from "../../apps/factory/src/models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../../apps/factory/src/models/native";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 
 const active = new Set<AbortController>();
 afterAll(() => {
@@ -27,7 +27,7 @@ test.skipIf(process.env["FACTORY_WIKI_PLAN_COVERAGE_LIVE"] !== "1")(
     const modelId = "gpt-6-luna";
     if (process.env["FACTORY_PROJECT_AGENT_MODEL"] !== modelId)
       throw new Error("Explicit Luna planning configuration is required");
-    const connection = projectModelConnection("knowledge");
+    const connection = installationPlanningConnection();
     const providerOptions = modelProviderOptions(connection, modelId);
     const directory = resolve(".factory/test-results/wiki-plan-quality", crypto.randomUUID());
     await mkdir(directory, { recursive: true });

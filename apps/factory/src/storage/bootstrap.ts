@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { sourceCheckpointObjects } from "../workspace/substrate-source";
 import { createPrivateObjects, objectDigest, type PrivateObjects } from "./objects";
 
 export async function requireObjectStorage(
@@ -44,6 +46,8 @@ export async function requireObjectStorage(
     >`SELECT objects FROM factory.attachment WHERE state='ready'`;
     const media = await database.client<{ id: string; sha256: string; bytes: number }[]>`
       SELECT id,sha256,byte_length AS bytes FROM factory.review_media WHERE state='complete'`;
+    const sources = await database.client<{ checkpoint: unknown }[]>`
+      SELECT checkpoint FROM factory.substrate_source WHERE checkpoint IS NOT NULL`;
     const retained = [
       ...attachments.flatMap((attachment) => attachment.objects),
       ...media.map((item) => ({
@@ -51,16 +55,26 @@ export async function requireObjectStorage(
         key: `factory-review/${storage.id}/${item.id}`,
       })),
     ];
-    for (const item of retained) {
-      try {
-        const data = await objects.read(item.key);
-        if (data.byteLength !== item.bytes || objectDigest(data) !== item.sha256)
-          throw new Error("Retained file content differs");
-      } catch {
-        throw new Error(
-          "Retained files are missing or changed in this object store. Complete and verify their explicit transfer before startup; retained references were not changed.",
-        );
+    async function checkedObject(item: { key: string; sha256: string; bytes: number }) {
+      const data = await objects.read(item.key);
+      if (data.byteLength !== item.bytes || objectDigest(data) !== item.sha256)
+        throw new Error("Retained file content differs");
+      return data;
+    }
+    try {
+      for (const item of retained) await checkedObject(item);
+      for (const row of sources) {
+        const source = sourceCheckpointObjects(row.checkpoint);
+        await checkedObject(source.manifest);
+        const whole = createHash("sha256");
+        for (const chunk of source.chunks) whole.update(await checkedObject(chunk));
+        if (whole.digest("hex") !== source.sha256)
+          throw new Error("Retained Source bundle content differs");
       }
+    } catch {
+      throw new Error(
+        "Retained files are missing or changed in this object store. Complete and verify their explicit transfer before startup; retained references were not changed.",
+      );
     }
   }
   // A small permanent identity probe has deterministic content. Startup

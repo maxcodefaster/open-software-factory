@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { runEnvironmentCommand } from "../../../../packages/runtime-kubernetes/src/command";
-import { factoryForgeSource } from "../knowledge/forge-source";
 
 const sourceRoot = "/tmp/open-software-factory-runtime-sources";
 
@@ -91,7 +91,10 @@ export async function prepareRuntimeRepository(
   revision: string,
 ) {
   const source = new URL(repositoryURL);
-  if (source.protocol !== "file:") return repositoryURL;
+  if (source.protocol !== "file:") {
+    configuredRepository(repositoryURL);
+    return repositoryURL;
+  }
   const destination = runtimeSourcePath(attemptID);
   await rm(destination, { recursive: true, force: true });
   await mkdir(sourceRoot, { recursive: true });
@@ -218,12 +221,11 @@ function configuredRepository(repositoryURL: string) {
   if (!apiURL || !token || !owner)
     throw new Error("Project repository is outside the configured forge");
   try {
-    const repository = factoryForgeSource(
-      repositoryURL,
+    const repository = boundForgeRepositoryFromURL(repositoryURL, {
       apiURL,
       owner,
-      process.env["FACTORY_FORGEJO_PUBLIC_URL"],
-    );
+      publicURL: process.env["FACTORY_FORGEJO_PUBLIC_URL"],
+    });
     return { apiURL, token, ...repository };
   } catch {
     throw new Error("Project repository is outside the configured forge");
@@ -239,6 +241,9 @@ export async function cleanRuntimeSourceArchive(
 ) {
   if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(revision) || !/^[a-f0-9-]{36}$/.test(projectID))
     throw new Error("Invalid clean Project source identity");
+  const repository = repositoryURL.startsWith("file://")
+    ? undefined
+    : configuredRepository(repositoryURL);
   const root = await mkdtemp(resolve(tmpdir(), "factory-clean-project-"));
   const checkout = resolve(root, "project");
   const archive = resolve(root, "source.tar");
@@ -253,8 +258,7 @@ export async function cleanRuntimeSourceArchive(
     COPYFILE_DISABLE: "1",
     GIT_CONFIG_COUNT: "0",
   };
-  if (!repositoryURL.startsWith("file://")) {
-    const repository = configuredRepository(repositoryURL);
+  if (repository) {
     Object.assign(env, {
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "http.extraHeader",

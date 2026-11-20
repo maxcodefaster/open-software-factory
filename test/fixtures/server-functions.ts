@@ -1,6 +1,12 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { APIRequestContext, APIResponse, Page, Route } from "@playwright/test";
+import type {
+  APIRequestContext,
+  APIResponse,
+  Request as BrowserRequest,
+  Page,
+  Route,
+} from "@playwright/test";
 import {
   decodeResponse as decodeNativeResponse,
   serializeString,
@@ -717,6 +723,18 @@ export async function factoryFunctionMatcher(name: string) {
 
 export async function factoryFunctionMatches(url: string, name: string) {
   return (await factoryFunctionMatcher(name))(new URL(url));
+}
+
+export async function factoryFunctionRequestMatcher(names: readonly string[]) {
+  const matchers = await Promise.all(
+    names.map(async (name) => ({ name, matches: await factoryFunctionMatcher(name) })),
+  );
+  return (request: Pick<BrowserRequest, "method" | "url">) => {
+    if (request.method() !== "POST") return undefined;
+    const url = new URL(request.url());
+    if (!/^\/_server\/data\/[^/]+$/.test(url.pathname)) return undefined;
+    return matchers.find((item) => item.matches(url))?.name;
+  };
 }
 
 /** Service doubles do not write durable read versions. Wake existing read observers explicitly. */

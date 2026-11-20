@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createAgentCandidates } from "../../apps/factory/src/agent/candidate-agent";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
@@ -6,6 +7,127 @@ import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { fixture } from "../fixtures/change-agent-turns";
 
 const writing = { fenceSource: async () => {}, protect: async () => {} };
+
+test("Agent recovery leaves an unconfirmed Workspace candidate to its original source owner", async () => {
+  const f = await fixture();
+  const base = "a".repeat(40),
+    commit = "d".repeat(40);
+  let remote = base;
+  const calls: string[] = [];
+  await f.database.client`UPDATE factory.change_writer
+    SET state='human',user_id=${f.userID},epoch=epoch+1 WHERE change_id=${f.changeID}`;
+  const submission = createWorkspaceSubmission(
+    f.database,
+    {
+      connected: () => true,
+      parentOperation: async (_attemptID, input, beforeSend) => {
+        await beforeSend?.(() => calls.push(input.action));
+        if (input.action === "git-prepare-commit") throw Error("Lost prepared commit receipt");
+        if (input.action === "git-push") remote = commit;
+        return { commitSHA: commit, remoteSHA: remote };
+      },
+    },
+    { assertSaved: async () => {} },
+    { getBranch: async () => ({ name: "branch", headSha: remote }) },
+    { username: "fixture", password: "fixture" },
+    writing,
+  );
+  const input = {
+    requestID: crypto.randomUUID(),
+    workspaceID: f.workspaceID,
+    expectedHead: base,
+    expectedRemoteHead: base,
+    message: "Submit saved source",
+  };
+  try {
+    await expect(submission.submit(f.userID, input)).rejects.toThrow("Lost prepared commit");
+    const candidates = createAgentCandidates(f.database, f.hub, () => false);
+    expect(await candidates.pending()).toHaveLength(0);
+    await candidates.reconcile(input.requestID, true);
+    await candidates.recoverRuntime(f.attemptID);
+    expect(f.commitCalls).toEqual([]);
+    const [unconfirmed] = await f.database.client<
+      { source: string; state: string; completed: Date | null }[]
+    >`SELECT source::text,state,completed_at AS completed FROM factory.change_commit_operation
+      WHERE id=${input.requestID}`;
+    expect(unconfirmed).toEqual({ source: "workspace", state: "commit-intended", completed: null });
+    await submission.recover();
+    expect(await submission.observe(f.userID, input.requestID)).toMatchObject({
+      state: "succeeded",
+      commitSHA: commit,
+    });
+    expect(calls).toEqual(["git-prepare-commit", "git-observe-commit", "git-push"]);
+  } finally {
+    await submission.close();
+    await f.database
+      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+    await f.dispose();
+  }
+}, 30000);
+
+test.each([
+  "workspace has no changes to commit",
+  "workspace HEAD no longer matches the commit intent",
+  "an ordinary commit cannot accept an unadmitted merge",
+])(
+  "Workspace candidate rejection retains its intent and returns the writer: %s",
+  async (error) => {
+    const f = await fixture();
+    const base = "a".repeat(40);
+    const calls: string[] = [];
+    await f.database.client`UPDATE factory.change_writer
+    SET state='human',user_id=${f.userID},epoch=epoch+1 WHERE change_id=${f.changeID}`;
+    const [original] = await f.database.client<{ epoch: string }[]>`
+    SELECT epoch::text FROM factory.change_writer WHERE change_id=${f.changeID}`;
+    const submission = createWorkspaceSubmission(
+      f.database,
+      {
+        connected: () => true,
+        parentOperation: async (_attemptID, input, beforeSend) => {
+          const [intent] = await f.database.client<{ state: string; source: string }[]>`
+          SELECT state,source::text FROM factory.change_commit_operation WHERE id=${input.operationId}`;
+          expect(intent).toEqual({ state: "commit-intended", source: "workspace" });
+          await beforeSend?.(() => calls.push(input.action));
+          throw Error(error);
+        },
+      },
+      { assertSaved: async () => {} },
+      { getBranch: async () => ({ name: "branch", headSha: base }) },
+      { username: "fixture", password: "fixture" },
+      writing,
+    );
+    const input = {
+      requestID: crypto.randomUUID(),
+      workspaceID: f.workspaceID,
+      expectedHead: base,
+      expectedRemoteHead: base,
+      message: "Submit rejected checkout",
+    };
+    try {
+      await expect(submission.submit(f.userID, input)).rejects.toThrow(error);
+      expect(await submission.submit(f.userID, input)).toMatchObject({
+        state: "failed",
+        commitSHA: null,
+      });
+      const [writer] = await f.database.client<{ state: string; user: string; epoch: string }[]>`
+      SELECT state,user_id AS user,epoch::text FROM factory.change_writer WHERE change_id=${f.changeID}`;
+      expect(writer).toEqual({
+        state: "human",
+        user: f.userID,
+        epoch: String(BigInt(original?.epoch ?? "0") + 2n),
+      });
+      expect(calls).toEqual(["git-prepare-commit"]);
+      expect(await f.database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
+      expect(await f.database.client`SELECT id FROM factory.delivery_approval`).toHaveLength(0);
+    } finally {
+      await submission.close();
+      await f.database
+        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      await f.dispose();
+    }
+  },
+  30000,
+);
 
 test("shared submission fences human Source and confirms the Factory branch writer before pushing", async () => {
   const f = await fixture();

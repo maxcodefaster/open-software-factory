@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { generateWiki } from "../../apps/factory/src/knowledge/generation-workflow";
 import { publishWikiPackage } from "../../apps/factory/src/knowledge/publication";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 import type { WikiPageSnapshot } from "../../packages/knowledge-domain/src/generation";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -112,7 +112,7 @@ test
         name: "Support desk",
         commit,
         modelId,
-        connection: projectModelConnection("knowledge"),
+        connection: installationPlanningConnection(),
         pages,
         inventory: sources.map(({ path, content }) => ({
           path,

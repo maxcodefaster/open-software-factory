@@ -111,13 +111,27 @@ test("project registration uses one locked transaction and preserves database de
   expect(writes[0]?.query).toContain("default");
   expect(writes[0]?.parameters).not.toContain("moonlit-landscape");
   expect(writes[0]?.parameters).not.toContain(createdAt);
-  expect(writes[1]?.parameters).toEqual([
-    writes[0]?.parameters[0],
-    userID,
-    "developer",
-    true,
-    userID,
-  ]);
+  const membership = writes[1];
+  const insert = membership?.query.match(/\(([^)]+)\) values \(([^)]+)\)/);
+  if (!membership || !insert?.[1] || !insert[2])
+    throw new Error("Membership insert was not executed");
+  const values = insert[2].split(",").map((value) => value.trim());
+  const bindings = Object.fromEntries(
+    insert[1].split(",").map((column, index) => {
+      const parameter = values[index]?.match(/^\$(\d+)$/);
+      return [
+        column.trim().replaceAll('"', ""),
+        parameter ? membership.parameters[Number(parameter[1]) - 1] : values[index],
+      ];
+    }),
+  );
+  expect(bindings).toMatchObject({
+    project_id: writes[0]?.parameters[0],
+    user_id: userID,
+    role: "developer",
+    manage_project: true,
+    updated_by: userID,
+  });
   expect(writes[2]?.parameters).toContain("configuration");
   expect(f.callbacks).toEqual([{ projectID, userID, recovering: false }]);
 });

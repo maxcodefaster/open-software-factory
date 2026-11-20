@@ -62,6 +62,7 @@ import { createMCPSourceEndpoint } from "../mcp/sources";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { createModelRelay } from "../models/relay";
+import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { createModelService } from "../models/service";
 import { createMonitoringController } from "../monitoring/controller";
@@ -69,7 +70,6 @@ import { createMonitoringRoutes } from "../monitoring/routes";
 import { createInputService } from "../monitoring/service";
 import { createMonitoringWorker } from "../monitoring/worker";
 import { createUIPreferenceController } from "../preferences/controller";
-import { projectModelConnection } from "../project-agent/adapter";
 import { createProjectAgentController } from "../project-agent/controller";
 import { createConversationService } from "../project-agent/service";
 import { createProjectService } from "../projects/service";
@@ -692,7 +692,7 @@ export async function createFactoryApplication() {
     connection: async (reference) =>
       reference.connectionID && reference.connectionVersion
         ? modelConnections.resolve(reference.connectionID, reference.connectionVersion)
-        : projectModelConnection(),
+        : installationPlanningConnection(),
     ready: async (projectID, userID) => {
       await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,command_id,state)
       VALUES(${projectID},'configuration',${crypto.randomUUID()},'ready')

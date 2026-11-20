@@ -9,7 +9,9 @@ import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 test("initial Verification continuation keeps exact-job, native identity and revocation fences", async () => {
   const f = await nativeRuntimeFixture("ticket");
   const previousPublic = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
+  const previousOwner = process.env["FACTORY_FORGEJO_OWNER"];
   process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.native.test";
+  process.env["FACTORY_FORGEJO_OWNER"] = "owned";
   const configuration = { ...f.configuration, egressHosts: ["git.native.test"] };
   const runtime = f.controller(configuration);
   let submissionSequence = 0;
@@ -176,6 +178,8 @@ test("initial Verification continuation keeps exact-job, native identity and rev
       console.info(`Controlled native Verification capacity fence: ${fault}`);
     }
   } finally {
+    if (previousOwner === undefined) delete process.env["FACTORY_FORGEJO_OWNER"];
+    else process.env["FACTORY_FORGEJO_OWNER"] = previousOwner;
     await f.dispose();
     if (previousPublic === undefined) delete process.env["FACTORY_FORGEJO_PUBLIC_URL"];
     else process.env["FACTORY_FORGEJO_PUBLIC_URL"] = previousPublic;

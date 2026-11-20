@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const maxContainerTransfer = 128 << 20
@@ -154,13 +155,37 @@ func (manager *containerFileManager) read(input ContainerFileRequest) (Container
 	if input.Offset > end {
 		return ContainerFileView{}, errors.New("container file offset exceeds size")
 	}
-	content := make([]byte, end-input.Offset)
-	if _, err := file.ReadAt(content, input.Offset); err != nil && err != io.EOF {
+	// Match workspace-domain's utf8TextPage rule: return complete characters
+	// inside the byte budget. At most three lookahead bytes validate a split
+	// tail without returning it or buffering the whole file.
+	readEnd := min(info.Size(), end+utf8.UTFMax-1)
+	content := make([]byte, readEnd-input.Offset)
+	count, err := file.ReadAt(content, input.Offset)
+	if err != nil && err != io.EOF {
 		return ContainerFileView{}, err
 	}
-	if after, err := file.Stat(); err != nil || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+	if after, err := file.Stat(); count != len(content) || err != nil || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
 		return ContainerFileView{}, errors.New("container file changed during read")
 	}
+	if input.Offset > 0 && len(content) > 0 && !utf8.RuneStart(content[0]) {
+		return ContainerFileView{}, errors.New("UTF-8 text page offset must be a character boundary")
+	}
+	var pageBytes int64
+	for pageBytes < end-input.Offset {
+		character, width := utf8.DecodeRune(content[pageBytes:])
+		if character == utf8.RuneError && width == 1 {
+			return ContainerFileView{}, errors.New("UTF-8 text page contains invalid encoding; use a binary file transfer")
+		}
+		if pageBytes+int64(width) > end-input.Offset {
+			break
+		}
+		pageBytes += int64(width)
+	}
+	if pageBytes == 0 && len(content) > 0 {
+		return ContainerFileView{}, errors.New("UTF-8 text page limit cannot fit the next character; increase limit")
+	}
+	content = content[:pageBytes]
+	end = input.Offset + pageBytes
 	return ContainerFileView{Path: input.Path, Version: version, Bytes: info.Size(), Content: content, Offset: input.Offset, NextOffset: end, Complete: end == info.Size()}, nil
 }
 

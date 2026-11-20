@@ -66,27 +66,7 @@
     "lockfile": "deploy/theia-ide/package-lock.json"
   },
   "openCode": {
-    "version": "2.3.2",
-    "packages": {
-      "amd64": {
-        "name": "@opencode/cli-linux-x64-baseline-musl",
-        "integrity": "sha512-7i2d0bUI87QHZYYvcc8VE1kKWXESPgKziQHotKs9lnFZC8jsuTNgCY1x2YpgOy38zqPVxeFagF5pzoSCwn+mfw=="
-      },
-      "arm64": {
-        "name": "@opencode/cli-linux-arm64-musl",
-        "integrity": "sha512-g25SO2YjCaPxwjVu72K4MAzvQPgZtzOLtmEZM+YuJZfcMSiZ7gQvOaWqFaH9+4DqC8X1Qb+4Vd2AQMI1ruxg5A=="
-      }
-    },
-    "glibcPackages": {
-      "amd64": {
-        "name": "@opencode/cli-linux-x64-baseline",
-        "integrity": "sha512-c8f1PimJ0dtKcF1sF7I+BSsySOH6HzmELqEfDTduzqBG2OzBH6g1sPwC/R5LhTf6kfG7FeLH5UFr9ZTTlcRdEw=="
-      },
-      "arm64": {
-        "name": "@opencode/cli-linux-arm64",
-        "integrity": "sha512-t44ZuW5CKaWiRSp4gWUDurMf4edyXw/SmUty1pRi827zda0T2RatKWj4LnMUewNCL05COLB1Ppg8RWicswhFaQ=="
-      }
-    }
+    "version": "2.3.2"
   },
   "openCodeServer": {
     "version": "2.3.2",

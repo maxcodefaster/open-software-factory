@@ -3,7 +3,7 @@ import { randomInt } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createCanvas } from "@napi-rs/canvas";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
 import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
@@ -16,7 +16,7 @@ import { fixtureValue } from "../fixtures/value";
 test.skipIf(process.env["FACTORY_ATTACHMENT_MODEL_LIVE"] !== "1")(
   "the configured planning model reads actual image, scanned/digital PDF and DOCX content through private S3 tools",
   async () => {
-    projectModelConnection();
+    installationPlanningConnection();
     const modelId = process.env["FACTORY_PROJECT_AGENT_MODEL"];
     if (!modelId) throw new Error("Configure the Planning model for this live proof");
     const s3 = await ownedAttachmentS3();

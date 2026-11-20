@@ -55,11 +55,38 @@ export type SubstrateSourceHandoff = Pick<
 function objectKey(saved: Checkpoint, suffix: string) {
   return `workspace-source/v1/${saved.workspaceID}/${saved.id}/${suffix}`;
 }
+function checkpointChunk(saved: Checkpoint, index: number) {
+  const sha256 = saved.bundle.chunks[index];
+  if (!sha256)
+    throw new CommandError(
+      "unavailable",
+      "Confirmed Source chunk is missing or corrupt. Old data was retained.",
+    );
+  return {
+    key: objectKey(saved, `chunk-${index}`),
+    bytes: Math.min(1 << 20, saved.bundle.bytes - index * (1 << 20)),
+    sha256,
+  };
+}
+function checkpointManifest(saved: Checkpoint) {
+  const bytes = new TextEncoder().encode(JSON.stringify(saved));
+  return {
+    key: objectKey(saved, "manifest.json"),
+    bytes: bytes.byteLength,
+    sha256: objectDigest(bytes),
+  };
+}
+export function sourceCheckpointObjects(value: unknown) {
+  const saved = checkpoint.parse(value);
+  return {
+    manifest: checkpointManifest(saved),
+    chunks: saved.bundle.chunks.map((_, index) => checkpointChunk(saved, index)),
+    sha256: saved.bundle.sha256,
+  };
+}
 function checkedBundle(data: Uint8Array, saved: Checkpoint, index: number) {
-  if (
-    data.byteLength !== Math.min(1 << 20, saved.bundle.bytes - index * (1 << 20)) ||
-    objectDigest(data) !== saved.bundle.chunks[index]
-  )
+  const item = checkpointChunk(saved, index);
+  if (data.byteLength !== item.bytes || objectDigest(data) !== item.sha256)
     throw new CommandError(
       "unavailable",
       "Confirmed Source chunk is missing or corrupt. Old data was retained.",
@@ -369,8 +396,9 @@ export function createSubstrateSources(
     return { ...row, checkpointID: row.checkpointID };
   }
   async function verifiedManifest(saved: Checkpoint) {
-    const bytes = await objects.read(objectKey(saved, "manifest.json"));
-    if (objectDigest(bytes) !== objectDigest(new TextEncoder().encode(JSON.stringify(saved))))
+    const item = checkpointManifest(saved);
+    const bytes = await objects.read(item.key);
+    if (bytes.byteLength !== item.bytes || objectDigest(bytes) !== item.sha256)
       throw new CommandError(
         "unavailable",
         "Confirmed Source manifest is missing or corrupt; old data retained",

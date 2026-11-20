@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { factoryProcess } from "../fixtures/factory-process";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 
 test.skipIf(process.env["FACTORY_RUN_SETUP_INSPECTION_PROOF"] !== "1")(
   "Luna inspects real exact-commit Forgejo source and confirms only missing configuration",
@@ -70,7 +70,7 @@ test.skipIf(process.env["FACTORY_RUN_SETUP_INSPECTION_PROOF"] !== "1")(
           connectionID: null,
           connectionVersion: null,
         }),
-        connection: async () => projectModelConnection(),
+        connection: async () => installationPlanningConnection(),
         ready: async () => {
           preparations++;
         },

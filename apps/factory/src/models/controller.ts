@@ -165,6 +165,7 @@ export function createModelSettingsController(
     sql: AgentTurnTransaction,
     projectID: string,
     userID: string,
+    personalSelection = true,
   ): Promise<InheritedModelSettingsView> {
     const canManageProject = await projectAuthorityIn(sql, userID, projectID);
     const system = await get(sql);
@@ -178,19 +179,21 @@ export function createModelSettingsController(
       .from(projectModelSettings)
       .where(eq(projectModelSettings.projectId, projectID));
     const project = projectRow ? projectModelInput.parse(projectRow) : emptyProject;
-    const [personalRow] = await db
-      .select({
-        version: personalModelSettings.version,
-        planningModelId: personalModelSettings.planningModelId,
-        buildModelId: personalModelSettings.buildModelId,
-      })
-      .from(personalModelSettings)
-      .where(
-        and(
-          eq(personalModelSettings.projectId, projectID),
-          eq(personalModelSettings.userId, userID),
-        ),
-      );
+    const [personalRow] = personalSelection
+      ? await db
+          .select({
+            version: personalModelSettings.version,
+            planningModelId: personalModelSettings.planningModelId,
+            buildModelId: personalModelSettings.buildModelId,
+          })
+          .from(personalModelSettings)
+          .where(
+            and(
+              eq(personalModelSettings.projectId, projectID),
+              eq(personalModelSettings.userId, userID),
+            ),
+          )
+      : [];
     const personal = personalRow
       ? personalModelInput.parse(personalRow)
       : { version: 0, planningModelId: null, buildModelId: null };
@@ -232,7 +235,12 @@ export function createModelSettingsController(
       context: { projectID: string; userID: string; personal?: boolean },
     ) {
       await lock(sql);
-      const view = await inherited(sql, context.projectID, context.userID);
+      const view = await inherited(
+        sql,
+        context.projectID,
+        context.userID,
+        context.personal !== false,
+      );
       const effective = (context.personal === false ? view.projectEffective : view.effective)[role];
       if (!effective.available)
         throw new CommandError(

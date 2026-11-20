@@ -3,6 +3,7 @@ import type { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
 import { ForgeMirrorWriteError } from "../../../../packages/forge/src/mirrors";
+import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import {
   type RepositoryMirror,
   type RepositoryMirrorProject,
@@ -48,23 +49,11 @@ export function createRepositoryMirrorController(options: {
     const [row] = await database.client<{ url: string }[]>`
       SELECT repository_url AS url FROM factory.project WHERE id=${projectID}`;
     if (!row) throw new CommandError("not-found", "Project not found");
-    const url = new URL(row.url);
-    const parts = url.pathname
-      .replace(/\.git$/, "")
-      .split("/")
-      .filter(Boolean);
-    if (
-      ![new URL(options.apiURL).origin, new URL(options.publicURL).origin].includes(url.origin) ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash ||
-      parts.length !== 2 ||
-      parts[0] !== options.owner ||
-      !parts[1]
-    )
-      throw new CommandError("conflict", "Project does not identify this Factory's repository");
-    return { owner: options.owner, name: parts[1] };
+    return boundForgeRepositoryFromURL(
+      row.url,
+      options,
+      () => new CommandError("conflict", "Project does not identify this Factory's repository"),
+    );
   }
   async function commands(projectID: string, sql: SQL = database.client) {
     return sql<Command[]>`

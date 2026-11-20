@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { projectModelConnection } from "./adapter";
+import { installationPlanningConnection } from "../models/resolver";
 import { projectAgentStructuredOutput, projectAgentStructuredOutputFor } from "./controller";
 
 test("reports an unconfigured model instead of inventing an interview response", async () => {
@@ -9,9 +9,9 @@ test("reports an unconfigured model instead of inventing an interview response",
   delete process.env["FACTORY_MODEL_API_KEY"];
   delete process.env["FACTORY_PLANNING_MODEL_API_KEY"];
   try {
-    expect(projectModelConnection).toThrow("The Project Agent model is not configured");
+    expect(installationPlanningConnection).toThrow("The Planning model is not configured");
     try {
-      projectModelConnection();
+      installationPlanningConnection();
     } catch (cause) {
       expect(cause).toMatchObject({ code: "unavailable", status: 503 });
     }

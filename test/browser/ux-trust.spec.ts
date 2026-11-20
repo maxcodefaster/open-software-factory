@@ -37,7 +37,7 @@ import {
   requestFunction,
   wakeFactoryReads,
 } from "../fixtures/server-functions";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -2998,9 +2998,35 @@ test("keeps board labels readable without repeating lane status and uses a full-
   await expect(board.getByRole("region", { name: "requirements", exact: true })).toBeVisible();
 });
 
-test("keeps board text readable on every artwork at desktop and narrow widths", async ({
+test("keeps Board materials and text readable on every artwork at desktop and phone widths", async ({
   page,
 }) => {
+  if (!database) throw new Error("Database is not ready");
+  const execution = await watchCommands(page, [
+    "implementTicket",
+    "startTicketChange",
+    "startCoding",
+    "resumeCoding",
+    "sendCodingPrompt",
+    "requestCodingChanges",
+    "sendConversationMessage",
+    "answerConversationQuestion",
+    "setConversationMode",
+    "startPersonalWorkspace",
+    "startTicketWorkspace",
+    "startFreshRuntimeAttempt",
+    "generateKnowledge",
+  ]);
+  await insertChangedTicket("Failed implementation", "failed");
+  const epicID = await createPlanningEpic({
+    database,
+    projectID,
+    userID,
+    title: "Navigation polish",
+  });
+  await database.client`INSERT INTO factory.ticket(id,project_id,title,state,epic_id,created_by)
+    VALUES(${crypto.randomUUID()},${projectID},'Group related onboarding improvements',
+      'inbox',${epicID},${userID})`;
   await signIn(page);
   await selectProject(page);
   const board = page.getByRole("region", { name: "Ticket board" });
@@ -3017,9 +3043,22 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
       hasText: "Needs a specification",
     }),
   ).toBeVisible();
+  await expect(
+    board.getByRole("button").filter({ hasText: "Failed implementation" }),
+  ).toContainText("Change failed");
+  const card = board.locator(".ticket-card").first();
+  const epic = board.locator(".epic-stack").first();
+  await expect(epic).toBeVisible();
+  await expect(epic).toContainText("Group related onboarding improvements");
   const desktop = page.locator(".factory-desktop");
-  const readings: { width: number; background: string; minimumContrast: number }[] = [];
-  for (const width of [1440, 1280, 900]) {
+  await page.mouse.move(0, 0);
+  const readings: {
+    width: number;
+    background: string;
+    condition: string;
+    minimumContrast: number;
+  }[] = [];
+  for (const width of [1440, 1280, 900, 390]) {
     await page.setViewportSize({ width, height: 900 });
     for (const background of desktopBackgroundKeys) {
       // Presentation-only variants, never a write to the signed-in user's preference.
@@ -3031,22 +3070,54 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
         const image = new Image();
         image.src = path;
         await image.decode();
+        await Promise.all(
+          element
+            .getAnimations({ subtree: true })
+            .filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity)
+            .map((animation) => animation.finished.catch(() => {})),
+        );
       }, background);
-      const observed = await desktop.evaluate((element) => ({
-        art: getComputedStyle(element, "::before").backgroundImage,
-        scrim: getComputedStyle(element, "::after").backgroundImage,
-        cards: [...element.querySelectorAll(".lane-heading > h2, .ticket-card")].map((card) => ({
-          background: getComputedStyle(card).backgroundColor,
-          colors: (card.matches("h2")
-            ? [card]
-            : [...card.querySelectorAll("span, small, strong")]
-          ).map((text) => ({
-            label: text.textContent,
-            color: getComputedStyle(text).color,
-          })),
-        })),
-      }));
+      const observed = await desktop.evaluate((element) => {
+        const stages = element.querySelector(".board");
+        const chrome = element.querySelector(".workspace-dock");
+        if (!stages || !chrome) throw new Error("Board navigation is absent");
+        const material = (item: Element) => {
+          const style = getComputedStyle(item);
+          return { background: style.backgroundColor, blur: style.backdropFilter };
+        };
+        return {
+          art: getComputedStyle(element, "::before").backgroundImage,
+          scrim: getComputedStyle(element, "::after").backgroundImage,
+          tint: getComputedStyle(element).getPropertyValue("--surface-rgb").trim(),
+          chrome: material(chrome),
+          band: getComputedStyle(stages, "::before").content,
+          headings: stages.querySelectorAll(".lane-heading > h2").length,
+          surfaces: stages.querySelectorAll(".ticket-card, .epic-stack").length,
+          cards: [...stages.querySelectorAll(".lane-heading > h2, .ticket-card, .epic-stack")].map(
+            (card) => ({
+              ...material(card),
+              colors: (card.matches("h2")
+                ? [card]
+                : [...card.querySelectorAll("span, small, strong")]
+              ).map((text) => ({
+                label: text.textContent,
+                color: getComputedStyle(text).color,
+                reference: text.matches(".ticket-card-body > small"),
+              })),
+            }),
+          ),
+        };
+      });
       expect(observed.art).toContain(`${background}.jpg`);
+      expect(observed.headings).toBe(4);
+      expect(observed.surfaces).toBeGreaterThanOrEqual(3);
+      expect(observed.band).toBe("none");
+      const tint = observed.tint.split(/\s+/).map(Number);
+      for (const card of observed.cards) {
+        expect({ background: card.background, blur: card.blur }).toEqual(observed.chrome);
+        expect(rgb(card.background).channels).toEqual(tint);
+        expect(rgb(card.background).alpha).toBeLessThan(0.9);
+      }
       const stops = [...observed.scrim.matchAll(/rgba?\([^)]+\)/g)].map((stop) => rgb(stop[0]));
       expect(stops.length).toBeGreaterThan(0);
       // The scrim's darkest possible pixel is composited over black artwork. The card
@@ -3054,34 +3125,41 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
       const canvasFloor = [0, 1, 2].map((index) =>
         Math.min(...stops.map((stop) => (stop.channels[index] ?? 0) * stop.alpha)),
       );
-      let minimumContrast = Infinity;
-      for (const card of observed.cards) {
-        const material = rgb(card.background);
-        const paperFloor = luminance(
-          material.channels.map(
-            (channel, index) =>
-              channel * material.alpha + (canvasFloor[index] ?? 0) * (1 - material.alpha),
-          ),
-        );
-        for (const { label, color } of card.colors) {
-          const text = rgb(color);
-          expect(text.alpha).toBe(1);
-          const ratio = (paperFloor + 0.05) / (luminance(text.channels) + 0.05);
-          minimumContrast = Math.min(minimumContrast, ratio);
-          expect(
-            ratio,
-            `${width}px ${background}: ${label}, ${color} on ${card.background}`,
-          ).toBeGreaterThanOrEqual(4.5);
+      // Keep both former contrast floors, using one compositing/contrast calculation.
+      for (const { condition, floor } of [
+        { condition: "material over black", floor: [0, 0, 0] },
+        { condition: "scrim and material over black", floor: canvasFloor },
+      ]) {
+        let minimumContrast = Infinity;
+        for (const card of observed.cards) {
+          const material = rgb(card.background);
+          const paperFloor = luminance(
+            material.channels.map(
+              (channel, index) =>
+                channel * material.alpha + (floor[index] ?? 0) * (1 - material.alpha),
+            ),
+          );
+          for (const { label, color, reference } of card.colors) {
+            if (reference) expect(label?.trim()).toBeTruthy();
+            const text = rgb(color);
+            expect(text.alpha).toBe(1);
+            const ratio = (paperFloor + 0.05) / (luminance(text.channels) + 0.05);
+            minimumContrast = Math.min(minimumContrast, ratio);
+            expect(
+              ratio,
+              `${width}px ${background} ${condition}: ${label}, ${color} on ${card.background}`,
+            ).toBeGreaterThanOrEqual(4.5);
+          }
         }
+        readings.push({ width, background, condition, minimumContrast });
       }
-      readings.push({ width, background, minimumContrast });
       await writeFile(
         `${evidenceDirectory}/board-contrast.json`,
         `${JSON.stringify(
           {
             readings,
             conditions:
-              "Chromium, scrim/card material composited above black artwork. Opaque heading/reference/title/status text, no persisted preference changes. Conservative floor, not sampled artwork pixels.",
+              "Chromium, shared Board/dock materials over black and scrim/material composited above black artwork. Opaque heading/reference/title/status/Epic text, no persisted preference changes. Conservative floors, not sampled artwork pixels.",
           },
           null,
           2,
@@ -3093,6 +3171,24 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
       });
     }
   }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.mouse.move(0, 0);
+  await card.hover();
+  await expect
+    .poll(() =>
+      card
+        .evaluate((element) => getComputedStyle(element).backgroundColor)
+        .then((color) => rgb(color).alpha),
+    )
+    .toBe(0.78);
+  const hover = await card.evaluate((element) => getComputedStyle(element).backgroundColor);
+  await epic.getByRole("button").focus();
+  await expect(epic.getByRole("button")).toBeFocused();
+  await expect
+    .poll(() => epic.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .toBe(hover);
+  await page.screenshot({ path: `${evidenceDirectory}/board-hover-focus.png` });
+  expect(execution).toEqual([]);
 });
 
 test("respects reduced motion for the board, workspace, Agent and popovers", async ({ page }) => {

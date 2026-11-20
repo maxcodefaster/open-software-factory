@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -9,7 +9,7 @@ test.skipIf(process.env["FACTORY_CODE_RESEARCH_LIVE"] !== "1")(
   async () => {
     if (globalThis.process.env["FACTORY_PROJECT_AGENT_MODEL"] !== "gpt-6-luna")
       throw new Error("Explicit Luna planning configuration is required for this proof");
-    projectModelConnection();
+    installationPlanningConnection();
     const process = await factoryProcess();
     const db = process.connect();
     try {

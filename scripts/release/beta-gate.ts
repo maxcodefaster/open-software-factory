@@ -36,6 +36,8 @@ export function findForbidden(terms: readonly string[], text: string) {
 export function gateSteps(): GateStep[] {
   return [
     { name: "docs", command: ["bun", "run", "check:docs"] },
+    { name: "db-schema", command: ["bun", "run", "db:check"] },
+    { name: "zero-schema", command: ["bun", "run", "zero:check"] },
     { name: "format", command: ["bun", "run", "format:check"] },
     { name: "lint", command: ["bun", "run", "lint"] },
     { name: "typecheck", command: ["bun", "run", "typecheck"] },

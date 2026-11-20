@@ -61,6 +61,27 @@ test("new Projects spread persistent backgrounds across the catalogue, including
       Array.from({ length: 12 }, (_, index) => create(index + 6)),
     );
     const projects = [...first, ...concurrent];
+    const memberships = await database.client<
+      {
+        project_id: string;
+        user_id: string;
+        role: string;
+        manage_project: boolean;
+        updated_by: string;
+      }[]
+    >`SELECT project_id,user_id,role,manage_project,updated_by
+      FROM factory.project_membership`;
+    expect(memberships).toHaveLength(projects.length);
+    expect(memberships.map((membership) => membership.project_id).sort()).toEqual(
+      projects.map((project) => project.id).sort(),
+    );
+    for (const membership of memberships)
+      expect(membership).toMatchObject({
+        user_id: manager,
+        role: "developer",
+        manage_project: true,
+        updated_by: manager,
+      });
     for (const key of desktopBackgroundKeys)
       expect(projects.filter((project) => project.desktopBackgroundKey === key)).toHaveLength(3);
     await database.client`UPDATE factory.project SET name=name || ' renamed'`;

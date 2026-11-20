@@ -2,8 +2,8 @@ import { verificationDiagnosisInput } from "../../../../packages/conversation-do
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { submittedCandidate } from "../agent/candidate-state";
 import { CommandError } from "../command-error";
-import { submittedCandidate } from "./submitted-candidate";
 
 // Retry only a queued workflow whose environment failed before accepting work.
 // Forgejo still owns the original run; this does not retry executed checks.

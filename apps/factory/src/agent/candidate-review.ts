@@ -13,6 +13,7 @@ import {
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { CommandError } from "../command-error";
 import { createReviewExecutionReader } from "./review-execution";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
@@ -56,11 +57,15 @@ export function createCandidateReviewController(
   execution = createReviewExecutionReader(database),
 ) {
   const turns = createAgentTurnStore(database);
-  const allowedOwner = forgeOverride ? undefined : process.env["FACTORY_FORGEJO_OWNER"];
+  const binding = {
+    apiURL: process.env["FACTORY_FORGEJO_API_URL"] ?? "",
+    publicURL: process.env["FACTORY_FORGEJO_PUBLIC_URL"],
+    owner: process.env["FACTORY_FORGEJO_OWNER"] ?? "",
+  };
   const forge =
     forgeOverride ??
     createForgejoClient({
-      apiURL: process.env["FACTORY_FORGEJO_API_URL"] ?? "",
+      apiURL: binding.apiURL,
       token: process.env["FACTORY_FORGEJO_TOKEN"] ?? "",
     });
   // Revision-scoped caches hold source only, never authority or review verdicts.
@@ -149,16 +154,11 @@ export function createCandidateReviewController(
     return result as T;
   }
   function repository(scope: ReviewScope) {
-    const url = new URL(scope.repositoryURL);
-    const parts = url.pathname
-      .replace(/\.git$/, "")
-      .split("/")
-      .filter(Boolean);
-    const name = parts.at(-1);
-    const owner = parts.at(-2);
-    if (!name || !owner || (allowedOwner && owner !== allowedOwner))
-      throw new Error("Review repository is not the configured Project forge");
-    return { owner, name };
+    return boundForgeRepositoryFromURL(
+      scope.repositoryURL,
+      binding,
+      () => new Error("Review repository is not the configured Project forge"),
+    );
   }
   async function inventories(scope: ReviewScope) {
     const repo = repository(scope);

@@ -2,12 +2,16 @@ import { createHmac } from "node:crypto";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
+  type ContainerFileMutation,
   containerFileMutation,
   containerFilePath,
-  workspaceTransferInput,
-  type ContainerFileMutation,
   type WorkspaceTransferInput,
+  workspaceTransferInput,
 } from "../../../../packages/workspace-domain/src/files";
+import {
+  decodeUTF8Text,
+  UTF8TextPageError,
+} from "../../../../packages/workspace-domain/src/text-page";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
@@ -279,16 +283,41 @@ export function createWorkspaceContainerFiles(
           })
           .parse(input);
         const attemptID = await ready(parsed.workspaceID, userID, false);
-        const result = nativeFile.parse(
-          await call(userID, parsed.workspaceID, attemptID, "file-read", parsed, false),
-        );
-        return {
-          path: result.path,
-          bytes: result.bytes,
-          version: result.version,
-          content: Buffer.from(result.content, "base64").toString("utf8"),
-          nextOffset: result.complete ? null : result.nextOffset,
-        };
+        try {
+          const result = nativeFile.parse(
+            await call(userID, parsed.workspaceID, attemptID, "file-read", parsed, false),
+          );
+          const content = Buffer.from(result.content, "base64");
+          if (
+            result.path !== parsed.path ||
+            !result.version ||
+            result.offset !== parsed.offset ||
+            content.length > parsed.limit ||
+            result.nextOffset !== parsed.offset + content.length ||
+            result.nextOffset > result.bytes ||
+            result.complete !== (result.nextOffset === result.bytes) ||
+            (!result.complete && !content.length)
+          )
+            throw new CommandError("unavailable", "Container text page has an invalid byte window");
+          if (parsed.version && result.version !== parsed.version)
+            throw new CommandError("conflict", "File changed between pages");
+          return {
+            path: result.path,
+            bytes: result.bytes,
+            version: result.version,
+            content: decodeUTF8Text(content),
+            nextOffset: result.complete ? null : result.nextOffset,
+          };
+        } catch (cause) {
+          if (
+            cause instanceof UTF8TextPageError ||
+            (cause instanceof Error && cause.message.startsWith("UTF-8 text page "))
+          )
+            throw new CommandError("invalid", cause.message);
+          if (cause instanceof Error && cause.message === "container file version changed")
+            throw new CommandError("conflict", "File changed between pages");
+          throw cause;
+        }
       }),
     list: (
       userID: string,

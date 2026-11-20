@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { codeReadInput } from "../../apps/factory/src/knowledge/code-read";
 import { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 import { recordedMastraUsage } from "../../apps/factory/src/usage/record-mastra";
 import { monitoringFixture } from "../fixtures/monitoring";
 import { fixtureValue } from "../fixtures/value";
@@ -13,7 +13,7 @@ test.skipIf(process.env["FACTORY_MONITORING_MODEL_LIVE"] !== "1")(
   async () => {
     const modelId = process.env["FACTORY_PROJECT_AGENT_MODEL"];
     if (!modelId) throw new Error("The configured Planning model is required");
-    const connection = projectModelConnection();
+    const connection = installationPlanningConnection();
     const capability = crypto.randomUUID();
     const exchanges: unknown[] = [];
     let proxy: ReturnType<typeof Bun.serve> | undefined;

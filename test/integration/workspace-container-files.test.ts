@@ -6,6 +6,7 @@ import { createWorkspaceContainerFiles } from "../../apps/factory/src/workspace/
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { createWorkspaceTransferRoutes } from "../../apps/factory/src/workspace/transfer-routes";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { utf8TextPage } from "../../packages/workspace-domain/src/text-page";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 const sha256 = (content: Uint8Array) => createHash("sha256").update(content).digest("hex");
@@ -33,6 +34,7 @@ async function fileFixture() {
   >();
   let loseBegin = false,
     loseCommit = false;
+  let readReply: Record<string, unknown> | undefined;
   const parent = {
     data: { kind: "connector", role: "parent", attemptID, generation: 1 },
     close() {},
@@ -48,7 +50,26 @@ async function fileFixture() {
       let result: unknown;
       if (request.action === "file-context")
         result = { workspaceFolder: "/workspaces/project", userID: 1000 };
-      else if (request.action === "file-upload-begin" || request.action === "file-download-begin") {
+      else if (request.action === "file-read") {
+        const content = published.get(input.path) ?? Buffer.from("A€B");
+        const version = sha256(content);
+        if (input.version && input.version !== version)
+          throw new Error("container file version changed");
+        const page = utf8TextPage(content, input.offset, input.limit);
+        const bytes = Buffer.from(page.content);
+        result = readReply ?? {
+          path: input.path,
+          bytes: content.length,
+          version,
+          content: bytes.toString("base64"),
+          offset: input.offset,
+          nextOffset: input.offset + bytes.length,
+          complete: page.nextOffset === null,
+        };
+      } else if (
+        request.action === "file-upload-begin" ||
+        request.action === "file-download-begin"
+      ) {
         const content =
           request.action === "file-download-begin"
             ? (published.get(input.path) ?? Buffer.from("pinned-download"))
@@ -147,6 +168,10 @@ async function fileFixture() {
     sharing,
     actions,
     native,
+    published,
+    setReadReply(reply: Record<string, unknown> | undefined) {
+      readReply = reply;
+    },
     loseBegin() {
       loseBegin = true;
     },
@@ -160,6 +185,121 @@ async function fileFixture() {
     },
   };
 }
+
+test("container text pages reconstruct multibyte content, preserve byte cursors and reject changed versions", async () => {
+  const f = await fileFixture();
+  const input = { workspaceID: f.workspaceID, path: "/text", limit: 2 };
+  try {
+    const first = await f.files.read(f.owner, input);
+    expect(first).toMatchObject({ content: "A", bytes: 5, nextOffset: 1 });
+    const second = await f.files.read(f.owner, {
+      ...input,
+      offset: 1,
+      limit: 3,
+      version: first.version,
+    });
+    expect(second).toMatchObject({ content: "€", bytes: 5, nextOffset: 4, version: first.version });
+    const last = await f.files.read(f.owner, {
+      ...input,
+      offset: 4,
+      limit: 1,
+      version: first.version,
+    });
+    expect(last).toMatchObject({
+      content: "B",
+      bytes: 5,
+      nextOffset: null,
+      version: first.version,
+    });
+    expect(first.content + second.content + last.content).toBe("A€B");
+    expect(await f.files.read(f.owner, { ...input, offset: 5 })).toMatchObject({
+      content: "",
+      nextOffset: null,
+      bytes: 5,
+    });
+    f.published.set("/empty", Buffer.alloc(0));
+    expect(await f.files.read(f.owner, { ...input, path: "/empty" })).toMatchObject({
+      content: "",
+      nextOffset: null,
+      bytes: 0,
+    });
+    for (const text of ["\ufeffA¢€😀B\ufeff", "�\x00é界🦊"]) {
+      f.published.set(input.path, Buffer.from(text));
+      for (const limit of [4, 5, 6, 7]) {
+        let offset = 0;
+        let content = "";
+        const version = sha256(Buffer.from(text));
+        for (;;) {
+          const page = await f.files.read(f.owner, { ...input, offset, limit, version });
+          const length = Buffer.byteLength(page.content);
+          expect(length).toBeLessThanOrEqual(limit);
+          expect(page.version).toBe(version);
+          content += page.content;
+          if (page.nextOffset === null) {
+            expect(offset + length).toBe(page.bytes);
+            break;
+          }
+          expect(page.nextOffset).toBe(offset + length);
+          expect(page.nextOffset).toBeGreaterThan(offset);
+          offset = page.nextOffset;
+        }
+        expect(content).toBe(text);
+      }
+    }
+    f.published.set(input.path, Buffer.from("A€C"));
+    await expect(
+      f.files.read(f.owner, { ...input, offset: 4, limit: 1, version: first.version }),
+    ).rejects.toMatchObject({ code: "conflict", message: "File changed between pages" });
+  } finally {
+    await f.dispose();
+  }
+}, 30000);
+
+test("container text paging refuses split offsets, insufficient budgets and invalid native text or cursors", async () => {
+  const f = await fileFixture();
+  const input = { workspaceID: f.workspaceID, path: "/text", limit: 2 };
+  try {
+    await expect(f.files.read(f.owner, { ...input, offset: 2, limit: 3 })).rejects.toMatchObject({
+      code: "invalid",
+      message: "UTF-8 text page offset must be a character boundary",
+    });
+    await expect(f.files.read(f.owner, { ...input, offset: 1 })).rejects.toMatchObject({
+      code: "invalid",
+      message: "UTF-8 text page limit cannot fit the next character; increase limit",
+    });
+    const native = {
+      path: input.path,
+      bytes: 5,
+      version: sha256(Buffer.from("A€B")),
+      content: Buffer.from([0x41, 0xe2]).toString("base64"),
+      offset: 0,
+      nextOffset: 2,
+      complete: false,
+    };
+    f.setReadReply(native);
+    await expect(f.files.read(f.owner, input)).rejects.toMatchObject({
+      code: "invalid",
+      message: "UTF-8 text page contains invalid encoding; use a binary file transfer",
+    });
+    for (const reply of [
+      { ...native, content: Buffer.from("A").toString("base64"), nextOffset: 2 },
+      { ...native, content: Buffer.from("A€").toString("base64"), nextOffset: 4 },
+      { ...native, content: "", nextOffset: 0 },
+      { ...native, content: Buffer.from("A").toString("base64"), nextOffset: 1, complete: true },
+    ]) {
+      f.setReadReply(reply);
+      await expect(f.files.read(f.owner, input)).rejects.toMatchObject({
+        code: "unavailable",
+        message: "Container text page has an invalid byte window",
+      });
+    }
+    f.setReadReply(undefined);
+    f.published.set(input.path, Buffer.from([0x41, 0xe2, 0x82]));
+    await expect(f.files.read(f.owner, input)).rejects.toMatchObject({ code: "invalid" });
+  } finally {
+    await f.dispose();
+  }
+}, 30000);
 
 test("container transfers retain exact intent, not file bytes, and never recreate uncertain uploads", async () => {
   const f = await fileFixture();
@@ -284,6 +424,9 @@ test("container access rechecks sharing, preserves actor ownership and refuses e
       expectedVersion: 0,
     });
     await expect(f.files.context(f.guest, f.workspaceID)).rejects.toThrow("observation only");
+    await expect(
+      f.files.read(f.guest, { workspaceID: f.workspaceID, path: "/text", limit: 4 }),
+    ).rejects.toThrow("observation only");
     await f.sharing.decide(f.owner, {
       commandID: crypto.randomUUID(),
       workspaceID: f.workspaceID,
@@ -295,6 +438,10 @@ test("container access rechecks sharing, preserves actor ownership and refuses e
       workspaceFolder: "/workspaces/project",
       userID: 1000,
     });
+    expect(
+      (await f.files.read(f.guest, { workspaceID: f.workspaceID, path: "/text", limit: 4 }))
+        .content,
+    ).toBe("A€");
     const download = await f.files.begin(f.guest, {
       requestID: crypto.randomUUID(),
       workspaceID: f.workspaceID,
@@ -315,6 +462,9 @@ test("container access rechecks sharing, preserves actor ownership and refuses e
     await expect(f.files.download(f.guest, download.transferID, 0)).rejects.toThrow(
       "Workspace not found",
     );
+    await expect(
+      f.files.read(f.guest, { workspaceID: f.workspaceID, path: "/text", limit: 4 }),
+    ).rejects.toThrow("Workspace not found");
     const [attempt] = await f.database.client<
       { state: string }[]
     >`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
@@ -325,6 +475,9 @@ test("container access rechecks sharing, preserves actor ownership and refuses e
     await expect(f.files.context(f.owner, f.workspaceID)).rejects.toThrow(
       "Start this Workspace explicitly",
     );
+    await expect(
+      f.files.read(f.owner, { workspaceID: f.workspaceID, path: "/text", limit: 4 }),
+    ).rejects.toThrow("Start this Workspace explicitly");
     expect(f.actions).toHaveLength(count);
   } finally {
     await f.dispose();

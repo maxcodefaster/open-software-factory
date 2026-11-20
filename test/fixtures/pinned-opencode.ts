@@ -55,7 +55,6 @@ export async function pinnedOpenCode(
   // The default proof runs the same packaged OpenCode 2 server as Build.
   // Only an explicitly supplied candidate binary uses the upgrade harness.
   const packaged = !serverBinary;
-  const nativeServer = Boolean(serverBinary || packaged);
   if (!/^(?:[a-zA-Z0-9.:/-]+@)?sha256:[a-f0-9]{64}$/.test(artifactImage))
     throw new Error("Owned OpenCode artifact requires an exact image digest");
   if (artifactImage.includes("@")) {
@@ -173,17 +172,10 @@ export async function pinnedOpenCode(
     networkAcknowledged = true;
     if (skillManifest)
       await Bun.write(resolve(scratch, "admitted-skills.json"), JSON.stringify(skillManifest));
-    if (packaged) {
-      // Run the exact runtime artifact itself; do not copy hundreds of upstream files to the host.
-    } else if (serverBinary) {
+    if (serverBinary) {
       const { copyFile } = await import("node:fs/promises");
       await copyFile(serverBinary, resolve(scratch, "opencode"));
-    } else
-      await docker(
-        "cp",
-        `${source}:/opt/factory/opencode/glibc/opencode`,
-        resolve(scratch, "opencode"),
-      );
+    }
     await create(
       container,
       "run",
@@ -200,7 +192,8 @@ export async function pinnedOpenCode(
         ? ["--env", `FACTORY_PROCESS_NATIVE_PROVIDER=${JSON.stringify(nativeProvider)}`]
         : []),
       ...(providerBaseURL ? ["--env", `FACTORY_PROCESS_PROVIDER_URL=${providerBaseURL}`] : []),
-      ...(nativeServer ? ["--env", "FACTORY_PROCESS_NATIVE_SERVER=1"] : []),
+      "--env",
+      "FACTORY_PROCESS_NATIVE_SERVER=1",
       ...(skillManifest
         ? [
             "--env",
@@ -234,7 +227,7 @@ export async function pinnedOpenCode(
             `type=bind,src=${resolve(scratch, "opencode")},dst=/opt/factory/opencode,readonly`,
           ]
         : []),
-      ...(nativeServer && !packaged
+      ...(!packaged
         ? [
             "--mount",
             `type=bind,src=${resolve("deploy/opencode-server")},dst=/owned-server,readonly`,
@@ -318,9 +311,7 @@ export async function pinnedOpenCode(
       "Owned native location did not become ready",
       45_000,
     );
-    const version = nativeServer
-      ? `opencode v${(await nativeInfo()).version}`
-      : await docker("exec", container, "/opt/factory/opencode", "--version");
+    const version = `opencode v${(await nativeInfo()).version}`;
     if (version !== `opencode v${expectedVersion}`)
       throw new Error(`Pinned OpenCode version differs: ${version}`);
     console.log("Owned pinned process", { version, scratch });
@@ -352,7 +343,7 @@ export async function pinnedOpenCode(
       }),
     };
   } catch (cause) {
-    if (nativeServer && acknowledged.has(container))
+    if (acknowledged.has(container))
       console.log("Owned native server startup", (await docker("logs", container)).slice(-3000));
     try {
       await dispose();

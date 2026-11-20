@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import {
+  forgeBinding,
+  forgeRepositoryBindingMatrix,
+} from "../../../../test/support/forge-repository-binding";
 import { factoryForgeSource } from "./forge-source";
 
 test("Wiki sources stay on the configured Forgejo origin and owner", () => {
@@ -50,5 +54,16 @@ test("Factory source identity accepts only the configured public Forge or privat
   ])
     expect(() => factoryForgeSource(source, api, "owned", publicURL)).toThrow(
       "configured Factory Forgejo",
+    );
+});
+
+test("Source consumes the shared binding matrix and retains forbidden errors", () => {
+  const { accepted, malformed } = forgeRepositoryBindingMatrix();
+  const source = (url: string) =>
+    factoryForgeSource(url, forgeBinding.apiURL, forgeBinding.owner, forgeBinding.publicURL);
+  for (const { url, repository } of accepted) expect(source(url)).toEqual(repository);
+  for (const url of malformed)
+    expect(() => source(url)).toThrow(
+      expect.objectContaining({ code: "forbidden", message: expect.stringContaining("Forgejo") }),
     );
 });

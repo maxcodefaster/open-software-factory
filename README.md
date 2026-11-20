@@ -202,12 +202,20 @@ TypeScript 6 remains required by compiler API-based test tooling and the package
 TypeScript 7's CLI does not provide those JavaScript compiler or `tsserver` APIs.
 Runtime and data-service upgrades need their native and backup checks, not only a newer lockfile.
 
-Data access uses schema-backed Drizzle queries in the converted access, settings, Project,
-usage-rate and library-cover slices. `drizzleTransaction` binds those queries to the existing
-Postgres.js transaction, including nested savepoints; it does not open a second connection.
-The native SQL baseline still owns PostgreSQL constraints, triggers and lifecycle invariants.
-Other slices still contain direct SQL and need the same incremental conversion and concurrency
-checks. Zero reuses its database provider per connection pool, not a user's authorization context.
+Database tables, enums, defaults, keys, indexes and checks live in the feature-grouped Drizzle
+models under `packages/db/src/schema/`. `bun run db:generate` composes them with owned native
+PostgreSQL routines and triggers under `packages/db/native/` into the single sealed Greenfield
+baseline. `bun run db:check` detects source drift. Operators install that checked-in baseline;
+they do not run a generator or adopt a historical database.
+
+Schema-backed Drizzle queries cover the converted access, settings, Project, usage-rate and
+library-cover slices. `drizzleTransaction` binds them to the existing Postgres.js transaction,
+including nested savepoints; it does not open a second connection. Other slices still contain
+direct SQL and need the same incremental conversion and concurrency checks. Zero reuses its
+database provider per connection pool, not a user's authorization context.
+Its eight planning tables are generated from an explicit Drizzle column allowlist with
+`bun run zero:generate`; `bun run zero:check` rejects drift. Authorization joins remain explicit.
+The generator is development-only, and the browser imports only its checked-in output.
 
 Mastra owns Planning orchestration. Explicit provider SDKs remain behind the model adapter because
 Mastra's compatible endpoint route does not preserve every native provider's protocol and reasoning

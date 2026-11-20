@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { reviewWork } from "../../apps/factory/src/learning/judge";
 import { calibrationCases, calibrationPassed } from "../../apps/factory/src/learning/calibration";
-import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 import { modelEnvironment } from "../../apps/factory/src/models/controller";
 import type { UsageEntry } from "../../apps/factory/src/usage/journal";
 import type { LearningCase } from "../../packages/conversation-domain/src/learning";
@@ -30,7 +30,7 @@ test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(
     const result = await reviewWork({
       cases: calibrationCases,
       modelId,
-      connection: projectModelConnection(),
+      connection: installationPlanningConnection(),
       signal: AbortSignal.timeout(120_000),
       authorize: async () => {},
       usage: {
@@ -95,7 +95,7 @@ test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(
     const usage: UsageEntry[] = [];
     const common = {
       modelId,
-      connection: projectModelConnection(),
+      connection: installationPlanningConnection(),
       signal: AbortSignal.timeout(300_000),
       authorize: async () => {},
       usage: {
@@ -227,7 +227,7 @@ test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(
     const result = await reviewWork({
       cases: [source],
       modelId,
-      connection: projectModelConnection(),
+      connection: installationPlanningConnection(),
       signal: AbortSignal.timeout(120_000),
       authorize: async () => {},
       usage: {

@@ -12,11 +12,20 @@ export function createRemoteMCP(
   endpoint: string,
   authentication?: OAuthClientProvider | { token(): Promise<string | undefined> },
   fetcher: FetchLike = secureMCPFetch,
+  signal?: AbortSignal,
 ) {
+  const lifetime = new AbortController();
+  const cancellation = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
+  const deadline = () => AbortSignal.any([cancellation, AbortSignal.timeout(30_000)]);
   const client = new Client({ name: "Factory", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     ...(authentication ? { authProvider: authentication } : {}),
-    fetch: fetcher,
+    // OAuth discovery and renewal do not always use the transport's request signal.
+    fetch: (input, init) => {
+      const signal = init?.signal ? AbortSignal.any([init.signal, cancellation]) : cancellation;
+      signal.throwIfAborted();
+      return fetcher(input, { ...init, signal });
+    },
     requestInit: { redirect: "error" },
     reconnectionOptions: {
       maxRetries: 0,
@@ -28,18 +37,25 @@ export function createRemoteMCP(
   return {
     client,
     transport,
-    connect: () => client.connect(transport, { signal: AbortSignal.timeout(30_000) }),
-    close: () => client.close(),
+    connect: async () => {
+      cancellation.throwIfAborted();
+      return client.connect(transport, { signal: deadline() });
+    },
+    close: () => {
+      lifetime.abort();
+      return client.close();
+    },
     async tools(): Promise<MCPTool[]> {
+      cancellation.throwIfAborted();
       const tools: MCPTool[] = [];
       let cursor: string | undefined;
       const seen = new Set<string>();
-      const deadline = AbortSignal.timeout(30_000);
+      const catalogueDeadline = deadline();
       let pages = 0;
       do {
         if (++pages > 16) throw new Error("MCP catalogue pagination exceeds its limit");
         const page = await client.listTools(cursor ? { cursor } : undefined, {
-          signal: deadline,
+          signal: catalogueDeadline,
         });
         for (const tool of page.tools) {
           if (tools.length >= 256 || tools.some((old) => old.name === tool.name))

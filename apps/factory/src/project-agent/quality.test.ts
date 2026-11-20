@@ -8,9 +8,10 @@ import {
 } from "../../../../test/support/project-agent-quality";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
+import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { requirementsInterviewSkill } from "../skills/reviewed";
-import { generateProjectResponse, projectModelConnection } from "./adapter";
+import { generateProjectResponse } from "./adapter";
 import type { ConversationEntry } from "./conversation-store";
 
 // Explicit opt-in. Controlled source facts, real admitted provider configuration,
@@ -165,7 +166,7 @@ for (const scenario of cases)
         );
         const connection = reference
           ? await connections.resolve(reference.connectionID, reference.version)
-          : projectModelConnection();
+          : installationPlanningConnection();
         let providerRounds = 0,
           firstFeedbackMs: number | null = null;
         const readSources = new Set<string>();
