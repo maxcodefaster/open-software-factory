@@ -160,6 +160,27 @@ export function browserLane(path: string) {
   return "ui";
 }
 
+export function laneSelections(requested: string[]) {
+  const flags = requested.filter((argument) => argument.startsWith("--shard="));
+  if (flags.length > 1) throw new Error("Select one test shard");
+  for (const flag of flags) {
+    const match = /^--shard=([1-9]\d*)\/([1-9]\d*)$/.exec(flag);
+    if (
+      !match ||
+      !Number.isSafeInteger(Number(match[1])) ||
+      !Number.isSafeInteger(Number(match[2])) ||
+      Number(match[1]) > Number(match[2])
+    )
+      throw new Error("Use --shard=INDEX/TOTAL with 1 <= INDEX <= TOTAL");
+  }
+  return {
+    flags,
+    filters: requested.filter(
+      (selection) => selection !== "--list" && !selection.startsWith("--shard="),
+    ),
+  };
+}
+
 if (import.meta.main) {
   const [lane = "unit", ...requested] = process.argv.slice(2);
   if (!["unit", "controllers", "native", "live"].includes(lane))
@@ -175,7 +196,7 @@ if (import.meta.main) {
       if (lane === "unit" ? !path.endsWith(".live.test.ts") : integrationLane(full) === lane)
         paths.push(full);
     }
-  const filters = requested.filter((selection) => selection !== "--list");
+  const { filters, flags } = laneSelections(requested);
   const selected = filters.length
     ? paths.filter((path) => filters.some((selection) => path.includes(selection)))
     : paths;
@@ -222,6 +243,7 @@ if (import.meta.main) {
           ...selected.map((path) => resolve(path)),
           "--timeout",
           lane === "unit" ? "10000" : "60000",
+          ...flags,
           ...(lane === "controllers" && env["FACTORY_CONTROLLER_RETRIES"]
             ? ["--retry", env["FACTORY_CONTROLLER_RETRIES"]]
             : []),

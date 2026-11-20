@@ -5,6 +5,7 @@ import {
   controllerNeedsDatabase,
   integrationLane,
   integrationNeedsApplicationBuild,
+  laneSelections,
 } from "./lanes";
 
 test("explicit lanes keep paid calls and retained-installation restarts outside defaults", () => {
@@ -34,6 +35,26 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(browserLane("runtime-console.spec.ts")).toBe("native");
   expect(browserLane("skill-settings.spec.ts")).toBe("ui");
   expect(() => browserLane("unclassified.live.spec.ts")).toThrow("Unclassified");
+});
+
+test("native file sharding is separate from exact test filters and never starts unselected lanes", () => {
+  expect(laneSelections(["test/integration/change-agent-turns.test.ts", "--shard=1/2"])).toEqual({
+    filters: ["test/integration/change-agent-turns.test.ts"],
+    flags: ["--shard=1/2"],
+  });
+  expect(laneSelections(["--shard=2/2", "--list"])).toEqual({
+    filters: [],
+    flags: ["--shard=2/2"],
+  });
+  for (const args of [
+    ["--shard=0/2"],
+    ["--shard=3/2"],
+    ["--shard=1/0"],
+    ["--shard=one/two"],
+    ["--shard=1/9007199254740992"],
+    ["--shard=1/2", "--shard=2/2"],
+  ])
+    expect(() => laneSelections(args)).toThrow();
 });
 
 test("writer input Stop requires native OpenCode but polling-only proofs stay in controllers", () => {

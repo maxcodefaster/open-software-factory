@@ -261,6 +261,12 @@ build; compiled endpoint checks retain it:
 mise exec -- bun run test:controllers test/integration/inbox.test.ts
 ```
 
+For a full parallel controller run, start `bun run test:controllers --shard=1/2` and
+`bun run test:controllers --shard=2/2` in separate terminals through `mise exec --`.
+Each invocation owns its build and PostgreSQL fixture. Both shards must pass.
+The browser lane accepts the same Playwright shard arguments and owns a separate installation
+per invocation. Reserve host capacity before running multiple lanes.
+
 Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode and Forgejo.
 [AGENTS.md](AGENTS.md) holds contributor rules. Report bugs in GitHub Issues and vulnerabilities
 through [SECURITY.md](SECURITY.md). [Apache-2.0](LICENSE); bundled assets keep their own notices.
