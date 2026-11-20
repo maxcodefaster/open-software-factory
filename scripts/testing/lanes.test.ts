@@ -66,6 +66,11 @@ test("the default browser selection excludes explicitly paid cases in mixed jour
 });
 
 test("self-contained protocol and PostgreSQL proofs do not acquire an unused shared database", () => {
+  for (const name of ["attachments-store", "conversation-persistence", "review-media"]) {
+    const path = `test/integration/${name}.test.ts`;
+    expect(controllerNeedsDatabase(path)).toBe(false);
+    expect(integrationNeedsApplicationBuild(path)).toBe(false);
+  }
   expect(controllerNeedsDatabase("test/integration/substrate-adapter.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/substrate-adapter.native.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/developer-ide-kubernetes.native.test.ts")).toBe(
@@ -115,4 +120,19 @@ test("self-contained protocol and PostgreSQL proofs do not acquire an unused sha
   expect(controllerNeedsDatabase("test/integration/server-functions.test.ts")).toBe(true);
   expect(controllerNeedsDatabase("test/integration/bootstrap.test.ts")).toBe(true);
   expect(controllerNeedsDatabase("test/integration/project-setup-observation.test.ts")).toBe(true);
+});
+
+test("database-only feature checks skip the application build while endpoint checks keep it", () => {
+  for (const name of [
+    "schema-baseline",
+    "postgres-baseline",
+    "project-release-store",
+    "mcp-library",
+    "mcp-oauth",
+    "mcp-cancellation",
+  ])
+    expect(integrationNeedsApplicationBuild(`test/integration/${name}.test.ts`)).toBe(false);
+  expect(integrationNeedsApplicationBuild("test/integration/server-function-runtime.test.ts")).toBe(
+    true,
+  );
 });

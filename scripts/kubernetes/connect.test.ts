@@ -552,7 +552,9 @@ test("transport observations use fresh header-only requests", async () => {
   }
 });
 
-test("a half-open forward heals before a browser request, even when kubectl never exits", async () => {
+// Each transport fixture owns distinct ports, files and subprocesses. Run these
+// three real timeout checks together without shortening production observation windows.
+test.concurrent("a half-open forward heals before a browser request, even when kubectl never exits", async () => {
   const proof = await fixture();
   try {
     proof.start();
@@ -576,7 +578,7 @@ test("a half-open forward heals before a browser request, even when kubectl neve
   }
 }, 30_000);
 
-test("an unconfirmed upstream never causes healthy local transports to churn", async () => {
+test.concurrent("an unconfirmed upstream never causes healthy local transports to churn", async () => {
   const proof = await fixture();
   try {
     proof.start();
@@ -630,7 +632,7 @@ test("an HTTP bootstrap failure is live transport, not permission to churn conne
   }
 });
 
-test("a slow healthy HTTP response does not turn a working connection into an outage", async () => {
+test.concurrent("a slow healthy HTTP response does not turn a working connection into an outage", async () => {
   const proof = await fixture({ FAKE_HTTP_DELAY_MS: "3000" });
   try {
     proof.start();

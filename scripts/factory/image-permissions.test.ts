@@ -91,3 +91,51 @@ test("the Factory image makes packaged code readable without exposing private st
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the runtime pruning command removes Factory tests and generators, keeping install sources and Starter tests", async () => {
+  const root = await mkdtemp(join(tmpdir(), "factory-image-pruning-"));
+  const removed = [
+    "apps/factory/src/nested/owner.test.ts",
+    "packages/domain/src/owner.test.ts",
+    "scripts/kubernetes/owner.spec.ts",
+    "packages/db/src/generate.ts",
+    "packages/zero-schema/src/generate.ts",
+    "packages/zero-schema/src/projection.ts",
+    "packages/db/native/invariant.sql",
+  ];
+  const retained = [
+    "apps/factory/src/nested/owner.ts",
+    "packages/db/src/client.ts",
+    "packages/db/src/schema/runtime.ts",
+    "packages/db/migrations/0001_baseline.sql",
+    "packages/zero-schema/src/schema.generated.ts",
+    "scripts/kubernetes/start.ts",
+    "templates/starter-app/src/owner.test.ts",
+  ];
+  try {
+    for (const file of [...removed, ...retained]) {
+      await mkdir(dirname(join(root, file)), { recursive: true });
+      await writeFile(join(root, file), file);
+    }
+    const dockerfile = await readFile(
+      resolve(import.meta.dir, "../../deploy/factory/Dockerfile"),
+      "utf8",
+    );
+    const command = dockerfile
+      .match(/^RUN find apps\/factory\/src[\s\S]*?(?=\n# COPY)/m)?.[0]
+      .replace(/^RUN /, "")
+      .replaceAll("\\\n", "");
+    if (!command) throw new Error("Runtime pruning command is missing");
+    const child = Bun.spawn(["sh", "-eu", "-c", command], {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+    for (const file of removed) expect(await Bun.file(join(root, file)).exists()).toBe(false);
+    for (const file of retained) expect(await readFile(join(root, file), "utf8")).toBe(file);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

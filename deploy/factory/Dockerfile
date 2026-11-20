@@ -58,6 +58,11 @@ COPY deploy/helm/factory/image-pins.json ./deploy/helm/factory/image-pins.json
 COPY scripts/factory/artifacts.ts scripts/factory/preflight.ts scripts/factory/forge-identity.ts scripts/factory/forge-logout.ts scripts/factory/readiness.ts scripts/factory/storage-readiness.ts scripts/factory/openbao-bootstrap.ts scripts/factory/native-installation.ts ./scripts/factory/
 COPY scripts/kubernetes ./scripts/kubernetes
 COPY templates ./templates
+# Runtime keeps the sealed baseline and models, not Factory's tests or build-time generators.
+# Starter tests remain part of the admitted project template.
+RUN find apps/factory/src packages scripts/kubernetes -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) -delete \
+  && rm packages/db/src/generate.ts packages/zero-schema/src/generate.ts packages/zero-schema/src/projection.ts \
+  && rm -r packages/db/native
 # COPY retains checkout modes. Keep public code readable to the non-root
 # runtime even with umask 077, without making code writable or touching state.
 RUN chmod -R u=rwX,go=rX apps packages scripts templates deploy package.json upstream.json LICENSE

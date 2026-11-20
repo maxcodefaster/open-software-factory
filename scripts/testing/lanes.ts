@@ -56,6 +56,9 @@ const selfContainedControllerTests = new Set([
   "openbao.test.ts",
   "postgres-baseline.test.ts",
   "schema-baseline.test.ts",
+  "attachments-store.test.ts",
+  "conversation-persistence.test.ts",
+  "review-media.test.ts",
   "native-ui-fixture.test.ts",
   "native-fixture-observation.test.ts",
   "uncreated-workspace-attempt.test.ts",
@@ -91,6 +94,15 @@ export function integrationNeedsApplicationBuild(path: string) {
     "backup-runner.native.test.ts",
     "substrate-rootless-proxy.native.test.ts",
     "openbao.test.ts",
+    "schema-baseline.test.ts",
+    "postgres-baseline.test.ts",
+    "attachments-store.test.ts",
+    "conversation-persistence.test.ts",
+    "review-media.test.ts",
+    "project-release-store.test.ts",
+    "mcp-library.test.ts",
+    "mcp-oauth.test.ts",
+    "mcp-cancellation.test.ts",
   ].includes(basename(path));
 }
 export function integrationLane(path: string) {
