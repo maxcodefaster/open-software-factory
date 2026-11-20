@@ -23,7 +23,7 @@ await Effect.runPromise(
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* start({
-        app: { name: "factory", version: "2.0.27", channel: "stable" },
+        app: { name: "factory", version: "2.3.2", channel: "stable" },
         hostname: process.env.FACTORY_OPENCODE_HOST ?? "127.0.0.1",
         port: 4096,
         password: process.env.OPENCODE_PASSWORD,

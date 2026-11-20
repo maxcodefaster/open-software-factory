@@ -25,9 +25,9 @@ button {
 /* Unclassified desktop chrome stays quiet. Named action variants below
    retain the same appearance inside and outside the desktop. */
 :where(.factory-desktop)
-button:where(
-  :not(.workspace-action, .quiet-button, .primary-button, .danger-button, .new-ticket-button)
-) {
+  button:where(
+    :not(.workspace-action, .quiet-button, .primary-button, .danger-button, .new-ticket-button)
+  ) {
   border: 0;
   color: inherit;
   background: none;

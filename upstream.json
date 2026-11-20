@@ -1,7 +1,7 @@
 {
   "kubectl": {
-    "version": "1.35.6",
-    "image": "registry.k8s.io/kubectl:v1.35.6@sha256:4d8c68e8c2bf360b1808927c4d39fb13998c106cac903622d127a2275c844126"
+    "version": "1.35.10",
+    "image": "registry.k8s.io/kubectl:v1.35.10@sha256:4e1d541a3d62f74637974e4c71f3cea91b9a36ffd059ab45e355648898783837"
   },
   "mkcert": {
     "version": "1.4.4",
@@ -40,98 +40,98 @@
     "sha256": "c7ba4001a9b927b78ef8a527ce3989428cd35a852d8fd7d679e9e460d1c54d8f"
   },
   "node": {
-    "version": "24.21.0",
-    "image": "docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2"
+    "version": "24.22.3",
+    "image": "docker.io/library/node:24.22.3-alpine3.23@sha256:3946fb783fdce8a2812136ea694bc95c698c4f4096f3fd18568dc27a8ac389dc"
   },
   "nodeDevelopment": {
-    "version": "24.21.0",
-    "image": "docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20"
+    "version": "24.22.3",
+    "image": "docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54"
   },
   "gitFeature": {
     "version": "1.3.8",
     "image": "ghcr.io/devcontainers/features/git@sha256:fd75977de13a9979000e0e78baf949adb0ca71d2398995fa22e0a36d7e7e7fe2"
   },
   "go": {
-    "version": "1.27.2",
-    "image": "docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079",
-    "testImage": "docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61"
+    "version": "1.27.4",
+    "image": "docker.io/library/golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd",
+    "testImage": "docker.io/library/golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea"
   },
   "devcontainersCli": {
     "version": "0.89.0",
     "integrity": "sha512-LzaoOGKQ/Zql6PsiZ4hVIYVZagzWkD65aG/1ou5/Kly5Y1PtjLg1yn7qu+LZCzVoAl6DZZ/pbz8qOO4RLNlqMg=="
   },
   "theia": {
-    "version": "1.76.0",
-    "source": "https://github.com/eclipse-theia/theia/tree/v1.76.0",
+    "version": "1.77.0",
+    "source": "https://github.com/eclipse-theia/theia/tree/v1.77.0",
     "lockfile": "deploy/theia-ide/package-lock.json"
   },
   "openCode": {
-    "version": "2.0.27",
+    "version": "2.3.2",
     "packages": {
       "amd64": {
         "name": "@opencode/cli-linux-x64-baseline-musl",
-        "integrity": "sha512-TJYnaabLzTF9GsgF2uPUm+NrXJJAC7CNiNlA046RyF/e84p56HM7mUVUAQ5JUrXjAKAJbUGdePU33x3KA0QRCA=="
+        "integrity": "sha512-7i2d0bUI87QHZYYvcc8VE1kKWXESPgKziQHotKs9lnFZC8jsuTNgCY1x2YpgOy38zqPVxeFagF5pzoSCwn+mfw=="
       },
       "arm64": {
         "name": "@opencode/cli-linux-arm64-musl",
-        "integrity": "sha512-uEjOgYsRM+Psw18enzd21aw4yQzcHbAlsITeMxYetmbWrl2ocxT/3fxjEmgaRgGTQlhh3tfTCcWIQwfz0RFgtA=="
+        "integrity": "sha512-g25SO2YjCaPxwjVu72K4MAzvQPgZtzOLtmEZM+YuJZfcMSiZ7gQvOaWqFaH9+4DqC8X1Qb+4Vd2AQMI1ruxg5A=="
       }
     },
     "glibcPackages": {
       "amd64": {
         "name": "@opencode/cli-linux-x64-baseline",
-        "integrity": "sha512-5q+5k6G8n4FGme5wf1zQQTX5CDEgakFPkCD45TLGlbecKCpCewJIZNoDR8n2O0HaEewRlyGIWJaNIRFrBQB5YA=="
+        "integrity": "sha512-c8f1PimJ0dtKcF1sF7I+BSsySOH6HzmELqEfDTduzqBG2OzBH6g1sPwC/R5LhTf6kfG7FeLH5UFr9ZTTlcRdEw=="
       },
       "arm64": {
         "name": "@opencode/cli-linux-arm64",
-        "integrity": "sha512-qK2E8iy7ZyOC1RcbJZuVuzUHHDwg4BxgE405+bPLZjep0cU2yqvifsVB0UptyiVs2GxXfZDbmn2w7y5PW49ssg=="
+        "integrity": "sha512-t44ZuW5CKaWiRSp4gWUDurMf4edyXw/SmUty1pRi827zda0T2RatKWj4LnMUewNCL05COLB1Ppg8RWicswhFaQ=="
       }
     }
   },
   "openCodeServer": {
-    "version": "2.0.27",
-    "integrity": "sha512-skrqpN9fAqV5jphrveIzobwgTD9fVKslErtQdnBDY3GsTWNNaE7S1YeZdwIHoHTsBwh5K5812RrVU+wAuHzPGQ==",
+    "version": "2.3.2",
+    "integrity": "sha512-WWmNiyW3YPNKngsQty5/tJdIblzE45Hqa5VKtPbpAyWv7YvjB0gSDFIvWm1obVLnmX3b8gGOjd76WQiN4wl5mQ==",
     "lockfile": "deploy/opencode-server/bun.lock",
-    "bunImage": "docker.io/oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598",
+    "bunImage": "docker.io/oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18",
     "bun": {
       "arm64": {
         "glibc": {
           "name": "@oven/bun-linux-aarch64",
-          "integrity": "sha512-ylogDFxDD+aRKO0TJauwDzCWM+rULvc85gRNZQ9CnY6rm2BU4GC2XUDi20bh67CIuB4Wt/0PL1xpsJ2hqplMww=="
+          "integrity": "sha512-4BXmsSKnjOrlGWqZV4x/oWa7AVoR+B6lCXddMzOAXBIm3t50eslg9wb66gmtW1AamEQ1l1CDvmmruysEhqOWMg=="
         },
         "musl": {
           "name": "@oven/bun-linux-aarch64-musl",
-          "integrity": "sha512-5OJIbcVspZxIN/zQtrFYwLuJgaOlciGcynmwCtwKyg0rmXHJoNG0QyspiiLnDUDoVTSGY/nrn0QEbWKhu0QbEQ=="
+          "integrity": "sha512-XCNc+WvvMAdNNb+OWTogpy+N9wm62fkVeEVLb6how0RZhW5LPi6c7BlkeVCuWps7XjEl2saFpHFa20/1E+PAHg=="
         }
       },
       "amd64": {
         "glibc": {
           "name": "@oven/bun-linux-x64",
-          "integrity": "sha512-RArgnpjeXjaGzjp5h7Rs89cUYJutO8IyqR3itE8OBaBzEt8KNm2jp/YozxBHq4eFovwrQLryeSwTAcmiT+zcoA=="
+          "integrity": "sha512-IWX9BELoGHAUtMonkeSaNaZwXzRk+oDw6Mk+HBFXd3KHYIBNBsIGRupMZPcgNoDbJpLu6gAJjIoIVPZtt1aJ1g=="
         },
         "musl": {
           "name": "@oven/bun-linux-x64-musl",
-          "integrity": "sha512-L0gTTjTncLqv7VsV/2iLz7Zk4vd969xqRgbtGnskmV3MvL+IJgzTyQr5zm8GGGWSm/SO/ab2vnn4GXgPomoGbg=="
+          "integrity": "sha512-10QoW/YfTgnURaGEaHpJCiXjLI2e5iTtfVDaA5JKcyUzaa1cq6cVUY9/Uq5XkYzvtRjHLRe9Oj/lTDIQcxy8HQ=="
         }
       }
     }
   },
   "openCodeClient": {
-    "version": "2.0.27",
-    "integrity": "sha512-RqJodg+QsUgqqJVo+b2PGk2w96l7424nM4BijUSb49Iep9IyUfjDH3zfii4OGfCsmZkNCYK83Mgk9e9EeRA1iQ=="
+    "version": "2.3.2",
+    "integrity": "sha512-zwlR1Q0MQxpLJU4tILaaNyHrexNQpTbquy4Lv4i5lwkSba5MMuhK0tsPmGhyLIrqAyY+sY1qI75dOzOpsCJK7Q=="
   },
   "ffmpeg": {
     "version": "5.1.9",
     "debianPackage": "7:5.1.9-0+deb12u1"
   },
   "chromeDevToolsMcp": {
-    "version": "1.10.1",
-    "integrity": "sha512-Klw6HWDqHC/XS1JwZldd2r49aUhbUJN9m9Mvcx4SEueIPXtzuQX+QelxAViobv8YUkDZ7HWDrmViR6LeYK0wAw==",
-    "source": "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/e52c6b59b476c5e04d8dd9fd4bd017ba3b3d65df"
+    "version": "1.13.0",
+    "integrity": "sha512-Yf4qhS0+2oo7c+gOySMDHQt4ZL/yKXG2Mxxzjk0gcArINtcQ3tLiQVzAW6g2nsyQzAGhkcLwWWBAtlx3Bg+Spg==",
+    "source": "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/b1e35e3ab1774664dfc66a2cb813a392535fe160"
   },
   "browserBundle": {
-    "version": "1.64.0",
-    "image": "mcr.microsoft.com/playwright:v1.64.0-noble@sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f"
+    "version": "1.65.1",
+    "image": "mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579"
   },
   "forgejoRunner": {
     "version": "13.2.0",

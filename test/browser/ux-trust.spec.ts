@@ -2565,8 +2565,12 @@ test("aligns workspace and Agent Minimize geometry and preserves the Agent contr
         borderRadius: style.borderRadius,
       };
     });
+  await page.mouse.move(0, 0);
+  expect(await toggle.evaluate((element) => element.matches(":hover"))).toBe(false);
   const closedStyle = await controlStyle();
   await toggle.click();
+  await page.mouse.move(0, 0);
+  expect(await toggle.evaluate((element) => element.matches(":hover"))).toBe(false);
   expect(await toggle.locator("svg").innerHTML()).not.toBe(closedIcon);
   expect(await controlStyle()).toEqual(closedStyle);
   for (const width of [1440, 1280]) {

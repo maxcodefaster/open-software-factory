@@ -303,7 +303,7 @@ export function createAttachmentStore(
         const [ticket] = await sql`SELECT id FROM factory.ticket WHERE id=${draftID}`;
         if (ticket) return {};
         await sql`INSERT INTO factory.attachment_draft(id,owner_id,project_id,sequence,attachment_ids)
-          VALUES(${z.uuid().parse(draftID)},${userID},${projectID},${input.sequence},${sql.array([...new Set(input.ids)], 2950)})
+          VALUES(${z.uuid().parse(draftID)},${userID},${projectID},${input.sequence},${[...new Set(input.ids)]}::uuid[])
           ON CONFLICT(id,owner_id) DO UPDATE SET sequence=EXCLUDED.sequence,attachment_ids=EXCLUDED.attachment_ids
           WHERE attachment_draft.project_id=EXCLUDED.project_id AND attachment_draft.sequence<EXCLUDED.sequence`;
         return {};

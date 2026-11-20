@@ -2,6 +2,10 @@
 
 This application uses TanStack Start for Solid 2, Node.js 24, Better Auth and PostgreSQL.
 Factory supplies the configured environment and starts the declared Web app inside its Dev Container.
+Start RC11 uses the fixed upstream server core 1.169.45. Installation repairs its missing
+request-scope export automatically, without changing the upstream implementation.
+Production bundles TanStack's declared dependency graph before Nitro packages the server.
+TypeScript 6 supplies both build checks and the `tsserver` API used by Factory's language tools.
 The exact Solid 2 and Start release candidates are pinned independently of Factory's own frontend.
 
 ```sh

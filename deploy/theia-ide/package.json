@@ -10,6 +10,6 @@
     "build": "npm run build --workspace factory-ide-extension && npm run build --workspace browser-app"
   },
   "overrides": {
-    "dompurify": "3.4.17"
+    "dompurify": "3.4.18"
   }
 }

@@ -1982,6 +1982,7 @@ dt {
 
 .selection-toolbar {
   position: absolute;
+  transition-property: none;
   z-index: 8;
   display: flex;
   align-items: center;

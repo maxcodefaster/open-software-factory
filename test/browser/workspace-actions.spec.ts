@@ -19,6 +19,33 @@ test.use({
   reducedMotion: "reduce",
   actionTimeout: 30_000,
 });
+const settingsTest = test.extend<{ settingsProjectID: string }>({
+  settingsProjectID: async ({ page }, use) => {
+    const database = createDatabase(1);
+    const id = crypto.randomUUID();
+    try {
+      const [administrator] = await database.client<{ id: string }[]>`
+        SELECT user_id AS id FROM factory.administrator LIMIT 1`;
+      if (!administrator) throw new Error("Owned browser administrator is missing");
+      await database.client`INSERT INTO factory.project
+        (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${id},${`library-actions-${id}`},'Library actions',
+          'https://example.invalid/library-actions.git','main','.devcontainer/devcontainer.json',
+          ${administrator.id})`;
+      await use(id);
+    } finally {
+      try {
+        await page.context().close();
+      } finally {
+        try {
+          await deleteFactoryProject(id, database);
+        } finally {
+          await database.client.end();
+        }
+      }
+    }
+  },
+});
 
 async function bounds(locator: Locator) {
   const rect = await locator.boundingBox();
@@ -203,95 +230,100 @@ test("Wiki page and revision actions share text controls and keep history keyboa
   }
 });
 
-test("Settings libraries share overflow-first actions, preserve drafts and keep local forms explicit", async ({
-  page,
-}) => {
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  await mkdir(evidence, { recursive: true });
-  await signIn(page);
-  await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  const navigation = await openSettings(page);
-  await chooseSettings(navigation, "Skills");
-  const skills = page.locator(".skill-library:not(.mcp-library)");
-  await expect(skills.getByRole("button", { name: /^Frontend design/ })).toBeVisible();
-  for (const width of widths) {
-    await page.setViewportSize({ width, height: 960 });
-    const bar = await actionBar(page, "Skills library actions", "Add skill");
-    const menu = bar.locator('summary[aria-label="Library actions"]');
-    expect((await bounds(menu)).x).toBeLessThan(
-      (await bounds(bar.getByRole("button", { name: "Add skill" }))).x,
+settingsTest(
+  "Settings libraries share overflow-first actions, preserve drafts and keep local forms explicit",
+  async ({ page, settingsProjectID }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await mkdir(evidence, { recursive: true });
+    await signIn(page);
+    await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+    await page.goto(`/projects/${settingsProjectID}/settings`);
+    await expect(page.getByRole("region", { name: "Settings", exact: true })).toBeVisible();
+    const navigation = page.getByRole("navigation", { name: "Settings navigation" });
+    await chooseSettings(navigation, "Skills");
+    const skills = page.locator(".skill-library:not(.mcp-library)");
+    await expect(skills.getByRole("button", { name: /^Frontend design/ })).toBeVisible();
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 960 });
+      const bar = await actionBar(page, "Skills library actions", "Add skill");
+      const menu = bar.locator('summary[aria-label="Library actions"]');
+      expect((await bounds(menu)).x).toBeLessThan(
+        (await bounds(bar.getByRole("button", { name: "Add skill" }))).x,
+      );
+      await capture(page, `skills-${width}`);
+      await menu.click();
+      const options = bar.locator(".skill-action-options");
+      await expect(options).toBeVisible();
+      const rect = await bounds(options);
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.x + rect.width).toBeLessThanOrEqual(width);
+      await capture(page, `skills-menu-${width}`, true);
+      await menu.press("Escape");
+      await expect(menu).toBeFocused();
+      await expect(bar.locator("details")).toHaveJSProperty("open", false);
+    }
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await skills.getByRole("button", { name: "Add skill", exact: true }).click();
+    const editor = skills.getByRole("form", { name: "Skill editor", exact: true });
+    await editor.getByLabel("Name", { exact: true }).fill("Retained action draft");
+    await editor.getByRole("button", { name: "Back to library", exact: true }).click();
+    await actionBar(page, "Skills library actions", "Resume draft");
+    await skills.getByRole("button", { name: /^Frontend design/ }).click();
+    const existingSkillActions = await actionBar(page, "Skill actions", "Edit skill");
+    await expect(existingSkillActions.getByRole("button", { name: "Edit skill" })).toBeDisabled();
+    await capture(page, "skill-detail");
+    await page
+      .getByRole("region", { name: "Skill details" })
+      .getByRole("button", { name: "Back to library" })
+      .click();
+    await skills.getByRole("button", { name: "Resume draft", exact: true }).click();
+    await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Retained action draft");
+    await editor
+      .getByLabel("When to use", { exact: true })
+      .fill("When checking a page action bar.");
+    await editor
+      .getByLabel("Instructions", { exact: true })
+      .fill("Check desktop and narrow layouts.");
+    await editor.getByRole("button", { name: "Save skill", exact: true }).click();
+    await expect(page.getByRole("region", { name: "Skill details" })).toContainText(
+      "Retained action draft",
     );
-    await capture(page, `skills-${width}`);
-    await menu.click();
-    const options = bar.locator(".skill-action-options");
-    await expect(options).toBeVisible();
-    const rect = await bounds(options);
-    expect(rect.x).toBeGreaterThanOrEqual(0);
-    expect(rect.x + rect.width).toBeLessThanOrEqual(width);
-    await capture(page, `skills-menu-${width}`, true);
-    await menu.press("Escape");
-    await expect(menu).toBeFocused();
-    await expect(bar.locator("details")).toHaveJSProperty("open", false);
-  }
-  await page.setViewportSize({ width: 1440, height: 960 });
-  await skills.getByRole("button", { name: "Add skill", exact: true }).click();
-  const editor = skills.getByRole("form", { name: "Skill editor", exact: true });
-  await editor.getByLabel("Name", { exact: true }).fill("Retained action draft");
-  await editor.getByRole("button", { name: "Back to library", exact: true }).click();
-  await actionBar(page, "Skills library actions", "Resume draft");
-  await skills.getByRole("button", { name: /^Frontend design/ }).click();
-  const existingSkillActions = await actionBar(page, "Skill actions", "Edit skill");
-  await expect(existingSkillActions.getByRole("button", { name: "Edit skill" })).toBeDisabled();
-  await capture(page, "skill-detail");
-  await page
-    .getByRole("region", { name: "Skill details" })
-    .getByRole("button", { name: "Back to library" })
-    .click();
-  await skills.getByRole("button", { name: "Resume draft", exact: true }).click();
-  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Retained action draft");
-  await editor.getByLabel("When to use", { exact: true }).fill("When checking a page action bar.");
-  await editor
-    .getByLabel("Instructions", { exact: true })
-    .fill("Check desktop and narrow layouts.");
-  await editor.getByRole("button", { name: "Save skill", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Skill details" })).toContainText(
-    "Retained action draft",
-  );
-  const savedSkillActions = await actionBar(page, "Skill actions", "Edit skill");
-  await expect(savedSkillActions.getByRole("button", { name: "Edit skill" })).toBeEnabled();
-  await capture(page, "personal-skill-detail");
-  await chooseSettings(navigation, "MCP connections");
-  for (const width of widths) {
-    await page.setViewportSize({ width, height: 960 });
-    const bar = await actionBar(page, "MCP library actions", "Add MCP");
-    await capture(page, `mcp-${width}`);
-    await bar.locator("summary").click();
-    const options = bar.locator(".skill-action-options");
-    await expect(options).toBeVisible();
-    const rect = await bounds(options);
-    expect(rect.x).toBeGreaterThanOrEqual(0);
-    expect(rect.x + rect.width).toBeLessThanOrEqual(width);
-    await bar.locator("summary").press("Escape");
-    await expect(bar.locator("details")).toHaveJSProperty("open", false);
-  }
-  await page.setViewportSize({ width: 1440, height: 960 });
-  await page.getByRole("button", { name: "Add MCP", exact: true }).click();
-  await page.getByLabel("Name", { exact: true }).fill("Action layout source");
-  await page.getByLabel("MCP endpoint", { exact: true }).fill("https://source.example/mcp");
-  await page.getByRole("button", { name: "Save definition", exact: true }).click();
-  const detail = page.getByRole("region", { name: "MCP details", exact: true });
-  await expect(detail).toBeVisible();
-  for (const width of widths) {
-    await page.setViewportSize({ width, height: 960 });
-    await actionBar(page, "MCP actions", "Edit definition");
-    await expect(detail.getByRole("button", { name: "Connect", exact: true })).toHaveClass(
-      "primary-button",
-    );
-    await capture(page, `mcp-detail-${width}`);
-  }
-  expect(errors).toEqual([]);
-});
+    const savedSkillActions = await actionBar(page, "Skill actions", "Edit skill");
+    await expect(savedSkillActions.getByRole("button", { name: "Edit skill" })).toBeEnabled();
+    await capture(page, "personal-skill-detail");
+    await chooseSettings(navigation, "MCP connections");
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 960 });
+      const bar = await actionBar(page, "MCP library actions", "Add MCP");
+      await capture(page, `mcp-${width}`);
+      await bar.locator("summary").click();
+      const options = bar.locator(".skill-action-options");
+      await expect(options).toBeVisible();
+      const rect = await bounds(options);
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.x + rect.width).toBeLessThanOrEqual(width);
+      await bar.locator("summary").press("Escape");
+      await expect(bar.locator("details")).toHaveJSProperty("open", false);
+    }
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.getByRole("button", { name: "Add MCP", exact: true }).click();
+    await page.getByLabel("Name", { exact: true }).fill("Action layout source");
+    await page.getByLabel("MCP endpoint", { exact: true }).fill("https://source.example/mcp");
+    await page.getByRole("button", { name: "Save definition", exact: true }).click();
+    const detail = page.getByRole("region", { name: "MCP details", exact: true });
+    await expect(detail).toBeVisible();
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 960 });
+      await actionBar(page, "MCP actions", "Edit definition");
+      await expect(detail.getByRole("button", { name: "Connect", exact: true })).toHaveClass(
+        "primary-button",
+      );
+      await capture(page, `mcp-detail-${width}`);
+    }
+    expect(errors).toEqual([]);
+  },
+);
 
 test("Settings connection and Input headers use the same actions without changing form decisions", async ({
   page,

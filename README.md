@@ -192,6 +192,15 @@ the host tools and IDE images separately. The Factory and Actor images embed the
 service; there is no separate Source image. Publication does not substitute arm64 host binaries or
 the local port-5000 registry for native browser and Starter dependencies.
 
+Factory and the Starter use Solid 2 with TanStack Start RC11 and the fixed upstream
+`start-server-core` 1.169.45. A metadata-only package repair exposes the existing native
+request-scope module omitted from that release's exports. Installation applies it automatically;
+no upstream implementation is copied or changed. The old security backport is removed.
+The Starter bundles TanStack before Nitro packages the production server.
+TypeScript 6 remains required by the browser diagnostics and packaged language server;
+TypeScript 7's CLI does not provide those JavaScript compiler or `tsserver` APIs.
+Runtime and data-service upgrades need their native and backup checks, not only a newer lockfile.
+
 `factory:reset` is restricted to an explicitly named disposable installation and matching
 confirmation. It refuses active runtime work or unconfirmed Coding Stop. Before removing its
 Compose data volumes, it checks that every recorded native scope, Developer IDE Namespace and

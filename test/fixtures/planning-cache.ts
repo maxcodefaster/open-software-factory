@@ -83,7 +83,7 @@ export async function ownedPlanningCache(
     "ZERO_MUTATE_FORWARD_COOKIES=true",
     "--env",
     "DO_NOT_TRACK=1",
-    "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437",
+    "docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1",
   );
   console.info(`Owned planning cache started: ${name}`);
   try {
@@ -112,7 +112,7 @@ export async function ownedPlanningCache(
         if (
           observed.owner !== owner ||
           observed.image !==
-            "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437" ||
+            "docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1" ||
           !observed.running
         )
           throw cause;

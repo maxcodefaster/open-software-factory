@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import upstream from "../../upstream.json";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { nativeBuildProcessFixture } from "../fixtures/native-build-process";
@@ -160,7 +161,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
               status = 503;
               data = { message: "Owned skill discovery failed before dispatch" };
             } else if (request.path === "/api/info") {
-              data = { version: "2.0.27" };
+              data = { version: upstream.openCode.version };
             } else if (request.path === "/api/skill") {
               data = installedSkills.map((id) => ({
                 id,

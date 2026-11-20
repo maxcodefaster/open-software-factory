@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@opencode/server": "2.0.27",
-    "effect": "4.0.1"
+    "@opencode/server": "2.3.2",
+    "effect": "4.1.0"
   }
 }

@@ -265,7 +265,7 @@ export function registerControllerCleanupRegression(databaseForCase: TestDatabas
         peer.releaseRemoval();
         const row = await until(
           observe,
-          (value) => value.state !== "running",
+          (value) => value.state !== "running" && value.sessionState !== "working",
           "the genuine failed outcome",
           owned.publishActivity,
         );

@@ -12,38 +12,62 @@ const corePackage = process.argv[2] ?? start.resolve("@tanstack/start-server-cor
 const core = createRequire(corePackage);
 const directory = join(dirname(corePackage), "dist/esm");
 let received: Record<string, unknown> | undefined;
+let resolvedContext: unknown;
 let rejectCaller = false;
+let outcome: () => unknown = () => ({ ok: true });
 const clientPackage = core.resolve("@tanstack/start-client-core/package.json");
-const { executeMiddleware } = await import(
+const { createServerFn } = await import(
   pathToFileURL(join(dirname(clientPackage), "dist/esm/createServerFn.js")).href
 );
+// Exercise the real generated wrapper, including its server-context merge.
+const native = createServerFn({ method: "GET" })
+  .middleware([
+    {
+      options: {
+        server: (options: { next(): Promise<unknown> }) => {
+          if (rejectCaller) throw new Error("Authentication required");
+          return options.next();
+        },
+      },
+    },
+  ])
+  .handler(
+    Object.assign(async () => {}, { serverFnMeta: { id: "security-probe" } }),
+    ({ context }: { context: unknown }) => {
+      resolvedContext = context;
+      return outcome();
+    },
+  );
 const action = Object.assign(
   async (input: Record<string, unknown>) => {
     received = input;
-    if (rejectCaller)
-      return executeMiddleware(
-        [
-          {
-            options: {
-              server: () => {
-                throw new Error("Authentication required");
-              },
-            },
-          },
-        ],
-        "server",
-        input,
-      );
-    return { result: { ok: true } };
+    return native.__executeServer(input);
   },
   { method: "GET" },
 );
 mock.module(join(directory, "getServerFnById.js"), () => ({ getServerFnById: async () => action }));
 const { toJSON } = await import(pathToFileURL(core.resolve("seroval")).href);
-const { handleServerAction } = await import(
+const { DeferredResponse, handleServerAction } = await import(
   pathToFileURL(join(directory, "server-functions-handler.js")).href
 );
-const { requestHandler } = await import(pathToFileURL(join(directory, "request-response.js")).href);
+const { createServerEntry } = await import(pathToFileURL(join(directory, "index.js")).href);
+const scopeEntry = (await Bun.file(corePackage).json()).exports["./request-scope"].import.default;
+const { finalizeResponse, withStartRequest } = await import(
+  pathToFileURL(join(dirname(corePackage), scopeEntry)).href
+);
+const isDeferredResponse = (
+  value: unknown,
+): value is { createResponse(event: unknown): Response } => value instanceof DeferredResponse;
+const responseHandler = (callback: (request: Request) => unknown) =>
+  createServerEntry({
+    fetch: withStartRequest(async (request: Request, _options: unknown, event: unknown) => {
+      const result = await callback(request);
+      return finalizeResponse(
+        isDeferredResponse(result) ? result.createResponse(event) : result,
+        event,
+      );
+    }),
+  }).fetch;
 const storagePackage = core.resolve("@tanstack/start-storage-context/package.json");
 const storageEntry = (await Bun.file(storagePackage).json()).exports["."].import.default;
 const { runWithStartContext } = await import(
@@ -63,9 +87,15 @@ const payload = toJSON({
 });
 const url = new URL("https://factory.invalid/_serverFn/security-probe");
 url.searchParams.set("payload", JSON.stringify(payload));
-const handler = requestHandler((request: Request) =>
-  runWithStartContext({ startOptions: { serializationAdapters: [] } }, () =>
-    handleServerAction({ request, context: { principal: "server" }, serverFnId: "security-probe" }),
+const handler = responseHandler((request: Request) =>
+  runWithStartContext(
+    {
+      request,
+      startOptions: { serializationAdapters: [] },
+      contextAfterGlobalMiddlewares: { principal: "server" },
+      executedRequestMiddlewares: new Set(),
+    },
+    () => handleServerAction({ request, serverFnId: "security-probe" }),
   ),
 );
 // Exercise the actual middleware error path. The old transport retains the
@@ -95,7 +125,7 @@ for (const method of ["GET", "POST"]) {
   const input = received as Record<string, unknown>;
   assert.deepEqual(Object.keys(input).sort(), ["context", "data", "method"]);
   assert.deepEqual(input["data"], { requested: "public input" });
-  assert.deepEqual(Object.assign({}, input["context"]), {
+  assert.deepEqual(Object.assign({}, resolvedContext), {
     principal: "server",
     extra: "public context",
   });
@@ -110,6 +140,9 @@ const injected = {
   headers: { "content-type": "text/html" },
   body: "<script>globalThis.injected=true</script>",
 };
+// Response-shaped return values and thrown values are serialized data, never
+// HTTP responses. The native pipeline, not a copied duck-type guard, handles them.
+action.method = "GET";
 for (const callback of [
   () => injected,
   async () => injected,
@@ -120,11 +153,14 @@ for (const callback of [
     throw injected;
   },
 ]) {
-  const rejected = await requestHandler(callback)(new Request(url));
-  assert.equal(rejected.status, 500);
-  assert.ok(!(await rejected.text()).includes("<script>"));
+  outcome = callback;
+  const rejected = await handler(new Request(url));
+  assert.ok(rejected instanceof Response);
+  assert.ok(rejected.headers.get("content-type")?.startsWith("application/json"));
+  assert.equal(rejected.headers.get("x-tss-raw"), null);
+  await rejected.arrayBuffer();
 }
-const legitimate = await requestHandler(() => new Response("App response", { status: 200 }))(
+const legitimate = await responseHandler(() => new Response("App response", { status: 200 }))(
   new Request(url),
 );
 assert.equal(legitimate.status, 200);

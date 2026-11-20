@@ -40,7 +40,7 @@ test("pinned native export/import preserves completed conversation and tool resu
         "-e",
         "console.log(require('/opt/factory/opencode/server/node_modules/@opencode/server/package.json').version)",
       ),
-    ).toBe("2.0.27");
+    ).toBe("2.3.2");
     const namespace = process.env["FACTORY_ARCHIVE_TEST_NAMESPACE"];
     storage = namespace ? await retainedArchiveObjects(namespace) : undefined;
     const objects = storage?.objects ?? memoryPrivateObjects();
@@ -91,7 +91,7 @@ test("pinned native export/import preserves completed conversation and tool resu
       },
       { revision: "a".repeat(40), availableUncommittedFile: "uncommitted.txt" },
     );
-    expect(saved.manifest.producer.version).toBe("2.0.27");
+    expect(saved.manifest.producer.version).toBe("2.3.2");
     expect(saved.summary.tools.some((tool) => tool.name === "shell" && tool.completed === 1)).toBe(
       true,
     );

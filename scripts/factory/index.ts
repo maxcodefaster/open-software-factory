@@ -177,7 +177,7 @@ async function preflight() {
     throw new Error(
       "Set FACTORY_RUNTIME_HOST to this host's address reachable from Kubernetes Pods",
     );
-  if (Bun.version !== "1.4.3") throw new Error("Factory startup requires Bun 1.4.3");
+  if (Bun.version !== "1.4.5") throw new Error("Factory startup requires Bun 1.4.5");
   const nativeConfiguration = requireNativeInstallation();
   requireNativeForgeOrigin(process.env, nativeConfiguration);
   if (action === "publish-runtime" || !(await publishedRuntimeArtifacts(sharedStateDirectory)))

@@ -105,7 +105,7 @@ test("native Attachment functions preserve private upload identity, draft sequen
       f.userID,
     );
     expect(await fixtureValue(upload, "upload").json()).toMatchObject({ id, state: "ready" });
-    await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 3, ids: [id] }]);
+    await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 3, ids: [id, id] }]);
     await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 2, ids: [] }]);
     const [retained] = await f.database.client<{ sequence: number; ids: string[] }[]>`
       SELECT sequence::float8 AS sequence,attachment_ids AS ids FROM factory.attachment_draft
@@ -577,6 +577,10 @@ test("cumulative storage does not block concurrent uploads and cleanup retains d
     expect((await store.usage(f.projectID, f.userID)).usedBytes).toBe(historicalBytes + 60);
     expect((await store.metadata(f.userID, retained.input.id)).state).toBe("ready");
     await store.retainDraft(f.userID, f.projectID, draft, { sequence: 3, ids: [] });
+    const [cleared] = await f.database.client<{ sequence: number; ids: string[] }[]>`
+      SELECT sequence::float8 AS sequence,attachment_ids AS ids FROM factory.attachment_draft
+      WHERE id=${draft} AND owner_id=${f.userID}`;
+    expect(cleared).toEqual({ sequence: 3, ids: [] });
     failDelete = true;
     await expect(store.sweep()).rejects.toThrow("uncertain deletion");
     expect((await store.usage(f.projectID, f.userID)).usedBytes).toBe(historicalBytes + 60);

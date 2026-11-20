@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": "24.21.0"
+    "node": "24.22.3"
   },
   "scripts": {
-    "postinstall": "node .factory/apply-framework-security.mjs",
+    "postinstall": "node .factory/repair-framework-export.mjs",
     "dev": "node --watch src/dev.ts",
     "build": "vite build",
     "start": "node .output/server/index.mjs",
@@ -16,24 +16,23 @@
   },
   "dependencies": {
     "@solidjs/web": "2.0.3",
-    "@tanstack/solid-router": "2.0.0-rc.9",
-    "@tanstack/solid-start": "2.0.0-rc.9",
-    "better-auth": "1.7.7",
+    "@tanstack/solid-router": "2.0.0-rc.11",
+    "@tanstack/solid-start": "2.0.0-rc.11",
+    "better-auth": "1.7.27",
     "drizzle-orm": "0.45.4",
-    "postgres": "3.4.9",
+    "postgres": "4.1.1",
     "solid-js": "2.0.3"
   },
   "devDependencies": {
     "@solidjs/vite-plugin": "3.0.1",
     "@types/node": "24.19.2",
-    "nitro": "3.0.260903-beta",
+    "nitro": "3.0.261103-rc",
     "typescript": "6.0.3",
-    "vite": "8.3.4"
+    "vite": "8.3.8"
   },
   "overrides": {
     "@solidjs/compiler": "2.0.2",
     "@solidjs/signals": "2.0.3",
-    "@solidjs/babel-plugin": "2.0.2",
     "better-auth": {
       "solid-js": "$solid-js",
       "@tanstack/solid-start": "$@tanstack/solid-start"

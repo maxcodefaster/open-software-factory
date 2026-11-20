@@ -57,7 +57,7 @@ test("fresh Coding retains history on the same Workspace and rejects old or unre
     expect(workspace).toEqual({ count: 1, attemptID: owned.attemptID });
     const project = createProjectAgentController(owned.database, { start: async () => null });
     const active = await project.get(owned.projectID, owned.ticketID, owned.userID);
-    expect(active).toMatchObject({
+    expect(active && { ...active, entries: [...active.entries] }).toMatchObject({
       contextId: contextID,
       isActiveCoding: true,
       mode: "build",

@@ -14,7 +14,7 @@ docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
     test "$(dockerd --version | cut -d" " -f3 | tr -d ,)" = 29.9.0
     test "$(docker compose version --short)" = 5.7.0-dev.1e1c577
     test "$(containerd --version | awk "{print \$3}")" = v2.4.1
-    test "$(node --version)" = v24.21.0
+    test "$(node --version)" = v24.22.3
     test "$(devcontainer --version)" = 0.89.0
     test "$(tinyproxy -v)" = "tinyproxy 1.11.2"
     test "$(sed -n "s/^Timeout //p" /opt/factory-rootless/tinyproxy.conf)" = 900

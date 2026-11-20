@@ -623,6 +623,12 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
       await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
         VALUES(${changeID},${attemptID},${`ses_owned_${suffix}`},'committed',now(),${session.user.id})`;
     });
+    const matchesConversation = await factoryFunctionMatcher("getConversation");
+    const initialConversation = page.waitForResponse(
+      (response) =>
+        matchesConversation(new URL(response.url())) &&
+        !!response.request().postData()?.includes(ticketID),
+    );
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page
@@ -630,6 +636,8 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
       .getByRole("button")
       .click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    // Let the initial shared context arrive before opening a restart confirmation.
+    await (await initialConversation).finished();
     const draft = page.getByRole("textbox", { name: "Message conversation", exact: true });
     await draft.fill("Keep this **unsent original** draft.");
     await startNewConversation(page);

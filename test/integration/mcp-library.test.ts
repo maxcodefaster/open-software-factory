@@ -383,12 +383,12 @@ test("completed private Project turns do not expose personal MCP definitions and
     await database.client`INSERT INTO factory.ticket_conversation(id,project_id,created_by)
       VALUES(${privateConversation},${project},${author})`;
     const privateTurnId = await completedTurn(privateConversation, null);
-    expect(await library.assignments(privateTurnId)).toMatchObject([
+    expect([...(await library.assignments(privateTurnId))]).toMatchObject([
       { connectionId: personal.libraryId, revisionId: personal.revisionId },
     ]);
-    expect(
-      await database.client`SELECT ticket_id,state FROM factory.agent_turn WHERE id=${privateTurnId}`,
-    ).toMatchObject([{ ticket_id: null, state: "completed" }]);
+    expect([
+      ...(await database.client`SELECT ticket_id,state FROM factory.agent_turn WHERE id=${privateTurnId}`),
+    ]).toMatchObject([{ ticket_id: null, state: "completed" }]);
     for (const userId of [reader, manager]) {
       const view = await library.view(userId, project);
       expect(view.entries.find((entry) => entry.id === personal.libraryId)).toBeUndefined();
@@ -420,10 +420,10 @@ test("completed private Project turns do not expose personal MCP definitions and
     await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,created_by)
       VALUES(${sharedConversation},${project},${ticket},${author})`;
     const sharedTurnId = await completedTurn(sharedConversation, ticket);
-    expect(
-      await database.client`SELECT ticket_id,state FROM factory.agent_turn WHERE id=${sharedTurnId}`,
-    ).toMatchObject([{ ticket_id: ticket, state: "completed" }]);
-    expect(await library.assignments(sharedTurnId)).toMatchObject([
+    expect([
+      ...(await database.client`SELECT ticket_id,state FROM factory.agent_turn WHERE id=${sharedTurnId}`),
+    ]).toMatchObject([{ ticket_id: ticket, state: "completed" }]);
+    expect([...(await library.assignments(sharedTurnId))]).toMatchObject([
       { connectionId: shared.libraryId, revisionId: shared.revisionId },
     ]);
     const newerRevisionId = crypto.randomUUID();

@@ -121,15 +121,7 @@ test.beforeEach(async ({ page }) => {
   } finally {
     await db.client.end();
   }
-  await openProjectMenu(page);
-  await page
-    .getByRole("button")
-    .filter({ hasText: `polish-${projectID}` })
-    .click();
-  await page
-    .getByRole("region", { name: "requirements", exact: true })
-    .locator(".ticket-card-body")
-    .click();
+  await page.goto(`/projects/${projectID}/tickets/${ticketID}`);
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeVisible();
 });
 
@@ -396,13 +388,17 @@ test("visual sweep keeps citation markers on their claim's last line", async ({ 
   }
 });
 
-test("visual sweep captures every Settings category without clipped controls", async ({ page }) => {
-  const navigation = await openSettings(page);
-  // Settings loads its authorized categories asynchronously. An empty .all() result
-  // would otherwise pass without visiting a single category.
-  for (const group of settingsGroups) {
+for (const group of settingsGroups) {
+  test(`visual sweep captures every ${group.scope} Settings category without clipped controls`, async ({
+    page,
+  }) => {
+    const navigation = await openSettings(page);
+    // Each scope owns its fixture and the existing timeout. All categories and
+    // both viewports remain checked without one cumulative screenshot budget.
     await resize(page, desktopViewport);
-    await navigation.getByRole("combobox", { name: "Settings scope" }).selectOption(group.scope);
+    const scope = navigation.getByRole("combobox", { name: "Settings scope" });
+    await scope.focus();
+    await scope.selectOption(group.scope);
     await expect(navigation.getByRole("button")).toHaveText(group.labels);
     for (const label of group.labels) {
       await resize(page, desktopViewport);
@@ -442,8 +438,8 @@ test("visual sweep captures every Settings category without clipped controls", a
         });
       }
     }
-  }
-});
+  });
+}
 
 test("document frost visibly transmits the obscured Board, with readable supporting text", async ({
   page,

@@ -484,8 +484,8 @@ immutable `FACTORY_RUNTIME_HOST_IMAGE` and `FACTORY_SUBSTRATE_BOOTSTRAP_IMAGE`
 digests. The former is the normal Factory runtime bundle, built from
 `deploy/runtime-host/Dockerfile`; the latter is the qualified rootless bootstrap
 above. This intentionally replaces its old Docker 29.0.0 engine with Factory's
-**29.9.0** binaries and retains Compose **5.7.0-dev.1e1c577**, Node **24.21.0**,
-Dev Containers CLI **0.89.0**, Connector and the packaged OpenCode **2.0.27** tools.
+**29.9.0** binaries and retains Compose **5.7.0-dev.1e1c577**, Node **24.22.3**,
+Dev Containers CLI **0.89.0**, Connector and the packaged OpenCode **2.3.2** tools.
 The image build checks executable versions. It does not substitute newer packages
 or qualify every Dev Container feature or Coding/Verification workflow.
 The distribution workflow builds this Actor image natively on amd64 and arm64 after
@@ -847,9 +847,11 @@ diagnostic CA. Arbitrary transparent TCP/UDP/IPv6, per-inner-container resource
 enforcement and all Dev Container features are not qualified.
 
 Factory currently pins Docker **29.9.0**, Compose **5.7.0-dev.1e1c577**, Dev
-Containers CLI **0.89.0**, Node **24.21.0** and OpenCode **2.0.27** in
+Containers CLI **0.89.0**, Node **24.22.3** and OpenCode **2.3.2** in
 [the RuntimeHost Dockerfile](../runtime-host/Dockerfile). The prior probe's
 Docker29.0/Compose2.40.3/CLI0.90 results do **not** qualify these Factory tools.
+These are source packaging pins. A previous native acceptance receipt does not qualify
+the refreshed Node, OpenCode, IDE, browser or Go artifacts.
 
 ## Render, install and apply
 

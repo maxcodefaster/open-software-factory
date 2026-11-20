@@ -37,11 +37,14 @@ export async function connectorBoundary(
   attemptID: string = crypto.randomUUID(),
 ) {
   const binary = resolve(process.scratch, "owned-connector");
-  const build = Bun.spawn(["go", "build", "-o", binary, "./cmd/factory-runtime-connector"], {
-    cwd: resolve("services/runtime-connector"),
-    stdout: "ignore",
-    stderr: "pipe",
-  });
+  const build = Bun.spawn(
+    ["mise", "exec", "--", "go", "build", "-o", binary, "./cmd/factory-runtime-connector"],
+    {
+      cwd: resolve("services/runtime-connector"),
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+  );
   const [buildError, buildStatus] = await Promise.all([
     new Response(build.stderr).text(),
     build.exited,

@@ -25,12 +25,15 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
     await rmdir(directory);
     throw new Error("Owned browser proof needs a supported Docker architecture");
   }
-  const compile = Bun.spawn(["go", "build", "-o", path, "./cmd/factory-runtime-connector"], {
-    cwd: resolve("services/runtime-connector"),
-    env: { ...process.env, GOOS: "linux", GOARCH: goArchitecture },
-    stdout: "ignore",
-    stderr: "pipe",
-  });
+  const compile = Bun.spawn(
+    ["mise", "exec", "--", "go", "build", "-o", path, "./cmd/factory-runtime-connector"],
+    {
+      cwd: resolve("services/runtime-connector"),
+      env: { ...process.env, GOOS: "linux", GOARCH: goArchitecture },
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+  );
   const turnID = crypto.randomUUID();
   let upstream: Awaited<ReturnType<typeof pinnedOpenCode>> | undefined;
   const calls: string[] = [];

@@ -27,4 +27,6 @@ export default defineConfig(({ command }) => ({
       : []),
   ],
   build: { target: "esnext" },
+  // Preserve each Start package's declared dependencies when Nitro rebundles SSR.
+  ssr: { noExternal: [/^@tanstack\//] },
 }));

@@ -143,6 +143,8 @@ export async function prepareTestPrerequisites(
       console.log(`Preparing locked ${target.name} dependencies for the selected tests`);
       await command(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], directory, env);
     }
+    if (target.name === "starter")
+      await command(["node", ".factory/repair-framework-export.mjs"], directory, env);
     let build = dependencies;
     if (target.name === "theia") {
       const sources: string[] = [];

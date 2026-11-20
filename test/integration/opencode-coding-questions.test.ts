@@ -183,7 +183,7 @@ test("Factory Coding excludes native question forms while retaining text clarifi
       "Owned native question server did not start",
       45_000,
     );
-    expect(info?.version).toBe("2.0.27");
+    expect(info?.version).toBe("2.3.2");
     const sessionID = `ses_owned_question_${id.replaceAll("-", "")}`;
     await client.session.create({
       id: sessionID,
@@ -230,7 +230,9 @@ test("Factory Coding excludes native question forms while retaining text clarifi
     ).toBe(true);
     const question = messages.data.flatMap((message) =>
       message.type === "assistant"
-        ? message.content.filter((part) => part.type === "tool" && part.name === "question")
+        ? message.content
+            .filter((part) => part.type === "tool")
+            .filter((part) => part.name === "question")
         : [],
     );
     expect(question[0]?.state?.status).toBe("error");

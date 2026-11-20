@@ -506,7 +506,7 @@ test("every publication job installs the same digest-pinned Cosign binary", asyn
   expect(await syntax.exited).toBe(0);
 });
 
-test("security exceptions follow exact-image backport proof and precede signing", async () => {
+test("fixed upstream transport proof and vulnerability scan precede image signing", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
@@ -526,11 +526,11 @@ test("security exceptions follow exact-image backport proof and precede signing"
   expect(steps[proof].env.IMAGE_REF).toBe(`\${{ steps.build.outputs.ref }}`);
   expect(steps[proof].run).toContain("--network=none --read-only --cap-drop=ALL --user 1000:1000");
   expect(steps[proof].run).toContain('> "$RUNNER_TEMP/framework-security-proof.json"');
-  expect(steps[scan].env.TRIVY_VEX).toBe(`\${{ runner.temp }}/framework-security.vex.json`);
+  expect(steps[scan].env.TRIVY_VEX).toBeUndefined();
   expect(steps[scan].env.TRIVY_PLATFORM).toBe(`linux/\${{ matrix.arch }}`);
   expect(steps[scan].with["exit-code"]).toBe(1);
   expect(steps[scan]["continue-on-error"]).not.toBe(true);
-  expect(steps[sign].run).toContain("cosign attest --yes --type https://openvex.dev/ns/v0.2.0");
+  expect(steps[sign].run).not.toContain("openvex");
   const dockerfile = await readFile(
     new URL("../../deploy/factory/Dockerfile", import.meta.url),
     "utf8",
@@ -538,7 +538,7 @@ test("security exceptions follow exact-image backport proof and precede signing"
   for (const stage of ["build", "dependencies"]) {
     const commands = dockerfile.split(`FROM tools AS ${stage}\n`)[1]?.split("\nFROM ")[0];
     expect(commands).toBeDefined();
-    expect(commands?.indexOf("COPY patches ./patches")).toBeLessThan(
+    expect(commands?.indexOf("COPY package.json bun.lock")).toBeLessThan(
       commands?.indexOf("RUN bun install") ?? -1,
     );
   }

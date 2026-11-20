@@ -297,7 +297,7 @@ test.each(cases)(
         await writeFile(resolve(workspace, "app.txt"), "implementation\n");
         const binary = resolve(scratch, "native-commit-test");
         await command(
-          ["go", "test", "-c", "-o", binary, "./connector"],
+          ["mise", "exec", "--", "go", "test", "-c", "-o", binary, "./connector"],
           resolve("services/runtime-connector"),
         );
         async function connect() {

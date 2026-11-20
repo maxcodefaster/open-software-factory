@@ -223,6 +223,7 @@ for (const width of [1440, 768, 390]) {
     await page.goto(`${origin}/glass-surfaces.html?surface=editor&dense=1`);
     const editor = page.getByRole("textbox", { name: "Ticket description", exact: true });
     await expect(editor).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
     const offset =
       "Release context stays readable while formatting the approved delivery scope. ".length * 30;
     const wordBounds = () =>
@@ -236,15 +237,18 @@ for (const width of [1440, 768, 390]) {
           const range = document.createRange();
           range.setStart(text, start);
           range.setEnd(text, start + 7);
+          if (range.toString() !== "Release") throw new Error("Missing dense editor word");
           const rectangles = [...range.getClientRects()];
           const first = rectangles[0];
           const last = rectangles.at(-1);
           if (!first || !last) throw new Error("Missing selected word geometry");
           return {
             top: first.top,
-            x: first.left + 0.5,
+            // Chromium rounds native pointer coordinates to integer pixels.
+            // Stay inside the text block rather than rounding into its left margin.
+            x: Math.ceil(first.left),
             y: (first.top + first.bottom) / 2,
-            endX: last.right - 0.5,
+            endX: Math.floor(last.right),
             endY: (last.top + last.bottom) / 2,
           };
         }, offset);
@@ -259,6 +263,8 @@ for (const width of [1440, 768, 390]) {
       before.top - bounds.y - 200,
     );
     const word = await wordBounds();
+    expect(word.y).toBeGreaterThan(bounds.y);
+    expect(word.y).toBeLessThan(bounds.y + bounds.height);
     await page.mouse.move(word.x, word.y);
     await page.mouse.down();
     await page.mouse.move(word.endX, word.endY, { steps: 8 });
@@ -296,9 +302,6 @@ for (const width of [1440, 768, 390]) {
 }
 
 async function selectFirstWord(page: Page, editor: Locator, length: number, text: string) {
-  await editor.press("ArrowRight");
-  await expect(page.locator(".selection-toolbar")).toBeHidden();
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
   const box = await editor
     .locator("p")
     .first()
@@ -308,13 +311,13 @@ async function selectFirstWord(page: Page, editor: Locator, length: number, text
       const range = document.createRange();
       range.setStart(node, 0);
       range.setEnd(node, count);
-      // Pointer drags are covered above. Keep link validation independent of native drag state.
-      const selection = getSelection();
-      if (!selection) throw new Error("Missing document selection");
-      selection.removeAllRanges();
-      selection.addRange(range);
       return range.getBoundingClientRect().toJSON();
     }, length);
+  // Use native caret/keyboard input after cancel or undo, not a DOM-only selection
+  // that can disagree with the engine while its focus restoration is pending.
+  await page.mouse.click(Math.ceil(box.left), (box.top + box.bottom) / 2);
+  await editor.press("Home");
+  for (let index = 0; index < length; index++) await editor.press("Shift+ArrowRight");
   await expect.poll(() => editor.evaluate(() => getSelection()?.toString())).toBe(text);
   return box;
 }
@@ -392,8 +395,10 @@ test("Wiki uses the same link editor and restores its selection on Escape", asyn
   await page.getByLabel("Edit Wiki body", { exact: true }).click();
   const editor = page.getByRole("textbox", { name: "Wiki body", exact: true });
   await expect(editor).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
   const selected = await selectFirstWord(page, editor, 6, "Choose");
   const toolbar = page.getByRole("toolbar", { name: "Wiki selection formatting" });
+  await expect(toolbar).toHaveCSS("transition-property", "none");
   await toolbar.getByRole("button", { name: "Link", exact: true }).click();
   const link = toolbar.getByRole("textbox", { name: "Link address", exact: true });
   await expect(link).toBeFocused();
@@ -401,9 +406,10 @@ test("Wiki uses the same link editor and restores its selection on Escape", asyn
   await expect
     .poll(async () => {
       const box = await toolbar.boundingBox();
-      return box
-        ? Math.min(Math.abs(box.y - selected.bottom), Math.abs(box.y + box.height - selected.top))
-        : Infinity;
+      if (!box) return Infinity;
+      if (box.y >= selected.bottom) return box.y - selected.bottom;
+      if (box.y + box.height <= selected.top) return selected.top - box.y - box.height;
+      return Infinity;
     })
     .toBeLessThanOrEqual(9);
   const box = await toolbar.boundingBox();

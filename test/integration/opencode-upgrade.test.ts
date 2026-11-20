@@ -149,7 +149,7 @@ test.skipIf(!candidateImage)(
         undefined,
         undefined,
         project,
-        "2.0.27",
+        "2.3.2",
       );
       expect(await upgraded.client.message.list({ sessionID, limit: 100 })).toEqual(history);
       const retainedLogs = await Array.fromAsync(

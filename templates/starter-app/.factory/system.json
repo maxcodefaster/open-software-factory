@@ -1,5 +1,13 @@
 {
   "version": 1,
   "primaryApp": "web",
-  "apps": [{ "id": "web", "label": "Web app", "command": ["npm", "run", "dev"], "port": 4300, "healthPath": "/health" }]
+  "apps": [
+    {
+      "id": "web",
+      "label": "Web app",
+      "command": ["npm", "run", "dev"],
+      "port": 4300,
+      "healthPath": "/health"
+    }
+  ]
 }

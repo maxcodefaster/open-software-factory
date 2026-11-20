@@ -54,7 +54,11 @@ export function openCodeUsageEntry(event: SessionLogOutput, sessionID: string): 
     return null;
   return {
     eventID: event.id,
-    source: event.type === "session.usage.recorded" ? event.data.source : "step",
+    // Standalone native generation is inference, billed in Factory's step bucket.
+    source:
+      event.type === "session.usage.recorded" && event.data.source !== "generate"
+        ? event.data.source
+        : "step",
     outcome:
       event.type === "session.step.failed" ||
       (event.type === "session.step.ended" && event.data.finish === "error")

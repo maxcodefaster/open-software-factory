@@ -3,20 +3,20 @@
   "private": true,
   "version": "0.0.0",
   "dependencies": {
-    "@theia/core": "1.76.0",
-    "@theia/editor": "1.76.0",
-    "@theia/filesystem": "1.76.0",
-    "@theia/markers": "1.76.0",
-    "@theia/messages": "1.76.0",
-    "@theia/monaco": "1.76.0",
-    "@theia/navigator": "1.76.0",
-    "@theia/preferences": "1.76.0",
-    "@theia/search-in-workspace": "1.76.0",
-    "@theia/workspace": "1.76.0",
+    "@theia/core": "1.77.0",
+    "@theia/editor": "1.77.0",
+    "@theia/filesystem": "1.77.0",
+    "@theia/markers": "1.77.0",
+    "@theia/messages": "1.77.0",
+    "@theia/monaco": "1.77.0",
+    "@theia/navigator": "1.77.0",
+    "@theia/preferences": "1.77.0",
+    "@theia/search-in-workspace": "1.77.0",
+    "@theia/workspace": "1.77.0",
     "factory-ide-extension": "0.0.0"
   },
   "devDependencies": {
-    "@theia/cli": "1.76.0"
+    "@theia/cli": "1.77.0"
   },
   "scripts": {
     "build": "theia build --mode production"

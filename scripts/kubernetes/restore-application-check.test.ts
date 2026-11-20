@@ -461,7 +461,7 @@ function target(f: Fixture) {
                   {
                     name: "zero",
                     image:
-                      "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437",
+                      "docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1",
                     env: [
                       ...["ZERO_UPSTREAM_DB", "ZERO_CVR_DB", "ZERO_CHANGE_DB"].map((name) => ({
                         name,

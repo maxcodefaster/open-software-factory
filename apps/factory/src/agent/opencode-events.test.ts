@@ -20,15 +20,19 @@ function controlledEvents() {
     cleanupRelease: ReturnType<typeof Promise.withResolvers<void>>;
     cleaned: ReturnType<typeof Promise.withResolvers<void>>;
   }[] = [];
-  const native = createOpenCodeClient(async () => {
-    throw new Error("Controlled event source must not use the transport");
-  });
+  const native = createOpenCodeClient(
+    async () =>
+      new Response(
+        `data: ${JSON.stringify({ id: "evt_controlled", type: "server.connected", data: {} })}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  );
   const client: ReturnType<typeof createOpenCodeClient> = {
     ...native,
     event: {
       ...native.event,
       subscribe(options) {
-        const signal = options?.signal;
+        const { signal, ...selection } = options ?? {};
         if (!signal) throw new Error("Event source must have an abort signal");
         const source = {
           signal,
@@ -40,18 +44,24 @@ function controlledEvents() {
           cleaned: Promise.withResolvers<void>(),
         };
         sources.push(source);
+        // Use the official typed parser, then control delivery of its queued event
+        // independently of cancellation to exercise the reader's shutdown fence.
+        const queued = native.event.subscribe(selection)[Symbol.asyncIterator]();
         return (async function* () {
           const aborted = Promise.withResolvers<void>();
           const abort = () => aborted.resolve();
           signal.addEventListener("abort", abort, { once: true });
           try {
             source.started.resolve();
+            const event = await queued.next();
+            if (event.done) throw new Error("Controlled native event was not queued");
             await Promise.race([source.eventReady.promise, aborted.promise]);
             // Model an already queued event arriving after cancellation.
-            yield { id: "evt_controlled", type: "server.connected" as const, data: {} };
+            yield event.value;
             source.delivered.resolve();
             await aborted.promise;
           } finally {
+            await queued.return?.();
             source.cleanupStarted.resolve();
             await source.cleanupRelease.promise;
             signal.removeEventListener("abort", abort);

@@ -351,7 +351,7 @@ jobs:
             --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
             --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \
             "$IMAGE_REF" /smoke/image-smoke.ts
-      - name: Verify the image security backport before generating its scoped VEX
+      - name: Verify the image's fixed upstream server-function transport
         env:
           IMAGE_REF: ${{ steps.build.outputs.ref }}
         run: |
@@ -360,17 +360,14 @@ jobs:
             --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
             --volume "$PWD/scripts/factory/framework-image-proof.ts:/proof/framework-image-proof.ts:ro" \
             --volume "$PWD/test/fixtures/framework-transport-security.ts:/proof/framework-transport-security.ts:ro" \
-            --volume "$PWD/templates/starter-app/.factory/framework-security.json:/proof/framework-security.json:ro" \
             "$IMAGE_REF" /proof/framework-image-proof.ts "$IMAGE_REF" \
-            /proof/framework-security.json /proof/framework-transport-security.ts \
+            /proof/framework-transport-security.ts \
             > "$RUNNER_TEMP/framework-security-proof.json"
-          jq -e '.vex' "$RUNNER_TEMP/framework-security-proof.json" > "$RUNNER_TEMP/framework-security.vex.json"
       - name: Scan the Factory image for fixable critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          TRIVY_VEX: ${{ runner.temp }}/framework-security.vex.json
           TRIVY_PLATFORM: linux/${{ matrix.arch }}
           TRIVY_SHOW_SUPPRESSED: "true"
         with:
@@ -387,7 +384,6 @@ jobs:
           name: factory-security-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/framework-security-proof.json
-            ${{ runner.temp }}/framework-security.vex.json
             ${{ runner.temp }}/factory-security-scan.json
           if-no-files-found: error
       - name: Sign the Factory architecture image
@@ -397,8 +393,6 @@ jobs:
           set -euo pipefail
           source scripts/factory/release-lib.sh
           release_sign "$IMAGE_REF"
-          cosign attest --yes --type https://openvex.dev/ns/v0.2.0 \
-            --predicate "$RUNNER_TEMP/framework-security.vex.json" "$IMAGE_REF"
   distribution:
     needs: [release, factory]
     if: ${{ !cancelled() && needs.release.result == 'success' && needs.factory.result == 'success' }}

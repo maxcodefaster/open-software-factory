@@ -1,4 +1,4 @@
-import { LLM, LLMClient, Tool, ToolChoice } from "@opencode/ai";
+import { ai, LLMClient, ToolChoice, tool } from "@opencode/ai/effect";
 import { model as anthropicModel } from "@opencode/ai/providers/anthropic";
 import { model as deepseekModel } from "@opencode/ai/providers/deepseek";
 import { model as openaiModel } from "@opencode/ai/providers/openai/responses";
@@ -45,9 +45,10 @@ export async function probeBuildModel(input: {
         : input.connection.provider === "deepseek"
           ? deepseekModel(input.modelId, settings)
           : openaiModel(input.modelId, settings);
-    const tool = Tool.make({
+    const probeTool = tool({
+      name: "factory_connection_probe",
       description: "Confirm native model access by returning this exact structured value.",
-      parameters: Schema.Struct({
+      input: Schema.Struct({
         verified: Schema.Literal(true),
         value: Schema.Literal("factory-connection-ok"),
       }),
@@ -57,30 +58,32 @@ export async function probeBuildModel(input: {
     await input.usageSink?.begin();
     admitted = true;
     const response = await Effect.runPromise(
-      LLM.generate(
-        LLM.request({
-          model,
-          system:
-            "Call factory_connection_probe once with verified:true and value:factory-connection-ok. Do nothing else.",
-          prompt: "Check native Build transport.",
-          generation: { maxTokens: 4_096 },
-          tools: Tool.toDefinitions({ factory_connection_probe: tool }),
-          toolChoice: ToolChoice.named("factory_connection_probe"),
-        }),
-        {
-          http: (request, execute) =>
-            execute(request).pipe(
-              Effect.tap((response) =>
-                Effect.sync(() => {
-                  limits = reportedModelLimits(response.headers);
-                }),
+      ai
+        .generate(
+          ai.request({
+            model,
+            system:
+              "Call factory_connection_probe once with verified:true and value:factory-connection-ok. Do nothing else.",
+            prompt: "Check native Build transport.",
+            maxTokens: 4_096,
+            tools: [probeTool],
+            toolChoice: ToolChoice.named("factory_connection_probe"),
+          }),
+          {
+            http: (request, execute) =>
+              execute(request).pipe(
+                Effect.tap((response) =>
+                  Effect.sync(() => {
+                    limits = reportedModelLimits(response.headers);
+                  }),
+                ),
               ),
-            ),
-        },
-      ).pipe(
-        Effect.catch((cause) => Effect.fail(cause.cause.http ?? cause)),
-        Effect.provide(layer),
-      ),
+          },
+        )
+        .pipe(
+          Effect.catch((cause) => Effect.fail(cause.cause.http ?? cause)),
+          Effect.provide(layer),
+        ),
       { signal },
     );
     const calls = response.toolCalls.filter((call) => call.name === "factory_connection_probe");
@@ -103,7 +106,7 @@ export async function probeBuildModel(input: {
     });
     await input.usageSink?.settle("completed");
     toolCall = calls.length === 1;
-    const structuredOutput = toolCall && Schema.is(tool.parameters)(calls[0]?.input);
+    const structuredOutput = toolCall && Schema.is(probeTool.input)(calls[0]?.input);
     return {
       status: structuredOutput ? "ready" : "unsupported",
       modelId: input.modelId,

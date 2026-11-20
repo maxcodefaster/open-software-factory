@@ -907,9 +907,10 @@ test("failed Promotion retry preserves its original attempt and admits one new e
     expect(
       (await f.database.client`SELECT * FROM factory.promotion_operation WHERE id=${promotion}`)[0],
     ).toEqual(original);
-    expect(
-      await f.database.client`SELECT state,failure FROM factory.runtime_attempt WHERE id=${failed}`,
-    ).toMatchObject([{ state: "stopped", failure: "missing Main-Preview configuration" }]);
+    expect([
+      ...(await f.database
+        .client`SELECT state,failure FROM factory.runtime_attempt WHERE id=${failed}`),
+    ]).toMatchObject([{ state: "stopped", failure: "missing Main-Preview configuration" }]);
   } finally {
     await f.close();
   }

@@ -30,7 +30,7 @@ RUN apk add --no-cache git libgcc libstdc++ \
   && test "$(docker --version | cut -d' ' -f3 | tr -d ,)" = 29.9.0 \
   && test "$(dockerd --version | cut -d' ' -f3 | tr -d ,)" = 29.9.0 \
   && test "$(docker compose version --short)" = 5.7.0-dev.1e1c577 \
-  && test "$(node --version)" = v24.21.0 \
+  && test "$(node --version)" = v24.22.3 \
   && test "$(devcontainer --version)" = 0.89.0
 RUN test "$(containerd --version | awk '{print $3}')" = v2.4.1
 COPY deploy/substrate/rootless/ /opt/factory-rootless/

@@ -1,7 +1,7 @@
-FROM docker.io/oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun
-FROM registry.k8s.io/kubectl:v1.35.6@sha256:4d8c68e8c2bf360b1808927c4d39fb13998c106cac903622d127a2275c844126 AS kubectl
+FROM docker.io/oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS bun
+FROM registry.k8s.io/kubectl:v1.35.10@sha256:4e1d541a3d62f74637974e4c71f3cea91b9a36ffd059ab45e355648898783837 AS kubectl
 
-FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS substrate-control
+FROM docker.io/library/golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS substrate-control
 WORKDIR /src
 COPY services/substrate-control/go.mod services/substrate-control/go.sum ./
 RUN go mod download
@@ -15,14 +15,14 @@ RUN go mod download
 COPY services/runtime-connector ./
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /factory-runtime-connector ./cmd/factory-runtime-connector
 
-FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS sqlite-tools
+FROM docker.io/library/golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS sqlite-tools
 ARG SQLITE_SOURCE=https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz
 ARG SQLITE_SHA256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
 RUN apk add --no-cache build-base
 COPY scripts/factory/build-sqlite.sh /build-sqlite.sh
 RUN sh /build-sqlite.sh "$SQLITE_SOURCE" "$SQLITE_SHA256" /factory-sqlite
 
-FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tools
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS tools
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates git util-linux openssl \
   && rm -rf /var/lib/apt/lists/*

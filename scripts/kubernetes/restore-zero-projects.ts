@@ -151,7 +151,7 @@ async function childRead(input: ZeroProjectRead) {
   // Bun aliases bare "ws" to its native compatibility layer. Load the already
   // installed JS dependency explicitly for Node TLS/lookup and redirect semantics.
   const wsPackage = requireZero.resolve("ws/package.json");
-  requireThat(requireZero(wsPackage).version === "8.22.0");
+  requireThat(requireZero(wsPackage).version === "8.23.0");
   type NativeSocket = WebSocket & { terminate(): void };
   const Native = requireZero(join(dirname(wsPackage), "index.js")) as {
     new (url: string | URL, protocols?: string | string[], options?: object): NativeSocket;
@@ -180,7 +180,7 @@ async function childRead(input: ZeroProjectRead) {
           attempts++ === 0 &&
           logical.protocol === "wss:" &&
           logical.host === expected.host &&
-          logical.pathname === "/zero/sync/v52/connect" &&
+          logical.pathname === "/zero/sync/v57/connect" &&
           !logical.username &&
           !logical.password &&
           !logical.hash &&

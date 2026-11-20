@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createCodingContexts } from "../../apps/factory/src/agent/conversation-contexts";
+import upstream from "../../upstream.json";
 import { createSessionArchives } from "../../apps/factory/src/agent/session-archive-store";
 import { readNativeSessionArchive } from "../../apps/factory/src/agent/session-archive";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -15,7 +16,7 @@ test("archive failure is independent of turn/commit settlement and retries retai
   const objects = memoryPrivateObjects();
   let fail = true;
   const client = createOpenCodeClient(async (_request, path) => {
-    if (path === "/api/info") return Response.json({ version: "2.0.27" });
+    if (path === "/api/info") return Response.json({ version: upstream.openCode.version });
     const intents = await owned.database.client<
       { sessionID: string; promptID: string; text: string }[]
     >`
@@ -196,7 +197,7 @@ test("native transcript checkpoint retains pinned recovery references without co
     });
     let exports = 0;
     const client = createOpenCodeClient(async (request, path) => {
-      if (path === "/api/info") return Response.json({ version: "2.0.27" });
+      if (path === "/api/info") return Response.json({ version: upstream.openCode.version });
       expect(request.method).toBe("GET");
       expect(path).toContain("/export");
       exports++;

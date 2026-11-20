@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { SessionTransferData } from "@opencode/client";
 import { memoryPrivateObjects } from "../../../../test/fixtures/private-objects";
+import upstream from "../../../../upstream.json";
 import { agentViewSchema } from "../api-contracts";
 import { createOpenCodeClient } from "./opencode-client";
 import {
@@ -43,7 +44,7 @@ function payload(): SessionTransferData {
     ],
   };
 }
-function client(native = payload(), version = "2.0.27") {
+function client(native = payload(), version = upstream.openCode.version) {
   const calls: { path: string; method: string; body: unknown }[] = [];
   const api = createOpenCodeClient(async (request, path) => {
     calls.push({

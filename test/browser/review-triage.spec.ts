@@ -34,6 +34,11 @@ test.beforeAll(async () => {
     fixtureValue(server.resolvedUrls, "server.resolvedUrls").local[0],
     "server.resolvedUrls!.local[0]",
   ).replace(/\/$/, "");
+  // Finish the fixture's static module transforms before a browser requests the
+  // page. Do not retry a failed module load or replay a review command.
+  const client = fixtureValue(server.environments["client"], "Owned review client environment");
+  await client.warmupRequest("/review-triage-surface.tsx");
+  await client.waitForRequestsIdle();
   await mkdir(directory, { recursive: true });
 });
 test.afterAll(async () => {
@@ -379,6 +384,10 @@ for (const externalActions of [false, true]) {
       },
     });
     await page.goto(`${origin}/review-triage.html${externalActions ? "?external-actions" : ""}`);
+    await expect(
+      page.getByRole("region", { name: "Visual review", exact: true }),
+      "The owned review fixture must mount before exercising its delayed read",
+    ).toBeVisible();
     const add = page.getByRole("button", { name: "Add feedback", exact: true });
     await expect(page.getByRole("status").filter({ hasText: "Loading review" })).toBeVisible();
     if (externalActions) await expect(add).toHaveCount(0);

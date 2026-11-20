@@ -172,7 +172,7 @@ test.each([
   "tsconfig.base.json",
   ".dockerignore",
   "templates/starter-app/package.json",
-  "patches/tanstack-start-server-core-security.patch",
+  "scripts/factory/framework-image-proof.ts",
   "apps/factory/public/art/README.md",
   "scripts/kubernetes/unknown-restore.test.ts",
   "scripts/kubernetes/restore-source-contract-new.ts",

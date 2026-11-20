@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS connector
+FROM docker.io/library/golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS connector
 
 WORKDIR /src/services/runtime-connector
 COPY services/runtime-connector/go.mod services/runtime-connector/go.sum ./
@@ -7,7 +7,7 @@ COPY services/runtime-connector ./
 RUN --mount=type=cache,id=factory-connector-go-build,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-runtime-connector ./cmd/factory-runtime-connector
 RUN --mount=type=cache,id=factory-connector-go-build,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-project-prebuild ./cmd/factory-project-prebuild
 
-FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS compose
+FROM docker.io/library/golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS compose
 WORKDIR /src/compose
 # Exact upstream fix for Bake's configured-input grants. Preserve filesystem
 # enforcement instead of disabling it for the CLI's generated Dockerfile.
@@ -19,7 +19,7 @@ RUN --mount=type=cache,id=factory-compose-go-mod,target=/go/pkg/mod \
     -ldflags="-s -w -X github.com/docker/compose/v5/internal.Version=v5.7.0-dev.1e1c577" \
     -o /docker-compose ./cmd
 
-FROM docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2 AS node
+FROM docker.io/library/node:24.22.3-alpine3.23@sha256:3946fb783fdce8a2812136ea694bc95c698c4f4096f3fd18568dc27a8ac389dc AS node
 
 FROM node AS language-node-musl
 RUN mkdir -p /opt/node-runtime/lib \
@@ -27,7 +27,7 @@ RUN mkdir -p /opt/node-runtime/lib \
   && cp -L /usr/lib/libstdc++.so.6 /opt/node-runtime/lib/libstdc++.so.6 \
   && cp -L /usr/lib/libgcc_s.so.1 /opt/node-runtime/lib/libgcc_s.so.1
 
-FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS language-node-glibc
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS language-node-glibc
 RUN mkdir -p /opt/node-runtime/lib \
   && cp -L /usr/local/bin/node /opt/node-runtime/node \
   && cp -L "$(find /usr/lib -name libstdc++.so.6 -print -quit)" /opt/node-runtime/lib/libstdc++.so.6 \
@@ -51,7 +51,7 @@ RUN opencode_package="$(node -e "const value=JSON.parse(require('fs').readFileSy
   && tar -xzf "$opencode_tarball" -C /opt/factory/opencode/glibc --strip-components=2 package/bin/opencode \
   && chmod 0555 /opt/factory/opencode/glibc/opencode
 
-FROM docker.io/oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS opencode-server
+FROM docker.io/oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS opencode-server
 ARG TARGETARCH
 WORKDIR /opt/factory/opencode/server
 COPY deploy/opencode-server/package.json deploy/opencode-server/bun.lock ./
@@ -75,7 +75,7 @@ FROM node AS bun-tool
 ARG TARGETARCH
 WORKDIR /opt/factory/opencode/server
 COPY upstream.json /tmp/upstream.json
-RUN node -e 'const fs=require("fs");const child=require("child_process");const crypto=require("crypto");const pins=JSON.parse(fs.readFileSync("/tmp/upstream.json")).openCodeServer.bun[process.argv[1]];for(const [libc,pin] of Object.entries(pins)){const tar=child.execFileSync("npm",["pack","--ignore-scripts",pin.name+"@1.4.3"]).toString().trim();if("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(tar)).digest("base64")!==pin.integrity)throw new Error("Bun integrity mismatch");fs.mkdirSync("../"+libc,{recursive:true});child.execFileSync("tar",["-xzf",tar,"-C","../"+libc,"--strip-components=2","package/bin/bun"]);fs.chmodSync("../"+libc+"/bun",0o555);fs.unlinkSync(tar)}' "$TARGETARCH"
+RUN node -e 'const fs=require("fs");const child=require("child_process");const crypto=require("crypto");const pins=JSON.parse(fs.readFileSync("/tmp/upstream.json")).openCodeServer.bun[process.argv[1]];for(const [libc,pin] of Object.entries(pins)){const tar=child.execFileSync("npm",["pack","--ignore-scripts",pin.name+"@1.4.5"]).toString().trim();if("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(tar)).digest("base64")!==pin.integrity)throw new Error("Bun integrity mismatch");fs.mkdirSync("../"+libc,{recursive:true});child.execFileSync("tar",["-xzf",tar,"-C","../"+libc,"--strip-components=2","package/bin/bun"]);fs.chmodSync("../"+libc+"/bun",0o555);fs.unlinkSync(tar)}' "$TARGETARCH"
 
 FROM node AS language-tools
 WORKDIR /opt/factory/language-tools
@@ -93,7 +93,7 @@ RUN runner_arch="$(node -e "process.stdout.write(process.argv[1] === 'arm64' ? '
   && chmod 0555 /usr/local/bin/forgejo-runner \
   && test "$(forgejo-runner --version | awk '{print $3}')" = "v$runner_version"
 
-FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS theia
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS theia
 
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
@@ -109,7 +109,7 @@ RUN npm ci --no-audit --no-fund
 COPY deploy/theia-ide/factory-ide-extension ./factory-ide-extension
 RUN npm run build
 
-FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS developer-ide
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS developer-ide
 COPY --from=theia /src/deploy/theia-ide/browser-app/lib /opt/factory/theia/lib
 COPY --from=theia /src/deploy/theia-ide/browser-app/package.json /opt/factory/theia/package.json
 USER 1000:1000

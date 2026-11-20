@@ -1,0 +1,18 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -59,7 +59,13 @@
+         "default": "./dist/esm/virtual-modules.js"
+       }
+     },
+-    "./package.json": "./package.json"
++    "./package.json": "./package.json",
++    "./request-scope": {
++      "import": {
++        "types": "./dist/esm/internal-request-response.d.ts",
++        "default": "./dist/esm/internal-request-response.js"
++      }
++    }
+   },
+   "imports": {
+     "#tanstack-start-server-fn-resolver": {

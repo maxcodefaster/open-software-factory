@@ -225,7 +225,7 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
       `${repository}/.devcontainer/devcontainer.json`,
       JSON.stringify({
         image:
-          "node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2",
+          "node:24.22.3-alpine3.23@sha256:3946fb783fdce8a2812136ea694bc95c698c4f4096f3fd18568dc27a8ac389dc",
         remoteUser: "node",
         workspaceFolder: "/workspace/project",
         // biome-ignore lint/suspicious/noTemplateCurlyInString: The Dev Containers CLI resolves this variable.

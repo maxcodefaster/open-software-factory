@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import upstream from "../../upstream.json";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { controlledForgeProtection } from "../fixtures/forge-protection";
@@ -172,7 +173,7 @@ test.each(["Build", "Staging"] as const)(
             } else if (path === "/api/mcp") {
               data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
             } else if (path === "/api/info") {
-              data = { version: "2.0.27" };
+              data = { version: upstream.openCode.version };
             } else if (path === "/api/skill") {
               data = installedSkills.map((id) => ({
                 id,

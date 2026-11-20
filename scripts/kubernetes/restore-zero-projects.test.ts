@@ -131,7 +131,10 @@ async function server(mode: Mode) {
   let requests = 0,
     active = 0,
     messages = 0,
+    queries = 0,
     sent = false;
+  const chunkSizes: number[] = [];
+  const queried = Promise.withResolvers<void>();
   const closed = new Set<() => void>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const observations: { host: string | null; origin: string | null; cookie: string | null }[] = [];
@@ -152,7 +155,7 @@ async function server(mode: Mode) {
         return new Response(null, { status: 302, headers: { location: `${url.origin}/foreign` } });
       if (mode === "unauthorized" || request.headers.get("cookie") !== "owned-test-session=fixture")
         return new Response("denied", { status: 401 });
-      if (url.pathname !== "/zero/sync/v52/connect" || url.searchParams.get("userID") !== user)
+      if (url.pathname !== "/zero/sync/v57/connect" || url.searchParams.get("userID") !== user)
         return new Response("wrong route", { status: 400 });
       const protocol = request.headers.get("sec-websocket-protocol") ?? "";
       const initial = JSON.parse(
@@ -194,6 +197,8 @@ async function server(mode: Mode) {
     if (!put || sent) return;
     expect(put.name).toBe("projects.list");
     expect(put.args).toEqual([]);
+    queries++;
+    queried.resolve();
     sent = true;
     if (mode === "unknown") return;
     if (mode === "ast-only") {
@@ -216,7 +221,7 @@ async function server(mode: Mode) {
     const publish = async () => {
       if (socket.readyState !== 1) return;
       socket.send(JSON.stringify(["pokeStart", { pokeID: "owned-poke", baseCookie: null }]));
-      const encoder = new PokeChunkEncoder(37);
+      const encoder = new PokeChunkEncoder(undefined, 37);
       const rows =
         mode === "empty"
           ? []
@@ -245,10 +250,12 @@ async function server(mode: Mode) {
           gotQueriesPatch: [{ op: "put", hash: put.hash }],
         }),
         async (chunk: Uint8Array) => {
+          chunkSizes.push(chunk.byteLength);
           socket.send(Buffer.from(chunk));
         },
       );
       await encoder.finish(async (chunk: Uint8Array) => {
+        chunkSizes.push(chunk.byteLength);
         socket.send(Buffer.from(chunk));
       });
       socket.send(JSON.stringify(["pokeEnd", { pokeID: "owned-poke", cookie: "0001" }]));
@@ -280,6 +287,9 @@ async function server(mode: Mode) {
     requests: () => requests,
     active: () => active,
     messages: () => messages,
+    queries: () => queries,
+    queried: queried.promise,
+    chunkSizes,
     async settled() {
       if (active === 0) return;
       await new Promise<void>((accept, reject) => {
@@ -308,6 +318,9 @@ test("real SDK decodes chunked completed rows over pinned CA TLS without resolvi
     await fake.settled();
     expect(fake.requests()).toBe(1);
     expect(fake.active()).toBe(0);
+    expect(fake.queries()).toBe(1);
+    expect(fake.chunkSizes.length).toBeGreaterThan(1);
+    expect(fake.chunkSizes.every((size) => size <= 37)).toBe(true);
     expect(fake.observations).toEqual([
       {
         host: new URL(fake.input.factoryOrigin).host,
@@ -323,6 +336,11 @@ test("a completed empty list is distinct from initial unknown data", async () =>
   const fake = await server("empty");
   try {
     expect(await readRestoredProjects(fake.input, AbortSignal.timeout(7000))).toEqual([]);
+    await fake.settled();
+    expect(fake.requests()).toBe(1);
+    expect(fake.active()).toBe(0);
+    expect(fake.queries()).toBe(1);
+    expect(fake.chunkSizes.length).toBeGreaterThan(0);
   } finally {
     await fake.close();
   }
@@ -333,6 +351,10 @@ test("unknown local empty data does not resolve before real completed rows", asy
     const started = Date.now();
     expect(await readRestoredProjects(fake.input, AbortSignal.timeout(7000))).toEqual([project]);
     expect(Date.now() - started).toBeGreaterThanOrEqual(180);
+    await fake.settled();
+    expect(fake.requests()).toBe(1);
+    expect(fake.active()).toBe(0);
+    expect(fake.queries()).toBe(1);
   } finally {
     await fake.close();
   }
@@ -347,7 +369,8 @@ test.each(["ast-only", "query-error", "oversize", "redirect", "unauthorized", "u
       ).rejects.toThrow("refused");
       await fake.settled();
       expect(fake.active()).toBe(0);
-      expect(fake.requests()).toBeLessThanOrEqual(1);
+      expect(fake.requests()).toBe(1);
+      expect(fake.queries()).toBe(["redirect", "unauthorized"].includes(mode) ? 0 : 1);
     } finally {
       await fake.close();
     }
@@ -384,15 +407,36 @@ test("cancellation reaps the same owned child and leaves no open socket or globa
   const fake = await server("unknown"),
     original = globalThis.WebSocket;
   const cancel = new AbortController();
-  const timer = setTimeout(() => cancel.abort(), 250);
+  const pending = readRestoredProjects(fake.input, cancel.signal);
+  const settled = pending.then(
+    () => ({ completed: true }),
+    () => ({ completed: false }),
+  );
+  const timeout = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => timeout.reject(new Error("Owned cancellation probe did not submit its query")),
+    5000,
+  );
   try {
-    await expect(readRestoredProjects(fake.input, cancel.signal)).rejects.toThrow("refused");
+    // Cancel an observed active read, not a child that a busy host has not started.
+    await Promise.race([fake.queried, timeout.promise]);
+    clearTimeout(timer);
+    cancel.abort();
+    expect((await settled).completed).toBe(false);
+    await expect(pending).rejects.toThrow("refused");
     await fake.settled();
+    expect(fake.requests()).toBe(1);
+    expect(fake.queries()).toBe(1);
     expect(fake.active()).toBe(0);
     expect(globalThis.WebSocket).toBe(original);
   } finally {
     clearTimeout(timer);
-    await fake.close();
+    cancel.abort();
+    try {
+      await pending.catch(() => {});
+    } finally {
+      await fake.close();
+    }
   }
 });
 test("rejects AST-only and duplicate/malformed row payloads without a network fallback", () => {

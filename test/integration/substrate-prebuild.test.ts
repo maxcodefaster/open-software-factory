@@ -295,7 +295,17 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
     if (!/^linux\/(amd64|arm64)$/.test(platform))
       throw new Error("Bootstrap validation requires a supported Linux Docker host");
     const build = Bun.spawn(
-      ["go", "build", "-trimpath", "-o", connector, "./cmd/factory-runtime-connector"],
+      [
+        "mise",
+        "exec",
+        "--",
+        "go",
+        "build",
+        "-trimpath",
+        "-o",
+        connector,
+        "./cmd/factory-runtime-connector",
+      ],
       {
         cwd: "services/runtime-connector",
         env: {

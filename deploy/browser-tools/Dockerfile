@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS worker
+FROM docker.io/library/golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS worker
 WORKDIR /src/services/runtime-connector
 COPY services/runtime-connector/go.mod services/runtime-connector/go.sum ./
 RUN go mod download
@@ -7,22 +7,22 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-browser-worker
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-browser-app-proxy ./cmd/factory-browser-app-proxy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-recording-encoder ./cmd/factory-recording-encoder
 
-FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS mcp
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS mcp
 WORKDIR /opt/factory/browser-mcp
 COPY upstream.json /tmp/upstream.json
-RUN tarball="$(npm pack --silent --ignore-scripts chrome-devtools-mcp@1.10.1)" \
+RUN tarball="$(npm pack --silent --ignore-scripts chrome-devtools-mcp@1.13.0)" \
   && node -e "const fs=require('fs'),crypto=require('crypto');const expected=JSON.parse(fs.readFileSync('/tmp/upstream.json')).chromeDevToolsMcp.integrity;const actual='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64');if(actual!==expected)throw new Error('Browser MCP integrity mismatch')" "$tarball" \
   && tar -xzf "$tarball" --strip-components=1 \
   && rm "$tarball"
 
-FROM mcr.microsoft.com/playwright:v1.64.0-noble@sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f AS browsers
+FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579 AS browsers
 # Copy the unmodified, digest-pinned Chromium distribution, not the upstream
 # image's other browsers and development tools. Deleting inherited layers would
 # not reduce downloads.
 RUN chromium="$(find /ms-playwright -type f -path '/ms-playwright/chromium-*/chrome-linux*/chrome')" \
   && test -n "$chromium" && cp -a "$(dirname "$chromium")" /chromium
 
-FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 # Playwright's minimal encoder cannot decode Puppeteer's PNG frames. Use the
 # exact Debian FFmpeg package, without changing Chromium or the MCP upstream.
 RUN apt-get update && apt-get install --yes --no-install-recommends \

@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { expect, type Page } from "@playwright/test";
+import { expect, type Page, type Request } from "@playwright/test";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
@@ -71,11 +71,27 @@ test("opening a Ticket asks the server for each identical read once while it is 
   await openBoard(page);
   await page.waitForTimeout(1000);
   const calls: string[] = [];
+  const pending = new Map<Request, string>();
+  const concurrent = new Map<string, number>();
+  let maximumConcurrent = 0;
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.includes("/_server/"))
-      calls.push(`${url.pathname.split("/").at(-1)?.slice(0, 8)} ${request.postData() ?? ""}`);
+    if (!url.pathname.includes("/_server/")) return;
+    const call = `${url.pathname.split("/").at(-1)?.slice(0, 8)} ${request.postData() ?? ""}`;
+    calls.push(call);
+    pending.set(request, call);
+    const active = (concurrent.get(call) ?? 0) + 1;
+    concurrent.set(call, active);
+    maximumConcurrent = Math.max(maximumConcurrent, active);
   });
+  const completed = (request: Request) => {
+    const call = pending.get(request);
+    if (call === undefined) return;
+    pending.delete(request);
+    concurrent.set(call, (concurrent.get(call) ?? 1) - 1);
+  };
+  page.on("requestfinished", completed);
+  page.on("requestfailed", completed);
   await page.locator(".ticket-card-body").filter({ hasText: "Retain my requirements" }).click();
   await expect(page.getByRole("textbox", { name: "Ticket title" })).toBeVisible();
   await page.waitForTimeout(4000);
@@ -84,7 +100,9 @@ test("opening a Ticket asks the server for each identical read once while it is 
   const report = [...counts].sort((a, b) => b[1] - a[1]).map(([call, count]) => `${count} ${call}`);
   console.info(`Ticket open made ${calls.length} server calls\n${report.join("\n")}`);
   expect(calls.length).toBeLessThanOrEqual(12);
-  expect(Math.max(0, ...counts.values())).toBeLessThanOrEqual(2);
+  // Sequential reads after an Inbox version change are required, including
+  // updates from another Project. Only overlapping identical reads are duplicates.
+  expect(maximumConcurrent).toBeLessThanOrEqual(2);
 });
 
 test("Tab starts at Skip to board and then visits every Ticket card", async ({ page }) => {

@@ -8,40 +8,74 @@ import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { createDatabase } from "../../packages/db/src/client";
-import { test } from "../fixtures/browser-test";
-import { openProjectMenu } from "../fixtures/project-menu";
+import { observeBrowserErrors } from "../fixtures/browser-errors";
+import { test as browserTest } from "../fixtures/browser-test";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { fixtureValue } from "../fixtures/value";
 
+const skillHostSchema = z.object({
+  fixtureBase: z.url(),
+  id: z.uuid(),
+  databaseURL: z.string(),
+});
+const test = browserTest.extend<{ skillHost: z.infer<typeof skillHostSchema> }>({
+  skillHost: [
+    async ({ browser }, use) => {
+      expect(browser.isConnected()).toBe(true);
+      const host = spawn(
+        "mise",
+        ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
+        {
+          cwd: resolve(import.meta.dirname, "../.."),
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const ready = Promise.withResolvers<z.infer<typeof skillHostSchema>>();
+      const stopped = new Promise<number | null>((resolve) => {
+        host.once("exit", resolve);
+        host.once("error", () => resolve(null));
+      });
+      host.once("error", ready.reject);
+      host.once("exit", (code) =>
+        ready.reject(new Error(`Owned Skill browser host exited before readiness: ${code}`)),
+      );
+      // Drain diagnostics without publishing raw provider/authentication data.
+      host.stderr.resume();
+      const lines = createInterface({ input: host.stdout });
+      lines.on("line", (line) => {
+        if (line.startsWith('{"fixtureBase"')) {
+          try {
+            ready.resolve(skillHostSchema.parse(JSON.parse(line)));
+          } catch (cause) {
+            ready.reject(cause);
+          }
+        }
+      });
+      try {
+        const fixture = await ready.promise;
+        console.info(`Owned Skill browser host: ${fixture.id}`);
+        await use(fixture);
+      } finally {
+        // This fixture tears down independently of the test's browser contexts,
+        // including when their cleanup rejects after a test timeout.
+        if (host.exitCode === null && host.signalCode === null) host.kill("SIGTERM");
+        const code = await stopped;
+        lines.close();
+        expect(code, "Owned Skill browser host must finish its resource cleanup").toBe(0);
+      }
+    },
+    { timeout: 60_000 },
+  ],
+});
+test.use({ actionTimeout: 30_000 });
+
 test("skill gallery preserves discovery, private drafts, scoped choices, imports and reviewed sharing", async ({
   page,
   browser,
+  skillHost: fixture,
 }) => {
   test.setTimeout(240_000);
-  const host = spawn(
-    "mise",
-    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
-  let stderr = "";
-  host.stderr.on("data", (chunk) => {
-    stderr += String(chunk);
-  });
-  const fixture = await new Promise<z.infer<typeof ready>>((resolve, reject) => {
-    const lines = createInterface({ input: host.stdout });
-    lines.on("line", (line) => {
-      if (line.startsWith('{"fixtureBase"')) {
-        try {
-          resolve(ready.parse(JSON.parse(line)));
-        } catch (error) {
-          reject(error);
-        }
-      }
-    });
-    host.once("exit", () => reject(new Error(`Owned browser host exited: ${stderr.slice(-2000)}`)));
-  });
   const oldURL = process.env["DATABASE_URL"];
   process.env["DATABASE_URL"] = fixture.databaseURL;
   const database = createDatabase(1);
@@ -56,11 +90,9 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
   const projectName = `Skills proof ${projectId.slice(0, 8)}`;
   const evidence = ".factory/test-results/skill-gallery";
   const directory = resolve(evidence, `import-${projectId}`);
-  const errors: string[] = [];
+  const errors = [page, author, manager].map(observeBrowserErrors);
   const choiceRequests: unknown[] = [];
   let rejectChoice = false;
-  for (const current of [page, author, manager])
-    current.on("pageerror", (error) => errors.push(error.message));
   await mockFactoryFunctions(author, {
     skills: {
       async choose(_actor, input) {
@@ -90,8 +122,10 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await expect(current.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   }
   async function selectProject(current: Page) {
-    await openProjectMenu(current);
-    await current.locator(".project-choice").filter({ hasText: projectName }).click();
+    await current.goto(new URL(`/projects/${projectId}`, fixture.fixtureBase).href);
+    await expect(
+      current.getByRole("button", { name: `${projectName}, open project menu`, exact: true }),
+    ).toBeVisible();
   }
   async function open(current: Page) {
     await current.getByRole("button", { name: "Settings", exact: true }).click();
@@ -509,6 +543,9 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await manager.screenshot({ path: `${evidence}/management-desktop.png`, fullPage: true });
 
     await author.reload();
+    // Libraries use /settings without a Project in the URL. After reload,
+    // explicitly restore this fixture's Project before inspecting its shared skill.
+    await selectProject(author);
     await open(author);
     await filtersClosed(author);
     await setFilter(author, "Ownership", "project");
@@ -714,18 +751,21 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     await expect(library.getByRole("heading", { name: "No matching skills" })).toBeVisible();
     await library.getByRole("button", { name: "Clear filters", exact: true }).click();
     await noOverflow(author);
-    expect(errors).toEqual([]);
+    expect(errors.flat()).toEqual([]);
     const [turns] = await database.client<
       Array<{ count: number }>
     >`SELECT count(*)::int AS count FROM factory.agent_turn WHERE project_id = ${projectId}`;
     expect(turns?.count).toBe(0);
   } finally {
-    await authorContext.close();
-    await managerContext.close();
-    await database.client.end();
-    await rm(directory, { recursive: true, force: true });
-    const stopped = new Promise<void>((resolve) => host.once("exit", () => resolve()));
-    host.kill("SIGTERM");
-    await stopped;
+    const cleanup = await Promise.allSettled([
+      authorContext.close(),
+      managerContext.close(),
+      database.client.end(),
+      rm(directory, { recursive: true, force: true }),
+    ]);
+    const failures = cleanup
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    expect.soft(failures, "Every owned Skill test cleanup action must complete").toEqual([]);
   }
 });

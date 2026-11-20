@@ -861,10 +861,10 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
       );
       expect(suspends).toBe(0);
       expect((await source.lease(f.workspaceID))?.owner).toBe("actor");
-      expect(
-        await f.database
-          .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`,
-      ).toMatchObject([{ checkpoint: null }]);
+      expect([
+        ...(await f.database
+          .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`),
+      ]).toMatchObject([{ checkpoint: null }]);
     } finally {
       await source.close();
       await f.dispose();

@@ -58,7 +58,7 @@ export function createForgeAccessReconciliation(options: {
         key = `forge-branch:${change.projectID}:${change.branch}`;
         await sql`SELECT pg_advisory_lock(hashtextextended(${key},0))`;
         await sql`INSERT INTO factory.forge_branch_intent(project_id,branch,writers,merger)
-          VALUES(${change.projectID},${change.branch},${sql.array([...writers])},${owner})
+          VALUES(${change.projectID},${change.branch},${[...writers]}::text[],${owner})
           ON CONFLICT(project_id,branch) DO UPDATE SET writers=EXCLUDED.writers,confirmed=false,updated_at=now()`;
         await forge.protectBranch({
           owner,

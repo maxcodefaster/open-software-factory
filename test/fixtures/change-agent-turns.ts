@@ -9,6 +9,7 @@ import type { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
+import upstream from "../../upstream.json";
 import { factoryProcess } from "./factory-process";
 import { fixtureValue } from "./value";
 
@@ -218,7 +219,7 @@ export async function fixture(
         }),
         { headers: { "content-type": "text/event-stream" } },
       );
-    if (path === "/api/info") return Response.json({ data: { version: "2.0.27" } });
+    if (path === "/api/info") return Response.json({ version: upstream.openCode.version });
     if (path === "/api/skill")
       return Response.json({
         data: installedSkills.map((id) => ({

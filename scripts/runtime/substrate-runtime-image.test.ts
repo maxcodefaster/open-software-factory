@@ -12,7 +12,7 @@ test("Factory native image keeps exact Factory tools and the official matching c
   for (const version of [
     "29.9.0",
     "5.7.0-dev.1e1c577",
-    "v24.21.0",
+    "v24.22.3",
     "0.89.0",
     `v${pins.containerd.version}`,
   ])

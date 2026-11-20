@@ -1127,7 +1127,7 @@ test("the same authenticated Project command replays before and after completion
     expect((await owned.entries()).filter((entry) => entry.kind === "user-message")).toHaveLength(
       1,
     );
-    expect(await owned.turns()).toMatchObject([
+    expect([...(await owned.turns())]).toMatchObject([
       {
         commandId: commandID,
         state: "completed",
@@ -1211,7 +1211,7 @@ test("an unavailable model retains admitted input but never dispatches", async (
     expect((await owned.entries()).filter((entry) => entry.kind === "user-message")).toHaveLength(
       1,
     );
-    expect(await owned.turns()).toMatchObject([{ commandId: commandID, state: "failed" }]);
+    expect([...(await owned.turns())]).toMatchObject([{ commandId: commandID, state: "failed" }]);
     await owned
       .controller()
       .message(owned.projectID, undefined, "Saved intent", owned.userID, commandID);
@@ -1231,7 +1231,9 @@ test("an unknown provider outcome requires a new explicit command rather than re
         .controller()
         .message(owned.projectID, undefined, "One request", owned.userID, commandID),
     ).rejects.toThrow();
-    expect(await owned.turns()).toMatchObject([{ commandId: commandID, state: "uncertain" }]);
+    expect([...(await owned.turns())]).toMatchObject([
+      { commandId: commandID, state: "uncertain" },
+    ]);
     await owned
       .controller()
       .message(owned.projectID, undefined, "One request", owned.userID, commandID);
@@ -1257,7 +1259,7 @@ test("a known local structured-output rejection is failed, not an unknown provid
         .controller()
         .message(owned.projectID, undefined, "Retain this input", owned.userID, commandID),
     ).rejects.toMatchObject({ name: "ProjectAgentOutputError" });
-    expect(await owned.turns()).toMatchObject([{ commandId: commandID, state: "failed" }]);
+    expect([...(await owned.turns())]).toMatchObject([{ commandId: commandID, state: "failed" }]);
     expect((await owned.entries()).filter((entry) => entry.kind === "user-message")).toHaveLength(
       1,
     );
@@ -1305,7 +1307,7 @@ test.each(["input", "requests"] as const)(
       );
       expect(failure.message).not.toContain("Private provider detail");
       expect(failure.message).not.toContain("unconfirmed");
-      expect(await owned.turns()).toMatchObject([{ commandId: commandID, state: "failed" }]);
+      expect([...(await owned.turns())]).toMatchObject([{ commandId: commandID, state: "failed" }]);
       const current = await controller.get(owned.projectID, undefined, owned.userID);
       expect(current?.turn?.summary).toBe(failure.message);
       expect((await owned.entries()).filter((entry) => entry.kind === "user-message")).toHaveLength(
@@ -1419,7 +1421,7 @@ test("returning to Plan does not restore an earlier turn's authority", async () 
     owned.release();
     await expect(pending).rejects.toMatchObject({ code: "conflict" });
     expect((await owned.entries()).filter((entry) => entry.kind === "question")).toHaveLength(0);
-    expect(await owned.turns()).toMatchObject([{ state: "failed" }]);
+    expect([...(await owned.turns())]).toMatchObject([{ state: "failed" }]);
   } finally {
     owned.release();
     if (pending) await Promise.allSettled([pending]);
@@ -1450,7 +1452,7 @@ test("a long Project request renews ownership without holding a database connect
     expect(after[0]?.expires).toBeGreaterThan(before[0].expires);
     owned.release();
     await pending;
-    expect(await owned.turns()).toMatchObject([{ state: "completed" }]);
+    expect([...(await owned.turns())]).toMatchObject([{ state: "completed" }]);
   } finally {
     owned.release();
     if (pending) await Promise.allSettled([pending]);

@@ -60,7 +60,7 @@ test("the authored Starter uses the selected exact toolchain and database images
   expect(manifest.devDependencies["@solidjs/vite-plugin"]).toMatch(/^3\.\d+\.\d+$/);
   for (const name of ["@tanstack/solid-router", "@tanstack/solid-start"])
     expect(manifest.dependencies[name]).toBe(factory.dependencies[name]);
-  for (const name of ["@solidjs/compiler", "@solidjs/signals", "@solidjs/babel-plugin"]) {
+  for (const name of ["@solidjs/compiler", "@solidjs/signals"]) {
     expect(manifest.overrides[name]).toBe(factory.overrides[name]);
     expect(manifest.overrides[name]).toMatch(/^2\.\d+\.\d+$/);
   }

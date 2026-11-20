@@ -7,16 +7,16 @@
     "src"
   ],
   "dependencies": {
-    "@shikijs/langs": "4.5.0",
-    "@theia/core": "1.76.0",
-    "@theia/editor": "1.76.0",
-    "@theia/filesystem": "1.76.0",
-    "@theia/markers": "1.76.0",
-    "@theia/monaco": "1.76.0",
+    "@shikijs/langs": "4.6.0",
+    "@theia/core": "1.77.0",
+    "@theia/editor": "1.77.0",
+    "@theia/filesystem": "1.77.0",
+    "@theia/markers": "1.77.0",
+    "@theia/monaco": "1.77.0",
     "@theia/monaco-editor-core": "1.108.201",
-    "@theia/navigator": "1.76.0",
-    "@theia/search-in-workspace": "1.76.0",
-    "@theia/workspace": "1.76.0",
+    "@theia/navigator": "1.77.0",
+    "@theia/search-in-workspace": "1.77.0",
+    "@theia/workspace": "1.77.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "typescript": "6.0.3",
@@ -24,7 +24,7 @@
     "y-monaco": "0.1.6",
     "y-protocols": "1.0.7",
     "yjs": "13.6.33",
-    "vscode-jsonrpc": "8.2.0"
+    "vscode-jsonrpc": "8.2.1"
   },
   "scripts": {
     "build": "tsc && cp src/browser/factory-ide.css lib/browser/factory-ide.css"

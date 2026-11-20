@@ -1,9 +1,37 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { signIn } from "../support/factory-fixture";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+
+let database: ReturnType<typeof createDatabase>;
+let projectID = "";
+test.beforeEach(async () => {
+  database = createDatabase(1);
+  projectID = crypto.randomUUID();
+  const [administrator] = await database.client<{ id: string }[]>`
+    SELECT user_id AS id FROM factory.administrator LIMIT 1`;
+  if (!administrator) throw new Error("Owned browser administrator is missing");
+  await database.client`INSERT INTO factory.project
+    (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    VALUES(${projectID},${`document-loading-${projectID}`},'Document loading',
+      'https://example.invalid/document-loading.git','main','.devcontainer/devcontainer.json',
+      ${administrator.id})`;
+});
+test.afterEach(async ({ context }) => {
+  try {
+    await context.close();
+  } finally {
+    try {
+      if (projectID) await deleteFactoryProject(projectID, database);
+    } finally {
+      await database?.client.end();
+      projectID = "";
+    }
+  }
+});
 
 test("the Board defers the editor, which retains editing and drafts after its lazy load", async ({
   page,
@@ -36,6 +64,11 @@ test("the Board defers the editor, which retains editing and drafts after its la
   });
   await page.setViewportSize({ width: 1440, height: 960 });
   await signIn(page);
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  await page.goto(`/projects/${projectID}`);
+  await expect(
+    page.getByRole("button", { name: "Document loading, open project menu", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("region", { name: "Ticket board", exact: true })).toBeVisible();
   expect(assets.some((asset) => asset.path.includes("/document-engine-"))).toBe(false);
   const initial = [...assets];

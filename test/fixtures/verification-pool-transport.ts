@@ -23,7 +23,7 @@ export async function verificationPoolTransport(id: string, directory: string, e
     "--pids-limit=128",
     "--mount",
     `type=bind,src=${directory},dst=/owned,readonly`,
-    "docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20",
+    "docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54",
     "node",
     "-e",
     program,

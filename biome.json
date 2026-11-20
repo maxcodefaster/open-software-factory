@@ -1,15 +1,17 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
   "files": {
     "includes": [
       "**",
       "!**/dist",
       "!**/coverage",
       "!**/node_modules",
-      "!**/.factory",
+      "!.factory",
       "!templates/starter-app/.output",
       "!templates/starter-app/.tanstack",
       "!templates/starter-app/src/routeTree.gen.ts",
+      "!deploy/helm/factory/templates",
+      "!templates/release/chart/templates",
       "!apps/factory/src/routeTree.gen.ts",
       "!apps/factory/.tanstack",
       "!**/.impeccable",
@@ -47,6 +49,8 @@
       "trailingCommas": "all"
     }
   },
+  "markdown": { "formatter": { "enabled": false } },
+  "yaml": { "formatter": { "enabled": false } },
   "overrides": [
     {
       "includes": ["test/browser/**/*.spec.ts"],

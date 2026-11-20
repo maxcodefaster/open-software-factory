@@ -3,6 +3,58 @@ import { createForgeAccessReconciliation } from "../../apps/factory/src/access/f
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
+test("Change branch reconciliation persists exact text writers before confirming Forge protection", async () => {
+  const owned = await fixture();
+  const owner = "factory";
+  let expectedWriters: readonly string[] = [];
+  let protections = 0;
+  try {
+    const forge = createForgeAccessReconciliation({
+      database: owned.database,
+      owner,
+      origin: "https://example.invalid",
+      publicOrigin: "https://example.invalid",
+      forge: {
+        readAccount: async () => undefined,
+        ensureAccount: async () => 1,
+        removeAlternativeGrants: async () => {},
+        repositoryGrant: async () => {},
+        protectBranch: async (input) => {
+          expect(input.writers).toEqual(expectedWriters);
+          const [intent] = await owned.database.client<
+            { writers: string[]; merger: string; confirmed: boolean }[]
+          >`SELECT writers,merger,confirmed FROM factory.forge_branch_intent
+            WHERE project_id=${owned.projectID} AND branch=${input.branch}`;
+          expect(intent).toEqual({
+            writers: [...expectedWriters],
+            merger: owner,
+            confirmed: false,
+          });
+          protections++;
+        },
+      },
+    });
+    for (const writers of [
+      [],
+      ["developer-two", "developer-one"],
+      ["writer'quoted", "writer,comma", 'writer"quoted', "writer\\slash", "writer'quoted"],
+    ]) {
+      expectedWriters = Object.freeze([...writers]);
+      await forge.protectChange(owned.changeID, expectedWriters);
+      const [intent] = await owned.database.client<
+        { writers: string[]; merger: string; confirmed: boolean }[]
+      >`SELECT writers,merger,confirmed FROM factory.forge_branch_intent
+        WHERE project_id=${owned.projectID} AND branch=(
+          SELECT branch_name FROM factory.change WHERE id=${owned.changeID}
+        )`;
+      expect(intent).toEqual({ writers: [...expectedWriters], merger: owner, confirmed: true });
+    }
+    expect(protections).toBe(3);
+  } finally {
+    await owned.dispose();
+  }
+}, 30_000);
+
 test("account reconciliation preserves initial import setup's workflow ownership", async () => {
   const host = await factoryProcess();
   const database = host.connect(1);
