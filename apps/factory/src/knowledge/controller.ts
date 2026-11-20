@@ -1,5 +1,29 @@
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  sql as expression,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  ne,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  authUser,
+  knowledgeGeneration,
+  knowledgePage,
+  knowledgeRevision,
+  projectMembership,
+  project as projectTable,
+  usageOperation,
+} from "../../../../packages/db/src/schema";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
   validateWikiGeneration,
@@ -32,7 +56,7 @@ import {
   prepareWikiPublication,
   publishWikiPackage,
   WikiPublicationConflict,
-  type WikiPublicationSnapshot,
+  wikiPublicationSnapshotsIn,
 } from "./publication";
 import { createRepositoryKnowledgeCache } from "./repository-cache";
 import { searchSnippet } from "./search-snippet";
@@ -112,17 +136,15 @@ export function createKnowledgeController(
   const documentSearchCache = createDocumentSearchCache();
 
   async function project(projectID: string) {
-    const rows = await database.client<
-      Array<{
-        id: string;
-        name: string;
-        repositoryURL: string;
-        defaultBranch: string;
-      }>
-    >`
-      SELECT id, name, repository_url AS "repositoryURL", default_branch AS "defaultBranch"
-      FROM factory.project WHERE id = ${projectID}
-    `;
+    const rows = await database.db
+      .select({
+        id: projectTable.id,
+        name: projectTable.name,
+        repositoryURL: projectTable.repositoryUrl,
+        defaultBranch: projectTable.defaultBranch,
+      })
+      .from(projectTable)
+      .where(eq(projectTable.id, projectID));
     const value = rows[0];
     if (!value) throw new Error("Project not found");
     const repository = factoryForgeSource(
@@ -168,16 +190,6 @@ export function createKnowledgeController(
     return { entry, body };
   }
 
-  async function snapshots(projectID: string) {
-    return Array.from(
-      await database.client<WikiPublicationSnapshot[]>`
-      SELECT id,slug,title,current_body AS body,generated_body AS "generatedBody",version::integer AS version,
-        current_revision_id AS "revisionId",parent_id AS "parentId",state,citations
-      FROM factory.knowledge_page WHERE project_id=${projectID} ORDER BY sort_order,id
-    `,
-    );
-  }
-
   async function sourceBundle(projectID: string, commitSha: string, pages: WikiPageSnapshot[]) {
     const current = await inventory(projectID, commitSha);
     if (current.files.length > 8_000 || JSON.stringify(pages).length > 240_000)
@@ -195,10 +207,17 @@ export function createKnowledgeController(
           file.path,
         ),
     );
-    const [previous] = await database.client<Array<{ commit: string }>>`
-      SELECT source_commit_sha AS commit FROM factory.knowledge_generation
-      WHERE project_id=${projectID} AND state='succeeded' ORDER BY completed_at DESC LIMIT 1
-    `;
+    const [previous] = await database.db
+      .select({ commit: knowledgeGeneration.sourceCommitSha })
+      .from(knowledgeGeneration)
+      .where(
+        and(
+          eq(knowledgeGeneration.projectId, projectID),
+          eq(knowledgeGeneration.state, "succeeded"),
+        ),
+      )
+      .orderBy(desc(knowledgeGeneration.completedAt))
+      .limit(1);
     const previousFiles = previous ? (await inventory(projectID, previous.commit)).files : [];
     const old = new Map(previousFiles.map((file) => [file.path, file.sha]));
     const next = new Map(current.files.map((file) => [file.path, file.sha]));
@@ -281,26 +300,43 @@ export function createKnowledgeController(
     projectID: string,
     commitSha: string,
   ) {
-    const [progress] = await database.client<
-      Array<{
-        pageCount: number;
-        previousState: string | null;
-        previousCount: number | null;
-        previousCommit: string | null;
-      }>
-    >`
-      SELECT COALESCE(current.page_count,0)::int AS "pageCount",
-        previous.state::text AS "previousState",previous.page_count::int AS "previousCount",
-        previous.source_commit_sha AS "previousCommit"
-      FROM factory.knowledge_generation current
-      LEFT JOIN LATERAL (
-        SELECT state,page_count,source_commit_sha FROM factory.knowledge_generation candidate
-        WHERE candidate.project_id=current.project_id AND candidate.id<>current.id
-          AND candidate.created_at<=current.created_at
-        ORDER BY candidate.created_at DESC,candidate.id DESC LIMIT 1
-      ) previous ON true
-      WHERE current.id=${generationID} AND current.attempt_id=${attemptID} AND current.state='running'
-        AND current.project_id=${projectID} AND current.source_commit_sha=${commitSha}`;
+    const db = database.db;
+    const candidate = alias(knowledgeGeneration, "candidate");
+    const previous = db
+      .select({
+        state: candidate.state,
+        pageCount: candidate.pageCount,
+        sourceCommitSha: candidate.sourceCommitSha,
+      })
+      .from(candidate)
+      .where(
+        and(
+          eq(candidate.projectId, knowledgeGeneration.projectId),
+          ne(candidate.id, knowledgeGeneration.id),
+          lte(candidate.createdAt, knowledgeGeneration.createdAt),
+        ),
+      )
+      .orderBy(desc(candidate.createdAt), desc(candidate.id))
+      .limit(1)
+      .as("previous");
+    const [progress] = await db
+      .select({
+        pageCount: expression<number>`coalesce(${knowledgeGeneration.pageCount},0)`,
+        previousState: previous.state,
+        previousCount: previous.pageCount,
+        previousCommit: previous.sourceCommitSha,
+      })
+      .from(knowledgeGeneration)
+      .leftJoinLateral(previous, expression`true`)
+      .where(
+        and(
+          eq(knowledgeGeneration.id, generationID),
+          eq(knowledgeGeneration.attemptId, attemptID),
+          eq(knowledgeGeneration.state, "running"),
+          eq(knowledgeGeneration.projectId, projectID),
+          eq(knowledgeGeneration.sourceCommitSha, commitSha),
+        ),
+      );
     if (!progress) throw new Error("Wiki execution no longer owns analysis");
     if (
       !progress.pageCount &&
@@ -311,14 +347,30 @@ export function createKnowledgeController(
       )
     )
       return [];
-    const checked = await database.client<Array<{ id: string }>>`
-      SELECT page.id FROM factory.knowledge_page page
-      WHERE page.project_id=${projectID} AND page.state='active' AND page.source_commit_sha=${commitSha}
-        AND EXISTS (
-          SELECT 1 FROM factory.knowledge_revision revision
-          WHERE revision.page_id=page.id AND revision.kind='generated'
-            AND revision.generation_id IS NOT NULL AND revision.source_commit_sha=${commitSha}
-        ) ORDER BY page.id`;
+    const checked = await db
+      .select({ id: knowledgePage.id })
+      .from(knowledgePage)
+      .where(
+        and(
+          eq(knowledgePage.projectId, projectID),
+          eq(knowledgePage.state, "active"),
+          eq(knowledgePage.sourceCommitSha, commitSha),
+          exists(
+            db
+              .select({ id: knowledgeRevision.id })
+              .from(knowledgeRevision)
+              .where(
+                and(
+                  eq(knowledgeRevision.pageId, knowledgePage.id),
+                  eq(knowledgeRevision.kind, "generated"),
+                  isNotNull(knowledgeRevision.generationId),
+                  eq(knowledgeRevision.sourceCommitSha, commitSha),
+                ),
+              ),
+          ),
+        ),
+      )
+      .orderBy(asc(knowledgePage.id));
     return checked.map((page) => page.id);
   }
 
@@ -328,15 +380,27 @@ export function createKnowledgeController(
     const attemptId = crypto.randomUUID();
     let failureMessage = "Wiki model is unavailable. Check Project settings and retry.";
     try {
-      const generations = await database.client<
-        Array<{ projectID: string; commitSha: string; userID: string; modelId: string | null }>
-      >`
-        UPDATE factory.knowledge_generation SET state = 'running', updated_at = now(), failure = NULL, attempt_id=${attemptId},
-          progress='{"phase":"planning","topicsTotal":0,"topicsDone":0,"currentTopic":null}'::jsonb
-        WHERE id = ${generationID} AND state IN ('pending', 'running')
-        RETURNING project_id AS "projectID", source_commit_sha AS "commitSha",
-          created_by AS "userID", model_id AS "modelId"
-      `;
+      const generations = await database.db
+        .update(knowledgeGeneration)
+        .set({
+          state: "running",
+          updatedAt: expression`now()`,
+          failure: null,
+          attemptId,
+          progress: { phase: "planning", topicsTotal: 0, topicsDone: 0, currentTopic: null },
+        })
+        .where(
+          and(
+            eq(knowledgeGeneration.id, generationID),
+            inArray(knowledgeGeneration.state, ["pending", "running"]),
+          ),
+        )
+        .returning({
+          projectID: knowledgeGeneration.projectId,
+          commitSha: knowledgeGeneration.sourceCommitSha,
+          userID: knowledgeGeneration.createdBy,
+          modelId: knowledgeGeneration.modelId,
+        });
       const generation = generations[0];
       if (!generation) return;
       const modelConnections = createModelConnections(
@@ -353,16 +417,38 @@ export function createKnowledgeController(
       if (!settings.projectEffective.planning.models.includes(modelId))
         throw new Error("Wiki model is no longer approved");
       const reference = await database.client.begin(async (sql) => {
-        const [current] = await sql<Array<{ connectionID: string | null; version: number | null }>>`
-          SELECT model_connection_id AS "connectionID", model_connection_version::float8 AS version
-          FROM factory.knowledge_generation WHERE id=${generationID} AND attempt_id=${attemptId} FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [current] = await db
+          .select({
+            connectionID: knowledgeGeneration.modelConnectionId,
+            version: knowledgeGeneration.modelConnectionVersion,
+          })
+          .from(knowledgeGeneration)
+          .where(
+            and(
+              eq(knowledgeGeneration.id, generationID),
+              eq(knowledgeGeneration.attemptId, attemptId),
+            ),
+          )
+          .for("update");
         if (!current) throw new Error("Wiki execution changed");
         const reference =
           current.connectionID && current.version
             ? { connectionID: current.connectionID, version: current.version }
             : await modelConnections.reference("planning", sql);
-        await sql`UPDATE factory.knowledge_generation SET model_id=${modelId}, model_connection_id=${reference?.connectionID ?? null},
-          model_connection_version=${reference?.version ?? null} WHERE id=${generationID} AND attempt_id=${attemptId}`;
+        await db
+          .update(knowledgeGeneration)
+          .set({
+            modelId,
+            modelConnectionId: reference?.connectionID ?? null,
+            modelConnectionVersion: reference?.version ?? null,
+          })
+          .where(
+            and(
+              eq(knowledgeGeneration.id, generationID),
+              eq(knowledgeGeneration.attemptId, attemptId),
+            ),
+          );
         return reference;
       });
       const connection = reference
@@ -373,8 +459,16 @@ export function createKnowledgeController(
         signal.throwIfAborted();
         await database.client.begin(async (sql) => {
           await projectAuthorityIn(sql, generation.userID, generation.projectID);
-          const [current] = await sql`SELECT id FROM factory.knowledge_generation
-            WHERE id=${generationID} AND attempt_id=${attemptId} AND state='running'`;
+          const [current] = await drizzleTransaction(sql)
+            .select({ id: knowledgeGeneration.id })
+            .from(knowledgeGeneration)
+            .where(
+              and(
+                eq(knowledgeGeneration.id, generationID),
+                eq(knowledgeGeneration.attemptId, attemptId),
+                eq(knowledgeGeneration.state, "running"),
+              ),
+            );
           if (!current) throw new CommandError("conflict", "Wiki execution authority changed.");
         });
       };
@@ -382,7 +476,7 @@ export function createKnowledgeController(
         signal.throwIfAborted();
         failureMessage =
           "Wiki source could not be read at this revision. Saved pages are retained; retry the update.";
-        const pages = await snapshots(generation.projectID);
+        const pages = await wikiPublicationSnapshotsIn(database.db, generation.projectID);
         // Generated baselines belong to publication, not model context or its input-size budget.
         const pageContext = () => pages.map(({ generatedBody: _, ...page }) => page);
         const completedPageIDs = await completedPublications(
@@ -415,9 +509,16 @@ export function createKnowledgeController(
             progress: async (progress) => {
               // Progress is advisory; a lost write must never fail checked generation.
               try {
-                await database.client`UPDATE factory.knowledge_generation
-                  SET progress=${JSON.stringify(progress)}::jsonb,updated_at=now()
-                  WHERE id=${generationID} AND attempt_id=${attemptId} AND state='running'`;
+                await database.db
+                  .update(knowledgeGeneration)
+                  .set({ progress, updatedAt: expression`now()` })
+                  .where(
+                    and(
+                      eq(knowledgeGeneration.id, generationID),
+                      eq(knowledgeGeneration.attemptId, attemptId),
+                      eq(knowledgeGeneration.state, "running"),
+                    ),
+                  );
               } catch {
                 console.error("[factory] Wiki progress could not be recorded");
               }
@@ -484,17 +585,29 @@ export function createKnowledgeController(
       throw new Error(failureMessage);
     } catch (cause) {
       failureMessage = wikiGenerationFailureMessage(cause, failureMessage);
-      await database.client`
-        UPDATE factory.knowledge_generation SET state = 'failed',
-          failure = ${failureMessage},
-          completed_at = now(), updated_at = now()
-        WHERE id = ${generationID} AND attempt_id=${attemptId} AND state IN ('pending', 'running')
-      `;
+      await database.db
+        .update(knowledgeGeneration)
+        .set({
+          state: "failed",
+          failure: failureMessage,
+          completedAt: expression`now()`,
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(knowledgeGeneration.id, generationID),
+            eq(knowledgeGeneration.attemptId, attemptId),
+            inArray(knowledgeGeneration.state, ["pending", "running"]),
+          ),
+        );
     } finally {
       running.delete(generationID);
-      const pendingRows = await database.client<
-        Array<{ id: string }>
-      >`SELECT id FROM factory.knowledge_generation WHERE state='pending' ORDER BY created_at,id LIMIT 2`;
+      const pendingRows = await database.db
+        .select({ id: knowledgeGeneration.id })
+        .from(knowledgeGeneration)
+        .where(eq(knowledgeGeneration.state, "pending"))
+        .orderBy(asc(knowledgeGeneration.createdAt), asc(knowledgeGeneration.id))
+        .limit(2);
       for (const pending of pendingRows) void runGeneration(pending.id);
     }
   }
@@ -547,16 +660,32 @@ export function createKnowledgeController(
       while (executions.size) await Promise.allSettled([...executions]);
     },
     async recover() {
-      const abandoned = await database.client<
-        Array<{ id: string }>
-      >`SELECT operation.id FROM factory.usage_operation operation
-        JOIN factory.knowledge_generation generation ON split_part(operation.id,':',2)=generation.id::text
-        WHERE operation.purpose='wiki' AND operation.settled_at IS NULL AND generation.state='running'`;
+      const abandoned = await database.db
+        .select({ id: usageOperation.id })
+        .from(usageOperation)
+        .innerJoin(
+          knowledgeGeneration,
+          eq(
+            expression<string>`split_part(${usageOperation.id},':',2)`,
+            expression`${knowledgeGeneration.id}::text`,
+          ),
+        )
+        .where(
+          and(
+            eq(usageOperation.purpose, "wiki"),
+            isNull(usageOperation.settledAt),
+            eq(knowledgeGeneration.state, "running"),
+          ),
+        );
       for (const operation of abandoned) await createUsageJournal(database).abandon(operation.id);
-      await database.client`UPDATE factory.knowledge_generation SET state='pending',attempt_id=NULL WHERE state='running'`;
-      const generations = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.knowledge_generation WHERE state IN ('pending', 'running')
-      `;
+      await database.db
+        .update(knowledgeGeneration)
+        .set({ state: "pending", attemptId: null })
+        .where(eq(knowledgeGeneration.state, "running"));
+      const generations = await database.db
+        .select({ id: knowledgeGeneration.id })
+        .from(knowledgeGeneration)
+        .where(inArray(knowledgeGeneration.state, ["pending", "running"]));
       for (const generation of generations) void runGeneration(generation.id);
     },
     async generate(projectID: string, userID: string, automatic = false) {
@@ -567,37 +696,84 @@ export function createKnowledgeController(
       const current = await inventory(projectID);
       const id = await database.client.begin(async (sql) => {
         await projectAuthorityIn(sql, userID, projectID);
-        await sql`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE`;
-        const [existing] = await sql<
-          Array<{ id: string }>
-        >`SELECT id FROM factory.knowledge_generation WHERE project_id=${projectID} AND state IN ('pending','running')`;
+        const db = drizzleTransaction(sql);
+        await db
+          .select({ id: projectTable.id })
+          .from(projectTable)
+          .where(eq(projectTable.id, projectID))
+          .for("update");
+        const [existing] = await db
+          .select({ id: knowledgeGeneration.id })
+          .from(knowledgeGeneration)
+          .where(
+            and(
+              eq(knowledgeGeneration.projectId, projectID),
+              inArray(knowledgeGeneration.state, ["pending", "running"]),
+            ),
+          );
         if (existing) return undefined;
         if (automatic) {
-          const [handled] = await sql<
-            Array<{ id: string }>
-          >`SELECT id FROM factory.knowledge_generation WHERE project_id=${projectID} AND source_commit_sha=${current.commitSha} LIMIT 1`;
+          const [handled] = await db
+            .select({ id: knowledgeGeneration.id })
+            .from(knowledgeGeneration)
+            .where(
+              and(
+                eq(knowledgeGeneration.projectId, projectID),
+                eq(knowledgeGeneration.sourceCommitSha, current.commitSha),
+              ),
+            )
+            .limit(1);
           // Reconciliation observes an attempted source revision. It must not
           // keep commissioning paid generations after a definite failure.
           // A new source commit or an explicit human Retry can start new work.
           if (handled) return undefined;
         }
         const id = crypto.randomUUID();
-        await sql`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,model_id) VALUES(${id},${projectID},${current.commitSha},${userID},${settings.projectEffective.planning.modelId})`;
+        await db.insert(knowledgeGeneration).values({
+          id,
+          projectId: projectID,
+          sourceCommitSha: current.commitSha,
+          createdBy: userID,
+          modelId: settings.projectEffective.planning.modelId,
+        });
         return id;
       });
       if (id) void runGeneration(id);
       return this.generation(projectID);
     },
     async reconcile(projectID?: string) {
-      const projects = await database.client<Array<{ id: string; userId: string }>>`
-        SELECT project.id, COALESCE(
-          (SELECT membership.user_id FROM factory.project_membership membership WHERE membership.project_id=project.id ORDER BY membership.user_id LIMIT 1),
-          (SELECT user_id FROM factory.administrator ORDER BY user_id LIMIT 1)
-        ) AS "userId" FROM factory.project project
-        WHERE (${projectID ?? null}::uuid IS NULL OR project.id=${projectID ?? null}::uuid)
-          AND EXISTS(SELECT 1 FROM factory.knowledge_generation WHERE project_id=project.id)
-        ORDER BY project.id
-      `;
+      const db = database.db;
+      const member = db
+        .select({ userId: projectMembership.userId })
+        .from(projectMembership)
+        .where(eq(projectMembership.projectId, projectTable.id))
+        .orderBy(asc(projectMembership.userId))
+        .limit(1);
+      const admin = db
+        .select({ userId: administrator.userId })
+        .from(administrator)
+        .orderBy(asc(administrator.userId))
+        .limit(1);
+      const projects = await db
+        .select({
+          id: projectTable.id,
+          userId: expression<string | null>`coalesce((${member}),(${admin}))`,
+        })
+        .from(projectTable)
+        .where(
+          and(
+            projectID === undefined || projectID === null
+              ? undefined
+              : eq(projectTable.id, projectID),
+            exists(
+              db
+                .select({ id: knowledgeGeneration.id })
+                .from(knowledgeGeneration)
+                .where(eq(knowledgeGeneration.projectId, projectTable.id)),
+            ),
+          ),
+        )
+        .orderBy(asc(projectTable.id));
       for (const project of projects) {
         if (!project.userId) continue;
         try {
@@ -608,13 +784,21 @@ export function createKnowledgeController(
       }
     },
     async generation(projectID: string) {
-      const rows = await database.client<Array<Record<string, unknown>>>`
-        SELECT id, state, page_count AS "pageCount",
-          conflict_count AS "conflictCount", failure, created_at AS "createdAt",
-          completed_at AS "completedAt", progress
-        FROM factory.knowledge_generation WHERE project_id = ${projectID}
-        ORDER BY created_at DESC LIMIT 1
-      `;
+      const rows = await database.db
+        .select({
+          id: knowledgeGeneration.id,
+          state: knowledgeGeneration.state,
+          pageCount: knowledgeGeneration.pageCount,
+          conflictCount: knowledgeGeneration.conflictCount,
+          failure: knowledgeGeneration.failure,
+          createdAt: expression<string>`${knowledgeGeneration.createdAt}::text`,
+          completedAt: expression<string | null>`${knowledgeGeneration.completedAt}::text`,
+          progress: knowledgeGeneration.progress,
+        })
+        .from(knowledgeGeneration)
+        .where(eq(knowledgeGeneration.projectId, projectID))
+        .orderBy(desc(knowledgeGeneration.createdAt))
+        .limit(1);
       return rows[0] ?? null;
     },
     async edit(pageID: string, input: KnowledgeEdit, userID: string, restoring = false) {
@@ -622,33 +806,69 @@ export function createKnowledgeController(
     },
     async archive(pageID: string, expectedVersion: number, userID: string) {
       return database.client.begin(async (transaction) => {
-        const [scope] = await transaction<
-          Array<{ projectId: string }>
-        >`SELECT project_id AS "projectId" FROM factory.knowledge_page WHERE id=${pageID} AND state='active'`;
+        const db = drizzleTransaction(transaction);
+        const [scope] = await db
+          .select({ projectId: knowledgePage.projectId })
+          .from(knowledgePage)
+          .where(and(eq(knowledgePage.id, pageID), eq(knowledgePage.state, "active")));
         if (!scope) throw new CommandError("not-found", "Wiki page not found");
         await projectAuthorityIn(transaction, userID, scope.projectId);
-        await transaction`SELECT id FROM factory.project WHERE id=${scope.projectId} FOR UPDATE`;
-        const [page] = await transaction<
-          Array<{ parentId: string | null }>
-        >`SELECT parent_id AS "parentId" FROM factory.knowledge_page WHERE id=${pageID} AND version=${expectedVersion} AND state='active' FOR UPDATE`;
+        await db
+          .select({ id: projectTable.id })
+          .from(projectTable)
+          .where(eq(projectTable.id, scope.projectId))
+          .for("update");
+        const [page] = await db
+          .select({ parentId: knowledgePage.parentId })
+          .from(knowledgePage)
+          .where(
+            and(
+              eq(knowledgePage.id, pageID),
+              eq(knowledgePage.version, expectedVersion),
+              eq(knowledgePage.state, "active"),
+            ),
+          )
+          .for("update");
         if (!page)
           throw new CommandError("conflict", "Wiki page changed. Refresh before archiving.");
-        await transaction`UPDATE factory.knowledge_page SET parent_id=${page.parentId},metadata_version=metadata_version+1 WHERE parent_id=${pageID} AND state='active'`;
-        const rows = await transaction<Array<{ id: string }>>`
-        UPDATE factory.knowledge_page SET state = 'archived', version = version + 1,
-          updated_at = now()
-        WHERE id = ${pageID} AND version = ${expectedVersion} AND state = 'active'
-        RETURNING id
-      `;
+        await db
+          .update(knowledgePage)
+          .set({
+            parentId: page.parentId,
+            metadataVersion: expression`${knowledgePage.metadataVersion}+1`,
+          })
+          .where(and(eq(knowledgePage.parentId, pageID), eq(knowledgePage.state, "active")));
+        const rows = await db
+          .update(knowledgePage)
+          .set({
+            state: "archived",
+            version: expression`${knowledgePage.version}+1`,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(knowledgePage.id, pageID),
+              eq(knowledgePage.version, expectedVersion),
+              eq(knowledgePage.state, "active"),
+            ),
+          )
+          .returning({ id: knowledgePage.id });
         if (!rows[0])
           throw new CommandError("conflict", "Wiki page changed. Refresh before archiving.");
         return rows[0];
       });
     },
     async restore(pageID: string, revisionID: string, expectedVersion: number, userID: string) {
-      const [revision] = await database.client<
-        Array<{ title: string; body: string }>
-      >`SELECT title,body FROM factory.knowledge_revision WHERE id=${revisionID} AND page_id=${pageID} AND kind<>'proposed'`;
+      const [revision] = await database.db
+        .select({ title: knowledgeRevision.title, body: knowledgeRevision.body })
+        .from(knowledgeRevision)
+        .where(
+          and(
+            eq(knowledgeRevision.id, revisionID),
+            eq(knowledgeRevision.pageId, pageID),
+            ne(knowledgeRevision.kind, "proposed"),
+          ),
+        );
       if (!revision) throw new CommandError("not-found", "Revision not found");
       return controller.edit(
         pageID,
@@ -658,45 +878,63 @@ export function createKnowledgeController(
       );
     },
     async sources(pageID: string, userID: string) {
-      const [page] = await database.client<Array<{ projectId: string; citations: unknown }>>`
-        SELECT project_id AS "projectId",citations FROM factory.knowledge_page WHERE id=${pageID}
-      `;
+      const [page] = await database.db
+        .select({ projectId: knowledgePage.projectId, citations: knowledgePage.citations })
+        .from(knowledgePage)
+        .where(eq(knowledgePage.id, pageID));
       if (!page) throw new CommandError("not-found", "Wiki page not found");
       await createAccessController(database).requireDevelopment(userID, page.projectId);
       return { citations: page.citations };
     },
     async history(pageID: string, userID: string) {
-      const [page] = await database.client<Array<{ projectId: string }>>`
-        SELECT project_id AS "projectId" FROM factory.knowledge_page WHERE id=${pageID}
-      `;
+      const [page] = await database.db
+        .select({ projectId: knowledgePage.projectId })
+        .from(knowledgePage)
+        .where(eq(knowledgePage.id, pageID));
       if (!page) throw new CommandError("not-found", "Wiki page not found");
       const develop = await createAccessController(database).canDevelop(userID, page.projectId);
-      return database.client<Array<Record<string, unknown>>>`
-        SELECT revision.id, revision.ordinal, revision.kind, revision.title, revision.body,
-          ${develop ? database.client`revision.source_commit_sha AS "sourceCommitSha",` : database.client``}
-          revision.created_at AS "createdAt", author.name AS author
-        FROM factory.knowledge_revision revision
-        LEFT JOIN auth."user" author ON author.id = revision.created_by
-        WHERE revision.page_id = ${pageID}
-        ORDER BY revision.ordinal DESC
-      `;
+      return database.db
+        .select({
+          id: knowledgeRevision.id,
+          ordinal: knowledgeRevision.ordinal,
+          kind: knowledgeRevision.kind,
+          title: knowledgeRevision.title,
+          body: knowledgeRevision.body,
+          ...(develop ? { sourceCommitSha: knowledgeRevision.sourceCommitSha } : {}),
+          createdAt: expression<string>`${knowledgeRevision.createdAt}::text`,
+          author: authUser.name,
+        })
+        .from(knowledgeRevision)
+        .leftJoin(authUser, eq(authUser.id, knowledgeRevision.createdBy))
+        .where(eq(knowledgeRevision.pageId, pageID))
+        .orderBy(desc(knowledgeRevision.ordinal));
     },
     async search(projectID: string, query: string, userID: string) {
       const develop = await createAccessController(database).canDevelop(userID, projectID);
       const text = query.trim();
       if (!text) return [];
-      const pages = await database.client<
-        Array<{ id: string; slug: string; title: string; currentBody: string; rank: number }>
-      >`
-        SELECT id, slug, title, current_body AS "currentBody",
-          ts_rank(to_tsvector('simple', title || ' ' || current_body),
-            plainto_tsquery('simple', ${text})) AS rank
-        FROM factory.knowledge_page
-        WHERE project_id = ${projectID} AND state = 'active'
-          AND to_tsvector('simple', title || ' ' || current_body)
-            @@ plainto_tsquery('simple', ${text})
-        ORDER BY rank DESC, title, id LIMIT 30
-      `;
+      const vector = expression`to_tsvector('simple',${knowledgePage.title}||' '||${knowledgePage.currentBody})`;
+      const rank = expression<number>`ts_rank(${vector},plainto_tsquery('simple',${text}))`.as(
+        "rank",
+      );
+      const pages = await database.db
+        .select({
+          id: knowledgePage.id,
+          slug: knowledgePage.slug,
+          title: knowledgePage.title,
+          currentBody: knowledgePage.currentBody,
+          rank,
+        })
+        .from(knowledgePage)
+        .where(
+          and(
+            eq(knowledgePage.projectId, projectID),
+            eq(knowledgePage.state, "active"),
+            expression`${vector} @@ plainto_tsquery('simple',${text})`,
+          ),
+        )
+        .orderBy(desc(rank), asc(knowledgePage.title), asc(knowledgePage.id))
+        .limit(30);
       const terms = text.toLocaleLowerCase().split(/\s+/).filter(Boolean);
       const results = pages.map((page) => ({
         id: page.id,

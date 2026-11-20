@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { drizzleTransaction } from "../../../../packages/db/src/client";
 import {
   forgeBinding,
   forgeBindingDatabase,
@@ -53,23 +54,32 @@ test("Verification binds before Forge lookup or retained-job execution and prese
   let nativeCalls = 0;
   const receipts: unknown[][] = [];
   const fixture = forgeBindingDatabase(
+    (text) => {
+      throw new Error(`Unexpected Verification query: ${text}`);
+    },
     (text, parameters) => {
-      if (text.startsWith('SELECT change.project_id AS "projectID"')) return [{ projectID }];
-      if (text.startsWith("SELECT verification.runner_job_handle"))
-        return [{ repository, handle, runID, commit }];
-      if (text.startsWith("UPDATE factory.verification")) {
-        expect(text).toContain("runner_job_handle=COALESCE(runner_job_handle,?)");
-        expect(text).toContain("action_run_id=? AND commit_sha=?");
-        expect(text).toContain("state IN ('pending','runner-starting','running')");
-        expect(parameters).toEqual(["owned-exact-job", verificationID, "4", commit]);
+      if (text.startsWith('select "factory"."change"."project_id"')) return [[projectID]];
+      if (text.startsWith('select "factory"."verification"."runner_job_handle"'))
+        return [[handle, runID, commit, repository]];
+      if (text.startsWith('update "factory"."verification"')) {
+        expect(text).toContain('coalesce("factory"."verification"."runner_job_handle", $1)');
+        expect(text).toContain('"factory"."verification"."action_run_id" = $3');
+        expect(text).toContain('"factory"."verification"."commit_sha" = $4');
+        expect(text).toContain('"factory"."verification"."state" in ($5, $6, $7)');
+        expect(parameters).toEqual([
+          "owned-exact-job",
+          verificationID,
+          4,
+          commit,
+          "pending",
+          "runner-starting",
+          "running",
+        ]);
         if (changedAuthority) return [];
         receipts.push(parameters);
         handle = "owned-exact-job";
-        return [{ handle }];
+        return [[handle]];
       }
-      throw new Error(`Unexpected Verification query: ${text}`);
-    },
-    (text) => {
       if (text.includes('"auth"."user"')) return [[actor]];
       if (text.includes('"factory"."account_access"')) return [[null, null]];
       if (text.includes('"factory"."project_membership"'))
@@ -79,6 +89,7 @@ test("Verification binds before Forge lookup or retained-job execution and prese
       throw new Error(`Unexpected Verification authority query: ${text}`);
     },
   );
+  fixture.database.db = drizzleTransaction(fixture.database.client);
   fixture.database.coordination = () => {
     starts++;
     throw new Error("Owned test stops at the Verification provisioning boundary");

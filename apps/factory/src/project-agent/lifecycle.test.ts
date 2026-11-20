@@ -1,19 +1,34 @@
 import { expect, test } from "bun:test";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type postgres from "postgres";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { createProjectAgentController } from "./controller";
 
 test("Project recovery joins its outstanding database observation without dispatching replacement work", async () => {
   const entered = Promise.withResolvers<void>();
   const finish = Promise.withResolvers<void>();
   let queries = 0;
-  const database = {
-    client: async () => {
+  const client = Object.assign(
+    async () => {
       queries++;
       if (queries === 1) return [{ id: "owned-turn" }];
-      entered.resolve();
-      await finish.promise;
-      return [];
+      throw new Error("Recovery history must use the Drizzle driver");
     },
+    {
+      unsafe() {
+        queries++;
+        return {
+          values: async () => {
+            entered.resolve();
+            await finish.promise;
+            return [];
+          },
+        };
+      },
+    },
+  ) as unknown as postgres.Sql;
+  const database = {
+    client,
+    db: drizzleTransaction(client),
   } as unknown as ReturnType<typeof createDatabase>;
   const controller = createProjectAgentController(database, {
     start: async () => {

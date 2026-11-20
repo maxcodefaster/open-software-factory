@@ -102,3 +102,73 @@ test.each([false, true])(
   },
   30_000,
 );
+
+test("Wiki shutdown aborts admitted analysis without publishing or changing a manual revision", async () => {
+  const owned = await factoryProcess();
+  const database = owned.connect();
+  const userID = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  const pageID = crypto.randomUUID();
+  const revisionID = crypto.randomUUID();
+  const commit = "a".repeat(40);
+  const entered = Promise.withResolvers<void>();
+  const settings = {
+    FACTORY_FORGEJO_API_URL: "http://127.0.0.1:9/api/v1/",
+    FACTORY_FORGEJO_TOKEN: "controlled",
+    FACTORY_FORGEJO_OWNER: "owned",
+    FACTORY_MODEL_BASE_URL: "http://127.0.0.1:9/v1",
+    FACTORY_MODEL_API_KEY: "controlled",
+    FACTORY_PROJECT_AGENT_MODEL: "controlled-wiki",
+  };
+  const previous = Object.fromEntries(Object.keys(settings).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, settings);
+  const wiki = createKnowledgeController(
+    database,
+    {
+      getDefaultBranch: async () => ({ name: "main", headSha: commit }),
+      listFiles: async () => [{ path: "src/main.ts", sha: commit, size: 64 }],
+      getFileInfo: async () => ({ sha: commit, content: "export const current = true;" }),
+    },
+    async (input) => {
+      const signal = fixtureValue(input.signal, "Wiki lifetime signal");
+      entered.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        if (signal.aborted) reject(signal.reason);
+      });
+    },
+  );
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${userID},'Wiki author',${`${userID}@factory.invalid`})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${`shutdown-${projectID}`},'Shutdown Wiki','http://127.0.0.1:9/owned/wiki.git',
+        'main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${projectID},${userID},'product-contributor',${userID})`;
+    await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
+      VALUES(${pageID},${projectID},'guide','Guide','Manual product framing.','Previous base.',${commit},${userID})`;
+    await database.client`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,created_by)
+      VALUES(${revisionID},${pageID},1,'human','Guide','Manual product framing.','Previous base.',${commit},${userID})`;
+    await database.client`UPDATE factory.knowledge_page SET current_revision_id=${revisionID} WHERE id=${pageID}`;
+    const admitted = await wiki.generate(projectID, userID);
+    await entered.promise;
+    await wiki.close();
+    const stopped = await wiki.generation(projectID);
+    expect(stopped?.id).toBe(admitted?.id);
+    expect(stopped?.state).toBe("failed");
+    const [page] = await database.client`
+      SELECT current_body AS body,current_revision_id AS revision,version::integer AS version
+      FROM factory.knowledge_page WHERE id=${pageID}`;
+    expect(page).toEqual({ body: "Manual product framing.", revision: revisionID, version: 1 });
+    expect(await wiki.history(pageID, userID)).toHaveLength(1);
+    await expect(wiki.generate(projectID, userID)).rejects.toThrow("shutting down");
+  } finally {
+    await wiki.close();
+    await database.client.end();
+    await owned.dispose();
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  }
+}, 30_000);

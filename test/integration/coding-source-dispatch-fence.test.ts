@@ -105,28 +105,47 @@ async function dispatchFixture(bootstrap: boolean, starting = false, failure?: E
       client: new Proxy(owned.database.client, {
         get(target, key, receiver) {
           if (key !== "begin") return Reflect.get(target, key, receiver);
-          return (work: (sql: DatabaseTransaction) => Promise<unknown>) => {
+          return (
+            optionsOrWork: string | ((sql: DatabaseTransaction) => Promise<unknown>),
+            callback?: (sql: DatabaseTransaction) => Promise<unknown>,
+          ) => {
+            const work = typeof optionsOrWork === "string" ? callback : optionsOrWork;
+            if (!work) throw new Error("Owned transaction callback is missing");
             let dispatch = false;
-            // Observe beginDispatch's pending-row lock without replacing the
-            // Turn store, executing substitute SQL, or changing its result.
-            return begin((sql) =>
+            // Observe the pending-row lock at Drizzle's actual driver boundary,
+            // preserving transaction options and every real query/result.
+            // Dispatch loads the full pending row, not an id-only readiness
+            // check or execution validation accepting several Turn states.
+            const observe = (sql: DatabaseTransaction) =>
               work(
                 new Proxy(sql, {
-                  apply(target, receiver, args) {
-                    const query = Array.isArray(args[0]) ? args[0].join(" ") : "";
-                    if (
-                      query.includes("SELECT * FROM factory.agent_turn") &&
-                      query.includes("state = 'pending'") &&
-                      query.includes("FOR UPDATE")
-                    ) {
-                      dispatch = true;
-                      events.push("begin-dispatch");
-                    }
-                    return Reflect.apply(target, receiver, args);
+                  get(target, key, receiver) {
+                    if (key !== "unsafe") return Reflect.get(target, key, receiver);
+                    return new Proxy(target.unsafe, {
+                      apply(query, receiver, args) {
+                        const statement = String(args[0]);
+                        const parameters = args[1] as unknown[] | undefined;
+                        if (
+                          !dispatch &&
+                          /^select "[^"]+", [^()]+ from "factory"\."agent_turn" where /.test(
+                            statement,
+                          ) &&
+                          statement.includes('"state" = ') &&
+                          statement.includes("for update") &&
+                          parameters?.includes("pending")
+                        ) {
+                          dispatch = true;
+                          events.push("begin-dispatch");
+                        }
+                        return Reflect.apply(query, receiver, args);
+                      },
+                    });
                   },
                 }),
-              ),
-            ).finally(() => {
+              );
+            const transaction =
+              typeof optionsOrWork === "string" ? begin(optionsOrWork, observe) : begin(observe);
+            return transaction.finally(() => {
               if (dispatch) dispatchFinished = true;
             });
           };

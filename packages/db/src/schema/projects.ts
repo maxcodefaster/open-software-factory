@@ -151,7 +151,10 @@ export const projectImagePreparation = factorySchema.table(
     revision: text("revision").notNull(),
     environmentVersion: bigint("environment_version", { mode: "number" }).notNull(),
     runtimeAttemptId: uuid("runtime_attempt_id"),
-    state: text("state").default("pending").notNull(),
+    state: text("state")
+      .$type<"pending" | "running" | "succeeded" | "unsupported" | "failed">()
+      .default("pending")
+      .notNull(),
     identity: text("identity"),
     image: text("image"),
     failure: text("failure"),

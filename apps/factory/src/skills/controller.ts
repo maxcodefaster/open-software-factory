@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { and, asc, desc, eq, inArray, ne, notExists, sql as expression } from "drizzle-orm";
 import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import {
   type InheritedSkillSettings,
@@ -20,8 +21,23 @@ import {
   skillRevisionInput,
   systemSkillSettingsInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
-import { projectAuthorityIn } from "../access/controller";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  personalSkillSettings,
+  projectSkillSettings,
+  skillLibrary,
+  skillLibraryRevision,
+  skillPublication,
+  skillRevision,
+  systemSkillSettings,
+} from "../../../../packages/db/src/schema";
+import { projectAuthorityIn, requireSystemManagerIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { createSkillLibraryController } from "./library-controller";
 
@@ -37,29 +53,48 @@ export function createSkillController(database: ReturnType<typeof createDatabase
   }
 
   async function manager(sql: DatabaseTransaction, userID: string) {
-    const [allowed] =
-      await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userID} FOR SHARE`;
-    if (!allowed) throw new CommandError("forbidden", "System Manager access required");
+    await requireSystemManagerIn(sql, userID);
   }
 
   async function catalogue(sql: DatabaseTransaction) {
-    const rows = await sql<
-      Array<{ id: string; revision: number; content: unknown; digest: string; published: boolean }>
-    >`
-      SELECT revision.id, revision.revision::float8 AS revision, revision.content,
-        revision.content_digest AS digest, publication.published
-      FROM factory.skill_revision revision JOIN factory.skill_publication publication ON publication.revision_id = revision.id
-      WHERE NOT EXISTS (SELECT 1 FROM factory.skill_library_revision link JOIN factory.skill_library library ON library.id = link.library_id
-        WHERE link.revision_id = revision.id AND library.scope != 'system')
-      ORDER BY revision.skill_key, revision.revision DESC
-    `;
+    const db = drizzleTransaction(sql);
+    const rows = await db
+      .select({
+        id: skillRevision.id,
+        revision: skillRevision.revision,
+        content: skillRevision.content,
+        digest: skillRevision.contentDigest,
+        published: skillPublication.published,
+      })
+      .from(skillRevision)
+      .innerJoin(skillPublication, eq(skillPublication.revisionId, skillRevision.id))
+      .where(
+        notExists(
+          db
+            .select({ id: skillLibraryRevision.revisionId })
+            .from(skillLibraryRevision)
+            .innerJoin(skillLibrary, eq(skillLibrary.id, skillLibraryRevision.libraryId))
+            .where(
+              and(
+                eq(skillLibraryRevision.revisionId, skillRevision.id),
+                ne(skillLibrary.scope, "system"),
+              ),
+            ),
+        ),
+      )
+      .orderBy(skillRevision.skillKey, desc(skillRevision.revision));
     return rows.map((row) => skillRevisionInput.parse(row));
   }
 
   async function system(sql: DatabaseTransaction): Promise<SystemSkillSettings> {
-    const [row] = await sql<Array<{ version: number; planning: unknown; build: unknown }>>`
-      SELECT version::float8 AS version, planning, build FROM factory.system_skill_settings WHERE singleton
-    `;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        version: systemSkillSettings.version,
+        planning: systemSkillSettings.planning,
+        build: systemSkillSettings.build,
+      })
+      .from(systemSkillSettings)
+      .where(eq(systemSkillSettings.singleton, true));
     return systemSkillSettingsInput.parse(
       row ?? {
         version: 0,
@@ -77,9 +112,15 @@ export function createSkillController(database: ReturnType<typeof createDatabase
     const canManageProject = await projectAuthorityIn(sql, userID, projectID);
     const global = await system(sql);
     const revisions = await catalogue(sql);
-    const [projectRow] = await sql<Array<{ version: number; planning: unknown; build: unknown }>>`
-      SELECT version::float8 AS version, planning, build FROM factory.project_skill_settings WHERE project_id = ${projectID}
-    `;
+    const db = drizzleTransaction(sql);
+    const [projectRow] = await db
+      .select({
+        version: projectSkillSettings.version,
+        planning: projectSkillSettings.planning,
+        build: projectSkillSettings.build,
+      })
+      .from(projectSkillSettings)
+      .where(eq(projectSkillSettings.projectId, projectID));
     const project = projectSkillSettingsInput.parse(
       projectRow ?? {
         version: 0,
@@ -87,9 +128,19 @@ export function createSkillController(database: ReturnType<typeof createDatabase
         build: { required: [], optional: null, selected: null },
       },
     );
-    const [personalRow] = await sql<Array<{ version: number; planning: unknown; build: unknown }>>`
-      SELECT version::float8 AS version, planning, build FROM factory.personal_skill_settings WHERE project_id = ${projectID} AND user_id = ${userID}
-    `;
+    const [personalRow] = await db
+      .select({
+        version: personalSkillSettings.version,
+        planning: personalSkillSettings.planning,
+        build: personalSkillSettings.build,
+      })
+      .from(personalSkillSettings)
+      .where(
+        and(
+          eq(personalSkillSettings.projectId, projectID),
+          eq(personalSkillSettings.userId, userID),
+        ),
+      );
     const personal = personalSkillSettingsInput.parse(
       personalRow ?? { version: 0, planning: null, build: null },
     );
@@ -136,13 +187,23 @@ export function createSkillController(database: ReturnType<typeof createDatabase
         if (changeID) {
           if (role !== "build")
             throw new CommandError("conflict", "A Change selects Coding guidance only");
-          const [change] = await sql`SELECT id FROM factory.change
-            WHERE id=${changeID} AND project_id=${projectID}`;
-          if (!change) throw new CommandError("not-found", "Change not found");
-          const [first] = await sql<{ authority: unknown }[]>`
-            SELECT authority FROM factory.agent_turn
-            WHERE change_id=${changeID} AND NOT (authority ? 'review')
-            ORDER BY created_at,id LIMIT 1`;
+          const db = drizzleTransaction(sql);
+          const [row] = await db
+            .select({ id: change.id })
+            .from(change)
+            .where(and(eq(change.id, changeID), eq(change.projectId, projectID)));
+          if (!row) throw new CommandError("not-found", "Change not found");
+          const [first] = await db
+            .select({ authority: agentTurn.authority })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.changeId, changeID),
+                expression`NOT (${agentTurn.authority} ? 'review')`,
+              ),
+            )
+            .orderBy(asc(agentTurn.createdAt), asc(agentTurn.id))
+            .limit(1);
           if (first) ids = agentTurnAuthorityInput.parse(first.authority).skillRevisionIds;
         }
         ids ??= (await this.resolveAssignment(role, sql, { projectID, userID })).revisionIds;
@@ -225,12 +286,15 @@ export function createSkillController(database: ReturnType<typeof createDatabase
       return database.client.begin(async (sql) => {
         await lock(sql, true);
         await manager(sql, userID);
-        const [existing] = await sql<
-          Array<{ digest: string; createdBy: string; revision: number }>
-        >`
-          SELECT content_digest AS digest, created_by AS "createdBy", revision::float8 AS revision
-          FROM factory.skill_revision WHERE id = ${input.revisionId}
-        `;
+        const db = drizzleTransaction(sql);
+        const [existing] = await db
+          .select({
+            digest: skillRevision.contentDigest,
+            createdBy: skillRevision.createdBy,
+            revision: skillRevision.revision,
+          })
+          .from(skillRevision)
+          .where(eq(skillRevision.id, input.revisionId));
         if (existing) {
           if (
             existing.digest !== contentDigest ||
@@ -243,23 +307,41 @@ export function createSkillController(database: ReturnType<typeof createDatabase
             );
           return (await catalogue(sql)).find((revision) => revision.id === input.revisionId);
         }
-        const [latest] = await sql<Array<{ revision: number }>>`
-          SELECT COALESCE(max(revision), 0)::float8 AS revision FROM factory.skill_revision WHERE skill_key = ${input.content.key}
-        `;
+        const [latest] = await db
+          .select({
+            revision: expression`COALESCE(max(${skillRevision.revision}), 0)`.mapWith(Number),
+          })
+          .from(skillRevision)
+          .where(eq(skillRevision.skillKey, input.content.key));
         if (latest?.revision !== input.expectedRevision)
           throw new CommandError(
             "conflict",
             "The Skill changed elsewhere. Reload before publishing.",
           );
-        await sql`INSERT INTO factory.skill_revision(id, skill_key, revision, content, content_digest, created_by)
-          VALUES (${input.revisionId}, ${input.content.key}, ${input.expectedRevision + 1}, ${JSON.stringify(input.content)}::jsonb, ${contentDigest}, ${userID})`;
-        await sql`INSERT INTO factory.skill_publication(revision_id, published, updated_by) VALUES (${input.revisionId}, true, ${userID})`;
+        await db.insert(skillRevision).values({
+          id: input.revisionId,
+          skillKey: input.content.key,
+          revision: input.expectedRevision + 1,
+          content: input.content,
+          contentDigest,
+          createdBy: userID,
+        });
+        await db.insert(skillPublication).values({
+          revisionId: input.revisionId,
+          published: true,
+          updatedBy: userID,
+        });
         const libraryID = createHash("md5")
           .update(`factory-legacy-skill:${input.content.key}`)
           .digest("hex");
         const identity = `${libraryID.slice(0, 8)}-${libraryID.slice(8, 12)}-4${libraryID.slice(13, 16)}-8${libraryID.slice(17, 20)}-${libraryID.slice(20)}`;
-        await sql`INSERT INTO factory.skill_library(id, storage_key, scope) VALUES (${identity}, ${input.content.key}, 'system') ON CONFLICT DO NOTHING`;
-        await sql`INSERT INTO factory.skill_library_revision(library_id, revision_id) VALUES (${identity}, ${input.revisionId})`;
+        await db
+          .insert(skillLibrary)
+          .values({ id: identity, storageKey: input.content.key, scope: "system" })
+          .onConflictDoNothing();
+        await db
+          .insert(skillLibraryRevision)
+          .values({ libraryId: identity, revisionId: input.revisionId });
         return (await catalogue(sql)).find((revision) => revision.id === input.revisionId);
       });
     },
@@ -267,9 +349,11 @@ export function createSkillController(database: ReturnType<typeof createDatabase
       return database.client.begin(async (sql) => {
         await lock(sql, true);
         await manager(sql, userID);
-        const [changed] =
-          await sql`UPDATE factory.skill_publication SET published = ${published}, updated_by = ${userID}, updated_at = now()
-          WHERE revision_id = ${revisionID} RETURNING revision_id`;
+        const [changed] = await drizzleTransaction(sql)
+          .update(skillPublication)
+          .set({ published, updatedBy: userID, updatedAt: expression`now()` })
+          .where(eq(skillPublication.revisionId, revisionID))
+          .returning({ revisionId: skillPublication.revisionId });
         if (!changed) throw new CommandError("not-found", "Skill revision not found");
         return { settings: await system(sql), revisions: await catalogue(sql) };
       });
@@ -284,13 +368,29 @@ export function createSkillController(database: ReturnType<typeof createDatabase
           const ids = [...input[role].required, ...input[role].optional];
           assertPublished(ids, role, revisions);
         }
+        const db = drizzleTransaction(sql);
+        const values = { planning: input.planning, build: input.build, updatedBy: userID };
         const [changed] =
           input.version === 0
-            ? await sql`INSERT INTO factory.system_skill_settings(singleton, version, planning, build, updated_by)
-              VALUES (true, 1, ${JSON.stringify(input.planning)}::jsonb, ${JSON.stringify(input.build)}::jsonb, ${userID}) ON CONFLICT DO NOTHING RETURNING version`
-            : await sql`UPDATE factory.system_skill_settings SET version = version + 1,
-              planning = ${JSON.stringify(input.planning)}::jsonb, build = ${JSON.stringify(input.build)}::jsonb, updated_by = ${userID}, updated_at = now()
-              WHERE singleton AND version = ${input.version} RETURNING version`;
+            ? await db
+                .insert(systemSkillSettings)
+                .values({ ...values, singleton: true, version: 1 })
+                .onConflictDoNothing()
+                .returning({ version: systemSkillSettings.version })
+            : await db
+                .update(systemSkillSettings)
+                .set({
+                  ...values,
+                  version: expression`${systemSkillSettings.version} + 1`,
+                  updatedAt: expression`now()`,
+                })
+                .where(
+                  and(
+                    eq(systemSkillSettings.singleton, true),
+                    eq(systemSkillSettings.version, input.version),
+                  ),
+                )
+                .returning({ version: systemSkillSettings.version });
         if (!changed)
           throw new CommandError(
             "conflict",
@@ -369,13 +469,29 @@ export function createSkillController(database: ReturnType<typeof createDatabase
             current.revisions,
           );
         }
+        const db = drizzleTransaction(sql);
+        const values = { planning: input.planning, build: input.build, updatedBy: userID };
         const [changed] =
           input.version === 0
-            ? await sql`INSERT INTO factory.project_skill_settings(project_id, version, planning, build, updated_by)
-              VALUES (${projectID}, 1, ${JSON.stringify(input.planning)}::jsonb, ${JSON.stringify(input.build)}::jsonb, ${userID}) ON CONFLICT DO NOTHING RETURNING version`
-            : await sql`UPDATE factory.project_skill_settings SET version = version + 1,
-              planning = ${JSON.stringify(input.planning)}::jsonb, build = ${JSON.stringify(input.build)}::jsonb, updated_by = ${userID}, updated_at = now()
-              WHERE project_id = ${projectID} AND version = ${input.version} RETURNING version`;
+            ? await db
+                .insert(projectSkillSettings)
+                .values({ ...values, projectId: projectID, version: 1 })
+                .onConflictDoNothing()
+                .returning({ version: projectSkillSettings.version })
+            : await db
+                .update(projectSkillSettings)
+                .set({
+                  ...values,
+                  version: expression`${projectSkillSettings.version} + 1`,
+                  updatedAt: expression`now()`,
+                })
+                .where(
+                  and(
+                    eq(projectSkillSettings.projectId, projectID),
+                    eq(projectSkillSettings.version, input.version),
+                  ),
+                )
+                .returning({ version: projectSkillSettings.version });
         if (!changed) throw changedElsewhere();
         return inherited(sql, projectID, userID);
       });
@@ -394,34 +510,47 @@ export function createSkillController(database: ReturnType<typeof createDatabase
             );
           if (ids) assertPublished(ids, role, current.revisions);
         }
+        const db = drizzleTransaction(sql);
+        const values = { planning: input.planning, build: input.build };
         const [changed] =
           input.version === 0
-            ? await sql`INSERT INTO factory.personal_skill_settings(project_id, user_id, version, planning, build)
-              VALUES (${projectID}, ${userID}, 1, ${input.planning === null ? null : JSON.stringify(input.planning)}::jsonb, ${input.build === null ? null : JSON.stringify(input.build)}::jsonb) ON CONFLICT DO NOTHING RETURNING version`
-            : await sql`UPDATE factory.personal_skill_settings SET version = version + 1,
-              planning = ${input.planning === null ? null : JSON.stringify(input.planning)}::jsonb, build = ${input.build === null ? null : JSON.stringify(input.build)}::jsonb, updated_at = now()
-              WHERE project_id = ${projectID} AND user_id = ${userID} AND version = ${input.version} RETURNING version`;
+            ? await db
+                .insert(personalSkillSettings)
+                .values({ ...values, projectId: projectID, userId: userID, version: 1 })
+                .onConflictDoNothing()
+                .returning({ version: personalSkillSettings.version })
+            : await db
+                .update(personalSkillSettings)
+                .set({
+                  ...values,
+                  version: expression`${personalSkillSettings.version} + 1`,
+                  updatedAt: expression`now()`,
+                })
+                .where(
+                  and(
+                    eq(personalSkillSettings.projectId, projectID),
+                    eq(personalSkillSettings.userId, userID),
+                    eq(personalSkillSettings.version, input.version),
+                  ),
+                )
+                .returning({ version: personalSkillSettings.version });
         if (!changed) throw changedElsewhere();
         return inherited(sql, projectID, userID);
       });
     },
     async load(ids: string[], transaction?: DatabaseTransaction): Promise<SkillRevision[]> {
       if (!ids.length) return [];
-      const sql = transaction ?? database.client;
-      const rows = await sql<
-        Array<{
-          id: string;
-          revision: number;
-          content: unknown;
-          digest: string;
-          published: boolean;
-        }>
-      >`
-        SELECT revision.id, revision.revision::float8 AS revision, revision.content,
-          revision.content_digest AS digest, publication.published
-        FROM factory.skill_revision revision JOIN factory.skill_publication publication ON publication.revision_id = revision.id
-        WHERE revision.id = ANY(${ids}::uuid[])
-      `;
+      const rows = await drizzleTransaction(transaction ?? database.client)
+        .select({
+          id: skillRevision.id,
+          revision: skillRevision.revision,
+          content: skillRevision.content,
+          digest: skillRevision.contentDigest,
+          published: skillPublication.published,
+        })
+        .from(skillRevision)
+        .innerJoin(skillPublication, eq(skillPublication.revisionId, skillRevision.id))
+        .where(inArray(skillRevision.id, ids));
       const revisions = rows.map((row) =>
         skillRevisionInput.parse({ ...row, content: skillContentInput.parse(row.content) }),
       );

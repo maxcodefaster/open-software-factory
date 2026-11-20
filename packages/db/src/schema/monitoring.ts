@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { MCPAssignment } from "../../../conversation-domain/src/mcp-library";
 import {
   bigint,
   boolean,
@@ -81,13 +82,15 @@ export const monitoringPolicy = factorySchema.table(
     id: uuid("id").primaryKey().notNull(),
     hookId: uuid("hook_id").notNull(),
     connectionId: uuid("connection_id"),
-    assignment: jsonb("assignment"),
+    assignment: jsonb("assignment").$type<MCPAssignment>(),
     delegatedBy: uuid("delegated_by").notNull(),
     delegatedAt: timestamp("delegated_at", { withTimezone: true }).defaultNow().notNull(),
-    delegation: text("delegation").notNull(),
+    delegation: text("delegation")
+      .$type<"prepare-ticket" | "application-fix-and-delivery">()
+      .notNull(),
     instructions: text("instructions"),
     sourceIds: uuid("source_ids").array().default([]).notNull(),
-    sourceAssignments: jsonb("source_assignments"),
+    sourceAssignments: jsonb("source_assignments").$type<MCPAssignment[]>(),
   },
   (table): PgTableExtraConfigValue[] => [
     foreignKey({

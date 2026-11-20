@@ -5,8 +5,8 @@ import { configurationPath } from "../../apps/factory/src/setup/configuration";
 import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
+import { createForgejoClient, ForgeAmbiguousWriteError } from "../../packages/forge/src/forge";
 import { setupFeedbackKey } from "../../packages/project-domain/src/setup";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 
@@ -344,6 +344,20 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     const settledCalls = calls;
     await controller.start(projectID, userID, recoveredReviewID, { parentID: failedReviewID });
     expect(calls).toBe(settledCalls);
+    await controller.stop(projectID, userID, recoveredReviewID);
+    const interruptedID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.project_setup_inspection
+      (id,project_id,source_commit,state,created_by,answers)
+      VALUES(${interruptedID},${projectID},${head},'inspecting',${userID},'{"port":"4321"}'::jsonb)`;
+    await controller.recover();
+    expect((await controller.view(projectID, userID))?.state).toBe("failed");
+    expect((await controller.view(projectID, userID))?.failure).toContain("interrupted");
+    expect(calls).toBe(settledCalls);
+    expect(
+      (
+        await database.client`SELECT answers FROM factory.project_setup_inspection WHERE id=${interruptedID}`
+      )[0]?.["answers"],
+    ).toEqual({ port: "4321" });
   } finally {
     await controller.settle();
     await database.client.end();
@@ -487,6 +501,78 @@ test("setup inference does not retain the application's only pooled database con
       }),
     ).rejects.toThrow("Source changed");
     expect(generations).toBe(3);
+    sourceCommit = "a".repeat(40);
+    const confirmedCommit = "d".repeat(40);
+    let applies = 0;
+    let merges = 0;
+    forge.ensureDefaultBranchProtection = async () => {};
+    forge.protectSetupWorkflow = async () => {};
+    forge.applySetupFiles = async (input) => {
+      expect(input.repository).toEqual({ owner: "owned", name: "pool" });
+      expect(input.baseCommit).toBe("a".repeat(40));
+      expect(input.files).toEqual(configuration);
+      const [confirmation] = await database.client`SELECT inspection_id,created_by
+        FROM factory.project_setup_confirmation WHERE inspection_id=${revisionID}`;
+      expect(confirmation?.["created_by"]).toBe(userID);
+      const [admitted] = await database.client`SELECT state,output
+        FROM factory.project_setup_inspection WHERE id=${revisionID}`;
+      expect(admitted?.["state"]).toBe("confirming");
+      expect(admitted?.["output"]).toMatchObject({ files: configuration });
+      if (++applies === 1) throw new ForgeAmbiguousWriteError("Owned unconfirmed setup write");
+      return confirmedCommit;
+    };
+    forge.ensurePullRequest = async (input) => ({
+      number: 1,
+      url: "https://forge.test/owned/pool/pulls/1",
+      state: "open",
+      merged: false,
+      baseBranch: input.baseBranch,
+      baseSha: "a".repeat(40),
+      headBranch: input.headBranch,
+      headSha: confirmedCommit,
+    });
+    forge.mergeInitialSetupWorkflow = async (_repository, _pull, commit, branch, base) => {
+      expect(base).toBe("a".repeat(40));
+      expect(commit).toBe(confirmedCommit);
+      merges++;
+      sourceCommit = commit;
+      return { name: branch, headSha: commit };
+    };
+    // Confirmation retains its existing pooled session lock. Give that owner
+    // two connections without changing the one-connection inference proof.
+    const confirmationDatabase = isolated.connect(2);
+    const confirming = createSetupInspection({
+      database: confirmationDatabase,
+      forge,
+      forgeURL: "https://forge.test",
+      forgeOwner: "owned",
+      model: async () => {
+        throw new Error("Confirmation must not commission inference");
+      },
+      connection: async () => {
+        throw new Error("Confirmation must not connect a model");
+      },
+      ready: async () => {},
+    });
+    try {
+      await expect(confirming.confirm(projectID, userID, revisionID)).rejects.toThrow(
+        "unconfirmed",
+      );
+      expect((await controller.view(projectID, userID))?.state).toBe("confirming");
+      expect(generations).toBe(3);
+      expect((await confirming.confirm(projectID, userID, revisionID))?.state).toBe("confirmed");
+      await confirming.confirm(projectID, userID, revisionID);
+      expect(applies).toBe(2);
+      expect(merges).toBe(1);
+      expect(
+        (
+          await database.client`SELECT inspection_id FROM factory.project_setup_confirmation WHERE inspection_id=${revisionID}`
+        ).length,
+      ).toBe(1);
+      expect(generations).toBe(3);
+    } finally {
+      await confirmationDatabase.client.end({ timeout: 2 });
+    }
   } finally {
     release.resolve();
     await database.client.end({ timeout: 0 });

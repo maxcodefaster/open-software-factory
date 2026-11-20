@@ -1,5 +1,35 @@
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNotNull,
+  lt,
+  lte,
+  notExists,
+  notInArray,
+  sql as query,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  candidateReview,
+  changeCommitOperation,
+  change as changeTable,
+  mergeOperation,
+  monitoringEvidence,
+  monitoringIncident,
+  requirementApproval,
+  requirementRevision,
+  ticket,
+  ticketConversation,
+  ticketDocumentRevision,
+} from "../../../../packages/db/src/schema";
 import { createRequirementRevision } from "../../../../packages/requirement-domain/src/requirement";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
@@ -39,6 +69,15 @@ type Incident = {
   context: string;
   ticketId: string | null;
   diagnosis: InputClarification | null;
+};
+const incidentColumns = {
+  id: monitoringIncident.id,
+  projectId: monitoringIncident.projectId,
+  title: monitoringIncident.title,
+  reference: monitoringIncident.reference,
+  context: monitoringIncident.context,
+  ticketId: monitoringIncident.ticketId,
+  diagnosis: query<InputClarification | null>`${monitoringIncident.diagnosis}`,
 };
 
 export function createMonitoringWorker(
@@ -80,10 +119,22 @@ export function createMonitoringWorker(
     state: "blocked" | "uncertain" = "blocked",
     token?: string,
   ) {
-    await database.client`UPDATE factory.monitoring_incident SET state=${state},reason=${reason.slice(0, 2_000)},
-      owner_token=NULL,owner_expires_at=NULL,settled_at=now()
-      WHERE id=${id} AND state IN ('queued','diagnosing','implementing')
-        AND (${token ?? null}::uuid IS NULL OR owner_token=${token ?? null})`;
+    await database.db
+      .update(monitoringIncident)
+      .set({
+        state,
+        reason: reason.slice(0, 2_000),
+        ownerToken: null,
+        ownerExpiresAt: null,
+        settledAt: query<Date>`now()`,
+      })
+      .where(
+        and(
+          eq(monitoringIncident.id, id),
+          inArray(monitoringIncident.state, ["queued", "diagnosing", "implementing"]),
+          token === undefined ? undefined : eq(monitoringIncident.ownerToken, token),
+        ),
+      );
   }
 
   async function commission(incident: Incident) {
@@ -91,9 +142,16 @@ export function createMonitoringWorker(
     const authority = await database.client.begin((sql) =>
       monitoringAuthorityIn(database, sql, incident.id),
     );
-    const [revision] = await database.client<{ id: string }[]>`
-      SELECT requirement_revision_id AS id FROM factory.requirement_approval
-      WHERE ticket_id=${incident.ticketId} AND monitoring_incident_id=${incident.id} AND monitoring_policy_id=${authority.policyId}`;
+    const [revision] = await database.db
+      .select({ id: requirementApproval.requirementRevisionId })
+      .from(requirementApproval)
+      .where(
+        and(
+          eq(requirementApproval.ticketId, incident.ticketId),
+          eq(requirementApproval.monitoringIncidentId, incident.id),
+          eq(requirementApproval.monitoringPolicyId, authority.policyId),
+        ),
+      );
     if (!revision) throw new CommandError("conflict", "Autofix requirements are no longer current");
     const baseSha = incident.diagnosis.code[0]?.commitSha;
     if (!baseSha)
@@ -116,19 +174,38 @@ export function createMonitoringWorker(
     } | null;
     try {
       admitted = await database.client.begin(async (sql) => {
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`monitoring-project:${incident.projectId}`}))`;
-        const [queued] =
-          await sql`SELECT id FROM factory.monitoring_incident WHERE id=${incident.id} AND state='queued'`;
+        const db = drizzleTransaction(sql);
+        await db.execute(
+          query`SELECT pg_advisory_xact_lock(hashtext(${`monitoring-project:${incident.projectId}`}))`,
+        );
+        const [queued] = await db
+          .select({ id: monitoringIncident.id })
+          .from(monitoringIncident)
+          .where(
+            and(eq(monitoringIncident.id, incident.id), eq(monitoringIncident.state, "queued")),
+          );
         if (!queued) return null;
-        const [busy] =
-          await sql`SELECT id FROM factory.monitoring_incident WHERE project_id=${incident.projectId}
-          AND state IN ('diagnosing','implementing') LIMIT 1`;
+        const [busy] = await db
+          .select({ id: monitoringIncident.id })
+          .from(monitoringIncident)
+          .where(
+            and(
+              eq(monitoringIncident.projectId, incident.projectId),
+              inArray(monitoringIncident.state, ["diagnosing", "implementing"]),
+            ),
+          )
+          .limit(1);
         if (busy) return null;
         const authority = await monitoringAuthorityIn(database, sql, incident.id);
         // Intake locks Hook before Incident when counting duplicate deliveries.
         // Keep that order here and in every lease/result transaction.
-        const [locked] = await sql`SELECT id FROM factory.monitoring_incident
-          WHERE id=${incident.id} AND state='queued' FOR UPDATE`;
+        const [locked] = await db
+          .select({ id: monitoringIncident.id })
+          .from(monitoringIncident)
+          .where(
+            and(eq(monitoringIncident.id, incident.id), eq(monitoringIncident.state, "queued")),
+          )
+          .for("update");
         if (!locked) return null;
         const modelId = await models.resolve("planning", sql, {
           projectID: incident.projectId,
@@ -153,32 +230,65 @@ export function createMonitoringWorker(
           projectContext: await admittedProjectContext(sql, incident.projectId, null),
           codeAccess,
         };
-        const [claimed] =
-          await sql`UPDATE factory.monitoring_incident SET state='diagnosing',started_at=now(),
-          model_id=${modelId},model_connection=${reference ? JSON.stringify(reference) : null}::jsonb,
-          owner_token=${token},owner_expires_at=now()+interval '2 minutes',skill_assignment=${JSON.stringify(skillAssignment)}::jsonb
-          WHERE id=${incident.id} AND state='queued' RETURNING id`;
+        const [claimed] = await db
+          .update(monitoringIncident)
+          .set({
+            state: "diagnosing",
+            startedAt: query<Date>`now()`,
+            modelId,
+            modelConnection: reference,
+            ownerToken: token,
+            ownerExpiresAt: query<Date>`now()+interval '2 minutes'`,
+            skillAssignment,
+          })
+          .where(
+            and(eq(monitoringIncident.id, incident.id), eq(monitoringIncident.state, "queued")),
+          )
+          .returning({ id: monitoringIncident.id });
         if (!claimed)
           throw new CommandError("conflict", "Monitoring diagnosis already has an owner");
         return { modelId, reference, skillAssignment };
       });
     } catch (cause) {
       if (cause instanceof CommandError)
-        await database.client`UPDATE factory.monitoring_incident SET state='blocked',reason=${cause.message.slice(0, 2_000)},settled_at=now()
-          WHERE id=${incident.id} AND state='queued'`;
+        await database.db
+          .update(monitoringIncident)
+          .set({
+            state: "blocked",
+            reason: cause.message.slice(0, 2_000),
+            settledAt: query<Date>`now()`,
+          })
+          .where(
+            and(eq(monitoringIncident.id, incident.id), eq(monitoringIncident.state, "queued")),
+          );
       throw cause;
     }
     if (!admitted) return;
     const authorize = async () => {
       controller.signal.throwIfAborted();
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         const authority = await monitoringAuthorityIn(database, sql, incident.id);
-        const [owned] = await sql`SELECT id FROM factory.monitoring_incident WHERE id=${incident.id}
-          AND state='diagnosing' AND owner_token=${token} AND owner_expires_at > now() FOR UPDATE`;
+        const [owned] = await db
+          .select({ id: monitoringIncident.id })
+          .from(monitoringIncident)
+          .where(
+            and(
+              eq(monitoringIncident.id, incident.id),
+              eq(monitoringIncident.state, "diagnosing"),
+              eq(monitoringIncident.ownerToken, token),
+              gt(monitoringIncident.ownerExpiresAt, query`now()`),
+            ),
+          )
+          .for("update");
         if (!owned)
           throw new CommandError("conflict", "Monitoring diagnosis lost execution ownership");
-        await sql`UPDATE factory.monitoring_incident SET owner_expires_at=now()+interval '2 minutes'
-          WHERE id=${incident.id} AND owner_token=${token}`;
+        await db
+          .update(monitoringIncident)
+          .set({ ownerExpiresAt: query<Date>`now()+interval '2 minutes'` })
+          .where(
+            and(eq(monitoringIncident.id, incident.id), eq(monitoringIncident.ownerToken, token)),
+          );
         return authority;
       });
     };
@@ -221,14 +331,30 @@ export function createMonitoringWorker(
         }),
         observe: (value: { kind: string; digest: string; path?: string; commitSha?: string }) =>
           database.client.begin(async (sql) => {
+            const db = drizzleTransaction(sql);
             await monitoringAuthorityIn(database, sql, incident.id);
-            const [owned] =
-              await sql`SELECT id FROM factory.monitoring_incident WHERE id=${incident.id}
-            AND state='diagnosing' AND owner_token=${token} AND owner_expires_at > now() FOR UPDATE`;
+            const [owned] = await db
+              .select({ id: monitoringIncident.id })
+              .from(monitoringIncident)
+              .where(
+                and(
+                  eq(monitoringIncident.id, incident.id),
+                  eq(monitoringIncident.state, "diagnosing"),
+                  eq(monitoringIncident.ownerToken, token),
+                  gt(monitoringIncident.ownerExpiresAt, query`now()`),
+                ),
+              )
+              .for("update");
             if (!owned)
               throw new CommandError("conflict", "Monitoring observation lost execution ownership");
-            await sql`INSERT INTO factory.monitoring_evidence(id,incident_id,kind,digest,path,commit_sha)
-            VALUES(${crypto.randomUUID()},${incident.id},${value.kind},${value.digest},${value.path ?? null},${value.commitSha ?? null})`;
+            await db.insert(monitoringEvidence).values({
+              id: crypto.randomUUID(),
+              incidentId: incident.id,
+              kind: value.kind,
+              digest: value.digest,
+              path: value.path ?? null,
+              commitSha: value.commitSha ?? null,
+            });
           }),
       };
       const [assignment] = authority.assignments;
@@ -250,15 +376,34 @@ export function createMonitoringWorker(
       );
       await authorize();
       await database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         const current = await monitoringAuthorityIn(database, sql, incident.id);
-        const [owned] = await sql`SELECT id FROM factory.monitoring_incident WHERE id=${incident.id}
-          AND state='diagnosing' AND owner_token=${token} AND owner_expires_at > now() FOR UPDATE`;
+        const [owned] = await db
+          .select({ id: monitoringIncident.id })
+          .from(monitoringIncident)
+          .where(
+            and(
+              eq(monitoringIncident.id, incident.id),
+              eq(monitoringIncident.state, "diagnosing"),
+              eq(monitoringIncident.ownerToken, token),
+              gt(monitoringIncident.ownerExpiresAt, query`now()`),
+            ),
+          )
+          .for("update");
         if (!owned)
           throw new CommandError("conflict", "Monitoring result lost execution ownership");
         if (result.outcome !== "fix" && result.outcome !== "ticket") {
-          await sql`UPDATE factory.monitoring_incident SET state=${result.outcome},reason=${result.explanation},
-            diagnosis=${JSON.stringify(result)}::jsonb,owner_token=NULL,owner_expires_at=NULL,settled_at=now()
-            WHERE id=${incident.id}`;
+          await db
+            .update(monitoringIncident)
+            .set({
+              state: result.outcome,
+              reason: result.explanation,
+              diagnosis: result,
+              ownerToken: null,
+              ownerExpiresAt: null,
+              settledAt: query<Date>`now()`,
+            })
+            .where(eq(monitoringIncident.id, incident.id));
           return;
         }
         const automatic =
@@ -275,24 +420,63 @@ export function createMonitoringWorker(
         const description = `${automatic ? "Autofix commissioned by an explicit Project Input delegation." : "Prepared by the Project Harness from an external Input. Implementation requires approval."}\n\n${result.explanation}${
           incident.reference ? `\n\nSource: ${incident.reference}` : ""
         }`;
-        await sql`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
-          VALUES(${ticketId},${incident.projectId},${result.title},${description},'ready',${current.userId})`;
-        await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by)
-          VALUES(${revision.id},${ticketId},1,${revision.canonicalContent},${revision.contentDigest},${current.userId})`;
+        await db.insert(ticket).values({
+          id: ticketId,
+          projectId: incident.projectId,
+          title: result.title,
+          description,
+          state: "ready",
+          createdBy: current.userId,
+        });
+        await db.insert(requirementRevision).values({
+          id: revision.id,
+          ticketId,
+          ordinal: 1,
+          canonicalContent: revision.canonicalContent,
+          contentDigest: revision.contentDigest,
+          createdBy: current.userId,
+        });
         if (automatic)
-          await sql`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by,
-          monitoring_incident_id,monitoring_policy_id)
-          VALUES(${crypto.randomUUID()},${ticketId},${revision.id},${current.userId},${incident.id},${current.policyId})`;
-        await sql`INSERT INTO factory.ticket_document_revision(id,ticket_id,ordinal,title,description,
-          canonical_content,content_digest,requirement_revision_id,input_digest,created_by,author_kind)
-          VALUES(${crypto.randomUUID()},${ticketId},1,${result.title},${description},${revision.canonicalContent},
-            ${revision.contentDigest},${revision.id},${revision.contentDigest},${current.userId},'ai')`;
-        await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
-          VALUES(${crypto.randomUUID()},${incident.projectId},${ticketId},${automatic ? "build" : "plan"},${current.userId})`;
-        await sql`UPDATE factory.monitoring_incident SET state=${automatic ? "implementing" : "prepared"},ticket_id=${ticketId},
-          diagnosis=${JSON.stringify(result)}::jsonb,reason=NULL,owner_token=NULL,owner_expires_at=NULL,
-          settled_at=CASE WHEN ${automatic} THEN NULL ELSE now() END
-          WHERE id=${incident.id}`;
+          await db.insert(requirementApproval).values({
+            id: crypto.randomUUID(),
+            ticketId,
+            requirementRevisionId: revision.id,
+            approvedBy: current.userId,
+            monitoringIncidentId: incident.id,
+            monitoringPolicyId: current.policyId,
+          });
+        await db.insert(ticketDocumentRevision).values({
+          id: crypto.randomUUID(),
+          ticketId,
+          ordinal: 1,
+          title: result.title,
+          description,
+          canonicalContent: revision.canonicalContent,
+          contentDigest: revision.contentDigest,
+          requirementRevisionId: revision.id,
+          inputDigest: revision.contentDigest,
+          createdBy: current.userId,
+          authorKind: "ai",
+        });
+        await db.insert(ticketConversation).values({
+          id: crypto.randomUUID(),
+          projectId: incident.projectId,
+          ticketId,
+          mode: automatic ? "build" : "plan",
+          createdBy: current.userId,
+        });
+        await db
+          .update(monitoringIncident)
+          .set({
+            state: automatic ? "implementing" : "prepared",
+            ticketId,
+            diagnosis: result,
+            reason: null,
+            ownerToken: null,
+            ownerExpiresAt: null,
+            settledAt: automatic ? null : query<Date>`now()`,
+          })
+          .where(eq(monitoringIncident.id, incident.id));
       });
     } catch (cause) {
       const known =
@@ -319,17 +503,37 @@ export function createMonitoringWorker(
   }
 
   async function implementation(incident: Incident) {
-    const [change] = await database.client<{ id: string; state: string; humanWork: boolean }[]>`
-      SELECT change.id,change.state,EXISTS(SELECT 1 FROM factory.agent_turn turn WHERE turn.change_id=change.id
-        AND input->>'kind'='change-prompt') AS "humanWork" FROM factory.change change WHERE change.ticket_id=${incident.ticketId}`;
+    if (!incident.ticketId) return;
+    const [change] = await database.db
+      .select({
+        id: changeTable.id,
+        state: changeTable.state,
+        humanWork: exists(
+          database.db
+            .select({ id: agentTurn.id })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.changeId, changeTable.id),
+                eq(query<string>`${agentTurn.input}->>'kind'`, "change-prompt"),
+              ),
+            ),
+        ),
+      })
+      .from(changeTable)
+      .where(eq(changeTable.ticketId, incident.ticketId));
     if (!change) {
       await commission(incident);
       return;
     }
     const delivery = await input.delivery.get(change.id);
     if (change.state === "delivered") {
-      await database.client`UPDATE factory.monitoring_incident SET state='delivered',reason=NULL,settled_at=now()
-        WHERE id=${incident.id} AND state='implementing'`;
+      await database.db
+        .update(monitoringIncident)
+        .set({ state: "delivered", reason: null, settledAt: query<Date>`now()` })
+        .where(
+          and(eq(monitoringIncident.id, incident.id), eq(monitoringIncident.state, "implementing")),
+        );
       return;
     }
     // An accepted merge is irreversible. Revocation does not abandon its
@@ -372,26 +576,108 @@ export function createMonitoringWorker(
       await database.client.begin(async (sql) => {
         const writer = await lockChangeWriterIn(sql, change.id);
         if (!writer.available || writer.state === "human" || writer.state === "handoff") return;
-        await sql`UPDATE factory.monitoring_incident SET state='blocked',
-        reason=${"Independent review is incomplete. The retained Change requires a human decision before retrying review or continuing Build."},
-        owner_token=NULL,owner_expires_at=NULL,settled_at=now()
-        WHERE id=${incident.id} AND state='implementing'
-          AND EXISTS(SELECT 1 FROM factory.candidate_review review
-            JOIN factory.agent_turn turn ON turn.id=review.turn_id
-            WHERE review.id=${reviewId} AND review.change_id=${change.id}
-              AND review.state='incomplete' AND turn.state='completed'
-              AND review.turn_id=(SELECT id FROM factory.agent_turn
-                WHERE change_id=review.change_id ORDER BY created_at DESC,id DESC LIMIT 1)
-              AND review.id=(SELECT id FROM factory.candidate_review
-                WHERE verification_id=review.verification_id ORDER BY ordinal DESC LIMIT 1)
-              AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
-                WHERE change_id=review.change_id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
-              AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=review.change_id
-                AND state IN ('pending','dispatching','running','uncertain'))
-              AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=review.change_id
-                AND state NOT IN ('succeeded','failed'))
-              AND NOT EXISTS(SELECT 1 FROM factory.merge_operation WHERE change_id=review.change_id
-                AND observed_default_sha IS NOT NULL))`;
+        const db = drizzleTransaction(sql);
+        const latestReview = alias(candidateReview, "latest_review");
+        await db
+          .update(monitoringIncident)
+          .set({
+            state: "blocked",
+            reason:
+              "Independent review is incomplete. The retained Change requires a human decision before retrying review or continuing Build.",
+            ownerToken: null,
+            ownerExpiresAt: null,
+            settledAt: query<Date>`now()`,
+          })
+          .where(
+            and(
+              eq(monitoringIncident.id, incident.id),
+              eq(monitoringIncident.state, "implementing"),
+              exists(
+                db
+                  .select({ id: candidateReview.id })
+                  .from(candidateReview)
+                  .innerJoin(agentTurn, eq(agentTurn.id, candidateReview.turnId))
+                  .where(
+                    and(
+                      eq(candidateReview.id, reviewId),
+                      eq(candidateReview.changeId, change.id),
+                      eq(candidateReview.state, "incomplete"),
+                      eq(agentTurn.state, "completed"),
+                      eq(
+                        candidateReview.turnId,
+                        db
+                          .select({ id: agentTurn.id })
+                          .from(agentTurn)
+                          .where(eq(agentTurn.changeId, candidateReview.changeId))
+                          .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+                          .limit(1),
+                      ),
+                      eq(
+                        candidateReview.id,
+                        db
+                          .select({ id: latestReview.id })
+                          .from(latestReview)
+                          .where(eq(latestReview.verificationId, candidateReview.verificationId))
+                          .orderBy(desc(latestReview.ordinal))
+                          .limit(1),
+                      ),
+                      eq(
+                        candidateReview.commitSha,
+                        db
+                          .select({ commitSha: changeCommitOperation.commitSha })
+                          .from(changeCommitOperation)
+                          .where(
+                            and(
+                              eq(changeCommitOperation.changeId, candidateReview.changeId),
+                              eq(changeCommitOperation.state, "succeeded"),
+                            ),
+                          )
+                          .orderBy(desc(changeCommitOperation.sequence))
+                          .limit(1),
+                      ),
+                      notExists(
+                        db
+                          .select({ id: agentTurn.id })
+                          .from(agentTurn)
+                          .where(
+                            and(
+                              eq(agentTurn.changeId, candidateReview.changeId),
+                              inArray(agentTurn.state, [
+                                "pending",
+                                "dispatching",
+                                "running",
+                                "uncertain",
+                              ]),
+                            ),
+                          ),
+                      ),
+                      notExists(
+                        db
+                          .select({ id: changeCommitOperation.id })
+                          .from(changeCommitOperation)
+                          .where(
+                            and(
+                              eq(changeCommitOperation.changeId, candidateReview.changeId),
+                              notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+                            ),
+                          ),
+                      ),
+                      notExists(
+                        db
+                          .select({ id: mergeOperation.id })
+                          .from(mergeOperation)
+                          .where(
+                            and(
+                              eq(mergeOperation.changeId, candidateReview.changeId),
+                              isNotNull(mergeOperation.observedDefaultSha),
+                            ),
+                          ),
+                      ),
+                    ),
+                  ),
+              ),
+            ),
+          );
       });
       return;
     }
@@ -425,11 +711,17 @@ export function createMonitoringWorker(
     const controller = new AbortController();
     running.set(projectId, controller);
     try {
-      const active = await database.client<
-        Incident[]
-      >`SELECT id,project_id AS "projectId",title,reference,context,
-        ticket_id AS "ticketId",diagnosis FROM factory.monitoring_incident WHERE project_id=${projectId}
-        AND state='implementing' ORDER BY received_at,id LIMIT 1`;
+      const active = await database.db
+        .select(incidentColumns)
+        .from(monitoringIncident)
+        .where(
+          and(
+            eq(monitoringIncident.projectId, projectId),
+            eq(monitoringIncident.state, "implementing"),
+          ),
+        )
+        .orderBy(asc(monitoringIncident.receivedAt), asc(monitoringIncident.id))
+        .limit(1);
       if (active[0]) {
         try {
           await implementation(active[0]);
@@ -440,16 +732,32 @@ export function createMonitoringWorker(
         return;
       }
       const incident = await database.client.begin(async (sql) => {
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`monitoring-project:${projectId}`}))`;
-        const [busy] =
-          await sql`SELECT id FROM factory.monitoring_incident WHERE project_id=${projectId}
-          AND state IN ('diagnosing','implementing')`;
+        const db = drizzleTransaction(sql);
+        await db.execute(
+          query`SELECT pg_advisory_xact_lock(hashtext(${`monitoring-project:${projectId}`}))`,
+        );
+        const [busy] = await db
+          .select({ id: monitoringIncident.id })
+          .from(monitoringIncident)
+          .where(
+            and(
+              eq(monitoringIncident.projectId, projectId),
+              inArray(monitoringIncident.state, ["diagnosing", "implementing"]),
+            ),
+          );
         if (busy) return;
-        const [next] = await sql<
-          Incident[]
-        >`SELECT id,project_id AS "projectId",title,reference,context,
-          ticket_id AS "ticketId",diagnosis FROM factory.monitoring_incident WHERE project_id=${projectId}
-          AND state='queued' ORDER BY received_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`;
+        const [next] = await db
+          .select(incidentColumns)
+          .from(monitoringIncident)
+          .where(
+            and(
+              eq(monitoringIncident.projectId, projectId),
+              eq(monitoringIncident.state, "queued"),
+            ),
+          )
+          .orderBy(asc(monitoringIncident.receivedAt), asc(monitoringIncident.id))
+          .limit(1)
+          .for("update", { skipLocked: true });
         // Claim is persisted in diagnose before the first provider request.
         return next;
       });
@@ -462,23 +770,48 @@ export function createMonitoringWorker(
     if (closed || sweeping) return;
     sweeping = true;
     try {
-      const expired = await database.client<
-        { id: string }[]
-      >`UPDATE factory.monitoring_incident SET state='uncertain',
-        reason='Diagnosis ownership expired. The provider outcome is unknown; no automatic retry was started.',
-        owner_token=NULL,owner_expires_at=NULL,settled_at=now()
-        WHERE state='diagnosing' AND owner_expires_at < now() RETURNING id`;
+      const expired = await database.db
+        .update(monitoringIncident)
+        .set({
+          state: "uncertain",
+          reason:
+            "Diagnosis ownership expired. The provider outcome is unknown; no automatic retry was started.",
+          ownerToken: null,
+          ownerExpiresAt: null,
+          settledAt: query<Date>`now()`,
+        })
+        .where(
+          and(
+            eq(monitoringIncident.state, "diagnosing"),
+            lt(monitoringIncident.ownerExpiresAt, query`now()`),
+          ),
+        )
+        .returning({ id: monitoringIncident.id });
       for (const item of expired) await createUsageJournal(database).abandon(usageId(item.id));
-      const projects = await database.client<{ id: string }[]>`SELECT DISTINCT project_id AS id
-        FROM factory.monitoring_incident WHERE state IN ('queued','implementing')
-          AND (${sweepCursor ?? null}::uuid IS NULL OR project_id > ${sweepCursor ?? null})
-        ORDER BY project_id LIMIT 50`;
+      const projects = await database.db
+        .selectDistinct({ id: monitoringIncident.projectId })
+        .from(monitoringIncident)
+        .where(
+          and(
+            inArray(monitoringIncident.state, ["queued", "implementing"]),
+            sweepCursor ? gt(monitoringIncident.projectId, sweepCursor) : undefined,
+          ),
+        )
+        .orderBy(asc(monitoringIncident.projectId))
+        .limit(50);
       if (sweepCursor && projects.length < 50)
         projects.push(
-          ...(await database.client<{ id: string }[]>`SELECT DISTINCT project_id AS id
-            FROM factory.monitoring_incident WHERE state IN ('queued','implementing')
-              AND project_id <= ${sweepCursor}
-            ORDER BY project_id LIMIT ${50 - projects.length}`),
+          ...(await database.db
+            .selectDistinct({ id: monitoringIncident.projectId })
+            .from(monitoringIncident)
+            .where(
+              and(
+                inArray(monitoringIncident.state, ["queued", "implementing"]),
+                lte(monitoringIncident.projectId, sweepCursor),
+              ),
+            )
+            .orderBy(asc(monitoringIncident.projectId))
+            .limit(50 - projects.length)),
         );
       // Advance past busy owners too, otherwise a persistent prefix starves the tail.
       sweepCursor = projects.at(-1)?.id;

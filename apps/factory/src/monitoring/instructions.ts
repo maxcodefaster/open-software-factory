@@ -1,6 +1,15 @@
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
+import { and, eq, getTableColumns, inArray, sql as expression } from "drizzle-orm";
 import { inputInstructions } from "../../../../packages/conversation-domain/src/monitoring";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  monitoringHook,
+  monitoringIncident,
+  monitoringPolicy,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import {
   manageMonitoringIn,
@@ -23,21 +32,21 @@ export async function editInputInstructionsIn(
   },
 ) {
   const instructions = inputInstructions.parse(input.instructions);
-  const [hook] = await sql<{ projectId: string; policyId: string; version: number }[]>`
-    SELECT project_id AS "projectId",policy_id AS "policyId",version::int AS version FROM factory.monitoring_hook
-    WHERE id=${input.hookId} FOR UPDATE`;
+  const db = drizzleTransaction(sql);
+  const [hook] = await db
+    .select({
+      projectId: monitoringHook.projectId,
+      policyId: monitoringHook.policyId,
+      version: monitoringHook.version,
+    })
+    .from(monitoringHook)
+    .where(eq(monitoringHook.id, input.hookId))
+    .for("update");
   if (!hook) throw new CommandError("not-found", "Input not found");
-  const [policy] = await sql<
-    {
-      delegatedBy: string;
-      delegation: "prepare-ticket" | "application-fix-and-delivery";
-      assignment: MCPAssignment | null;
-      sourceAssignments: MCPAssignment[] | null;
-      instructions: string | null;
-    }[]
-  >`
-    SELECT delegated_by AS "delegatedBy",delegation,assignment,source_assignments AS "sourceAssignments",instructions
-    FROM factory.monitoring_policy WHERE id=${hook.policyId}`;
+  const [policy] = await db
+    .select()
+    .from(monitoringPolicy)
+    .where(eq(monitoringPolicy.id, hook.policyId));
   if (!policy) throw new CommandError("not-found", "Input policy not found");
   await manageMonitoringIn(sql, input.userId, hook.projectId, policy.delegation);
   await manageMonitoringIn(sql, policy.delegatedBy, hook.projectId, policy.delegation);
@@ -48,8 +57,16 @@ export async function editInputInstructionsIn(
     );
   if (policy.instructions === instructions)
     throw new CommandError("invalid", "The edit does not change the saved Input task.");
-  const [busy] = await sql`SELECT id FROM factory.monitoring_incident WHERE hook_id=${input.hookId}
-    AND state IN ('queued','diagnosing','implementing') LIMIT 1`;
+  const [busy] = await db
+    .select({ id: monitoringIncident.id })
+    .from(monitoringIncident)
+    .where(
+      and(
+        eq(monitoringIncident.hookId, input.hookId),
+        inArray(monitoringIncident.state, ["queued", "diagnosing", "implementing"]),
+      ),
+    )
+    .limit(1);
   if (busy)
     throw new CommandError(
       "conflict",
@@ -62,10 +79,23 @@ export async function editInputInstructionsIn(
     hook.projectId,
     policy.delegatedBy,
   );
-  await sql`INSERT INTO factory.monitoring_policy(id,hook_id,connection_id,assignment,delegated_by,delegated_at,delegation,
-    instructions,source_ids,source_assignments)
-    SELECT ${input.revisionId},hook_id,connection_id,assignment,delegated_by,delegated_at,delegation,
-      ${instructions},source_ids,source_assignments FROM factory.monitoring_policy WHERE id=${input.policyId}`;
-  await sql`UPDATE factory.monitoring_hook SET policy_id=${input.revisionId},version=version+1 WHERE id=${input.hookId}`;
+  // Copy in PostgreSQL so the original delegation timestamp keeps microsecond precision.
+  await db.insert(monitoringPolicy).select(
+    db
+      .select({
+        ...getTableColumns(monitoringPolicy),
+        id: expression<string>`${input.revisionId}::uuid`.as("id"),
+        instructions: expression<string>`${instructions}`.as("instructions"),
+      })
+      .from(monitoringPolicy)
+      .where(eq(monitoringPolicy.id, input.policyId)),
+  );
+  await db
+    .update(monitoringHook)
+    .set({
+      policyId: input.revisionId,
+      version: expression`${monitoringHook.version}+1`,
+    })
+    .where(eq(monitoringHook.id, input.hookId));
   return { revisionId: input.revisionId, version: input.version + 1 };
 }

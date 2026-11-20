@@ -1,5 +1,58 @@
+import {
+  and,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  max,
+  ne,
+  notExists,
+  notInArray,
+  or,
+  sql,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  accountAccess,
+  administrator,
+  agentTurn,
+  authUser,
+  candidateReview,
+  change,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  changeEditingRequest,
+  changeWriter,
+  codingPause,
+  conversationEntry,
+  deliveryApproval,
+  inboxReceipt,
+  monitoringIncident,
+  project,
+  projectMembership,
+  requirementApproval,
+  requirementRevision,
+  reviewFeedback,
+  reviewFeedbackMessage,
+  technicalDesignRevision,
+  ticket,
+  ticketConversation,
+  ticketDocumentRevision,
+  ticketFollow,
+  ticketResponsibility,
+  ticketResponsibilityEvent,
+  verification,
+} from "../../../../packages/db/src/schema";
 import {
   type AttentionCapability,
   type AttentionMember,
@@ -54,54 +107,123 @@ const plainPreview = (source: Source): Source => ({
   preview: plainFailureMessage(source.preview),
 });
 
-async function peopleIn(sql: DatabaseTransaction, projectID: string): Promise<AttentionPerson[]> {
-  return sql<AttentionPerson[]>`
-    SELECT person.id,person.name,
-      (membership.role='developer' OR admin.user_id IS NOT NULL) AS develop,
-      (membership.manage_project OR admin.user_id IS NOT NULL) AS manage
-    FROM factory.project_membership membership
-    JOIN auth."user" person ON person.id=membership.user_id
-    JOIN factory.account_access account ON account.user_id=person.id
-    LEFT JOIN factory.administrator admin ON admin.user_id=person.id
-    WHERE membership.project_id=${projectID}
-      AND account.disabled_at IS NULL AND account.directory_disabled_at IS NULL
-    ORDER BY lower(person.name),person.id`;
+async function peopleIn(
+  transaction: DatabaseTransaction,
+  projectID: string,
+): Promise<AttentionPerson[]> {
+  return drizzleTransaction(transaction)
+    .select({
+      id: authUser.id,
+      name: authUser.name,
+      develop: sql<boolean>`${projectMembership.role}='developer' OR ${administrator.userId} IS NOT NULL`,
+      manage: sql<boolean>`${projectMembership.manageProject} OR ${administrator.userId} IS NOT NULL`,
+    })
+    .from(projectMembership)
+    .innerJoin(authUser, eq(authUser.id, projectMembership.userId))
+    .innerJoin(accountAccess, eq(accountAccess.userId, authUser.id))
+    .leftJoin(administrator, eq(administrator.userId, authUser.id))
+    .where(
+      and(
+        eq(projectMembership.projectId, projectID),
+        isNull(accountAccess.disabledAt),
+        isNull(accountAccess.directoryDisabledAt),
+      ),
+    )
+    .orderBy(sql`lower(${authUser.name})`, authUser.id);
 }
 
-async function ticketsIn(sql: DatabaseTransaction, userID: string, projects: string[]) {
-  return sql<Ticket[]>`
-    SELECT ticket.id,ticket.project_id AS "projectId",ticket.title,ticket.state,
-      responsibility.user_id AS "responsibleId",
-      COALESCE(follow.following,
-        ticket.created_by=${userID} OR responsibility.user_id=${userID}
-        OR EXISTS(SELECT 1 FROM factory.agent_turn WHERE ticket_id=ticket.id AND created_by=${userID})
-        OR EXISTS(SELECT 1 FROM factory.conversation_entry entry
-          JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-          WHERE conversation.ticket_id=ticket.id AND entry.created_by=${userID} AND entry.actor='user')
-        OR EXISTS(SELECT 1 FROM factory.review_feedback_message message
-          JOIN factory.review_feedback feedback ON feedback.id=message.feedback_id
-          JOIN factory.change change ON change.id=feedback.change_id
-          WHERE change.ticket_id=ticket.id AND message.author_id=${userID}),false) AS following
-    FROM factory.ticket ticket
-    LEFT JOIN factory.ticket_responsibility responsibility ON responsibility.ticket_id=ticket.id
-    LEFT JOIN factory.ticket_follow follow ON follow.ticket_id=ticket.id AND follow.user_id=${userID}
-    WHERE ticket.project_id=ANY(${projects}::uuid[])
-      AND ticket.trashed_at IS NULL AND ticket.converted_to_epic_id IS NULL`;
+async function ticketsIn(
+  transaction: DatabaseTransaction,
+  userID: string,
+  projects: string[],
+): Promise<Ticket[]> {
+  const db = drizzleTransaction(transaction);
+  const participated = or(
+    eq(ticket.createdBy, userID),
+    eq(ticketResponsibility.userId, userID),
+    exists(
+      db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .where(and(eq(agentTurn.ticketId, ticket.id), eq(agentTurn.createdBy, userID))),
+    ),
+    exists(
+      db
+        .select({ id: conversationEntry.id })
+        .from(conversationEntry)
+        .innerJoin(ticketConversation, eq(ticketConversation.id, conversationEntry.conversationId))
+        .where(
+          and(
+            eq(ticketConversation.ticketId, ticket.id),
+            eq(conversationEntry.createdBy, userID),
+            eq(conversationEntry.actor, "user"),
+          ),
+        ),
+    ),
+    exists(
+      db
+        .select({ id: reviewFeedbackMessage.id })
+        .from(reviewFeedbackMessage)
+        .innerJoin(reviewFeedback, eq(reviewFeedback.id, reviewFeedbackMessage.feedbackId))
+        .innerJoin(change, eq(change.id, reviewFeedback.changeId))
+        .where(and(eq(change.ticketId, ticket.id), eq(reviewFeedbackMessage.authorId, userID))),
+    ),
+  );
+  return db
+    .select({
+      id: ticket.id,
+      projectId: ticket.projectId,
+      title: ticket.title,
+      state: ticket.state,
+      responsibleId: ticketResponsibility.userId,
+      following: sql<boolean>`coalesce(${ticketFollow.following}, ${participated}, false)`,
+    })
+    .from(ticket)
+    .leftJoin(ticketResponsibility, eq(ticketResponsibility.ticketId, ticket.id))
+    .leftJoin(
+      ticketFollow,
+      and(eq(ticketFollow.ticketId, ticket.id), eq(ticketFollow.userId, userID)),
+    )
+    .where(
+      and(
+        inArray(ticket.projectId, projects),
+        isNull(ticket.trashedAt),
+        isNull(ticket.convertedToEpicId),
+      ),
+    );
 }
 
 // The Inbox projects retained source records. It cannot approve, retry, dispatch,
 // or invent work. Resolved/superseded source state removes an obligation for all
 // recipients, independently of their personal read receipts.
-async function listIn(sql: DatabaseTransaction, userID: string): Promise<InboxView> {
-  await requireActiveAccountIn(sql, userID);
-  const [administrator] =
-    await sql`SELECT user_id FROM factory.administrator WHERE user_id=${userID} FOR SHARE`;
-  const memberships = await sql<{ projectId: string; role: string; manage: boolean }[]>`
-    SELECT project_id AS "projectId",role,manage_project AS manage
-    FROM factory.project_membership WHERE user_id=${userID} FOR SHARE`;
-  const projects = await sql<{ id: string; name: string }[]>`
-    SELECT id,name FROM factory.project
-    WHERE ${Boolean(administrator)} OR id=ANY(${memberships.map((row) => row.projectId)}::uuid[])`;
+async function listIn(transaction: DatabaseTransaction, userID: string): Promise<InboxView> {
+  const db = drizzleTransaction(transaction);
+  await requireActiveAccountIn(transaction, userID);
+  const [admin] = await db
+    .select({ userId: administrator.userId })
+    .from(administrator)
+    .where(eq(administrator.userId, userID))
+    .for("share");
+  const memberships = await db
+    .select({
+      projectId: projectMembership.projectId,
+      role: projectMembership.role,
+      manage: projectMembership.manageProject,
+    })
+    .from(projectMembership)
+    .where(eq(projectMembership.userId, userID))
+    .for("share");
+  const projects = await db
+    .select({ id: project.id, name: project.name })
+    .from(project)
+    .where(
+      admin
+        ? undefined
+        : inArray(
+            project.id,
+            memberships.map((row) => row.projectId),
+          ),
+    );
   if (!projects.length) return { items: [], count: 0 };
   const scopes = new Map<string, Scope>(
     projects.map((project) => {
@@ -110,14 +232,16 @@ async function listIn(sql: DatabaseTransaction, userID: string): Promise<InboxVi
         project.id,
         {
           ...project,
-          develop: Boolean(administrator || membership?.role === "developer"),
-          manage: Boolean(administrator || membership?.manage),
+          develop: Boolean(admin || membership?.role === "developer"),
+          manage: Boolean(admin || membership?.manage),
         },
       ];
     }),
   );
   const projectIDs = projects.map((project) => project.id);
-  const tickets = new Map((await ticketsIn(sql, userID, projectIDs)).map((row) => [row.id, row]));
+  const tickets = new Map(
+    (await ticketsIn(transaction, userID, projectIDs)).map((row) => [row.id, row]),
+  );
   const followedIDs = [...tickets.values()]
     .filter((ticket) => ticket.following)
     .map((ticket) => ticket.id);
@@ -126,21 +250,34 @@ async function listIn(sql: DatabaseTransaction, userID: string): Promise<InboxVi
       [...tickets.values()].flatMap((row) => (row.responsibleId ? [row.responsibleId] : [])),
     ),
   ];
-  const responsibleMembers = await sql<(AttentionMember & { projectId: string })[]>`
-    SELECT member.user_id AS id,member.project_id AS "projectId",
-      (member.role='developer' OR admin.user_id IS NOT NULL) AS develop,
-      (member.manage_project OR admin.user_id IS NOT NULL) AS manage
-    FROM factory.project_membership member
-    JOIN factory.account_access account ON account.user_id=member.user_id
-    LEFT JOIN factory.administrator admin ON admin.user_id=member.user_id
-    WHERE member.user_id=ANY(${responsibleIDs}::uuid[])
-      AND member.project_id=ANY(${projectIDs}::uuid[])
-      AND account.disabled_at IS NULL AND account.directory_disabled_at IS NULL`;
+  const responsibleMembers: (AttentionMember & { projectId: string })[] = await db
+    .select({
+      id: projectMembership.userId,
+      projectId: projectMembership.projectId,
+      develop: sql<boolean>`${projectMembership.role}='developer' OR ${administrator.userId} IS NOT NULL`,
+      manage: sql<boolean>`${projectMembership.manageProject} OR ${administrator.userId} IS NOT NULL`,
+    })
+    .from(projectMembership)
+    .innerJoin(accountAccess, eq(accountAccess.userId, projectMembership.userId))
+    .leftJoin(administrator, eq(administrator.userId, projectMembership.userId))
+    .where(
+      and(
+        inArray(projectMembership.userId, responsibleIDs),
+        inArray(projectMembership.projectId, projectIDs),
+        isNull(accountAccess.disabledAt),
+        isNull(accountAccess.directoryDisabledAt),
+      ),
+    );
   const receipts = new Map(
     (
-      await sql<{ itemId: string; seen: string | null; archived: boolean }[]>`
-    SELECT item_id AS "itemId",seen_event_id AS seen,archived
-    FROM factory.inbox_receipt WHERE user_id=${userID}`
+      await db
+        .select({
+          itemId: inboxReceipt.itemId,
+          seen: inboxReceipt.seenEventId,
+          archived: inboxReceipt.archived,
+        })
+        .from(inboxReceipt)
+        .where(eq(inboxReceipt.userId, userID))
     ).map((row) => [row.itemId, row]),
   );
   const items = new Map<string, InboxItem>();
@@ -193,247 +330,684 @@ async function listIn(sql: DatabaseTransaction, userID: string): Promise<InboxVi
   }
 
   // Shared Ticket chat only. Private Project histories never become team activity.
-  const conversations = await sql<(Source & { actorID: string; visibility: string | null })[]>`
-    SELECT 'conversation:'||conversation.id::text||':'||COALESCE(entry.payload->>'contextId','original') AS id,
-      entry.id::text AS "eventId",conversation.project_id AS "projectId",
-      conversation.ticket_id AS "ticketId",'New Ticket discussion' AS title,entry.body AS preview,
-      entry.created_at AS "createdAt",'conversation' AS target,entry.id AS "targetId",
-      (entry.payload->>'contextId')::uuid AS "contextId",'contribute' AS capability,
-      entry.created_by AS "actorID",entry.payload->>'visibility' AS visibility
-    FROM factory.conversation_entry entry
-    JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-    WHERE conversation.project_id=ANY(${projectIDs}::uuid[]) AND conversation.ticket_id IS NOT NULL
-      AND entry.actor='user' AND entry.kind IN ('user-message','answer')
-      AND entry.created_by<>${userID}
-      AND (conversation.ticket_id=ANY(${followedIDs}::uuid[]) OR position(${userID} IN entry.body)>0)
-    ORDER BY entry.created_at,entry.ordinal`;
+  const conversations = await db
+    .select({
+      id: sql<string>`'conversation:'||${ticketConversation.id}::text||':'||coalesce(${conversationEntry.payload}->>'contextId','original')`,
+      eventId: conversationEntry.id,
+      projectId: ticketConversation.projectId,
+      ticketId: ticketConversation.ticketId,
+      title: sql<string>`'New Ticket discussion'`,
+      preview: conversationEntry.body,
+      createdAt: conversationEntry.createdAt,
+      target: sql<Source["target"]>`'conversation'`,
+      targetId: conversationEntry.id,
+      contextId: sql<string | null>`(${conversationEntry.payload}->>'contextId')::uuid`,
+      capability: sql<AttentionCapability>`'contribute'`,
+      visibility: sql<string | null>`${conversationEntry.payload}->>'visibility'`,
+    })
+    .from(conversationEntry)
+    .innerJoin(ticketConversation, eq(ticketConversation.id, conversationEntry.conversationId))
+    .where(
+      and(
+        inArray(ticketConversation.projectId, projectIDs),
+        isNotNull(ticketConversation.ticketId),
+        eq(conversationEntry.actor, "user"),
+        inArray(conversationEntry.kind, ["user-message", "answer"]),
+        ne(conversationEntry.createdBy, userID),
+        or(
+          inArray(ticketConversation.ticketId, followedIDs),
+          sql<boolean>`position(${userID} IN ${conversationEntry.body})>0`,
+        ),
+      ),
+    )
+    .orderBy(conversationEntry.createdAt, conversationEntry.ordinal);
   for (const row of conversations) {
     const mentioned = mentionedPeople(row.preview).includes(userID);
     if (row.visibility === "developer" && !scopes.get(row.projectId)?.develop) continue;
     if ((row.ticketId && tickets.get(row.ticketId)?.following) || mentioned)
       append({ ...row, title: mentioned ? "You were mentioned in Ticket chat" : row.title }, false);
   }
-  const coding = await sql<Source[]>`
-    SELECT 'coding:'||change.id::text||':'||COALESCE(turn.input->>'contextId','original') AS id,
-      turn.id::text AS "eventId",turn.project_id AS "projectId",turn.ticket_id AS "ticketId",
-      'New Coding discussion' AS title,turn.input->>'text' AS preview,turn.created_at AS "createdAt",
-      'coding' AS target,intent.prompt_id AS "targetId",(turn.input->>'contextId')::uuid AS "contextId",
-      'develop' AS capability
-    FROM factory.agent_turn turn JOIN factory.change change ON change.id=turn.change_id
-    JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-    WHERE turn.project_id=ANY(${projectIDs}::uuid[]) AND turn.input->>'kind'='change-prompt'
-      AND turn.created_by<>${userID}
-      AND (turn.ticket_id=ANY(${followedIDs}::uuid[]) OR position(${userID} IN turn.input->>'text')>0)
-    ORDER BY turn.created_at,turn.id`;
+  const coding = await db
+    .select({
+      id: sql<string>`'coding:'||${change.id}::text||':'||coalesce(${agentTurn.input}->>'contextId','original')`,
+      eventId: agentTurn.id,
+      projectId: agentTurn.projectId,
+      ticketId: agentTurn.ticketId,
+      title: sql<string>`'New Coding discussion'`,
+      preview: sql<string>`${agentTurn.input}->>'text'`,
+      createdAt: agentTurn.createdAt,
+      target: sql<Source["target"]>`'coding'`,
+      targetId: changeAgentTurnIntent.promptId,
+      contextId: sql<string | null>`(${agentTurn.input}->>'contextId')::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+    })
+    .from(agentTurn)
+    .innerJoin(change, eq(change.id, agentTurn.changeId))
+    .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+    .where(
+      and(
+        inArray(agentTurn.projectId, projectIDs),
+        sql<boolean>`${agentTurn.input}->>'kind'='change-prompt'`,
+        ne(agentTurn.createdBy, userID),
+        or(
+          inArray(agentTurn.ticketId, followedIDs),
+          sql<boolean>`position(${userID} IN ${agentTurn.input}->>'text')>0`,
+        ),
+      ),
+    )
+    .orderBy(agentTurn.createdAt, agentTurn.id);
   for (const row of coding) {
     const mentioned = mentionedPeople(row.preview).includes(userID);
     if ((row.ticketId && tickets.get(row.ticketId)?.following) || mentioned)
       append({ ...row, title: mentioned ? "You were mentioned in Coding" : row.title }, false);
   }
-  const discussions = await sql<Source[]>`
-    SELECT 'feedback:'||feedback.id::text AS id,message.id::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",
-      'New review discussion' AS title,message.body AS preview,message.created_at AS "createdAt",
-      'review' AS target,feedback.id AS "targetId",NULL::uuid AS "contextId",'contribute' AS capability
-    FROM factory.review_feedback_message message
-    JOIN factory.review_feedback feedback ON feedback.id=message.feedback_id
-    JOIN factory.change change ON change.id=feedback.change_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND message.author_id<>${userID}
-      AND (change.ticket_id=ANY(${followedIDs}::uuid[]) OR position(${userID} IN message.body)>0)
-    ORDER BY message.created_at,message.id`;
+  const discussions = await db
+    .select({
+      id: sql<string>`'feedback:'||${reviewFeedback.id}::text`,
+      eventId: reviewFeedbackMessage.id,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'New review discussion'`,
+      preview: reviewFeedbackMessage.body,
+      createdAt: reviewFeedbackMessage.createdAt,
+      target: sql<Source["target"]>`'review'`,
+      targetId: reviewFeedback.id,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'contribute'`,
+    })
+    .from(reviewFeedbackMessage)
+    .innerJoin(reviewFeedback, eq(reviewFeedback.id, reviewFeedbackMessage.feedbackId))
+    .innerJoin(change, eq(change.id, reviewFeedback.changeId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        ne(reviewFeedbackMessage.authorId, userID),
+        or(
+          inArray(change.ticketId, followedIDs),
+          sql<boolean>`position(${userID} IN ${reviewFeedbackMessage.body})>0`,
+        ),
+      ),
+    )
+    .orderBy(reviewFeedbackMessage.createdAt, reviewFeedbackMessage.id);
   for (const row of discussions) {
     const mentioned = mentionedPeople(row.preview).includes(userID);
     if ((row.ticketId && tickets.get(row.ticketId)?.following) || mentioned)
       append({ ...row, title: mentioned ? "You were mentioned in review" : row.title }, false);
   }
-  const assignments = await sql<Source[]>`
-    SELECT 'responsibility:'||event.ticket_id::text AS id,event.id::text AS "eventId",
-      ticket.project_id AS "projectId",ticket.id AS "ticketId",'You are responsible for this Ticket' AS title,
-      actor.name||' assigned you responsibility. This does not start Agent work.' AS preview,
-      event.created_at AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'contribute' AS capability
-    FROM factory.ticket_responsibility_event event
-    JOIN factory.ticket ticket ON ticket.id=event.ticket_id
-    JOIN auth."user" actor ON actor.id=event.actor_id
-    WHERE ticket.project_id=ANY(${projectIDs}::uuid[]) AND event.user_id=${userID} AND event.actor_id<>${userID}
-    ORDER BY event.created_at,event.id`;
+  const assignments = await db
+    .select({
+      id: sql<string>`'responsibility:'||${ticketResponsibilityEvent.ticketId}::text`,
+      eventId: ticketResponsibilityEvent.id,
+      projectId: ticket.projectId,
+      ticketId: ticket.id,
+      title: sql<string>`'You are responsible for this Ticket'`,
+      preview: sql<string>`${authUser.name}||' assigned you responsibility. This does not start Agent work.'`,
+      createdAt: ticketResponsibilityEvent.createdAt,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'contribute'`,
+    })
+    .from(ticketResponsibilityEvent)
+    .innerJoin(ticket, eq(ticket.id, ticketResponsibilityEvent.ticketId))
+    .innerJoin(authUser, eq(authUser.id, ticketResponsibilityEvent.actorId))
+    .where(
+      and(
+        inArray(ticket.projectId, projectIDs),
+        eq(ticketResponsibilityEvent.userId, userID),
+        ne(ticketResponsibilityEvent.actorId, userID),
+      ),
+    )
+    .orderBy(ticketResponsibilityEvent.createdAt, ticketResponsibilityEvent.id);
   for (const row of assignments) append(row, false);
 
-  const questions = await sql<Source[]>`
-    SELECT entry.kind::text||':'||entry.id::text AS id,entry.id::text AS "eventId",
-      conversation.project_id AS "projectId",conversation.ticket_id AS "ticketId",
-      CASE WHEN entry.kind='question' THEN 'Answer the Agent’s question' ELSE 'Confirm proposed requirements' END AS title,
-      entry.body AS preview,entry.created_at AS "createdAt",'conversation' AS target,
-      entry.id AS "targetId",(entry.payload->>'contextId')::uuid AS "contextId",
-      CASE WHEN entry.payload->>'visibility'='developer' THEN 'develop' ELSE 'contribute' END AS capability,
-      CASE WHEN conversation.ticket_id IS NULL THEN conversation.created_by END AS "addressedTo"
-    FROM factory.conversation_entry entry
-    JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-    WHERE conversation.project_id=ANY(${projectIDs}::uuid[])
-      AND (conversation.ticket_id IS NOT NULL OR conversation.created_by=${userID})
-      AND entry.kind IN ('question','requirement')
-      AND NOT EXISTS(SELECT 1 FROM factory.conversation_entry answer
-        WHERE answer.in_reply_to_entry_id=entry.id AND answer.kind='answer')
-      AND NOT EXISTS(SELECT 1 FROM factory.ticket_document_revision revision WHERE revision.proposal_entry_id=entry.id)
-      AND NOT EXISTS(SELECT 1 FROM factory.conversation_entry newer
-        WHERE newer.conversation_id=entry.conversation_id AND newer.ordinal>entry.ordinal
-          AND newer.payload->>'contextId' IS NOT DISTINCT FROM entry.payload->>'contextId'
-          AND (newer.kind IN ('question','requirement') OR
-            (newer.kind='user-message' AND COALESCE(newer.payload->>'intent','')!='project-research')))`;
+  const answer = alias(conversationEntry, "answer");
+  const newerEntry = alias(conversationEntry, "newer_entry");
+  const questions = await db
+    .select({
+      id: sql<string>`${conversationEntry.kind}::text||':'||${conversationEntry.id}::text`,
+      eventId: conversationEntry.id,
+      projectId: ticketConversation.projectId,
+      ticketId: ticketConversation.ticketId,
+      title: sql<string>`case when ${conversationEntry.kind}='question' then 'Answer the Agent’s question' else 'Confirm proposed requirements' end`,
+      preview: conversationEntry.body,
+      createdAt: conversationEntry.createdAt,
+      target: sql<Source["target"]>`'conversation'`,
+      targetId: conversationEntry.id,
+      contextId: sql<string | null>`(${conversationEntry.payload}->>'contextId')::uuid`,
+      capability: sql<AttentionCapability>`case when ${conversationEntry.payload}->>'visibility'='developer' then 'develop' else 'contribute' end`,
+      addressedTo: sql<
+        string | null
+      >`case when ${ticketConversation.ticketId} is null then ${ticketConversation.createdBy} end`,
+    })
+    .from(conversationEntry)
+    .innerJoin(ticketConversation, eq(ticketConversation.id, conversationEntry.conversationId))
+    .where(
+      and(
+        inArray(ticketConversation.projectId, projectIDs),
+        or(isNotNull(ticketConversation.ticketId), eq(ticketConversation.createdBy, userID)),
+        inArray(conversationEntry.kind, ["question", "requirement"]),
+        notExists(
+          db
+            .select({ id: answer.id })
+            .from(answer)
+            .where(
+              and(eq(answer.inReplyToEntryId, conversationEntry.id), eq(answer.kind, "answer")),
+            ),
+        ),
+        notExists(
+          db
+            .select({ id: ticketDocumentRevision.id })
+            .from(ticketDocumentRevision)
+            .where(eq(ticketDocumentRevision.proposalEntryId, conversationEntry.id)),
+        ),
+        notExists(
+          db
+            .select({ id: newerEntry.id })
+            .from(newerEntry)
+            .where(
+              and(
+                eq(newerEntry.conversationId, conversationEntry.conversationId),
+                gt(newerEntry.ordinal, conversationEntry.ordinal),
+                sql<boolean>`${newerEntry.payload}->>'contextId' is not distinct from ${conversationEntry.payload}->>'contextId'`,
+                or(
+                  inArray(newerEntry.kind, ["question", "requirement"]),
+                  and(
+                    eq(newerEntry.kind, "user-message"),
+                    sql<boolean>`coalesce(${newerEntry.payload}->>'intent','')!='project-research'`,
+                  ),
+                ),
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of questions) {
     if (!row.ticketId && row.title === "Confirm proposed requirements") continue;
     append(row, true);
   }
-  const designs = await sql<Source[]>`
-    SELECT 'design:'||design.id::text AS id,design.id::text AS "eventId",
-      ticket.project_id AS "projectId",ticket.id AS "ticketId",'Review the technical design' AS title,
-      'Technical planning is complete. Review the design before approving implementation.' AS preview,
-      design.created_at AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'develop' AS capability
-    FROM factory.technical_design_revision design JOIN factory.ticket ticket ON ticket.id=design.ticket_id
-    WHERE ticket.project_id=ANY(${projectIDs}::uuid[]) AND ticket.state='ready'
-      AND design.ordinal=(SELECT max(ordinal) FROM factory.technical_design_revision WHERE ticket_id=ticket.id)
-      AND design.requirement_revision_id=(SELECT id FROM factory.requirement_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1)
-      AND NOT EXISTS(SELECT 1 FROM factory.requirement_approval WHERE technical_design_revision_id=design.id)
-      AND NOT EXISTS(SELECT 1 FROM factory.change WHERE ticket_id=ticket.id)
-      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE ticket_id=ticket.id AND state IN ('pending','dispatching','running','uncertain'))`;
+  const newestDesign = alias(technicalDesignRevision, "newest_design");
+  const designs = await db
+    .select({
+      id: sql<string>`'design:'||${technicalDesignRevision.id}::text`,
+      eventId: technicalDesignRevision.id,
+      projectId: ticket.projectId,
+      ticketId: ticket.id,
+      title: sql<string>`'Review the technical design'`,
+      preview: sql<string>`'Technical planning is complete. Review the design before approving implementation.'`,
+      createdAt: technicalDesignRevision.createdAt,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+    })
+    .from(technicalDesignRevision)
+    .innerJoin(ticket, eq(ticket.id, technicalDesignRevision.ticketId))
+    .where(
+      and(
+        inArray(ticket.projectId, projectIDs),
+        eq(ticket.state, "ready"),
+        eq(
+          technicalDesignRevision.ordinal,
+          db
+            .select({ ordinal: max(newestDesign.ordinal) })
+            .from(newestDesign)
+            .where(eq(newestDesign.ticketId, ticket.id)),
+        ),
+        eq(
+          technicalDesignRevision.requirementRevisionId,
+          db
+            .select({ id: requirementRevision.id })
+            .from(requirementRevision)
+            .where(eq(requirementRevision.ticketId, ticket.id))
+            .orderBy(desc(requirementRevision.ordinal))
+            .limit(1),
+        ),
+        notExists(
+          db
+            .select({ id: requirementApproval.id })
+            .from(requirementApproval)
+            .where(eq(requirementApproval.technicalDesignRevisionId, technicalDesignRevision.id)),
+        ),
+        notExists(db.select({ id: change.id }).from(change).where(eq(change.ticketId, ticket.id))),
+        notExists(
+          db
+            .select({ id: agentTurn.id })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.ticketId, ticket.id),
+                inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of designs) append(row, true);
-  const failures = await sql<Source[]>`
-    SELECT 'turn:'||turn.id::text AS id,turn.id::text AS "eventId",turn.project_id AS "projectId",
-      turn.ticket_id AS "ticketId",'Agent work needs attention' AS title,
-      COALESCE(turn.outcome_summary,'Work stopped without a confirmed result. Inspect before retrying.') AS preview,
-      turn.updated_at AS "createdAt",'conversation' AS target,NULL::uuid AS "targetId",
-      (turn.input->>'contextId')::uuid AS "contextId",
-      CASE WHEN turn.authority->>'mode'='build' OR turn.authority->>'visibility'='developer'
-        OR turn.input->>'intent' IN ('technical-planning','full-planning') THEN 'develop' ELSE 'contribute' END AS capability,
-      CASE WHEN turn.ticket_id IS NULL THEN turn.created_by END AS "addressedTo"
-    FROM factory.agent_turn turn
-    WHERE turn.project_id=ANY(${projectIDs}::uuid[]) AND turn.state IN ('failed','uncertain')
-      AND (turn.ticket_id IS NOT NULL OR turn.created_by=${userID})
-      AND NOT EXISTS(SELECT 1 FROM factory.coding_pause pause WHERE pause.turn_id=turn.id AND pause.resumed_by_turn_id IS NULL)
-      AND NOT EXISTS(SELECT 1 FROM factory.change change WHERE change.id=turn.change_id AND change.state='failed')
-      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn newer
-        WHERE ((turn.change_id IS NOT NULL AND newer.change_id=turn.change_id) OR
-          (turn.change_id IS NULL AND newer.conversation_id=turn.conversation_id
-            AND newer.input->>'contextId' IS NOT DISTINCT FROM turn.input->>'contextId'))
-          AND (newer.created_at,newer.id)>(turn.created_at,turn.id))`;
+  const newerTurn = alias(agentTurn, "newer_turn");
+  const failures = await db
+    .select({
+      id: sql<string>`'turn:'||${agentTurn.id}::text`,
+      eventId: agentTurn.id,
+      projectId: agentTurn.projectId,
+      ticketId: agentTurn.ticketId,
+      title: sql<string>`'Agent work needs attention'`,
+      preview: sql<string>`coalesce(${agentTurn.outcomeSummary},'Work stopped without a confirmed result. Inspect before retrying.')`,
+      createdAt: agentTurn.updatedAt,
+      target: sql<Source["target"]>`'conversation'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`(${agentTurn.input}->>'contextId')::uuid`,
+      capability: sql<AttentionCapability>`case when ${agentTurn.authority}->>'mode'='build' or ${agentTurn.authority}->>'visibility'='developer'
+      or ${agentTurn.input}->>'intent' in ('technical-planning','full-planning') then 'develop' else 'contribute' end`,
+      addressedTo: sql<
+        string | null
+      >`case when ${agentTurn.ticketId} is null then ${agentTurn.createdBy} end`,
+    })
+    .from(agentTurn)
+    .where(
+      and(
+        inArray(agentTurn.projectId, projectIDs),
+        inArray(agentTurn.state, ["failed", "uncertain"]),
+        or(isNotNull(agentTurn.ticketId), eq(agentTurn.createdBy, userID)),
+        notExists(
+          db
+            .select({ id: codingPause.turnId })
+            .from(codingPause)
+            .where(and(eq(codingPause.turnId, agentTurn.id), isNull(codingPause.resumedByTurnId))),
+        ),
+        notExists(
+          db
+            .select({ id: change.id })
+            .from(change)
+            .where(and(eq(change.id, agentTurn.changeId), eq(change.state, "failed"))),
+        ),
+        notExists(
+          db
+            .select({ id: newerTurn.id })
+            .from(newerTurn)
+            .where(
+              and(
+                or(
+                  and(isNotNull(agentTurn.changeId), eq(newerTurn.changeId, agentTurn.changeId)),
+                  and(
+                    isNull(agentTurn.changeId),
+                    eq(newerTurn.conversationId, agentTurn.conversationId),
+                    sql<boolean>`${newerTurn.input}->>'contextId' is not distinct from ${agentTurn.input}->>'contextId'`,
+                  ),
+                ),
+                sql<boolean>`(${newerTurn.createdAt},${newerTurn.id})>(${agentTurn.createdAt},${agentTurn.id})`,
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of failures) {
     const ticket = row.ticketId && tickets.get(row.ticketId);
     if (ticket && ["done", "cancelled"].includes(ticket.state)) continue;
     append(plainPreview(row), true);
   }
-  const changes = await sql<Source[]>`
-    SELECT 'change:'||change.id::text AS id,change.id::text||':'||change.version::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Implementation is blocked' AS title,
-      COALESCE(change.failure,'Implementation failed. Inspect the Ticket before retrying.') AS preview,
-      change.created_at AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'develop' AS capability
-    FROM factory.change change WHERE change.project_id=ANY(${projectIDs}::uuid[])
-      AND change.state='failed'
-      AND NOT EXISTS(SELECT 1 FROM factory.change newer WHERE newer.ticket_id=change.ticket_id
-        AND (newer.created_at,newer.id)>(change.created_at,change.id))`;
+  const newerChange = alias(change, "newer_change");
+  const changes = await db
+    .select({
+      id: sql<string>`'change:'||${change.id}::text`,
+      eventId: sql<string>`${change.id}::text||':'||${change.version}::text`,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Implementation is blocked'`,
+      preview: sql<string>`coalesce(${change.failure},'Implementation failed. Inspect the Ticket before retrying.')`,
+      createdAt: change.createdAt,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+    })
+    .from(change)
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        eq(change.state, "failed"),
+        notExists(
+          db
+            .select({ id: newerChange.id })
+            .from(newerChange)
+            .where(
+              and(
+                eq(newerChange.ticketId, change.ticketId),
+                sql<boolean>`(${newerChange.createdAt},${newerChange.id})>(${change.createdAt},${change.id})`,
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of changes) append(plainPreview(row), true);
-  const pauses = await sql<Source[]>`
-    SELECT 'pause:'||pause.turn_id::text AS id,pause.turn_id::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Coding is paused' AS title,
-      pause.reason AS preview,turn.updated_at AS "createdAt",'ticket' AS target,
-      NULL::uuid AS "targetId",NULL::uuid AS "contextId",'contribute' AS capability
-    FROM factory.coding_pause pause JOIN factory.agent_turn turn ON turn.id=pause.turn_id
-    JOIN factory.change change ON change.id=turn.change_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND pause.resumed_by_turn_id IS NULL
-      AND change.state NOT IN ('cancelled','delivered')
-      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn newer WHERE newer.change_id=change.id
-        AND (newer.created_at,newer.id)>(turn.created_at,turn.id))`;
+  const pauses = await db
+    .select({
+      id: sql<string>`'pause:'||${codingPause.turnId}::text`,
+      eventId: codingPause.turnId,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Coding is paused'`,
+      preview: codingPause.reason,
+      createdAt: agentTurn.updatedAt,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'contribute'`,
+    })
+    .from(codingPause)
+    .innerJoin(agentTurn, eq(agentTurn.id, codingPause.turnId))
+    .innerJoin(change, eq(change.id, agentTurn.changeId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        isNull(codingPause.resumedByTurnId),
+        notInArray(change.state, ["cancelled", "delivered"]),
+        notExists(
+          db
+            .select({ id: newerTurn.id })
+            .from(newerTurn)
+            .where(
+              and(
+                eq(newerTurn.changeId, change.id),
+                sql<boolean>`(${newerTurn.createdAt},${newerTurn.id})>(${agentTurn.createdAt},${agentTurn.id})`,
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of pauses) append(plainPreview(row), true);
 
-  const feedback = await sql<Source[]>`
-    SELECT 'recheck:'||feedback.id::text AS id,feedback.id::text||':'||feedback.version::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Recheck implemented feedback' AS title,
-      'The Agent reports this Thread implemented. Inspect the result and resolve it or request changes.' AS preview,
-      feedback.created_at AS "createdAt",'review' AS target,feedback.id AS "targetId",
-      NULL::uuid AS "contextId",'develop' AS capability,feedback.author_id AS "authorID"
-    FROM factory.review_feedback feedback JOIN factory.change change ON change.id=feedback.change_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND feedback.kind='thread'
-      AND feedback.state='implemented' AND change.state NOT IN ('cancelled','delivered')`;
+  const feedback = await db
+    .select({
+      id: sql<string>`'recheck:'||${reviewFeedback.id}::text`,
+      eventId: sql<string>`${reviewFeedback.id}::text||':'||${reviewFeedback.version}::text`,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Recheck implemented feedback'`,
+      preview: sql<string>`'The Agent reports this Thread implemented. Inspect the result and resolve it or request changes.'`,
+      createdAt: reviewFeedback.createdAt,
+      target: sql<Source["target"]>`'review'`,
+      targetId: reviewFeedback.id,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+      authorID: reviewFeedback.authorId,
+    })
+    .from(reviewFeedback)
+    .innerJoin(change, eq(change.id, reviewFeedback.changeId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        eq(reviewFeedback.kind, "thread"),
+        eq(reviewFeedback.state, "implemented"),
+        notInArray(change.state, ["cancelled", "delivered"]),
+      ),
+    );
   for (const row of feedback) append(row, true);
-  const editing = await sql<Source[]>`
-    SELECT 'editing:'||request.id::text AS id,request.id::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Editing transfer requested' AS title,
-      requester.name||' would like to edit this Ticket Workspace.' AS preview,
-      request.created_at AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'develop' AS capability,request.owner_id AS "addressedTo"
-    FROM factory.change_editing_request request
-    JOIN factory.change change ON change.id=request.change_id
-    JOIN factory.change_writer writer ON writer.change_id=change.id
-    JOIN auth."user" requester ON requester.id=request.requester_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND request.state='requested'
-      AND request.owner_id=${userID} AND writer.user_id=request.owner_id
-      AND writer.epoch=request.writer_epoch AND writer.state='human'`;
+  const editing = await db
+    .select({
+      id: sql<string>`'editing:'||${changeEditingRequest.id}::text`,
+      eventId: changeEditingRequest.id,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Editing transfer requested'`,
+      preview: sql<string>`${authUser.name}||' would like to edit this Ticket Workspace.'`,
+      createdAt: changeEditingRequest.createdAt,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+      addressedTo: changeEditingRequest.ownerId,
+    })
+    .from(changeEditingRequest)
+    .innerJoin(change, eq(change.id, changeEditingRequest.changeId))
+    .innerJoin(changeWriter, eq(changeWriter.changeId, change.id))
+    .innerJoin(authUser, eq(authUser.id, changeEditingRequest.requesterId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        eq(changeEditingRequest.state, "requested"),
+        eq(changeEditingRequest.ownerId, userID),
+        eq(changeWriter.userId, changeEditingRequest.ownerId),
+        eq(changeWriter.epoch, changeEditingRequest.writerEpoch),
+        eq(changeWriter.state, "human"),
+      ),
+    );
   for (const row of editing) append(row, true);
 
   // Exact current verification/review, settled writer and no open Threads.
   // The destination command still rechecks its complete immutable-candidate gate.
-  const delivery = await sql<Source[]>`
-    SELECT 'delivery:'||review.id::text AS id,review.id::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Review and approve Delivery' AS title,
-      COALESCE(review.result->>'summary','Verification and independent review passed. Inspect the exact candidate before Delivery.') AS preview,
-      review.completed_at AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'develop' AS capability
-    FROM factory.change change
-    JOIN factory.change_agent_session session ON session.change_id=change.id AND session.state='committed'
-    JOIN factory.verification verification ON verification.change_id=change.id AND verification.state='succeeded'
-    JOIN factory.candidate_review review ON review.verification_id=verification.id AND review.state='passed'
-    JOIN factory.requirement_approval approved ON approved.id=change.requirement_approval_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND change.state='active'
-      AND change.cancel_requested_at IS NULL AND NOT session.stop_pending
-      AND verification.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
-        WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
-      AND review.ordinal=(SELECT max(ordinal) FROM factory.candidate_review WHERE verification_id=verification.id)
-      AND approved.requirement_revision_id=(SELECT id FROM factory.requirement_revision
-        WHERE ticket_id=change.ticket_id ORDER BY ordinal DESC LIMIT 1)
-      AND NOT EXISTS(SELECT 1 FROM factory.delivery_approval WHERE verification_id=verification.id)
-      AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE change_id=change.id AND kind='thread' AND state<>'resolved')
-      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running','uncertain'))
-      AND NOT EXISTS(SELECT 1 FROM factory.change_writer WHERE change_id=change.id AND state NOT IN ('agent','unassigned'))
-      AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id AND state NOT IN ('succeeded','failed'))`;
+  const newestReview = alias(candidateReview, "newest_review");
+  const currentCommit = db
+    .select({ commitSha: changeCommitOperation.commitSha })
+    .from(changeCommitOperation)
+    .where(
+      and(
+        eq(changeCommitOperation.changeId, change.id),
+        eq(changeCommitOperation.state, "succeeded"),
+      ),
+    )
+    .orderBy(desc(changeCommitOperation.sequence))
+    .limit(1);
+  const delivery = await db
+    .select({
+      id: sql<string>`'delivery:'||${candidateReview.id}::text`,
+      eventId: candidateReview.id,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Review and approve Delivery'`,
+      preview: sql<string>`coalesce(${candidateReview.result}->>'summary','Verification and independent review passed. Inspect the exact candidate before Delivery.')`,
+      createdAt: sql<Date | string>`${candidateReview.completedAt}`,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+    })
+    .from(change)
+    .innerJoin(
+      changeAgentSession,
+      and(eq(changeAgentSession.changeId, change.id), eq(changeAgentSession.state, "committed")),
+    )
+    .innerJoin(
+      verification,
+      and(eq(verification.changeId, change.id), eq(verification.state, "succeeded")),
+    )
+    .innerJoin(
+      candidateReview,
+      and(eq(candidateReview.verificationId, verification.id), eq(candidateReview.state, "passed")),
+    )
+    .innerJoin(requirementApproval, eq(requirementApproval.id, change.requirementApprovalId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        eq(change.state, "active"),
+        isNull(change.cancelRequestedAt),
+        eq(changeAgentSession.stopPending, false),
+        eq(verification.commitSha, currentCommit),
+        eq(
+          candidateReview.ordinal,
+          db
+            .select({ ordinal: max(newestReview.ordinal) })
+            .from(newestReview)
+            .where(eq(newestReview.verificationId, verification.id)),
+        ),
+        eq(
+          requirementApproval.requirementRevisionId,
+          db
+            .select({ id: requirementRevision.id })
+            .from(requirementRevision)
+            .where(eq(requirementRevision.ticketId, change.ticketId))
+            .orderBy(desc(requirementRevision.ordinal))
+            .limit(1),
+        ),
+        notExists(
+          db
+            .select({ id: deliveryApproval.id })
+            .from(deliveryApproval)
+            .where(eq(deliveryApproval.verificationId, verification.id)),
+        ),
+        notExists(
+          db
+            .select({ id: reviewFeedback.id })
+            .from(reviewFeedback)
+            .where(
+              and(
+                eq(reviewFeedback.changeId, change.id),
+                eq(reviewFeedback.kind, "thread"),
+                ne(reviewFeedback.state, "resolved"),
+              ),
+            ),
+        ),
+        notExists(
+          db
+            .select({ id: agentTurn.id })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.changeId, change.id),
+                inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+              ),
+            ),
+        ),
+        notExists(
+          db
+            .select({ id: changeWriter.changeId })
+            .from(changeWriter)
+            .where(
+              and(
+                eq(changeWriter.changeId, change.id),
+                notInArray(changeWriter.state, ["agent", "unassigned"]),
+              ),
+            ),
+        ),
+        notExists(
+          db
+            .select({ id: changeCommitOperation.id })
+            .from(changeCommitOperation)
+            .where(
+              and(
+                eq(changeCommitOperation.changeId, change.id),
+                notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of delivery) append(row, true);
-  const reviewFailures = await sql<Source[]>`
-    SELECT 'review:'||review.id::text AS id,review.id::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Independent review needs attention' AS title,
-      COALESCE(review.result->>'summary','Independent review is incomplete. Inspect its evidence before retrying.') AS preview,
-      COALESCE(review.completed_at,review.created_at) AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'contribute' AS capability
-    FROM factory.candidate_review review
-    JOIN factory.change change ON change.id=review.change_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND change.state='active' AND review.state='incomplete'
-      AND review.ordinal=(SELECT max(ordinal) FROM factory.candidate_review WHERE verification_id=review.verification_id)
-      AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
-        WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
-      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running'))`;
+  const reviewFailures = await db
+    .select({
+      id: sql<string>`'review:'||${candidateReview.id}::text`,
+      eventId: candidateReview.id,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Independent review needs attention'`,
+      preview: sql<string>`coalesce(${candidateReview.result}->>'summary','Independent review is incomplete. Inspect its evidence before retrying.')`,
+      createdAt: sql<
+        Date | string
+      >`coalesce(${candidateReview.completedAt},${candidateReview.createdAt})`,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'contribute'`,
+    })
+    .from(candidateReview)
+    .innerJoin(change, eq(change.id, candidateReview.changeId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        eq(change.state, "active"),
+        eq(candidateReview.state, "incomplete"),
+        eq(
+          candidateReview.ordinal,
+          db
+            .select({ ordinal: max(newestReview.ordinal) })
+            .from(newestReview)
+            .where(eq(newestReview.verificationId, candidateReview.verificationId)),
+        ),
+        eq(candidateReview.commitSha, currentCommit),
+        notExists(
+          db
+            .select({ id: agentTurn.id })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.changeId, change.id),
+                inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of reviewFailures) append(row, true);
-  const checks = await sql<Source[]>`
-    SELECT 'verification:'||verification.id::text AS id,verification.id::text AS "eventId",
-      change.project_id AS "projectId",change.ticket_id AS "ticketId",'Verification needs attention' AS title,
-      COALESCE(verification.summary,'Verification failed after the correction attempt. Inspect the checks before continuing.') AS preview,
-      verification.updated_at AS "createdAt",'ticket' AS target,NULL::uuid AS "targetId",
-      NULL::uuid AS "contextId",'develop' AS capability
-    FROM factory.verification verification JOIN factory.change change ON change.id=verification.change_id
-    WHERE change.project_id=ANY(${projectIDs}::uuid[]) AND change.state='active'
-      AND verification.state='failed' AND verification.repair_prompted_at IS NOT NULL
-      AND verification.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
-        WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
-      AND NOT EXISTS(SELECT 1 FROM factory.verification newer WHERE newer.change_id=change.id
-        AND (newer.created_at,newer.id)>(verification.created_at,verification.id))
-      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running'))`;
+  const newerVerification = alias(verification, "newer_verification");
+  const checks = await db
+    .select({
+      id: sql<string>`'verification:'||${verification.id}::text`,
+      eventId: verification.id,
+      projectId: change.projectId,
+      ticketId: change.ticketId,
+      title: sql<string>`'Verification needs attention'`,
+      preview: sql<string>`coalesce(${verification.summary},'Verification failed after the correction attempt. Inspect the checks before continuing.')`,
+      createdAt: verification.updatedAt,
+      target: sql<Source["target"]>`'ticket'`,
+      targetId: sql<string | null>`null::uuid`,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'develop'`,
+    })
+    .from(verification)
+    .innerJoin(change, eq(change.id, verification.changeId))
+    .where(
+      and(
+        inArray(change.projectId, projectIDs),
+        eq(change.state, "active"),
+        eq(verification.state, "failed"),
+        isNotNull(verification.repairPromptedAt),
+        eq(verification.commitSha, currentCommit),
+        notExists(
+          db
+            .select({ id: newerVerification.id })
+            .from(newerVerification)
+            .where(
+              and(
+                eq(newerVerification.changeId, change.id),
+                sql<boolean>`(${newerVerification.createdAt},${newerVerification.id})>(${verification.createdAt},${verification.id})`,
+              ),
+            ),
+        ),
+        notExists(
+          db
+            .select({ id: agentTurn.id })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.changeId, change.id),
+                inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+              ),
+            ),
+        ),
+      ),
+    );
   for (const row of checks) append(row, true);
-  const inputs = await sql<Source[]>`
-    SELECT 'input:'||incident.id::text AS id,incident.id::text||':'||incident.state AS "eventId",
-      incident.project_id AS "projectId",incident.ticket_id AS "ticketId",'Project Input needs attention' AS title,
-      COALESCE(incident.reason,'This external request could not continue. Inspect its retained outcome before retrying.') AS preview,
-      incident.last_seen_at AS "createdAt",'inputs' AS target,incident.id AS "targetId",
-      NULL::uuid AS "contextId",'manage' AS capability
-    FROM factory.monitoring_incident incident
-    WHERE incident.project_id=ANY(${projectIDs}::uuid[]) AND incident.state IN ('blocked','uncertain')`;
+  const inputs = await db
+    .select({
+      id: sql<string>`'input:'||${monitoringIncident.id}::text`,
+      eventId: sql<string>`${monitoringIncident.id}::text||':'||${monitoringIncident.state}`,
+      projectId: monitoringIncident.projectId,
+      ticketId: monitoringIncident.ticketId,
+      title: sql<string>`'Project Input needs attention'`,
+      preview: sql<string>`coalesce(${monitoringIncident.reason},'This external request could not continue. Inspect its retained outcome before retrying.')`,
+      createdAt: monitoringIncident.lastSeenAt,
+      target: sql<Source["target"]>`'inputs'`,
+      targetId: monitoringIncident.id,
+      contextId: sql<string | null>`null::uuid`,
+      capability: sql<AttentionCapability>`'manage'`,
+    })
+    .from(monitoringIncident)
+    .where(
+      and(
+        inArray(monitoringIncident.projectId, projectIDs),
+        inArray(monitoringIncident.state, ["blocked", "uncertain"]),
+      ),
+    );
   // Inputs retain terminal outcomes but have no per-event resolve/retry command.
   // Notify their managers without manufacturing an unresolvable shared request.
   for (const row of inputs) append(row, false);
@@ -448,64 +1022,87 @@ async function listIn(sql: DatabaseTransaction, userID: string): Promise<InboxVi
 
 export function createInboxService(database: ReturnType<typeof createDatabase>) {
   async function attentionIn(
-    sql: DatabaseTransaction,
+    transaction: DatabaseTransaction,
     userID: string,
     ticketID: string,
     write = false,
   ) {
-    const [ticket] = await sql<{ projectId: string }[]>`
-      SELECT project_id AS "projectId" FROM factory.ticket WHERE id=${ticketID}
-        AND trashed_at IS NULL AND converted_to_epic_id IS NULL`;
-    if (!ticket) throw new CommandError("not-found", "Ticket not found");
-    await projectAuthorityIn(sql, userID, ticket.projectId);
+    const db = drizzleTransaction(transaction);
+    const [foundTicket] = await db
+      .select({ projectId: ticket.projectId })
+      .from(ticket)
+      .where(
+        and(eq(ticket.id, ticketID), isNull(ticket.trashedAt), isNull(ticket.convertedToEpicId)),
+      );
+    if (!foundTicket) throw new CommandError("not-found", "Ticket not found");
+    await projectAuthorityIn(transaction, userID, foundTicket.projectId);
     // Match the existing account/membership -> Ticket lock order. Polling takes
     // only a shared lock; metadata writes serialize without fencing Agent work.
-    const locked = write
-      ? await sql`SELECT id FROM factory.ticket WHERE id=${ticketID} AND project_id=${ticket.projectId}
-          AND trashed_at IS NULL AND converted_to_epic_id IS NULL FOR UPDATE`
-      : await sql`SELECT id FROM factory.ticket WHERE id=${ticketID} AND project_id=${ticket.projectId}
-          AND trashed_at IS NULL AND converted_to_epic_id IS NULL FOR SHARE`;
+    const locked = await db
+      .select({ id: ticket.id })
+      .from(ticket)
+      .where(
+        and(
+          eq(ticket.id, ticketID),
+          eq(ticket.projectId, foundTicket.projectId),
+          isNull(ticket.trashedAt),
+          isNull(ticket.convertedToEpicId),
+        ),
+      )
+      .for(write ? "update" : "share");
     if (!locked.length) throw new CommandError("not-found", "Ticket not found");
-    const [responsibility] = await sql<{ userId: string | null; version: number }[]>`
-      SELECT user_id AS "userId",version FROM factory.ticket_responsibility WHERE ticket_id=${ticketID}`;
-    const ticketView = (await ticketsIn(sql, userID, [ticket.projectId])).find(
+    const [responsibility] = await db
+      .select({
+        userId: ticketResponsibility.userId,
+        version: ticketResponsibility.version,
+      })
+      .from(ticketResponsibility)
+      .where(eq(ticketResponsibility.ticketId, ticketID));
+    const ticketView = (await ticketsIn(transaction, userID, [foundTicket.projectId])).find(
       (row) => row.id === ticketID,
     );
     return {
-      projectID: ticket.projectId,
+      projectID: foundTicket.projectId,
       view: ticketAttentionSchema.parse({
         responsibleId: responsibility?.userId ?? null,
         version: responsibility?.version ?? 0,
         following: ticketView?.following ?? false,
-        people: await peopleIn(sql, ticket.projectId),
+        people: await peopleIn(transaction, foundTicket.projectId),
       }),
     };
   }
   return {
     async list(userID: string) {
-      return database.client.begin((sql) => listIn(sql, userID));
+      return database.client.begin((transaction) => listIn(transaction, userID));
     },
     async people(userID: string, projectID: string) {
-      return database.client.begin(async (sql) => {
-        await projectAuthorityIn(sql, userID, projectID);
-        return peopleIn(sql, projectID);
+      return database.client.begin(async (transaction) => {
+        await projectAuthorityIn(transaction, userID, projectID);
+        return peopleIn(transaction, projectID);
       });
     },
     async ticket(userID: string, ticketID: string) {
-      return database.client.begin(async (sql) => (await attentionIn(sql, userID, ticketID)).view);
+      return database.client.begin(
+        async (transaction) => (await attentionIn(transaction, userID, ticketID)).view,
+      );
     },
     async responsibility(
       userID: string,
       ticketID: string,
       input: z.output<typeof responsibilityInput>,
     ) {
-      return database.client.begin(async (sql) => {
-        const current = await attentionIn(sql, userID, ticketID, true);
-        const [receipt] = await sql<
-          { ticketId: string; actorId: string; userId: string | null; expectedVersion: number }[]
-        >`
-          SELECT ticket_id AS "ticketId",actor_id AS "actorId",user_id AS "userId",expected_version AS "expectedVersion"
-          FROM factory.ticket_responsibility_event WHERE id=${input.commandId}`;
+      return database.client.begin(async (transaction) => {
+        const db = drizzleTransaction(transaction);
+        const current = await attentionIn(transaction, userID, ticketID, true);
+        const [receipt] = await db
+          .select({
+            ticketId: ticketResponsibilityEvent.ticketId,
+            actorId: ticketResponsibilityEvent.actorId,
+            userId: ticketResponsibilityEvent.userId,
+            expectedVersion: ticketResponsibilityEvent.expectedVersion,
+          })
+          .from(ticketResponsibilityEvent)
+          .where(eq(ticketResponsibilityEvent.id, input.commandId));
         if (receipt) {
           if (
             receipt.ticketId !== ticketID ||
@@ -523,30 +1120,58 @@ export function createInboxService(database: ReturnType<typeof createDatabase>) 
           !current.view.people.some((person) => person.id === input.responsibleId)
         )
           throw new CommandError("conflict", "Choose an active member of this Project.");
-        await sql`INSERT INTO factory.ticket_responsibility(ticket_id,user_id,version)
-          VALUES(${ticketID},${input.responsibleId},${input.expectedVersion + 1})
-          ON CONFLICT(ticket_id) DO UPDATE SET user_id=EXCLUDED.user_id,version=EXCLUDED.version`;
-        await sql`INSERT INTO factory.ticket_responsibility_event(id,ticket_id,user_id,actor_id,expected_version)
-          VALUES(${input.commandId},${ticketID},${input.responsibleId},${userID},${input.expectedVersion})`;
+        const responsibility = {
+          userId: input.responsibleId,
+          version: input.expectedVersion + 1,
+        };
+        await db
+          .insert(ticketResponsibility)
+          .values({ ticketId: ticketID, ...responsibility })
+          .onConflictDoUpdate({ target: ticketResponsibility.ticketId, set: responsibility });
+        await db.insert(ticketResponsibilityEvent).values({
+          id: input.commandId,
+          ticketId: ticketID,
+          userId: input.responsibleId,
+          actorId: userID,
+          expectedVersion: input.expectedVersion,
+        });
         if (input.responsibleId && input.responsibleId !== current.view.responsibleId)
-          await sql`INSERT INTO factory.ticket_follow(ticket_id,user_id,following)
-            VALUES(${ticketID},${input.responsibleId},true)
-            ON CONFLICT(ticket_id,user_id) DO UPDATE SET following=true`;
-        return (await attentionIn(sql, userID, ticketID)).view;
+          await db
+            .insert(ticketFollow)
+            .values({
+              ticketId: ticketID,
+              userId: input.responsibleId,
+              following: true,
+            })
+            .onConflictDoUpdate({
+              target: [ticketFollow.ticketId, ticketFollow.userId],
+              set: { following: true },
+            });
+        return (await attentionIn(transaction, userID, ticketID)).view;
       });
     },
     async follow(userID: string, ticketID: string, following: boolean) {
-      return database.client.begin(async (sql) => {
-        await attentionIn(sql, userID, ticketID, true);
-        await sql`INSERT INTO factory.ticket_follow(ticket_id,user_id,following)
-          VALUES(${ticketID},${userID},${following}) ON CONFLICT(ticket_id,user_id)
-          DO UPDATE SET following=EXCLUDED.following`;
-        return (await attentionIn(sql, userID, ticketID)).view;
+      return database.client.begin(async (transaction) => {
+        await attentionIn(transaction, userID, ticketID, true);
+        await drizzleTransaction(transaction)
+          .insert(ticketFollow)
+          .values({
+            ticketId: ticketID,
+            userId: userID,
+            following,
+          })
+          .onConflictDoUpdate({
+            target: [ticketFollow.ticketId, ticketFollow.userId],
+            set: { following },
+          });
+        return (await attentionIn(transaction, userID, ticketID)).view;
       });
     },
     async receipt(userID: string, input: z.output<typeof inboxReceiptInput>) {
-      return database.client.begin(async (sql) => {
-        const item = (await listIn(sql, userID)).items.find((row) => row.id === input.itemId);
+      return database.client.begin(async (transaction) => {
+        const item = (await listIn(transaction, userID)).items.find(
+          (row) => row.id === input.itemId,
+        );
         if (!item || item.eventId !== input.eventId)
           throw new CommandError("conflict", "This Inbox item changed. Refresh before marking it.");
         if (item.needsAction && input.action === "archive")
@@ -554,10 +1179,21 @@ export function createInboxService(database: ReturnType<typeof createDatabase>) 
             "conflict",
             "Resolve this request in its source. Reading does not complete it.",
           );
-        await sql`INSERT INTO factory.inbox_receipt(user_id,item_id,seen_event_id,archived)
-          VALUES(${userID},${input.itemId},${input.action === "unread" ? null : input.eventId},${input.action === "archive"})
-          ON CONFLICT(user_id,item_id) DO UPDATE
-          SET seen_event_id=EXCLUDED.seen_event_id,archived=EXCLUDED.archived`;
+        const receipt = {
+          seenEventId: input.action === "unread" ? null : input.eventId,
+          archived: input.action === "archive",
+        };
+        await drizzleTransaction(transaction)
+          .insert(inboxReceipt)
+          .values({
+            userId: userID,
+            itemId: input.itemId,
+            ...receipt,
+          })
+          .onConflictDoUpdate({
+            target: [inboxReceipt.userId, inboxReceipt.itemId],
+            set: receipt,
+          });
       });
     },
   };

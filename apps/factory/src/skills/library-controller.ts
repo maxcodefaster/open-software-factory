@@ -1,4 +1,20 @@
 import { createHash } from "node:crypto";
+import {
+  and,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql as expression,
+} from "drizzle-orm";
+import {
+  defaultLibraryCover,
+  libraryCoverInput,
+} from "../../../../packages/conversation-domain/src/library-covers";
 import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import {
   type LibraryChoice,
@@ -6,7 +22,10 @@ import {
   resolveLibraryChoice,
   type SkillLibraryView,
   skillChoiceInput,
+  skillChoiceView,
   skillLibrarySaveInput,
+  skillLibraryView,
+  skillScopeInput,
 } from "../../../../packages/conversation-domain/src/skill-library";
 import {
   type SkillContent,
@@ -14,14 +33,22 @@ import {
   skillContentInput,
   skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
-
-type RetainedSettings = Pick<InheritedSkillSettings, "system" | "project" | "personal">;
-
 import {
-  defaultLibraryCover,
-  libraryCoverInput,
-} from "../../../../packages/conversation-domain/src/library-covers";
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  administrator,
+  agentTurn,
+  skillLibrary,
+  skillLibraryChoice,
+  skillLibraryRevision,
+  skillPublication,
+  skillRevision,
+  skillShareProposal,
+  systemSkillSettings,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import {
@@ -32,6 +59,7 @@ import {
 import { checkSkillSourceUpdate, previewRepositorySkill, previewSkillImport } from "./import";
 import { starterSkills } from "./starters";
 
+type RetainedSettings = Pick<InheritedSkillSettings, "system" | "project" | "personal">;
 const nil = "00000000-0000-0000-0000-000000000000";
 const hash = (content: SkillContent) =>
   createHash("sha256").update(JSON.stringify(content)).digest("hex");
@@ -46,8 +74,11 @@ type Library = {
 export function createSkillLibraryController(database: ReturnType<typeof createDatabase>) {
   async function capabilities(sql: DatabaseTransaction, userId: string, projectId?: string) {
     await requireActiveAccountIn(sql, userId);
-    const [admin] =
-      await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userId} FOR SHARE`;
+    const [admin] = await drizzleTransaction(sql)
+      .select({ userId: administrator.userId })
+      .from(administrator)
+      .where(eq(administrator.userId, userId))
+      .for("share");
     return {
       canManageSystem: Boolean(admin),
       canManageProject: projectId ? await projectAuthorityIn(sql, userId, projectId) : false,
@@ -69,9 +100,11 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     await sql`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`;
   }
   async function libraries(sql: DatabaseTransaction) {
-    return sql<
-      Library[]
-    >`SELECT id, storage_key AS "storageKey", scope, owner_id AS "ownerId", project_id AS "projectId" FROM factory.skill_library ORDER BY scope, storage_key`;
+    const rows = await drizzleTransaction(sql)
+      .select()
+      .from(skillLibrary)
+      .orderBy(skillLibrary.scope, skillLibrary.storageKey);
+    return rows.map((row): Library => ({ ...row, scope: skillScopeInput.parse(row.scope) }));
   }
   async function writeRevision(
     sql: DatabaseTransaction,
@@ -83,11 +116,17 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     copiedFrom?: string,
   ) {
     const digest = hash(content);
-    const [existing] = await sql<
-      Array<{ digest: string; revision: number; createdBy: string; libraryId: string }>
-    >`
-      SELECT r.content_digest AS digest, r.revision::float8 AS revision, r.created_by AS "createdBy", link.library_id AS "libraryId"
-      FROM factory.skill_revision r JOIN factory.skill_library_revision link ON link.revision_id = r.id WHERE r.id = ${revisionId}`;
+    const db = drizzleTransaction(sql);
+    const [existing] = await db
+      .select({
+        digest: skillRevision.contentDigest,
+        revision: skillRevision.revision,
+        createdBy: skillRevision.createdBy,
+        libraryId: skillLibraryRevision.libraryId,
+      })
+      .from(skillRevision)
+      .innerJoin(skillLibraryRevision, eq(skillLibraryRevision.revisionId, skillRevision.id))
+      .where(eq(skillRevision.id, revisionId));
     if (existing) {
       if (
         existing.digest !== digest ||
@@ -98,24 +137,43 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         throw new CommandError("conflict", "Skill save identity was reused with different input");
       return;
     }
-    const [latest] = await sql<
-      Array<{ revision: number }>
-    >`SELECT COALESCE(max(revision), 0)::float8 AS revision FROM factory.skill_revision WHERE skill_key = ${library.storageKey}`;
+    const [latest] = await db
+      .select({ revision: expression`COALESCE(max(${skillRevision.revision}), 0)`.mapWith(Number) })
+      .from(skillRevision)
+      .where(eq(skillRevision.skillKey, library.storageKey));
     if (latest?.revision !== expected)
       throw new CommandError("conflict", "This skill changed elsewhere. Reload before saving.");
-    await sql`INSERT INTO factory.skill_revision(id, skill_key, revision, content, content_digest, created_by)
-      VALUES (${revisionId}, ${library.storageKey}, ${expected + 1}, ${JSON.stringify(content)}::jsonb, ${digest}, ${userId})`;
-    await sql`INSERT INTO factory.skill_publication(revision_id, published, updated_by) VALUES (${revisionId}, true, ${userId})`;
-    await sql`INSERT INTO factory.skill_library_revision(library_id, revision_id, copied_from) VALUES (${library.id}, ${revisionId}, ${copiedFrom ?? null})`;
+    await db.insert(skillRevision).values({
+      id: revisionId,
+      skillKey: library.storageKey,
+      revision: expected + 1,
+      content,
+      contentDigest: digest,
+      createdBy: userId,
+    });
+    await db.insert(skillPublication).values({ revisionId, published: true, updatedBy: userId });
+    await db.insert(skillLibraryRevision).values({
+      libraryId: library.id,
+      revisionId,
+      copiedFrom: copiedFrom ?? null,
+    });
   }
   async function seed(sql: DatabaseTransaction, userId: string) {
-    const [administrator] = await sql<
-      Array<{ id: string }>
-    >`SELECT user_id AS id FROM factory.administrator ORDER BY user_id LIMIT 1`;
-    const [oldSettings] =
-      await sql`SELECT singleton FROM factory.system_skill_settings WHERE singleton`;
+    const db = drizzleTransaction(sql);
+    const [admin] = await db
+      .select({ id: administrator.userId })
+      .from(administrator)
+      .orderBy(administrator.userId)
+      .limit(1);
+    const [oldSettings] = await db
+      .select({ singleton: systemSkillSettings.singleton })
+      .from(systemSkillSettings)
+      .where(eq(systemSkillSettings.singleton, true));
     for (const starter of starterSkills) {
-      const [existing] = await sql`SELECT id FROM factory.skill_library WHERE id = ${starter.id}`;
+      const [existing] = await db
+        .select({ id: skillLibrary.id })
+        .from(skillLibrary)
+        .where(eq(skillLibrary.id, starter.id));
       if (existing) continue;
       const library: Library = {
         id: starter.id,
@@ -124,19 +182,31 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         ownerId: null,
         projectId: null,
       };
-      await sql`INSERT INTO factory.skill_library(id, storage_key, scope) VALUES (${library.id}, ${library.storageKey}, 'system')`;
+      await db.insert(skillLibrary).values({
+        id: library.id,
+        storageKey: library.storageKey,
+        scope: "system",
+      });
       await writeRevision(
         sql,
         library,
         starter.revisionId,
         0,
         skillContentInput.parse(starter.content),
-        administrator?.id ?? userId,
+        admin?.id ?? userId,
       );
       if (starter.enabled && !oldSettings)
         for (const role of starter.content.roles)
-          await sql`INSERT INTO factory.skill_library_choice(library_id, scope, context_id, user_id, role, state, revision_id, version)
-          VALUES (${library.id}, 'system', ${nil}, ${nil}, ${role}, 'enable', ${starter.revisionId}, 1)`;
+          await db.insert(skillLibraryChoice).values({
+            libraryId: library.id,
+            scope: "system",
+            contextId: nil,
+            userId: nil,
+            role,
+            state: "enable",
+            revisionId: starter.revisionId,
+            version: 1,
+          });
     }
   }
   async function viewIn(
@@ -158,24 +228,53 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       "skill",
       visible.map((item) => item.id),
     );
-    const rows = await sql<
-      Array<{
-        libraryId: string;
-        id: string;
-        revision: number;
-        content: unknown;
-        digest: string;
-        published: boolean;
-      }>
-    >`
-      SELECT link.library_id AS "libraryId", revision.id, revision.revision::float8 AS revision, revision.content, revision.content_digest AS digest, publication.published
-      FROM factory.skill_library_revision link JOIN factory.skill_revision revision ON revision.id = link.revision_id
-      JOIN factory.skill_publication publication ON publication.revision_id = revision.id
-      WHERE link.library_id = ANY(${visible.map((item) => item.id)}::uuid[]) ORDER BY revision.revision DESC`;
-    const choices = await sql<
-      LibraryChoice[]
-    >`SELECT library_id AS "libraryId", scope, role, state, revision_id AS "revisionId", version::float8 AS version FROM factory.skill_library_choice
-      WHERE scope = 'system' OR (context_id = ${projectId ?? nil} AND (scope = 'project' OR (scope = 'personal' AND user_id = ${userId})))`;
+    const db = drizzleTransaction(sql);
+    const rows = await db
+      .select({
+        libraryId: skillLibraryRevision.libraryId,
+        id: skillRevision.id,
+        revision: skillRevision.revision,
+        content: skillRevision.content,
+        digest: skillRevision.contentDigest,
+        published: skillPublication.published,
+      })
+      .from(skillLibraryRevision)
+      .innerJoin(skillRevision, eq(skillRevision.id, skillLibraryRevision.revisionId))
+      .innerJoin(skillPublication, eq(skillPublication.revisionId, skillRevision.id))
+      .where(
+        inArray(
+          skillLibraryRevision.libraryId,
+          visible.map((item) => item.id),
+        ),
+      )
+      .orderBy(desc(skillRevision.revision));
+    const choices = (
+      await db
+        .select({
+          libraryId: skillLibraryChoice.libraryId,
+          scope: skillLibraryChoice.scope,
+          role: skillLibraryChoice.role,
+          state: skillLibraryChoice.state,
+          revisionId: skillLibraryChoice.revisionId,
+          version: skillLibraryChoice.version,
+        })
+        .from(skillLibraryChoice)
+        .where(
+          or(
+            eq(skillLibraryChoice.scope, "system"),
+            and(
+              eq(skillLibraryChoice.contextId, projectId ?? nil),
+              or(
+                eq(skillLibraryChoice.scope, "project"),
+                and(
+                  eq(skillLibraryChoice.scope, "personal"),
+                  eq(skillLibraryChoice.userId, userId),
+                ),
+              ),
+            ),
+          ),
+        )
+    ).map((row) => skillChoiceView.parse(row));
     // Translate retained whole-list settings into per-skill choices without rewriting history.
     if (legacy)
       for (const role of ["planning", "build"] as const)
@@ -218,30 +317,65 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
           if (personal !== null)
             add("personal", personal.includes(base) ? "enable" : "disable", base);
         }
-    const proposals = await sql<
-      SkillLibraryView["proposals"]
-    >`SELECT proposal.id, proposal.revision_id AS "revisionId", proposal.target, proposal.project_id AS "projectId", revision.content->>'name' AS name
-      FROM factory.skill_share_proposal proposal JOIN factory.skill_revision revision ON revision.id = proposal.revision_id
-      WHERE proposal.accepted_library_id IS NULL AND (proposal.proposed_by = ${userId} OR (proposal.target = 'system' AND ${access.canManageSystem}) OR (proposal.project_id = ${projectId ?? nil} AND ${access.canManageProject}))`;
+    const proposals = skillLibraryView.shape.proposals.parse(
+      await db
+        .select({
+          id: skillShareProposal.id,
+          revisionId: skillShareProposal.revisionId,
+          target: skillShareProposal.target,
+          projectId: skillShareProposal.projectId,
+          name: expression<string>`${skillRevision.content}->>'name'`,
+        })
+        .from(skillShareProposal)
+        .innerJoin(skillRevision, eq(skillRevision.id, skillShareProposal.revisionId))
+        .where(
+          and(
+            isNull(skillShareProposal.acceptedLibraryId),
+            or(
+              eq(skillShareProposal.proposedBy, userId),
+              and(eq(skillShareProposal.target, "system"), expression`${access.canManageSystem}`),
+              and(
+                eq(skillShareProposal.projectId, projectId ?? nil),
+                expression`${access.canManageProject}`,
+              ),
+            ),
+          ),
+        ),
+    );
     return {
       ...access,
       sharedVersions: (
-        await sql<
-          Array<{
-            id: string;
-            revision: number;
-            content: unknown;
-            digest: string;
-            published: boolean;
-          }>
-        >`
-        SELECT DISTINCT revision.id, revision.revision::float8 AS revision, revision.content, revision.content_digest AS digest, publication.published
-        FROM factory.skill_revision revision JOIN factory.skill_publication publication ON publication.revision_id = revision.id
-        JOIN factory.skill_library_revision link ON link.revision_id = revision.id JOIN factory.skill_library library ON library.id = link.library_id
-        WHERE library.scope = 'personal' AND library.owner_id != ${userId}
-          AND EXISTS (SELECT 1 FROM factory.agent_turn turn WHERE turn.project_id = ${projectId ?? nil}
-            AND turn.ticket_id IS NOT NULL AND turn.authority->'skillRevisionIds' ? revision.id::text)
-        LIMIT 100`
+        await db
+          .selectDistinct({
+            id: skillRevision.id,
+            revision: skillRevision.revision,
+            content: skillRevision.content,
+            digest: skillRevision.contentDigest,
+            published: skillPublication.published,
+          })
+          .from(skillRevision)
+          .innerJoin(skillPublication, eq(skillPublication.revisionId, skillRevision.id))
+          .innerJoin(skillLibraryRevision, eq(skillLibraryRevision.revisionId, skillRevision.id))
+          .innerJoin(skillLibrary, eq(skillLibrary.id, skillLibraryRevision.libraryId))
+          .where(
+            and(
+              eq(skillLibrary.scope, "personal"),
+              ne(skillLibrary.ownerId, userId),
+              exists(
+                db
+                  .select({ id: agentTurn.id })
+                  .from(agentTurn)
+                  .where(
+                    and(
+                      eq(agentTurn.projectId, projectId ?? nil),
+                      isNotNull(agentTurn.ticketId),
+                      expression`${agentTurn.authority}->'skillRevisionIds' ? ${skillRevision.id}::text`,
+                    ),
+                  ),
+              ),
+            ),
+          )
+          .limit(100)
       ).map((row) => skillRevisionInput.parse(row)),
       proposals,
       choices: choices.filter((choice) => visible.some((item) => item.id === choice.libraryId)),
@@ -303,7 +437,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
           ownerId: input.scope === "personal" ? userId : null,
           projectId: input.scope === "project" ? (input.projectId ?? null) : null,
         };
-        await sql`INSERT INTO factory.skill_library(id, storage_key, scope, owner_id, project_id) VALUES (${library.id}, ${library.storageKey}, ${library.scope}, ${library.ownerId}, ${library.projectId})`;
+        await drizzleTransaction(sql).insert(skillLibrary).values(library);
         await initializeLibraryCoverIn(
           sql,
           "skill",
@@ -370,17 +504,49 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         throw new CommandError("conflict", "Select an available version for this role");
       const context = input.scope === "system" ? nil : (input.projectId ?? nil);
       const owner = input.scope === "personal" ? userId : nil;
-      const [current] = await sql<
-        Array<{ version: number }>
-      >`SELECT version::float8 AS version FROM factory.skill_library_choice WHERE library_id = ${entry.id} AND scope = ${input.scope} AND context_id = ${context} AND user_id = ${owner} AND role = ${input.role}`;
+      const db = drizzleTransaction(sql);
+      const [current] = await db
+        .select({ version: skillLibraryChoice.version })
+        .from(skillLibraryChoice)
+        .where(
+          and(
+            eq(skillLibraryChoice.libraryId, entry.id),
+            eq(skillLibraryChoice.scope, input.scope),
+            eq(skillLibraryChoice.contextId, context),
+            eq(skillLibraryChoice.userId, owner),
+            eq(skillLibraryChoice.role, input.role),
+          ),
+        );
       if ((current?.version ?? 0) !== input.expectedVersion)
         throw new CommandError(
           "conflict",
           "Skill choices changed elsewhere. Reload before saving.",
         );
-      await sql`INSERT INTO factory.skill_library_choice(library_id, scope, context_id, user_id, role, state, revision_id, version)
-          VALUES (${entry.id}, ${input.scope}, ${context}, ${owner}, ${input.role}, ${input.state}, ${revision.id}, ${(current?.version ?? 0) + 1})
-          ON CONFLICT (library_id, scope, context_id, user_id, role) DO UPDATE SET state = EXCLUDED.state, revision_id = EXCLUDED.revision_id, version = EXCLUDED.version`;
+      const values = {
+        state: input.state,
+        revisionId: revision.id,
+        version: (current?.version ?? 0) + 1,
+      };
+      await db
+        .insert(skillLibraryChoice)
+        .values({
+          ...values,
+          libraryId: entry.id,
+          scope: input.scope,
+          contextId: context,
+          userId: owner,
+          role: input.role,
+        })
+        .onConflictDoUpdate({
+          target: [
+            skillLibraryChoice.libraryId,
+            skillLibraryChoice.scope,
+            skillLibraryChoice.contextId,
+            skillLibraryChoice.userId,
+            skillLibraryChoice.role,
+          ],
+          set: values,
+        });
       return { saved: true };
     },
     async choose(
@@ -402,17 +568,24 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         await capabilities(sql, userId, projectId);
         if (target === "project" && !projectId)
           throw new CommandError("conflict", "Select a Project to share with");
-        const [owned] =
-          await sql`SELECT link.revision_id FROM factory.skill_library_revision link JOIN factory.skill_library library ON library.id = link.library_id WHERE link.revision_id = ${revisionId} AND library.owner_id = ${userId}`;
+        const db = drizzleTransaction(sql);
+        const [owned] = await db
+          .select({ revisionId: skillLibraryRevision.revisionId })
+          .from(skillLibraryRevision)
+          .innerJoin(skillLibrary, eq(skillLibrary.id, skillLibraryRevision.libraryId))
+          .where(
+            and(eq(skillLibraryRevision.revisionId, revisionId), eq(skillLibrary.ownerId, userId)),
+          );
         if (!owned) throw new CommandError("not-found", "Personal skill version not found");
-        const [existing] = await sql<
-          Array<{
-            revisionId: string;
-            proposedBy: string;
-            target: string;
-            projectId: string | null;
-          }>
-        >`SELECT revision_id AS "revisionId", proposed_by AS "proposedBy", target, project_id AS "projectId" FROM factory.skill_share_proposal WHERE id = ${id}`;
+        const [existing] = await db
+          .select({
+            revisionId: skillShareProposal.revisionId,
+            proposedBy: skillShareProposal.proposedBy,
+            target: skillShareProposal.target,
+            projectId: skillShareProposal.projectId,
+          })
+          .from(skillShareProposal)
+          .where(eq(skillShareProposal.id, id));
         if (
           existing &&
           (existing.revisionId !== revisionId ||
@@ -421,36 +594,50 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
             existing.projectId !== (target === "project" ? projectId : null))
         )
           throw new CommandError("conflict", "Sharing identity reused with different input");
-        await sql`INSERT INTO factory.skill_share_proposal(id, revision_id, proposed_by, target, project_id) VALUES (${id}, ${revisionId}, ${userId}, ${target}, ${target === "project" ? (projectId ?? null) : null}) ON CONFLICT DO NOTHING`;
+        await db
+          .insert(skillShareProposal)
+          .values({
+            id,
+            revisionId,
+            proposedBy: userId,
+            target,
+            projectId: target === "project" ? (projectId ?? null) : null,
+          })
+          .onConflictDoNothing();
         return { id };
       });
     },
     async accept(proposalId: string, userId: string) {
       return database.client.begin(async (sql) => {
         await lock(sql);
-        const [proposal] = await sql<
-          Array<{
-            revisionId: string;
-            target: "project" | "system";
-            projectId: string | null;
-            accepted: string | null;
-            content: unknown;
-          }>
-        >`SELECT proposal.revision_id AS "revisionId", proposal.target, proposal.project_id AS "projectId", proposal.accepted_library_id AS accepted, revision.content FROM factory.skill_share_proposal proposal JOIN factory.skill_revision revision ON revision.id = proposal.revision_id WHERE proposal.id = ${proposalId}`;
+        const db = drizzleTransaction(sql);
+        const [proposal] = await db
+          .select({
+            revisionId: skillShareProposal.revisionId,
+            target: skillShareProposal.target,
+            projectId: skillShareProposal.projectId,
+            accepted: skillShareProposal.acceptedLibraryId,
+            content: skillRevision.content,
+          })
+          .from(skillShareProposal)
+          .innerJoin(skillRevision, eq(skillRevision.id, skillShareProposal.revisionId))
+          .where(eq(skillShareProposal.id, proposalId));
         if (!proposal) throw new CommandError("not-found", "Sharing proposal not found");
-        await authority(sql, userId, proposal.target, proposal.projectId ?? undefined);
+        const target = skillScopeInput.extract(["system", "project"]).parse(proposal.target);
+        await authority(sql, userId, target, proposal.projectId ?? undefined);
         if (proposal.accepted) return { libraryId: proposal.accepted };
         const library: Library = {
           id: proposalId,
           storageKey: `shared-${proposalId}`,
-          scope: proposal.target,
+          scope: target,
           ownerId: null,
           projectId: proposal.projectId,
         };
-        await sql`INSERT INTO factory.skill_library(id, storage_key, scope, project_id) VALUES (${library.id}, ${library.storageKey}, ${library.scope}, ${library.projectId})`;
-        const [source] = await sql<Array<{ libraryId: string }>>`
-          SELECT library_id AS "libraryId" FROM factory.skill_library_revision
-          WHERE revision_id = ${proposal.revisionId}`;
+        await db.insert(skillLibrary).values(library);
+        const [source] = await db
+          .select({ libraryId: skillLibraryRevision.libraryId })
+          .from(skillLibraryRevision)
+          .where(eq(skillLibraryRevision.revisionId, proposal.revisionId));
         const cover = source
           ? (await libraryCoversIn(sql, "skill", [source.libraryId])).get(source.libraryId)
           : undefined;
@@ -473,29 +660,71 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
           userId,
           proposal.revisionId,
         );
-        await sql`UPDATE factory.skill_share_proposal SET accepted_library_id = ${library.id} WHERE id = ${proposalId}`;
+        await db
+          .update(skillShareProposal)
+          .set({ acceptedLibraryId: library.id })
+          .where(eq(skillShareProposal.id, proposalId));
         return { libraryId: library.id };
       });
     },
     async inspect(revisionId: string, userId: string, projectId?: string): Promise<SkillRevision> {
       return database.client.begin(async (sql) => {
         const access = await capabilities(sql, userId, projectId);
-        const [row] = await sql<
-          Array<{
-            id: string;
-            revision: number;
-            content: unknown;
-            digest: string;
-            published: boolean;
-          }>
-        >`
-          SELECT revision.id, revision.revision::float8 AS revision, revision.content, revision.content_digest AS digest, publication.published
-          FROM factory.skill_revision revision JOIN factory.skill_publication publication ON publication.revision_id = revision.id
-          JOIN factory.skill_library_revision link ON link.revision_id = revision.id JOIN factory.skill_library library ON library.id = link.library_id
-          WHERE revision.id = ${revisionId} AND (library.scope = 'system' OR library.owner_id = ${userId} OR library.project_id = ${projectId ?? nil}
-            OR EXISTS (SELECT 1 FROM factory.agent_turn turn WHERE turn.project_id = ${projectId ?? nil}
-              AND turn.ticket_id IS NOT NULL AND turn.authority->'skillRevisionIds' ? revision.id::text)
-            OR EXISTS (SELECT 1 FROM factory.skill_share_proposal proposal WHERE proposal.revision_id = revision.id AND ((proposal.target = 'system' AND ${access.canManageSystem}) OR (proposal.project_id = ${projectId ?? nil} AND ${access.canManageProject}))))`;
+        const db = drizzleTransaction(sql);
+        const [row] = await db
+          .select({
+            id: skillRevision.id,
+            revision: skillRevision.revision,
+            content: skillRevision.content,
+            digest: skillRevision.contentDigest,
+            published: skillPublication.published,
+          })
+          .from(skillRevision)
+          .innerJoin(skillPublication, eq(skillPublication.revisionId, skillRevision.id))
+          .innerJoin(skillLibraryRevision, eq(skillLibraryRevision.revisionId, skillRevision.id))
+          .innerJoin(skillLibrary, eq(skillLibrary.id, skillLibraryRevision.libraryId))
+          .where(
+            and(
+              eq(skillRevision.id, revisionId),
+              or(
+                eq(skillLibrary.scope, "system"),
+                eq(skillLibrary.ownerId, userId),
+                eq(skillLibrary.projectId, projectId ?? nil),
+                exists(
+                  db
+                    .select({ id: agentTurn.id })
+                    .from(agentTurn)
+                    .where(
+                      and(
+                        eq(agentTurn.projectId, projectId ?? nil),
+                        isNotNull(agentTurn.ticketId),
+                        expression`${agentTurn.authority}->'skillRevisionIds' ? ${skillRevision.id}::text`,
+                      ),
+                    ),
+                ),
+                exists(
+                  db
+                    .select({ id: skillShareProposal.id })
+                    .from(skillShareProposal)
+                    .where(
+                      and(
+                        eq(skillShareProposal.revisionId, skillRevision.id),
+                        or(
+                          and(
+                            eq(skillShareProposal.target, "system"),
+                            expression`${access.canManageSystem}`,
+                          ),
+                          and(
+                            eq(skillShareProposal.projectId, projectId ?? nil),
+                            expression`${access.canManageProject}`,
+                          ),
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+          );
         if (!row) throw new CommandError("not-found", "Skill version not found");
         return skillRevisionInput.parse(row);
       });

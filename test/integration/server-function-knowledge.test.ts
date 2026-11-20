@@ -37,6 +37,9 @@ test("compiled Knowledge functions keep authority, exact versions, ISO history a
     pageCount: 0,
     conflictCount: 0,
     failure: null,
+    createdAt: date.toISOString(),
+    completedAt: null,
+    progress: null,
   };
   const knowledge = createKnowledgeService({
     access: {

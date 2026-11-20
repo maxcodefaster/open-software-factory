@@ -1,4 +1,3 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { lockChangeWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -6,15 +5,16 @@ import { createReviewAdmission } from "../../apps/factory/src/agent/review-admis
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
+import type { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
 import { createMonitoringWorker } from "../../apps/factory/src/monitoring/worker";
+import type { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import { monitoringFixture } from "../fixtures/monitoring";
-import type { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
-import type { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
 import { fixtureValue } from "../fixtures/value";
 
 const codeCommit = "a".repeat(40);
@@ -702,3 +702,83 @@ test("insufficient and uncertain diagnoses never create Tickets or repeat paid i
     restore();
   }
 });
+
+test.each(["credential-epoch", "source-policy", "hook-delegation", "owner-token"] as const)(
+  "Monitoring rechecks %s before observations and publishing a diagnosis",
+  async (revocation) => {
+    const restore = configureModels();
+    const f = await monitoringFixture();
+    let worker: ReturnType<typeof createMonitoringWorker> | undefined;
+    let calls = 0;
+    const newerOwner = crypto.randomUUID();
+    try {
+      const incidentId = await f.receive(`owned-${revocation}`);
+      const forbidden = async () => {
+        throw new Error("A revoked diagnosis cannot create or deliver a Change");
+      };
+      worker = createMonitoringWorker(f.database, {
+        mcp: f.mcp,
+        code: { codePaths: forbidden, code: forbidden },
+        changes: { start: forbidden },
+        agent: { admitStartIn: forbidden },
+        delivery: { get: async () => null, approve: forbidden },
+        signingKey: "owned-epoch-test-key",
+        diagnose: async (input) => {
+          calls++;
+          await input.authorize();
+          await input.observe({
+            kind: "code",
+            digest: "c".repeat(64),
+            path: "src/invoice.ts",
+            commitSha: codeCommit,
+          });
+          if (revocation === "credential-epoch")
+            await f.database
+              .client`UPDATE factory.mcp_connection SET credential_epoch=${crypto.randomUUID()}
+              WHERE id=${f.source.id}`;
+          else if (revocation === "source-policy")
+            await f.database.client`UPDATE factory.mcp_connection SET version=version+1
+              WHERE id=${f.source.id}`;
+          else if (revocation === "hook-delegation")
+            await f.controller.change(f.projectId, f.hookId, f.userId, "disable", {
+              commandId: crypto.randomUUID(),
+              expectedVersion: 1,
+            });
+          else
+            await f.database.client`UPDATE factory.monitoring_incident SET owner_token=${newerOwner}
+              WHERE id=${incidentId}`;
+          await expect(input.authorize()).rejects.toThrow();
+          await expect(
+            input.observe({ kind: "code", digest: "d".repeat(64), path: "unpublished.ts" }),
+          ).rejects.toThrow();
+          return diagnosis;
+        },
+      });
+      await worker.project(f.projectId);
+      await worker.project(f.projectId);
+      expect(calls).toBe(1);
+      const [incident] = await f.database.client<
+        { state: string; ownerToken: string | null; diagnosis: unknown; ticketId: string | null }[]
+      >`SELECT state,owner_token AS "ownerToken",diagnosis,ticket_id AS "ticketId"
+        FROM factory.monitoring_incident WHERE id=${incidentId}`;
+      expect(incident).toMatchObject({
+        state: revocation === "owner-token" ? "diagnosing" : "blocked",
+        ownerToken: revocation === "owner-token" ? newerOwner : null,
+        diagnosis: null,
+        ticketId: null,
+      });
+      const evidence = await f.database.client<{ kind: string; path: string; digest: string }[]>`
+        SELECT kind,path,digest FROM factory.monitoring_evidence WHERE incident_id=${incidentId}`;
+      expect([...evidence]).toEqual([
+        { kind: "code", path: "src/invoice.ts", digest: "c".repeat(64) },
+      ]);
+      expect(await f.database.client`SELECT id FROM factory.ticket`).toHaveLength(0);
+      expect(await f.database.client`SELECT id FROM factory.requirement_approval`).toHaveLength(0);
+      expect(await f.database.client`SELECT id FROM factory.change`).toHaveLength(0);
+    } finally {
+      await worker?.close();
+      await f.dispose();
+      restore();
+    }
+  },
+);

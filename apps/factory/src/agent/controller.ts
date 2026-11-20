@@ -4,7 +4,27 @@ import {
   candidateReviewResultInput,
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  agentTurnSkill,
+  candidateReview,
+  change as changeTable,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  codingPause,
+  conversationContext,
+  executionPolicyCommand,
+  runtimeAttempt,
+  runtimeComputeWait,
+  ticket,
+  ticketConversation,
+} from "../../../../packages/db/src/schema";
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
@@ -166,14 +186,22 @@ export function createAgentController(
     if (!promptID) return;
     const intent = await admission.intent(turnID);
     if (intent.skillLoading !== "native") return;
-    const [turn] = await database.client<
-      Array<{ ids: string[] }>
-    >`SELECT ARRAY(SELECT jsonb_array_elements_text(authority->'skillRevisionIds')) AS ids FROM factory.agent_turn WHERE id = ${turnID}`;
+    const [turn] = await database.db
+      .select({
+        ids: expression<
+          string[]
+        >`ARRAY(SELECT jsonb_array_elements_text(${agentTurn.authority}->'skillRevisionIds'))`,
+      })
+      .from(agentTurn)
+      .where(eq(agentTurn.id, turnID));
     const loaded = observedNativeSkillIds(messages, promptID, turn?.ids ?? []);
     if (loaded.length)
       await turns.validateExecution(turnID, ownerToken, async (sql) => {
         for (const id of loaded)
-          await sql`INSERT INTO factory.agent_turn_skill(turn_id, revision_id) VALUES (${turnID}, ${id}) ON CONFLICT DO NOTHING`;
+          await drizzleTransaction(sql)
+            .insert(agentTurnSkill)
+            .values({ turnId: turnID, revisionId: id })
+            .onConflictDoNothing();
       });
   }
   const usageJournal = createRecordedOpenCodeUsage(database);
@@ -221,25 +249,35 @@ export function createAgentController(
   async function row(
     changeID: string,
     sql: Database["client"] | DatabaseTransaction = database.client,
-  ) {
-    const rows = await sql<AgentRow[]>`
-      SELECT change.id AS "changeID", change.project_id AS "projectID",
-        change.ticket_id AS "ticketID", ticket.title AS "ticketTitle",
-        change.branch_name AS "branchName", change.base_sha AS "baseSHA",
-        session.runtime_attempt_id AS "runtimeAttemptID", attempt.state AS "runtimeState",
-        session.state, session.opencode_session_id AS "sessionID",
-        session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed",
-        COALESCE(session.implementation_session_id,session.opencode_session_id) AS "implementationSessionID",
-        COALESCE(session.implementation_session_confirmed_at,session.native_session_confirmed_at) IS NOT NULL AS "implementationSessionConfirmed",
-        session.active_inbox_id AS "activeInboxID", session.last_error AS "lastError",
-        session.active_turn_id AS "activeTurnID", session.stop_pending AS "stopPending",
-        session.stop_id AS "stopID"
-      FROM factory.change_agent_session session
-      JOIN factory.change change ON change.id = session.change_id
-      JOIN factory.ticket ticket ON ticket.id = change.ticket_id
-      JOIN factory.runtime_attempt attempt ON attempt.id = session.runtime_attempt_id
-      WHERE session.change_id = ${changeID}
-    `;
+  ): Promise<AgentRow | null> {
+    const rows = await drizzleTransaction(sql)
+      .select({
+        changeID: changeTable.id,
+        projectID: changeTable.projectId,
+        ticketID: changeTable.ticketId,
+        ticketTitle: ticket.title,
+        branchName: changeTable.branchName,
+        baseSHA: changeTable.baseSha,
+        runtimeAttemptID: changeAgentSession.runtimeAttemptId,
+        runtimeState: runtimeAttempt.state,
+        state: changeAgentSession.state,
+        sessionID: changeAgentSession.opencodeSessionId,
+        sessionConfirmed: expression<boolean>`${changeAgentSession.nativeSessionConfirmedAt} IS NOT NULL`,
+        implementationSessionID: expression<
+          string | null
+        >`COALESCE(${changeAgentSession.implementationSessionId},${changeAgentSession.opencodeSessionId})`,
+        implementationSessionConfirmed: expression<boolean>`COALESCE(${changeAgentSession.implementationSessionConfirmedAt},${changeAgentSession.nativeSessionConfirmedAt}) IS NOT NULL`,
+        activeInboxID: changeAgentSession.activeInboxId,
+        lastError: changeAgentSession.lastError,
+        activeTurnID: changeAgentSession.activeTurnId,
+        stopPending: changeAgentSession.stopPending,
+        stopID: changeAgentSession.stopId,
+      })
+      .from(changeAgentSession)
+      .innerJoin(changeTable, eq(changeTable.id, changeAgentSession.changeId))
+      .innerJoin(ticket, eq(ticket.id, changeTable.ticketId))
+      .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId))
+      .where(eq(changeAgentSession.changeId, changeID));
     return rows[0] ?? null;
   }
 
@@ -249,16 +287,25 @@ export function createAgentController(
     attemptID: string,
     sessionID: string,
   ) {
-    const confirmed = await database.client`
-      UPDATE factory.change_agent_session
-      SET native_session_confirmed_at = COALESCE(native_session_confirmed_at, now()),
-        implementation_session_confirmed_at = CASE WHEN implementation_session_id = ${sessionID}
-          THEN COALESCE(implementation_session_confirmed_at, now()) ELSE implementation_session_confirmed_at END
-      WHERE change_id = ${changeID} AND active_turn_id = ${turnID}
-        AND runtime_attempt_id = ${attemptID} AND opencode_session_id = ${sessionID}
-        AND state <> 'stopped' AND NOT stop_pending
-    `;
-    if (confirmed.count !== 1)
+    const confirmed = await database.db
+      .update(changeAgentSession)
+      .set({
+        nativeSessionConfirmedAt: expression`COALESCE(${changeAgentSession.nativeSessionConfirmedAt}, now())`,
+        implementationSessionConfirmedAt: expression`CASE WHEN ${changeAgentSession.implementationSessionId} = ${sessionID}
+        THEN COALESCE(${changeAgentSession.implementationSessionConfirmedAt}, now()) ELSE ${changeAgentSession.implementationSessionConfirmedAt} END`,
+      })
+      .where(
+        and(
+          eq(changeAgentSession.changeId, changeID),
+          eq(changeAgentSession.activeTurnId, turnID),
+          eq(changeAgentSession.runtimeAttemptId, attemptID),
+          eq(changeAgentSession.opencodeSessionId, sessionID),
+          ne(changeAgentSession.state, "stopped"),
+          not(changeAgentSession.stopPending),
+        ),
+      )
+      .returning({ id: changeAgentSession.changeId });
+    if (confirmed.length !== 1)
       throw new CommandError(
         "conflict",
         "Native Session confirmation no longer matches this Build",
@@ -266,24 +313,18 @@ export function createAgentController(
   }
 
   async function currentChange(changeID: string) {
-    const rows = await database.client<
-      Array<{
-        changeID: string;
-        branchName: string;
-        declaredApps: string[];
-        runtimeAttemptID: string | null;
-        runtimeState: string | null;
-        changeState: string;
-      }>
-    >`
-      SELECT change.id AS "changeID", change.runtime_attempt_id AS "runtimeAttemptID",
-        change.branch_name AS "branchName",
-        COALESCE(attempt.declared_apps,'[]'::jsonb) AS "declaredApps",
-        attempt.state AS "runtimeState", change.state AS "changeState"
-      FROM factory.change change
-      LEFT JOIN factory.runtime_attempt attempt ON attempt.id = change.runtime_attempt_id
-      WHERE change.id = ${changeID}
-    `;
+    const rows = await database.db
+      .select({
+        changeID: changeTable.id,
+        runtimeAttemptID: changeTable.runtimeAttemptId,
+        branchName: changeTable.branchName,
+        declaredApps: expression<string[]>`COALESCE(${runtimeAttempt.declaredApps},'[]'::jsonb)`,
+        runtimeState: runtimeAttempt.state,
+        changeState: changeTable.state,
+      })
+      .from(changeTable)
+      .leftJoin(runtimeAttempt, eq(runtimeAttempt.id, changeTable.runtimeAttemptId))
+      .where(eq(changeTable.id, changeID));
     const change = rows[0];
     if (!change) throw new CommandError("not-found", "Change not found");
     if (!["active", "starting"].includes(change.changeState)) {
@@ -330,9 +371,11 @@ export function createAgentController(
     try {
       // Branch creation is independently recovered. A recorded bootstrap waits
       // for that outcome without claiming a lease or dispatching any inference.
-      const [branch] = await database.client<Array<{ state: string }>>`SELECT change.state
-        FROM factory.agent_turn turn JOIN factory.change change ON change.id = turn.change_id
-        WHERE turn.id = ${turnID}`;
+      const [branch] = await database.db
+        .select({ state: changeTable.state })
+        .from(agentTurn)
+        .innerJoin(changeTable, eq(changeTable.id, agentTurn.changeId))
+        .where(eq(agentTurn.id, turnID));
       if (branch?.state === "branch-pending") return;
       owned = await turns.claimPending(turnID);
       if (!owned?.ownerToken || owned.authority.mode !== "build" || !("changeId" in owned.command))
@@ -382,33 +425,68 @@ export function createAgentController(
       if (!current.runtimeAttemptID) throw new Error("Ticket Sandbox was not created");
       const attemptID = current.runtimeAttemptID;
       const prepared = await database.client.begin(async (sql) => {
-        const active = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
-          WHERE id = ${turnID} AND state = 'pending' AND owner_token = ${ownerToken}
-            AND owner_expires_at > clock_timestamp() FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const active = await db
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, turnID),
+              eq(agentTurn.state, "pending"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .for("update");
         if (!active[0]) return false;
-        await sql`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id = ${attemptID}
-          WHERE turn_id = ${turnID} AND runtime_attempt_id IS NULL`;
-        await sql`INSERT INTO factory.change_agent_session(
-          change_id, runtime_attempt_id, opencode_session_id, state, created_by, active_turn_id,
-          implementation_session_id
-        ) VALUES (${changeID}, ${attemptID}, ${intent.sessionID}, 'starting', ${userID}, ${turnID},
-          ${owned?.authority.mode === "build" && owned.authority.review ? null : intent.sessionID})
-        ON CONFLICT (change_id) DO UPDATE SET runtime_attempt_id = EXCLUDED.runtime_attempt_id,
-          implementation_session_id = COALESCE(EXCLUDED.implementation_session_id,
-            factory.change_agent_session.implementation_session_id,factory.change_agent_session.opencode_session_id),
-          implementation_session_confirmed_at = COALESCE(factory.change_agent_session.implementation_session_confirmed_at,
-            CASE WHEN factory.change_agent_session.implementation_session_id IS NULL THEN factory.change_agent_session.native_session_confirmed_at END),
-          native_session_confirmed_at = CASE
-            WHEN factory.change_agent_session.opencode_session_id IS NOT DISTINCT FROM EXCLUDED.opencode_session_id
-              THEN factory.change_agent_session.native_session_confirmed_at END,
-          opencode_session_id = EXCLUDED.opencode_session_id, state = 'starting', active_turn_id = EXCLUDED.active_turn_id,
-          active_inbox_id = NULL, last_error = NULL, updated_at = now()`;
+        await db
+          .update(changeAgentTurnIntent)
+          .set({ runtimeAttemptId: attemptID })
+          .where(
+            and(
+              eq(changeAgentTurnIntent.turnId, turnID),
+              isNull(changeAgentTurnIntent.runtimeAttemptId),
+            ),
+          );
+        const implementationSessionID =
+          owned?.authority.mode === "build" && owned.authority.review ? null : intent.sessionID;
+        await db
+          .insert(changeAgentSession)
+          .values({
+            changeId: changeID,
+            runtimeAttemptId: attemptID,
+            opencodeSessionId: intent.sessionID,
+            state: "starting",
+            createdBy: userID,
+            activeTurnId: turnID,
+            implementationSessionId: implementationSessionID,
+          })
+          .onConflictDoUpdate({
+            target: changeAgentSession.changeId,
+            set: {
+              runtimeAttemptId: attemptID,
+              implementationSessionId: expression`COALESCE(${implementationSessionID}::text,${changeAgentSession.implementationSessionId},${changeAgentSession.opencodeSessionId})`,
+              implementationSessionConfirmedAt: expression`COALESCE(${changeAgentSession.implementationSessionConfirmedAt},
+              CASE WHEN ${changeAgentSession.implementationSessionId} IS NULL THEN ${changeAgentSession.nativeSessionConfirmedAt} END)`,
+              nativeSessionConfirmedAt: expression`CASE WHEN ${changeAgentSession.opencodeSessionId} IS NOT DISTINCT FROM ${intent.sessionID}::text
+              THEN ${changeAgentSession.nativeSessionConfirmedAt} END`,
+              opencodeSessionId: intent.sessionID,
+              state: "starting",
+              activeTurnId: turnID,
+              activeInboxId: null,
+              lastError: null,
+              updatedAt: expression`now()`,
+            },
+          });
         return true;
       });
       if (!prepared) return;
       if (
         (
-          await database.client`SELECT attempt_id FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`
+          await database.db
+            .select({ id: runtimeComputeWait.attemptId })
+            .from(runtimeComputeWait)
+            .where(eq(runtimeComputeWait.attemptId, attemptID))
         ).length
       ) {
         await turns.releasePending(turnID, ownerToken);
@@ -467,7 +545,10 @@ export function createAgentController(
       if (!(await turns.beginDispatch(turnID, ownerToken))) {
         if (
           (
-            await database.client`SELECT turn_id FROM factory.coding_pause WHERE turn_id=${turnID} AND resumed_by_turn_id IS NULL`
+            await database.db
+              .select({ id: codingPause.turnId })
+              .from(codingPause)
+              .where(and(eq(codingPause.turnId, turnID), isNull(codingPause.resumedByTurnId)))
           ).length
         )
           return;
@@ -611,19 +692,42 @@ export function createAgentController(
       if (inbox.id !== intent.promptID)
         throw new Error("OpenCode returned another prompt identity");
       const running = await turns.markRunning(turnID, ownerToken, async (sql) => {
+        const db = drizzleTransaction(sql);
         for (const revisionID of intent.skillLoading === "eager" ? skillRevisionIDs : []) {
-          await sql`INSERT INTO factory.agent_turn_skill(turn_id, revision_id)
-            VALUES (${turnID}, ${revisionID}) ON CONFLICT DO NOTHING`;
+          await db
+            .insert(agentTurnSkill)
+            .values({ turnId: turnID, revisionId: revisionID })
+            .onConflictDoNothing();
         }
-        const rows = await sql<Array<{ id: string }>>`UPDATE factory.change_agent_session
-          SET state = 'working', active_inbox_id = ${intent.promptID}, last_error = NULL, updated_at = now()
-          WHERE change_id = ${changeID} AND state = 'starting' AND active_turn_id = ${turnID}
-          RETURNING change_id AS id`;
+        const rows = await db
+          .update(changeAgentSession)
+          .set({
+            state: "working",
+            activeInboxId: intent.promptID,
+            lastError: null,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(changeAgentSession.changeId, changeID),
+              eq(changeAgentSession.state, "starting"),
+              eq(changeAgentSession.activeTurnId, turnID),
+            ),
+          )
+          .returning({ id: changeAgentSession.changeId });
         if (!rows[0])
           throw new CommandError("conflict", "Build ownership changed before recording dispatch");
         if (owned?.authority.mode === "build" && owned.authority.review)
-          await sql`UPDATE factory.candidate_review SET state='running'
-            WHERE id=${owned.authority.review.reviewId} AND turn_id=${turnID} AND state='pending'`;
+          await db
+            .update(candidateReview)
+            .set({ state: "running" })
+            .where(
+              and(
+                eq(candidateReview.id, owned.authority.review.reviewId),
+                eq(candidateReview.turnId, turnID),
+                eq(candidateReview.state, "pending"),
+              ),
+            );
       });
       if (!running) {
         // The accepted prompt may still be running, or Stop may already have
@@ -643,9 +747,21 @@ export function createAgentController(
         if (!changed && startupRejected)
           changed = await turns.failUnboundStartup(turnID, owned.ownerToken, summary);
         if (changed)
-          await database.client`UPDATE factory.change_agent_session SET state = 'failed',
-          last_error = ${dispatched ? `Execution outcome uncertain. Stop or resolve this turn before new Build work. ${summary}` : summary},
-          updated_at = now() WHERE active_turn_id = ${turnID} AND state IN ('starting', 'working')`;
+          await database.db
+            .update(changeAgentSession)
+            .set({
+              state: "failed",
+              lastError: dispatched
+                ? `Execution outcome uncertain. Stop or resolve this turn before new Build work. ${summary}`
+                : summary,
+              updatedAt: expression`now()`,
+            })
+            .where(
+              and(
+                eq(changeAgentSession.activeTurnId, turnID),
+                inArray(changeAgentSession.state, ["starting", "working"]),
+              ),
+            );
       }
     } finally {
       if (renew) clearInterval(renew);
@@ -744,14 +860,39 @@ export function createAgentController(
             // process loss. Do not re-admit/wake its input or recreate grants.
             let restored = false;
             const allowed = await turns.validateExecution(turnID, ownerToken, async (sql) => {
-              const rows = await sql<{ id: string }[]>`
-                UPDATE factory.change_agent_session SET state='working',last_error=NULL,updated_at=now()
-                WHERE change_id=${changeID} AND active_turn_id=${turnID}
-                  AND active_inbox_id=${intent.promptID} AND state<>'stopped' AND NOT stop_pending
-                  AND runtime_attempt_id=${intent.attemptID} AND opencode_session_id=${intent.sessionID}
-                  AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=${turnID}
-                    AND state='running' AND owner_token=${ownerToken}
-                    AND owner_expires_at>clock_timestamp()) RETURNING change_id AS id`;
+              const db = drizzleTransaction(sql);
+              const rows = await db
+                .update(changeAgentSession)
+                .set({
+                  state: "working",
+                  lastError: null,
+                  updatedAt: expression`now()`,
+                })
+                .where(
+                  and(
+                    eq(changeAgentSession.changeId, changeID),
+                    eq(changeAgentSession.activeTurnId, turnID),
+                    eq(changeAgentSession.activeInboxId, intent.promptID),
+                    ne(changeAgentSession.state, "stopped"),
+                    not(changeAgentSession.stopPending),
+                    expression`${changeAgentSession.runtimeAttemptId} = ${intent.attemptID}::uuid`,
+                    eq(changeAgentSession.opencodeSessionId, intent.sessionID),
+                    exists(
+                      db
+                        .select({ id: agentTurn.id })
+                        .from(agentTurn)
+                        .where(
+                          and(
+                            eq(agentTurn.id, turnID),
+                            eq(agentTurn.state, "running"),
+                            eq(agentTurn.ownerToken, ownerToken),
+                            gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+                          ),
+                        ),
+                    ),
+                  ),
+                )
+                .returning({ id: changeAgentSession.changeId });
               restored = rows.length === 1;
             });
             if (!allowed || !restored) return;
@@ -841,8 +982,10 @@ export function createAgentController(
         if (
           !(await turns.validateExecution(turnID, ownerToken, async (sql) => {
             for (const revisionID of intent.skillLoading === "eager" ? skillRevisionIDs : []) {
-              await sql`INSERT INTO factory.agent_turn_skill(turn_id, revision_id)
-              VALUES (${turnID}, ${revisionID}) ON CONFLICT DO NOTHING`;
+              await drizzleTransaction(sql)
+                .insert(agentTurnSkill)
+                .values({ turnId: turnID, revisionId: revisionID })
+                .onConflictDoNothing();
             }
           }))
         )
@@ -870,13 +1013,37 @@ export function createAgentController(
           throw new Error(
             "Recorded OpenCode input is retained, but no running or completed outcome can be established; no inference was repeated",
           );
-        const restored = await database.client<Array<{ id: string }>>`
-          UPDATE factory.change_agent_session SET state = 'working', active_inbox_id = ${intent.promptID},
-            last_error = NULL, updated_at = now()
-          WHERE change_id = ${changeID} AND active_turn_id = ${turnID} AND state <> 'stopped'
-            AND runtime_attempt_id = ${intent.attemptID} AND opencode_session_id = ${intent.sessionID}
-            AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id = ${turnID} AND state = 'running'
-              AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()) RETURNING change_id AS id`;
+        const restored = await database.db
+          .update(changeAgentSession)
+          .set({
+            state: "working",
+            activeInboxId: intent.promptID,
+            lastError: null,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(changeAgentSession.changeId, changeID),
+              eq(changeAgentSession.activeTurnId, turnID),
+              ne(changeAgentSession.state, "stopped"),
+              eq(changeAgentSession.runtimeAttemptId, intent.attemptID),
+              eq(changeAgentSession.opencodeSessionId, intent.sessionID),
+              exists(
+                database.db
+                  .select({ id: agentTurn.id })
+                  .from(agentTurn)
+                  .where(
+                    and(
+                      eq(agentTurn.id, turnID),
+                      eq(agentTurn.state, "running"),
+                      eq(agentTurn.ownerToken, ownerToken),
+                      gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+                    ),
+                  ),
+              ),
+            ),
+          )
+          .returning({ id: changeAgentSession.changeId });
         if (!restored[0]) return;
         await monitor(changeID, owned.command.createdBy, turnID, ownerToken);
         return;
@@ -886,11 +1053,22 @@ export function createAgentController(
       if (owned?.ownerToken && "changeId" in owned.command) {
         const summary = bounded(readableError(cause), 2_000);
         if (await turns.settle(turnID, owned.ownerToken, "uncertain", summary)) {
-          await database.client`UPDATE factory.change_agent_session SET state = 'failed',
-            last_error = ${summary}, updated_at = now()
-            WHERE change_id = ${owned.command.changeId} AND active_turn_id = ${turnID}
-              AND state <> 'stopped' AND EXISTS(SELECT 1 FROM factory.agent_turn
-                WHERE id = ${turnID} AND state = 'uncertain')`;
+          await database.db
+            .update(changeAgentSession)
+            .set({ state: "failed", lastError: summary, updatedAt: expression`now()` })
+            .where(
+              and(
+                eq(changeAgentSession.changeId, owned.command.changeId),
+                eq(changeAgentSession.activeTurnId, turnID),
+                ne(changeAgentSession.state, "stopped"),
+                exists(
+                  database.db
+                    .select({ id: agentTurn.id })
+                    .from(agentTurn)
+                    .where(and(eq(agentTurn.id, turnID), eq(agentTurn.state, "uncertain"))),
+                ),
+              ),
+            );
         }
       }
     } finally {
@@ -1049,8 +1227,10 @@ export function createAgentController(
           if (outcome.state === "failed" || outcome.state === "succeeded")
             await usageJournal.drain(turnID, client, session.sessionID);
           if (outcome.state === "failed") {
-            const pause =
-              await database.client`SELECT turn_id FROM factory.coding_pause WHERE turn_id=${turnID} AND resumed_by_turn_id IS NULL`;
+            const pause = await database.db
+              .select({ id: codingPause.turnId })
+              .from(codingPause)
+              .where(and(eq(codingPause.turnId, turnID), isNull(codingPause.resumedByTurnId)));
             await usageJournal.settle(
               turnID,
               "failed",
@@ -1060,11 +1240,23 @@ export function createAgentController(
               ? "Coding paused at its allowance. Existing code is retained. Resume explicitly after reset or an allowance increase."
               : bounded(readableError(outcome.error), 2_000);
             await turns.settle(turnID, ownerToken, "failed", summary);
-            await database.client`UPDATE factory.change_agent_session SET state = 'failed',
-              last_error = ${summary}, updated_at = now()
-              WHERE change_id = ${changeID} AND state = 'working' AND active_turn_id = ${turnID}
-                AND active_inbox_id = ${session.activeInboxID}
-                AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id = ${turnID} AND state = 'failed')`;
+            await database.db
+              .update(changeAgentSession)
+              .set({ state: "failed", lastError: summary, updatedAt: expression`now()` })
+              .where(
+                and(
+                  eq(changeAgentSession.changeId, changeID),
+                  eq(changeAgentSession.state, "working"),
+                  eq(changeAgentSession.activeTurnId, turnID),
+                  expression`${changeAgentSession.activeInboxId} = ${session.activeInboxID}::text`,
+                  exists(
+                    database.db
+                      .select({ id: agentTurn.id })
+                      .from(agentTurn)
+                      .where(and(eq(agentTurn.id, turnID), eq(agentTurn.state, "failed"))),
+                  ),
+                ),
+              );
             return;
           }
           if (outcome.state === "succeeded") {
@@ -1080,8 +1272,10 @@ export function createAgentController(
             if (reviewTurn?.authority.mode === "build" && reviewTurn.authority.review) {
               await browser?.finishTurnRecording(turnID, ownerToken, observationController.signal);
               const reviewID = reviewTurn.authority.review.reviewId;
-              const [review] = await database.client<{ result: unknown }[]>`
-                SELECT result FROM factory.candidate_review WHERE id=${reviewID} AND turn_id=${turnID}`;
+              const [review] = await database.db
+                .select({ result: candidateReview.result })
+                .from(candidateReview)
+                .where(and(eq(candidateReview.id, reviewID), eq(candidateReview.turnId, turnID)));
               const parsed = candidateReviewResultInput.safeParse(review?.result);
               const result = parsed.success ? parsed.data : null;
               const summary =
@@ -1093,11 +1287,33 @@ export function createAgentController(
                 "completed",
                 bounded(summary, 2_000),
                 async (sql) => {
-                  await sql`UPDATE factory.candidate_review SET state=${result?.verdict ?? "incomplete"},completed_at=now()
-                  WHERE id=${reviewID} AND turn_id=${turnID} AND state IN ('pending','running')`;
-                  await sql`UPDATE factory.change_agent_session SET state='committed',active_inbox_id=NULL,
-                  last_error=NULL,updated_at=now() WHERE change_id=${changeID} AND active_turn_id=${turnID}
-                    AND state='working' AND active_inbox_id=${session.activeInboxID}`;
+                  const db = drizzleTransaction(sql);
+                  await db
+                    .update(candidateReview)
+                    .set({ state: result?.verdict ?? "incomplete", completedAt: expression`now()` })
+                    .where(
+                      and(
+                        eq(candidateReview.id, reviewID),
+                        eq(candidateReview.turnId, turnID),
+                        inArray(candidateReview.state, ["pending", "running"]),
+                      ),
+                    );
+                  await db
+                    .update(changeAgentSession)
+                    .set({
+                      state: "committed",
+                      activeInboxId: null,
+                      lastError: null,
+                      updatedAt: expression`now()`,
+                    })
+                    .where(
+                      and(
+                        eq(changeAgentSession.changeId, changeID),
+                        eq(changeAgentSession.activeTurnId, turnID),
+                        eq(changeAgentSession.state, "working"),
+                        expression`${changeAgentSession.activeInboxId} = ${session.activeInboxID}::text`,
+                      ),
+                    );
                 },
               );
               if (!settled)
@@ -1114,12 +1330,22 @@ export function createAgentController(
                 ? bounded(`Agent reports completion: ${outcome.summary}`, 2_000)
                 : "OpenCode ended this Build turn. Source submission and independent Verification are separate steps; Delivery still requires approval.",
               async (sql) => {
-                const accepted = await sql<
-                  Array<{ id: string }>
-                >`UPDATE factory.change_agent_session SET state = 'waiting',
-                active_inbox_id = NULL, updated_at = now()
-                WHERE change_id = ${changeID} AND state = 'working' AND active_turn_id = ${turnID}
-                  AND active_inbox_id = ${session.activeInboxID} RETURNING change_id AS id`;
+                const accepted = await drizzleTransaction(sql)
+                  .update(changeAgentSession)
+                  .set({
+                    state: "waiting",
+                    activeInboxId: null,
+                    updatedAt: expression`now()`,
+                  })
+                  .where(
+                    and(
+                      eq(changeAgentSession.changeId, changeID),
+                      eq(changeAgentSession.state, "working"),
+                      eq(changeAgentSession.activeTurnId, turnID),
+                      expression`${changeAgentSession.activeInboxId} = ${session.activeInboxID}::text`,
+                    ),
+                  )
+                  .returning({ id: changeAgentSession.changeId });
                 if (!accepted[0])
                   throw new CommandError("conflict", "Build outcome no longer owns this session");
                 await candidates.record(sql, session, userID, turnID);
@@ -1247,36 +1473,73 @@ export function createAgentController(
       // Failure settlement and its Session projection can lose their connection
       // independently. Restore only the exact failed Turn's diagnostic state;
       // this neither executes work nor resolves uncertain external outcomes.
-      await database.client`
-        UPDATE factory.change_agent_session session
-        SET state = 'failed', last_error = turn.outcome_summary, updated_at = now()
-        FROM factory.agent_turn turn, factory.change_agent_turn_intent intent,
-          factory.change change
-        WHERE session.active_turn_id = turn.id AND turn.state = 'failed'
-          AND session.state IN ('starting', 'working') AND NOT session.stop_pending
-          AND turn.change_id = session.change_id AND change.id = session.change_id
-          AND change.state IN ('starting', 'active')
-          AND intent.turn_id = turn.id AND intent.change_id = session.change_id
-          AND intent.session_id = session.opencode_session_id
-          AND intent.runtime_attempt_id = session.runtime_attempt_id
-          AND change.runtime_attempt_id = session.runtime_attempt_id
-          AND (session.state = 'starting' AND session.active_inbox_id IS NULL
-            OR session.state = 'working' AND session.active_inbox_id = intent.prompt_id)
-      `;
+      await database.db
+        .update(changeAgentSession)
+        .set({
+          state: "failed",
+          lastError: agentTurn.outcomeSummary,
+          updatedAt: expression`now()`,
+        })
+        .from(agentTurn)
+        .where(
+          and(
+            eq(changeAgentSession.activeTurnId, agentTurn.id),
+            eq(agentTurn.state, "failed"),
+            inArray(changeAgentSession.state, ["starting", "working"]),
+            not(changeAgentSession.stopPending),
+            eq(agentTurn.changeId, changeAgentSession.changeId),
+            exists(
+              database.db
+                .select({ id: changeAgentTurnIntent.turnId })
+                .from(changeAgentTurnIntent)
+                .innerJoin(changeTable, eq(changeTable.id, changeAgentTurnIntent.changeId))
+                .where(
+                  and(
+                    eq(changeTable.id, changeAgentSession.changeId),
+                    inArray(changeTable.state, ["starting", "active"]),
+                    eq(changeAgentTurnIntent.turnId, agentTurn.id),
+                    eq(changeAgentTurnIntent.changeId, changeAgentSession.changeId),
+                    eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+                    eq(changeAgentTurnIntent.runtimeAttemptId, changeAgentSession.runtimeAttemptId),
+                    eq(changeTable.runtimeAttemptId, changeAgentSession.runtimeAttemptId),
+                    or(
+                      and(
+                        eq(changeAgentSession.state, "starting"),
+                        isNull(changeAgentSession.activeInboxId),
+                      ),
+                      and(
+                        eq(changeAgentSession.state, "working"),
+                        eq(changeAgentSession.activeInboxId, changeAgentTurnIntent.promptId),
+                      ),
+                    ),
+                  ),
+                ),
+            ),
+          ),
+        );
       for (const operation of await candidates.pending())
         run(candidates.reconcile(operation.id, true));
-      const external = await database.client<
-        Array<{ id: string }>
-      >`SELECT id FROM factory.agent_turn
-        WHERE change_id IS NOT NULL AND state IN ('dispatching', 'running', 'uncertain') ORDER BY created_at`;
+      const external = await database.db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .where(
+          and(
+            isNotNull(agentTurn.changeId),
+            inArray(agentTurn.state, ["dispatching", "running", "uncertain"]),
+          ),
+        )
+        .orderBy(asc(agentTurn.createdAt));
       for (const turn of external) run(recoverExternal(turn.id));
-      const pending = await database.client<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
-        WHERE change_id IS NOT NULL AND state = 'pending' ORDER BY created_at`;
+      const pending = await database.db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .where(and(isNotNull(agentTurn.changeId), eq(agentTurn.state, "pending")))
+        .orderBy(asc(agentTurn.createdAt));
       for (const turn of pending) run(execute(turn.id));
-      const stopped = await database.client<
-        Array<{ changeID: string }>
-      >`SELECT change_id AS "changeID"
-        FROM factory.change_agent_session WHERE stop_pending`;
+      const stopped = await database.db
+        .select({ changeID: changeAgentSession.changeId })
+        .from(changeAgentSession)
+        .where(eq(changeAgentSession.stopPending, true));
       for (const session of stopped) run(reconcileStop(session.changeID));
     },
 
@@ -1287,9 +1550,15 @@ export function createAgentController(
       const work = Promise.all([
         candidates.recoverRuntime(attemptID),
         (async () => {
-          const stopped = await database.client<{ changeID: string }[]>`
-            SELECT change_id AS "changeID" FROM factory.change_agent_session
-            WHERE runtime_attempt_id=${attemptID} AND stop_pending`;
+          const stopped = await database.db
+            .select({ changeID: changeAgentSession.changeId })
+            .from(changeAgentSession)
+            .where(
+              and(
+                eq(changeAgentSession.runtimeAttemptId, attemptID),
+                eq(changeAgentSession.stopPending, true),
+              ),
+            );
           await Promise.all(stopped.map((session) => reconcileStop(session.changeID, true)));
         })(),
       ]).then(() => {});
@@ -1298,11 +1567,16 @@ export function createAgentController(
     },
 
     async dispatchRuntimePending(attemptID: string) {
-      const pending = await database.client<
-        Array<{ id: string }>
-      >`SELECT turn.id FROM factory.agent_turn turn
-        JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-        WHERE intent.runtime_attempt_id=${attemptID} AND turn.state='pending'`;
+      const pending = await database.db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+        .where(
+          and(
+            eq(changeAgentTurnIntent.runtimeAttemptId, attemptID),
+            eq(agentTurn.state, "pending"),
+          ),
+        );
       for (const turn of pending) run(execute(turn.id));
     },
 
@@ -1371,22 +1645,28 @@ export function createAgentController(
       return this.get(changeID, accepted.turn.id);
     },
     async resume(changeID: string, userID: string, commandID: string, pausedTurnID: string) {
-      const [pendingResume] = await database.client<
-        Array<{
-          state: string;
-          review: boolean;
-          attemptID: string;
-          sessionID: string;
-          promptID: string;
-        }>
-      >`
-        SELECT turn.state,(turn.authority ? 'review') AS review,intent.runtime_attempt_id AS "attemptID",intent.session_id AS "sessionID",intent.prompt_id AS "promptID"
-        FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-        JOIN factory.coding_pause pause ON pause.turn_id=turn.id
-        WHERE turn.id=${pausedTurnID} AND turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL`;
-      const [project] = await database.client<
-        Array<{ id: string }>
-      >`SELECT project_id AS id FROM factory.change WHERE id=${changeID}`;
+      const [pendingResume] = await database.db
+        .select({
+          state: agentTurn.state,
+          review: expression<boolean>`${agentTurn.authority} ? 'review'`,
+          attemptID: changeAgentTurnIntent.runtimeAttemptId,
+          sessionID: changeAgentTurnIntent.sessionId,
+          promptID: changeAgentTurnIntent.promptId,
+        })
+        .from(agentTurn)
+        .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+        .innerJoin(codingPause, eq(codingPause.turnId, agentTurn.id))
+        .where(
+          and(
+            eq(agentTurn.id, pausedTurnID),
+            eq(agentTurn.changeId, changeID),
+            isNull(codingPause.resumedByTurnId),
+          ),
+        );
+      const [project] = await database.db
+        .select({ id: changeTable.projectId })
+        .from(changeTable)
+        .where(eq(changeTable.id, changeID));
       if (!project) throw new CommandError("not-found", "Change not found");
       await database.client.begin((sql) => projectAuthorityIn(sql, userID, project.id));
       if (pendingResume?.state === "failed" && pendingResume.review)
@@ -1396,11 +1676,12 @@ export function createAgentController(
         );
       if (
         pendingResume?.state === "failed" &&
-        !(await confirmSettledOpenCodeInput(
-          opencode(hub, pendingResume.attemptID),
-          pendingResume.sessionID,
-          pendingResume.promptID,
-        ))
+        (!pendingResume.attemptID ||
+          !(await confirmSettledOpenCodeInput(
+            opencode(hub, pendingResume.attemptID),
+            pendingResume.sessionID,
+            pendingResume.promptID,
+          )))
       )
         throw new CommandError(
           "conflict",
@@ -1409,35 +1690,52 @@ export function createAgentController(
       const turnID = await database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`coding-resume:${commandID}`}))`;
         const input = { changeID, pausedTurnID };
-        const [old] = await sql<
-          Array<{
-            actor_id: string;
-            input: { changeID: string; pausedTurnID: string };
-            result: { turnID: string };
-          }>
-        >`
-          SELECT actor_id,input,result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
-        const [project] = await sql<
-          Array<{ id: string }>
-        >`SELECT project_id AS id FROM factory.change WHERE id=${changeID}`;
+        const db = drizzleTransaction(sql);
+        const [old] = await db
+          .select({
+            actorID: executionPolicyCommand.actorId,
+            input: expression<{
+              changeID: string;
+              pausedTurnID: string;
+            }>`${executionPolicyCommand.input}`,
+            result: expression<{ turnID: string }>`${executionPolicyCommand.result}`,
+          })
+          .from(executionPolicyCommand)
+          .where(eq(executionPolicyCommand.commandId, commandID));
+        const [project] = await db
+          .select({ id: changeTable.projectId })
+          .from(changeTable)
+          .where(eq(changeTable.id, changeID));
         if (!project) throw new CommandError("not-found", "Change not found");
         if (old) {
           await projectAuthorityIn(sql, userID, project.id);
           if (
-            old.actor_id !== userID ||
+            old.actorID !== userID ||
             old.input.changeID !== changeID ||
             old.input.pausedTurnID !== pausedTurnID
           )
             throw new CommandError("conflict", "Resume command changed input");
           return old.result.turnID;
         }
-        await sql`SELECT id FROM factory.agent_turn WHERE id=${pausedTurnID} FOR UPDATE`;
+        await db
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(eq(agentTurn.id, pausedTurnID))
+          .for("update");
         await lockChangeWriterIn(sql, changeID);
         await projectAuthorityIn(sql, userID, project.id);
-        const [paused] = await sql<
-          Array<{ state: string }>
-        >`SELECT turn.state FROM factory.coding_pause pause JOIN factory.agent_turn turn ON turn.id=pause.turn_id
-          WHERE pause.turn_id=${pausedTurnID} AND turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL FOR UPDATE OF pause,turn`;
+        const [paused] = await db
+          .select({ state: agentTurn.state })
+          .from(codingPause)
+          .innerJoin(agentTurn, eq(agentTurn.id, codingPause.turnId))
+          .where(
+            and(
+              eq(codingPause.turnId, pausedTurnID),
+              eq(agentTurn.changeId, changeID),
+              isNull(codingPause.resumedByTurnId),
+            ),
+          )
+          .for("update");
         if (!paused) throw new CommandError("conflict", "This Coding pause is no longer current");
         let next: string;
         if (paused.state === "pending") next = await turns.resumePendingIn(sql, pausedTurnID);
@@ -1454,8 +1752,13 @@ export function createAgentController(
             "conflict",
             "Wait for the current model call to finish before resuming",
           );
-        await sql`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-          VALUES(${commandID},${`coding-resume:${changeID}`},${userID},${JSON.stringify(input)}::jsonb,${JSON.stringify({ turnID: next })}::jsonb)`;
+        await db.insert(executionPolicyCommand).values({
+          commandId: commandID,
+          scope: `coding-resume:${changeID}`,
+          actorId: userID,
+          input,
+          result: { turnID: next },
+        });
         return next;
       });
       run(execute(turnID));
@@ -1477,11 +1780,17 @@ export function createAgentController(
     },
 
     async dispatchPending(changeID: string) {
-      const pending = await database.client<
-        Array<{ id: string }>
-      >`SELECT turn.id FROM factory.agent_turn turn
-        JOIN factory.change change ON change.id = turn.change_id
-        WHERE change.id = ${changeID} AND change.state IN ('starting', 'active') AND turn.state = 'pending'`;
+      const pending = await database.db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .innerJoin(changeTable, eq(changeTable.id, agentTurn.changeId))
+        .where(
+          and(
+            eq(changeTable.id, changeID),
+            inArray(changeTable.state, ["starting", "active"]),
+            eq(agentTurn.state, "pending"),
+          ),
+        );
       for (const turn of pending) run(execute(turn.id));
     },
 
@@ -1564,38 +1873,65 @@ export function createAgentController(
     },
 
     async retainedMessages(conversationID: string, contextID?: string) {
-      const [context] = await database.client<
-        {
-          changeID: string;
-          original: boolean;
-          id: string;
-          nativeID: string | null;
-          currentID: string | null;
-          confirmed: boolean;
-          attemptID: string | null;
-        }[]
-      >`SELECT context.change_id AS "changeID",context.id,context.original,
-          context.native_session_id AS "nativeID",context.archived_session->>'opencode_session_id' AS "currentID",
-          (context.archived_session->>'native_session_confirmed_at' IS NOT NULL OR
-           context.archived_session->>'implementation_session_confirmed_at' IS NOT NULL) AS confirmed,
-          current.id AS "attemptID"
-        FROM factory.conversation_context context
-        JOIN factory.change change ON change.id=context.change_id
-        LEFT JOIN factory.runtime_attempt original ON original.id=(context.archived_session->>'runtime_attempt_id')::uuid
-        LEFT JOIN factory.runtime_attempt current ON current.id=change.runtime_attempt_id AND current.state='ready'
-          AND current.workspace_id=original.workspace_id AND current.workspace_id IS NOT NULL
-        WHERE context.conversation_id=${conversationID} AND context.archived_session IS NOT NULL
-          AND (context.id=${contextID ?? null} OR (${contextID ?? null}::uuid IS NULL AND context.original)) LIMIT 1`;
+      const original = alias(runtimeAttempt, "original");
+      const current = alias(runtimeAttempt, "current");
+      const [context] = await database.db
+        .select({
+          changeID: changeTable.id,
+          id: conversationContext.id,
+          original: conversationContext.original,
+          nativeID: conversationContext.nativeSessionId,
+          currentID: expression<
+            string | null
+          >`${conversationContext.archivedSession}->>'opencode_session_id'`,
+          confirmed: expression<boolean>`${conversationContext.archivedSession}->>'native_session_confirmed_at' IS NOT NULL OR
+          ${conversationContext.archivedSession}->>'implementation_session_confirmed_at' IS NOT NULL`,
+          attemptID: current.id,
+        })
+        .from(conversationContext)
+        .innerJoin(changeTable, eq(changeTable.id, conversationContext.changeId))
+        .leftJoin(
+          original,
+          expression`${original.id}=(${conversationContext.archivedSession}->>'runtime_attempt_id')::uuid`,
+        )
+        .leftJoin(
+          current,
+          and(
+            eq(current.id, changeTable.runtimeAttemptId),
+            eq(current.state, "ready"),
+            eq(current.workspaceId, original.workspaceId),
+            isNotNull(current.workspaceId),
+          ),
+        )
+        .where(
+          and(
+            eq(conversationContext.conversationId, conversationID),
+            isNotNull(conversationContext.archivedSession),
+            contextID === undefined
+              ? eq(conversationContext.original, true)
+              : eq(conversationContext.id, contextID),
+          ),
+        )
+        .limit(1);
       if (!context) return;
       if (!context.confirmed) return { messages: [], messagesAvailable: true };
       if (!context.attemptID || !hub.connected(context.attemptID))
         return archives.retainedMessages(context.id).catch(() => undefined);
-      const intents = await database.client<{ promptID: string; text: string | null }[]>`
-        SELECT intent.prompt_id AS "promptID",
-          CASE WHEN turn.input->>'kind'='change-start' THEN NULL ELSE turn.input->>'text' END AS text
-        FROM factory.change_agent_turn_intent intent JOIN factory.agent_turn turn ON turn.id=intent.turn_id
-        WHERE intent.change_id=${context.changeID} AND turn.input->>'contextId'
-          IS NOT DISTINCT FROM ${context.original ? null : context.id}`;
+      const intents = await database.db
+        .select({
+          promptID: changeAgentTurnIntent.promptId,
+          text: expression<
+            string | null
+          >`CASE WHEN ${agentTurn.input}->>'kind'='change-start' THEN NULL ELSE ${agentTurn.input}->>'text' END`,
+        })
+        .from(changeAgentTurnIntent)
+        .innerJoin(agentTurn, eq(agentTurn.id, changeAgentTurnIntent.turnId))
+        .where(
+          and(
+            eq(changeAgentTurnIntent.changeId, context.changeID),
+            expression`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM ${context.original ? null : context.id}::text`,
+          ),
+        );
       try {
         const client = opencode(hub, context.attemptID);
         const messages = (
@@ -1633,9 +1969,10 @@ export function createAgentController(
       expectedContextID: string | null,
     ) {
       await database.client.begin(async (sql) => {
-        const [change] = await sql<
-          { projectID: string }[]
-        >`SELECT project_id AS "projectID" FROM factory.change WHERE id=${changeID}`;
+        const [change] = await drizzleTransaction(sql)
+          .select({ projectID: changeTable.projectId })
+          .from(changeTable)
+          .where(eq(changeTable.id, changeID));
         if (!change) throw new CommandError("not-found", "Change not found");
         await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
       });
@@ -1649,32 +1986,41 @@ export function createAgentController(
     },
     async get(changeID: string, turnID?: string, history = true, includeNavigation = true) {
       const transcriptArchive = await archives.status(changeID);
-      const [waiting] = await database.client<
-        Array<{ reason: string }>
-      >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
-        JOIN factory.change change ON change.runtime_attempt_id=waiting.attempt_id WHERE change.id=${changeID}`;
+      const [waiting] = await database.db
+        .select({ reason: runtimeComputeWait.reason })
+        .from(runtimeComputeWait)
+        .innerJoin(changeTable, eq(changeTable.runtimeAttemptId, runtimeComputeWait.attemptId))
+        .where(eq(changeTable.id, changeID));
       const turn = await readTurnObservation(database, { changeID, ...(turnID ? { turnID } : {}) });
       const intents = history
-        ? await database.client<
-            Array<{
-              turnID: string;
-              commandID: string;
-              sessionID: string;
-              promptID: string;
-              bootstrap: boolean;
-              text: string | null;
-              at: number;
-            }>
-          >`SELECT intent.turn_id AS "turnID", turn.command_id AS "commandID", intent.session_id AS "sessionID",
-              intent.prompt_id AS "promptID", (turn.input->>'kind'='change-start') AS bootstrap, turn.input->>'text' AS text,
-              EXTRACT(EPOCH FROM turn.created_at)::float8 * 1000 AS at
-            FROM factory.change_agent_turn_intent intent
-            JOIN factory.agent_turn turn ON turn.id = intent.turn_id
-            WHERE intent.change_id = ${changeID}
-              AND turn.input->>'contextId' IS NOT DISTINCT FROM
-                (SELECT conversation.active_coding_context_id::text FROM factory.ticket_conversation conversation
-                  JOIN factory.change change ON change.ticket_id=conversation.ticket_id WHERE change.id=${changeID})
-            ORDER BY intent.created_at DESC, intent.turn_id DESC LIMIT 100`
+        ? await database.db
+            .select({
+              turnID: changeAgentTurnIntent.turnId,
+              commandID: agentTurn.commandId,
+              sessionID: changeAgentTurnIntent.sessionId,
+              promptID: changeAgentTurnIntent.promptId,
+              bootstrap: expression<boolean>`${agentTurn.input}->>'kind'='change-start'`,
+              text: expression<string | null>`${agentTurn.input}->>'text'`,
+              at: expression<number>`EXTRACT(EPOCH FROM ${agentTurn.createdAt})::float8 * 1000`,
+            })
+            .from(changeAgentTurnIntent)
+            .innerJoin(agentTurn, eq(agentTurn.id, changeAgentTurnIntent.turnId))
+            .where(
+              and(
+                eq(changeAgentTurnIntent.changeId, changeID),
+                expression`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM (${database.db
+                  .select({
+                    contextID: expression<
+                      string | null
+                    >`${ticketConversation.activeCodingContextId}::text`,
+                  })
+                  .from(ticketConversation)
+                  .innerJoin(changeTable, eq(changeTable.ticketId, ticketConversation.ticketId))
+                  .where(eq(changeTable.id, changeID))})`,
+              ),
+            )
+            .orderBy(desc(changeAgentTurnIntent.createdAt), desc(changeAgentTurnIntent.turnId))
+            .limit(100)
         : [];
       const admittedMessages = intents.toReversed().flatMap((intent) =>
         !intent.bootstrap && intent.text !== null
@@ -1689,12 +2035,33 @@ export function createAgentController(
             ]
           : [],
       );
-      const [codingPause] = await database.client<Array<{ reason: string; turnID: string }>>`
-        SELECT pause.reason,pause.turn_id AS "turnID" FROM factory.coding_pause pause
-        JOIN factory.agent_turn turn ON turn.id=pause.turn_id WHERE turn.change_id=${changeID}
-        AND pause.resumed_by_turn_id IS NULL AND turn.state IN ('pending','dispatching','running','failed')
-        AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${changeID} AND (stop_pending OR state='stopped'))
-        ORDER BY pause.created_at DESC LIMIT 1`;
+      const [pause] = await database.db
+        .select({ reason: codingPause.reason, turnID: codingPause.turnId })
+        .from(codingPause)
+        .innerJoin(agentTurn, eq(agentTurn.id, codingPause.turnId))
+        .where(
+          and(
+            eq(agentTurn.changeId, changeID),
+            isNull(codingPause.resumedByTurnId),
+            inArray(agentTurn.state, ["pending", "dispatching", "running", "failed"]),
+            notExists(
+              database.db
+                .select({ id: changeAgentSession.changeId })
+                .from(changeAgentSession)
+                .where(
+                  and(
+                    eq(changeAgentSession.changeId, changeID),
+                    or(
+                      eq(changeAgentSession.stopPending, true),
+                      eq(changeAgentSession.state, "stopped"),
+                    ),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .orderBy(desc(codingPause.createdAt))
+        .limit(1);
       // Git settlement updates the operation and Session together. Capture them
       // in one read snapshot so native history latency cannot split that outcome.
       // Release the pooled connection before any native transcript request.
@@ -1702,26 +2069,56 @@ export function createAgentController(
         "isolation level repeatable read read only",
         async (sql) => {
           const session = await row(changeID, sql);
-          const operations = await sql<Array<{ commitSHA: string | null }>>`
-            SELECT commit_sha AS "commitSHA" FROM factory.change_commit_operation
-            WHERE change_id = ${changeID} AND state = 'succeeded'
-            ORDER BY sequence DESC LIMIT 1
-          `;
-          const pendingCommits = await sql<
-            Array<{
-              id: string;
-              state: "commit-intended" | "committed" | "push-intended";
-              lastError: string | null;
-            }>
-          >`SELECT id, state, last_error AS "lastError" FROM factory.change_commit_operation
-            WHERE change_id = ${changeID} AND source = 'agent'
-              AND state IN ('commit-intended', 'committed', 'push-intended') LIMIT 1`;
+          const db = drizzleTransaction(sql);
+          const operations = await db
+            .select({ commitSHA: changeCommitOperation.commitSha })
+            .from(changeCommitOperation)
+            .where(
+              and(
+                eq(changeCommitOperation.changeId, changeID),
+                eq(changeCommitOperation.state, "succeeded"),
+              ),
+            )
+            .orderBy(desc(changeCommitOperation.sequence))
+            .limit(1);
+          const pendingCommits = await db
+            .select({
+              id: changeCommitOperation.id,
+              state: expression<
+                "commit-intended" | "committed" | "push-intended"
+              >`${changeCommitOperation.state}`,
+              lastError: changeCommitOperation.lastError,
+            })
+            .from(changeCommitOperation)
+            .where(
+              and(
+                eq(changeCommitOperation.changeId, changeID),
+                eq(changeCommitOperation.source, "agent"),
+                inArray(changeCommitOperation.state, [
+                  "commit-intended",
+                  "committed",
+                  "push-intended",
+                ]),
+              ),
+            )
+            .limit(1);
           const [emptyCommit] =
             turn?.state === "completed"
-              ? await sql<Array<{ summary: string }>>`
-                  SELECT last_error AS summary FROM factory.change_commit_operation
-                  WHERE id = ${turn.id} AND change_id = ${changeID} AND state = 'failed' AND commit_sha IS NULL
-                    AND last_error IN (${noChangesToSubmit}, ${noChangesToSubmit + earlierSubmissionUnchanged})`
+              ? await db
+                  .select({ summary: expression<string>`${changeCommitOperation.lastError}` })
+                  .from(changeCommitOperation)
+                  .where(
+                    and(
+                      eq(changeCommitOperation.id, turn.id),
+                      eq(changeCommitOperation.changeId, changeID),
+                      eq(changeCommitOperation.state, "failed"),
+                      isNull(changeCommitOperation.commitSha),
+                      inArray(changeCommitOperation.lastError, [
+                        noChangesToSubmit,
+                        noChangesToSubmit + earlierSubmissionUnchanged,
+                      ]),
+                    ),
+                  )
               : [];
           return { session, operations, pendingCommits, emptyCommit };
         },
@@ -1750,7 +2147,7 @@ export function createAgentController(
           runtimeConnected: false,
           stopPending: false,
           stopId: null,
-          codingPause: codingPause ?? null,
+          codingPause: pause ?? null,
           computeWait: waiting?.reason ?? null,
           transcriptArchive,
         };
@@ -1761,14 +2158,24 @@ export function createAgentController(
       let activityRuntimeState = session.runtimeState;
       let displayRuntimeState = session.runtimeState;
       if (session.sessionID && ["failed", "stopped"].includes(session.runtimeState)) {
-        const [retained] = await database.client<Array<{ id: string; state: string }>>`
-          SELECT current.id, current.state FROM factory.change change
-          JOIN factory.runtime_attempt current ON current.id = change.runtime_attempt_id
-          JOIN factory.runtime_attempt original ON original.id = ${session.runtimeAttemptID}
-          WHERE change.id = ${changeID} AND change.state IN ('starting', 'active')
-            AND current.change_id = change.id AND original.change_id = change.id
-            AND current.workspace_id = original.workspace_id AND current.workspace_id IS NOT NULL
-            AND current.generation > original.generation`;
+        const current = alias(runtimeAttempt, "current");
+        const original = alias(runtimeAttempt, "original");
+        const [retained] = await database.db
+          .select({ id: current.id, state: current.state })
+          .from(changeTable)
+          .innerJoin(current, eq(current.id, changeTable.runtimeAttemptId))
+          .innerJoin(original, eq(original.id, session.runtimeAttemptID))
+          .where(
+            and(
+              eq(changeTable.id, changeID),
+              inArray(changeTable.state, ["starting", "active"]),
+              eq(current.changeId, changeTable.id),
+              eq(original.changeId, changeTable.id),
+              eq(current.workspaceId, original.workspaceId),
+              isNotNull(current.workspaceId),
+              gt(current.generation, original.generation),
+            ),
+          );
         if (retained) {
           displayRuntimeState = retained.state;
           // Saved lifecycle state is displayable before retained OpenCode history is reachable.
@@ -1843,7 +2250,7 @@ export function createAgentController(
           (turn.state === "pending" || turn.state === "dispatching"),
       );
       return {
-        codingPause: codingPause ?? null,
+        codingPause: pause ?? null,
         computeWait: waiting?.reason ?? null,
         transcriptArchive,
         state: preparingNewTurn
@@ -1880,3 +2287,20 @@ export function createAgentController(
     },
   };
 }
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  not,
+  notExists,
+  or,
+  sql as expression,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";

@@ -1,6 +1,13 @@
 import { createHmac } from "node:crypto";
+import { and, eq, sql as expression, inArray, isNotNull, isNull, ne } from "drizzle-orm";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { projectMembership } from "../../../../packages/db/src/schema";
+import {
+  administrator,
+  project,
+  projectMembership,
+  projectRepositoryIntent,
+  projectSetupDraft,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { ForgeAmbiguousWriteError } from "../../../../packages/forge/src/forge";
 import {
@@ -17,19 +24,6 @@ import type { ImportSecrets } from "./secrets";
 import { starterFiles } from "./starter";
 
 type Database = ReturnType<typeof createDatabase>;
-type Intent = {
-  commandID: string;
-  setupID: string;
-  userID: string;
-  projectID: string;
-  name: string;
-  slug: string;
-  kind: "starter" | "import";
-  sourceURL: string;
-  credentialKey: string | null;
-  fingerprint: string;
-  state: string;
-};
 
 export function createProjectSetupController(options: {
   database: Database;
@@ -42,6 +36,7 @@ export function createProjectSetupController(options: {
   onCreated(projectID: string, userID: string): Promise<void>;
 }) {
   const sql = options.database.client;
+  const db = options.database.db;
   const access = createAccessController(options.database);
   const conflict = () =>
     new CommandError("conflict", "Project setup changed. Reload before continuing.");
@@ -53,36 +48,70 @@ export function createProjectSetupController(options: {
 
   async function view(userID: string): Promise<ProjectSetupView | null> {
     await access.requireSystemManager(userID);
-    const [row] = await sql`SELECT id,version::float8 AS version,name,slug,kind,
-      source_url AS "sourceURL",state,project_id AS "projectID",command_id AS "commandID",failure
-      FROM factory.project_setup_draft WHERE user_id=${userID}`;
+    const [row] = await db
+      .select({
+        id: projectSetupDraft.id,
+        version: projectSetupDraft.version,
+        name: projectSetupDraft.name,
+        slug: projectSetupDraft.slug,
+        kind: projectSetupDraft.kind,
+        sourceURL: projectSetupDraft.sourceUrl,
+        state: projectSetupDraft.state,
+        projectID: projectSetupDraft.projectId,
+        commandID: projectSetupDraft.commandId,
+        failure: projectSetupDraft.failure,
+      })
+      .from(projectSetupDraft)
+      .where(eq(projectSetupDraft.userId, userID));
     return row ? projectSetupView.parse(row) : null;
   }
 
   async function begin(userID: string) {
     await access.requireSystemManager(userID);
     const id = crypto.randomUUID();
-    await sql`INSERT INTO factory.project_setup_draft(id,user_id) VALUES(${id},${userID})
-      ON CONFLICT(user_id) DO UPDATE SET id=CASE WHEN factory.project_setup_draft.state='created' THEN EXCLUDED.id ELSE factory.project_setup_draft.id END,
-      version=CASE WHEN factory.project_setup_draft.state='created' THEN 1 ELSE factory.project_setup_draft.version END,
-      name=CASE WHEN factory.project_setup_draft.state='created' THEN '' ELSE factory.project_setup_draft.name END,
-      slug=CASE WHEN factory.project_setup_draft.state='created' THEN '' ELSE factory.project_setup_draft.slug END,
-      kind=CASE WHEN factory.project_setup_draft.state='created' THEN 'starter' ELSE factory.project_setup_draft.kind END,
-      source_url=CASE WHEN factory.project_setup_draft.state='created' THEN '' ELSE factory.project_setup_draft.source_url END,
-      project_id=CASE WHEN factory.project_setup_draft.state='created' THEN NULL ELSE factory.project_setup_draft.project_id END,
-      command_id=CASE WHEN factory.project_setup_draft.state='created' THEN NULL ELSE factory.project_setup_draft.command_id END,
-      failure=CASE WHEN factory.project_setup_draft.state='created' THEN NULL ELSE factory.project_setup_draft.failure END,
-      state=CASE WHEN factory.project_setup_draft.state='created' THEN 'draft' ELSE factory.project_setup_draft.state END`;
+    await db
+      .insert(projectSetupDraft)
+      .values({ id, userId: userID })
+      .onConflictDoUpdate({
+        target: projectSetupDraft.userId,
+        set: {
+          id: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN ${id}::uuid ELSE ${projectSetupDraft.id} END`,
+          version: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN 1 ELSE ${projectSetupDraft.version} END`,
+          name: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN '' ELSE ${projectSetupDraft.name} END`,
+          slug: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN '' ELSE ${projectSetupDraft.slug} END`,
+          kind: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN 'starter' ELSE ${projectSetupDraft.kind} END`,
+          sourceUrl: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN '' ELSE ${projectSetupDraft.sourceUrl} END`,
+          projectId: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN NULL ELSE ${projectSetupDraft.projectId} END`,
+          commandId: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN NULL ELSE ${projectSetupDraft.commandId} END`,
+          failure: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN NULL ELSE ${projectSetupDraft.failure} END`,
+          state: expression`CASE WHEN ${projectSetupDraft.state}='created' THEN 'draft' ELSE ${projectSetupDraft.state} END`,
+        },
+      });
     return view(userID);
   }
 
   async function save(userID: string, input: unknown) {
     await access.requireSystemManager(userID);
     const value = projectSetupSave.parse(input);
-    const rows =
-      await sql`UPDATE factory.project_setup_draft SET name=${value.name},slug=${value.slug},
-      kind=${value.kind},source_url=${value.sourceURL},version=version+1,updated_at=now()
-      WHERE id=${value.id} AND user_id=${userID} AND version=${value.version} AND state='draft' RETURNING id`;
+    const rows = await db
+      .update(projectSetupDraft)
+      .set({
+        name: value.name,
+        slug: value.slug,
+        kind: value.kind,
+        sourceUrl: value.sourceURL,
+        version: expression`${projectSetupDraft.version}+1`,
+        updatedAt: expression`now()`,
+      })
+      .where(
+        and(
+          eq(projectSetupDraft.id, value.id),
+          eq(projectSetupDraft.userId, userID),
+          eq(projectSetupDraft.version, value.version),
+          eq(projectSetupDraft.state, "draft"),
+        ),
+      )
+      .returning({ id: projectSetupDraft.id });
     if (!rows.length) throw conflict();
     return view(userID);
   }
@@ -91,41 +120,91 @@ export function createProjectSetupController(options: {
     await access.requireSystemManager(userID);
     // Keep every external intent immutable. A new draft is a new operation,
     // never a retry with changed credentials or a replacement of retained Git.
-    const rows = await sql`UPDATE factory.project_setup_draft SET id=${crypto.randomUUID()},
-      version=1,name='',slug='',kind='starter',source_url='',state='draft',
-      project_id=NULL,command_id=NULL,failure=NULL,updated_at=now()
-      WHERE user_id=${userID} AND id=${setupID} AND state IN ('checking','failed') RETURNING id`;
+    const rows = await db
+      .update(projectSetupDraft)
+      .set({
+        id: crypto.randomUUID(),
+        version: 1,
+        name: "",
+        slug: "",
+        kind: "starter",
+        sourceUrl: "",
+        state: "draft",
+        projectId: null,
+        commandId: null,
+        failure: null,
+        updatedAt: expression`now()`,
+      })
+      .where(
+        and(
+          eq(projectSetupDraft.userId, userID),
+          eq(projectSetupDraft.id, setupID),
+          inArray(projectSetupDraft.state, ["checking", "failed"]),
+        ),
+      )
+      .returning({ id: projectSetupDraft.id });
     if (!rows.length) throw conflict();
     return view(userID);
   }
 
-  async function intent(commandID: string): Promise<Intent | undefined> {
-    const [row] = await sql<
-      Intent[]
-    >`SELECT command_id AS "commandID",setup_id AS "setupID",user_id AS "userID",
-      project_id AS "projectID",name,slug,kind,source_url AS "sourceURL",credential_key AS "credentialKey",fingerprint,state
-      FROM factory.project_repository_intent WHERE command_id=${commandID}`;
+  async function intent(commandID: string) {
+    const [row] = await db
+      .select({
+        commandID: projectRepositoryIntent.commandId,
+        setupID: projectRepositoryIntent.setupId,
+        userID: projectRepositoryIntent.userId,
+        projectID: projectRepositoryIntent.projectId,
+        name: projectRepositoryIntent.name,
+        slug: projectRepositoryIntent.slug,
+        kind: projectRepositoryIntent.kind,
+        sourceURL: projectRepositoryIntent.sourceUrl,
+        credentialKey: projectRepositoryIntent.credentialKey,
+        fingerprint: projectRepositoryIntent.fingerprint,
+        state: projectRepositoryIntent.state,
+      })
+      .from(projectRepositoryIntent)
+      .where(eq(projectRepositoryIntent.commandId, commandID));
     return row;
   }
+  type Intent = NonNullable<Awaited<ReturnType<typeof intent>>>;
 
   async function removeCredential(row: Intent) {
     if (!row.credentialKey) return;
-    const [active] =
-      await sql`SELECT command_id FROM factory.project_repository_intent WHERE command_id=${row.commandID} AND credential_removed_at IS NULL`;
+    const [active] = await db
+      .select({ commandID: projectRepositoryIntent.commandId })
+      .from(projectRepositoryIntent)
+      .where(
+        and(
+          eq(projectRepositoryIntent.commandId, row.commandID),
+          isNull(projectRepositoryIntent.credentialRemovedAt),
+        ),
+      );
     if (!active) return;
     await options.secrets.remove(row.credentialKey);
-    await sql`UPDATE factory.project_repository_intent SET credential_removed_at=COALESCE(credential_removed_at,now()) WHERE command_id=${row.commandID}`;
+    await db
+      .update(projectRepositoryIntent)
+      .set({
+        credentialRemovedAt: expression`COALESCE(${projectRepositoryIntent.credentialRemovedAt},now())`,
+      })
+      .where(eq(projectRepositoryIntent.commandId, row.commandID));
   }
 
   async function finish(row: Intent, branch: string) {
     await sql.begin(async (transaction) => {
+      const tx = drizzleTransaction(transaction);
       await transaction`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
-      const [manager] =
-        await transaction`SELECT user_id FROM factory.administrator WHERE user_id=${row.userID} FOR SHARE`;
+      const [manager] = await tx
+        .select({ userID: administrator.userId })
+        .from(administrator)
+        .where(eq(administrator.userId, row.userID))
+        .for("share");
       if (!manager) throw new CommandError("forbidden", "System Manager access required");
-      const [locked] =
-        await transaction`SELECT state FROM factory.project_repository_intent WHERE command_id=${row.commandID} FOR UPDATE`;
-      if (locked?.["state"] === "committed") return;
+      const [locked] = await tx
+        .select({ state: projectRepositoryIntent.state })
+        .from(projectRepositoryIntent)
+        .where(eq(projectRepositoryIntent.commandId, row.commandID))
+        .for("update");
+      if (locked?.state === "committed") return;
       const url = new URL(
         `${encodeURIComponent(options.forgeOwner)}/${encodeURIComponent(row.slug)}`,
         `${options.forgeOrigin}/`,
@@ -139,16 +218,37 @@ export function createProjectSetupController(options: {
         devcontainerPath: ".devcontainer/devcontainer.json",
         createdBy: row.userID,
       });
-      await drizzleTransaction(transaction).insert(projectMembership).values({
+      await tx.insert(projectMembership).values({
         projectId: row.projectID,
         userId: row.userID,
         role: "developer",
         manageProject: true,
         updatedBy: row.userID,
       });
-      await transaction`UPDATE factory.project_repository_intent SET state='committed',default_branch=${branch},failure=NULL,completed_at=now() WHERE command_id=${row.commandID}`;
-      await transaction`UPDATE factory.project_setup_draft SET state='created',project_id=${row.projectID},failure=NULL,updated_at=now()
-        WHERE id=${row.setupID} AND user_id=${row.userID} AND command_id=${row.commandID}`;
+      await tx
+        .update(projectRepositoryIntent)
+        .set({
+          state: "committed",
+          defaultBranch: branch,
+          failure: null,
+          completedAt: expression`now()`,
+        })
+        .where(eq(projectRepositoryIntent.commandId, row.commandID));
+      await tx
+        .update(projectSetupDraft)
+        .set({
+          state: "created",
+          projectId: row.projectID,
+          failure: null,
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(projectSetupDraft.id, row.setupID),
+            eq(projectSetupDraft.userId, row.userID),
+            eq(projectSetupDraft.commandId, row.commandID),
+          ),
+        );
     });
     await removeCredential(row);
     await options.onCreated(row.projectID, row.userID);
@@ -174,8 +274,18 @@ export function createProjectSetupController(options: {
         let observed = await options.forge.setupRepository(repository, row.setupID);
         if (!observed) {
           if (!authorizeCreate) {
-            await sql`UPDATE factory.project_repository_intent SET state='uncertain' WHERE command_id=${row.commandID}`;
-            await sql`UPDATE factory.project_setup_draft SET state='checking',failure='Repository creation is still unconfirmed. Factory keeps checking without repeating creation or import.' WHERE id=${row.setupID}`;
+            await db
+              .update(projectRepositoryIntent)
+              .set({ state: "uncertain" })
+              .where(eq(projectRepositoryIntent.commandId, row.commandID));
+            await db
+              .update(projectSetupDraft)
+              .set({
+                state: "checking",
+                failure:
+                  "Repository creation is still unconfirmed. Factory keeps checking without repeating creation or import.",
+              })
+              .where(eq(projectSetupDraft.id, row.setupID));
             return;
           }
           let token: string | undefined;
@@ -189,7 +299,10 @@ export function createProjectSetupController(options: {
               throw unavailable();
             token = stored.token;
           }
-          await sql`UPDATE factory.project_repository_intent SET state='create-intended' WHERE command_id=${row.commandID}`;
+          await db
+            .update(projectRepositoryIntent)
+            .set({ state: "create-intended" })
+            .where(eq(projectRepositoryIntent.commandId, row.commandID));
           observed = await options.forge.createSetupRepository({
             repository,
             setupID: row.setupID,
@@ -201,7 +314,10 @@ export function createProjectSetupController(options: {
           const files = await starterFiles();
           const head = await options.forge.getBranch(repository, observed.defaultBranch || "main");
           if (!head) {
-            await sql`UPDATE factory.project_repository_intent SET state='repository-ready' WHERE command_id=${row.commandID}`;
+            await db
+              .update(projectRepositoryIntent)
+              .set({ state: "repository-ready" })
+              .where(eq(projectRepositoryIntent.commandId, row.commandID));
             await options.forge.createSetupFiles({
               repository,
               branch: "main",
@@ -231,10 +347,29 @@ export function createProjectSetupController(options: {
       const ambiguous =
         error instanceof ForgeAmbiguousWriteError ||
         (error instanceof CommandError && error.code === "unavailable");
-      await sql`UPDATE factory.project_repository_intent SET state=${ambiguous ? "uncertain" : "failed"},failure=${ambiguous ? "Repository setup is unconfirmed. Factory is checking without repeating creation or import." : "Repository setup could not finish. Check the repository access and try again."}
-        WHERE command_id=${row.commandID} AND state<>'committed'`;
-      await sql`UPDATE factory.project_setup_draft SET state=${ambiguous ? "checking" : "failed"},failure=${ambiguous ? "Repository setup is unconfirmed. Factory is checking without repeating creation or import." : "Repository setup could not finish. Check repository access."}
-        WHERE id=${row.setupID} AND state<>'created'`;
+      await db
+        .update(projectRepositoryIntent)
+        .set({
+          state: ambiguous ? "uncertain" : "failed",
+          failure: ambiguous
+            ? "Repository setup is unconfirmed. Factory is checking without repeating creation or import."
+            : "Repository setup could not finish. Check the repository access and try again.",
+        })
+        .where(
+          and(
+            eq(projectRepositoryIntent.commandId, row.commandID),
+            ne(projectRepositoryIntent.state, "committed"),
+          ),
+        );
+      await db
+        .update(projectSetupDraft)
+        .set({
+          state: ambiguous ? "checking" : "failed",
+          failure: ambiguous
+            ? "Repository setup is unconfirmed. Factory is checking without repeating creation or import."
+            : "Repository setup could not finish. Check repository access.",
+        })
+        .where(and(eq(projectSetupDraft.id, row.setupID), ne(projectSetupDraft.state, "created")));
     } finally {
       await connection.end({ timeout: 1 });
     }
@@ -244,24 +379,23 @@ export function createProjectSetupController(options: {
     await access.requireSystemManager(userID);
     const value = projectSetupCreate.parse(input);
     const admitted = await sql.begin(async (transaction) => {
-      const [draft] =
-        await transaction`SELECT * FROM factory.project_setup_draft WHERE user_id=${userID} FOR UPDATE`;
-      if (!draft || draft["id"] !== value.id) throw conflict();
-      if (draft["command_id"]) {
-        if (draft["command_id"] !== value.commandID) throw conflict();
+      const tx = drizzleTransaction(transaction);
+      const [draft] = await tx
+        .select()
+        .from(projectSetupDraft)
+        .where(eq(projectSetupDraft.userId, userID))
+        .for("update");
+      if (!draft || draft.id !== value.id) throw conflict();
+      if (draft.commandId) {
+        if (draft.commandId !== value.commandID) throw conflict();
         return false;
       }
-      if (
-        Number(draft["version"]) !== value.version ||
-        draft["state"] !== "draft" ||
-        !draft["name"] ||
-        !draft["slug"]
-      )
+      if (draft.version !== value.version || draft.state !== "draft" || !draft.name || !draft.slug)
         throw conflict();
       let sourceURL = "";
-      if (draft["kind"] === "import")
+      if (draft.kind === "import")
         try {
-          sourceURL = projectImportURL(String(draft["source_url"]), options.importOrigins);
+          sourceURL = projectImportURL(draft.sourceUrl, options.importOrigins);
         } catch (cause) {
           throw new CommandError(
             "invalid",
@@ -270,31 +404,53 @@ export function createProjectSetupController(options: {
               : "Enter a valid HTTPS Git URL.",
           );
         }
-      if (value.importToken && draft["kind"] !== "import") throw conflict();
+      if (value.importToken && draft.kind !== "import") throw conflict();
       if (value.importToken && !options.secrets.configured) throw unavailable();
       const projectID = crypto.randomUUID();
       await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`project-setup-identity:${projectID}`},0))`;
       // Check before recording/dispatching Git creation. A retained Project or
       // another admitted setup is never converted or adopted as the fresh one.
-      const [existing] = await transaction`SELECT id FROM factory.project WHERE id=${projectID}
-        UNION ALL SELECT project_id FROM factory.project_repository_intent WHERE project_id=${projectID}`;
+      const [existing] = await tx
+        .select({ id: project.id })
+        .from(project)
+        .where(eq(project.id, projectID))
+        .unionAll(
+          tx
+            .select({ id: projectRepositoryIntent.projectId })
+            .from(projectRepositoryIntent)
+            .where(eq(projectRepositoryIntent.projectId, projectID)),
+        );
       if (existing) throw conflict();
       const fingerprint = createHmac("sha256", options.signingKey)
         .update(
           JSON.stringify({
             setupID: value.id,
-            name: draft["name"],
-            slug: draft["slug"],
-            kind: draft["kind"],
+            name: draft.name,
+            slug: draft.slug,
+            kind: draft.kind,
             sourceURL,
             token: value.importToken ?? "",
           }),
         )
         .digest("hex");
       const key = value.importToken ? `imports/${value.id}/${value.commandID}` : null;
-      await transaction`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,credential_key,fingerprint,state)
-        VALUES(${value.commandID},${value.id},${userID},${projectID},${String(draft["name"])},${String(draft["slug"])},${String(draft["kind"])},${sourceURL},${key},${fingerprint},${key ? "credential-intended" : "create-intended"})`;
-      await transaction`UPDATE factory.project_setup_draft SET state='creating',command_id=${value.commandID},failure=NULL WHERE id=${value.id}`;
+      await tx.insert(projectRepositoryIntent).values({
+        commandId: value.commandID,
+        setupId: value.id,
+        userId: userID,
+        projectId: projectID,
+        name: draft.name,
+        slug: draft.slug,
+        kind: draft.kind as Intent["kind"],
+        sourceUrl: sourceURL,
+        credentialKey: key,
+        fingerprint,
+        state: key ? "credential-intended" : "create-intended",
+      });
+      await tx
+        .update(projectSetupDraft)
+        .set({ state: "creating", commandId: value.commandID, failure: null })
+        .where(eq(projectSetupDraft.id, value.id));
       return true;
     });
     const row = await intent(value.commandID);
@@ -368,16 +524,31 @@ export function createProjectSetupController(options: {
   async function recover() {
     // An explicit new draft must not strand an older unconfirmed operation.
     // Observation can settle it, but never authorizes another external create.
-    const rows = await sql<{ commandID: string }[]>`SELECT command_id AS "commandID"
-      FROM factory.project_repository_intent
-      WHERE state IN ('credential-intended','create-intended','repository-ready','uncertain')`;
+    const rows = await db
+      .select({ commandID: projectRepositoryIntent.commandId })
+      .from(projectRepositoryIntent)
+      .where(
+        inArray(projectRepositoryIntent.state, [
+          "credential-intended",
+          "create-intended",
+          "repository-ready",
+          "uncertain",
+        ]),
+      );
     for (const row of rows) {
       const saved = await intent(row.commandID);
       if (saved) await execute(saved, false);
     }
-    const completed = await sql<
-      { commandID: string }[]
-    >`SELECT command_id AS "commandID" FROM factory.project_repository_intent WHERE state='committed' AND credential_key IS NOT NULL AND credential_removed_at IS NULL`;
+    const completed = await db
+      .select({ commandID: projectRepositoryIntent.commandId })
+      .from(projectRepositoryIntent)
+      .where(
+        and(
+          eq(projectRepositoryIntent.state, "committed"),
+          isNotNull(projectRepositoryIntent.credentialKey),
+          isNull(projectRepositoryIntent.credentialRemovedAt),
+        ),
+      );
     for (const row of completed) {
       const saved = await intent(row.commandID);
       if (saved) await removeCredential(saved);

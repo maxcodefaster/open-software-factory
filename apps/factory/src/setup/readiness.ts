@@ -1,10 +1,16 @@
 import { createHmac } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, asc, eq, exists, sql as expression, inArray, isNull, or } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
-  type SetupTask,
-  type SetupTaskView,
-  setupTask,
-} from "../../../../packages/project-domain/src/setup";
+  knowledgeGeneration,
+  project,
+  projectImagePreparation,
+  projectRepositoryIntent,
+  projectSetupReadiness,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
+import { type SetupTask, setupTask } from "../../../../packages/project-domain/src/setup";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import type { createEnvironmentController } from "../environments/controller";
 
@@ -20,6 +26,7 @@ export function createSetupReadiness(input: {
   requiredVariables?(projectID: string): Promise<readonly string[]>;
 }) {
   const sql = input.database.client;
+  const db = input.database.db;
   const access = createAccessController(input.database);
   const running = new Map<string, Promise<void>>();
   let stopping = false;
@@ -28,52 +35,121 @@ export function createSetupReadiness(input: {
   async function status(projectID: string, userID: string) {
     await access.requireProject(userID, projectID);
     // Observe the admitted operation, never an unrelated newer generation.
-    await sql`UPDATE factory.project_setup_readiness task SET state=CASE generation.state WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END,
-      failure=CASE WHEN generation.state='failed' THEN 'Wiki generation needs retry.' ELSE NULL END
-      FROM factory.knowledge_generation generation
-      WHERE task.project_id=${projectID} AND task.task='wiki' AND task.state='running'
-        AND generation.project_id=task.project_id AND generation.id=task.operation_id`;
-    await sql`UPDATE factory.project_setup_readiness task SET state=CASE attempt.state WHEN 'ready' THEN 'ready' WHEN 'failed' THEN 'failed' WHEN 'cleanup-failed' THEN 'failed' WHEN 'stopped' THEN 'failed' ELSE 'running' END,
-      failure=CASE WHEN attempt.state IN ('failed','cleanup-failed','stopped') THEN 'Main-Preview startup needs retry.' ELSE NULL END
-      FROM factory.runtime_attempt attempt
-      WHERE task.project_id=${projectID} AND task.task='main-preview' AND task.state='running'
-        AND attempt.project_id=task.project_id AND attempt.id=task.operation_id`;
-    await sql`UPDATE factory.project_setup_readiness task SET state=CASE preparation.state WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' WHEN 'unsupported' THEN 'ready' ELSE 'running' END,
-      failure=CASE preparation.state WHEN 'failed' THEN 'Image preparation needs attention. Normal startup remains available.' WHEN 'unsupported' THEN 'This configuration uses normal startup instead of a prebuilt image.' ELSE NULL END
-      FROM factory.project_image_preparation preparation
-      WHERE task.project_id=${projectID} AND task.task IN ('development','preview-image') AND task.state='running'
-        AND preparation.project_id=task.project_id AND preparation.id=task.operation_id`;
-    return sql<
-      SetupTaskView[]
-    >`SELECT task,state,command_id AS "commandID",operation_id AS "operationID",failure
-      FROM factory.project_setup_readiness WHERE project_id=${projectID} ORDER BY task`;
+    await db
+      .update(projectSetupReadiness)
+      .set({
+        state: expression`CASE ${knowledgeGeneration.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END`,
+        failure: expression`CASE WHEN ${knowledgeGeneration.state}='failed' THEN 'Wiki generation needs retry.' ELSE NULL END`,
+      })
+      .from(knowledgeGeneration)
+      .where(
+        and(
+          eq(projectSetupReadiness.projectId, projectID),
+          eq(projectSetupReadiness.task, "wiki"),
+          eq(projectSetupReadiness.state, "running"),
+          eq(knowledgeGeneration.projectId, projectSetupReadiness.projectId),
+          eq(knowledgeGeneration.id, projectSetupReadiness.operationId),
+        ),
+      );
+    await db
+      .update(projectSetupReadiness)
+      .set({
+        state: expression`CASE ${runtimeAttempt.state} WHEN 'ready' THEN 'ready' WHEN 'failed' THEN 'failed' WHEN 'cleanup-failed' THEN 'failed' WHEN 'stopped' THEN 'failed' ELSE 'running' END`,
+        failure: expression`CASE WHEN ${runtimeAttempt.state} IN ('failed','cleanup-failed','stopped') THEN 'Main-Preview startup needs retry.' ELSE NULL END`,
+      })
+      .from(runtimeAttempt)
+      .where(
+        and(
+          eq(projectSetupReadiness.projectId, projectID),
+          eq(projectSetupReadiness.task, "main-preview"),
+          eq(projectSetupReadiness.state, "running"),
+          eq(runtimeAttempt.projectId, projectSetupReadiness.projectId),
+          eq(runtimeAttempt.id, projectSetupReadiness.operationId),
+        ),
+      );
+    await db
+      .update(projectSetupReadiness)
+      .set({
+        state: expression`CASE ${projectImagePreparation.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' WHEN 'unsupported' THEN 'ready' ELSE 'running' END`,
+        failure: expression`CASE ${projectImagePreparation.state} WHEN 'failed' THEN 'Image preparation needs attention. Normal startup remains available.' WHEN 'unsupported' THEN 'This configuration uses normal startup instead of a prebuilt image.' ELSE NULL END`,
+      })
+      .from(projectImagePreparation)
+      .where(
+        and(
+          eq(projectSetupReadiness.projectId, projectID),
+          inArray(projectSetupReadiness.task, ["development", "preview-image"]),
+          eq(projectSetupReadiness.state, "running"),
+          eq(projectImagePreparation.projectId, projectSetupReadiness.projectId),
+          eq(projectImagePreparation.id, projectSetupReadiness.operationId),
+        ),
+      );
+    return db
+      .select({
+        task: expression<SetupTask>`${projectSetupReadiness.task}`,
+        state: projectSetupReadiness.state,
+        commandID: projectSetupReadiness.commandId,
+        operationID: projectSetupReadiness.operationId,
+        failure: projectSetupReadiness.failure,
+      })
+      .from(projectSetupReadiness)
+      .where(eq(projectSetupReadiness.projectId, projectID))
+      .orderBy(asc(projectSetupReadiness.task));
   }
 
   async function observeWikiRetry(projectID: string, userID: string, generationID: string) {
     await sql.begin(async (transaction) => {
+      const tx = drizzleTransaction(transaction);
+      const previous = alias(knowledgeGeneration, "previous");
       await projectAuthorityIn(transaction, userID, projectID);
       // Only the authenticated retry's returned operation can replace a failed
       // setup observation. Ordinary reads and newer background work cannot.
-      await transaction`UPDATE factory.project_setup_readiness task
-        SET operation_id=generation.id,
-          state=CASE generation.state WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END,
-          failure=CASE WHEN generation.state='failed' THEN 'Wiki generation needs retry.' ELSE NULL END,
-          updated_at=now()
-        FROM factory.knowledge_generation generation
-        WHERE task.project_id=${projectID} AND task.task='wiki'
-          AND generation.id=${generationID} AND generation.project_id=task.project_id
-          AND (task.state='failed' OR (task.state='running' AND EXISTS(
-            SELECT 1 FROM factory.knowledge_generation previous
-            WHERE previous.id=task.operation_id AND previous.project_id=task.project_id AND previous.state='failed'
-          )))`;
+      await tx
+        .update(projectSetupReadiness)
+        .set({
+          operationId: knowledgeGeneration.id,
+          state: expression`CASE ${knowledgeGeneration.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END`,
+          failure: expression`CASE WHEN ${knowledgeGeneration.state}='failed' THEN 'Wiki generation needs retry.' ELSE NULL END`,
+          updatedAt: expression`now()`,
+        })
+        .from(knowledgeGeneration)
+        .where(
+          and(
+            eq(projectSetupReadiness.projectId, projectID),
+            eq(projectSetupReadiness.task, "wiki"),
+            eq(knowledgeGeneration.id, generationID),
+            eq(knowledgeGeneration.projectId, projectSetupReadiness.projectId),
+            or(
+              eq(projectSetupReadiness.state, "failed"),
+              and(
+                eq(projectSetupReadiness.state, "running"),
+                exists(
+                  tx
+                    .select({ id: previous.id })
+                    .from(previous)
+                    .where(
+                      and(
+                        eq(previous.id, projectSetupReadiness.operationId),
+                        eq(previous.projectId, projectSetupReadiness.projectId),
+                        eq(previous.state, "failed"),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+          ),
+        );
     });
   }
 
   async function seed(projectID: string, userID: string) {
     await access.requireProject(userID, projectID, true);
     for (const name of setupTask.options)
-      await sql`INSERT INTO factory.project_setup_readiness(project_id,task,command_id)
-        VALUES(${projectID},${name},${crypto.randomUUID()}) ON CONFLICT(project_id,task) DO NOTHING`;
+      await db
+        .insert(projectSetupReadiness)
+        .values({ projectId: projectID, task: name, commandId: crypto.randomUUID() })
+        .onConflictDoNothing({
+          target: [projectSetupReadiness.projectId, projectSetupReadiness.task],
+        });
   }
 
   async function task(
@@ -84,19 +160,48 @@ export function createSetupReadiness(input: {
     failure = "This step needs attention. Other work stays available.",
   ) {
     await access.requireProject(userID, projectID, true);
-    const [claim] = await sql<{ commandID: string }[]>`UPDATE factory.project_setup_readiness
-      SET state='running',failure=NULL,operation_id=NULL,updated_at=now()
-      WHERE project_id=${projectID} AND task=${name} AND state='pending' RETURNING command_id AS "commandID"`;
+    const [claim] = await db
+      .update(projectSetupReadiness)
+      .set({ state: "running", failure: null, operationId: null, updatedAt: expression`now()` })
+      .where(
+        and(
+          eq(projectSetupReadiness.projectId, projectID),
+          eq(projectSetupReadiness.task, name),
+          eq(projectSetupReadiness.state, "pending"),
+        ),
+      )
+      .returning({ commandID: projectSetupReadiness.commandId });
     if (!claim) return;
     try {
       const operationID = await operation(claim.commandID);
-      await sql`UPDATE factory.project_setup_readiness SET state=${operationID ? "running" : "ready"},
-        operation_id=${operationID ?? null},failure=NULL,updated_at=now()
-        WHERE project_id=${projectID} AND task=${name} AND command_id=${claim.commandID} AND state='running'`;
+      await db
+        .update(projectSetupReadiness)
+        .set({
+          state: operationID ? "running" : "ready",
+          operationId: operationID ?? null,
+          failure: null,
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(projectSetupReadiness.projectId, projectID),
+            eq(projectSetupReadiness.task, name),
+            eq(projectSetupReadiness.commandId, claim.commandID),
+            eq(projectSetupReadiness.state, "running"),
+          ),
+        );
     } catch {
-      await sql`UPDATE factory.project_setup_readiness SET state='failed',
-        failure=${failure},updated_at=now()
-        WHERE project_id=${projectID} AND task=${name} AND command_id=${claim.commandID} AND state='running'`;
+      await db
+        .update(projectSetupReadiness)
+        .set({ state: "failed", failure, updatedAt: expression`now()` })
+        .where(
+          and(
+            eq(projectSetupReadiness.projectId, projectID),
+            eq(projectSetupReadiness.task, name),
+            eq(projectSetupReadiness.commandId, claim.commandID),
+            eq(projectSetupReadiness.state, "running"),
+          ),
+        );
     }
   }
 
@@ -192,9 +297,16 @@ export function createSetupReadiness(input: {
         // Owning this lock proves there is no live coordinator in another process.
         // Missing acknowledgements never authorize another paid generation.
         if (recovering)
-          await sql`UPDATE factory.project_setup_readiness SET state='failed',
-          failure='Setup was interrupted. Check and retry this step.'
-          WHERE project_id=${projectID} AND state='running' AND operation_id IS NULL`;
+          await db
+            .update(projectSetupReadiness)
+            .set({ state: "failed", failure: "Setup was interrupted. Check and retry this step." })
+            .where(
+              and(
+                eq(projectSetupReadiness.projectId, projectID),
+                eq(projectSetupReadiness.state, "running"),
+                isNull(projectSetupReadiness.operationId),
+              ),
+            );
         if (starter) await task(projectID, userID, "configuration", async () => undefined);
         await Promise.all([
           task(projectID, userID, "hook", async () => {
@@ -262,19 +374,42 @@ export function createSetupReadiness(input: {
     if (stopping) throw new Error("Project preparation is shutting down");
     await access.requireProject(userID, projectID, true);
     await status(projectID, userID);
-    await sql`UPDATE factory.project_setup_readiness SET state='pending',failure=NULL,operation_id=NULL
-      WHERE project_id=${projectID} AND task=${name} AND state='failed'`;
+    await db
+      .update(projectSetupReadiness)
+      .set({ state: "pending", failure: null, operationId: null })
+      .where(
+        and(
+          eq(projectSetupReadiness.projectId, projectID),
+          eq(projectSetupReadiness.task, name),
+          eq(projectSetupReadiness.state, "failed"),
+        ),
+      );
     await start(projectID, userID, starter, false, name === "wiki");
   }
   async function recover() {
     if (stopping) return;
-    const projects = await sql<{ id: string; userID: string; starter: boolean }[]>`SELECT
-      project.id,COALESCE(intent.user_id,project.created_by) AS "userID",COALESCE(intent.kind='starter',false) AS starter
-      FROM factory.project project
-      LEFT JOIN factory.project_repository_intent intent ON intent.project_id=project.id
-      WHERE intent.state='committed' OR (intent.project_id IS NULL AND EXISTS(
-        SELECT 1 FROM factory.project_setup_readiness readiness WHERE readiness.project_id=project.id
-      ))`;
+    const projects = await db
+      .select({
+        id: project.id,
+        userID: expression<string>`COALESCE(${projectRepositoryIntent.userId},${project.createdBy})`,
+        starter: expression<boolean>`COALESCE(${projectRepositoryIntent.kind}='starter',false)`,
+      })
+      .from(project)
+      .leftJoin(projectRepositoryIntent, eq(projectRepositoryIntent.projectId, project.id))
+      .where(
+        or(
+          eq(projectRepositoryIntent.state, "committed"),
+          and(
+            isNull(projectRepositoryIntent.projectId),
+            exists(
+              db
+                .select({ projectID: projectSetupReadiness.projectId })
+                .from(projectSetupReadiness)
+                .where(eq(projectSetupReadiness.projectId, project.id)),
+            ),
+          ),
+        ),
+      );
     for (const project of projects)
       void start(project.id, project.userID, project.starter, true).catch(() => {});
   }

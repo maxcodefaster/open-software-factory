@@ -1,23 +1,23 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createLearningAutomation } from "../../apps/factory/src/learning/automation";
+import { calibrationCases } from "../../apps/factory/src/learning/calibration";
+import type { WorkReviewInput } from "../../apps/factory/src/learning/judge";
+import { priorProposalEvidence } from "../../apps/factory/src/learning/prior-proposals";
+import type { ReplayInput } from "../../apps/factory/src/learning/replay";
 import { createLearningService } from "../../apps/factory/src/learning/service";
+import { createLearningTargets, learningEditDigest } from "../../apps/factory/src/learning/targets";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { calibratedResult } from "../fixtures/learning";
-import {
-  comparisonExample,
-  comparisonBefore,
-  comparisonAfter,
-} from "../fixtures/learning-comparison";
+import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
+import type { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import type { createDatabase } from "../../packages/db/src/client";
-import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
-import type { ReplayInput } from "../../apps/factory/src/learning/replay";
-import type { WorkReviewInput } from "../../apps/factory/src/learning/judge";
-import { calibrationCases } from "../../apps/factory/src/learning/calibration";
-import { priorProposalEvidence } from "../../apps/factory/src/learning/prior-proposals";
-import { learningEditDigest } from "../../apps/factory/src/learning/targets";
+import { calibratedResult } from "../fixtures/learning";
+import {
+  comparisonAfter,
+  comparisonBefore,
+  comparisonExample,
+} from "../fixtures/learning-comparison";
 import { fixtureValue } from "../fixtures/value";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -538,6 +538,8 @@ for (const fence of [
   "authority-loss",
   "lease-loss",
   "unknown",
+  "policy-version",
+  "cancel",
 ] as const) {
   test(`automatic comparison fences ${fence} without a write or paid replay`, async () => {
     const host = await factoryProcess(),
@@ -566,6 +568,16 @@ for (const fence of [
             );
           if (fence === "lease-loss")
             await database.client`UPDATE factory.learning_trial SET owner_expires_at=now()-interval '1 second' WHERE proposal_id=${value.proposalId}`;
+          if (fence === "policy-version")
+            await value.service.set(value.userID, {
+              commandId: crypto.randomUUID(),
+              projectId: value.projectID,
+              scope: "project",
+              expectedVersion: 1,
+              enabled: true,
+              automaticSkills: true,
+            });
+          if (fence === "cancel") worker?.close();
           if (fence === "pause")
             await value.service.set(value.userID, {
               commandId: crypto.randomUUID(),
@@ -598,8 +610,22 @@ for (const fence of [
       expect(await worker.sweep()).toBe(false);
       expect(calls).toBe(1);
       expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(0);
-      const [trial] = await database.client`SELECT state FROM factory.learning_trial`;
-      expect(trial?.["state"]).toBe(fence === "unknown" ? "uncertain" : "failed");
+      const [trial] = await database.client<{ state: string; policyVersion: number }[]>`
+        SELECT state,policy_version AS "policyVersion" FROM factory.learning_trial`;
+      expect(trial?.state).toBe(fence === "unknown" || fence === "cancel" ? "uncertain" : "failed");
+      expect(trial?.policyVersion).toBe(1);
+      if (fence === "policy-version") {
+        const [policy] = await database.client<
+          { version: number; enabled: boolean; automatic: boolean }[]
+        >`
+          SELECT version,enabled,automatic_skills AS automatic FROM factory.learning_policy WHERE project_id=${value.projectID}`;
+        expect(policy).toEqual({ version: 2, enabled: true, automatic: true });
+      }
+      if (fence === "cancel") {
+        const [step] = await database.client<{ state: string; result: unknown }[]>`
+          SELECT state,result FROM factory.learning_trial_step`;
+        expect(step).toEqual({ state: "uncertain", result: null });
+      }
     } finally {
       worker?.close();
       await database.client.end({ timeout: 2 });
@@ -660,6 +686,57 @@ test("private-to-shared edits, Build guidance and incomplete tasks stay manual w
     expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(0);
   } finally {
     for (const worker of workers) worker.close();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+test("a rejected application insert rolls back the exact Skill revision and choices while retaining completed comparison evidence", async () => {
+  const host = await factoryProcess(),
+    database = host.connect();
+  let worker: ReturnType<typeof createLearningAutomation> | undefined;
+  try {
+    const value = await setup(database);
+    const targets = createLearningTargets(database);
+    const current = () =>
+      database.client.begin((sql) =>
+        targets.current(sql, value.edit.target, value.userID, value.projectID),
+      );
+    const before = await current();
+    await database.client`CREATE FUNCTION factory.reject_owned_learning_application() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned application persistence failed'; END $$`;
+    await database.client`CREATE TRIGGER reject_owned_learning_application BEFORE INSERT
+      ON factory.learning_application FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_learning_application()`;
+    worker = createLearningAutomation(database, value.dependencies);
+    expect(await worker.sweep()).toBe(true);
+    expect(value.calls()).toBe(3);
+    expect(await current()).toEqual(before);
+    expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(0);
+    const [proposal] = await database.client<
+      { state: string; decision: string | null; content: unknown }[]
+    >`
+      SELECT state,decision_id AS decision,content FROM factory.learning_proposal WHERE id=${value.proposalId}`;
+    expect(proposal).toEqual({ state: "proposed", decision: null, content: value.originalContent });
+    const [trial] = await database.client<{ id: string; state: string; result: unknown }[]>`
+      SELECT id,state,result FROM factory.learning_trial WHERE proposal_id=${value.proposalId}`;
+    expect(trial).toMatchObject({ state: "uncertain", result: null });
+    const evidence = await database.client`SELECT stage,state,input,input_digest,result
+      FROM factory.learning_trial_step WHERE trial_id=${fixtureValue(trial, "retained trial").id} ORDER BY stage`;
+    expect(evidence).toHaveLength(3);
+    expect(evidence.every((step) => step["state"] === "completed" && step["result"] !== null)).toBe(
+      true,
+    );
+    await database.client`DROP TRIGGER reject_owned_learning_application ON factory.learning_application`;
+    await database.client`DROP FUNCTION factory.reject_owned_learning_application()`;
+    expect(await worker.sweep()).toBe(false);
+    expect(value.calls()).toBe(3);
+    expect(await current()).toEqual(before);
+    expect(
+      await database.client`SELECT stage,state,input,input_digest,result
+      FROM factory.learning_trial_step WHERE trial_id=${fixtureValue(trial, "retained trial").id} ORDER BY stage`,
+    ).toEqual(evidence);
+  } finally {
+    worker?.close();
     await database.client.end({ timeout: 2 });
     await host.dispose();
   }

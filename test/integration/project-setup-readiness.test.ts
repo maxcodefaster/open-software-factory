@@ -5,6 +5,7 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createSetupReadiness } from "../../apps/factory/src/setup/readiness";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { callFactoryFunction } from "../fixtures/server-functions";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 import { fixtureValue } from "../fixtures/value";
 
 test("setup coordination leaves a one-connection pool available and joins admitted work before shutdown", async () => {
@@ -305,6 +306,194 @@ test("setup readiness separates protected environments, observes exact work and 
     await process.dispose();
   }
 }, 30_000);
+
+test("setup readiness joins only its exact Project operations and fences Wiki retry replacement", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const userID = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  const foreignProjectID = crypto.randomUUID();
+  const originalWiki = crypto.randomUUID();
+  const retriedWiki = crypto.randomUUID();
+  const foreignWiki = crypto.randomUUID();
+  const preparations: string[] = [];
+  const attempts: string[] = [];
+  const recoveredHooks: string[] = [];
+  const coordinator = createSetupReadiness({
+    database,
+    environments: createEnvironmentController(
+      database,
+      { configured: false, read: async () => undefined, create: async () => {} },
+      "owned-operation-joins",
+    ),
+    signingKey: "owned-operation-joins",
+    protection: async () => {},
+    hook: async (id) => {
+      recoveredHooks.push(id);
+    },
+    wiki: async () => {
+      throw new Error("Observation must not commission inference");
+    },
+    prepare: async () => {
+      throw new Error("Observation must not prepare images");
+    },
+    preview: async () => {
+      throw new Error("Observation must not start execution");
+    },
+  });
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${userID},'Owned operation joins',${`${userID}@setup.test`})`;
+    for (const id of [projectID, foreignProjectID]) {
+      await database.client`INSERT INTO factory.project
+        (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${id},${`joins-${id}`},'Owned joins','https://example.invalid/owned','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project_membership
+        (project_id,user_id,role,manage_project,updated_by)
+        VALUES(${id},${userID},'developer',true,${userID})`;
+      const preparationID = crypto.randomUUID();
+      preparations.push(preparationID);
+      await database.client`INSERT INTO factory.project_image_preparation
+        (id,project_id,environment,revision,environment_version,state)
+        VALUES(${preparationID},${id},'development',${"a".repeat(40)},0,'unsupported')`;
+      const workspaceID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.development_workspace
+        (id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+        VALUES(${workspaceID},${id},'personal',${userID},'main',${"a".repeat(40)},${userID})`;
+      attempts.push(
+        await recordUncreatedWorkspaceAttempt(database, {
+          workspaceID,
+          generation: 1,
+          createdBy: userID,
+          parentHash: "1".repeat(64),
+          childHash: "2".repeat(64),
+          connectorURL: "wss://factory.invalid/internal/runtime-connect",
+        }),
+      );
+    }
+    await database.client`INSERT INTO factory.knowledge_generation
+      (id,project_id,source_commit_sha,created_by,state,completed_at)
+      VALUES(${originalWiki},${projectID},${"a".repeat(40)},${userID},'failed',now()),
+        (${foreignWiki},${foreignProjectID},${"a".repeat(40)},${userID},'succeeded',now())`;
+    await database.client`INSERT INTO factory.knowledge_generation
+      (id,project_id,source_commit_sha,created_by,state)
+      VALUES(${retriedWiki},${projectID},${"a".repeat(40)},${userID},'running')`;
+    const ownPreparation = fixtureValue(preparations[0], "own preparation");
+    const foreignPreparation = fixtureValue(preparations[1], "foreign preparation");
+    const ownAttempt = fixtureValue(attempts[0], "own attempt");
+    const foreignAttempt = fixtureValue(attempts[1], "foreign attempt");
+    for (const [task, operationID] of [
+      ["wiki", originalWiki],
+      ["development", foreignPreparation],
+      ["preview-image", foreignPreparation],
+      ["main-preview", foreignAttempt],
+    ])
+      await database.client`INSERT INTO factory.project_setup_readiness
+        (project_id,task,command_id,state,operation_id)
+        VALUES(${projectID},${fixtureValue(task, "task")},${crypto.randomUUID()},'running',${fixtureValue(operationID, "operation")})`;
+    const retained = async () =>
+      database.client`SELECT * FROM factory.project_setup_readiness
+        WHERE project_id=${projectID} AND task='wiki'`;
+    const before = await retained();
+    await coordinator.observeWikiRetry(projectID, userID, foreignWiki);
+    expect([...(await retained())]).toEqual([...before]);
+    await coordinator.observeWikiRetry(projectID, userID, retriedWiki);
+    await coordinator.observeWikiRetry(projectID, userID, originalWiki);
+    const observed = await coordinator.status(projectID, userID);
+    expect(observed.map((task) => task.task)).toEqual([
+      "development",
+      "main-preview",
+      "preview-image",
+      "wiki",
+    ]);
+    expect(observed.every((task) => task.state === "running")).toBe(true);
+    expect(observed.find((task) => task.task === "wiki")?.operationID).toBe(retriedWiki);
+    await database.client`UPDATE factory.project_setup_readiness
+      SET state='failed' WHERE project_id=${projectID} AND task='wiki'`;
+    await coordinator.observeWikiRetry(projectID, userID, originalWiki);
+    expect((await retained())[0]).toMatchObject({
+      state: "failed",
+      operation_id: originalWiki,
+      failure: "Wiki generation needs retry.",
+    });
+    await coordinator.observeWikiRetry(projectID, userID, retriedWiki);
+    await database.client`UPDATE factory.knowledge_generation
+      SET state='succeeded',completed_at=now() WHERE id=${retriedWiki}`;
+    await coordinator.status(projectID, userID);
+    await coordinator.observeWikiRetry(projectID, userID, originalWiki);
+    expect(
+      (await coordinator.status(projectID, userID)).find((task) => task.task === "wiki"),
+    ).toMatchObject({ state: "ready", operationID: retriedWiki, failure: null });
+    await database.client`UPDATE factory.project_setup_readiness
+      SET operation_id=${ownPreparation} WHERE project_id=${projectID} AND task IN ('development','preview-image')`;
+    await database.client`UPDATE factory.project_setup_readiness
+      SET operation_id=${ownAttempt} WHERE project_id=${projectID} AND task='main-preview'`;
+    for (const state of ["ready", "failed", "cleanup-failed", "stopped", "starting"]) {
+      await database.client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${ownAttempt}`;
+      await database.client`UPDATE factory.project_setup_readiness
+        SET state='running' WHERE project_id=${projectID} AND task='main-preview'`;
+      const failed = ["failed", "cleanup-failed", "stopped"].includes(state);
+      expect(
+        (await coordinator.status(projectID, userID)).find((task) => task.task === "main-preview"),
+      ).toMatchObject({
+        state: state === "ready" ? "ready" : failed ? "failed" : "running",
+        operationID: ownAttempt,
+        failure: failed ? "Main-Preview startup needs retry." : null,
+      });
+    }
+    for (const [index, state] of [
+      "pending",
+      "running",
+      "succeeded",
+      "failed",
+      "unsupported",
+    ].entries()) {
+      const operationID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.project_image_preparation
+        (id,project_id,environment,revision,environment_version,state,identity,image)
+        VALUES(${operationID},${projectID},'development',${"a".repeat(40)},${index + 1},${state},
+          ${state === "succeeded" ? "3".repeat(64) : null},
+          ${state === "succeeded" ? `registry.invalid/owned@sha256:${"4".repeat(64)}` : null})`;
+      await database.client`UPDATE factory.project_setup_readiness
+        SET state='running',operation_id=${operationID}
+        WHERE project_id=${projectID} AND task IN ('development','preview-image')`;
+      const expected =
+        state === "failed"
+          ? "failed"
+          : ["succeeded", "unsupported"].includes(state)
+            ? "ready"
+            : "running";
+      const tasks = (await coordinator.status(projectID, userID)).filter((task) =>
+        ["development", "preview-image"].includes(task.task),
+      );
+      expect(tasks.map((task) => task.state)).toEqual([expected, expected]);
+      expect(tasks.every((task) => task.operationID === operationID)).toBe(true);
+      expect(
+        tasks.every((task) => state !== "unsupported" || task.failure?.includes("normal startup")),
+      ).toBe(true);
+    }
+    const unrelatedID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.project
+      (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${unrelatedID},${`unrelated-${unrelatedID}`},'Unrelated','https://example.invalid/other','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project_repository_intent
+      (command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
+      VALUES(${crypto.randomUUID()},${crypto.randomUUID()},${userID},${foreignProjectID},
+        'Owned recovery',${`recovery-${foreignProjectID}`},'import','https://github.com/owned/import',${"5".repeat(64)},'committed')`;
+    await coordinator.recover();
+    await coordinator.close();
+    expect(recoveredHooks.sort()).toEqual([projectID, foreignProjectID].sort());
+    expect(
+      (
+        await database.client`SELECT task FROM factory.project_setup_readiness WHERE project_id=${unrelatedID}`
+      ).length,
+    ).toBe(0);
+  } finally {
+    await coordinator.close();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 20_000);
 
 test.each(["failed", "running"] as const)(
   "an explicit Wiki retry hands failed setup readiness to that exact generation without commissioning another, observed=%s",

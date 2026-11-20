@@ -325,3 +325,85 @@ test.each(readCases)(
     }
   },
 );
+
+test("Drizzle history keeps native epoch milliseconds and exact Unicode human input", async () => {
+  const owned = await fixture();
+  try {
+    const text = 'Prüfe 界 "quoted" \\ path\n🙂';
+    const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+      owned.changeID,
+      owned.userID,
+      { kind: "change-prompt", commandId: crypto.randomUUID(), text },
+    );
+    const intent = await createChangeAdmission(owned.database, buildModelID).intent(turn.id);
+    const [stored] = await owned.database.client<{ at: number; text: string }[]>`
+      SELECT EXTRACT(EPOCH FROM created_at)::float8*1000 AS at,input->>'text' AS text
+      FROM factory.agent_turn WHERE id=${turn.id}`;
+    if (!stored) throw new Error("Owned history row required");
+    const result = await owned.controller().get(owned.changeID);
+    expect(result.admittedMessages).toEqual([
+      {
+        id: intent.promptID,
+        commandId: turn.commandId,
+        role: "user",
+        text,
+        at: stored.at,
+      },
+    ]);
+    expect(typeof result.admittedMessages?.[0]?.at).toBe("number");
+    expect(stored.text).toBe(text);
+    expect(owned.requests()).toBe(0);
+    expect(owned.commitCalls).toEqual([]);
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test.each([true, false])(
+  "failed projection recovery requires the exact retained prompt, match=%s",
+  async (matches) => {
+    const owned = await fixture();
+    try {
+      const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+        owned.changeID,
+        owned.userID,
+        {
+          kind: "change-prompt",
+          commandId: crypto.randomUUID(),
+          text: "Retain this exact failure",
+        },
+      );
+      const intent = await createChangeAdmission(owned.database, buildModelID).intent(turn.id);
+      const store = createAgentTurnStore(owned.database);
+      const claimed = await store.claimPending(turn.id);
+      if (!claimed?.ownerToken) throw new Error("Owned projection lease required");
+      await store.beginDispatch(turn.id, claimed.ownerToken);
+      expect(
+        await store.settle(turn.id, claimed.ownerToken, "failed", "Prüfe 界 retained failure"),
+      ).toBe(true);
+      await owned.database.client`UPDATE factory.change_agent_turn_intent
+        SET runtime_attempt_id=${owned.attemptID} WHERE turn_id=${turn.id}`;
+      await owned.database.client`UPDATE factory.change_agent_session SET state='working',
+        active_turn_id=${turn.id},opencode_session_id=${intent.sessionID},
+        active_inbox_id=${matches ? intent.promptID : "msg_other"},last_error=NULL
+        WHERE change_id=${owned.changeID}`;
+      const controller = owned.controller();
+      await controller.recover();
+      const [session] = await owned.database.client<{ state: string; error: string | null }[]>`
+        SELECT state,last_error AS error FROM factory.change_agent_session
+        WHERE change_id=${owned.changeID}`;
+      expect(session).toEqual({
+        state: matches ? "failed" : "working",
+        error: matches ? "Prüfe 界 retained failure" : null,
+      });
+      expect(await store.get(turn.id)).toMatchObject({
+        state: "failed",
+        outcomeSummary: "Prüfe 界 retained failure",
+      });
+      expect(owned.requests()).toBe(0);
+      expect(owned.commitCalls).toEqual([]);
+    } finally {
+      await owned.dispose();
+    }
+  },
+);

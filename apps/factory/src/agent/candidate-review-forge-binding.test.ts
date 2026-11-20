@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { drizzleTransaction } from "../../../../packages/db/src/client";
+import { agentTurn } from "../../../../packages/db/src/schema";
+import { eq } from "drizzle-orm";
 import {
   forgeBinding,
   forgeBindingDatabase,
@@ -96,12 +99,41 @@ test("review binds injected Forge readers before source calls, retaining exact r
       }
       throw new Error(`Unexpected review query: ${text}`);
     },
-    (text) => {
+    (text, parameters) => {
+      if (text.includes('from "factory"."agent_turn"')) {
+        if (!lease) return [];
+        if (text.startsWith('select "id" from')) return [[turnID]];
+        // Match the real schema selection order rather than another row definition.
+        const selected = drizzleTransaction(fixture.database.client)
+          .select()
+          .from(agentTurn)
+          .where(eq(agentTurn.id, turnID))
+          .toSQL()
+          .sql.match(/^select (.+) from/)?.[1];
+        if (!selected) throw new Error("Agent schema projection is missing");
+        const values: Record<string, unknown> = {
+          ...turn,
+          project_id: projectID,
+          ticket_id: ticketID,
+          conversation_id: null,
+          change_id: changeID,
+          created_by: actor,
+          input_digest: "a".repeat(64),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          owner_expires_at: turn.owner_expires_at.toISOString(),
+        };
+        expect(parameters).toContain(turnID);
+        return [selected.split(", ").map((column) => values[column.replaceAll('"', "")])];
+      }
       if (text.includes('"auth"."user"')) return [[actor]];
       if (text.includes('"factory"."account_access"')) return [[null, null]];
       if (text.includes('"factory"."project_membership"')) return [["developer", false]];
       if (text.includes('"factory"."administrator"')) return [];
       if (text.includes('"factory"."project"')) return [[projectID]];
+      if (text.includes('from "factory"."change"')) return [[changeID]];
+      if (text.includes('from "factory"."change_writer"')) return [["agent", turnID]];
+      if (text.includes('from "factory"."ticket_conversation"')) return [];
       throw new Error(`Unexpected review authority query: ${text}`);
     },
   );

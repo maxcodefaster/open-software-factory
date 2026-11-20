@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { eq, is } from "drizzle-orm";
+import { eq, is, sql } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
 import { drizzleTransaction } from "../../packages/db/src/client";
@@ -61,6 +61,41 @@ test("typed and native queries share commit, rollback and nested savepoints on t
       { name: "Native update" },
     ]);
   } finally {
+    await client.end({ timeout: 2 });
+    await server.dispose();
+  }
+});
+
+test("reserved connection queries retain the owning connection and manual rollback/commit", async () => {
+  const server = await ownedPostgresServer();
+  const client = postgres(server.identity.url, { max: 1 });
+  drizzleTransaction(client);
+  const reserved = await client.reserve();
+  const id = crypto.randomUUID();
+  const db = drizzleTransaction(reserved);
+  try {
+    const [original] = await reserved<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    if (!original) throw new Error("Owned reserved PostgreSQL connection is missing");
+    await reserved`BEGIN`;
+    await db.insert(schema.authUser).values({ id, name: "Reserved", email: `${id}@reserved.test` });
+    const [observed] = await db.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`);
+    expect(observed?.pid).toBe(original.pid);
+    expect(await db.select({ name: schema.authUser.name }).from(schema.authUser)).toEqual([
+      { name: "Reserved" },
+    ]);
+    await reserved`ROLLBACK`;
+    expect(await db.select({ id: schema.authUser.id }).from(schema.authUser)).toHaveLength(0);
+    await reserved`BEGIN`;
+    await db
+      .insert(schema.authUser)
+      .values({ id, name: "Committed", email: `${id}@reserved.test` });
+    await reserved`COMMIT`;
+    expect([...(await reserved`SELECT name FROM auth."user" WHERE id=${id}`)]).toEqual([
+      { name: "Committed" },
+    ]);
+  } finally {
+    await reserved`ROLLBACK`.catch(() => {});
+    reserved.release();
     await client.end({ timeout: 2 });
     await server.dispose();
   }

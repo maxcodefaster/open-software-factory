@@ -3,7 +3,7 @@ import { createProjectSetupController } from "../../apps/factory/src/setup/contr
 import type { ImportCredential } from "../../apps/factory/src/setup/secrets";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
-import { factoryProcess } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("retained setup and ambiguous import recover without duplicate repositories with one application connection", async () => {
   const process = await factoryProcess();
@@ -22,6 +22,11 @@ test("retained setup and ambiguous import recover without duplicate repositories
     fetch: async (_url, init) => {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
+        const [intent] = await database.client`SELECT state,source_url,credential_key
+          FROM factory.project_repository_intent`;
+        expect(intent?.["state"]).toBe("create-intended");
+        expect(intent?.["source_url"]).toBe("https://github.com/team/private.git");
+        expect(credentials.has(String(intent?.["credential_key"]))).toBe(true);
         creates++;
         expect(body.mirror).toBe(false);
         expect(body.auth_token).toBe("private-source-token");
@@ -55,6 +60,11 @@ test("retained setup and ambiguous import recover without duplicate repositories
       configured: true,
       read: async (key) => credentials.get(key),
       create: async (key, value) => {
+        const [intent] = await database.client`SELECT state,command_id,fingerprint
+          FROM factory.project_repository_intent WHERE credential_key=${key}`;
+        expect(intent?.["state"]).toBe("credential-intended");
+        expect(intent?.["command_id"]).toBe(value.commandID);
+        expect(intent?.["fingerprint"]).toBe(value.fingerprint);
         credentials.set(key, value);
       },
       remove: async (key) => {
@@ -164,12 +174,123 @@ test("retained setup and ambiguous import recover without duplicate repositories
         await database.client`UPDATE factory.project_repository_intent SET source_url='https://evil.test/repo'`;
       })(),
     ).rejects.toThrow("immutable");
-    expect((await restarted.begin(manager))?.id).not.toBe(draft.id);
+    const next = await restarted.begin(manager);
+    expect(next?.id).not.toBe(draft.id);
+    expect(next).toMatchObject({
+      version: 1,
+      name: "",
+      slug: "",
+      kind: "starter",
+      sourceURL: "",
+      state: "draft",
+      projectID: null,
+      commandID: null,
+      failure: null,
+    });
   } finally {
     await database.client.end({ timeout: 2 });
     await process.dispose();
   }
 }, 30_000);
+
+test("setup draft compare-and-swap keeps one winner under real row-lock contention", async () => {
+  const host = await factoryProcess();
+  const database = host.connect(4);
+  const manager = crypto.randomUUID();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let blockerPID = 0;
+  let lock: Promise<unknown> | undefined;
+  let saves: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  const controller = createProjectSetupController({
+    database,
+    forge: createForgejoClient({
+      apiURL: "https://forge.test/api/v1/",
+      token: "owned-fixture",
+      fetch: async () => {
+        throw new Error("Saving a draft must not create a repository");
+      },
+    }),
+    forgeOwner: "owned",
+    forgeOrigin: "https://forge.test",
+    signingKey: "owned-cas",
+    importOrigins: [],
+    secrets: {
+      configured: false,
+      read: async () => undefined,
+      create: async () => {},
+      remove: async () => {},
+    },
+    onCreated: async () => {},
+  });
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${manager},'Owned CAS',${`${manager}@setup.test`})`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
+    const draft = await controller.begin(manager);
+    if (!draft) throw new Error("Owned draft missing");
+    await database.client`UPDATE factory.project_setup_draft SET updated_at='2001-01-01'`;
+    const [before] = await database.client`SELECT * FROM factory.project_setup_draft`;
+    expect(await controller.begin(manager)).toEqual(draft);
+    expect((await database.client`SELECT * FROM factory.project_setup_draft`)[0]).toEqual(before);
+    lock = database.client.begin(async (transaction) => {
+      await transaction`SELECT id FROM factory.project_setup_draft WHERE id=${draft.id} FOR UPDATE`;
+      const [backend] = await transaction<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (!backend) throw new Error("Owned draft lock backend is missing");
+      blockerPID = backend.pid;
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    saves = Promise.allSettled(
+      ["first", "second"].map((name) =>
+        controller.save(manager, {
+          id: draft.id,
+          version: draft.version,
+          name,
+          slug: name,
+          kind: "starter",
+          sourceURL: "",
+        }),
+      ),
+    );
+    await eventually(
+      async () => {
+        const [waiting] = await database.client<{ count: number }[]>`
+          WITH RECURSIVE queued(pid) AS (
+            SELECT pid FROM pg_stat_activity
+            WHERE datname=current_database() AND ${blockerPID}=ANY(pg_blocking_pids(pid))
+            UNION
+            SELECT activity.pid FROM pg_stat_activity activity
+            JOIN queued ON queued.pid=ANY(pg_blocking_pids(activity.pid))
+            WHERE activity.datname=current_database()
+          )
+          SELECT count(*)::integer AS count FROM queued`;
+        return waiting?.count;
+      },
+      (count) => count === 2,
+      "Both draft saves did not contend on the retained row",
+      3000,
+    );
+    release.resolve();
+    await lock;
+    const results = await saves;
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const current = await controller.view(manager);
+    if (!current) throw new Error("Owned draft missing after CAS");
+    expect(current.version).toBe(2);
+    expect(["first", "second"]).toContain(current.name);
+    const [after] = await database.client`SELECT updated_at FROM factory.project_setup_draft`;
+    expect(after?.["updated_at"]).not.toEqual(before?.["updated_at"]);
+  } finally {
+    release.resolve();
+    await lock;
+    await saves;
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 10_000);
 
 test("a rejected private import can start another setup without discarding or replaying the old intent", async () => {
   const process = await factoryProcess();

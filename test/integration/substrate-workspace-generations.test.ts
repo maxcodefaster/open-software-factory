@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { substrateWorkspaceGrantIn } from "../../apps/factory/src/runtime/substrate-grant";
 import {
   createSubstrateWorkspaces,
@@ -359,6 +360,24 @@ async function proveGenerations(kind: "personal" | "ticket") {
       { generation: "1", created_by: f.userID, revision: base },
       { generation: "2", created_by: nextUser, revision },
     ]);
+    const { projectID, ...installation } = config;
+    const inventory = createRuntimeController(f.database, f.hub, secret, {
+      configuration: installation,
+      call,
+      provisionerCall: call,
+      sources,
+    });
+    expect(
+      (await inventory.list(projectID, f.userID))
+        .filter((row) => row.workspaceId === f.workspaceID)
+        .map((row) => row.id),
+    ).toEqual([secondID]);
+    expect(
+      (await inventory.list(undefined, f.userID))
+        .filter((row) => row.workspaceId === f.workspaceID)
+        .map((row) => row.id)
+        .sort(),
+    ).toEqual([firstID, secondID].sort());
     expect(contractRevisions.at(-1)).toBe(revision);
     expect(
       (

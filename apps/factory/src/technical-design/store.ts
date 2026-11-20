@@ -1,5 +1,14 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { createHash } from "node:crypto";
+import { and, desc, eq, exists, notExists, sql as expression } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  requirementApproval,
+  requirementRevision,
+  technicalDesignRevision,
+  ticket,
+  ticketDocumentRevision,
+} from "../../../../packages/db/src/schema";
 import type { z } from "zod";
 import type { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
@@ -18,19 +27,39 @@ export async function technicalPlanningOutstandingIn(
   ticketID: string,
   requirementRevisionID: string | null,
 ) {
-  const [result] = await sql<{ outstanding: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM (
-        SELECT turn.id FROM factory.agent_turn turn
-        WHERE turn.ticket_id=${ticketID} AND turn.input->>'intent'='technical-planning'
-        ORDER BY turn.created_at DESC,turn.id DESC LIMIT 1
-      ) request WHERE NOT EXISTS (
-        SELECT 1 FROM factory.technical_design_revision design
-        WHERE design.ticket_id=${ticketID} AND design.requirement_revision_id=${requirementRevisionID}
-          AND design.planning_turn_id=request.id
-      )
-    ) AS outstanding`;
-  return result?.outstanding ?? false;
+  const db = drizzleTransaction(sql);
+  const request = db
+    .select({ id: agentTurn.id })
+    .from(agentTurn)
+    .where(
+      and(
+        eq(agentTurn.ticketId, ticketID),
+        expression`${agentTurn.input}->>'intent'='technical-planning'`,
+      ),
+    )
+    .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+    .limit(1)
+    .as("request");
+  const [outstanding] = await db
+    .select({ id: request.id })
+    .from(request)
+    .where(
+      notExists(
+        db
+          .select({ id: technicalDesignRevision.id })
+          .from(technicalDesignRevision)
+          .where(
+            and(
+              eq(technicalDesignRevision.ticketId, ticketID),
+              requirementRevisionID
+                ? eq(technicalDesignRevision.requirementRevisionId, requirementRevisionID)
+                : expression`false`,
+              eq(technicalDesignRevision.planningTurnId, request.id),
+            ),
+          ),
+      ),
+    );
+  return Boolean(outstanding);
 }
 
 export async function saveTechnicalDesignIn(
@@ -47,12 +76,23 @@ export async function saveTechnicalDesignIn(
   },
 ) {
   await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${input.ticketID}`}))`;
-  const [ticket] = await sql<{ projectID: string; admitted: boolean; trashed: boolean }[]>`
-    SELECT project_id AS "projectID", (trashed_at IS NOT NULL OR converted_to_epic_id IS NOT NULL OR state IN ('cancelled','done')) AS trashed,
-      EXISTS(SELECT 1 FROM factory.requirement_approval WHERE ticket_id=ticket.id) AS admitted
-    FROM factory.ticket WHERE id=${input.ticketID} FOR UPDATE`;
-  if (!ticket) throw new CommandError("not-found", "Ticket not found.");
-  await projectDevelopmentAuthorityIn(sql, input.userID, ticket.projectID);
+  const db = drizzleTransaction(sql);
+  const [savedTicket] = await db
+    .select({
+      projectID: ticket.projectId,
+      trashed: expression<boolean>`${ticket.trashedAt} IS NOT NULL OR ${ticket.convertedToEpicId} IS NOT NULL OR ${ticket.state} IN ('cancelled','done')`,
+      admitted: exists(
+        db
+          .select({ id: requirementApproval.id })
+          .from(requirementApproval)
+          .where(eq(requirementApproval.ticketId, ticket.id)),
+      ),
+    })
+    .from(ticket)
+    .where(eq(ticket.id, input.ticketID))
+    .for("update");
+  if (!savedTicket) throw new CommandError("not-found", "Ticket not found.");
+  await projectDevelopmentAuthorityIn(sql, input.userID, savedTicket.projectID);
   const content = technicalDesignContentInput.parse(input.content);
   const canonical = JSON.stringify(content);
   if (Buffer.byteLength(canonical) > 96 * 1024)
@@ -61,21 +101,18 @@ export async function saveTechnicalDesignIn(
       "Shorten the technical design before saving. Your draft is retained.",
     );
   const digest = createHash("sha256").update(canonical).digest("hex");
-  const [replay] = await sql<
-    {
-      contentDigest: string;
-      userID: string;
-      ticketID: string;
-      previousID: string | null;
-      productID: string;
-      sourceCommit: string;
-      requestID: string | null;
-    }[]
-  >`
-    SELECT content_digest AS "contentDigest",created_by AS "userID",ticket_id AS "ticketID",
-      previous_revision_id AS "previousID",requirement_revision_id AS "productID",source_commit AS "sourceCommit"
-      ,planning_turn_id AS "requestID"
-    FROM factory.technical_design_revision WHERE id=${input.id}`;
+  const [replay] = await db
+    .select({
+      contentDigest: technicalDesignRevision.contentDigest,
+      userID: technicalDesignRevision.createdBy,
+      ticketID: technicalDesignRevision.ticketId,
+      previousID: technicalDesignRevision.previousRevisionId,
+      productID: technicalDesignRevision.requirementRevisionId,
+      sourceCommit: technicalDesignRevision.sourceCommit,
+      requestID: technicalDesignRevision.planningTurnId,
+    })
+    .from(technicalDesignRevision)
+    .where(eq(technicalDesignRevision.id, input.id));
   if (replay) {
     if (
       replay.contentDigest !== digest ||
@@ -89,18 +126,30 @@ export async function saveTechnicalDesignIn(
       throw new CommandError("conflict", "This technical design command has different input.");
     return;
   }
-  const [revision] = await sql<{ id: string; canonical: string }[]>`
-    SELECT id,canonical_content AS canonical FROM factory.requirement_revision
-    WHERE ticket_id=${input.ticketID} ORDER BY ordinal DESC LIMIT 1`;
-  const [document] = await sql<{ id: string; revisionID: string | null }[]>`
-    SELECT id,requirement_revision_id AS "revisionID" FROM factory.ticket_document_revision
-    WHERE ticket_id=${input.ticketID} ORDER BY ordinal DESC LIMIT 1`;
-  const [previous] = await sql<{ id: string; ordinal: number }[]>`
-    SELECT id,ordinal FROM factory.technical_design_revision WHERE ticket_id=${input.ticketID}
-    ORDER BY ordinal DESC LIMIT 1`;
+  const [revision] = await db
+    .select({ id: requirementRevision.id, canonical: requirementRevision.canonicalContent })
+    .from(requirementRevision)
+    .where(eq(requirementRevision.ticketId, input.ticketID))
+    .orderBy(desc(requirementRevision.ordinal))
+    .limit(1);
+  const [document] = await db
+    .select({
+      id: ticketDocumentRevision.id,
+      revisionID: ticketDocumentRevision.requirementRevisionId,
+    })
+    .from(ticketDocumentRevision)
+    .where(eq(ticketDocumentRevision.ticketId, input.ticketID))
+    .orderBy(desc(ticketDocumentRevision.ordinal))
+    .limit(1);
+  const [previous] = await db
+    .select({ id: technicalDesignRevision.id, ordinal: technicalDesignRevision.ordinal })
+    .from(technicalDesignRevision)
+    .where(eq(technicalDesignRevision.ticketId, input.ticketID))
+    .orderBy(desc(technicalDesignRevision.ordinal))
+    .limit(1);
   if (
-    ticket.admitted ||
-    ticket.trashed ||
+    savedTicket.admitted ||
+    savedTicket.trashed ||
     revision?.id !== input.base.requirementRevisionId ||
     (document?.id ?? null) !== input.base.documentId ||
     (document && document.revisionID !== revision?.id) ||
@@ -123,11 +172,21 @@ export async function saveTechnicalDesignIn(
   }
   if (input.renders.length !== content.diagrams.length)
     throw new CommandError("conflict", "Every architecture diagram needs a rendering outcome.");
-  await sql`INSERT INTO factory.technical_design_revision(
-    id,ticket_id,requirement_revision_id,previous_revision_id,ordinal,source_commit,canonical_content,content_digest,
-    citations,diagram_renders,renderer_version,created_by,author_kind,turn_id,planning_turn_id)
-    VALUES(${input.id},${input.ticketID},${input.base.requirementRevisionId},${input.base.previousDesignId},${(previous?.ordinal ?? 0) + 1},
-      ${input.base.sourceCommit},${canonical},${digest},${JSON.stringify(input.citations)}::jsonb,
-      ${JSON.stringify(input.renders)}::jsonb,${diagramRendererVersion},${input.userID},
-      ${input.turnID ? "ai" : "human"},${input.turnID ?? null},${input.base.requestId ?? null})`;
+  await db.insert(technicalDesignRevision).values({
+    id: input.id,
+    ticketId: input.ticketID,
+    requirementRevisionId: input.base.requirementRevisionId,
+    previousRevisionId: input.base.previousDesignId,
+    ordinal: (previous?.ordinal ?? 0) + 1,
+    sourceCommit: input.base.sourceCommit,
+    canonicalContent: canonical,
+    contentDigest: digest,
+    citations: input.citations,
+    diagramRenders: input.renders,
+    rendererVersion: diagramRendererVersion,
+    createdBy: input.userID,
+    authorKind: input.turnID ? "ai" : "human",
+    turnId: input.turnID ?? null,
+    planningTurnId: input.base.requestId ?? null,
+  });
 }

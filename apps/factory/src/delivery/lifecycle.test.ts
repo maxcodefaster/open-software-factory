@@ -7,13 +7,14 @@ test("Delivery shutdown joins a directly admitted observation and refuses new ob
   const entered = Promise.withResolvers<void>();
   const finish = Promise.withResolvers<void>();
   let queries = 0;
+  const query = async () => {
+    queries++;
+    entered.resolve();
+    await finish.promise;
+    return [];
+  };
   const database = {
-    client: async () => {
-      queries++;
-      entered.resolve();
-      await finish.promise;
-      return [];
-    },
+    client: Object.assign(query, { unsafe: () => ({ values: query }) }),
   } as unknown as ReturnType<typeof createDatabase>;
   const controller = createDeliveryController(
     database,

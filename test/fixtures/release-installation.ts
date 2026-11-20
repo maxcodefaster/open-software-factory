@@ -5,6 +5,10 @@ import { chromium, type Page, expect as visible } from "@playwright/test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
+import {
+  requireNativeForgeOrigin,
+  requireNativeInstallation,
+} from "../../scripts/factory/native-installation";
 import { openProjectMenu } from "./project-menu";
 
 const stateInput = z
@@ -39,6 +43,23 @@ const stateInput = z
   .strict();
 export type ReleaseState = z.infer<typeof stateInput>;
 
+export function releaseRepositoryURL(
+  forgejoPort: number,
+  environment: Record<string, string | undefined> = process.env,
+) {
+  const native = requireNativeInstallation(environment, { database: "factory" });
+  return new URL(
+    "/factory-mutation/runtime-fixture.git",
+    requireNativeForgeOrigin(
+      {
+        ...environment,
+        FACTORY_FORGEJO_API_URL: `http://127.0.0.1:${forgejoPort}/api/v1/`,
+      },
+      native,
+    ),
+  ).href;
+}
+
 export async function releaseInstallation(name: string) {
   const root = resolve(import.meta.dir, "../..");
   const installation = await loadInstallation(root, name);
@@ -58,7 +79,7 @@ export async function releaseInstallation(name: string) {
   if (state.installation !== name)
     throw new Error("Release journey identity differs from installation");
   const base = `http://127.0.0.1:${installation.ports.factory}`;
-  const repositoryURL = `http://127.0.0.1:${installation.ports.forgejo}/factory-mutation/runtime-fixture.git`;
+  const repositoryURL = releaseRepositoryURL(installation.ports.forgejo);
   const secret = async (file: string) => (await readFile(resolve(directory, file), "utf8")).trim();
   const databasePassword = await secret("database-password");
   const original = process.env["DATABASE_URL"];
@@ -108,29 +129,11 @@ export async function releaseInstallation(name: string) {
       .map((item) => item.split(";")[0])
       .join("; ");
   }
-  async function request(cookie: string, path: string, method = "GET", body?: unknown) {
-    const response = await fetch(`${base}${path}`, {
-      method,
-      headers: { cookie, origin: base, "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(120_000),
-      redirect: "manual",
-    });
-    const text = await response.text();
-    noSecrets(text);
-    return { status: response.status, body: text ? (JSON.parse(text) as unknown) : null };
-  }
   function noSecrets(text: string) {
     for (const value of secrets) expect(text.includes(value)).toBe(false);
   }
   function sanitize(text: string) {
     return secrets.reduce((value, secret) => value.replaceAll(secret, "<REDACTED>"), text);
-  }
-  async function command(cookie: string, path: string, method = "GET", body?: unknown) {
-    const result = await request(cookie, path, method, body);
-    if (result.status < 200 || result.status >= 300)
-      throw new Error(`Release command ${path} failed with ${result.status}`);
-    return result.body;
   }
   async function page(role: "admin" | "manager" | "developer") {
     const context = await browser.newContext({
@@ -193,10 +196,8 @@ export async function releaseInstallation(name: string) {
     evidence,
     credentials,
     login,
-    request,
     noSecrets,
     sanitize,
-    command,
     page,
     selectProject,
     save,

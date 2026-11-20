@@ -1,4 +1,20 @@
-import type { TransactionSql } from "postgres";
+import {
+  and,
+  asc,
+  count,
+  DrizzleQueryError,
+  desc,
+  eq,
+  exists,
+  getTableColumns,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  sql as query,
+} from "drizzle-orm";
 import type { z } from "zod";
 import type { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
 import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
@@ -7,7 +23,31 @@ import {
   verificationDiagnosisInput,
   verificationRepairInstructions,
 } from "../../../../packages/conversation-domain/src/verification";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  candidateReview,
+  changeAgentSession,
+  changeCommitOperation,
+  change as changeTable,
+  deliveryApproval,
+  executionPolicyCommand,
+  mergeOperation,
+  monitoringEvidence,
+  project,
+  projectDeliveryQueue,
+  promotionOperation,
+  pullRequestOperation,
+  reviewFeedback,
+  runtimeAttempt,
+  stagingPreview,
+  ticket,
+  verification as verificationTable,
+} from "../../../../packages/db/src/schema";
 import {
   createForgejoClient,
   ForgeAmbiguousWriteError,
@@ -56,6 +96,33 @@ function bounded(value: string, limit = 2_000) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
+function failureMessage(cause: unknown, fallback: string): string {
+  // Drizzle's wrapper includes SQL parameters. Persist the original driver
+  // message as before, never runner credentials or other query inputs.
+  if (cause instanceof DrizzleQueryError) return failureMessage(cause.cause, fallback);
+  return bounded(cause instanceof Error ? cause.message : fallback);
+}
+
+function pendingReviewColumns() {
+  // INSERT SELECT must supply every model column in model order. Reset the
+  // fields omitted by the original insert to their native fresh-review defaults.
+  return {
+    ...getTableColumns(candidateReview),
+    supersedesId: query<null>`NULL::uuid`.as("supersedes_id"),
+    findingChecks: query<null>`NULL::jsonb`.as("finding_checks"),
+    turnId: query<null>`NULL::uuid`.as("turn_id"),
+    state: query<string>`'pending'::text`.as("state"),
+    uiRequired: query<boolean>`false`.as("ui_required"),
+    result: query<null>`NULL::jsonb`.as("result"),
+    evidence: query<unknown[]>`'[]'::jsonb`.as("evidence"),
+    repairCommandId: query<string>`gen_random_uuid()`.as("repair_command_id"),
+    repairPromptedAt: query<null>`NULL::timestamptz`.as("repair_prompted_at"),
+    createdAt: query<Date>`now()`.as("created_at"),
+    completedAt: query<null>`NULL::timestamptz`.as("completed_at"),
+    coverageVersion: query<number>`1`.as("coverage_version"),
+  };
+}
+
 export function createDeliveryController(
   database: Database,
   runtime: RuntimeController,
@@ -64,6 +131,7 @@ export function createDeliveryController(
   forgeOverride?: { client: ReturnType<typeof createForgejoClient>; owner: string },
   integration?: Pick<ReturnType<typeof createChangeIntegration>, "reconcile">,
 ) {
+  const db = drizzleTransaction(database.client);
   const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
   function configuredForge() {
     if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER)
@@ -85,51 +153,75 @@ export function createDeliveryController(
   let reconcilingAll = false;
   const coordination = createDeliveryCoordination(database);
   async function failedCorrections(changeID: string) {
-    const [row] = await database.client<{ count: number }[]>`
-      SELECT ((SELECT COUNT(*) FROM factory.verification WHERE change_id=${changeID}
-        AND state='failed' AND repair_prompted_at IS NOT NULL)
-        + (SELECT COUNT(*) FROM factory.candidate_review WHERE change_id=${changeID}
-          AND state='changes-requested' AND repair_prompted_at IS NOT NULL))::integer AS count`;
+    const failedVerifications = db
+      .select({ count: count() })
+      .from(verificationTable)
+      .where(
+        and(
+          eq(verificationTable.changeId, changeID),
+          eq(verificationTable.state, "failed"),
+          isNotNull(verificationTable.repairPromptedAt),
+        ),
+      );
+    const failedReviews = db
+      .select({ count: count() })
+      .from(candidateReview)
+      .where(
+        and(
+          eq(candidateReview.changeId, changeID),
+          eq(candidateReview.state, "changes-requested"),
+          isNotNull(candidateReview.repairPromptedAt),
+        ),
+      );
+    const [row] = await db
+      .select({
+        count: query<number>`((${failedVerifications}) + (${failedReviews}))::integer`,
+      })
+      .from(changeTable)
+      .where(eq(changeTable.id, changeID));
     return Number(row?.count ?? 0);
   }
 
   async function changeRow(changeID: string) {
-    const rows = await database.client<
-      Array<{
-        id: string;
-        projectID: string;
-        ticketID: string;
-        title: string;
-        description: string;
-        branchName: string;
-        baseSHA: string;
-        state: string;
-        trashed: boolean;
-        userID: string;
-        repositoryURL: string;
-        defaultBranch: string;
-        commitSHA: string | null;
-        runtimeAttemptID: string | null;
-        deliveryWaitingSHA: string | null;
-        deliveryWaitingPolicyID: string | null;
-      }>
-    >`
-      SELECT change.id, change.project_id AS "projectID", change.ticket_id AS "ticketID",
-        ticket.title, ticket.description, change.branch_name AS "branchName",
-        COALESCE(commit.integration_base_sha,change.base_sha) AS "baseSHA", change.state, ticket.trashed_at IS NOT NULL AS trashed, change.created_by AS "userID",
-        project.repository_url AS "repositoryURL", project.default_branch AS "defaultBranch",
-        commit.commit_sha AS "commitSHA", change.runtime_attempt_id AS "runtimeAttemptID",
-        change.delivery_waiting_sha AS "deliveryWaitingSHA",change.delivery_waiting_policy_id AS "deliveryWaitingPolicyID"
-      FROM factory.change change
-      JOIN factory.ticket ticket ON ticket.id = change.ticket_id
-      JOIN factory.project project ON project.id = change.project_id
-      LEFT JOIN LATERAL (
-        SELECT commit_sha,integration_base_sha FROM factory.change_commit_operation
-        WHERE change_id = change.id AND state = 'succeeded'
-        ORDER BY sequence DESC LIMIT 1
-      ) commit ON true
-      WHERE change.id = ${changeID}
-    `;
+    const commit = db
+      .select({
+        commitSHA: changeCommitOperation.commitSha,
+        integrationBaseSHA: changeCommitOperation.integrationBaseSha,
+      })
+      .from(changeCommitOperation)
+      .where(
+        and(
+          eq(changeCommitOperation.changeId, changeTable.id),
+          eq(changeCommitOperation.state, "succeeded"),
+        ),
+      )
+      .orderBy(desc(changeCommitOperation.sequence))
+      .limit(1)
+      .as("commit");
+    const rows = await db
+      .select({
+        id: changeTable.id,
+        projectID: changeTable.projectId,
+        ticketID: changeTable.ticketId,
+        title: ticket.title,
+        description: ticket.description,
+        branchName: changeTable.branchName,
+        baseSHA: query<string>`COALESCE(${commit.integrationBaseSHA},${changeTable.baseSha})`,
+        state: changeTable.state,
+        trashed: isNotNull(ticket.trashedAt),
+        userID: changeTable.createdBy,
+        repositoryURL: project.repositoryUrl,
+        defaultBranch: project.defaultBranch,
+        commitSHA: commit.commitSHA,
+        runtimeAttemptID: changeTable.runtimeAttemptId,
+        deliveryWaitingSHA: changeTable.deliveryWaitingSha,
+        deliveryWaitingPolicyID: changeTable.deliveryWaitingPolicyId,
+      })
+      .from(changeTable)
+      .innerJoin(ticket, eq(ticket.id, changeTable.ticketId))
+      .innerJoin(project, eq(project.id, changeTable.projectId))
+      .leftJoinLateral(commit, query`true`)
+      .where(eq(changeTable.id, changeID));
     return rows[0] ?? null;
   }
 
@@ -138,44 +230,50 @@ export function createDeliveryController(
     if (repository.owner !== allowedOwner) {
       throw new Error("Project Forge owner is not allowed");
     }
-    let operations = await database.client<
-      Array<{ id: string; state: string; number: string | null; url: string | null }>
-    >`
-      SELECT id, state, pull_request_number AS number, pull_request_url AS url
-      FROM factory.pull_request_operation WHERE change_id = ${change.id}
-    `;
+    const selection = {
+      id: pullRequestOperation.id,
+      state: pullRequestOperation.state,
+      number: query<string | null>`${pullRequestOperation.pullRequestNumber}::text`,
+      url: pullRequestOperation.pullRequestUrl,
+    };
+    const readOperation = () =>
+      db
+        .select(selection)
+        .from(pullRequestOperation)
+        .where(eq(pullRequestOperation.changeId, change.id));
+    let operations = await readOperation();
     if (!operations[0]) {
-      operations = await database.client<
-        Array<{ id: string; state: string; number: string | null; url: string | null }>
-      >`
-        INSERT INTO factory.pull_request_operation(
-          id, change_id, repository_owner, repository_name, base_branch, head_branch,
-          first_head_sha, title, body, idempotency_key
-        ) VALUES (
-          ${crypto.randomUUID()}, ${change.id}, ${repository.owner}, ${repository.name},
-          ${change.defaultBranch}, ${change.branchName}, ${change.commitSHA}, ${change.title},
-          ${bounded(change.description, 10_000)}, ${`change:${change.id}:pull-request`}
-        )
-        ON CONFLICT(change_id) DO NOTHING
-        RETURNING id, state, pull_request_number AS number, pull_request_url AS url
-      `;
-      if (!operations[0]) {
-        operations = await database.client<
-          Array<{ id: string; state: string; number: string | null; url: string | null }>
-        >`
-          SELECT id, state, pull_request_number AS number, pull_request_url AS url
-          FROM factory.pull_request_operation WHERE change_id = ${change.id}
-        `;
-      }
+      operations = await db
+        .insert(pullRequestOperation)
+        .values({
+          id: crypto.randomUUID(),
+          changeId: change.id,
+          repositoryOwner: repository.owner,
+          repositoryName: repository.name,
+          baseBranch: change.defaultBranch,
+          headBranch: change.branchName,
+          firstHeadSha: query`${change.commitSHA}`,
+          title: change.title,
+          body: bounded(change.description, 10_000),
+          idempotencyKey: `change:${change.id}:pull-request`,
+        })
+        .onConflictDoNothing({ target: pullRequestOperation.changeId })
+        .returning(selection);
+      if (!operations[0]) operations = await readOperation();
     }
     const operation = operations[0];
     if (!operation) throw new Error("Pull request intent was not created");
     if (operation.state === "failed") throw new Error("Pull request creation failed");
     if (operation.state !== "succeeded") {
-      await database.client`
-        UPDATE factory.pull_request_operation SET state = 'executing', updated_at = now()
-        WHERE id = ${operation.id} AND state IN ('pending', 'ambiguous')
-      `;
+      await db
+        .update(pullRequestOperation)
+        .set({ state: "executing", updatedAt: query`now()` })
+        .where(
+          and(
+            eq(pullRequestOperation.id, operation.id),
+            inArray(pullRequestOperation.state, ["pending", "ambiguous"]),
+          ),
+        );
       try {
         const protectedWorkflow = await forge.getFile(
           repository,
@@ -192,29 +290,51 @@ export function createDeliveryController(
           title: change.title,
           body: bounded(change.description, 10_000),
         });
-        await database.client`
-          UPDATE factory.pull_request_operation
-          SET state = 'succeeded', pull_request_number = ${pullRequest.number},
-            pull_request_url = ${pullRequest.url}, completed_at = now(), updated_at = now(),
-            last_error = NULL
-          WHERE id = ${operation.id} AND state = 'executing'
-        `;
+        await db
+          .update(pullRequestOperation)
+          .set({
+            state: "succeeded",
+            pullRequestNumber: pullRequest.number,
+            pullRequestUrl: pullRequest.url,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+            lastError: null,
+          })
+          .where(
+            and(
+              eq(pullRequestOperation.id, operation.id),
+              eq(pullRequestOperation.state, "executing"),
+            ),
+          );
         return { repository, pullRequest };
       } catch (cause) {
-        const message = bounded(cause instanceof Error ? cause.message : "Pull request failed");
+        const message = failureMessage(cause, "Pull request failed");
         if (cause instanceof ForgeAmbiguousWriteError) {
-          await database.client`
-            UPDATE factory.pull_request_operation SET state = 'ambiguous',
-              last_error = ${message}, updated_at = now()
-            WHERE id = ${operation.id} AND state = 'executing'
-          `;
+          await db
+            .update(pullRequestOperation)
+            .set({ state: "ambiguous", lastError: message, updatedAt: query`now()` })
+            .where(
+              and(
+                eq(pullRequestOperation.id, operation.id),
+                eq(pullRequestOperation.state, "executing"),
+              ),
+            );
           return null;
         }
-        await database.client`
-          UPDATE factory.pull_request_operation SET state = 'failed', last_error = ${message},
-            completed_at = now(), updated_at = now()
-          WHERE id = ${operation.id} AND state = 'executing'
-        `;
+        await db
+          .update(pullRequestOperation)
+          .set({
+            state: "failed",
+            lastError: message,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(pullRequestOperation.id, operation.id),
+              eq(pullRequestOperation.state, "executing"),
+            ),
+          );
         throw cause;
       }
     }
@@ -232,9 +352,13 @@ export function createDeliveryController(
     verification: { id: string; runtimeAttemptID: string | null; runnerID: string | null },
   ) {
     if (verification.runtimeAttemptID) {
-      const [attempt] = await database.client<{ state: string; stopping: boolean }[]>`
-        SELECT state,stop_intended_at IS NOT NULL AS stopping FROM factory.runtime_attempt
-        WHERE id=${verification.runtimeAttemptID}`;
+      const [attempt] = await db
+        .select({
+          state: runtimeAttempt.state,
+          stopping: query<boolean>`${runtimeAttempt.stopIntendedAt} IS NOT NULL`,
+        })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.id, verification.runtimeAttemptID));
       // Stop is durable intent, not completed cleanup. Its runtime owner keeps
       // reconciling; another Delivery sweep must not reset its retry policy.
       if (attempt && attempt.state !== "stopped" && !attempt.stopping)
@@ -245,8 +369,15 @@ export function createDeliveryController(
     if (verification.runnerID) {
       try {
         await forge.deleteRunner(repository, Number(verification.runnerID));
-        await database.client`UPDATE factory.verification SET runner_id = NULL, updated_at = now()
-          WHERE id = ${verification.id} AND runner_id = ${verification.runnerID}`;
+        await db
+          .update(verificationTable)
+          .set({ runnerId: null, updatedAt: query`now()` })
+          .where(
+            and(
+              eq(verificationTable.id, verification.id),
+              eq(verificationTable.runnerId, query`${verification.runnerID}::bigint`),
+            ),
+          );
       } catch {
         // The retained runner identity lets cancellation retry revocation.
       }
@@ -272,33 +403,33 @@ export function createDeliveryController(
     pullRequest: Awaited<ReturnType<typeof forge.getPullRequest>> & {},
   ) {
     if (!change.commitSHA || pullRequest.headSha !== change.commitSHA || pullRequest.merged) return;
-    type VerificationRow = {
-      id: string;
-      state: string;
-      actionRunID: string | null;
-      runtimeAttemptID: string | null;
-      runtimeState: string | null;
-      runtimeUpdatedAt: string | null;
-      runtimeFailure: string | null;
-      runnerID: string | null;
-      runnerUUID: string | null;
-      runnerToken: string | null;
-      repairPromptedAt: string | null;
-      diagnosis: unknown;
-    };
-    let rows = await database.client<VerificationRow[]>`
-      SELECT verification.id, verification.state,
-        verification.action_run_id AS "actionRunID",
-        verification.runtime_attempt_id AS "runtimeAttemptID",
-        attempt.state AS "runtimeState", attempt.updated_at AS "runtimeUpdatedAt",
-        attempt.failure AS "runtimeFailure",
-        verification.runner_id AS "runnerID",
-        verification.runner_uuid AS "runnerUUID", verification.runner_token AS "runnerToken",
-        verification.repair_prompted_at AS "repairPromptedAt", verification.diagnosis
-      FROM factory.verification verification
-      LEFT JOIN factory.runtime_attempt attempt ON attempt.id = verification.runtime_attempt_id
-      WHERE verification.change_id = ${change.id} AND verification.commit_sha = ${change.commitSHA}
-    `;
+    const commitSHA = change.commitSHA;
+    const readVerification = () =>
+      db
+        .select({
+          id: verificationTable.id,
+          state: verificationTable.state,
+          actionRunID: query<string | null>`${verificationTable.actionRunId}::text`,
+          runtimeAttemptID: verificationTable.runtimeAttemptId,
+          runtimeState: runtimeAttempt.state,
+          // Keep native precision; these are observations, not Date-based write tokens.
+          runtimeUpdatedAt: query<string | null>`${runtimeAttempt.updatedAt}::text`,
+          runtimeFailure: runtimeAttempt.failure,
+          runnerID: query<string | null>`${verificationTable.runnerId}::text`,
+          runnerUUID: verificationTable.runnerUuid,
+          runnerToken: verificationTable.runnerToken,
+          repairPromptedAt: query<string | null>`${verificationTable.repairPromptedAt}::text`,
+          diagnosis: verificationTable.diagnosis,
+        })
+        .from(verificationTable)
+        .leftJoin(runtimeAttempt, eq(runtimeAttempt.id, verificationTable.runtimeAttemptId))
+        .where(
+          and(
+            eq(verificationTable.changeId, change.id),
+            eq(verificationTable.commitSha, commitSHA),
+          ),
+        );
+    let rows = await readVerification();
     if (!rows[0]) {
       const candidateWorkflow = await forge.getFile(repository, workflowPath, change.commitSHA);
       const protectedWorkflow = await forge.getFile(repository, workflowPath, change.defaultBranch);
@@ -315,28 +446,21 @@ export function createDeliveryController(
           FOR UPDATE OF change, ticket
         `;
         if (!active[0]) return;
-        await sql`INSERT INTO factory.verification(
-          id, change_id, commit_sha, pull_request_number, runner_name, created_by
-        ) VALUES (
-          ${verificationID}, ${change.id}, ${change.commitSHA}, ${pullRequest.number},
-          ${`factory-${verificationID.replaceAll("-", "").slice(0, 16)}`}, ${change.userID}
-        )
-        ON CONFLICT(change_id, commit_sha) DO NOTHING
-        `;
+        await drizzleTransaction(sql)
+          .insert(verificationTable)
+          .values({
+            id: verificationID,
+            changeId: change.id,
+            commitSha: commitSHA,
+            pullRequestNumber: pullRequest.number,
+            runnerName: `factory-${verificationID.replaceAll("-", "").slice(0, 16)}`,
+            createdBy: change.userID,
+          })
+          .onConflictDoNothing({
+            target: [verificationTable.changeId, verificationTable.commitSha],
+          });
       });
-      rows = await database.client<VerificationRow[]>`
-        SELECT verification.id, verification.state,
-          verification.action_run_id AS "actionRunID",
-          verification.runtime_attempt_id AS "runtimeAttemptID",
-          attempt.state AS "runtimeState", attempt.updated_at AS "runtimeUpdatedAt",
-          attempt.failure AS "runtimeFailure",
-          verification.runner_id AS "runnerID",
-          verification.runner_uuid AS "runnerUUID", verification.runner_token AS "runnerToken",
-          verification.repair_prompted_at AS "repairPromptedAt", verification.diagnosis
-        FROM factory.verification verification
-        LEFT JOIN factory.runtime_attempt attempt ON attempt.id = verification.runtime_attempt_id
-        WHERE verification.change_id = ${change.id} AND verification.commit_sha = ${change.commitSHA}
-      `;
+      rows = await readVerification();
     }
     const verification = rows[0];
     if (!verification || verification.state === "cancelled") return;
@@ -373,11 +497,16 @@ export function createDeliveryController(
     if (!actionRun) return;
     if (!(await stillActive())) return;
     if (!verification.actionRunID) {
-      await database.client`
-        UPDATE factory.verification SET action_run_id = ${actionRun.id},
-          action_run_url = ${actionRun.url}, updated_at = now()
-        WHERE id = ${verification.id} AND action_run_id IS NULL
-      `;
+      await db
+        .update(verificationTable)
+        .set({
+          actionRunId: actionRun.id,
+          actionRunUrl: actionRun.url,
+          updatedAt: query`now()`,
+        })
+        .where(
+          and(eq(verificationTable.id, verification.id), isNull(verificationTable.actionRunId)),
+        );
       verification.actionRunID = String(actionRun.id);
     }
     if (["success", "failure", "cancelled", "skipped"].includes(actionRun.status)) {
@@ -411,18 +540,26 @@ export function createDeliveryController(
       const summary = diagnosis
         ? diagnosis.summary
         : `Forgejo Actions passed ${change.commitSHA.slice(0, 12)}.${receipt?.complete ? "" : " Detailed check observations are incomplete."}`;
-      const [recorded] = await database.client<{ diagnosis: unknown }[]>`
-        UPDATE factory.verification SET state = ${succeeded ? "succeeded" : "failed"}::factory.verification_state,
-          summary = ${bounded(summary)},
-          diagnosis=CASE WHEN ${succeeded} THEN
-            CASE WHEN octet_length((COALESCE(diagnosis,'{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb)::text)<=24000
-              THEN COALESCE(diagnosis,'{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb ELSE diagnosis END
-            ELSE ${diagnosis ? JSON.stringify(diagnosis) : null}::jsonb END,
-          completed_at = now(), updated_at = now()
-        WHERE id = ${verification.id} AND state NOT IN ('succeeded', 'cancelled')
-          AND (diagnosis IS NULL OR ${succeeded})
-        RETURNING diagnosis
-      `;
+      const [recorded] = await db
+        .update(verificationTable)
+        .set({
+          state: succeeded ? "succeeded" : "failed",
+          summary: bounded(summary),
+          diagnosis: query`CASE WHEN ${succeeded} THEN
+          CASE WHEN octet_length((COALESCE(${verificationTable.diagnosis},'{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb)::text)<=24000
+            THEN COALESCE(${verificationTable.diagnosis},'{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb ELSE ${verificationTable.diagnosis} END
+          ELSE ${diagnosis ? JSON.stringify(diagnosis) : null}::jsonb END`,
+          completedAt: query`now()`,
+          updatedAt: query`now()`,
+        })
+        .where(
+          and(
+            eq(verificationTable.id, verification.id),
+            notInArray(verificationTable.state, ["succeeded", "cancelled"]),
+            or(isNull(verificationTable.diagnosis), query`${succeeded}`),
+          ),
+        )
+        .returning({ diagnosis: verificationTable.diagnosis });
       if (!succeeded) {
         // A competing reconciler may have saved another observed attempt.
         // The correction must use the saved packet, never this process's later read.
@@ -431,9 +568,10 @@ export function createDeliveryController(
           (verification.diagnosis
             ? verification
             : (
-                await database.client<
-                  { diagnosis: unknown }[]
-                >`SELECT diagnosis FROM factory.verification WHERE id=${verification.id}`
+                await db
+                  .select({ diagnosis: verificationTable.diagnosis })
+                  .from(verificationTable)
+                  .where(eq(verificationTable.id, verification.id))
               )[0]);
         diagnosis = persisted?.diagnosis
           ? verificationDiagnosisInput.parse(persisted.diagnosis)
@@ -445,9 +583,10 @@ export function createDeliveryController(
       if (!(await verificationCleanupConfirmed(verification.id))) return;
       if (!succeeded && diagnosis?.kind === "check-failed" && !verification.repairPromptedAt) {
         if (!(await stillActive())) return;
-        const sessions = await database.client<Array<{ state: string }>>`
-          SELECT state FROM factory.change_agent_session WHERE change_id = ${change.id}
-        `;
+        const sessions = await db
+          .select({ state: changeAgentSession.state })
+          .from(changeAgentSession)
+          .where(eq(changeAgentSession.changeId, change.id));
         if (sessions[0]?.state !== "committed") return;
         if ((await failedCorrections(change.id)) >= 3)
           throw new Error(
@@ -465,10 +604,15 @@ export function createDeliveryController(
           verification.id,
           true,
         );
-        await database.client`
-          UPDATE factory.verification SET repair_prompted_at = now(), updated_at = now()
-          WHERE id = ${verification.id} AND repair_prompted_at IS NULL
-        `;
+        await db
+          .update(verificationTable)
+          .set({ repairPromptedAt: query`now()`, updatedAt: query`now()` })
+          .where(
+            and(
+              eq(verificationTable.id, verification.id),
+              isNull(verificationTable.repairPromptedAt),
+            ),
+          );
       }
       return;
     }
@@ -508,11 +652,22 @@ export function createDeliveryController(
           : {}),
         jobs: [],
       });
-      await database.client`UPDATE factory.verification SET state='failed',
-        diagnosis=${JSON.stringify(diagnosis)}::jsonb,summary=${diagnosis.summary},
-        completed_at=now(),updated_at=now()
-        WHERE id=${verification.id} AND runtime_attempt_id=${verification.runtimeAttemptID}
-          AND state IN ('pending','runner-starting','running')`;
+      await db
+        .update(verificationTable)
+        .set({
+          state: "failed",
+          diagnosis,
+          summary: diagnosis.summary,
+          completedAt: query`now()`,
+          updatedAt: query`now()`,
+        })
+        .where(
+          and(
+            eq(verificationTable.id, verification.id),
+            eq(verificationTable.runtimeAttemptId, verification.runtimeAttemptID),
+            inArray(verificationTable.state, ["pending", "runner-starting", "running"]),
+          ),
+        );
       await stopVerification(repository, verification);
       return;
     }
@@ -521,32 +676,63 @@ export function createDeliveryController(
         await forge.deleteRunner(repository, Number(verification.runnerID));
       }
       if (!(await stillActive())) return;
-      const names = await database.client<Array<{ name: string }>>`
-        SELECT runner_name AS name FROM factory.verification WHERE id = ${verification.id}
-      `;
+      const names = await db
+        .select({ name: verificationTable.runnerName })
+        .from(verificationTable)
+        .where(eq(verificationTable.id, verification.id));
       const registration = await forge.registerEphemeralRunner(
         repository,
         names[0]?.name ?? `factory-${verification.id.replaceAll("-", "").slice(0, 16)}`,
       );
-      const saved = await database.client`
-        UPDATE factory.verification SET
-          runner_id = ${registration.id}, runner_uuid = ${registration.uuid},
-          runner_token = ${registration.token}, updated_at = now()
-        WHERE id = ${verification.id} AND runner_id IS NOT DISTINCT FROM ${verification.runnerID}::bigint
-          AND state IN ('pending', 'runner-starting', 'running')
-          AND EXISTS(SELECT 1 FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
+      const saved = await db
+        .update(verificationTable)
+        .set({
+          runnerId: registration.id,
+          runnerUuid: registration.uuid,
+          runnerToken: registration.token,
+          updatedAt: query`now()`,
+        })
+        .where(
+          and(
+            eq(verificationTable.id, verification.id),
+            query`${verificationTable.runnerId} IS NOT DISTINCT FROM ${verification.runnerID}::bigint`,
+            inArray(verificationTable.state, ["pending", "runner-starting", "running"]),
+            query`EXISTS(SELECT 1 FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
             WHERE change.id = ${change.id} AND change.state = 'active' AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
-            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id = change.id AND (session.state = 'stopped' OR session.stop_pending)))
-      `;
+            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id = change.id AND (session.state = 'stopped' OR session.stop_pending)))`,
+          ),
+        );
       if (saved.count !== 1) {
         // Retain a late external outcome so cancellation can retry revocation.
-        await database.client`UPDATE factory.verification SET runner_id = ${registration.id},
-          runner_uuid = ${registration.uuid}, runner_token = ${registration.token}, updated_at = now()
-          WHERE id = ${verification.id} AND state = 'cancelled'
-            AND (runner_id IS NULL OR runner_id = ${verification.runnerID}::bigint)`;
+        await db
+          .update(verificationTable)
+          .set({
+            runnerId: registration.id,
+            runnerUuid: registration.uuid,
+            runnerToken: registration.token,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(verificationTable.id, verification.id),
+              eq(verificationTable.state, "cancelled"),
+              or(
+                isNull(verificationTable.runnerId),
+                eq(verificationTable.runnerId, query`${verification.runnerID}::bigint`),
+              ),
+            ),
+          );
         await forge.deleteRunner(repository, registration.id);
-        await database.client`UPDATE factory.verification SET runner_id = NULL
-          WHERE id = ${verification.id} AND state = 'cancelled' AND runner_id = ${registration.id}`;
+        await db
+          .update(verificationTable)
+          .set({ runnerId: null })
+          .where(
+            and(
+              eq(verificationTable.id, verification.id),
+              eq(verificationTable.state, "cancelled"),
+              eq(verificationTable.runnerId, registration.id),
+            ),
+          );
         return;
       }
       verification.runnerID = String(registration.id);
@@ -558,12 +744,18 @@ export function createDeliveryController(
     // This also settles its completed Coding predecessor after process restart;
     // startVerification cannot implicitly replace a stopped/failed Attempt.
     await runtime.startVerification(verification.id, change.userID);
-    await database.client`
-      UPDATE factory.verification SET
-        state = ${actionRun.status === "running" ? "running" : "runner-starting"}::factory.verification_state,
-        updated_at = now()
-      WHERE id = ${verification.id} AND state IN ('pending', 'runner-starting', 'running')
-    `;
+    await db
+      .update(verificationTable)
+      .set({
+        state: actionRun.status === "running" ? "running" : "runner-starting",
+        updatedAt: query`now()`,
+      })
+      .where(
+        and(
+          eq(verificationTable.id, verification.id),
+          inArray(verificationTable.state, ["pending", "runner-starting", "running"]),
+        ),
+      );
   }
 
   async function cancelVerifications(
@@ -571,68 +763,115 @@ export function createDeliveryController(
     repository: ForgeRepository,
     keepCommitSHA: string | null = null,
   ) {
-    const verifications = await database.client<
-      Array<{ id: string; runtimeAttemptID: string | null; runnerID: string | null }>
-    >`
-      UPDATE factory.verification verification SET state = 'cancelled', completed_at = COALESCE(completed_at, now()),
-        updated_at = now()
-      WHERE change_id = ${changeID}
-        AND (${keepCommitSHA}::text IS NULL OR (
-          commit_sha <> ${keepCommitSHA}
+    const verifications = await db
+      .update(verificationTable)
+      .set({
+        state: "cancelled",
+        completedAt: query`COALESCE(${verificationTable.completedAt}, now())`,
+        updatedAt: query`now()`,
+      })
+      .where(
+        and(
+          eq(verificationTable.changeId, changeID),
+          query`(${keepCommitSHA}::text IS NULL OR (
+          ${verificationTable.commitSha} <> ${keepCommitSHA}
           AND ${keepCommitSHA} = (
             SELECT commit.commit_sha FROM factory.change_commit_operation commit
-            WHERE commit.change_id = verification.change_id AND commit.state = 'succeeded'
+            WHERE commit.change_id = ${verificationTable.changeId} AND commit.state = 'succeeded'
             ORDER BY commit.sequence DESC LIMIT 1
           )
-        ))
-        AND (state IN ('pending', 'runner-starting', 'running') OR (
-          state = 'cancelled' AND (runner_id IS NOT NULL OR EXISTS (
+        ))`,
+          query`(${verificationTable.state} IN ('pending', 'runner-starting', 'running') OR (
+          ${verificationTable.state} = 'cancelled' AND (${verificationTable.runnerId} IS NOT NULL OR EXISTS (
             SELECT 1 FROM factory.runtime_attempt attempt
-            WHERE attempt.id = verification.runtime_attempt_id
+            WHERE attempt.id = ${verificationTable.runtimeAttemptId}
               AND attempt.state NOT IN ('stopped', 'failed')
           ))
-        ))
-      RETURNING id, runtime_attempt_id AS "runtimeAttemptID", runner_id AS "runnerID"
-    `;
+        ))`,
+        ),
+      )
+      .returning({
+        id: verificationTable.id,
+        runtimeAttemptID: verificationTable.runtimeAttemptId,
+        runnerID: query<string | null>`${verificationTable.runnerId}::text`,
+      });
     for (const verification of verifications) await stopVerification(repository, verification);
   }
 
   async function ensureReview(change: NonNullable<Awaited<ReturnType<typeof changeRow>>>) {
-    const [verification] = await database.client<{ id: string }[]>`
-      SELECT id FROM factory.verification
-      WHERE change_id=${change.id} AND commit_sha=${change.commitSHA} AND state='succeeded'`;
+    const [verification] = await db
+      .select({ id: verificationTable.id })
+      .from(verificationTable)
+      .where(
+        and(
+          eq(verificationTable.changeId, change.id),
+          eq(verificationTable.commitSha, query`${change.commitSHA}`),
+          eq(verificationTable.state, "succeeded"),
+        ),
+      );
     if (!verification || !(await verificationCleanupConfirmed(verification.id))) return;
-    await database.client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by,focus_review_id)
-      VALUES(${crypto.randomUUID()},${verification.id},${change.id},${change.commitSHA},${change.baseSHA},${change.userID},
-        (SELECT review.id FROM factory.candidate_review review JOIN factory.agent_turn turn ON turn.id=review.turn_id
-          WHERE review.change_id=${change.id} AND review.commit_sha<>${change.commitSHA}
-            AND review.state IN ('passed','changes-requested') AND turn.state='completed'
-            AND (review.state='passed' OR review.repair_prompted_at IS NOT NULL)
-          ORDER BY review.created_at DESC,review.ordinal DESC LIMIT 1))
-      ON CONFLICT(verification_id,ordinal) DO NOTHING`;
-    const [review] = await database.client<
-      {
-        id: string;
-        userID: string;
-        turnID: string | null;
-        state: string;
-        result: unknown;
-        repairCommandID: string;
-        repaired: boolean;
-        findingSourceID: string | null;
-      }[]
-    >`SELECT id,turn_id AS "turnID",state,result,repair_command_id AS "repairCommandID",
-      repair_prompted_at IS NOT NULL AS repaired,created_by AS "userID",finding_source_id AS "findingSourceID"
-      FROM factory.candidate_review
-      WHERE verification_id=${verification.id} AND commit_sha=${change.commitSHA}
-      ORDER BY ordinal DESC LIMIT 1`;
+    const focusReview = db
+      .select({ id: candidateReview.id })
+      .from(candidateReview)
+      .innerJoin(agentTurn, eq(agentTurn.id, candidateReview.turnId))
+      .where(
+        and(
+          eq(candidateReview.changeId, change.id),
+          ne(candidateReview.commitSha, query`${change.commitSHA}`),
+          inArray(candidateReview.state, ["passed", "changes-requested"]),
+          eq(agentTurn.state, "completed"),
+          or(eq(candidateReview.state, "passed"), isNotNull(candidateReview.repairPromptedAt)),
+        ),
+      )
+      .orderBy(desc(candidateReview.createdAt), desc(candidateReview.ordinal))
+      .limit(1);
+    await db
+      .insert(candidateReview)
+      .values({
+        id: crypto.randomUUID(),
+        verificationId: verification.id,
+        changeId: change.id,
+        commitSha: query`${change.commitSHA}`,
+        baseSha: change.baseSHA,
+        createdBy: change.userID,
+        focusReviewId: query<string | null>`(${focusReview})`,
+      })
+      .onConflictDoNothing({ target: [candidateReview.verificationId, candidateReview.ordinal] });
+    const [review] = await db
+      .select({
+        id: candidateReview.id,
+        turnID: candidateReview.turnId,
+        state: candidateReview.state,
+        result: candidateReview.result,
+        repairCommandID: candidateReview.repairCommandId,
+        repaired: query<boolean>`${candidateReview.repairPromptedAt} IS NOT NULL`,
+        userID: candidateReview.createdBy,
+        findingSourceID: candidateReview.findingSourceId,
+      })
+      .from(candidateReview)
+      .where(
+        and(
+          eq(candidateReview.verificationId, verification.id),
+          eq(candidateReview.commitSha, query`${change.commitSHA}`),
+        ),
+      )
+      .orderBy(desc(candidateReview.ordinal))
+      .limit(1);
     if (!review) return;
-    const [session] = await database.client<{ state: string; stopping: boolean }[]>`
-      SELECT state,stop_pending AS stopping FROM factory.change_agent_session WHERE change_id=${change.id}`;
+    const [session] = await db
+      .select({ state: changeAgentSession.state, stopping: changeAgentSession.stopPending })
+      .from(changeAgentSession)
+      .where(eq(changeAgentSession.changeId, change.id));
     if (session?.stopping || (session && session.state !== "committed")) return;
-    const [work] =
-      await database.client`SELECT id FROM factory.agent_turn WHERE change_id=${change.id}
-      AND state IN ('pending','dispatching','running','uncertain')`;
+    const [work] = await db
+      .select({ id: agentTurn.id })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.changeId, change.id),
+          inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+        ),
+      );
     if (work) return;
     if (!review.turnID) {
       if (!agent.review) throw new Error("Independent candidate review is not configured");
@@ -643,12 +882,36 @@ export function createDeliveryController(
     if (!review.findingSourceID) {
       // One fresh, batched check only when discovery proposes blockers. Its
       // separate row retains the original report and uses all existing lifecycle gates.
-      const [created] = await database.client`INSERT INTO factory.candidate_review(
-        id,verification_id,ordinal,change_id,commit_sha,base_sha,created_by,finding_source_id,focus_review_id)
-        SELECT ${crypto.randomUUID()},verification_id,ordinal+1,change_id,commit_sha,base_sha,created_by,id,focus_review_id
-        FROM factory.candidate_review source WHERE source.id=${review.id}
-          AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=source.turn_id AND state='completed')
-        ON CONFLICT DO NOTHING RETURNING id`;
+      const [created] = await db
+        .insert(candidateReview)
+        .select(
+          db
+            .select({
+              ...pendingReviewColumns(),
+              id: query<string>`${crypto.randomUUID()}::uuid`.as("id"),
+              ordinal: query<number>`${candidateReview.ordinal}+1`.as("ordinal"),
+              findingSourceId: candidateReview.id,
+            })
+            .from(candidateReview)
+            .where(
+              and(
+                eq(candidateReview.id, review.id),
+                exists(
+                  db
+                    .select({ id: agentTurn.id })
+                    .from(agentTurn)
+                    .where(
+                      and(
+                        eq(agentTurn.id, candidateReview.turnId),
+                        eq(agentTurn.state, "completed"),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+        )
+        .onConflictDoNothing()
+        .returning({ id: candidateReview.id });
       if (created) await ensureReview(change);
       return;
     }
@@ -673,56 +936,94 @@ export function createDeliveryController(
       review.repairCommandID,
       true,
     );
-    await database.client`UPDATE factory.candidate_review SET repair_prompted_at=now()
-      WHERE id=${review.id} AND repair_prompted_at IS NULL`;
+    await db
+      .update(candidateReview)
+      .set({ repairPromptedAt: query`now()` })
+      .where(and(eq(candidateReview.id, review.id), isNull(candidateReview.repairPromptedAt)));
   }
 
   async function reconcileMerge(
     change: NonNullable<Awaited<ReturnType<typeof changeRow>>>,
     repository: ForgeRepository,
   ) {
-    const rows = await database.client<
-      Array<{
-        id: string;
-        state: string;
-        commitSHA: string;
-        baseSHA: string;
-        pullRequestNumber: string;
-        monitoringIncidentID: string | null;
-        deliveryPolicyID: string | null;
-      }>
-    >`
-      SELECT merge.id, merge.state, merge.commit_sha AS "commitSHA",
-        merge.base_sha AS "baseSHA", merge.pull_request_number AS "pullRequestNumber",
-        approval.monitoring_incident_id AS "monitoringIncidentID",approval.delivery_policy_id AS "deliveryPolicyID"
-      FROM factory.merge_operation merge JOIN factory.delivery_approval approval ON approval.id=merge.delivery_approval_id
-      WHERE merge.change_id = ${change.id}
-      ORDER BY (merge.state<>'failed') DESC,merge.requested_at DESC,merge.id DESC LIMIT 1
-    `;
+    const rows = await db
+      .select({
+        id: mergeOperation.id,
+        state: mergeOperation.state,
+        commitSHA: mergeOperation.commitSha,
+        baseSHA: mergeOperation.baseSha,
+        pullRequestNumber: query<string>`${mergeOperation.pullRequestNumber}::text`,
+        monitoringIncidentID: deliveryApproval.monitoringIncidentId,
+        deliveryPolicyID: deliveryApproval.deliveryPolicyId,
+      })
+      .from(mergeOperation)
+      .innerJoin(deliveryApproval, eq(deliveryApproval.id, mergeOperation.deliveryApprovalId))
+      .where(eq(mergeOperation.changeId, change.id))
+      .orderBy(
+        desc(query<boolean>`${mergeOperation.state}<>'failed'`),
+        desc(mergeOperation.requestedAt),
+        desc(mergeOperation.id),
+      )
+      .limit(1);
     const operation = rows[0];
     if (!operation || operation.state === "failed") return;
-    const ensurePromotion = async (transaction: TransactionSql) => {
+    const ensurePromotion = async (transaction: DatabaseTransaction) => {
       // Imported Projects need not have opened Main Preview before their first
       // Delivery. Initialize only its empty selection, never replace an
       // existing Preview, and persist the Promotion before starting compute.
-      await transaction`
-        INSERT INTO factory.staging_preview(project_id,revision)
-        SELECT ${change.projectID},${operation.commitSHA}
-        WHERE EXISTS(SELECT 1 FROM factory.merge_operation
-          WHERE id=${operation.id} AND state='succeeded')
-        ON CONFLICT(project_id) DO NOTHING
-      `;
-      await transaction`
-        INSERT INTO factory.promotion_operation(
-          id,change_id,project_id,commit_sha,previous_runtime_attempt_id
+      const tx = drizzleTransaction(transaction);
+      const confirmedMerge = and(
+        eq(mergeOperation.id, operation.id),
+        eq(mergeOperation.state, "succeeded"),
+      );
+      await tx
+        .insert(stagingPreview)
+        .select(
+          tx
+            .select({
+              projectId: query<string>`${change.projectID}::uuid`.as("project_id"),
+              revision: query<string>`${operation.commitSHA}::text`.as("revision"),
+              runtimeAttemptId: query<null>`NULL::uuid`.as("runtime_attempt_id"),
+              createdAt: query<Date>`now()`.as("created_at"),
+              updatedAt: query<Date>`now()`.as("updated_at"),
+            })
+            .from(mergeOperation)
+            .where(confirmedMerge),
         )
-        SELECT ${crypto.randomUUID()},${change.id},${change.projectID},${operation.commitSHA},
-          runtime_attempt_id FROM factory.staging_preview
-        WHERE project_id=${change.projectID}
-          AND EXISTS(SELECT 1 FROM factory.merge_operation
-            WHERE id=${operation.id} AND state='succeeded')
-        ON CONFLICT(change_id,ordinal) DO NOTHING
-      `;
+        .onConflictDoNothing({ target: stagingPreview.projectId });
+      await tx
+        .insert(promotionOperation)
+        .select(
+          tx
+            .select({
+              id: query<string>`${crypto.randomUUID()}::uuid`.as("id"),
+              changeId: query<string>`${change.id}::uuid`.as("change_id"),
+              projectId: query<string>`${change.projectID}::uuid`.as("project_id"),
+              commitSha: query<string>`${operation.commitSHA}::text`.as("commit_sha"),
+              previousRuntimeAttemptId: stagingPreview.runtimeAttemptId,
+              replacementRuntimeAttemptId: query<null>`NULL::uuid`.as(
+                "replacement_runtime_attempt_id",
+              ),
+              state: query<"pending">`'pending'::factory.promotion_operation_state`.as("state"),
+              lastError: query<null>`NULL::text`.as("last_error"),
+              requestedAt: query<Date>`now()`.as("requested_at"),
+              updatedAt: query<Date>`now()`.as("updated_at"),
+              completedAt: query<null>`NULL::timestamptz`.as("completed_at"),
+              ordinal: query<number>`1`.as("ordinal"),
+              supersedesId: query<null>`NULL::uuid`.as("supersedes_id"),
+              retryCommandId: query<null>`NULL::uuid`.as("retry_command_id"),
+            })
+            .from(stagingPreview)
+            .where(
+              and(
+                eq(stagingPreview.projectId, change.projectID),
+                exists(
+                  tx.select({ id: mergeOperation.id }).from(mergeOperation).where(confirmedMerge),
+                ),
+              ),
+            ),
+        )
+        .onConflictDoNothing({ target: [promotionOperation.changeId, promotionOperation.ordinal] });
     };
     if (operation.state === "succeeded") {
       // Continue the confirmed outcome without repeating its external merge.
@@ -731,112 +1032,159 @@ export function createDeliveryController(
       return;
     }
     const outcomeUnknown = operation.state === "ambiguous" || operation.state === "executing";
-    if (operation.state !== "succeeded") {
-      const pullRequest = await forge.getPullRequest(
-        repository,
-        change.defaultBranch,
-        change.branchName,
-      );
-      const base = await forge.getDefaultBranch(repository);
-      if (
-        base.headSha !== operation.commitSHA &&
-        (!pullRequest ||
-          pullRequest.headSha !== operation.commitSHA ||
-          base.headSha !== operation.baseSHA)
-      ) {
-        if (outcomeUnknown) {
-          // A later default-branch commit cannot prove whether the earlier
-          // merge happened. Keep the Project fenced rather than replaying it.
-          await database.client`
-            UPDATE factory.merge_operation SET state='ambiguous',
-              last_error='Default branch moved before the earlier merge outcome was confirmed',
-              completed_at=NULL,updated_at=now() WHERE id=${operation.id}
-              AND state IN ('executing','ambiguous')
-          `;
-          return;
-        }
-        await database.client`
-          UPDATE factory.merge_operation SET state = 'failed',
-            last_error = 'Delivery gate moved before merge', completed_at = now(), updated_at = now()
-          WHERE id = ${operation.id} AND state NOT IN ('succeeded', 'failed')
-        `;
-        await database.client`UPDATE factory.change SET state='active',failure='Delivery basis changed before merge',version=version+1
-          WHERE id=${change.id} AND state='delivering'`;
+    const pullRequest = await forge.getPullRequest(
+      repository,
+      change.defaultBranch,
+      change.branchName,
+    );
+    const base = await forge.getDefaultBranch(repository);
+    if (
+      base.headSha !== operation.commitSHA &&
+      (!pullRequest ||
+        pullRequest.headSha !== operation.commitSHA ||
+        base.headSha !== operation.baseSHA)
+    ) {
+      if (outcomeUnknown) {
+        // A later default-branch commit cannot prove whether the earlier
+        // merge happened. Keep the Project fenced rather than replaying it.
+        await db
+          .update(mergeOperation)
+          .set({
+            state: "ambiguous",
+            lastError: "Default branch moved before the earlier merge outcome was confirmed",
+            completedAt: null,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(mergeOperation.id, operation.id),
+              inArray(mergeOperation.state, ["executing", "ambiguous"]),
+            ),
+          );
         return;
       }
-      await database.client`
-        UPDATE factory.merge_operation SET state = 'executing', updated_at = now()
-        WHERE id = ${operation.id} AND state IN ('pending', 'ambiguous')
-      `;
-      try {
-        const pullRequestNumber = operation.pullRequestNumber;
-        const commitSHA = operation.commitSHA;
-        const deliveryPolicyID = operation.deliveryPolicyID;
-        const monitoringIncidentID = operation.monitoringIncidentID;
-        async function performMerge() {
-          return forge.mergeFastForward(
-            repository,
-            Number(pullRequestNumber),
-            commitSHA,
-            change.defaultBranch,
-          );
-        }
-        async function delegatedMerge() {
-          const coordination = database.coordination();
-          try {
-            return await coordination.begin(async (sql) => {
-              // Revocation and this irreversible command serialize on the
-              // same authority rows, without holding the application pool.
-              await sql`SELECT id FROM factory.change WHERE id=${change.id} FOR UPDATE`;
-              if (deliveryPolicyID)
-                await deliveryDelegationIn(sql, change.projectID, deliveryPolicyID);
-              else if (monitoringIncidentID)
-                await monitoringChangeAuthorityIn(database, sql, change.id, monitoringIncidentID);
-              return performMerge();
-            });
-          } finally {
-            await coordination.end();
-          }
-        }
-        const merged =
-          base.headSha === operation.commitSHA
-            ? { headSha: base.headSha }
-            : operation.monitoringIncidentID || operation.deliveryPolicyID
-              ? await delegatedMerge()
-              : await performMerge();
-        await database.client.begin(async (transaction) => {
-          await transaction`
-            UPDATE factory.merge_operation SET state = 'succeeded',
-              observed_default_sha = ${merged.headSha}, completed_at = now(), updated_at = now(),
-              last_error = NULL WHERE id = ${operation.id}
-          `;
-          await ensurePromotion(transaction);
-          await transaction`
-            UPDATE factory.change SET state = 'delivering', failure = NULL, version = version + 1
-            WHERE id = ${change.id}
-          `;
-        });
-      } catch (cause) {
-        const message = bounded(cause instanceof Error ? cause.message : "Merge failed");
-        if (
-          cause instanceof CommandError &&
-          (operation.monitoringIncidentID || operation.deliveryPolicyID) &&
-          !outcomeUnknown
-        ) {
-          await database.client`UPDATE factory.merge_operation SET state='failed',last_error=${message},
-            completed_at=now(),updated_at=now() WHERE id=${operation.id} AND state='executing'`;
-          await database.client`UPDATE factory.change SET state='active',failure=${message},version=version+1
-            WHERE id=${change.id} AND state='delivering'`;
-          return;
-        }
-        await database.client`
-          UPDATE factory.merge_operation
-          SET state = 'ambiguous',
-            last_error = ${message},
-            completed_at = NULL,
-            updated_at = now() WHERE id = ${operation.id}
-        `;
+      await db
+        .update(mergeOperation)
+        .set({
+          state: "failed",
+          lastError: "Delivery gate moved before merge",
+          completedAt: query`now()`,
+          updatedAt: query`now()`,
+        })
+        .where(
+          and(
+            eq(mergeOperation.id, operation.id),
+            notInArray(mergeOperation.state, ["succeeded", "failed"]),
+          ),
+        );
+      await db
+        .update(changeTable)
+        .set({
+          state: "active",
+          failure: "Delivery basis changed before merge",
+          version: query`${changeTable.version}+1`,
+        })
+        .where(and(eq(changeTable.id, change.id), eq(changeTable.state, "delivering")));
+      return;
+    }
+    await db
+      .update(mergeOperation)
+      .set({ state: "executing", updatedAt: query`now()` })
+      .where(
+        and(
+          eq(mergeOperation.id, operation.id),
+          inArray(mergeOperation.state, ["pending", "ambiguous"]),
+        ),
+      );
+    try {
+      const pullRequestNumber = operation.pullRequestNumber;
+      const commitSHA = operation.commitSHA;
+      const deliveryPolicyID = operation.deliveryPolicyID;
+      const monitoringIncidentID = operation.monitoringIncidentID;
+      async function performMerge() {
+        return forge.mergeFastForward(
+          repository,
+          Number(pullRequestNumber),
+          commitSHA,
+          change.defaultBranch,
+        );
       }
+      async function delegatedMerge() {
+        const coordination = database.coordination();
+        try {
+          return await coordination.begin(async (sql) => {
+            // Revocation and this irreversible command serialize on the
+            // same authority rows, without holding the application pool.
+            await sql`SELECT id FROM factory.change WHERE id=${change.id} FOR UPDATE`;
+            if (deliveryPolicyID)
+              await deliveryDelegationIn(sql, change.projectID, deliveryPolicyID);
+            else if (monitoringIncidentID)
+              await monitoringChangeAuthorityIn(database, sql, change.id, monitoringIncidentID);
+            return performMerge();
+          });
+        } finally {
+          await coordination.end();
+        }
+      }
+      const merged =
+        base.headSha === operation.commitSHA
+          ? { headSha: base.headSha }
+          : operation.monitoringIncidentID || operation.deliveryPolicyID
+            ? await delegatedMerge()
+            : await performMerge();
+      await database.client.begin(async (transaction) => {
+        const tx = drizzleTransaction(transaction);
+        await tx
+          .update(mergeOperation)
+          .set({
+            state: "succeeded",
+            observedDefaultSha: merged.headSha,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+            lastError: null,
+          })
+          .where(eq(mergeOperation.id, operation.id));
+        await ensurePromotion(transaction);
+        await tx
+          .update(changeTable)
+          .set({
+            state: "delivering",
+            failure: null,
+            version: query`${changeTable.version}+1`,
+          })
+          .where(eq(changeTable.id, change.id));
+      });
+    } catch (cause) {
+      const message = failureMessage(cause, "Merge failed");
+      if (
+        cause instanceof CommandError &&
+        (operation.monitoringIncidentID || operation.deliveryPolicyID) &&
+        !outcomeUnknown
+      ) {
+        await db
+          .update(mergeOperation)
+          .set({
+            state: "failed",
+            lastError: message,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+          })
+          .where(and(eq(mergeOperation.id, operation.id), eq(mergeOperation.state, "executing")));
+        await db
+          .update(changeTable)
+          .set({ state: "active", failure: message, version: query`${changeTable.version}+1` })
+          .where(and(eq(changeTable.id, change.id), eq(changeTable.state, "delivering")));
+        return;
+      }
+      await db
+        .update(mergeOperation)
+        .set({
+          state: "ambiguous",
+          lastError: message,
+          completedAt: null,
+          updatedAt: query`now()`,
+        })
+        .where(eq(mergeOperation.id, operation.id));
     }
   }
 
@@ -898,8 +1246,15 @@ export function createDeliveryController(
             await coordination.release(changeID);
             return;
           }
-          await database.client`UPDATE factory.change SET delivery_waiting_sha=NULL,delivery_waiting_policy_id=NULL
-            WHERE id=${changeID} AND delivery_waiting_sha=${change.commitSHA}`;
+          await db
+            .update(changeTable)
+            .set({ deliveryWaitingSha: null, deliveryWaitingPolicyId: null })
+            .where(
+              and(
+                eq(changeTable.id, changeID),
+                eq(changeTable.deliveryWaitingSha, change.commitSHA),
+              ),
+            );
         }
         const [blocked] =
           await database.client`SELECT session.change_id FROM factory.change_agent_session session
@@ -920,9 +1275,23 @@ export function createDeliveryController(
           await coordination.release(changeID);
           return;
         }
-        const [feedback] = await database.client<{ open: boolean }[]>`
-          SELECT EXISTS(SELECT 1 FROM factory.review_feedback
-            WHERE change_id=${changeID} AND kind='thread' AND state<>'resolved') AS open`;
+        const [feedback] = await db
+          .select({
+            open: exists(
+              db
+                .select({ id: reviewFeedback.id })
+                .from(reviewFeedback)
+                .where(
+                  and(
+                    eq(reviewFeedback.changeId, changeID),
+                    eq(reviewFeedback.kind, "thread"),
+                    ne(reviewFeedback.state, "resolved"),
+                  ),
+                ),
+            ),
+          })
+          .from(changeTable)
+          .where(eq(changeTable.id, changeID));
         if (feedback?.open && change.state !== "delivering") {
           // A human needs exact-candidate checks and QA to recheck a correction.
           // Do not integrate or hold the Project Delivery slot while they decide.
@@ -953,17 +1322,27 @@ export function createDeliveryController(
       }
       const pull = await ensurePullRequest(change);
       if (!pull) return;
-      const merge = await database.client<Array<{ exists: boolean }>>`
-        SELECT EXISTS(
-          SELECT 1 FROM factory.merge_operation WHERE change_id = ${change.id} AND state<>'failed'
-        ) AS exists
-      `;
+      const merge = await db
+        .select({
+          exists: exists(
+            db
+              .select({ id: mergeOperation.id })
+              .from(mergeOperation)
+              .where(
+                and(eq(mergeOperation.changeId, change.id), ne(mergeOperation.state, "failed")),
+              ),
+          ),
+        })
+        .from(changeTable)
+        .where(eq(changeTable.id, change.id));
       if (merge[0]?.exists) {
         await reconcileMerge(change, pull.repository);
         await reconcilePromotion(change, pull.repository);
         if (integration) {
-          const [terminal] =
-            await database.client`SELECT id FROM factory.merge_operation WHERE change_id=${changeID} AND state='failed'`;
+          const [terminal] = await db
+            .select({ id: mergeOperation.id })
+            .from(mergeOperation)
+            .where(and(eq(mergeOperation.changeId, changeID), eq(mergeOperation.state, "failed")));
           if (terminal) await coordination.release(changeID);
         }
         return;
@@ -972,13 +1351,20 @@ export function createDeliveryController(
       if (pull.pullRequest.headSha === change.commitSHA && !pull.pullRequest.merged)
         await ensureReview(change);
       if (integration) {
-        const [review] = await database.client<
-          { state: string }[]
-        >`SELECT review.state FROM factory.candidate_review review
-          JOIN factory.verification verification ON verification.id=review.verification_id
-          WHERE review.change_id=${changeID} AND review.commit_sha=${change.commitSHA}
-            AND review.base_sha=${change.baseSHA} AND verification.state='succeeded'
-          ORDER BY review.created_at DESC,review.ordinal DESC LIMIT 1`;
+        const [review] = await db
+          .select({ state: candidateReview.state })
+          .from(candidateReview)
+          .innerJoin(verificationTable, eq(verificationTable.id, candidateReview.verificationId))
+          .where(
+            and(
+              eq(candidateReview.changeId, changeID),
+              eq(candidateReview.commitSha, query`${change.commitSHA}`),
+              eq(candidateReview.baseSha, change.baseSHA),
+              eq(verificationTable.state, "succeeded"),
+            ),
+          )
+          .orderBy(desc(candidateReview.createdAt), desc(candidateReview.ordinal))
+          .limit(1);
         if (review?.state === "passed") {
           const policy = await coordination.activePolicy(change.projectID);
           if (policy) {
@@ -987,13 +1373,31 @@ export function createDeliveryController(
               return;
             } catch (cause) {
               if (!(cause instanceof CommandError)) throw cause;
-              await database.client`UPDATE factory.change SET failure=${cause.message.slice(0, 2000)}
-                WHERE id=${changeID} AND state='active' AND failure IS DISTINCT FROM ${cause.message.slice(0, 2000)}`;
+              await db
+                .update(changeTable)
+                .set({ failure: cause.message.slice(0, 2000) })
+                .where(
+                  and(
+                    eq(changeTable.id, changeID),
+                    eq(changeTable.state, "active"),
+                    query`${changeTable.failure} IS DISTINCT FROM ${cause.message.slice(0, 2000)}`,
+                  ),
+                );
             }
           }
-          await database.client`UPDATE factory.change SET delivery_waiting_sha=${change.commitSHA},
-            delivery_waiting_policy_id=${policy?.id ?? null} WHERE id=${changeID} AND state='active'
-            AND ROW(delivery_waiting_sha,delivery_waiting_policy_id) IS DISTINCT FROM ROW(${change.commitSHA}::text,${policy?.id ?? null}::uuid)`;
+          await db
+            .update(changeTable)
+            .set({
+              deliveryWaitingSha: change.commitSHA,
+              deliveryWaitingPolicyId: policy?.id ?? null,
+            })
+            .where(
+              and(
+                eq(changeTable.id, changeID),
+                eq(changeTable.state, "active"),
+                query`ROW(${changeTable.deliveryWaitingSha},${changeTable.deliveryWaitingPolicyId}) IS DISTINCT FROM ROW(${change.commitSHA}::text,${policy?.id ?? null}::uuid)`,
+              ),
+            );
           await coordination.release(changeID);
         } else if (review && !["pending", "running"].includes(review.state)) {
           await coordination.release(changeID);
@@ -1001,11 +1405,17 @@ export function createDeliveryController(
       }
     } catch (cause) {
       if (integration) await coordination.release(changeID);
-      const message = bounded(cause instanceof Error ? cause.message : "Delivery failed");
-      await database.client`
-        UPDATE factory.change SET failure = ${message}, version = version + 1
-        WHERE id = ${changeID} AND state NOT IN ('cancelled', 'delivered') AND failure IS DISTINCT FROM ${message}
-      `;
+      const message = failureMessage(cause, "Delivery failed");
+      await db
+        .update(changeTable)
+        .set({ failure: message, version: query`${changeTable.version}+1` })
+        .where(
+          and(
+            eq(changeTable.id, changeID),
+            notInArray(changeTable.state, ["cancelled", "delivered"]),
+            query`${changeTable.failure} IS DISTINCT FROM ${message}`,
+          ),
+        );
     } finally {
       running.delete(changeID);
       if (projectLock) {
@@ -1023,22 +1433,54 @@ export function createDeliveryController(
     if (closed || reconcilingAll) return;
     reconcilingAll = true;
     try {
-      const changes = await database.client<Array<{ id: string; projectID: string }>>`
-      SELECT DISTINCT change.id,change.project_id AS "projectID",change.created_at
-      FROM factory.change change
-      JOIN factory.change_commit_operation commit ON commit.change_id = change.id
-      LEFT JOIN factory.current_promotion promotion ON promotion.change_id = change.id
-      WHERE commit.state = 'succeeded'
-        AND (change.state <> 'cancelled' OR EXISTS(
-          SELECT 1 FROM factory.verification verification
-          LEFT JOIN factory.runtime_attempt attempt ON attempt.id = verification.runtime_attempt_id
-          WHERE verification.change_id = change.id
-            AND (verification.runner_id IS NOT NULL
-              OR attempt.state NOT IN ('stopped', 'failed'))
-        ))
-        AND (change.state <> 'delivered' OR promotion.last_error IS NOT NULL)
-      ORDER BY change.created_at,change.id
-    `;
+      // The native view remains the owner of current-promotion selection.
+      const promotion = db
+        .select({
+          changeId: query<string>`promotion.change_id`.as("change_id"),
+          lastError: query<string | null>`promotion.last_error`.as("last_error"),
+        })
+        .from(query`factory.current_promotion promotion`)
+        .as("promotion");
+      const changes = await db
+        .selectDistinct({
+          id: changeTable.id,
+          projectID: changeTable.projectId,
+          createdAt: query<string>`${changeTable.createdAt}`,
+        })
+        .from(changeTable)
+        .innerJoin(changeCommitOperation, eq(changeCommitOperation.changeId, changeTable.id))
+        .leftJoin(promotion, eq(query<string>`"promotion"."change_id"`, changeTable.id))
+        .where(
+          and(
+            eq(changeCommitOperation.state, "succeeded"),
+            or(
+              ne(changeTable.state, "cancelled"),
+              exists(
+                db
+                  .select({ id: verificationTable.id })
+                  .from(verificationTable)
+                  .leftJoin(
+                    runtimeAttempt,
+                    eq(runtimeAttempt.id, verificationTable.runtimeAttemptId),
+                  )
+                  .where(
+                    and(
+                      eq(verificationTable.changeId, changeTable.id),
+                      or(
+                        isNotNull(verificationTable.runnerId),
+                        notInArray(runtimeAttempt.state, ["stopped", "failed"]),
+                      ),
+                    ),
+                  ),
+              ),
+            ),
+            or(
+              ne(changeTable.state, "delivered"),
+              isNotNull(query<string | null>`"promotion"."last_error"`),
+            ),
+          ),
+        )
+        .orderBy(asc(changeTable.createdAt), asc(changeTable.id));
       // Let blocked work release its slot before the next independent candidate
       // competes for it. Overlapping sweeps cannot repeatedly starve that candidate.
       const projects = new Map<string, string[]>();
@@ -1062,14 +1504,14 @@ export function createDeliveryController(
       input: z.input<typeof deliveryDelegationInput>,
     ) => coordination.configure(projectID, userID, input),
     async recover() {
-      await database.client`
-        UPDATE factory.pull_request_operation SET state = 'ambiguous', updated_at = now()
-        WHERE state = 'executing'
-      `;
-      await database.client`
-        UPDATE factory.merge_operation SET state = 'ambiguous', updated_at = now()
-        WHERE state = 'executing'
-      `;
+      await db
+        .update(pullRequestOperation)
+        .set({ state: "ambiguous", updatedAt: query`now()` })
+        .where(eq(pullRequestOperation.state, "executing"));
+      await db
+        .update(mergeOperation)
+        .set({ state: "ambiguous", updatedAt: query`now()` })
+        .where(eq(mergeOperation.state, "executing"));
     },
     sweep: reconcileAll,
     close() {
@@ -1089,8 +1531,16 @@ export function createDeliveryController(
       if (!change?.commitSHA)
         throw new CommandError("conflict", "Change has no delivered commit candidate");
       if (integration)
-        await database.client`UPDATE factory.change SET delivery_waiting_sha=NULL,delivery_waiting_policy_id=NULL
-          WHERE id=${changeID} AND state='active' AND delivery_waiting_sha=${change.commitSHA}`;
+        await db
+          .update(changeTable)
+          .set({ deliveryWaitingSha: null, deliveryWaitingPolicyId: null })
+          .where(
+            and(
+              eq(changeTable.id, changeID),
+              eq(changeTable.state, "active"),
+              eq(changeTable.deliveryWaitingSha, change.commitSHA),
+            ),
+          );
       if (integration && !(await coordination.claim(change.projectID, changeID)))
         throw new CommandError(
           "conflict",
@@ -1133,8 +1583,15 @@ export function createDeliveryController(
       `;
       const verification = verifications[0];
       if (deliveryPolicyID && verification) {
-        const [eligible] = await database.client`SELECT id FROM factory.candidate_review
-          WHERE id=${verification.reviewID} AND result->>'delivery'='ordinary'`;
+        const [eligible] = await db
+          .select({ id: candidateReview.id })
+          .from(candidateReview)
+          .where(
+            and(
+              eq(candidateReview.id, verification.reviewID),
+              query`${candidateReview.result}->>'delivery'='ordinary'`,
+            ),
+          );
         if (!eligible)
           throw new CommandError("conflict", "This review requires a human Delivery decision.");
       }
@@ -1145,8 +1602,10 @@ export function createDeliveryController(
         base.headSha !== change.baseSHA
       ) {
         if (integration) {
-          await database.client`UPDATE factory.change SET delivery_waiting_sha=NULL,delivery_waiting_policy_id=NULL
-            WHERE id=${changeID} AND state='active'`;
+          await db
+            .update(changeTable)
+            .set({ deliveryWaitingSha: null, deliveryWaitingPolicyId: null })
+            .where(and(eq(changeTable.id, changeID), eq(changeTable.state, "active")));
           void reconcile(changeID);
         }
         throw new CommandError("conflict", "Current commit is not eligible for delivery");
@@ -1158,14 +1617,21 @@ export function createDeliveryController(
           ? await monitoringCandidate(forge, repository, change.baseSHA, verification.commitSHA)
           : null;
       await database.client.begin(async (transaction) => {
+        const tx = drizzleTransaction(transaction);
         await projectDevelopmentAuthorityIn(transaction, userID, change.projectID);
         if (integration) {
           // A waiting reconciler may release our first claim during Forge reads.
           // Reclaim only a vacant slot, then keep it locked through admission.
           // Queue-before-Change matches claim's foreign-key lock order.
-          await transaction`UPDATE factory.project_delivery_queue
-            SET change_id=${changeID},updated_at=now()
-            WHERE project_id=${change.projectID} AND change_id IS NULL`;
+          await tx
+            .update(projectDeliveryQueue)
+            .set({ changeId: changeID, updatedAt: query`now()` })
+            .where(
+              and(
+                eq(projectDeliveryQueue.projectId, change.projectID),
+                isNull(projectDeliveryQueue.changeId),
+              ),
+            );
           const [slot] = await transaction`SELECT project_id FROM factory.project_delivery_queue
             WHERE project_id=${change.projectID} AND change_id=${changeID} FOR SHARE`;
           if (!slot)
@@ -1223,20 +1689,43 @@ export function createDeliveryController(
             "conflict",
             "Requirements changed. Verify and review the current approved scope before Delivery.",
           );
-        const [thread] = await transaction`SELECT id FROM factory.review_feedback
-          WHERE change_id=${changeID} AND kind='thread' AND state<>'resolved' LIMIT 1`;
+        const [thread] = await tx
+          .select({ id: reviewFeedback.id })
+          .from(reviewFeedback)
+          .where(
+            and(
+              eq(reviewFeedback.changeId, changeID),
+              eq(reviewFeedback.kind, "thread"),
+              query`${reviewFeedback.state}<>'resolved'`,
+            ),
+          )
+          .limit(1);
         if (thread)
           throw new CommandError("conflict", "Resolve the open review Threads before Delivery.");
-        const [work] =
-          await transaction`SELECT id FROM factory.agent_turn WHERE change_id = ${changeID}
-          AND state IN ('pending', 'dispatching', 'running', 'uncertain')`;
-        const [session] = await transaction<
-          Array<{ state: string }>
-        >`SELECT state FROM factory.change_agent_session WHERE change_id = ${changeID}`;
-        const [commit] = await transaction<
-          Array<{ sha: string }>
-        >`SELECT commit_sha AS sha FROM factory.change_commit_operation
-          WHERE change_id = ${changeID} AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1`;
+        const [work] = await tx
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.changeId, changeID),
+              inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+            ),
+          );
+        const [session] = await tx
+          .select({ state: changeAgentSession.state })
+          .from(changeAgentSession)
+          .where(eq(changeAgentSession.changeId, changeID));
+        const [commit] = await tx
+          .select({ sha: changeCommitOperation.commitSha })
+          .from(changeCommitOperation)
+          .where(
+            and(
+              eq(changeCommitOperation.changeId, changeID),
+              eq(changeCommitOperation.state, "succeeded"),
+            ),
+          )
+          .orderBy(desc(changeCommitOperation.sequence))
+          .limit(1);
         const [review] = await transaction`
           SELECT review.id FROM factory.candidate_review review
           JOIN factory.verification verification ON verification.id=review.verification_id
@@ -1254,38 +1743,72 @@ export function createDeliveryController(
           !review
         )
           throw new Error("Wait for the current implementation to finish before delivery.");
-        await transaction`
-          INSERT INTO factory.delivery_approval(
-            id, change_id, verification_id, commit_sha, approved_by,candidate_review_id,
-            monitoring_incident_id,monitoring_policy_id,delivery_policy_id
-          ) VALUES (
-            ${approvalID}, ${changeID}, ${verification.id}, ${verification.commitSHA}, ${userID},${verification.reviewID},
-            ${monitoringIncidentID ?? null},${delegated?.policyId ?? null},${deliveryPolicyID ?? null}
-          )
-          ON CONFLICT DO NOTHING
-        `;
+        await tx
+          .insert(deliveryApproval)
+          .values({
+            id: approvalID,
+            changeId: changeID,
+            verificationId: verification.id,
+            commitSha: verification.commitSHA,
+            approvedBy: userID,
+            candidateReviewId: verification.reviewID,
+            monitoringIncidentId: monitoringIncidentID ?? null,
+            monitoringPolicyId: delegated?.policyId ?? null,
+            deliveryPolicyId: deliveryPolicyID ?? null,
+          })
+          .onConflictDoNothing();
         if (delegated && candidateDigest)
-          await transaction`INSERT INTO factory.monitoring_evidence(id,incident_id,kind,digest,commit_sha)
-            VALUES(${crypto.randomUUID()},${delegated.id},'delivery-candidate',${candidateDigest},${verification.commitSHA})`;
-        await transaction`
-          INSERT INTO factory.merge_operation(
-            id, change_id, delivery_approval_id, pull_request_number,
-            base_sha, commit_sha, idempotency_key
+          await tx.insert(monitoringEvidence).values({
+            id: crypto.randomUUID(),
+            incidentId: delegated.id,
+            kind: "delivery-candidate",
+            digest: candidateDigest,
+            commitSha: verification.commitSHA,
+          });
+        await tx
+          .insert(mergeOperation)
+          .select(
+            tx
+              .select({
+                id: query<string>`${mergeID}::uuid`.as("id"),
+                changeId: query<string>`${changeID}::uuid`.as("change_id"),
+                deliveryApprovalId: deliveryApproval.id,
+                pullRequestNumber: query<number>`${pullRequest.number}::bigint`.as(
+                  "pull_request_number",
+                ),
+                baseSha: query<string>`${change.baseSHA}::text`.as("base_sha"),
+                commitSha: query<string>`${verification.commitSHA}::text`.as("commit_sha"),
+                idempotencyKey:
+                  query<string>`${`change:${changeID}:merge:`} || ${deliveryApproval.id}::text`.as(
+                    "idempotency_key",
+                  ),
+                state: query<"pending">`'pending'::factory.merge_operation_state`.as("state"),
+                observedDefaultSha: query<null>`NULL::text`.as("observed_default_sha"),
+                lastError: query<null>`NULL::text`.as("last_error"),
+                requestedAt: query<Date>`now()`.as("requested_at"),
+                updatedAt: query<Date>`now()`.as("updated_at"),
+                completedAt: query<null>`NULL::timestamptz`.as("completed_at"),
+              })
+              .from(deliveryApproval)
+              .where(
+                and(
+                  eq(deliveryApproval.verificationId, verification.id),
+                  eq(deliveryApproval.candidateReviewId, verification.reviewID),
+                  eq(deliveryApproval.approvedBy, userID),
+                  query`${deliveryApproval.monitoringPolicyId} IS NOT DISTINCT FROM ${delegated?.policyId ?? null}::uuid`,
+                  query`${deliveryApproval.deliveryPolicyId} IS NOT DISTINCT FROM ${deliveryPolicyID ?? null}::uuid`,
+                ),
+              ),
           )
-          SELECT ${mergeID}, ${changeID}, approval.id, ${pullRequest.number},
-            ${change.baseSHA}, ${verification.commitSHA}, ${`change:${changeID}:merge:`} || approval.id::text
-          FROM factory.delivery_approval approval
-          WHERE approval.verification_id = ${verification.id}
-            AND approval.candidate_review_id=${verification.reviewID}
-            AND approval.approved_by=${userID}
-            AND approval.monitoring_policy_id IS NOT DISTINCT FROM ${delegated?.policyId ?? null}::uuid
-            AND approval.delivery_policy_id IS NOT DISTINCT FROM ${deliveryPolicyID ?? null}::uuid
-          ON CONFLICT DO NOTHING
-        `;
-        await transaction`
-          UPDATE factory.change SET state = 'delivering', failure = NULL, version = version + 1
-          WHERE id = ${changeID} AND state = 'active'
-        `;
+          .onConflictDoNothing();
+        await tx
+          .update(changeTable)
+          .set({
+            state: "delivering",
+            failure: null,
+            version: query`${changeTable.version}+1`,
+          })
+          .where(and(eq(changeTable.id, changeID), eq(changeTable.state, "active")));
       });
       void reconcile(changeID);
       return this.get(changeID);
@@ -1338,10 +1861,15 @@ export function createDeliveryController(
         await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
         const input = { changeID, verificationID, stopID };
         const scope = `checks-resume:${changeID}`;
-        const [previous] = await sql<
-          { scope: string; userID: string; input: typeof input }[]
-        >`SELECT scope,actor_id AS "userID",input FROM factory.execution_policy_command
-          WHERE command_id=${commandID}`;
+        const tx = drizzleTransaction(sql);
+        const [previous] = await tx
+          .select({
+            scope: executionPolicyCommand.scope,
+            userID: executionPolicyCommand.actorId,
+            input: query<typeof input>`${executionPolicyCommand.input}`,
+          })
+          .from(executionPolicyCommand)
+          .where(eq(executionPolicyCommand.commandId, commandID));
         if (previous) {
           if (
             previous.scope !== scope ||
@@ -1382,10 +1910,13 @@ export function createDeliveryController(
           );
         // Restore only the submitted candidate's delivery eligibility. No turn,
         // prompt, source edit or Stop confirmation is created or replayed here.
-        await sql`UPDATE factory.change_agent_session SET state='committed',last_error=NULL,
-          updated_at=now() WHERE change_id=${changeID}`;
-        await sql`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-          VALUES(${commandID},${scope},${userID},${JSON.stringify(input)}::jsonb,'{}'::jsonb)`;
+        await tx
+          .update(changeAgentSession)
+          .set({ state: "committed", lastError: null, updatedAt: query`now()` })
+          .where(eq(changeAgentSession.changeId, changeID));
+        await tx
+          .insert(executionPolicyCommand)
+          .values({ commandId: commandID, scope, actorId: userID, input, result: {} });
       });
       await reconcile(changeID);
       return this.get(changeID);
@@ -1400,29 +1931,44 @@ export function createDeliveryController(
         throw new CommandError("unavailable", "Independent candidate review is not configured");
       await database.client.begin(async (sql) => {
         await lockChangeWriterIn(sql, changeID);
-        const [change] = await sql<
-          {
-            projectID: string;
-            sha: string;
-            base: string;
-            state: string;
-            runtimeState: string | null;
-          }[]
-        >`
-          SELECT change.project_id AS "projectID",COALESCE((SELECT integration_base_sha FROM factory.change_commit_operation
-            WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),change.base_sha) AS base,change.state,
-            attempt.state AS "runtimeState",
-            (SELECT commit_sha FROM factory.change_commit_operation WHERE change_id=change.id
-              AND state='succeeded' ORDER BY sequence DESC LIMIT 1) AS sha
-          FROM factory.change change
-          LEFT JOIN factory.runtime_attempt attempt ON attempt.id=change.runtime_attempt_id
-          WHERE change.id=${changeID}`;
+        const tx = drizzleTransaction(sql);
+        const commit = tx
+          .select({
+            sha: changeCommitOperation.commitSha,
+            base: changeCommitOperation.integrationBaseSha,
+          })
+          .from(changeCommitOperation)
+          .where(
+            and(
+              eq(changeCommitOperation.changeId, changeTable.id),
+              eq(changeCommitOperation.state, "succeeded"),
+            ),
+          )
+          .orderBy(desc(changeCommitOperation.sequence))
+          .limit(1)
+          .as("commit");
+        const [change] = await tx
+          .select({
+            projectID: changeTable.projectId,
+            base: query<string>`COALESCE(${commit.base},${changeTable.baseSha})`,
+            state: changeTable.state,
+            runtimeState: runtimeAttempt.state,
+            sha: commit.sha,
+          })
+          .from(changeTable)
+          .leftJoin(runtimeAttempt, eq(runtimeAttempt.id, changeTable.runtimeAttemptId))
+          .leftJoinLateral(commit, query`true`)
+          .where(eq(changeTable.id, changeID));
         if (!change) throw new CommandError("not-found", "Change not found");
         await projectAuthorityIn(sql, userID, change.projectID);
-        const [old] = await sql<
-          { changeID: string; userID: string; previousID: string | null }[]
-        >`SELECT change_id AS "changeID",created_by AS "userID",supersedes_id AS "previousID"
-          FROM factory.candidate_review WHERE id=${commandID}`;
+        const [old] = await tx
+          .select({
+            changeID: candidateReview.changeId,
+            userID: candidateReview.createdBy,
+            previousID: candidateReview.supersedesId,
+          })
+          .from(candidateReview)
+          .where(eq(candidateReview.id, commandID));
         if (old) {
           if (
             old.changeID !== changeID ||
@@ -1432,25 +1978,39 @@ export function createDeliveryController(
             throw new CommandError("conflict", "Review retry changed target");
           return;
         }
-        const [previous] = await sql<
-          {
-            id: string;
-            verificationID: string;
-            ordinal: number;
-            state: string;
-            turnState: string | null;
-          }[]
-        >`
-          SELECT review.id,review.verification_id AS "verificationID",review.ordinal,review.state,turn.state AS "turnState"
-          FROM factory.candidate_review review
-          LEFT JOIN factory.agent_turn turn ON turn.id=review.turn_id
-          JOIN factory.verification verification ON verification.id=review.verification_id
-          WHERE review.change_id=${changeID} AND review.commit_sha=${change.sha}
-            AND verification.state='succeeded' ORDER BY review.ordinal DESC LIMIT 1`;
-        const [session] = await sql<{ stopping: boolean }[]>`SELECT stop_pending AS stopping
-          FROM factory.change_agent_session WHERE change_id=${changeID}`;
-        const [active] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
-          AND state IN ('pending','dispatching','running','uncertain')`;
+        const [previous] = await tx
+          .select({
+            id: candidateReview.id,
+            verificationID: candidateReview.verificationId,
+            ordinal: candidateReview.ordinal,
+            state: candidateReview.state,
+            turnState: agentTurn.state,
+          })
+          .from(candidateReview)
+          .leftJoin(agentTurn, eq(agentTurn.id, candidateReview.turnId))
+          .innerJoin(verificationTable, eq(verificationTable.id, candidateReview.verificationId))
+          .where(
+            and(
+              eq(candidateReview.changeId, changeID),
+              eq(candidateReview.commitSha, query`${change.sha}`),
+              eq(verificationTable.state, "succeeded"),
+            ),
+          )
+          .orderBy(desc(candidateReview.ordinal))
+          .limit(1);
+        const [session] = await tx
+          .select({ stopping: changeAgentSession.stopPending })
+          .from(changeAgentSession)
+          .where(eq(changeAgentSession.changeId, changeID));
+        const [active] = await tx
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.changeId, changeID),
+              inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+            ),
+          );
         if (
           !(
             change.state === "active" ||
@@ -1470,10 +2030,22 @@ export function createDeliveryController(
             "conflict",
             "Resolve active, stale or uncertain work before retrying an incomplete review",
           );
-        await sql`INSERT INTO factory.candidate_review(id,verification_id,ordinal,change_id,commit_sha,base_sha,created_by,supersedes_id,
-          finding_source_id,focus_review_id)
-          SELECT ${commandID},${previous.verificationID},${previous.ordinal + 1},${changeID},${change.sha},${change.base},${userID},${previousReviewID},
-            finding_source_id,focus_review_id FROM factory.candidate_review WHERE id=${previousReviewID}`;
+        await tx.insert(candidateReview).select(
+          tx
+            .select({
+              ...pendingReviewColumns(),
+              id: query<string>`${commandID}::uuid`.as("id"),
+              verificationId: query<string>`${previous.verificationID}::uuid`.as("verification_id"),
+              ordinal: query<number>`${previous.ordinal + 1}::integer`.as("ordinal"),
+              changeId: query<string>`${changeID}::uuid`.as("change_id"),
+              commitSha: query<string>`${change.sha}::text`.as("commit_sha"),
+              baseSha: query<string>`${change.base}::text`.as("base_sha"),
+              createdBy: query<string>`${userID}::uuid`.as("created_by"),
+              supersedesId: query<string>`${previousReviewID}::uuid`.as("supersedes_id"),
+            })
+            .from(candidateReview)
+            .where(eq(candidateReview.id, previousReviewID)),
+        );
       });
       await agent.review(changeID, commandID, userID);
       return this.get(changeID);
@@ -1488,14 +2060,30 @@ export function createDeliveryController(
       if (running.has(changeID)) throw new Error("Verification stop is not confirmed");
       // Observe late runner registration before allowing Restore, then revoke it.
       await cancelVerifications(changeID, repository);
-      const retained = await database.client<
-        Array<{ id: string; runtimeAttemptID: string | null; runnerID: string | null }>
-      >`
-        SELECT id, runtime_attempt_id AS "runtimeAttemptID", runner_id AS "runnerID" FROM factory.verification
-        WHERE change_id = ${changeID} AND runner_id IS NOT NULL`;
+      const retained = await db
+        .select({
+          id: verificationTable.id,
+          runtimeAttemptID: verificationTable.runtimeAttemptId,
+          runnerID: query<string | null>`${verificationTable.runnerId}::text`,
+        })
+        .from(verificationTable)
+        .where(
+          and(
+            eq(verificationTable.changeId, changeID),
+            query`${verificationTable.runnerId} IS NOT NULL`,
+          ),
+        );
       for (const verification of retained) await stopVerification(repository, verification);
-      const [remaining] =
-        await database.client`SELECT id FROM factory.verification WHERE change_id = ${changeID} AND runner_id IS NOT NULL LIMIT 1`;
+      const [remaining] = await db
+        .select({ id: verificationTable.id })
+        .from(verificationTable)
+        .where(
+          and(
+            eq(verificationTable.changeId, changeID),
+            query`${verificationTable.runnerId} IS NOT NULL`,
+          ),
+        )
+        .limit(1);
       if (remaining) throw new Error("Verification runner revocation is not confirmed");
     },
     async get(changeID: string) {

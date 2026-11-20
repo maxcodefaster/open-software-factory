@@ -1,5 +1,18 @@
 import { createHash } from "node:crypto";
 import {
+  and,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql as typedSQL,
+} from "drizzle-orm";
+import {
   LearningResultRejected,
   learningBatchDue,
   learningBatchSize,
@@ -8,7 +21,15 @@ import {
   legacyWikiCallPattern,
   maxCalibrationGrades,
 } from "../../../../packages/conversation-domain/src/learning";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  learningCase as caseTable,
+  learningApplication,
+  learningProposal,
+  learningReview,
+  projectMembership,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
@@ -99,20 +120,63 @@ export function createLearningWorker(
     return database.client.begin(async (sql) => {
       const key = `${scope.projectId}:${scope.ownerId ?? "project"}:${scope.developerOnly}`;
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning:${key}`}))`;
+      const db = drizzleTransaction(sql);
       if (!(await learningEnabledIn(sql, scope.projectId, scope.ownerId))) return null;
-      const [busy] =
-        await sql`SELECT id FROM factory.learning_review WHERE project_id=${scope.projectId}
-        AND owner_id IS NOT DISTINCT FROM ${scope.ownerId}::uuid AND developer_only=${scope.developerOnly} AND state='running'`;
+      const [busy] = await db
+        .select({ id: learningReview.id })
+        .from(learningReview)
+        .where(
+          and(
+            eq(learningReview.projectId, scope.projectId),
+            scope.ownerId === null
+              ? isNull(learningReview.ownerId)
+              : eq(learningReview.ownerId, scope.ownerId),
+            eq(learningReview.developerOnly, scope.developerOnly),
+            eq(learningReview.state, "running"),
+          ),
+        );
       if (busy) return null;
-      const rows = await sql<{ snapshot: unknown; reviewerId: string }[]>`
-        SELECT source.snapshot,source.reviewer_id AS "reviewerId" FROM factory.learning_case source
-        WHERE source.project_id=${scope.projectId} AND source.owner_id IS NOT DISTINCT FROM ${scope.ownerId}::uuid
-          AND source.developer_only=${scope.developerOnly} AND source.selected AND source.batch_id IS NULL
-          AND NOT(source.activity='wiki' AND source.id ~ ${legacyWikiCallPattern})
-          AND (source.activity<>'setup' OR EXISTS(SELECT 1 FROM factory.project_membership membership
-            WHERE membership.project_id=source.project_id AND membership.user_id=source.reviewer_id AND membership.manage_project)
-            OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=source.reviewer_id))
-        ORDER BY source.settled_at,source.id LIMIT ${request?.cases ?? learningBatchSize}`;
+      const rows = await db
+        .select({ snapshot: caseTable.snapshot, reviewerId: caseTable.reviewerId })
+        .from(caseTable)
+        .where(
+          and(
+            eq(caseTable.projectId, scope.projectId),
+            scope.ownerId === null
+              ? isNull(caseTable.ownerId)
+              : eq(caseTable.ownerId, scope.ownerId),
+            eq(caseTable.developerOnly, scope.developerOnly),
+            eq(caseTable.selected, true),
+            isNull(caseTable.batchId),
+            or(
+              ne(caseTable.activity, "wiki"),
+              typedSQL<boolean>`${caseTable.id} !~ ${legacyWikiCallPattern}`,
+            ),
+            or(
+              ne(caseTable.activity, "setup"),
+              exists(
+                db
+                  .select({ userId: projectMembership.userId })
+                  .from(projectMembership)
+                  .where(
+                    and(
+                      eq(projectMembership.projectId, caseTable.projectId),
+                      eq(projectMembership.userId, caseTable.reviewerId),
+                      eq(projectMembership.manageProject, true),
+                    ),
+                  ),
+              ),
+              exists(
+                db
+                  .select({ userId: administrator.userId })
+                  .from(administrator)
+                  .where(eq(administrator.userId, caseTable.reviewerId)),
+              ),
+            ),
+          ),
+        )
+        .orderBy(caseTable.settledAt, caseTable.id)
+        .limit(request?.cases ?? learningBatchSize);
       const cases = rows.map((row) => learningCase.parse(row.snapshot));
       if (request ? !cases.length : !learningBatchDue(cases)) return null;
       // Split an unusually escape-heavy packet instead of admitting a call
@@ -159,9 +223,11 @@ export function createLearningWorker(
       });
       // Expired or unknown calibration never authorizes another paid call.
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning-judge:${judgeKey}`}))`;
-      const calibrations = await sql<{ state: string; calibrated: boolean | null }[]>`
-        SELECT state,calibrated FROM factory.learning_review WHERE judge_key=${judgeKey} AND kind='calibration'
-        ORDER BY created_at DESC`;
+      const calibrations = await db
+        .select({ state: learningReview.state, calibrated: learningReview.calibrated })
+        .from(learningReview)
+        .where(and(eq(learningReview.judgeKey, judgeKey), eq(learningReview.kind, "calibration")))
+        .orderBy(desc(learningReview.createdAt));
       const calibration = calibrations[0];
       // A model can grade the fixed cases wrongly once and rightly the next time. Repeat a
       // completed failing grade a bounded number of times so one unlucky answer does not
@@ -178,26 +244,65 @@ export function createLearningWorker(
       const kind = calibration?.calibrated ? "work" : "calibration";
       const admittedCases = kind === "work" ? cases : calibrationCases;
       if (kind === "work" && admittedCases[0] && admittedCases[0].evidence.length < 24) {
-        const previous = await sql<PriorProposal[]>`
-          SELECT proposal.id,proposal.state,proposal.content,application.state AS "applicationState" FROM factory.learning_proposal proposal
-          JOIN factory.learning_review review ON review.id=proposal.review_id
-          LEFT JOIN factory.learning_application application ON application.proposal_id=proposal.id
-          WHERE review.project_id=${scope.projectId} AND review.owner_id IS NOT DISTINCT FROM ${scope.ownerId}::uuid
-            AND review.developer_only=${scope.developerOnly}
-            AND (${managerOnly} OR NOT(review.input @> '[{"activity":"setup"}]'::jsonb))
-          ORDER BY review.created_at DESC,proposal.ordinal LIMIT 12`;
+        const previous: PriorProposal[] = await db
+          .select({
+            id: learningProposal.id,
+            state: learningProposal.state,
+            content: typedSQL<PriorProposal["content"]>`${learningProposal.content}`,
+            applicationState: learningApplication.state,
+          })
+          .from(learningProposal)
+          .innerJoin(learningReview, eq(learningReview.id, learningProposal.reviewId))
+          .leftJoin(learningApplication, eq(learningApplication.proposalId, learningProposal.id))
+          .where(
+            and(
+              eq(learningReview.projectId, scope.projectId),
+              scope.ownerId === null
+                ? isNull(learningReview.ownerId)
+                : eq(learningReview.ownerId, scope.ownerId),
+              eq(learningReview.developerOnly, scope.developerOnly),
+              managerOnly
+                ? undefined
+                : typedSQL<boolean>`not(${learningReview.input} @> '[{"activity":"setup"}]'::jsonb)`,
+            ),
+          )
+          .orderBy(desc(learningReview.createdAt), learningProposal.ordinal)
+          .limit(12);
         if (previous.length)
           admittedCases[0].evidence.push(priorProposalEvidence(previous, judgeKey));
       }
       const id = crypto.randomUUID();
       const token = crypto.randomUUID();
-      await sql`INSERT INTO factory.learning_review(id,project_id,owner_id,developer_only,reviewer_id,kind,rubric,
-        model_id,model_connection,judge_key,state,input,input_digest,owner_token,owner_expires_at)
-        VALUES(${id},${scope.projectId},${scope.ownerId},${scope.developerOnly},${actorId},${kind},${learningRubric},
-          ${modelId},${reference ? JSON.stringify(reference) : null}::jsonb,${judgeKey},'running',
-          ${JSON.stringify(admittedCases)}::jsonb,${hash(admittedCases)},${token},now()+interval '2 minutes')`;
+      await db.insert(learningReview).values({
+        id,
+        projectId: scope.projectId,
+        ownerId: scope.ownerId,
+        developerOnly: scope.developerOnly,
+        reviewerId: actorId,
+        kind,
+        rubric: learningRubric,
+        modelId,
+        modelConnection: reference ?? null,
+        judgeKey,
+        state: "running",
+        input: admittedCases,
+        inputDigest: hash(admittedCases),
+        ownerToken: token,
+        ownerExpiresAt: typedSQL`now()+interval '2 minutes'`,
+      });
       if (kind === "work")
-        await sql`UPDATE factory.learning_case SET batch_id=${id} WHERE id=ANY(${cases.map((item) => item.id)}::text[]) AND batch_id IS NULL`;
+        await db
+          .update(caseTable)
+          .set({ batchId: id })
+          .where(
+            and(
+              inArray(
+                caseTable.id,
+                cases.map((item) => item.id),
+              ),
+              isNull(caseTable.batchId),
+            ),
+          );
       return {
         ...scope,
         managerOnly: manager,
@@ -222,9 +327,18 @@ export function createLearningWorker(
         await learningAuthorityIn(sql, admitted.actorId, admitted);
         if (!(await learningEnabledIn(sql, admitted.projectId, admitted.ownerId)))
           throw new CommandError("forbidden", "Learning is paused");
-        const [owned] =
-          await sql`UPDATE factory.learning_review SET owner_expires_at=now()+interval '2 minutes'
-          WHERE id=${admitted.id} AND owner_token=${admitted.token} AND state='running' AND owner_expires_at>now() RETURNING id`;
+        const [owned] = await drizzleTransaction(sql)
+          .update(learningReview)
+          .set({ ownerExpiresAt: typedSQL`now()+interval '2 minutes'` })
+          .where(
+            and(
+              eq(learningReview.id, admitted.id),
+              eq(learningReview.ownerToken, admitted.token),
+              eq(learningReview.state, "running"),
+              gt(learningReview.ownerExpiresAt, typedSQL`now()`),
+            ),
+          )
+          .returning({ id: learningReview.id });
         if (!owned) throw new CommandError("conflict", "Work review ownership expired");
       });
     };
@@ -267,34 +381,61 @@ export function createLearningWorker(
         await learningAuthorityIn(sql, admitted.actorId, admitted);
         if (!(await learningEnabledIn(sql, admitted.projectId, admitted.ownerId)))
           throw new CommandError("forbidden", "Learning is paused");
-        const [owned] =
-          await sql`UPDATE factory.learning_review SET state='completed',result=${JSON.stringify(result)}::jsonb,
-          calibrated=${admitted.kind === "calibration" ? calibrationPassed(result) : null},completed_at=now()
-          WHERE id=${admitted.id} AND owner_token=${admitted.token} AND state='running' AND owner_expires_at>now() RETURNING id`;
+        const db = drizzleTransaction(sql);
+        const [owned] = await db
+          .update(learningReview)
+          .set({
+            state: "completed",
+            result,
+            calibrated: admitted.kind === "calibration" ? calibrationPassed(result) : null,
+            completedAt: typedSQL`now()`,
+          })
+          .where(
+            and(
+              eq(learningReview.id, admitted.id),
+              eq(learningReview.ownerToken, admitted.token),
+              eq(learningReview.state, "running"),
+              gt(learningReview.ownerExpiresAt, typedSQL`now()`),
+            ),
+          )
+          .returning({ id: learningReview.id });
         if (!owned)
           throw new CommandError("conflict", "Work review lost ownership before settlement");
         if (admitted.kind === "work")
           for (const [ordinal, proposal] of result.proposals.entries())
-            await sql`INSERT INTO factory.learning_proposal(id,review_id,ordinal,content)
-              VALUES(${crypto.randomUUID()},${admitted.id},${ordinal},${JSON.stringify(proposal)}::jsonb)`;
+            await db.insert(learningProposal).values({
+              id: crypto.randomUUID(),
+              reviewId: admitted.id,
+              ordinal,
+              content: proposal,
+            });
       });
     } catch (cause) {
       // The lease is not proof no inference happened. Uncertain calls are
       // retained, never silently returned to the pending work queue.
       const rejected = cause instanceof LearningResultRejected;
       const state = knownModelRejection(cause) || rejected ? "failed" : "uncertain";
-      await database.client`UPDATE factory.learning_review SET state=${state},
-        reason=${
-          rejected
+      await database.db
+        .update(learningReview)
+        .set({
+          state,
+          reason: rejected
             ? learningRejectionReason(
                 cause,
                 "The model's review did not match the evidence it was given, so it was discarded. It will not be repeated automatically.",
               )
             : state === "failed"
               ? "The model rejected this review."
-              : "Review outcome is unconfirmed. It will not be repeated automatically."
-        },
-        completed_at=now() WHERE id=${admitted.id} AND state='running' AND owner_token=${admitted.token}`;
+              : "Review outcome is unconfirmed. It will not be repeated automatically.",
+          completedAt: typedSQL`now()`,
+        })
+        .where(
+          and(
+            eq(learningReview.id, admitted.id),
+            eq(learningReview.state, "running"),
+            eq(learningReview.ownerToken, admitted.token),
+          ),
+        );
       await createUsageJournal(database).abandon(`learning:${admitted.id}`);
     } finally {
       clearInterval(renewalTimer);
@@ -307,10 +448,20 @@ export function createLearningWorker(
     if (closed || sweeping) return;
     sweeping = true;
     try {
-      const expired = await database.client<{ id: string }[]>`
-        UPDATE factory.learning_review SET state='uncertain',completed_at=now(),
-          reason='Review ownership expired. The paid call will not be repeated automatically.'
-        WHERE state='running' AND owner_expires_at<now() RETURNING id`;
+      const expired = await database.db
+        .update(learningReview)
+        .set({
+          state: "uncertain",
+          completedAt: typedSQL`now()`,
+          reason: "Review ownership expired. The paid call will not be repeated automatically.",
+        })
+        .where(
+          and(
+            eq(learningReview.state, "running"),
+            lt(learningReview.ownerExpiresAt, typedSQL`now()`),
+          ),
+        )
+        .returning({ id: learningReview.id });
       for (const row of expired) await createUsageJournal(database).abandon(`learning:${row.id}`);
       // Deferred source settlement cannot hide later completed work forever.
       // The scan position is ephemeral; case identity/deduplication is durable.
@@ -336,13 +487,30 @@ export function createLearningWorker(
           if (!(cause instanceof CommandError)) throw cause;
         }
       }
-      const pendingGroups = () => database.client<(Group & { key: string })[]>`
-        SELECT project_id AS "projectId",owner_id AS "ownerId",developer_only AS "developerOnly",
-          project_id::text||':'||coalesce(owner_id::text,'project')||':'||developer_only::text AS key
-        FROM factory.learning_case WHERE selected AND batch_id IS NULL
-          AND NOT(activity='wiki' AND id ~ ${legacyWikiCallPattern})
-          AND project_id::text||':'||coalesce(owner_id::text,'project')||':'||developer_only::text > ${groupCursor}
-        GROUP BY project_id,owner_id,developer_only ORDER BY key LIMIT 32`;
+      const groupKey = typedSQL<string>`${caseTable.projectId}::text||':'||coalesce(${caseTable.ownerId}::text,'project')||':'||${caseTable.developerOnly}::text`;
+      const pendingGroups = () =>
+        database.db
+          .select({
+            projectId: caseTable.projectId,
+            ownerId: caseTable.ownerId,
+            developerOnly: caseTable.developerOnly,
+            key: groupKey,
+          })
+          .from(caseTable)
+          .where(
+            and(
+              eq(caseTable.selected, true),
+              isNull(caseTable.batchId),
+              or(
+                ne(caseTable.activity, "wiki"),
+                typedSQL<boolean>`${caseTable.id} !~ ${legacyWikiCallPattern}`,
+              ),
+              gt(groupKey, groupCursor),
+            ),
+          )
+          .groupBy(caseTable.projectId, caseTable.ownerId, caseTable.developerOnly)
+          .orderBy(groupKey)
+          .limit(32);
       let groups = await pendingGroups();
       if (!groups.length && groupCursor) {
         groupCursor = "";

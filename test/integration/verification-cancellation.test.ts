@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
+import { substrateVerificationAuthorityIn } from "../../apps/factory/src/runtime/substrate-verification-grant";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
@@ -222,6 +223,15 @@ test.each(["verification", "change", "trashed", "restored-stop"] as const)(
     try {
       const runtime = owned.controller();
       await runtime.startPersisted(owned.changeID, owned.userID);
+      // Workspace startup reads this fixture's local Git tree. Verification
+      // uses the installation-bound Forge identity, including retained jobs.
+      const owner = process.env["FACTORY_FORGEJO_OWNER"];
+      const forge =
+        process.env["FACTORY_FORGEJO_PUBLIC_URL"] ?? process.env["FACTORY_FORGEJO_API_URL"];
+      if (!owner || !forge) throw new Error("Owned Verification Forge configuration is missing");
+      const repository = new URL(`/${encodeURIComponent(owner)}/owned-cancelled-admission`, forge);
+      await database.client`UPDATE factory.project SET repository_url=${repository.href}
+        WHERE id=${owned.projectID}`;
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
       await database.client`UPDATE factory.change SET state='active' WHERE id=${owned.changeID}`;
       await database.client`INSERT INTO factory.change_agent_session(
@@ -234,6 +244,10 @@ test.each(["verification", "change", "trashed", "restored-stop"] as const)(
         runner_name, runner_uuid, runner_token, action_run_id, runner_job_handle, created_by)
         VALUES (${verificationID}, ${owned.changeID}, ${"d".repeat(40)}, 1, 'owned-cancelled',
           ${crypto.randomUUID()}, 'owned-token', 1, 'owned-exact-job', ${owned.userID})`;
+      const authorized = await database.client.begin((sql) =>
+        substrateVerificationAuthorityIn(sql, owned.projectID, verificationID, owned.userID),
+      );
+      expect(authorized.revision).toBe("d".repeat(40));
       if (cancelled === "verification")
         await database.client`UPDATE factory.verification SET state = 'cancelled', completed_at = now()
           WHERE id = ${verificationID}`;

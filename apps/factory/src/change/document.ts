@@ -1,9 +1,21 @@
+import { and, desc, eq, gt, inArray, isNull, notExists, sql as query } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
+import {
+  change,
+  conversationEntry,
+  requirementApproval,
+  requirementRevision,
+  ticketConversation,
+  ticketDocumentRevision,
+  ticketFollowUp,
+  ticket as ticketTable,
+} from "../../../../packages/db/src/schema";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
@@ -48,17 +60,29 @@ export function createTicketDocumentController(
   return {
     async followUp(ticketID: string, userID: string, input: TicketFollowUpInput) {
       return database.client.begin(async (sql) => {
-        const [ticket] = await sql<
-          Array<{ projectID: string; title: string; description: string; epicID: string | null }>
-        >`
-          SELECT project_id AS "projectID", title, description, epic_id AS "epicID" FROM factory.ticket WHERE id = ${ticketID} AND trashed_at IS NULL FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [ticket] = await db
+          .select({
+            projectID: ticketTable.projectId,
+            title: ticketTable.title,
+            description: ticketTable.description,
+            epicID: ticketTable.epicId,
+          })
+          .from(ticketTable)
+          .where(and(eq(ticketTable.id, ticketID), isNull(ticketTable.trashedAt)))
+          .for("update");
         if (!ticket) throw new CommandError("not-found", "Ticket not found");
         await projectAuthorityIn(sql, userID, ticket.projectID);
-        const [existing] = await sql<
-          Array<{ sourceID: string; documentID: string | null; revisionID: string; userID: string }>
-        >`
-          SELECT follow.source_ticket_id AS "sourceID", follow.source_document_id AS "documentID", follow.source_revision_id AS "revisionID", ticket.created_by AS "userID"
-          FROM factory.ticket_follow_up follow JOIN factory.ticket ticket ON ticket.id = follow.ticket_id WHERE follow.ticket_id = ${input.commandId}`;
+        const [existing] = await db
+          .select({
+            sourceID: ticketFollowUp.sourceTicketId,
+            documentID: ticketFollowUp.sourceDocumentId,
+            revisionID: ticketFollowUp.sourceRevisionId,
+            userID: ticketTable.createdBy,
+          })
+          .from(ticketFollowUp)
+          .innerJoin(ticketTable, eq(ticketTable.id, ticketFollowUp.ticketId))
+          .where(eq(ticketFollowUp.ticketId, input.commandId));
         if (existing) {
           if (
             existing.sourceID !== ticketID ||
@@ -69,24 +93,45 @@ export function createTicketDocumentController(
             throw new CommandError("conflict", "This follow-up command belongs to different work");
           return { ticketId: input.commandId };
         }
-        const [delivered] = await sql`
-          SELECT change.id FROM factory.change change JOIN factory.requirement_approval approval ON approval.id = change.requirement_approval_id
-          WHERE change.ticket_id = ${ticketID} AND change.state = 'delivered' AND approval.requirement_revision_id = ${input.requirementRevisionId}`;
+        const [delivered] = await db
+          .select({ id: change.id })
+          .from(change)
+          .innerJoin(requirementApproval, eq(requirementApproval.id, change.requirementApprovalId))
+          .where(
+            and(
+              eq(change.ticketId, ticketID),
+              eq(change.state, "delivered"),
+              eq(requirementApproval.requirementRevisionId, input.requirementRevisionId),
+            ),
+          );
         if (!delivered)
           throw new CommandError("conflict", "Follow-up work requires a delivered Ticket");
-        const [document] = await sql<Array<{ id: string; canonical: string }>>`
-          SELECT id, canonical_content AS canonical FROM factory.ticket_document_revision WHERE ticket_id = ${ticketID} ORDER BY ordinal DESC LIMIT 1`;
+        const [document] = await db
+          .select({
+            id: ticketDocumentRevision.id,
+            canonical: ticketDocumentRevision.canonicalContent,
+          })
+          .from(ticketDocumentRevision)
+          .where(eq(ticketDocumentRevision.ticketId, ticketID))
+          .orderBy(desc(ticketDocumentRevision.ordinal))
+          .limit(1);
         if ((document?.id ?? null) !== input.expectedDocumentId)
           throw new CommandError(
             "conflict",
             "The document changed. Review it before creating follow-up work.",
           );
-        const [revision] = await sql<
-          Array<{ canonical: string }>
-        >`SELECT canonical_content AS canonical FROM factory.requirement_revision WHERE id = ${input.requirementRevisionId} AND ticket_id = ${ticketID}`;
+        const [revision] = await db
+          .select({ canonical: requirementRevision.canonicalContent })
+          .from(requirementRevision)
+          .where(
+            and(
+              eq(requirementRevision.id, input.requirementRevisionId),
+              eq(requirementRevision.ticketId, ticketID),
+            ),
+          );
         const canonical = document?.canonical ?? revision?.canonical;
         if (!canonical) throw new CommandError("conflict", "Requirements are unavailable");
-        await insertInitialTicketIn(drizzleTransaction(sql), {
+        await insertInitialTicketIn(db, {
           id: input.commandId,
           projectId: ticket.projectID,
           epicId: ticket.epicID,
@@ -98,8 +143,12 @@ export function createTicketDocumentController(
             requirement: { id: crypto.randomUUID(), canonicalContent: canonical },
           },
         });
-        await sql`INSERT INTO factory.ticket_follow_up(ticket_id, source_ticket_id, source_document_id, source_revision_id)
-          VALUES (${input.commandId}, ${ticketID}, ${document?.id ?? null}, ${input.requirementRevisionId})`;
+        await db.insert(ticketFollowUp).values({
+          ticketId: input.commandId,
+          sourceTicketId: ticketID,
+          sourceDocumentId: document?.id ?? null,
+          sourceRevisionId: input.requirementRevisionId,
+        });
         return { ticketId: input.commandId };
       });
     },
@@ -112,24 +161,35 @@ export function createTicketDocumentController(
       return database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${input.commandId}`}))`;
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${ticketID}`}))`;
-        const tickets = await sql<Array<{ projectID: string; version: number; state: string }>>`
-          SELECT project_id AS "projectID", version::integer, state FROM factory.ticket
-          WHERE id = ${ticketID} AND trashed_at IS NULL AND converted_to_epic_id IS NULL FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const tickets = await db
+          .select({
+            projectID: ticketTable.projectId,
+            version: ticketTable.version,
+            state: ticketTable.state,
+          })
+          .from(ticketTable)
+          .where(
+            and(
+              eq(ticketTable.id, ticketID),
+              isNull(ticketTable.trashedAt),
+              isNull(ticketTable.convertedToEpicId),
+            ),
+          )
+          .for("update");
         const ticket = tickets[0];
         if (!ticket) throw new CommandError("not-found", "Ticket not found");
         await projectAuthorityIn(sql, userID, ticket.projectID);
-        const replay = await sql<
-          Array<{
-            id: string;
-            inputDigest: string;
-            ticketID: string;
-            userID: string;
-            requirementRevisionId: string | null;
-          }>
-        >`
-          SELECT id, input_digest AS "inputDigest", ticket_id AS "ticketID", created_by AS "userID",
-            requirement_revision_id AS "requirementRevisionId"
-          FROM factory.ticket_document_revision WHERE id = ${input.commandId}`;
+        const replay = await db
+          .select({
+            id: ticketDocumentRevision.id,
+            inputDigest: ticketDocumentRevision.inputDigest,
+            ticketID: ticketDocumentRevision.ticketId,
+            userID: ticketDocumentRevision.createdBy,
+            requirementRevisionId: ticketDocumentRevision.requirementRevisionId,
+          })
+          .from(ticketDocumentRevision)
+          .where(eq(ticketDocumentRevision.id, input.commandId));
         if (replay[0]) {
           if (
             replay[0].inputDigest !== inputDigest ||
@@ -143,18 +203,31 @@ export function createTicketDocumentController(
             requirementRevisionId: replay[0].requirementRevisionId ?? input.requirementRevisionId,
           };
         }
-        const approvals = await sql<Array<{ revisionID: string }>>`
-          SELECT requirement_revision_id AS "revisionID" FROM factory.requirement_approval WHERE ticket_id = ${ticketID}`;
-        const [latest] = await sql<Array<{ id: string; ordinal: number; canonical: string }>>`
-          SELECT id, ordinal, canonical_content AS canonical FROM factory.requirement_revision WHERE ticket_id=${ticketID}
-          ORDER BY ordinal DESC LIMIT 1`;
+        const approvals = await db
+          .select({ revisionID: requirementApproval.requirementRevisionId })
+          .from(requirementApproval)
+          .where(eq(requirementApproval.ticketId, ticketID));
+        const [latest] = await db
+          .select({
+            id: requirementRevision.id,
+            ordinal: requirementRevision.ordinal,
+            canonical: requirementRevision.canonicalContent,
+          })
+          .from(requirementRevision)
+          .where(eq(requirementRevision.ticketId, ticketID))
+          .orderBy(desc(requirementRevision.ordinal))
+          .limit(1);
         if ((approvals[0]?.revisionID ?? latest?.id ?? null) !== input.requirementRevisionId)
           throw new CommandError(
             "conflict",
             "The implementation scope changed. Reload the Ticket before saving.",
           );
-        const current = await sql<Array<{ id: string; ordinal: number }>>`
-          SELECT id, ordinal FROM factory.ticket_document_revision WHERE ticket_id = ${ticketID} ORDER BY ordinal DESC LIMIT 1`;
+        const current = await db
+          .select({ id: ticketDocumentRevision.id, ordinal: ticketDocumentRevision.ordinal })
+          .from(ticketDocumentRevision)
+          .where(eq(ticketDocumentRevision.ticketId, ticketID))
+          .orderBy(desc(ticketDocumentRevision.ordinal))
+          .limit(1);
         if (
           ticket.version !== input.expectedVersion ||
           (current[0]?.id ?? null) !== input.expectedDocumentId
@@ -173,31 +246,52 @@ export function createTicketDocumentController(
               "conflict",
               "These requirements already have implementation scope",
             );
-          const [entry] = await sql<Array<{ payload: Record<string, unknown> }>>`
-            SELECT entry.payload FROM factory.conversation_entry entry
-            JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-            WHERE entry.id=${input.proposalEntryId} AND conversation.ticket_id=${ticketID}
-              AND entry.kind='requirement' AND entry.actor='project-agent'
-              AND NOT EXISTS (SELECT 1 FROM factory.conversation_entry newer
-                WHERE newer.conversation_id=entry.conversation_id AND newer.kind='requirement'
-                  AND newer.ordinal>entry.ordinal)`;
-          if (entry?.payload["visibility"] === "developer") {
+          const newer = alias(conversationEntry, "newer");
+          const [entry] = await db
+            .select({ payload: conversationEntry.payload })
+            .from(conversationEntry)
+            .innerJoin(
+              ticketConversation,
+              eq(ticketConversation.id, conversationEntry.conversationId),
+            )
+            .where(
+              and(
+                eq(conversationEntry.id, input.proposalEntryId),
+                eq(ticketConversation.ticketId, ticketID),
+                eq(conversationEntry.kind, "requirement"),
+                eq(conversationEntry.actor, "project-agent"),
+                notExists(
+                  db
+                    .select({ id: newer.id })
+                    .from(newer)
+                    .where(
+                      and(
+                        eq(newer.conversationId, conversationEntry.conversationId),
+                        eq(newer.kind, "requirement"),
+                        gt(newer.ordinal, conversationEntry.ordinal),
+                      ),
+                    ),
+                ),
+              ),
+            );
+          const payload = entry?.payload;
+          if (payload?.["visibility"] === "developer") {
             const { projectDevelopmentAuthorityIn } = await import("../access/controller");
             await projectDevelopmentAuthorityIn(sql, userID, ticket.projectID);
           }
-          if (entry?.payload["fullPlanning"] === true) {
+          if (payload?.["fullPlanning"] === true) {
             fullPlanningSource = z
               .string()
               .regex(/^[a-f0-9]{40}$/)
-              .parse(entry.payload["sourceCommit"]);
-            planningContextID = z.uuid().optional().parse(entry.payload["contextId"]);
+              .parse(payload["sourceCommit"]);
+            planningContextID = z.uuid().optional().parse(payload["contextId"]);
             if (!complete.success || !continuePlanning)
               throw new CommandError(
                 "conflict",
                 "Complete the product specification before continuing Technical Planning.",
               );
           }
-          const proposal = proposedDocument.safeParse(entry?.payload);
+          const proposal = proposedDocument.safeParse(payload);
           if (
             !proposal.success ||
             proposal.data.base.id !== ticketID ||
@@ -220,7 +314,7 @@ export function createTicketDocumentController(
         }
         if (!approvals.length && !complete.success) revisionID = null;
         const ordinal = Math.max(current[0]?.ordinal ?? 0, latest?.ordinal ?? 0) + 1;
-        await appendTicketAuthoringIn(drizzleTransaction(sql), {
+        await appendTicketAuthoringIn(db, {
           ticketId: ticketID,
           createdBy: userID,
           title: input.title,
@@ -236,9 +330,19 @@ export function createTicketDocumentController(
             ...(input.proposalEntryId ? { proposalEntryId: input.proposalEntryId } : {}),
           },
         });
-        await sql`UPDATE factory.ticket SET title = ${input.title}, description = ${input.description},
-          state = CASE WHEN state IN ('inbox','backlog') AND ${complete.success} THEN 'ready' ELSE state END,
-          version = version + 1, updated_at = now() WHERE id = ${ticketID}`;
+        await db
+          .update(ticketTable)
+          .set({
+            title: input.title,
+            description: input.description,
+            state: complete.success
+              ? query`CASE WHEN ${inArray(ticketTable.state, ["inbox", "backlog"])}
+                  THEN 'ready'::factory.ticket_state ELSE ${ticketTable.state} END`
+              : ticketTable.state,
+            version: query`${ticketTable.version} + 1`,
+            updatedAt: query`now()`,
+          })
+          .where(eq(ticketTable.id, ticketID));
         if (fullPlanningSource && revisionID)
           await continuePlanning?.(sql, {
             commandID: input.commandId,

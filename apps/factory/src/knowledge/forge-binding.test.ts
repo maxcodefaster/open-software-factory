@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { drizzleTransaction } from "../../../../packages/db/src/client";
 import {
   forgeBinding,
   forgeBindingDatabase,
@@ -13,10 +14,17 @@ test("Source rejects the shared malformed matrix before any branch/tree/file rea
   let repositoryURL = "";
   let reads = 0;
   const revision = "a".repeat(40);
-  const fixture = forgeBindingDatabase((text) => {
-    expect(text).toContain('repository_url AS "repositoryURL"');
-    return [{ id: "owned-project", name: "Owned", repositoryURL, defaultBranch: "main" }];
-  });
+  const fixture = forgeBindingDatabase(
+    () => {
+      throw new Error("Source project reads must use the schema-backed query");
+    },
+    (text, parameters) => {
+      expect(text).toContain('from "factory"."project"');
+      expect(parameters).toEqual(["owned-project"]);
+      return [["owned-project", "Owned", repositoryURL, "main"]];
+    },
+  );
+  fixture.database.db = drizzleTransaction(fixture.database.client);
   let expectedRepository = { owner: forgeBinding.owner, name: "repo" };
   const controller = createKnowledgeController(
     fixture.database,

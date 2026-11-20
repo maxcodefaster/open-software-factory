@@ -1,4 +1,32 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  and,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  notInArray,
+  or,
+  sql as query,
+} from "drizzle-orm";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  authUser,
+  change,
+  changeAgentSession,
+  changeCommitOperation,
+  changeEditingDecision,
+  changeEditingRequest,
+  changeWriter,
+  developmentWorkspace,
+  monitoringIncident,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
 import { forgeUsername } from "../../../../packages/forge/src/access";
 import type { PendingWriterHandoff } from "../agent/stop";
 import { createAgentTurnStore } from "../agent/turn-store";
@@ -102,24 +130,36 @@ export function createChangeWriterController(options: {
     return database.client.begin(async (sql) => {
       const writer = await lockChangeWriterIn(sql, changeID);
       await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
-      const [shared] =
-        await sql`SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND collaboration_enabled`;
-      const [actor] = await sql<
-        { id: string; name: string; delegated: boolean; workState: string | null }[]
-      >`
-        SELECT account.id,left(account.name,160) AS name,
-          COALESCE(turn.authority ? 'monitoringIncidentId',false) AS delegated,
-          turn.state::text AS "workState"
-        FROM auth."user" account
-        LEFT JOIN factory.agent_turn turn ON turn.id=${writer.turnID}
-        WHERE account.id=COALESCE(${writer.userID}::uuid,turn.created_by)`;
+      const db = drizzleTransaction(sql);
+      const [shared] = await db
+        .select({ id: developmentWorkspace.id })
+        .from(developmentWorkspace)
+        .where(
+          and(
+            eq(developmentWorkspace.changeId, changeID),
+            developmentWorkspace.collaborationEnabled,
+          ),
+        );
+      const [actor] = await db
+        .select({
+          id: authUser.id,
+          name: query<string>`left(${authUser.name},160)`,
+          delegated: query<boolean>`COALESCE(${agentTurn.authority} ? 'monitoringIncidentId',false)`,
+          workState: query<string | null>`${agentTurn.state}::text`,
+        })
+        .from(authUser)
+        .leftJoin(agentTurn, eq(agentTurn.id, query`${writer.turnID}::uuid`))
+        .where(eq(authUser.id, query`COALESCE(${writer.userID}::uuid,${agentTurn.createdBy})`));
       const [requester] = writer.requestedBy
-        ? await sql<{ id: string; name: string }[]>`SELECT id,left(name,160) AS name
-          FROM auth."user" WHERE id=${writer.requestedBy}`
+        ? await db
+            .select({ id: authUser.id, name: query<string>`left(${authUser.name},160)` })
+            .from(authUser)
+            .where(eq(authUser.id, writer.requestedBy))
         : [];
-      const [agent] = await sql<{ stopPending: boolean }[]>`
-        SELECT stop_pending AS "stopPending" FROM factory.change_agent_session
-        WHERE change_id=${changeID}`;
+      const [agent] = await db
+        .select({ stopPending: changeAgentSession.stopPending })
+        .from(changeAgentSession)
+        .where(eq(changeAgentSession.changeId, changeID));
       const stopPending = agent?.stopPending ?? false;
       const presence =
         writer.state === "human" && writer.userID
@@ -128,13 +168,27 @@ export function createChangeWriterController(options: {
       if (writer.state !== "human") activity.clear(changeID);
       const requests =
         writer.state === "human"
-          ? await sql<{ id: string; userID: string; name: string; epoch: number }[]>`
-          SELECT request.id,account.id AS "userID",left(account.name,160) AS name,
-            request.writer_epoch::float8 AS epoch
-          FROM factory.change_editing_request request JOIN auth."user" account ON account.id=request.requester_id
-          WHERE request.change_id=${changeID} AND request.writer_epoch=${writer.epoch}::bigint
-            AND request.state='requested' AND (request.owner_id=${userID} OR request.requester_id=${userID})
-          ORDER BY request.created_at,request.id`
+          ? await db
+              .select({
+                id: changeEditingRequest.id,
+                userID: authUser.id,
+                name: query<string>`left(${authUser.name},160)`,
+                epoch: query<number>`${changeEditingRequest.writerEpoch}::float8`,
+              })
+              .from(changeEditingRequest)
+              .innerJoin(authUser, eq(authUser.id, changeEditingRequest.requesterId))
+              .where(
+                and(
+                  eq(changeEditingRequest.changeId, changeID),
+                  eq(changeEditingRequest.writerEpoch, query`${writer.epoch}::bigint`),
+                  eq(changeEditingRequest.state, "requested"),
+                  or(
+                    eq(changeEditingRequest.ownerId, userID),
+                    eq(changeEditingRequest.requesterId, userID),
+                  ),
+                ),
+              )
+              .orderBy(changeEditingRequest.createdAt, changeEditingRequest.id)
           : [];
       return {
         state: writer.state,
@@ -176,8 +230,15 @@ export function createChangeWriterController(options: {
       await database.client.begin(async (sql) => {
         const writer = await lockChangeWriterIn(sql, changeID);
         await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
-        const [shared] =
-          await sql`SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND collaboration_enabled`;
+        const [shared] = await drizzleTransaction(sql)
+          .select({ id: developmentWorkspace.id })
+          .from(developmentWorkspace)
+          .where(
+            and(
+              eq(developmentWorkspace.changeId, changeID),
+              developmentWorkspace.collaborationEnabled,
+            ),
+          );
         if (
           !writer.available ||
           writer.state !== "human" ||
@@ -199,9 +260,15 @@ export function createChangeWriterController(options: {
       await database.client.begin(async (sql) => {
         const writer = await lockChangeWriterIn(sql, changeID);
         await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
-        const [previous] = await sql<{ changeID: string; userID: string; epoch: string }[]>`
-          SELECT change_id AS "changeID",requester_id AS "userID",writer_epoch::text AS epoch
-          FROM factory.change_editing_request WHERE id=${commandID}`;
+        const db = drizzleTransaction(sql);
+        const [previous] = await db
+          .select({
+            changeID: changeEditingRequest.changeId,
+            userID: changeEditingRequest.requesterId,
+            epoch: query<string>`${changeEditingRequest.writerEpoch}::text`,
+          })
+          .from(changeEditingRequest)
+          .where(eq(changeEditingRequest.id, commandID));
         if (previous) {
           if (
             previous.changeID !== changeID ||
@@ -225,9 +292,23 @@ export function createChangeWriterController(options: {
             "conflict",
             "The writer changed. Check the current editing status.",
           );
-        await sql`INSERT INTO factory.change_editing_request(id,change_id,requester_id,owner_id,writer_epoch)
-          VALUES(${commandID},${changeID},${userID},${writer.userID},${writer.epoch}::bigint)
-          ON CONFLICT (change_id,requester_id,writer_epoch) WHERE state='requested' DO NOTHING`;
+        await db
+          .insert(changeEditingRequest)
+          .values({
+            id: commandID,
+            changeId: changeID,
+            requesterId: userID,
+            ownerId: writer.userID,
+            writerEpoch: query`${writer.epoch}::bigint`,
+          })
+          .onConflictDoNothing({
+            target: [
+              changeEditingRequest.changeId,
+              changeEditingRequest.requesterId,
+              changeEditingRequest.writerEpoch,
+            ],
+            where: query`${changeEditingRequest.state}='requested'`,
+          });
       });
       return readView(changeID, userID);
     },
@@ -238,9 +319,16 @@ export function createChangeWriterController(options: {
       requestID: string,
       expectedEpoch: number,
     ) {
-      const [request] = await database.client<{ requesterID: string }[]>`
-        SELECT requester_id AS "requesterID" FROM factory.change_editing_request
-        WHERE id=${requestID} AND change_id=${changeID} AND owner_id=${userID}`;
+      const [request] = await database.db
+        .select({ requesterID: changeEditingRequest.requesterId })
+        .from(changeEditingRequest)
+        .where(
+          and(
+            eq(changeEditingRequest.id, requestID),
+            eq(changeEditingRequest.changeId, changeID),
+            eq(changeEditingRequest.ownerId, userID),
+          ),
+        );
       if (!request) throw new CommandError("not-found", "Editing request not found.");
       await this.takeOver(changeID, request.requesterID, commandID, undefined, {
         epoch: expectedEpoch,
@@ -262,11 +350,16 @@ export function createChangeWriterController(options: {
         const intended = await database.client.begin(async (sql) => {
           const writer = await lockChangeWriterIn(sql, changeID);
           await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
-          const [decision] = await sql<
-            { actorID: string; epoch: string; changeID: string; kind: string }[]
-          >`
-            SELECT actor_id AS "actorID",writer_epoch::text AS epoch,change_id AS "changeID",kind
-            FROM factory.change_editing_decision WHERE command_id=${commandID}`;
+          const db = drizzleTransaction(sql);
+          const [decision] = await db
+            .select({
+              actorID: changeEditingDecision.actorId,
+              epoch: query<string>`${changeEditingDecision.writerEpoch}::text`,
+              changeID: changeEditingDecision.changeId,
+              kind: changeEditingDecision.kind,
+            })
+            .from(changeEditingDecision)
+            .where(eq(changeEditingDecision.commandId, commandID));
           if (
             decision &&
             (decision.actorID !== userID ||
@@ -296,12 +389,28 @@ export function createChangeWriterController(options: {
               "conflict",
               "The writer changed. Your files have not been discarded.",
             );
-          await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,writer_epoch,kind)
-            VALUES(${commandID},${changeID},${userID},${writer.epoch}::bigint,'release')`;
-          await sql`UPDATE factory.change_writer SET state='handoff',handoff_kind='release',
-            epoch=epoch+1,user_id=NULL,turn_id=NULL,requested_by=${userID},request_id=${commandID},
-            fence_required=true,fence_attempt_id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}),
-            updated_at=now() WHERE change_id=${changeID}`;
+          await db.insert(changeEditingDecision).values({
+            commandId: commandID,
+            changeId: changeID,
+            actorId: userID,
+            writerEpoch: query`${writer.epoch}::bigint`,
+            kind: "release",
+          });
+          await db
+            .update(changeWriter)
+            .set({
+              state: "handoff",
+              handoffKind: "release",
+              epoch: query`${changeWriter.epoch}+1`,
+              userId: null,
+              turnId: null,
+              requestedBy: userID,
+              requestId: commandID,
+              fenceRequired: true,
+              fenceAttemptId: query`(${db.select({ id: change.runtimeAttemptId }).from(change).where(eq(change.id, changeID))})`,
+              updatedAt: query`now()`,
+            })
+            .where(eq(changeWriter.changeId, changeID));
           return lockChangeWriterIn(sql, changeID);
         });
         if (!intended) return readView(changeID, userID);
@@ -321,11 +430,27 @@ export function createChangeWriterController(options: {
             writer.requestID !== commandID
           )
             throw new CommandError("conflict", "Editing release changed before confirmation.");
-          await sql`UPDATE factory.change_writer SET state='unassigned',epoch=epoch+1,
-            requested_by=NULL,request_id=NULL,fence_required=false,updated_at=now()
-            WHERE change_id=${changeID}`;
-          await sql`UPDATE factory.change_editing_request SET state='superseded',decided_at=now()
-            WHERE change_id=${changeID} AND state='requested'`;
+          const db = drizzleTransaction(sql);
+          await db
+            .update(changeWriter)
+            .set({
+              state: "unassigned",
+              epoch: query`${changeWriter.epoch}+1`,
+              requestedBy: null,
+              requestId: null,
+              fenceRequired: false,
+              updatedAt: query`now()`,
+            })
+            .where(eq(changeWriter.changeId, changeID));
+          await db
+            .update(changeEditingRequest)
+            .set({ state: "superseded", decidedAt: query`now()` })
+            .where(
+              and(
+                eq(changeEditingRequest.changeId, changeID),
+                eq(changeEditingRequest.state, "requested"),
+              ),
+            );
         });
         activity.clear(changeID);
         return readView(changeID, userID);
@@ -335,28 +460,55 @@ export function createChangeWriterController(options: {
       // An open editor keeps observing after Coding settles. That read must not
       // commission a human takeover and silently block exact-commit Verification.
       // Only already recorded human decisions may continue here.
-      const [pending] = await database.client<{ commandID: string }[]>`
-        SELECT writer.request_id AS "commandID" FROM factory.change_writer writer
-        LEFT JOIN factory.runtime_attempt attempt ON attempt.id=writer.fence_attempt_id
-        WHERE writer.change_id=${changeID} AND writer.state='handoff' AND writer.handoff_kind='takeover'
-          AND writer.requested_by=${userID} AND writer.request_id IS NOT NULL
-          AND (writer.fence_attempt_id IS NULL OR attempt.state='stopped'
-            OR attempt.state='paused')`;
+      const [pending] = await database.db
+        .select({ commandID: changeWriter.requestId })
+        .from(changeWriter)
+        .leftJoin(runtimeAttempt, eq(runtimeAttempt.id, changeWriter.fenceAttemptId))
+        .where(
+          and(
+            eq(changeWriter.changeId, changeID),
+            eq(changeWriter.state, "handoff"),
+            eq(changeWriter.handoffKind, "takeover"),
+            eq(changeWriter.requestedBy, userID),
+            isNotNull(changeWriter.requestId),
+            or(
+              isNull(changeWriter.fenceAttemptId),
+              inArray(runtimeAttempt.state, ["stopped", "paused"]),
+            ),
+          ),
+        );
       // Continue only the same person's recorded request. A native paused row
       // merely schedules observation; takeover still rechecks the exact durable
       // native result, permissions, Agent Stop, Source and branch fences.
-      if (pending) return this.takeOver(changeID, userID, pending.commandID);
-      const [release] = await database.client<{ commandID: string; epoch: number }[]>`
-        SELECT writer.request_id AS "commandID",decision.writer_epoch::float8 AS epoch
-        FROM factory.change_writer writer
-        JOIN factory.change_editing_decision decision ON decision.command_id=writer.request_id
-          AND decision.change_id=writer.change_id AND decision.actor_id=writer.requested_by
-          AND decision.kind='release' AND decision.writer_epoch+1=writer.epoch
-        WHERE writer.change_id=${changeID} AND writer.state='handoff'
-          AND writer.handoff_kind='release' AND writer.requested_by=${userID}`;
+      if (pending?.commandID) return this.takeOver(changeID, userID, pending.commandID);
+      const [release] = await database.db
+        .select({
+          commandID: changeWriter.requestId,
+          epoch: query<number>`${changeEditingDecision.writerEpoch}::float8`,
+        })
+        .from(changeWriter)
+        .innerJoin(
+          changeEditingDecision,
+          and(
+            eq(changeEditingDecision.commandId, changeWriter.requestId),
+            eq(changeEditingDecision.changeId, changeWriter.changeId),
+            eq(changeEditingDecision.actorId, changeWriter.requestedBy),
+            eq(changeEditingDecision.kind, "release"),
+            eq(query`${changeEditingDecision.writerEpoch}+1`, changeWriter.epoch),
+          ),
+        )
+        .where(
+          and(
+            eq(changeWriter.changeId, changeID),
+            eq(changeWriter.state, "handoff"),
+            eq(changeWriter.handoffKind, "release"),
+            eq(changeWriter.requestedBy, userID),
+          ),
+        );
       // Reconcile the already commissioned release, not a new editing command.
       // The exact decision rechecks authority and all fences after transport loss.
-      if (release) return this.release(changeID, userID, release.commandID, release.epoch);
+      if (release?.commandID)
+        return this.release(changeID, userID, release.commandID, release.epoch);
       return readView(changeID, userID);
     },
     async prepareAgent(changeID: string, turnID: string, ownerToken?: string) {
@@ -414,7 +566,14 @@ export function createChangeWriterController(options: {
               "Agent writing authority changed during preparation",
             );
           await options.protect(changeID, [options.agentUsername]);
-          await sql`UPDATE factory.change_writer SET state='agent',fence_required=false,updated_at=now() WHERE change_id=${changeID}`;
+          await drizzleTransaction(sql)
+            .update(changeWriter)
+            .set({
+              state: "agent",
+              fenceRequired: false,
+              updatedAt: query`now()`,
+            })
+            .where(eq(changeWriter.changeId, changeID));
         });
         return true;
       });
@@ -464,6 +623,7 @@ export function createChangeWriterController(options: {
         const intended = await database.client.begin(async (sql) => {
           const writer = await lockChangeWriterIn(sql, changeID);
           await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+          const db = drizzleTransaction(sql);
           const continuing =
             writer.state === "handoff" &&
             writer.handoffKind === "takeover" &&
@@ -480,19 +640,64 @@ export function createChangeWriterController(options: {
               "Idle takeover applies only to the observed human writer. Agent and unconfirmed work must use explicit Stop.",
             );
           if (humanTransfer && continuing) {
-            const [decision] = await sql`SELECT command_id FROM factory.change_editing_decision
-              WHERE command_id=${commandID} AND change_id=${changeID} AND target_id=${userID}
-                AND actor_id=${humanTransfer.approverID ?? userID} AND writer_epoch=${humanTransfer.epoch}::bigint
-                AND kind=${humanTransfer.approverID ? "approve" : "idle-takeover"}
-                AND request_id IS NOT DISTINCT FROM ${humanTransfer.requestID ?? null}`;
+            const [decision] = await db
+              .select({ commandID: changeEditingDecision.commandId })
+              .from(changeEditingDecision)
+              .where(
+                and(
+                  eq(changeEditingDecision.commandId, commandID),
+                  eq(changeEditingDecision.changeId, changeID),
+                  eq(changeEditingDecision.targetId, userID),
+                  eq(changeEditingDecision.actorId, humanTransfer.approverID ?? userID),
+                  eq(changeEditingDecision.writerEpoch, query`${humanTransfer.epoch}::bigint`),
+                  eq(
+                    changeEditingDecision.kind,
+                    humanTransfer.approverID ? "approve" : "idle-takeover",
+                  ),
+                  query`${changeEditingDecision.requestId} IS NOT DISTINCT FROM ${humanTransfer.requestID ?? null}`,
+                ),
+              );
             if (!decision)
               throw new CommandError("conflict", "The editing decision changed input.");
           }
           if (completedEpoch) {
-            const [settled] = await sql`SELECT change_id FROM factory.change_agent_session
-              WHERE change_id=${changeID} AND state IN ('committed','stopped') AND NOT stop_pending
-                AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${changeID} AND state IN ('pending','dispatching','running','uncertain'))
-                AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${changeID} AND state NOT IN ('succeeded','failed'))`;
+            const [settled] = await db
+              .select({ changeID: changeAgentSession.changeId })
+              .from(changeAgentSession)
+              .where(
+                and(
+                  eq(changeAgentSession.changeId, changeID),
+                  inArray(changeAgentSession.state, ["committed", "stopped"]),
+                  eq(changeAgentSession.stopPending, false),
+                  notExists(
+                    db
+                      .select({ id: agentTurn.id })
+                      .from(agentTurn)
+                      .where(
+                        and(
+                          eq(agentTurn.changeId, changeID),
+                          inArray(agentTurn.state, [
+                            "pending",
+                            "dispatching",
+                            "running",
+                            "uncertain",
+                          ]),
+                        ),
+                      ),
+                  ),
+                  notExists(
+                    db
+                      .select({ id: changeCommitOperation.id })
+                      .from(changeCommitOperation)
+                      .where(
+                        and(
+                          eq(changeCommitOperation.changeId, changeID),
+                          notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+                        ),
+                      ),
+                  ),
+                ),
+              );
             if (writer.state !== "agent" || writer.epoch !== completedEpoch || !settled)
               return null;
           }
@@ -527,12 +732,24 @@ export function createChangeWriterController(options: {
               );
             if (authorizedTransfer) {
               const kind = humanTransfer?.approverID ? "approve" : "idle-takeover";
-              await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,target_id,writer_epoch,kind,request_id)
-                VALUES(${commandID},${changeID},${humanTransfer?.approverID ?? userID},${userID},
-                  ${writer.epoch}::bigint,${kind},${humanTransfer?.requestID ?? null})`;
+              await db.insert(changeEditingDecision).values({
+                commandId: commandID,
+                changeId: changeID,
+                actorId: humanTransfer?.approverID ?? userID,
+                targetId: userID,
+                writerEpoch: query`${writer.epoch}::bigint`,
+                kind,
+                requestId: humanTransfer?.requestID ?? null,
+              });
               if (humanTransfer?.requestID)
-                await sql`UPDATE factory.change_editing_request SET state='accepted',
-                  decided_by=${humanTransfer.approverID ?? userID},decided_at=now() WHERE id=${humanTransfer.requestID}`;
+                await db
+                  .update(changeEditingRequest)
+                  .set({
+                    state: "accepted",
+                    decidedBy: humanTransfer.approverID ?? userID,
+                    decidedAt: query`now()`,
+                  })
+                  .where(eq(changeEditingRequest.id, humanTransfer.requestID));
             }
             try {
               if (!writer.userID) throw new Error("Human writer identity is unavailable");
@@ -540,10 +757,15 @@ export function createChangeWriterController(options: {
             } catch (cause) {
               if (!(cause instanceof CommandError)) throw cause;
               // Revoked writers cannot strand retained Project work indefinitely.
-              await sql`UPDATE factory.change_writer SET state='unassigned',user_id=NULL WHERE change_id=${changeID}`;
+              await db
+                .update(changeWriter)
+                .set({ state: "unassigned", userId: null })
+                .where(eq(changeWriter.changeId, changeID));
             }
-            const [current] =
-              await sql`SELECT change_id FROM factory.change_writer WHERE change_id=${changeID} AND state='human'`;
+            const [current] = await db
+              .select({ changeID: changeWriter.changeId })
+              .from(changeWriter)
+              .where(and(eq(changeWriter.changeId, changeID), eq(changeWriter.state, "human")));
             if (current && !authorizedTransfer)
               throw new CommandError(
                 "conflict",
@@ -562,25 +784,67 @@ export function createChangeWriterController(options: {
               await projectDevelopmentAuthorityIn(sql, writer.requestedBy, writer.projectID);
             } catch (cause) {
               if (!(cause instanceof CommandError)) throw cause;
-              await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,target_id,writer_epoch,kind)
-                VALUES(${commandID},${changeID},${userID},${userID},${writer.epoch}::bigint,'takeover')`;
-              await sql`UPDATE factory.change_writer SET requested_by=${userID},request_id=${commandID},
-                handoff_kind='takeover',epoch=epoch+1,updated_at=now() WHERE change_id=${changeID}`;
+              await db.insert(changeEditingDecision).values({
+                commandId: commandID,
+                changeId: changeID,
+                actorId: userID,
+                targetId: userID,
+                writerEpoch: query`${writer.epoch}::bigint`,
+                kind: "takeover",
+              });
+              await db
+                .update(changeWriter)
+                .set({
+                  requestedBy: userID,
+                  requestId: commandID,
+                  handoffKind: "takeover",
+                  epoch: query`${changeWriter.epoch}+1`,
+                  updatedAt: query`now()`,
+                })
+                .where(eq(changeWriter.changeId, changeID));
               return lockChangeWriterIn(sql, changeID);
             }
             throw new CommandError("conflict", "An editing takeover is already in progress");
           }
-          await sql`UPDATE factory.monitoring_incident incident SET state='blocked',
-            reason='A developer took over source editing. Automatic Delivery is disabled.',settled_at=now()
-            FROM factory.change change WHERE change.id=${changeID} AND incident.ticket_id=change.ticket_id
-              AND incident.state='implementing'`;
+          await db
+            .update(monitoringIncident)
+            .set({
+              state: "blocked",
+              reason: "A developer took over source editing. Automatic Delivery is disabled.",
+              settledAt: query`now()`,
+            })
+            .from(change)
+            .where(
+              and(
+                eq(change.id, changeID),
+                eq(monitoringIncident.ticketId, change.ticketId),
+                eq(monitoringIncident.state, "implementing"),
+              ),
+            );
           if (!humanTransfer)
-            await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,target_id,writer_epoch,kind)
-              VALUES(${commandID},${changeID},${userID},${userID},${writer.epoch}::bigint,'takeover')`;
-          await sql`UPDATE factory.change_writer SET state='handoff',handoff_kind='takeover',user_id=NULL,turn_id=NULL,
-          epoch=epoch+1,requested_by=${userID},request_id=${commandID},fence_required=true,
-          fence_attempt_id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}),updated_at=now()
-          WHERE change_id=${changeID}`;
+            await db.insert(changeEditingDecision).values({
+              commandId: commandID,
+              changeId: changeID,
+              actorId: userID,
+              targetId: userID,
+              writerEpoch: query`${writer.epoch}::bigint`,
+              kind: "takeover",
+            });
+          await db
+            .update(changeWriter)
+            .set({
+              state: "handoff",
+              handoffKind: "takeover",
+              userId: null,
+              turnId: null,
+              epoch: query`${changeWriter.epoch}+1`,
+              requestedBy: userID,
+              requestId: commandID,
+              fenceRequired: true,
+              fenceAttemptId: query`(${db.select({ id: change.runtimeAttemptId }).from(change).where(eq(change.id, changeID))})`,
+              updatedAt: query`now()`,
+            })
+            .where(eq(changeWriter.changeId, changeID));
           return lockChangeWriterIn(sql, changeID);
         });
         if (!intended) return readView(changeID, userID);
@@ -595,10 +859,29 @@ export function createChangeWriterController(options: {
             throw new CommandError("conflict", "Editing takeover changed before fencing");
           await options.protect(changeID, []);
         });
-        const [running] =
-          await database.client`SELECT change_id FROM factory.change_agent_session WHERE change_id=${changeID}
-        AND (stop_pending OR state IN ('starting','working','failed'))
-        UNION ALL SELECT change_id FROM factory.agent_turn WHERE change_id=${changeID} AND state IN ('pending','dispatching','running','uncertain')`;
+        const [running] = await database.db
+          .select({ changeID: changeAgentSession.changeId })
+          .from(changeAgentSession)
+          .where(
+            and(
+              eq(changeAgentSession.changeId, changeID),
+              or(
+                changeAgentSession.stopPending,
+                inArray(changeAgentSession.state, ["starting", "working", "failed"]),
+              ),
+            ),
+          )
+          .unionAll(
+            database.db
+              .select({ changeID: query<string>`${agentTurn.changeId}` })
+              .from(agentTurn)
+              .where(
+                and(
+                  eq(agentTurn.changeId, changeID),
+                  inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+                ),
+              ),
+          );
         if (running) await options.stopAgent(changeID);
         const [unsubmittedFailure] = await database.client`SELECT session.change_id
           FROM factory.change_agent_session session
@@ -631,10 +914,32 @@ export function createChangeWriterController(options: {
             );
           await options.stopAgent(changeID);
         }
-        const [unsettled] =
-          await database.client`SELECT change_id FROM factory.change_agent_session WHERE change_id=${changeID} AND stop_pending
-        UNION ALL SELECT change_id FROM factory.agent_turn WHERE change_id=${changeID} AND state IN ('pending','dispatching','running','uncertain')
-        UNION ALL SELECT change_id FROM factory.change_commit_operation WHERE change_id=${changeID} AND state NOT IN ('succeeded','failed')`;
+        const [unsettled] = await database.db
+          .select({ changeID: changeAgentSession.changeId })
+          .from(changeAgentSession)
+          .where(and(eq(changeAgentSession.changeId, changeID), changeAgentSession.stopPending))
+          .unionAll(
+            database.db
+              .select({ changeID: query<string>`${agentTurn.changeId}` })
+              .from(agentTurn)
+              .where(
+                and(
+                  eq(agentTurn.changeId, changeID),
+                  inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+                ),
+              ),
+          )
+          .unionAll(
+            database.db
+              .select({ changeID: changeCommitOperation.changeId })
+              .from(changeCommitOperation)
+              .where(
+                and(
+                  eq(changeCommitOperation.changeId, changeID),
+                  notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+                ),
+              ),
+          );
         if (unsettled)
           throw new CommandError(
             "conflict",
@@ -661,10 +966,28 @@ export function createChangeWriterController(options: {
           await options.protect(changeID, [forgeUsername(userID)]);
           // Persist the new human epoch before enabling source writes. The first
           // authorized save confirms it, including after a lost acknowledgement.
-          await sql`UPDATE factory.change_writer SET state='human',epoch=epoch+1,user_id=${userID},requested_by=NULL,request_id=NULL,
-          fence_required=false,updated_at=now() WHERE change_id=${changeID}`;
-          await sql`UPDATE factory.change_editing_request SET state='superseded',decided_at=now()
-            WHERE change_id=${changeID} AND state='requested'`;
+          const db = drizzleTransaction(sql);
+          await db
+            .update(changeWriter)
+            .set({
+              state: "human",
+              epoch: query`${changeWriter.epoch}+1`,
+              userId: userID,
+              requestedBy: null,
+              requestId: null,
+              fenceRequired: false,
+              updatedAt: query`now()`,
+            })
+            .where(eq(changeWriter.changeId, changeID));
+          await db
+            .update(changeEditingRequest)
+            .set({ state: "superseded", decidedAt: query`now()` })
+            .where(
+              and(
+                eq(changeEditingRequest.changeId, changeID),
+                eq(changeEditingRequest.state, "requested"),
+              ),
+            );
         });
         return readView(changeID, userID);
       });

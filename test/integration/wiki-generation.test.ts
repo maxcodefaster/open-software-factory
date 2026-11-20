@@ -9,12 +9,11 @@ import {
 } from "../../apps/factory/src/knowledge/generation-failure";
 import { WikiPublicationConflict } from "../../apps/factory/src/knowledge/publication";
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
-import { type createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
 test.each(["version", "revision", "state"] as const)(
-  "offline Wiki publication wiring keeps baselines private and fences changed %s",
+  "owned PostgreSQL Wiki publication keeps baselines private and fences changed %s",
   async (drift) => {
     const projectID = crypto.randomUUID();
     const userID = crypto.randomUUID();
@@ -37,19 +36,16 @@ test.each(["version", "revision", "state"] as const)(
     const inline = {
       ...row,
       id: crypto.randomUUID(),
+      revisionId: crypto.randomUUID(),
       slug: "guide",
       title: "Guide",
       body: "The color is green.",
       generatedBody: "The color is blue.",
     };
     const rows = [row, inline];
-    const revisions: unknown[][] = [];
-    let pageWrites = 0;
-    let pageCount = 0;
-    let state = "pending";
     let calls = 0;
-    let transactionDepth = 0;
-    const typedReads: Array<{ query: string; parameters: unknown[] }> = [];
+    const owned = await factoryProcess();
+    const database = owned.connect();
     const environment = {
       FACTORY_FORGEJO_API_URL: "https://forge.invalid/api/v1/",
       FACTORY_FORGEJO_PUBLIC_URL: "https://forge.invalid",
@@ -70,145 +66,6 @@ test.each(["version", "revision", "state"] as const)(
     );
     Object.assign(process.env, environment);
     const fetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network admitted"));
-    // Replace PostgreSQL I/O, retaining the actual Drizzle builders and result mapping.
-    const sql = async (parts: TemplateStringsArray, ...values: unknown[]) => {
-      const text = parts.join("?").replace(/\s+/g, " ").trim();
-      if (text.startsWith("SELECT pg_advisory_xact_lock")) return [];
-      if (
-        text ===
-        'SELECT connection_id AS "connectionID", connection_version::float8 AS version FROM factory.model_role_connection WHERE role=?'
-      ) {
-        expect(values).toEqual(["planning"]);
-        return [];
-      }
-      if (text.includes("FROM factory.usage_operation")) return [];
-      if (text.includes("FROM factory.project WHERE"))
-        return [
-          {
-            id: projectID,
-            name: "Overview",
-            repositoryURL: "https://forge.invalid/owned/wiki",
-            defaultBranch: "main",
-          },
-        ];
-      if (text.startsWith("UPDATE factory.knowledge_generation SET state = 'running'")) {
-        state = "running";
-        return [{ projectID, commitSha: commit, userID, modelId: "controlled-wiki" }];
-      }
-      if (text.startsWith("UPDATE factory.knowledge_generation SET state = 'failed'")) {
-        state = "failed";
-        throw new Error(`Unexpected generation failure: ${String(values[0])}`);
-      }
-      if (text.startsWith("UPDATE factory.knowledge_generation SET page_count")) {
-        pageCount += Number(values[0]);
-        if (values[2]) state = "succeeded";
-        return [];
-      }
-      if (text.startsWith("UPDATE factory.knowledge_generation")) return [];
-      if (text.startsWith("SELECT COALESCE(current.page_count"))
-        return [{ pageCount, previousState: null, previousCount: null, previousCommit: null }];
-      if (text.startsWith("SELECT page.id FROM factory.knowledge_page"))
-        return pageCount ? [{ id: row.id }] : [];
-      if (text.includes("FROM factory.knowledge_generation")) {
-        if (text.includes('AS "connectionID"')) return [{ connectionID: null, version: null }];
-        if (text.includes("state='pending'")) return [];
-        if (text.includes("state='succeeded'")) return [];
-        return [{ id: generationID }];
-      }
-      if (text.startsWith("SELECT COALESCE(MAX(ordinal)"))
-        return [{ ordinal: revisions.length + 4 }];
-      if (text.startsWith("INSERT INTO factory.knowledge_revision")) {
-        revisions.push(values);
-        return [];
-      }
-      if (text.startsWith("UPDATE factory.knowledge_page SET title")) {
-        pageWrites++;
-        const saved = fixtureValue(
-          rows.find((page) => page.id === values[7]),
-          "updated page",
-        );
-        saved.title = String(values[0]);
-        saved.version += Number(values[1]);
-        saved.revisionId = String(values[2]);
-        saved.body = String(values[3]);
-        saved.generatedBody = String(values[4]);
-        return [];
-      }
-      if (text.includes("FROM factory.knowledge_page"))
-        return rows.map(({ generatedBody, ...page }) =>
-          text.includes('generated_body AS "generatedBody"')
-            ? { ...page, generatedBody }
-            : { ...page },
-        );
-      throw new Error(`Unhandled offline statement: ${text}`);
-    };
-    const modelRoleRead = [
-      'select "factory"."model_role_connection"."role", "factory"."model_connection_version"."provider",',
-      '"factory"."model_role_connection"."model_id", "factory"."model_connection_version"."endpoint"',
-      'from "factory"."model_role_connection" inner join "factory"."model_connection_version"',
-      'on ("factory"."model_connection_version"."connection_id" = "factory"."model_role_connection"."connection_id"',
-      'and "factory"."model_connection_version"."version" = "factory"."model_role_connection"."connection_version")',
-    ].join(" ");
-    const client = Object.assign(sql, {
-      unsafe(query: string, parameters: unknown[]) {
-        typedReads.push({ query, parameters });
-        expect(transactionDepth).toBeGreaterThan(0);
-        let values: unknown[][];
-        switch (query) {
-          case 'select "id" from "auth"."user" where "auth"."user"."id" = $1 for share':
-            expect(parameters).toEqual([userID]);
-            values = [[userID]];
-            break;
-          case 'select "disabled_at", "directory_disabled_at" from "factory"."account_access" where "factory"."account_access"."user_id" = $1 for share':
-            expect(parameters).toEqual([userID]);
-            values = [[null, null]];
-            break;
-          case 'select "role", "manage_project" from "factory"."project_membership" where ("factory"."project_membership"."project_id" = $1 and "factory"."project_membership"."user_id" = $2) for share':
-            expect(parameters).toEqual([projectID, userID]);
-            values = [["developer", false]];
-            break;
-          case 'select "user_id" from "factory"."administrator" where "factory"."administrator"."user_id" = $1 for share':
-            expect(parameters).toEqual([userID]);
-            values = [];
-            break;
-          case 'select "id" from "factory"."project" where "factory"."project"."id" = $1':
-            expect(parameters).toEqual([projectID]);
-            values = [[projectID]];
-            break;
-          case modelRoleRead:
-            expect(parameters).toEqual([]);
-            values = [];
-            break;
-          case 'select "version", "planning_model_id", "build_model_id", "role_rules" from "factory"."model_defaults" where "factory"."model_defaults"."singleton" = $1':
-            expect(parameters).toEqual([true]);
-            values = [];
-            break;
-          case 'select "version", "planning", "build" from "factory"."project_model_settings" where "factory"."project_model_settings"."project_id" = $1':
-            expect(parameters).toEqual([projectID]);
-            values = [];
-            break;
-          case 'select "version", "planning_model_id", "build_model_id" from "factory"."personal_model_settings" where ("factory"."personal_model_settings"."project_id" = $1 and "factory"."personal_model_settings"."user_id" = $2)':
-            expect(parameters).toEqual([projectID, userID]);
-            values = [];
-            break;
-          default:
-            throw new Error(`Unhandled offline Drizzle statement: ${query}`);
-        }
-        return Object.assign(Promise.resolve(values), { values: async () => values });
-      },
-      async begin<T>(work: (transaction: typeof sql) => Promise<T>) {
-        transactionDepth++;
-        try {
-          return await work(sql);
-        } finally {
-          transactionDepth--;
-        }
-      },
-    });
-    const database = {
-      client,
-      db: drizzleTransaction(client as unknown as ReturnType<typeof createDatabase>["client"]),
-    } as unknown as ReturnType<typeof createDatabase>;
     const wiki = createKnowledgeController(
       database,
       {
@@ -245,21 +102,42 @@ test.each(["version", "revision", "state"] as const)(
           const published = await publish(first);
           for (const page of published) expect(page).not.toHaveProperty("generatedBody");
           expect(published.find((page) => page.id === row.id)?.body).toBe(checked.pages[0]?.body);
+          const [saved] = await database.client<
+            { body: string; generatedBody: string; version: number; revisionId: string }[]
+          >`SELECT current_body AS body,generated_body AS "generatedBody",version::integer AS version,
+            current_revision_id AS "revisionId" FROM factory.knowledge_page WHERE id=${row.id}`;
+          Object.assign(row, fixtureValue(saved, "published page"));
           expect(row.generatedBody).toBe("Current generated overview.");
-          expect(revisions[0]?.[4]).toBe(checked.pages[0]?.body);
-          expect(revisions[0]?.[5]).toBe("Current generated overview.");
+          const [revision] = await database.client<{ body: string; generated: string }[]>`
+            SELECT body,generated_body AS generated FROM factory.knowledge_revision WHERE id=${row.revisionId}`;
+          expect(revision).toEqual({
+            body: checked.pages[0]?.body ?? "",
+            generated: "Current generated overview.",
+          });
           const next = output("A later generated overview.");
           expect(prepare(next).pages[0]?.body).toBe(`A later generated overview.\n\n${note}`);
           // The private baseline refreshed after progressive publication, but a
           // subsequent human edit must invalidate that checked snapshot, not rebase it.
-          if (drift === "state") inline.state = "archived";
-          else {
+          if (drift === "state") {
+            inline.state = "archived";
+            await database.client`UPDATE factory.knowledge_page SET state='archived' WHERE id=${inline.id}`;
+          } else {
             row.body += "\n\nA concurrent human note.";
             if (drift === "version") row.version++;
-            else row.revisionId = crypto.randomUUID();
+            else {
+              row.revisionId = crypto.randomUUID();
+              await database.client`INSERT INTO factory.knowledge_revision(
+                id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,created_by)
+                VALUES(${row.revisionId},${row.id},5,'human',${row.title},${row.body},
+                  ${row.generatedBody},${commit},${userID})`;
+            }
+            await database.client`UPDATE factory.knowledge_page SET current_body=${row.body},
+              version=${row.version},current_revision_id=${row.revisionId} WHERE id=${row.id}`;
           }
           await expect(publish(next)).rejects.toThrow(WikiPublicationConflict);
-          expect(pageWrites).toBe(1);
+          expect(
+            await database.client`SELECT id FROM factory.knowledge_revision WHERE kind='generated'`,
+          ).toHaveLength(1);
           throw new WikiPublicationConflict("Retry the changed snapshot");
         }
         expect(calls).toBe(2);
@@ -274,23 +152,33 @@ test.each(["version", "revision", "state"] as const)(
       },
     );
     try {
+      await database.client`INSERT INTO auth."user"(id,name,email)
+        VALUES(${userID},'Owned Wiki author',${`${userID}@factory.invalid`})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${projectID},${`wiring-${projectID}`},'Overview','https://forge.invalid/owned/wiki.git',
+          'main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+        VALUES(${projectID},${userID},'developer',${userID})`;
+      for (const page of rows) {
+        await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,
+          generated_body,version,source_commit_sha,created_by)
+          VALUES(${page.id},${projectID},${page.slug},${page.title},${page.body},${page.generatedBody},
+            ${page.version},${"a".repeat(40)},${userID})`;
+        await database.client`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,
+          generated_body,source_commit_sha,created_by)
+          VALUES(${page.revisionId},${page.id},3,'human',${page.title},${page.body},${page.generatedBody},
+            ${"a".repeat(40)},${userID})`;
+        await database.client`UPDATE factory.knowledge_page SET current_revision_id=${page.revisionId} WHERE id=${page.id}`;
+      }
+      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,model_id)
+        VALUES(${generationID},${projectID},${commit},${userID},'controlled-wiki')`;
       await wiki.recover();
       await wiki.settle();
       expect(calls).toBe(2);
-      expect(typedReads.filter(({ query }) => query === modelRoleRead)).toHaveLength(1);
+      expect((await wiki.generation(projectID))?.state).toBe("succeeded");
       expect(
-        typedReads.filter(({ query }) => query.includes('from "factory"."model_defaults"')),
+        await database.client`SELECT id FROM factory.knowledge_revision WHERE kind='generated'`,
       ).toHaveLength(1);
-      expect(
-        typedReads.filter(({ query }) => query.includes('from "factory"."project_model_settings"')),
-      ).toHaveLength(1);
-      expect(
-        typedReads.filter(({ query }) =>
-          query.includes('from "factory"."personal_model_settings"'),
-        ),
-      ).toHaveLength(1);
-      expect(state).toBe("succeeded");
-      expect(pageWrites).toBe(1);
       expect(row.generatedBody).toBe("Current generated overview.");
       expect(row.body).toBe(
         `Current generated overview.\n\n${note}${drift === "state" ? "" : "\n\nA concurrent human note."}`,
@@ -299,13 +187,15 @@ test.each(["version", "revision", "state"] as const)(
     } finally {
       await wiki.close();
       fetch.mockRestore();
+      await database.client.end();
+      await owned.dispose();
       for (const [key, value] of Object.entries(before)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
     }
   },
-  10_000,
+  30_000,
 );
 
 test.each(["README", "README.md"])(

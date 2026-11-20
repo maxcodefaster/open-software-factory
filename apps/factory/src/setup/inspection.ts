@@ -1,4 +1,14 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import { and, desc, eq, sql as expression, inArray } from "drizzle-orm";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  projectSetupConfirmation,
+  projectSetupInspection,
+  project as projectTable,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
   type SetupInspectionOutput,
@@ -25,19 +35,13 @@ import {
 import { inspectConfiguration } from "./inspection-agent";
 import { setupInspectionTimeoutMS, setupQuestionRoundLimit } from "./limits";
 
-type InspectionRow = {
-  id: string;
-  projectID: string;
-  sourceCommit: string;
-  state: string;
-  output: unknown;
-  failure: string | null;
-  modelID: string | null;
-  connectionID: string | null;
-  connectionVersion: number | null;
-  userID: string;
-  parentID: string | null;
-  answers: Record<string, string>;
+const inspectionViewFields = {
+  id: projectSetupInspection.id,
+  projectID: projectSetupInspection.projectId,
+  sourceCommit: projectSetupInspection.sourceCommit,
+  state: projectSetupInspection.state,
+  output: projectSetupInspection.output,
+  failure: projectSetupInspection.failure,
 };
 
 function readableSetupSource(path: string) {
@@ -72,6 +76,7 @@ export function createSetupInspection(input: {
   generate?: typeof inspectConfiguration;
 }) {
   const sql = input.database.client;
+  const db = input.database.db;
   const access = createAccessController(input.database);
   const executions = new Map<string, Promise<void>>();
   const aborts = new Map<string, AbortController>();
@@ -95,9 +100,10 @@ export function createSetupInspection(input: {
   }
   async function project(projectID: string, userID: string) {
     await access.requireProject(userID, projectID, true);
-    const [value] = await sql<
-      { url: string; branch: string }[]
-    >`SELECT repository_url AS url,default_branch AS branch FROM factory.project WHERE id=${projectID}`;
+    const [value] = await db
+      .select({ url: projectTable.repositoryUrl, branch: projectTable.defaultBranch })
+      .from(projectTable)
+      .where(eq(projectTable.id, projectID));
     if (!value) throw new CommandError("not-found", "Project not found");
     return {
       ...value,
@@ -110,18 +116,29 @@ export function createSetupInspection(input: {
     };
   }
   async function row(id: string) {
-    const [value] = await sql<
-      InspectionRow[]
-    >`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,failure,
-      model_id AS "modelID",connection_id AS "connectionID",connection_version::float8 AS "connectionVersion",created_by AS "userID",parent_id AS "parentID",answers
-      FROM factory.project_setup_inspection WHERE id=${id}`;
+    const [value] = await db
+      .select({
+        ...inspectionViewFields,
+        modelID: projectSetupInspection.modelId,
+        connectionID: projectSetupInspection.connectionId,
+        connectionVersion: projectSetupInspection.connectionVersion,
+        userID: projectSetupInspection.createdBy,
+        parentID: projectSetupInspection.parentId,
+        answers: expression<Record<string, string>>`${projectSetupInspection.answers}`,
+      })
+      .from(projectSetupInspection)
+      .where(eq(projectSetupInspection.id, id));
     return value;
   }
+  type InspectionRow = NonNullable<Awaited<ReturnType<typeof row>>>;
   async function view(projectID: string, userID: string) {
     await access.requireProject(userID, projectID, true);
-    const [value] =
-      await sql`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,failure
-      FROM factory.project_setup_inspection WHERE project_id=${projectID} ORDER BY created_at DESC LIMIT 1`;
+    const [value] = await db
+      .select(inspectionViewFields)
+      .from(projectSetupInspection)
+      .where(eq(projectSetupInspection.projectId, projectID))
+      .orderBy(desc(projectSetupInspection.createdAt))
+      .limit(1);
     return value ? setupInspectionView.parse(value) : null;
   }
   async function inspect(value: InspectionRow) {
@@ -175,7 +192,15 @@ export function createSetupInspection(input: {
         });
         validateSetupProposal(output, existing);
         await access.requireProject(value.userID, value.projectID, true);
-        await sql`UPDATE factory.project_setup_inspection SET state='proposal',output=${JSON.stringify(output)}::jsonb,updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+        await db
+          .update(projectSetupInspection)
+          .set({ state: "proposal", output, updatedAt: expression`now()` })
+          .where(
+            and(
+              eq(projectSetupInspection.id, value.id),
+              eq(projectSetupInspection.state, "inspecting"),
+            ),
+          );
       } catch (cause) {
         const timedOut =
           (signal?.aborted &&
@@ -189,7 +214,15 @@ export function createSetupInspection(input: {
             : cause instanceof SetupConfigurationError
               ? cause.recovery
               : "Inspection could not finish. Previous answers and source are unchanged; retry when ready.";
-        await sql`UPDATE factory.project_setup_inspection SET state='failed',failure=${failure},updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+        await db
+          .update(projectSetupInspection)
+          .set({ state: "failed", failure, updatedAt: expression`now()` })
+          .where(
+            and(
+              eq(projectSetupInspection.id, value.id),
+              eq(projectSetupInspection.state, "inspecting"),
+            ),
+          );
       } finally {
         aborts.delete(value.id);
       }
@@ -278,13 +311,27 @@ export function createSetupInspection(input: {
       );
     }
     await sql.begin(async (transaction) => {
-      await transaction`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE`;
+      const tx = drizzleTransaction(transaction);
+      await tx
+        .select({ id: projectTable.id })
+        .from(projectTable)
+        .where(eq(projectTable.id, projectID))
+        .for("update");
       await projectAuthorityIn(transaction, userID, projectID, true);
       if (command.parentID) {
-        const [parent] = await transaction<
-          InspectionRow[]
-        >`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,answers,parent_id AS "parentID"
-          FROM factory.project_setup_inspection WHERE id=${command.parentID} FOR UPDATE`;
+        const [parent] = await tx
+          .select({
+            id: projectSetupInspection.id,
+            projectID: projectSetupInspection.projectId,
+            sourceCommit: projectSetupInspection.sourceCommit,
+            state: projectSetupInspection.state,
+            output: projectSetupInspection.output,
+            answers: projectSetupInspection.answers,
+            parentID: projectSetupInspection.parentId,
+          })
+          .from(projectSetupInspection)
+          .where(eq(projectSetupInspection.id, command.parentID))
+          .for("update");
         if (
           !parent ||
           parent.projectID !== projectID ||
@@ -319,17 +366,42 @@ export function createSetupInspection(input: {
                 ? "Describe the required configuration changes before continuing"
                 : "Answer the current setup questions before continuing",
             );
-          await transaction`UPDATE factory.project_setup_inspection SET state='superseded' WHERE id=${parent.id} AND state='proposal'`;
+          await tx
+            .update(projectSetupInspection)
+            .set({ state: "superseded" })
+            .where(
+              and(
+                eq(projectSetupInspection.id, parent.id),
+                eq(projectSetupInspection.state, "proposal"),
+              ),
+            );
         }
       }
       await projectAuthorityIn(transaction, userID, projectID, true);
-      const active =
-        await transaction`SELECT id FROM factory.project_setup_inspection WHERE project_id=${projectID} AND state IN ('inspecting','proposal','confirming')`;
+      const active = await tx
+        .select({ id: projectSetupInspection.id })
+        .from(projectSetupInspection)
+        .where(
+          and(
+            eq(projectSetupInspection.projectId, projectID),
+            inArray(projectSetupInspection.state, ["inspecting", "proposal", "confirming"]),
+          ),
+        );
       if (active.length)
         throw new CommandError("conflict", "Continue the retained setup inspection");
       const model = complete ? undefined : await input.model(projectID, userID, transaction);
-      await transaction`INSERT INTO factory.project_setup_inspection(id,project_id,source_commit,state,model_id,connection_id,connection_version,created_by,parent_id,answers)
-        VALUES(${commandID},${projectID},${head.headSha},${complete ? "complete" : "inspecting"},${model?.modelID ?? null},${model?.connectionID ?? null},${model?.connectionVersion ?? null},${userID},${command.parentID ?? null},${JSON.stringify(command.answers)}::jsonb)`;
+      await tx.insert(projectSetupInspection).values({
+        id: commandID,
+        projectId: projectID,
+        sourceCommit: head.headSha,
+        state: complete ? "complete" : "inspecting",
+        modelId: model?.modelID ?? null,
+        connectionId: model?.connectionID ?? null,
+        connectionVersion: model?.connectionVersion ?? null,
+        createdBy: userID,
+        parentId: command.parentID ?? null,
+        answers: command.answers,
+      });
     });
     if (complete) await input.ready(projectID, userID);
     else {
@@ -347,8 +419,15 @@ export function createSetupInspection(input: {
     if (!value || value.projectID !== projectID)
       throw new CommandError("not-found", "Inspection not found");
     if (["inspecting", "proposal"].includes(value.state)) {
-      await sql`UPDATE factory.project_setup_inspection SET state='superseded',failure=NULL,updated_at=now()
-        WHERE id=${id} AND state IN ('inspecting','proposal')`;
+      await db
+        .update(projectSetupInspection)
+        .set({ state: "superseded", failure: null, updatedAt: expression`now()` })
+        .where(
+          and(
+            eq(projectSetupInspection.id, id),
+            inArray(projectSetupInspection.state, ["inspecting", "proposal"]),
+          ),
+        );
       aborts.get(id)?.abort(new DOMException("Inspection stopped", "AbortError"));
     } else if (value.state === "confirming") {
       throw new CommandError(
@@ -387,8 +466,17 @@ export function createSetupInspection(input: {
             "Source changed. Inspect its current configuration again before confirming",
           );
         await sql.begin(async (transaction) => {
-          await transaction`INSERT INTO factory.project_setup_confirmation(inspection_id,created_by) VALUES(${id},${userID}) ON CONFLICT(inspection_id) DO NOTHING`;
-          await transaction`UPDATE factory.project_setup_inspection SET state='confirming',updated_at=now() WHERE id=${id} AND state='proposal'`;
+          const tx = drizzleTransaction(transaction);
+          await tx
+            .insert(projectSetupConfirmation)
+            .values({ inspectionId: id, createdBy: userID })
+            .onConflictDoNothing({ target: projectSetupConfirmation.inspectionId });
+          await tx
+            .update(projectSetupInspection)
+            .set({ state: "confirming", updatedAt: expression`now()` })
+            .where(
+              and(eq(projectSetupInspection.id, id), eq(projectSetupInspection.state, "proposal")),
+            );
         });
         const commit = await input.forge.applySetupFiles({
           repository: current.repository,
@@ -436,7 +524,12 @@ export function createSetupInspection(input: {
           await merge();
         }
         await input.forge.protectSetupWorkflow(current.repository, current.branch);
-        await sql`UPDATE factory.project_setup_inspection SET state='confirmed',failure=NULL,updated_at=now() WHERE id=${id} AND state='confirming'`;
+        await db
+          .update(projectSetupInspection)
+          .set({ state: "confirmed", failure: null, updatedAt: expression`now()` })
+          .where(
+            and(eq(projectSetupInspection.id, id), eq(projectSetupInspection.state, "confirming")),
+          );
         await input.ready(projectID, userID);
         return view(projectID, userID);
       } finally {
@@ -455,17 +548,33 @@ export function createSetupInspection(input: {
       await Promise.allSettled([...executions.values()]);
     },
     async recover() {
-      const confirmed = await sql<
-        { projectID: string; userID: string }[]
-      >`SELECT project_id AS "projectID",created_by AS "userID" FROM factory.project_setup_inspection WHERE state IN ('confirmed','complete')`;
+      const confirmed = await db
+        .select({
+          projectID: projectSetupInspection.projectId,
+          userID: projectSetupInspection.createdBy,
+        })
+        .from(projectSetupInspection)
+        .where(inArray(projectSetupInspection.state, ["confirmed", "complete"]));
       for (const value of confirmed) await input.ready(value.projectID, value.userID);
-      const pending = await sql<
-        { id: string }[]
-      >`SELECT id FROM factory.project_setup_inspection WHERE state='inspecting'`;
+      const pending = await db
+        .select({ id: projectSetupInspection.id })
+        .from(projectSetupInspection)
+        .where(eq(projectSetupInspection.state, "inspecting"));
       for (const value of pending) {
         await inspectionLock(value.id, async () => {
           await createUsageJournal(input.database).abandon(`setup:${value.id}`);
-          await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection was interrupted. Retry explicitly; source is unchanged.' WHERE id=${value.id} AND state='inspecting'`;
+          await db
+            .update(projectSetupInspection)
+            .set({
+              state: "failed",
+              failure: "Inspection was interrupted. Retry explicitly; source is unchanged.",
+            })
+            .where(
+              and(
+                eq(projectSetupInspection.id, value.id),
+                eq(projectSetupInspection.state, "inspecting"),
+              ),
+            );
         });
       }
     },

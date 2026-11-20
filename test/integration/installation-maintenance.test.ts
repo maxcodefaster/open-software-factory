@@ -16,7 +16,7 @@ test("upgrade admission serializes against real inference intent and never disca
   const userID = crypto.randomUUID();
   const projectID = crypto.randomUUID();
   const generationID = crypto.randomUUID();
-  const entered = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<number>();
   const release = Promise.withResolvers<void>();
   let writing: Promise<unknown> | undefined;
   try {
@@ -31,10 +31,12 @@ test("upgrade admission serializes against real inference intent and never disca
       await sql`
         INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
         VALUES(${generationID},${projectID},${"a".repeat(40)},${userID})`;
-      entered.resolve();
+      const [owner] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (!owner) throw new Error("Owned inference transaction is missing");
+      entered.resolve(owner.pid);
       await release.promise;
     });
-    await entered.promise;
+    const writerPID = await entered.promise;
     const maintenance = beginInstallationMaintenance(database).then(
       () => ({ allowed: true, message: "" }),
       (cause: Error) => ({ allowed: false, message: cause.message }),
@@ -44,7 +46,7 @@ test("upgrade admission serializes against real inference intent and never disca
         const [waiting] = await database.client<{ waiting: boolean }[]>`
           SELECT EXISTS(SELECT 1 FROM pg_stat_activity
             WHERE datname=current_database() AND wait_event_type='Lock'
-              AND query LIKE '%UPDATE factory.installation_maintenance SET enabled=true%') AS waiting`;
+              AND ${writerPID}=ANY(pg_blocking_pids(pid))) AS waiting`;
         return waiting?.waiting;
       },
       Boolean,

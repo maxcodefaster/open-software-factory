@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { factoryProcess } from "../fixtures/factory-process";
 import {
   createWikiSourceUpdates,
   wikiHookSecret,
 } from "../../apps/factory/src/knowledge/source-updates";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes and fences stale heads", async () => {
   const owned = await factoryProcess();
@@ -110,6 +110,95 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
     expect(Number(row?.["event_version"])).toBe(3);
     expect(Number(row?.["handled_version"])).toBe(2);
   } finally {
+    await controller.drain();
+    await database.client.end();
+    await owned.dispose();
+  }
+}, 60_000);
+
+test("Wiki drain retains a newer signed event while acknowledging its captured bigint version", async () => {
+  const owned = await factoryProcess();
+  const database = owned.connect();
+  const projectID = crypto.randomUUID();
+  const userID = crypto.randomUUID();
+  const commit = "a".repeat(40);
+  const signingKey = "owned-wiki-hook-key-not-a-real-secret";
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let calls = 0;
+  const controller = createWikiSourceUpdates({
+    database,
+    apiURL: "https://forge.example/api/v1",
+    owner: "factory",
+    receiverURL: "https://factory.example",
+    signingKey,
+    forge: {
+      listPushHooks: async () => [],
+      createPushHook: async () => 7,
+      configurePushHook: async (_repository, id) => id,
+      getDefaultBranch: async () => ({ name: "main", headSha: commit }),
+    },
+    reconcile: async () => {
+      if (++calls === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+    },
+  });
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${userID},'Owned source author',${`${userID}@factory.invalid`})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${`counter-${projectID}`},'Source counter','https://forge.example/factory/app.git',
+        'main','.devcontainer/devcontainer.json',${userID})`;
+    await controller.ensure(projectID);
+    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at)
+      VALUES(${crypto.randomUUID()},${projectID},${commit},'succeeded',${userID},now())`;
+    await database.client`UPDATE factory.wiki_source_update SET event_version=9007199254740993,
+      handled_version=9007199254740992,next_attempt_at=now()-interval '1 second' WHERE project_id=${projectID}`;
+    const first = controller.drain();
+    await Promise.race([
+      entered.promise,
+      first.then(() => {
+        throw new Error("The pending source event was not claimed");
+      }),
+    ]);
+    const body = JSON.stringify({
+      ref: "refs/heads/main",
+      after: commit,
+      repository: { full_name: "factory/app", default_branch: "main" },
+    });
+    try {
+      const response = await controller.receive(
+        new Request("https://factory.example", {
+          method: "POST",
+          body,
+          headers: {
+            "x-forgejo-event": "push",
+            "x-forgejo-signature": createHmac("sha256", wikiHookSecret(signingKey, projectID))
+              .update(body)
+              .digest("hex"),
+          },
+        }),
+        projectID,
+      );
+      expect(response.status).toBe(202);
+    } finally {
+      release.resolve();
+    }
+    await first;
+    const read = async () => {
+      const [row] = await database.client<{ event: string; handled: string }[]>`
+        SELECT event_version::text AS event,handled_version::text AS handled
+        FROM factory.wiki_source_update WHERE project_id=${projectID}`;
+      return row;
+    };
+    expect(await read()).toEqual({ event: "9007199254740994", handled: "9007199254740993" });
+    await controller.drain();
+    expect(await read()).toEqual({ event: "9007199254740994", handled: "9007199254740994" });
+    expect(calls).toBe(2);
+  } finally {
+    release.resolve();
     await controller.drain();
     await database.client.end();
     await owned.dispose();

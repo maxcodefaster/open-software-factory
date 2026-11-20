@@ -104,11 +104,8 @@ test("Wiki saves deduplicate retry, reject stale writes and restore immutably wi
     expect(revisions[0]).not.toHaveProperty("citations");
     expect(typeof revisions[0]?.createdAt).toBe("string");
     const originalDate = (await knowledge.history(pageId, userId))[0]?.["createdAt"];
-    if (!(originalDate instanceof Date) && typeof originalDate !== "string")
-      throw new Error("Owned revision timestamp is missing");
-    expect(fixtureValue(revisions[0], "revisions[0]").createdAt).toBe(
-      originalDate instanceof Date ? originalDate.toISOString() : originalDate,
-    );
+    if (typeof originalDate !== "string") throw new Error("Owned revision timestamp is missing");
+    expect(fixtureValue(revisions[0], "revisions[0]").createdAt).toBe(originalDate);
     expect(
       Number.isFinite(new Date(fixtureValue(revisions[0], "revisions[0]").createdAt).getTime()),
     ).toBe(true);

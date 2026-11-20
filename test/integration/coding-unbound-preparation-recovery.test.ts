@@ -582,17 +582,25 @@ test("local cancellation rechecks the intent and Session in a fresh statement af
   owned.database.client = new Proxy(original, {
     get(target, property, receiver) {
       if (property === "begin")
-        return (callback: (sql: DatabaseTransaction) => unknown) =>
-          original.begin((sql) =>
-            Reflect.apply(callback, undefined, [
+        return (
+          optionsOrCallback: string | ((sql: DatabaseTransaction) => unknown),
+          callback?: (sql: DatabaseTransaction) => unknown,
+        ) => {
+          const work = typeof optionsOrCallback === "string" ? callback : optionsOrCallback;
+          if (!work) throw new Error("Owned transaction callback is missing");
+          const observe = (sql: DatabaseTransaction) =>
+            Reflect.apply(work, undefined, [
               new Proxy(sql, {
                 apply(query, context, args) {
                   statements.push((args[0] as TemplateStringsArray).join(""));
                   return Reflect.apply(query, context, args);
                 },
               }),
-            ]),
-          );
+            ]);
+          return typeof optionsOrCallback === "string"
+            ? original.begin(optionsOrCallback, observe)
+            : original.begin(observe);
+        };
       return Reflect.get(target, property, receiver);
     },
   });

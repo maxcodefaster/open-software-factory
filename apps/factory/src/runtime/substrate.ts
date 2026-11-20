@@ -1,7 +1,49 @@
 import { createHash, createHmac } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import {
+  and,
+  desc,
+  eq,
+  exists,
+  sql as expression,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  or,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  developmentWorkspace,
+  installationMaintenance,
+  projectImagePreparation,
+  promotionOperation,
+  releaseAttempt,
+  runtimeAttempt,
+  runtimeComputeWait,
+  runtimeEnvironmentIntent,
+  stagingConfiguration,
+  stagingPreview,
+  substrateActorRpc,
+  substrateBinding,
+  substrateInputStop,
+  substrateIsolated,
+  substrateSource,
+  substrateWorkspace,
+  verification,
+} from "../../../../packages/db/src/schema";
 import {
   hashConnectorToken,
   runtimeConnectorTokens,
@@ -412,14 +454,24 @@ export function createSubstrateExecution(
       throw new Error("Native Connector egress differs from its pinned restricted policy");
   }
   async function binding(sql: Database["client"] | DatabaseTransaction = database.client) {
-    const [row] = await sql<
-      Binding[]
-    >`SELECT intent,atespace,actor_name AS "actorName",actor_uid::text AS "actorUID",
-      create_attempted_at::text AS "attemptedAt",create_rejected AS "createRejected",delete_intended_at IS NOT NULL AS deleting,
-      deleted_at IS NOT NULL AS deleted,checkpoint,observation FROM factory.substrate_binding WHERE runtime_attempt_id=${attemptID}`;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        intent: substrateBinding.intent,
+        atespace: substrateBinding.atespace,
+        actorName: substrateBinding.actorName,
+        actorUID: substrateBinding.actorUid,
+        attemptedAt: expression<string | null>`${substrateBinding.createAttemptedAt}::text`,
+        createRejected: substrateBinding.createRejected,
+        deleting: expression<boolean>`${substrateBinding.deleteIntendedAt} IS NOT NULL`,
+        deleted: expression<boolean>`${substrateBinding.deletedAt} IS NOT NULL`,
+        checkpoint: substrateBinding.checkpoint,
+        observation: substrateBinding.observation,
+      })
+      .from(substrateBinding)
+      .where(eq(substrateBinding.runtimeAttemptId, attemptID));
     if (!row || !isDeepStrictEqual(row.intent, retainedIntent))
       throw new Error("Native current configuration differs from immutable binding");
-    return row;
+    return { ...row, intent: retainedIntent };
   }
   function locked<T>(action: (sql: Database["client"]) => Promise<T>) {
     return trackNativeOperation(
@@ -495,10 +547,21 @@ export function createSubstrateExecution(
       const resumed = await actorRPCIn(sql, attemptID, "resume", actorRPCOrigin(saved.checkpoint));
       if (resumed?.attempted && !resumed.outcome) requireResumeContinuity(actor, saved, resumed);
     }
-    const result =
-      await sql`UPDATE factory.substrate_binding SET actor_uid=COALESCE(actor_uid,${actor.metadata.uid}::uuid),observation=${JSON.stringify(actor)}::text::jsonb
-      WHERE runtime_attempt_id=${attemptID} AND deleted_at IS NULL AND (actor_uid IS NULL OR actor_uid=${actor.metadata.uid}::uuid)`;
-    if (result.count !== 1) throw new Error("Native current Actor UID binding changed");
+    const result = await drizzleTransaction(sql)
+      .update(substrateBinding)
+      .set({
+        actorUid: expression`COALESCE(${substrateBinding.actorUid},${actor.metadata.uid}::uuid)`,
+        observation: actor,
+      })
+      .where(
+        and(
+          eq(substrateBinding.runtimeAttemptId, attemptID),
+          isNull(substrateBinding.deletedAt),
+          or(isNull(substrateBinding.actorUid), eq(substrateBinding.actorUid, actor.metadata.uid)),
+        ),
+      )
+      .returning({ attemptID: substrateBinding.runtimeAttemptId });
+    if (result.length !== 1) throw new Error("Native current Actor UID binding changed");
     return actor;
   }
   function allow(uid: string) {
@@ -525,12 +588,27 @@ export function createSubstrateExecution(
     if (
       (verificationID || workspaceID) &&
       ["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"].includes(actor.status.state)
-    )
-      await sql`DELETE FROM factory.runtime_compute_wait waiting
-        USING factory.runtime_attempt attempt
-        WHERE waiting.attempt_id=${attemptID} AND waiting.reason='compute-capacity'
-          AND attempt.id=waiting.attempt_id AND attempt.state IN ('starting','ready')
-          AND attempt.stop_intended_at IS NULL`;
+    ) {
+      const db = drizzleTransaction(sql);
+      await db.delete(runtimeComputeWait).where(
+        and(
+          eq(runtimeComputeWait.attemptId, attemptID),
+          eq(runtimeComputeWait.reason, "compute-capacity"),
+          exists(
+            db
+              .select({ id: runtimeAttempt.id })
+              .from(runtimeAttempt)
+              .where(
+                and(
+                  eq(runtimeAttempt.id, runtimeComputeWait.attemptId),
+                  inArray(runtimeAttempt.state, ["starting", "ready"]),
+                  isNull(runtimeAttempt.stopIntendedAt),
+                ),
+              ),
+          ),
+        ),
+      );
+    }
     return actor;
   }
   async function inputStopVersion() {
@@ -646,18 +724,43 @@ export function createSubstrateExecution(
         "Initial native Verification Resume differs from its original unassigned Actor",
       );
     await substrateVerificationGrantIn(sql, config.projectID, verificationID, attemptID, userID);
-    const [current] = await sql`SELECT attempt.id FROM factory.runtime_attempt attempt
-      JOIN factory.verification verification ON verification.id=attempt.verification_id
-      JOIN factory.change change ON change.id=verification.change_id
-      WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
-        AND attempt.verification_id=${verificationID} AND attempt.isolated_kind='verification'
-        AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
-        AND attempt.generation=${config.generation} AND attempt.revision=verification.commit_sha
-        AND attempt.state='starting' AND attempt.ready_at IS NULL AND attempt.stop_intended_at IS NULL
-        AND verification.state IN ('pending','runner-starting')
-        AND verification.runtime_attempt_id=attempt.id
-        AND verification.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
-          WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)`;
+    const db = drizzleTransaction(sql);
+    const [current] = await db
+      .select({ id: runtimeAttempt.id })
+      .from(runtimeAttempt)
+      .innerJoin(verification, eq(verification.id, runtimeAttempt.verificationId))
+      .innerJoin(change, eq(change.id, verification.changeId))
+      .where(
+        and(
+          eq(runtimeAttempt.id, attemptID),
+          eq(runtimeAttempt.projectId, config.projectID),
+          eq(runtimeAttempt.verificationId, verificationID),
+          eq(runtimeAttempt.isolatedKind, "verification"),
+          isNull(runtimeAttempt.workspaceId),
+          isNull(runtimeAttempt.changeId),
+          eq(runtimeAttempt.generation, config.generation),
+          eq(runtimeAttempt.revision, verification.commitSha),
+          eq(runtimeAttempt.state, "starting"),
+          isNull(runtimeAttempt.readyAt),
+          isNull(runtimeAttempt.stopIntendedAt),
+          inArray(verification.state, ["pending", "runner-starting"]),
+          eq(verification.runtimeAttemptId, runtimeAttempt.id),
+          eq(
+            verification.commitSha,
+            db
+              .select({ commitSHA: changeCommitOperation.commitSha })
+              .from(changeCommitOperation)
+              .where(
+                and(
+                  eq(changeCommitOperation.changeId, change.id),
+                  eq(changeCommitOperation.state, "succeeded"),
+                ),
+              )
+              .orderBy(desc(changeCommitOperation.sequence))
+              .limit(1),
+          ),
+        ),
+      );
     if (!current)
       throw new CommandError(
         "conflict",
@@ -699,15 +802,47 @@ export function createSubstrateExecution(
       requireDurableROOTFS(actor, saved, nativeSnapshot.parse(saved.checkpoint));
     else if (actor.status.lastAssignedGeneration || actor.status.snapshots?.length)
       throw new CommandError("unavailable", "Initial Workspace acquired an unrecorded checkpoint");
-    const [current] = await sql`SELECT attempt.id FROM factory.runtime_attempt attempt
-      WHERE attempt.id=${attemptID} AND attempt.workspace_id=${workspaceID}
-        AND attempt.project_id=${config.projectID} AND attempt.generation=${config.generation}
-        AND attempt.state='starting' AND attempt.stop_intended_at IS NULL
-        AND (${saved.checkpoint !== null} OR attempt.ready_at IS NULL)
-        AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
-          WHERE newer.workspace_id=attempt.workspace_id AND newer.generation>attempt.generation)
-        AND (NOT ${waiting} OR EXISTS(SELECT 1 FROM factory.runtime_compute_wait waiting
-          WHERE waiting.attempt_id=attempt.id AND waiting.reason='compute-capacity'))`;
+    const db = drizzleTransaction(sql);
+    const newer = alias(runtimeAttempt, "newer");
+    const [current] = await db
+      .select({ id: runtimeAttempt.id })
+      .from(runtimeAttempt)
+      .where(
+        and(
+          eq(runtimeAttempt.id, attemptID),
+          eq(runtimeAttempt.workspaceId, workspaceID),
+          eq(runtimeAttempt.projectId, config.projectID),
+          eq(runtimeAttempt.generation, config.generation),
+          eq(runtimeAttempt.state, "starting"),
+          isNull(runtimeAttempt.stopIntendedAt),
+          or(expression`${saved.checkpoint !== null}`, isNull(runtimeAttempt.readyAt)),
+          notExists(
+            db
+              .select({ id: newer.id })
+              .from(newer)
+              .where(
+                and(
+                  eq(newer.workspaceId, runtimeAttempt.workspaceId),
+                  gt(newer.generation, runtimeAttempt.generation),
+                ),
+              ),
+          ),
+          or(
+            expression`NOT ${waiting}`,
+            exists(
+              db
+                .select({ attemptID: runtimeComputeWait.attemptId })
+                .from(runtimeComputeWait)
+                .where(
+                  and(
+                    eq(runtimeComputeWait.attemptId, runtimeAttempt.id),
+                    eq(runtimeComputeWait.reason, "compute-capacity"),
+                  ),
+                ),
+            ),
+          ),
+        ),
+      );
     if (!current)
       throw new CommandError(
         "unavailable",
@@ -715,9 +850,18 @@ export function createSubstrateExecution(
       );
     await substrateWorkspaceGrantIn(database, sql, workspaceID, userID, true);
     if (sources) {
-      const [source] = await sql`SELECT workspace_id FROM factory.substrate_source
-        WHERE workspace_id=${workspaceID} AND actor_uid=${operation.actorUID}
-          AND owner='actor' AND writable AND checkpoint_id IS NULL`;
+      const [source] = await db
+        .select({ workspaceID: substrateSource.workspaceId })
+        .from(substrateSource)
+        .where(
+          and(
+            eq(substrateSource.workspaceId, workspaceID),
+            eq(substrateSource.actorUid, operation.actorUID),
+            eq(substrateSource.owner, "actor"),
+            eq(substrateSource.writable, true),
+            isNull(substrateSource.checkpointId),
+          ),
+        );
       if (!source)
         throw new CommandError(
           "unavailable",
@@ -778,10 +922,29 @@ export function createSubstrateExecution(
             "A Stop-only Resume cannot authorize ordinary execution",
           );
         const requireCurrentStart = async () => {
-          const [current] = await sql`SELECT id FROM factory.runtime_attempt a
-            WHERE a.id=${attemptID} AND a.state='starting' AND a.stop_intended_at IS NULL
-              AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
-                WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
+          const db = drizzleTransaction(sql);
+          const newer = alias(runtimeAttempt, "newer");
+          const [current] = await db
+            .select({ id: runtimeAttempt.id })
+            .from(runtimeAttempt)
+            .where(
+              and(
+                eq(runtimeAttempt.id, attemptID),
+                eq(runtimeAttempt.state, "starting"),
+                isNull(runtimeAttempt.stopIntendedAt),
+                notExists(
+                  db
+                    .select({ id: newer.id })
+                    .from(newer)
+                    .where(
+                      and(
+                        eq(newer.workspaceId, runtimeAttempt.workspaceId),
+                        gt(newer.generation, runtimeAttempt.generation),
+                      ),
+                    ),
+                ),
+              ),
+            );
           if (!current)
             throw new CommandError("conflict", "Original native startup is no longer current");
         };
@@ -831,13 +994,35 @@ export function createSubstrateExecution(
     await sql.begin(async (tx) => {
       if (stopID) {
         const stopped = await nativeInputStopIn(tx, attemptID, stopID);
-        const [source] = await tx<{ id: string; epoch: number }[]>`SELECT checkpoint->>'id' AS id,
-          writer_epoch::float8 AS epoch FROM factory.substrate_source
-          WHERE workspace_id=${workspaceID ?? null} AND actor_uid=${before.metadata.uid}
-            AND owner='actor' AND writable AND checkpoint IS NOT NULL`;
+        const [source] = await drizzleTransaction(tx)
+          .select({
+            id: expression<string>`${substrateSource.checkpoint}->>'id'`,
+            epoch: substrateSource.writerEpoch,
+          })
+          .from(substrateSource)
+          .where(
+            and(
+              eq(substrateSource.workspaceId, workspaceID ?? expression`NULL`),
+              eq(substrateSource.actorUid, before.metadata.uid),
+              eq(substrateSource.owner, "actor"),
+              eq(substrateSource.writable, true),
+              isNotNull(substrateSource.checkpoint),
+            ),
+          );
         if (!stopped || !source) throw new Error("Native Stop Source transfer is unconfirmed");
-        await tx`UPDATE factory.substrate_input_stop SET source_checkpoint_id=${source.id},source_writer_epoch=${source.epoch},
-          resume_attempted_at=now() WHERE stop_id=${stopID} AND resume_attempted_at IS NULL`;
+        await drizzleTransaction(tx)
+          .update(substrateInputStop)
+          .set({
+            sourceCheckpointId: source.id,
+            sourceWriterEpoch: source.epoch,
+            resumeAttemptedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(substrateInputStop.stopId, stopID),
+              isNull(substrateInputStop.resumeAttemptedAt),
+            ),
+          );
       }
       if (operation.attempted) {
         if (!userID)
@@ -850,12 +1035,20 @@ export function createSubstrateExecution(
           // A confirmed refusal permits one continuation, not retries after an
           // unknown later reply. Only another confirmed capacity rejection
           // below may publish a new wait for this same dispatch.
-          await tx`DELETE FROM factory.runtime_compute_wait
-            WHERE attempt_id=${attemptID} AND reason='compute-capacity'`;
+          await drizzleTransaction(tx)
+            .delete(runtimeComputeWait)
+            .where(
+              and(
+                eq(runtimeComputeWait.attemptId, attemptID),
+                eq(runtimeComputeWait.reason, "compute-capacity"),
+              ),
+            );
         } else await requireInitialVerificationResumeIn(tx, saved, before, operation, userID);
       } else await dispatchActorRPCIn(tx, attemptID, operation);
-      await tx`UPDATE factory.runtime_attempt SET state='starting',failure=NULL,updated_at=now()
-        WHERE id=${attemptID} AND stop_intended_at IS NULL`;
+      await drizzleTransaction(tx)
+        .update(runtimeAttempt)
+        .set({ state: "starting", failure: null, updatedAt: expression`now()` })
+        .where(and(eq(runtimeAttempt.id, attemptID), isNull(runtimeAttempt.stopIntendedAt)));
     });
     allow(before.metadata.uid);
     try {
@@ -897,10 +1090,15 @@ export function createSubstrateExecution(
                 dispatched,
                 userID,
               );
-            await tx`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
-              VALUES(${attemptID},'compute-capacity') ON CONFLICT(attempt_id) DO NOTHING`;
-            const [hold] = await tx<{ reason: string }[]>`
-              SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`;
+            const db = drizzleTransaction(tx);
+            await db
+              .insert(runtimeComputeWait)
+              .values({ attemptId: attemptID, reason: "compute-capacity" })
+              .onConflictDoNothing({ target: runtimeComputeWait.attemptId });
+            const [hold] = await db
+              .select({ reason: runtimeComputeWait.reason })
+              .from(runtimeComputeWait)
+              .where(eq(runtimeComputeWait.attemptId, attemptID));
             waiting = hold?.reason === "compute-capacity";
           });
         } catch {
@@ -921,9 +1119,10 @@ export function createSubstrateExecution(
     const saved = await binding(sql);
     if (saved.deleting || saved.deleted) throw new Error("Native Actor is stopping");
     const before = await observe(sql, saved);
-    const [recorded] = await sql<
-      { state: string }[]
-    >`SELECT state::text AS state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    const [recorded] = await drizzleTransaction(sql)
+      .select({ state: runtimeAttempt.state })
+      .from(runtimeAttempt)
+      .where(eq(runtimeAttempt.id, attemptID));
     const reentering =
       before.status.state === "ACTOR_STATE_SUSPENDING" && recorded?.state === "pausing";
     if (
@@ -1009,7 +1208,10 @@ export function createSubstrateExecution(
       requireDurableROOTFS(before, saved, nativeSnapshot.parse(saved.checkpoint));
     if (completing && operation?.attempted && !operation.outcome)
       requireRecordedPause(before, saved);
-    await sql`UPDATE factory.runtime_attempt SET state='pausing',updated_at=now() WHERE id=${attemptID} AND stop_intended_at IS NULL`;
+    await drizzleTransaction(sql)
+      .update(runtimeAttempt)
+      .set({ state: "pausing", updatedAt: expression`now()` })
+      .where(and(eq(runtimeAttempt.id, attemptID), isNull(runtimeAttempt.stopIntendedAt)));
     if (workspaceID && !retainBootstrap) await sources?.freezeActor(workspaceID, attemptID, sql);
     hub.revoke(attemptID);
     if (!completing && !reentering) {
@@ -1018,8 +1220,15 @@ export function createSubstrateExecution(
       await sql.begin(async (tx) => {
         await dispatchActorRPCIn(tx, attemptID, dispatch);
         if (inputStop)
-          await tx`UPDATE factory.substrate_input_stop SET snapshot_attempted_at=now()
-          WHERE stop_id=${inputStop.stopID} AND snapshot_attempted_at IS NULL`;
+          await drizzleTransaction(tx)
+            .update(substrateInputStop)
+            .set({ snapshotAttemptedAt: expression`now()` })
+            .where(
+              and(
+                eq(substrateInputStop.stopId, inputStop.stopID),
+                isNull(substrateInputStop.snapshotAttemptedAt),
+              ),
+            );
       });
       operation = { ...dispatch, attempted: true };
     }
@@ -1059,21 +1268,45 @@ export function createSubstrateExecution(
     // on every rejection; a native reply alone cannot release Source.
     const dispatched = operation;
     await sql.begin(async (tx) => {
-      await tx`UPDATE factory.substrate_binding SET checkpoint=${JSON.stringify(checkpoint)}::text::jsonb WHERE runtime_attempt_id=${attemptID}`;
-      await tx`UPDATE factory.runtime_attempt SET state='paused',failure=CASE WHEN ready_at IS NULL THEN failure ELSE NULL END,updated_at=now() WHERE id=${attemptID} AND stop_intended_at IS NULL`;
+      const db = drizzleTransaction(tx);
+      await db
+        .update(substrateBinding)
+        .set({ checkpoint })
+        .where(eq(substrateBinding.runtimeAttemptId, attemptID));
+      await db
+        .update(runtimeAttempt)
+        .set({
+          state: "paused",
+          failure: expression`CASE WHEN ${runtimeAttempt.readyAt} IS NULL THEN ${runtimeAttempt.failure} ELSE NULL END`,
+          updatedAt: expression`now()`,
+        })
+        .where(and(eq(runtimeAttempt.id, attemptID), isNull(runtimeAttempt.stopIntendedAt)));
       if (dispatched?.attempted && !dispatched.outcome)
         await observeActorRPCIn(tx, attemptID, dispatched, actor, checkpoint);
     });
     if (workspaceID && !retainBootstrap) await sources?.paused(workspaceID, sql);
   }
   async function completeInputStopIn(sql: Database["client"], stopID: string) {
-    const changed = await sql`UPDATE factory.substrate_input_stop operation SET completed_at=now(),
-      completed_checkpoint=binding.checkpoint,completed_source_checkpoint_id=(source.checkpoint->>'id')::uuid
-      FROM factory.substrate_binding binding,factory.substrate_source source
-      WHERE operation.stop_id=${stopID} AND operation.runtime_attempt_id=${attemptID}
-        AND binding.runtime_attempt_id=operation.runtime_attempt_id
-        AND source.workspace_id=operation.workspace_id AND operation.completed_at IS NULL`;
-    if (changed.count !== 1)
+    const changed = await drizzleTransaction(sql)
+      .update(substrateInputStop)
+      .set({
+        completedAt: expression`now()`,
+        completedCheckpoint: substrateBinding.checkpoint,
+        completedSourceCheckpointId: expression`(${substrateSource.checkpoint}->>'id')::uuid`,
+      })
+      .from(substrateBinding)
+      .innerJoin(substrateSource, expression`true`)
+      .where(
+        and(
+          eq(substrateInputStop.stopId, stopID),
+          eq(substrateInputStop.runtimeAttemptId, attemptID),
+          eq(substrateBinding.runtimeAttemptId, substrateInputStop.runtimeAttemptId),
+          eq(substrateSource.workspaceId, substrateInputStop.workspaceId),
+          isNull(substrateInputStop.completedAt),
+        ),
+      )
+      .returning({ stopID: substrateInputStop.stopId });
+    if (changed.length !== 1)
       throw new Error("Native Stop completion lost its exact Source/snapshot binding");
   }
   return {
@@ -1083,46 +1316,127 @@ export function createSubstrateExecution(
     // transaction lock. This permits retaining a paused input across an upgrade,
     // not confirming Stop or dispatching any cleanup, lifecycle or inference.
     async pausedStopRetainedIn(sql: DatabaseTransaction, stopID: string) {
-      const [retained] = await sql`
-        SELECT attempt.id FROM factory.runtime_attempt attempt
-        JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
-          AND workspace.project_id=attempt.project_id AND workspace.change_id=attempt.change_id
-          AND workspace.kind='ticket'
-        JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
-        JOIN factory.change_agent_session session ON session.change_id=change.id
-          AND session.runtime_attempt_id=attempt.id
-        JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
-          AND intent.change_id=change.id AND intent.runtime_attempt_id=attempt.id
-          AND intent.session_id=session.opencode_session_id AND intent.prompt_id IS NOT NULL
-        JOIN factory.agent_turn turn ON turn.id=intent.turn_id AND turn.change_id=change.id
-        JOIN factory.substrate_source source ON source.workspace_id=workspace.id
-        WHERE attempt.id=${attemptID} AND attempt.state='paused'
-          AND attempt.stop_intended_at IS NULL
-          AND EXISTS(SELECT 1 FROM factory.installation_maintenance WHERE singleton AND enabled)
-          AND session.state='stopped' AND session.stop_pending AND session.stop_id=${stopID}
-          AND session.native_session_confirmed_at IS NOT NULL
-          AND turn.state IN ('failed','stopped','completed')
-          AND source.owner='service' AND source.writable AND source.service_base IS NOT NULL
-          AND source.generation>0 AND source.checkpoint IS NOT NULL
-          AND NOT EXISTS(SELECT 1 FROM factory.substrate_input_stop worker
-            WHERE worker.runtime_attempt_id=attempt.id)
-          AND NOT EXISTS(SELECT 1 FROM factory.substrate_actor_rpc operation
-            WHERE operation.runtime_attempt_id=attempt.id AND operation.outcome IS NULL)
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
-            WHERE newer.workspace_id=workspace.id AND newer.generation>attempt.generation)`;
+      const db = drizzleTransaction(sql);
+      const newer = alias(runtimeAttempt, "newer");
+      const [retained] = await db
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .innerJoin(
+          developmentWorkspace,
+          and(
+            eq(developmentWorkspace.id, runtimeAttempt.workspaceId),
+            eq(developmentWorkspace.projectId, runtimeAttempt.projectId),
+            eq(developmentWorkspace.changeId, runtimeAttempt.changeId),
+            eq(developmentWorkspace.kind, "ticket"),
+          ),
+        )
+        .innerJoin(
+          change,
+          and(
+            eq(change.id, runtimeAttempt.changeId),
+            eq(change.runtimeAttemptId, runtimeAttempt.id),
+          ),
+        )
+        .innerJoin(
+          changeAgentSession,
+          and(
+            eq(changeAgentSession.changeId, change.id),
+            eq(changeAgentSession.runtimeAttemptId, runtimeAttempt.id),
+          ),
+        )
+        .innerJoin(
+          changeAgentTurnIntent,
+          and(
+            eq(changeAgentTurnIntent.turnId, changeAgentSession.stopTurnId),
+            eq(changeAgentTurnIntent.changeId, change.id),
+            eq(changeAgentTurnIntent.runtimeAttemptId, runtimeAttempt.id),
+            eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+            isNotNull(changeAgentTurnIntent.promptId),
+          ),
+        )
+        .innerJoin(
+          agentTurn,
+          and(eq(agentTurn.id, changeAgentTurnIntent.turnId), eq(agentTurn.changeId, change.id)),
+        )
+        .innerJoin(substrateSource, eq(substrateSource.workspaceId, developmentWorkspace.id))
+        .where(
+          and(
+            eq(runtimeAttempt.id, attemptID),
+            eq(runtimeAttempt.state, "paused"),
+            isNull(runtimeAttempt.stopIntendedAt),
+            exists(
+              db
+                .select({ singleton: installationMaintenance.singleton })
+                .from(installationMaintenance)
+                .where(
+                  and(
+                    eq(installationMaintenance.singleton, true),
+                    eq(installationMaintenance.enabled, true),
+                  ),
+                ),
+            ),
+            eq(changeAgentSession.state, "stopped"),
+            eq(changeAgentSession.stopPending, true),
+            eq(changeAgentSession.stopId, stopID),
+            isNotNull(changeAgentSession.nativeSessionConfirmedAt),
+            inArray(agentTurn.state, ["failed", "stopped", "completed"]),
+            eq(substrateSource.owner, "service"),
+            eq(substrateSource.writable, true),
+            isNotNull(substrateSource.serviceBase),
+            gt(substrateSource.generation, 0),
+            isNotNull(substrateSource.checkpoint),
+            notExists(
+              db
+                .select({ stopID: substrateInputStop.stopId })
+                .from(substrateInputStop)
+                .where(eq(substrateInputStop.runtimeAttemptId, runtimeAttempt.id)),
+            ),
+            notExists(
+              db
+                .select({ attemptID: substrateActorRpc.runtimeAttemptId })
+                .from(substrateActorRpc)
+                .where(
+                  and(
+                    eq(substrateActorRpc.runtimeAttemptId, runtimeAttempt.id),
+                    isNull(substrateActorRpc.outcome),
+                  ),
+                ),
+            ),
+            notExists(
+              db
+                .select({ id: newer.id })
+                .from(newer)
+                .where(
+                  and(
+                    eq(newer.workspaceId, developmentWorkspace.id),
+                    gt(newer.generation, runtimeAttempt.generation),
+                  ),
+                ),
+            ),
+          ),
+        );
       if (!retained) return false;
       const saved = await binding(sql);
       if (saved.deleting || saved.deleted || !saved.actorUID || !saved.checkpoint) return false;
       const actor = await observe(sql, saved);
       requireDurableROOTFS(actor, saved, nativeSnapshot.parse(saved.checkpoint));
-      const [source] = await sql`
-        SELECT workspace_id FROM factory.substrate_source
-        WHERE workspace_id=${workspaceID ?? null} AND actor_uid=${actor.metadata.uid}
-          AND owner='service' AND writable AND service_base IS NOT NULL
-          AND generation>0 AND checkpoint->>'actorUID'=${actor.metadata.uid}
-          AND checkpoint->>'workspaceID'=workspace_id::text
-          AND (checkpoint->>'generation')::bigint=generation
-          AND (checkpoint->>'writerEpoch')::bigint<writer_epoch`;
+      const [source] = await db
+        .select({ workspaceID: substrateSource.workspaceId })
+        .from(substrateSource)
+        .where(
+          and(
+            eq(substrateSource.workspaceId, workspaceID ?? expression`NULL`),
+            eq(substrateSource.actorUid, actor.metadata.uid),
+            eq(substrateSource.owner, "service"),
+            eq(substrateSource.writable, true),
+            isNotNull(substrateSource.serviceBase),
+            gt(substrateSource.generation, 0),
+            expression`${substrateSource.checkpoint}->>'actorUID'=${actor.metadata.uid}`,
+            expression`${substrateSource.checkpoint}->>'workspaceID'=${substrateSource.workspaceId}::text`,
+            expression`(${substrateSource.checkpoint}->>'generation')::bigint=${substrateSource.generation}`,
+            expression`(${substrateSource.checkpoint}->>'writerEpoch')::bigint<${substrateSource.writerEpoch}`,
+          ),
+        );
       return Boolean(source && (await inputStopVersion()));
     },
     async supportsInitialSourceRole(sql: DatabaseTransaction) {
@@ -1135,9 +1449,19 @@ export function createSubstrateExecution(
             throw new Error("Native adapter is limited to its explicitly owned database");
           const saved = await binding(sql);
           if (saved.deleting || saved.deleted || !saved.actorUID || saved.checkpoint) return false;
-          const [provision] = await sql<{ workloadImage: string }[]>`
-          SELECT intent#>>'{configuration,workloadImage}' AS "workloadImage"
-          FROM factory.substrate_workspace WHERE workspace_id=${workspaceID} AND generation=1`;
+          const [provision] = await drizzleTransaction(sql)
+            .select({
+              workloadImage: expression<
+                string | null
+              >`${substrateWorkspace.intent}#>>'{configuration,workloadImage}'`,
+            })
+            .from(substrateWorkspace)
+            .where(
+              and(
+                eq(substrateWorkspace.workspaceId, workspaceID),
+                eq(substrateWorkspace.generation, 1),
+              ),
+            );
           if (!provision?.workloadImage) return false;
           // The caller already owns the runtime try-lock. Do not acquire another
           // connection/lock here. Native reads validate UID/version/full spec hash.
@@ -1179,16 +1503,28 @@ export function createSubstrateExecution(
             return "pending";
           requireDurableROOTFS(actor, saved, nativeSnapshot.parse(saved.checkpoint));
           await sources.requireIndependent(workspaceID, saved.actorUID, sql);
-          const [scope] = await sql<{ modelID: string }[]>`
-            SELECT turn.authority->>'modelId' AS "modelID"
-            FROM factory.change_agent_session session
-            JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
-            JOIN factory.agent_turn turn ON turn.id=intent.turn_id
-            JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
-            WHERE session.change_id=${target.changeID} AND session.state='stopped' AND session.stop_pending
-              AND session.stop_id=${target.stopID} AND session.runtime_attempt_id=${attemptID}
-              AND session.opencode_session_id=${target.sessionID}
-              AND intent.runtime_attempt_id=${attemptID} AND intent.session_id=${target.sessionID} AND intent.prompt_id=${target.promptID}`;
+          const [scope] = await drizzleTransaction(sql)
+            .select({ modelID: expression<string>`${agentTurn.authority}->>'modelId'` })
+            .from(changeAgentSession)
+            .innerJoin(
+              changeAgentTurnIntent,
+              eq(changeAgentTurnIntent.turnId, changeAgentSession.stopTurnId),
+            )
+            .innerJoin(agentTurn, eq(agentTurn.id, changeAgentTurnIntent.turnId))
+            .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId))
+            .where(
+              and(
+                eq(changeAgentSession.changeId, target.changeID),
+                eq(changeAgentSession.state, "stopped"),
+                eq(changeAgentSession.stopPending, true),
+                eq(changeAgentSession.stopId, target.stopID),
+                eq(changeAgentSession.runtimeAttemptId, attemptID),
+                eq(changeAgentSession.opencodeSessionId, target.sessionID),
+                eq(changeAgentTurnIntent.runtimeAttemptId, attemptID),
+                eq(changeAgentTurnIntent.sessionId, target.sessionID),
+                eq(changeAgentTurnIntent.promptId, target.promptID),
+              ),
+            );
           if (!scope) return "pending";
           const version = await inputStopVersion();
           if (!version) return "pending";
@@ -1201,9 +1537,15 @@ export function createSubstrateExecution(
             version,
             mode: "interrupt",
           });
-          await sql`INSERT INTO factory.substrate_input_stop(stop_id,runtime_attempt_id,workspace_id,change_id,actor_uid,assignment,checkpoint)
-            VALUES(${target.stopID},${attemptID},${workspaceID},${target.changeID},${saved.actorUID},
-              ${JSON.stringify(assignment)}::text::jsonb,${JSON.stringify(saved.checkpoint)}::text::jsonb)`;
+          await drizzleTransaction(sql).insert(substrateInputStop).values({
+            stopId: target.stopID,
+            runtimeAttemptId: attemptID,
+            workspaceId: workspaceID,
+            changeId: target.changeID,
+            actorUid: saved.actorUID,
+            assignment,
+            checkpoint: saved.checkpoint,
+          });
           operation = await nativeInputStopIn(sql, attemptID, target.stopID);
         }
         if (!operation) return "pending";
@@ -1271,8 +1613,12 @@ export function createSubstrateExecution(
         if (!operation || signal.aborted) return false;
         if (operation.completed) return true;
         if (observedResult)
-          await sql`UPDATE factory.substrate_input_stop SET result=${JSON.stringify(observedResult)}::text::jsonb
-          WHERE stop_id=${target.stopID} AND result IS NULL`;
+          await drizzleTransaction(sql)
+            .update(substrateInputStop)
+            .set({ result: observedResult })
+            .where(
+              and(eq(substrateInputStop.stopId, target.stopID), isNull(substrateInputStop.result)),
+            );
         await suspendIn(sql);
         if (!observedResult.confirmed) return false;
         await completeInputStopIn(sql, target.stopID);
@@ -1281,8 +1627,10 @@ export function createSubstrateExecution(
     },
     async recover() {
       return locked(async (sql) => {
-        const [present] =
-          await sql`SELECT runtime_attempt_id FROM factory.substrate_binding WHERE runtime_attempt_id=${attemptID}`;
+        const [present] = await drizzleTransaction(sql)
+          .select({ attemptID: substrateBinding.runtimeAttemptId })
+          .from(substrateBinding)
+          .where(eq(substrateBinding.runtimeAttemptId, attemptID));
         if (!present) return;
         const saved = await binding(sql);
         if (saved.deleting || saved.deleted || !saved.attemptedAt) return;
@@ -1301,8 +1649,16 @@ export function createSubstrateExecution(
           return;
         }
         if (["ACTOR_STATE_SUSPENDING", "ACTOR_STATE_SUSPENDED"].includes(actor.status.state)) {
-          const [pausing] = await sql`SELECT id FROM factory.runtime_attempt
-            WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+          const [pausing] = await drizzleTransaction(sql)
+            .select({ id: runtimeAttempt.id })
+            .from(runtimeAttempt)
+            .where(
+              and(
+                eq(runtimeAttempt.id, attemptID),
+                eq(runtimeAttempt.state, "pausing"),
+                isNull(runtimeAttempt.stopIntendedAt),
+              ),
+            );
           // Continue only the recorded native Pause, not an uncertain Resume or
           // inference. suspendIn requires its original dispatch and snapshot,
           // and still independently confirms durability before Source handoff.
@@ -1321,17 +1677,55 @@ export function createSubstrateExecution(
           if (hub.sourceConnected(attemptID)) await suspendIn(sql);
           return;
         }
-        const [attempt] = await sql<
-          { userID: string }[]
-        >`SELECT created_by AS "userID" FROM factory.runtime_attempt a WHERE id=${attemptID}
-           AND (state IN ('starting','ready') OR (${Boolean(workspaceID && sources)} AND state IN ('failed','pausing')
-             AND EXISTS(
-               SELECT 1 FROM factory.development_workspace w JOIN factory.substrate_source s ON s.workspace_id=w.id
-               JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id AND b.actor_uid=s.actor_uid
-               WHERE w.id=a.workspace_id AND w.kind='personal' AND s.owner='actor'
-                 AND ((a.ready_at IS NULL AND a.failure IS NOT NULL)
-                   OR (a.state='pausing' AND a.ready_at IS NOT NULL AND NOT s.writable AND s.checkpoint_id IS NOT NULL)))))
-          AND stop_intended_at IS NULL`;
+        const db = drizzleTransaction(sql);
+        const [attempt] = await db
+          .select({ userID: runtimeAttempt.createdBy })
+          .from(runtimeAttempt)
+          .where(
+            and(
+              eq(runtimeAttempt.id, attemptID),
+              or(
+                inArray(runtimeAttempt.state, ["starting", "ready"]),
+                and(
+                  expression`${Boolean(workspaceID && sources)}`,
+                  inArray(runtimeAttempt.state, ["failed", "pausing"]),
+                  exists(
+                    db
+                      .select({ workspaceID: developmentWorkspace.id })
+                      .from(developmentWorkspace)
+                      .innerJoin(
+                        substrateSource,
+                        eq(substrateSource.workspaceId, developmentWorkspace.id),
+                      )
+                      .innerJoin(
+                        substrateBinding,
+                        and(
+                          eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id),
+                          eq(substrateBinding.actorUid, substrateSource.actorUid),
+                        ),
+                      )
+                      .where(
+                        and(
+                          eq(developmentWorkspace.id, runtimeAttempt.workspaceId),
+                          eq(developmentWorkspace.kind, "personal"),
+                          eq(substrateSource.owner, "actor"),
+                          or(
+                            and(isNull(runtimeAttempt.readyAt), isNotNull(runtimeAttempt.failure)),
+                            and(
+                              eq(runtimeAttempt.state, "pausing"),
+                              isNotNull(runtimeAttempt.readyAt),
+                              eq(substrateSource.writable, false),
+                              isNotNull(substrateSource.checkpointId),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ),
+                ),
+              ),
+              isNull(runtimeAttempt.stopIntendedAt),
+            ),
+          );
         if (!attempt) return;
         const principal = await sql.begin((tx) =>
           preparationID
@@ -1358,29 +1752,51 @@ export function createSubstrateExecution(
               workspaceID)
         )
           throw new CommandError("forbidden", "Native owned Workspace identity differs");
-        const [existing] =
-          await sql`SELECT runtime_attempt_id FROM factory.substrate_binding WHERE runtime_attempt_id=${attemptID}`;
+        const [existing] = await drizzleTransaction(sql)
+          .select({ attemptID: substrateBinding.runtimeAttemptId })
+          .from(substrateBinding)
+          .where(eq(substrateBinding.runtimeAttemptId, attemptID));
         if (!existing) {
-          const [prior] = await sql<
-            {
-              id: string;
-              generation: number;
-              state: string;
-              actorUID: string | null;
-              deleted: boolean;
-            }[]
-          >`SELECT a.id,a.generation::float8 AS generation,a.state,
-            b.actor_uid::text AS "actorUID",b.deleted_at IS NOT NULL AS deleted
-            FROM factory.runtime_attempt a LEFT JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-            WHERE a.workspace_id=${workspaceID ?? null} OR a.id=${attemptID}
-            ORDER BY a.generation DESC LIMIT 1`;
+          const [prior] = await drizzleTransaction(sql)
+            .select({
+              id: runtimeAttempt.id,
+              generation: runtimeAttempt.generation,
+              state: runtimeAttempt.state,
+              actorUID: substrateBinding.actorUid,
+              deleted: expression<boolean>`${substrateBinding.deletedAt} IS NOT NULL`,
+            })
+            .from(runtimeAttempt)
+            .leftJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+            .where(
+              or(
+                workspaceID ? eq(runtimeAttempt.workspaceId, workspaceID) : undefined,
+                eq(runtimeAttempt.id, attemptID),
+              ),
+            )
+            .orderBy(desc(runtimeAttempt.generation))
+            .limit(1);
           if (prior) {
             const [retained] =
               workspaceID && sources && prior.actorUID
-                ? await sql`SELECT s.workspace_id FROM factory.substrate_source s
-                JOIN factory.substrate_workspace p ON p.workspace_id=s.workspace_id AND p.generation=${config.generation}
-                WHERE s.workspace_id=${workspaceID} AND s.actor_uid=${prior.actorUID}
-                  AND s.owner='service' AND s.writable AND s.checkpoint IS NOT NULL`
+                ? await drizzleTransaction(sql)
+                    .select({ workspaceID: substrateSource.workspaceId })
+                    .from(substrateSource)
+                    .innerJoin(
+                      substrateWorkspace,
+                      and(
+                        eq(substrateWorkspace.workspaceId, substrateSource.workspaceId),
+                        eq(substrateWorkspace.generation, config.generation),
+                      ),
+                    )
+                    .where(
+                      and(
+                        eq(substrateSource.workspaceId, workspaceID),
+                        eq(substrateSource.actorUid, prior.actorUID),
+                        eq(substrateSource.owner, "service"),
+                        eq(substrateSource.writable, true),
+                        isNotNull(substrateSource.checkpoint),
+                      ),
+                    )
                 : [];
             if (
               !retained ||
@@ -1395,6 +1811,7 @@ export function createSubstrateExecution(
           } else if (workspaceID && config.generation !== 1)
             throw new Error("Native Workspace begins with generation one");
           await sql.begin(async (tx) => {
+            const db = drizzleTransaction(tx);
             if (verificationID) {
               const grant = await substrateVerificationGrantIn(
                 tx,
@@ -1404,10 +1821,29 @@ export function createSubstrateExecution(
                 userID,
               );
               await admitComputeIn(tx, config.projectID, substrateResourceReservation(config));
-              await tx`INSERT INTO factory.runtime_attempt(id,project_id,verification_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-                VALUES(${attemptID},${config.projectID},${verificationID},'verification',${config.generation},${grant.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID})`;
-              await tx`UPDATE factory.verification SET runtime_attempt_id=${attemptID},state='runner-starting',updated_at=now()
-                WHERE id=${verificationID} AND runtime_attempt_id IS NULL`;
+              await db.insert(runtimeAttempt).values({
+                id: attemptID,
+                projectId: config.projectID,
+                verificationId: verificationID,
+                isolatedKind: "verification",
+                generation: config.generation,
+                revision: grant.revision,
+                state: "create-intended",
+                parentConnectorTokenHash: hashConnectorToken(tokens.parent),
+                childConnectorTokenHash: hashConnectorToken(tokens.child),
+                createIntendedAt: expression`now()`,
+                createdBy: userID,
+              });
+              await db
+                .update(verification)
+                .set({
+                  runtimeAttemptId: attemptID,
+                  state: "runner-starting",
+                  updatedAt: expression`now()`,
+                })
+                .where(
+                  and(eq(verification.id, verificationID), isNull(verification.runtimeAttemptId)),
+                );
             } else if (preparationID) {
               const grant = await substratePrebuildGrantIn(
                 tx,
@@ -1417,10 +1853,31 @@ export function createSubstrateExecution(
                 userID,
               );
               await admitComputeIn(tx, config.projectID, substrateResourceReservation(config));
-              await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-                VALUES(${attemptID},${config.projectID},'prebuild',${config.generation},${grant.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID})`;
-              await tx`UPDATE factory.project_image_preparation SET runtime_attempt_id=${attemptID},state='running',updated_at=now()
-                WHERE id=${preparationID} AND runtime_attempt_id IS NULL`;
+              await db.insert(runtimeAttempt).values({
+                id: attemptID,
+                projectId: config.projectID,
+                isolatedKind: "prebuild",
+                generation: config.generation,
+                revision: grant.revision,
+                state: "create-intended",
+                parentConnectorTokenHash: hashConnectorToken(tokens.parent),
+                childConnectorTokenHash: hashConnectorToken(tokens.child),
+                createIntendedAt: expression`now()`,
+                createdBy: userID,
+              });
+              await db
+                .update(projectImagePreparation)
+                .set({
+                  runtimeAttemptId: attemptID,
+                  state: "running",
+                  updatedAt: expression`now()`,
+                })
+                .where(
+                  and(
+                    eq(projectImagePreparation.id, preparationID),
+                    isNull(projectImagePreparation.runtimeAttemptId),
+                  ),
+                );
             } else if (isolated) {
               const grant = await substrateIsolatedGrantIn(
                 tx,
@@ -1430,59 +1887,165 @@ export function createSubstrateExecution(
                 userID,
               );
               await admitComputeIn(tx, config.projectID, substrateResourceReservation(config));
-              await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-                VALUES(${attemptID},${config.projectID},${isolated.isolatedKind},${config.generation},${grant.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID})`;
+              await db.insert(runtimeAttempt).values({
+                id: attemptID,
+                projectId: config.projectID,
+                isolatedKind: isolated.isolatedKind,
+                generation: config.generation,
+                revision: grant.revision,
+                state: "create-intended",
+                parentConnectorTokenHash: hashConnectorToken(tokens.parent),
+                childConnectorTokenHash: hashConnectorToken(tokens.child),
+                createIntendedAt: expression`now()`,
+                createdBy: userID,
+              });
               if (isolated.isolatedKind === "publication") {
-                const linked =
-                  await tx`UPDATE factory.release_attempt SET runtime_attempt_id=${attemptID}
-                  WHERE id=${isolated.isolatedID} AND runtime_attempt_id IS NULL AND state='running'`;
-                if (linked.count !== 1)
+                const linked = await db
+                  .update(releaseAttempt)
+                  .set({ runtimeAttemptId: attemptID })
+                  .where(
+                    and(
+                      eq(releaseAttempt.id, isolated.isolatedID),
+                      isNull(releaseAttempt.runtimeAttemptId),
+                      eq(releaseAttempt.state, "running"),
+                    ),
+                  )
+                  .returning({ id: releaseAttempt.id });
+                if (linked.length !== 1)
                   throw new Error("Publication execution owner changed before binding");
               } else if (isolated.promotionID) {
-                const linked =
-                  await tx`UPDATE factory.promotion_operation SET replacement_runtime_attempt_id=${attemptID},state='starting',updated_at=now()
-                  WHERE id=${isolated.promotionID} AND replacement_runtime_attempt_id IS NULL AND state='pending'`;
-                if (linked.count !== 1)
+                const linked = await db
+                  .update(promotionOperation)
+                  .set({
+                    replacementRuntimeAttemptId: attemptID,
+                    state: "starting",
+                    updatedAt: expression`now()`,
+                  })
+                  .where(
+                    and(
+                      eq(promotionOperation.id, isolated.promotionID),
+                      isNull(promotionOperation.replacementRuntimeAttemptId),
+                      eq(promotionOperation.state, "pending"),
+                    ),
+                  )
+                  .returning({ id: promotionOperation.id });
+                if (linked.length !== 1)
                   throw new Error("Promotion execution owner changed before binding");
               } else {
-                const linked =
-                  await tx`UPDATE factory.staging_preview SET runtime_attempt_id=${attemptID},updated_at=now()
-                  WHERE project_id=${config.projectID} AND revision=${grant.revision}
-                    AND (runtime_attempt_id IS NULL OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor
-                      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=predecessor.id
-                      WHERE predecessor.id=factory.staging_preview.runtime_attempt_id AND predecessor.state='stopped' AND binding.deleted_at IS NOT NULL))`;
-                if (linked.count !== 1) throw new Error("Staging Preview changed before binding");
+                const predecessor = alias(runtimeAttempt, "predecessor");
+                const linked = await db
+                  .update(stagingPreview)
+                  .set({ runtimeAttemptId: attemptID, updatedAt: expression`now()` })
+                  .where(
+                    and(
+                      eq(stagingPreview.projectId, config.projectID),
+                      eq(stagingPreview.revision, grant.revision),
+                      or(
+                        isNull(stagingPreview.runtimeAttemptId),
+                        exists(
+                          db
+                            .select({ id: predecessor.id })
+                            .from(predecessor)
+                            .innerJoin(
+                              substrateBinding,
+                              eq(substrateBinding.runtimeAttemptId, predecessor.id),
+                            )
+                            .where(
+                              and(
+                                eq(predecessor.id, stagingPreview.runtimeAttemptId),
+                                eq(predecessor.state, "stopped"),
+                                isNotNull(substrateBinding.deletedAt),
+                              ),
+                            ),
+                        ),
+                      ),
+                    ),
+                  )
+                  .returning({ projectID: stagingPreview.projectId });
+                if (linked.length !== 1) throw new Error("Staging Preview changed before binding");
               }
               if (isolated.isolatedKind === "staging") {
-                const [provision] =
-                  await tx`SELECT intent->'declaration' AS declaration FROM factory.substrate_isolated WHERE runtime_attempt_id=${attemptID}`;
-                await tx`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
-                  VALUES(${attemptID},${JSON.stringify(provision?.["declaration"])}::text::jsonb)`;
+                const [provision] = await db
+                  .select({
+                    declaration: expression<unknown>`${substrateIsolated.intent}->'declaration'`,
+                  })
+                  .from(substrateIsolated)
+                  .where(eq(substrateIsolated.runtimeAttemptId, attemptID));
+                await db.insert(stagingConfiguration).values({
+                  runtimeAttemptId: attemptID,
+                  declaration: provision?.declaration,
+                });
               }
             } else {
               if (!workspaceID) throw new Error("Native Workspace identity is missing");
-              await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
+              const grant = await substrateWorkspaceGrantIn(
+                database,
+                tx,
+                workspaceID,
+                userID,
+                true,
+              );
               const revision = await substrateWorkspaceRevisionIn(tx, workspaceID);
-              const [provision] = await tx<{ revision: string }[]>`
-                SELECT intent->>'revision' AS revision FROM factory.substrate_workspace
-                WHERE workspace_id=${workspaceID} AND generation=${config.generation}`;
+              const [provision] = await db
+                .select({ revision: expression<string>`${substrateWorkspace.intent}->>'revision'` })
+                .from(substrateWorkspace)
+                .where(
+                  and(
+                    eq(substrateWorkspace.workspaceId, workspaceID),
+                    eq(substrateWorkspace.generation, config.generation),
+                  ),
+                );
               if (provision && provision.revision !== revision)
                 throw new CommandError(
                   "conflict",
                   "Workspace execution revision differs from its native provisioning intent",
                 );
               await admitComputeIn(tx, config.projectID, substrateResourceReservation(config));
-              await tx`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-              SELECT ${attemptID},project_id,id,change_id,${config.generation},${revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID}
-                FROM factory.development_workspace WHERE id=${workspaceID}`;
+              await db.insert(runtimeAttempt).values({
+                id: attemptID,
+                projectId: grant.projectID,
+                workspaceId: workspaceID,
+                changeId: grant.changeID,
+                generation: config.generation,
+                revision,
+                state: "create-intended",
+                parentConnectorTokenHash: hashConnectorToken(tokens.parent),
+                childConnectorTokenHash: hashConnectorToken(tokens.child),
+                createIntendedAt: expression`now()`,
+                createdBy: userID,
+              });
             }
-            await tx`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent) VALUES(${attemptID},${atespace},${actorName},${JSON.stringify(retainedIntent)}::text::jsonb)`;
+            await db.insert(substrateBinding).values({
+              runtimeAttemptId: attemptID,
+              atespace,
+              actorName,
+              intent: retainedIntent,
+            });
             if (config.environment)
-              await tx`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key) VALUES(${attemptID},${"preparationID" in config || "isolatedID" in config ? config.environment.environment : "development"},${config.environment.version},${config.environment.secretKey})`;
+              await db.insert(runtimeEnvironmentIntent).values({
+                runtimeAttemptId: attemptID,
+                environment:
+                  "preparationID" in config || "isolatedID" in config
+                    ? config.environment.environment
+                    : "development",
+                version: config.environment.version,
+                secretKey: config.environment.secretKey,
+              });
             if (config.declaredApps)
-              await tx`UPDATE factory.runtime_attempt SET declared_apps=${JSON.stringify(config.declaredApps)}::text::jsonb WHERE id=${attemptID}`;
+              await db
+                .update(runtimeAttempt)
+                .set({ declaredApps: config.declaredApps })
+                .where(eq(runtimeAttempt.id, attemptID));
             if (workspace.changeID)
-              await tx`UPDATE factory.change SET runtime_attempt_id=${attemptID},state='starting',failure=NULL,version=version+1 WHERE id=${workspace.changeID}`;
+              await db
+                .update(change)
+                .set({
+                  runtimeAttemptId: attemptID,
+                  state: "starting",
+                  failure: null,
+                  version: expression`${change.version}+1`,
+                })
+                .where(eq(change.id, workspace.changeID));
           });
         }
         let saved = await binding(sql);
@@ -1493,7 +2056,15 @@ export function createSubstrateExecution(
           await currentGrant(sql, userID, true);
           if (await getActor())
             throw new Error("Foreign or already-existing Actor was not adopted");
-          await sql`UPDATE factory.substrate_binding SET create_attempted_at=now() WHERE runtime_attempt_id=${attemptID} AND create_attempted_at IS NULL`;
+          await drizzleTransaction(sql)
+            .update(substrateBinding)
+            .set({ createAttemptedAt: expression`now()` })
+            .where(
+              and(
+                eq(substrateBinding.runtimeAttemptId, attemptID),
+                isNull(substrateBinding.createAttemptedAt),
+              ),
+            );
           saved = await binding(sql);
           // Persisted above before dispatch. Errors remain unknown, not a second Create.
           let created: unknown;
@@ -1512,7 +2083,10 @@ export function createSubstrateExecution(
                 error.code,
               )
             )
-              await sql`UPDATE factory.substrate_binding SET create_rejected=true WHERE runtime_attempt_id=${attemptID}`;
+              await drizzleTransaction(sql)
+                .update(substrateBinding)
+                .set({ createRejected: true })
+                .where(eq(substrateBinding.runtimeAttemptId, attemptID));
             throw error;
           }
           await remember(sql, saved, created);
@@ -1522,12 +2096,39 @@ export function createSubstrateExecution(
         await requireSettledBootstrap(sql, saved, actor.status.lastAssignedGeneration);
         if (workspaceID) await sources?.attach(workspaceID, actor.metadata.uid, sql);
         await egress();
-        await sql`UPDATE factory.runtime_attempt SET state='starting',create_observed_at=COALESCE(create_observed_at,now()),updated_at=now() WHERE id=${attemptID} AND state='create-intended' AND stop_intended_at IS NULL`;
+        await drizzleTransaction(sql)
+          .update(runtimeAttempt)
+          .set({
+            state: "starting",
+            createObservedAt: expression`COALESCE(${runtimeAttempt.createObservedAt},now())`,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(runtimeAttempt.id, attemptID),
+              eq(runtimeAttempt.state, "create-intended"),
+              isNull(runtimeAttempt.stopIntendedAt),
+            ),
+          );
         // Create produces a natively SUSPENDED Actor. Resume uses that same
         // original identity; no source hooks, prompts or model queues are replayed.
         actor = await resumeActorIn(sql, saved, actor, userID);
         if (actor.status.state === "ACTOR_STATE_RUNNING") {
-          await sql`UPDATE factory.runtime_attempt SET state='starting',create_observed_at=COALESCE(create_observed_at,now()),failure=NULL,updated_at=now() WHERE id=${attemptID} AND state='create-intended' AND stop_intended_at IS NULL`;
+          await drizzleTransaction(sql)
+            .update(runtimeAttempt)
+            .set({
+              state: "starting",
+              createObservedAt: expression`COALESCE(${runtimeAttempt.createObservedAt},now())`,
+              failure: null,
+              updatedAt: expression`now()`,
+            })
+            .where(
+              and(
+                eq(runtimeAttempt.id, attemptID),
+                eq(runtimeAttempt.state, "create-intended"),
+                isNull(runtimeAttempt.stopIntendedAt),
+              ),
+            );
           allow(actor.metadata.uid);
         }
         return attemptID;
@@ -1550,18 +2151,36 @@ export function createSubstrateExecution(
             actor.status.crash?.message === "killed for exceeding its memory limit"
               ? "Native execution exceeded its memory limit. Its latest filesystem state is not a confirmed recovery point; retained resources were not reverted or replaced."
               : "Native execution crashed. A pending snapshot is not a confirmed recovery point; retained resources were not reverted or replaced.";
-          await sql`UPDATE factory.runtime_attempt SET state='failed',failure=${failure},updated_at=now()
-            WHERE id=${attemptID} AND state IN ('starting','ready','pausing','paused','failed') AND stop_intended_at IS NULL
-              AND (state<>'failed' OR failure IS DISTINCT FROM ${failure})`;
+          await drizzleTransaction(sql)
+            .update(runtimeAttempt)
+            .set({ state: "failed", failure, updatedAt: expression`now()` })
+            .where(
+              and(
+                eq(runtimeAttempt.id, attemptID),
+                inArray(runtimeAttempt.state, ["starting", "ready", "pausing", "paused", "failed"]),
+                isNull(runtimeAttempt.stopIntendedAt),
+                expression`(${runtimeAttempt.state}<>'failed' OR ${runtimeAttempt.failure} IS DISTINCT FROM ${failure})`,
+              ),
+            );
         }
         let sourceHandoff: "pending" | "confirmed-same-node" = "pending";
-        const [source] = await sql`
-          SELECT s.workspace_id FROM factory.substrate_source s
-          JOIN factory.runtime_attempt a ON a.workspace_id=s.workspace_id
-          WHERE a.id=${attemptID} AND a.state='paused' AND a.stop_intended_at IS NULL
-            AND s.actor_uid=${actor.metadata.uid} AND s.owner='service' AND s.writable
-            AND s.generation>0 AND s.service_base IS NOT NULL
-            AND s.checkpoint->>'actorUID'=${actor.metadata.uid}`;
+        const [source] = await drizzleTransaction(sql)
+          .select({ workspaceID: substrateSource.workspaceId })
+          .from(substrateSource)
+          .innerJoin(runtimeAttempt, eq(runtimeAttempt.workspaceId, substrateSource.workspaceId))
+          .where(
+            and(
+              eq(runtimeAttempt.id, attemptID),
+              eq(runtimeAttempt.state, "paused"),
+              isNull(runtimeAttempt.stopIntendedAt),
+              eq(substrateSource.actorUid, actor.metadata.uid),
+              eq(substrateSource.owner, "service"),
+              eq(substrateSource.writable, true),
+              gt(substrateSource.generation, 0),
+              isNotNull(substrateSource.serviceBase),
+              expression`${substrateSource.checkpoint}->>'actorUID'=${actor.metadata.uid}`,
+            ),
+          );
         if (source && actor.status.state === "ACTOR_STATE_SUSPENDED" && saved.checkpoint) {
           // A generic suspended state or an old local snapshot is not a Source
           // handoff. Independently re-observe the exact recorded durable ROOTFS.
@@ -1616,8 +2235,20 @@ export function createSubstrateExecution(
           await sources.requireIndependent(workspaceID, saved.actorUID, sql);
           saved = await binding(sql);
         }
-        await sql`UPDATE factory.runtime_attempt SET stop_intended_at=COALESCE(stop_intended_at,now()),state='stopping',updated_at=now() WHERE id=${attemptID}`;
-        await sql`UPDATE factory.substrate_binding SET delete_intended_at=COALESCE(delete_intended_at,now()) WHERE runtime_attempt_id=${attemptID}`;
+        await drizzleTransaction(sql)
+          .update(runtimeAttempt)
+          .set({
+            stopIntendedAt: expression`COALESCE(${runtimeAttempt.stopIntendedAt},now())`,
+            state: "stopping",
+            updatedAt: expression`now()`,
+          })
+          .where(eq(runtimeAttempt.id, attemptID));
+        await drizzleTransaction(sql)
+          .update(substrateBinding)
+          .set({
+            deleteIntendedAt: expression`COALESCE(${substrateBinding.deleteIntendedAt},now())`,
+          })
+          .where(eq(substrateBinding.runtimeAttemptId, attemptID));
         hub.revoke(attemptID);
         saved = await binding(sql);
         if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
@@ -1642,10 +2273,21 @@ export function createSubstrateExecution(
           throw new Error(
             "Unknown create outcome retained; absent Actor without an original UID is not confirmed deletion",
           );
-        await sql`UPDATE factory.substrate_binding SET deleted_at=now() WHERE runtime_attempt_id=${attemptID} AND deleted_at IS NULL`;
+        await drizzleTransaction(sql)
+          .update(substrateBinding)
+          .set({ deletedAt: expression`now()` })
+          .where(
+            and(
+              eq(substrateBinding.runtimeAttemptId, attemptID),
+              isNull(substrateBinding.deletedAt),
+            ),
+          );
         // Confirming deletion settles compute, not the recorded execution
         // failure. Verification/history must retain its original diagnosis.
-        await sql`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now(),updated_at=now() WHERE id=${attemptID}`;
+        await drizzleTransaction(sql)
+          .update(runtimeAttempt)
+          .set({ state: "stopped", stoppedAt: expression`now()`, updatedAt: expression`now()` })
+          .where(eq(runtimeAttempt.id, attemptID));
       });
     },
     async authorizeConnector(request: Request) {
@@ -1666,11 +2308,36 @@ export function createSubstrateExecution(
         const retainedSourceParent = Boolean(
           workspaceID && sources && request.headers.get("x-factory-connector-role") === "parent",
         );
-        const [attempt] = await sql<
-          { userID: string }[]
-        >`SELECT created_by AS "userID" FROM factory.runtime_attempt a WHERE id=${attemptID}
-          AND generation=${config.generation} AND (state IN ('starting','ready') OR (${retainedSourceParent} AND state IN ('failed','pausing'))) AND stop_intended_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
+        const db = drizzleTransaction(sql);
+        const newer = alias(runtimeAttempt, "newer");
+        const [attempt] = await db
+          .select({ userID: runtimeAttempt.createdBy })
+          .from(runtimeAttempt)
+          .where(
+            and(
+              eq(runtimeAttempt.id, attemptID),
+              eq(runtimeAttempt.generation, config.generation),
+              or(
+                inArray(runtimeAttempt.state, ["starting", "ready"]),
+                and(
+                  expression`${retainedSourceParent}`,
+                  inArray(runtimeAttempt.state, ["failed", "pausing"]),
+                ),
+              ),
+              isNull(runtimeAttempt.stopIntendedAt),
+              notExists(
+                db
+                  .select({ id: newer.id })
+                  .from(newer)
+                  .where(
+                    and(
+                      eq(newer.workspaceId, runtimeAttempt.workspaceId),
+                      gt(newer.generation, runtimeAttempt.generation),
+                    ),
+                  ),
+              ),
+            ),
+          );
         if (!attempt) return false;
         const stoppingInput = await nativeInputStopIn(sql, attemptID);
         if (stoppingInput) {

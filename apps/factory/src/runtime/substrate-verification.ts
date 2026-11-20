@@ -1,16 +1,22 @@
 import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, desc, eq, exists, inArray, isNotNull, isNull, sql as query } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  executionPolicyCommand,
+  projectEnvironment,
+  runtimeAttempt,
+  substrateBinding,
+  substrateVerification,
+  verification,
+} from "../../../../packages/db/src/schema";
 import {
   runtimeConnectorTokens,
   runtimeIdentity,
 } from "../../../../packages/runtime-domain/src/identity";
 import {
   createSubstrateControl,
-  nativeMetadata,
   type SubstrateCall,
-  SubstrateRPCError,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
 import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
@@ -22,6 +28,14 @@ import {
   type SubstrateVerificationConfiguration,
   substrateTemplateSHA256,
 } from "./substrate";
+import {
+  absentBoundNativeResource,
+  type BoundNativeProvisioningFacts,
+  boundNativeCreateRejected,
+  boundNativeProvisioningChecks,
+  boundNativeProvisioningKinds,
+  boundNativeProvisioningResource,
+} from "./substrate-bound-provisioning";
 import type { createSubstrateCapacity } from "./substrate-capacity";
 import { substrateResourceReservation } from "./substrate-resources";
 import { renderSubstrateTemplate } from "./substrate-template";
@@ -33,31 +47,22 @@ import {
 } from "./substrate-workspaces";
 
 type Database = ReturnType<typeof createDatabase>;
-const resource = z.object({ metadata: nativeMetadata }).passthrough();
-type Resource = z.infer<typeof resource>;
-type Provision = {
-  attemptID: string;
-  generation: number;
-  intent: {
-    configuration: SubstrateWorkspaceConfiguration;
-    revision: string;
-    repository: string;
-    devcontainerPath: string;
-    runnerUUID: string;
-    jobHandle: string;
-    templateSHA256: string;
-    environment: { version: number; secretKey: string | null };
+type Provision = Omit<
+  typeof substrateVerification.$inferSelect,
+  keyof BoundNativeProvisioningFacts | "intent"
+> &
+  BoundNativeProvisioningFacts & {
+    intent: {
+      configuration: SubstrateWorkspaceConfiguration;
+      revision: string;
+      repository: string;
+      devcontainerPath: string;
+      runnerUUID: string;
+      jobHandle: string;
+      templateSHA256: string;
+      environment: { version: number; secretKey: string | null };
+    };
   };
-  atespace: Resource | null;
-  policy: Resource | null;
-  template: Resource | null;
-  atespaceAttempted: string | null;
-  policyAttempted: string | null;
-  templateAttempted: string | null;
-  atespaceRejected: boolean;
-  policyRejected: boolean;
-  templateRejected: boolean;
-};
 
 // External create facts only. Verification remains the existing product owner;
 // the same Substrate adapter owns Actor lifecycle, observation and exact cleanup.
@@ -78,14 +83,17 @@ export function createSubstrateVerification(
   const editor = editorCall ?? createSubstrateControl(config.connection);
   const owner = provisionerCall ?? createSubstrateControl(config.provisioner);
   async function saved(verificationID: string, attemptID: string, sql = database.client) {
-    const [row] = await sql<
-      Provision[]
-    >`SELECT runtime_attempt_id AS "attemptID",generation::float8 AS generation,intent,
-      atespace,policy,template,atespace_attempted_at::text AS "atespaceAttempted",
-      policy_attempted_at::text AS "policyAttempted",template_attempted_at::text AS "templateAttempted",
-      atespace_rejected AS "atespaceRejected",policy_rejected AS "policyRejected",template_rejected AS "templateRejected"
-      FROM factory.substrate_verification WHERE verification_id=${verificationID} AND runtime_attempt_id=${attemptID}`;
-    if (!row || runtimeIdentity(verificationID, row.generation).attemptID !== row.attemptID)
+    const [selected] = await drizzleTransaction(sql)
+      .select()
+      .from(substrateVerification)
+      .where(
+        and(
+          eq(substrateVerification.verificationId, verificationID),
+          eq(substrateVerification.runtimeAttemptId, attemptID),
+        ),
+      );
+    const row = selected as Provision | undefined;
+    if (!row || runtimeIdentity(verificationID, row.generation).attemptID !== row.runtimeAttemptId)
       throw new Error(
         "Native Verification configuration or deterministic identity differs from immutable intent",
       );
@@ -117,63 +125,107 @@ export function createSubstrateVerification(
     };
     return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor);
   }
-  async function absent(call: SubstrateCall, method: string, request: unknown) {
-    try {
-      return await call(method, request);
-    } catch (error) {
-      if (error instanceof SubstrateRPCError && error.code === "NotFound") return null;
-      throw error;
-    }
-  }
   return {
     matchesProject: (id: string) => id === config.projectID,
     async forAttempt(attemptID: string) {
-      const [row] = await database.client<{ verificationID: string }[]>`
-        SELECT provision.verification_id AS "verificationID" FROM factory.substrate_verification provision
-        JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id
-        WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
-          AND attempt.verification_id=provision.verification_id AND attempt.isolated_kind='verification'
-          AND attempt.workspace_id IS NULL`;
+      const [row] = await database.db
+        .select({ verificationID: substrateVerification.verificationId })
+        .from(substrateVerification)
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, substrateVerification.runtimeAttemptId))
+        .where(
+          and(
+            eq(runtimeAttempt.id, attemptID),
+            eq(runtimeAttempt.projectId, config.projectID),
+            eq(runtimeAttempt.verificationId, substrateVerification.verificationId),
+            eq(runtimeAttempt.isolatedKind, "verification"),
+            isNull(runtimeAttempt.workspaceId),
+          ),
+        );
       return row
         ? execution(row.verificationID, await saved(row.verificationID, attemptID))
         : undefined;
     },
     async recover() {
-      const rows = await database.client<
-        { id: string }[]
-      >`SELECT attempt.id FROM factory.runtime_attempt attempt
-        JOIN factory.substrate_verification provision ON provision.runtime_attempt_id=attempt.id
-        WHERE attempt.project_id=${config.projectID} AND attempt.state IN ('starting','ready')
-          AND attempt.stop_intended_at IS NULL`;
+      const rows = await database.db
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .innerJoin(
+          substrateVerification,
+          eq(substrateVerification.runtimeAttemptId, runtimeAttempt.id),
+        )
+        .where(
+          and(
+            eq(runtimeAttempt.projectId, config.projectID),
+            inArray(runtimeAttempt.state, ["starting", "ready"]),
+            isNull(runtimeAttempt.stopIntendedAt),
+          ),
+        );
       for (const row of rows) await (await this.forAttempt(row.id))?.recover();
     },
     async start(verificationID: string, userID: string) {
       const sql = database.coordination();
+      const db = drizzleTransaction(sql);
       let row: Provision;
       try {
         await sql`SELECT pg_advisory_lock(hashtext(${`native-verification:${verificationID}`}))`;
-        const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
-        if (db?.name !== config.database)
+        const [currentDatabase] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
+        if (currentDatabase?.name !== config.database)
           throw new Error("Native Verification database differs from its configuration");
-        const [previous] = await sql<
-          Provision[]
-        >`SELECT runtime_attempt_id AS "attemptID",generation::float8 AS generation,intent FROM factory.substrate_verification WHERE verification_id=${verificationID} ORDER BY generation DESC LIMIT 1`;
+        const [previous] = await db
+          .select({
+            attemptID: substrateVerification.runtimeAttemptId,
+            generation: substrateVerification.generation,
+            intent: query<Provision["intent"]>`${substrateVerification.intent}`,
+          })
+          .from(substrateVerification)
+          .where(eq(substrateVerification.verificationId, verificationID))
+          .orderBy(desc(substrateVerification.generation))
+          .limit(1);
         // A saved explicit retry releases only its exact cleaned-up predecessor.
         // Provisioning without an Attempt, lost replies and retained executions
         // continue observing their original names, never allocate a successor.
         const [replacement] = previous
-          ? await sql`SELECT verification.id FROM factory.verification verification
-              JOIN factory.runtime_attempt attempt ON attempt.id=${previous.attemptID}
-              JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-              WHERE verification.id=${verificationID} AND verification.runtime_attempt_id IS NULL
-                AND verification.state='pending' AND attempt.verification_id=verification.id
- AND attempt.state='stopped' AND binding.deleted_at IS NOT NULL
-                AND EXISTS(SELECT 1 FROM factory.execution_policy_command decision
-                  WHERE decision.scope='checks-bootstrap-retry:'||verification.change_id::text
-                    AND decision.input->>'verificationID'=verification.id::text
-                    AND decision.input->>'runtimeAttemptID'=attempt.id::text
-                    AND decision.result->>'runtimeAttemptID'=attempt.id::text
-                    AND decision.result->>'state'='failed')`
+          ? await db
+              .select({ id: verification.id })
+              .from(verification)
+              .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, previous.attemptID))
+              .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+              .where(
+                and(
+                  eq(verification.id, verificationID),
+                  isNull(verification.runtimeAttemptId),
+                  eq(verification.state, "pending"),
+                  eq(runtimeAttempt.verificationId, verification.id),
+                  eq(runtimeAttempt.state, "stopped"),
+                  isNotNull(substrateBinding.deletedAt),
+                  exists(
+                    db
+                      .select({ id: executionPolicyCommand.commandId })
+                      .from(executionPolicyCommand)
+                      .where(
+                        and(
+                          eq(
+                            executionPolicyCommand.scope,
+                            query`'checks-bootstrap-retry:' || ${verification.changeId}::text`,
+                          ),
+                          eq(
+                            query`${executionPolicyCommand.input}->>'verificationID'`,
+                            query`${verification.id}::text`,
+                          ),
+                          eq(
+                            query`${executionPolicyCommand.input}->>'runtimeAttemptID'`,
+                            query`${runtimeAttempt.id}::text`,
+                          ),
+                          eq(
+                            query`${executionPolicyCommand.result}->>'runtimeAttemptID'`,
+                            query`${runtimeAttempt.id}::text`,
+                          ),
+                          eq(query`${executionPolicyCommand.result}->>'state'`, "failed"),
+                        ),
+                      ),
+                  ),
+                ),
+              )
           : [];
         const prior = replacement ? undefined : previous;
         const selectedConfiguration = prior
@@ -186,9 +238,18 @@ export function createSubstrateVerification(
         );
         if (!prior)
           await capacity?.requireReady(substrateResourceReservation(selectedConfiguration));
-        const [currentEnvironment] = await sql<{ version: number; secretKey: string | null }[]>`
-          SELECT version::float8 AS version,secret_key AS "secretKey" FROM factory.project_environment
-          WHERE project_id=${config.projectID} AND environment='development'`;
+        const [currentEnvironment] = await db
+          .select({
+            version: projectEnvironment.version,
+            secretKey: projectEnvironment.secretKey,
+          })
+          .from(projectEnvironment)
+          .where(
+            and(
+              eq(projectEnvironment.projectId, config.projectID),
+              eq(projectEnvironment.environment, "development"),
+            ),
+          );
         const environment = prior?.intent.environment ??
           currentEnvironment ?? { version: 0, secretKey: null };
         const atespace = `fa-${attemptID.replaceAll("-", "")}`;
@@ -267,43 +328,37 @@ export function createSubstrateVerification(
               userID,
               attemptID,
             );
-            await tx`INSERT INTO factory.substrate_verification(verification_id,runtime_attempt_id,generation,intent)
-            VALUES(${verificationID},${attemptID},${generation},${JSON.stringify(intent)}::text::jsonb)`;
+            await drizzleTransaction(tx).insert(substrateVerification).values({
+              verificationId: verificationID,
+              runtimeAttemptId: attemptID,
+              generation,
+              intent,
+            });
           });
         row = await saved(verificationID, attemptID, sql);
         if (!isDeepStrictEqual(row.intent, intent))
           throw new Error("Native Verification inputs differ from immutable provisioning intent");
-        const bindings = [{ role: "editor", members: [config.editorPrincipal] }];
-        for (const kind of ["atespace", "policy", "template"] as const) {
+        const checks = boundNativeProvisioningChecks(
+          "Verification",
+          atespace,
+          config.editorPrincipal,
+          template,
+          intent.templateSHA256,
+        );
+        const identity = and(
+          eq(substrateVerification.verificationId, verificationID),
+          eq(substrateVerification.runtimeAttemptId, attemptID),
+        );
+        for (const kind of boundNativeProvisioningKinds) {
           if (row[`${kind}Rejected`])
             throw new Error(
               "Native Verification Create was rejected; foreign resources are never adopted",
             );
           const call = kind === "template" ? editor : owner;
-          const getMethod =
-            kind === "atespace"
-              ? "GetAtespace"
-              : kind === "policy"
-                ? "GetAtespaceAccessPolicy"
-                : "GetActorTemplate";
-          const createMethod = getMethod.replace("Get", "Create");
-          const getRequest =
-            kind === "atespace"
-              ? { atespace: { name: atespace } }
-              : kind === "policy"
-                ? { atespace: { name: atespace }, name: "default" }
-                : { actorTemplate: { atespace, name: "runtime" } };
-          const createRequest =
-            kind === "atespace"
-              ? { atespace: { metadata: { name: atespace } } }
-              : kind === "policy"
-                ? {
-                    atespace: { name: atespace },
-                    accessPolicy: { metadata: { name: "default" }, bindings },
-                  }
-                : { actorTemplate: template };
-          if (!row[`${kind}Attempted`]) {
-            if (await absent(call, getMethod, getRequest))
+          const { getMethod, getRequest, createMethod, createRequest, requireOriginal } =
+            checks(kind);
+          if (!row[`${kind}AttemptedAt`]) {
+            if (await absentBoundNativeResource(call, getMethod, getRequest))
               throw new Error("Preexisting native Verification resource was not adopted");
             await sql.begin((tx) =>
               substrateVerificationAuthorityIn(
@@ -314,44 +369,27 @@ export function createSubstrateVerification(
                 attemptID,
               ),
             );
-            // Column names come only from the closed constant list above.
-            await sql.unsafe(
-              `UPDATE factory.substrate_verification SET ${kind}_attempted_at=now() WHERE verification_id=$1 AND runtime_attempt_id=$2`,
-              [verificationID, attemptID],
-            );
+            await db
+              .update(substrateVerification)
+              .set({ [`${kind}AttemptedAt`]: query`now()` })
+              .where(identity);
             row = await saved(verificationID, attemptID, sql);
             try {
-              const created = resource.parse(await call(createMethod, createRequest));
-              requireOriginal(
-                created,
-                null,
-                row[`${kind}Attempted`],
-                kind === "atespace" ? atespace : kind === "policy" ? "default" : "runtime",
-                kind === "template" ? atespace : undefined,
+              const created = boundNativeProvisioningResource.parse(
+                await call(createMethod, createRequest),
               );
-              if (kind === "template" && substrateTemplateSHA256(created) !== intent.templateSHA256)
-                throw new Error("Native Verification template differs from its frozen intent");
-              if (kind === "policy" && !isDeepStrictEqual(created["bindings"], bindings))
-                throw new Error("Native Verification editor grant differs from intent");
+              requireOriginal(created, null, row[`${kind}AttemptedAt`]);
               const outcome = kind === "template" ? { metadata: created.metadata } : created;
-              await sql.unsafe(
-                `UPDATE factory.substrate_verification SET ${kind}=$1::text::jsonb WHERE verification_id=$2 AND runtime_attempt_id=$3`,
-                [JSON.stringify(outcome), verificationID, attemptID],
-              );
+              await db
+                .update(substrateVerification)
+                .set({ [kind]: outcome })
+                .where(identity);
             } catch (error) {
-              if (
-                error instanceof SubstrateRPCError &&
-                [
-                  "AlreadyExists",
-                  "PermissionDenied",
-                  "Unauthenticated",
-                  "InvalidArgument",
-                ].includes(error.code)
-              )
-                await sql.unsafe(
-                  `UPDATE factory.substrate_verification SET ${kind}_rejected=true WHERE verification_id=$1 AND runtime_attempt_id=$2`,
-                  [verificationID, attemptID],
-                );
+              if (boundNativeCreateRejected(error))
+                await db
+                  .update(substrateVerification)
+                  .set({ [`${kind}Rejected`]: true })
+                  .where(identity);
               throw error;
             }
             row = await saved(verificationID, attemptID, sql);
@@ -359,24 +397,16 @@ export function createSubstrateVerification(
           // A confirmed grant lets the scoped Editor observe retained resources;
           // continuing this exact job must not depend on a global Owner token.
           const observer = kind === "template" || row.policy ? editor : owner;
-          const actual = resource.parse(await observer(getMethod, getRequest));
-          requireOriginal(
-            actual,
-            row[kind],
-            row[`${kind}Attempted`],
-            kind === "atespace" ? atespace : kind === "policy" ? "default" : "runtime",
-            kind === "template" ? atespace : undefined,
+          const actual = boundNativeProvisioningResource.parse(
+            await observer(getMethod, getRequest),
           );
-          if (kind === "template" && substrateTemplateSHA256(actual) !== intent.templateSHA256)
-            throw new Error("Native Verification template differs from its frozen intent");
-          if (kind === "policy" && !isDeepStrictEqual(actual["bindings"], bindings))
-            throw new Error("Native Verification editor grant differs from intent");
+          requireOriginal(actual, row[kind], row[`${kind}AttemptedAt`]);
           if (!row[kind]) {
             const outcome = kind === "template" ? { metadata: actual.metadata } : actual;
-            await sql.unsafe(
-              `UPDATE factory.substrate_verification SET ${kind}=$1::text::jsonb WHERE verification_id=$2 AND runtime_attempt_id=$3`,
-              [JSON.stringify(outcome), verificationID, attemptID],
-            );
+            await db
+              .update(substrateVerification)
+              .set({ [kind]: outcome })
+              .where(identity);
             row = await saved(verificationID, attemptID, sql);
           }
         }
@@ -390,23 +420,4 @@ export function createSubstrateVerification(
       return execution(verificationID, row).start(userID);
     },
   };
-}
-
-function requireOriginal(
-  value: Resource,
-  prior: Resource | null,
-  attempted: string | null,
-  name: string,
-  atespace?: string,
-) {
-  if (
-    !attempted ||
-    value.metadata.name !== name ||
-    value.metadata.atespace !== atespace ||
-    Date.parse(value.metadata.createTime) < Date.parse(attempted) ||
-    (prior &&
-      (prior.metadata.uid !== value.metadata.uid ||
-        prior.metadata.version !== value.metadata.version))
-  )
-    throw new Error("Native Verification provisioning resource differs from its original identity");
 }

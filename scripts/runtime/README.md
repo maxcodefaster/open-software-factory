@@ -12,15 +12,12 @@ existing monitoring owned by the operator is not removed or reconfigured.
 Read [the native profile](../../deploy/substrate/README.md) for the approved upstream commit,
 worker/gVisor pins, serving trust, separate Owner and Editor credentials, TLS egress, Actor image
 and installation-wide configuration. Execution uses the explicit Linux amd64 or arm64 runtime
-identity, never the control-plane host's architecture as a fallback. An artifact download,
-control-plane build or ordinary Docker component test does not qualify that profile.
-The owned ARM infrastructure proof has separately verified actual worker/runsc
-checksums, current-image private Docker, native DNS/TLS policy, synchronous durable
-ROOTFS cold restart and UID-bound Actor deletion. It is not the normal Factory
-Workspace/Source path or complete product acceptance.
-The [current qualification scope](../../deploy/substrate/README.md#qualification-scope) records
-the separately exercised ARM product path. The commands below retain their individual fixture
-boundaries; a passing component receipt is not a substitute for that product path.
+identity, never the control-plane host's architecture as a fallback.
+The [qualification scope](../../deploy/substrate/README.md#qualification-scope) owns the current
+ARM infrastructure and product evidence, including worker/runsc checksums, private Docker,
+TLS egress, ROOTFS restart and Actor deletion. The commands here distinguish live product,
+controlled controller and packaged-component checks. Each receipt retains its tested source,
+installation and scope; component or controller checks do not qualify the full product journey.
 
 The profile tools are explicit operator commands:
 
@@ -46,11 +43,9 @@ Do not point these at a retained user installation.
 mise exec -- bun run runtime:conformance
 ```
 
-This runs the official gRPC/Connector lifecycle proof and authenticated Factory Workspace proofs.
-Missing fixture configuration is a failure, never a skipped or successful proof. These tests cover
-their explicit assertions, not a released-image, two-Project Helm acceptance or the complete
-approved Ticket through Delivery. The operator remains responsible for the exact native fixture
-inventory the tests retain. There is no general Namespace cleanup or finalizer-removal command.
+This runs the official gRPC/Connector lifecycle and authenticated Factory Workspace proofs.
+Missing fixture configuration fails the command. The operator remains responsible for the exact
+native fixture inventory it retains. There is no general Namespace cleanup or finalizer-removal command.
 
 ## Product live fixtures
 
@@ -142,28 +137,24 @@ Wrong CA and hostname checks must fail certificate validation. Cleanup checks th
 original container ID, removes that container and deletes both fixture private keys.
 Receipts default to `.factory/test-results/substrate-rootless-proxy/OWNER_UUID/`; set
 `FACTORY_SUBSTRATE_PROXY_TEST_RESULTS` to choose another evidence directory under
-`.factory/test-results/`. This is a packaged-proxy component check, not native Actor lifecycle,
-Substrate isolation or native product acceptance.
+`.factory/test-results/`.
 
 `substrate-image-proof.sh` checks the Actor package on its matching native Linux architecture
 without starting an Actor. Emulated host/image mismatches are refused.
 `compose-inputs-proof.sh` and `project-compose-prebuild-proof.sh` exercise the shipped Compose,
 Buildx and Dev Containers components in separate, exactly owned ordinary Docker containers.
 The latter proofs deliberately use no network, host Docker socket, Project source or credentials.
-Their receipts state `nativeSubstrateProof: false`. They are publication gates for the packaged
-components, not proof of Substrate isolation, actual worker placement or ROOTFS lifecycle.
+Their receipts state `nativeSubstrateProof: false`. They gate publication of the packaged components.
 Its `cold-prebuild` recipe stops the original prepared-image primary, removes its temporary
 override, edits application Source and reopens that same container with the pinned CLI.
-The image/input and public configuration must still match; a successful component run does
-not qualify native Source restoration or an approved Ticket journey.
+The image/input and public configuration must still match.
 `credential-free` checks committed prebuild matching and CLI startup without Runtime
 environment or registry credentials. The reserve/template-fork, captured-process activation
 and private prepared-primary image paths have been removed, including their component recipes.
 Normal startup still validates prebuild input identity, native dependency images and required hooks.
 
 Controlled controller tests use real PostgreSQL and Factory owners with explicit RPC responses.
-Keep them separate from live native evidence. Cold restart is the accepted model; no check here
-promises warm memory, preserved process IDs, provider comparisons or billed compute savings.
+Cold restart is the accepted model, without preserved process IDs or warm memory.
 
 The independent editor's Kubernetes admission and UID-bound cleanup have a separate real-API proof:
 
@@ -171,9 +162,8 @@ The independent editor's Kubernetes admission and UID-bound cleanup have a separ
 FACTORY_IDE_NATIVE_CONTEXT=your-explicit-context mise exec -- bun run test:native developer-ide-kubernetes.native
 ```
 
-It creates an exactly owned Namespace and nonprivileged Node component Pod, then proves refusal
-of a changed UID, deletion and cleanup without finalizer changes. It does not qualify Theia,
-the editor browser journey or Substrate execution.
+It creates an exactly owned Namespace and nonprivileged Node component Pod, then checks refusal
+of a changed UID, deletion and cleanup without finalizer changes. Theia's browser journey runs separately.
 
 ## Product acceptance
 

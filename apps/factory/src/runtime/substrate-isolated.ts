@@ -1,7 +1,16 @@
 import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, desc, eq, inArray, isNotNull, isNull, sql as query } from "drizzle-orm";
+import type { z } from "zod";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  project,
+  projectEnvironment,
+  runtimeAttempt,
+  stagingPreview,
+  substrateBinding,
+  substrateIsolated,
+} from "../../../../packages/db/src/schema";
 import {
   runtimeConnectorTokens,
   runtimeIdentity,
@@ -9,9 +18,7 @@ import {
 } from "../../../../packages/runtime-domain/src/identity";
 import {
   createSubstrateControl,
-  nativeMetadata,
   type SubstrateCall,
-  SubstrateRPCError,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
 import type { SystemContract } from "../../../../packages/system-contract/src/system-contract";
@@ -31,6 +38,14 @@ import {
   type SubstrateIsolatedConfiguration,
   substrateTemplateSHA256,
 } from "./substrate";
+import {
+  absentBoundNativeResource,
+  type BoundNativeProvisioningFacts,
+  boundNativeCreateRejected,
+  boundNativeProvisioningChecks,
+  boundNativeProvisioningKinds,
+  boundNativeProvisioningResource,
+} from "./substrate-bound-provisioning";
 import type { createSubstrateCapacity } from "./substrate-capacity";
 import {
   type SubstrateIsolatedOwner,
@@ -46,37 +61,27 @@ import {
 } from "./substrate-workspaces";
 
 type Database = ReturnType<typeof createDatabase>;
-const resource = z.object({ metadata: nativeMetadata }).passthrough();
-type Resource = z.infer<typeof resource>;
-type Provision = {
-  ownerID: string;
-  kind: "staging" | "publication";
-  generation: number;
-  attemptID: string;
-  intent: {
-    configuration: SubstrateWorkspaceConfiguration;
-    createdBy: string;
-    promotionID: string | null;
-    revision: string;
-    repository: string;
-    devcontainerPath: string;
-    runnerUUID: string | null;
-    jobHandle: string | null;
-    version: string | null;
-    environment: SubstrateIsolatedConfiguration["environment"];
-    declaration: z.infer<typeof stagingConfiguration> | null;
-    templateSHA256: string;
+type Provision = Omit<
+  typeof substrateIsolated.$inferSelect,
+  keyof BoundNativeProvisioningFacts | "intent" | "kind"
+> &
+  BoundNativeProvisioningFacts & {
+    kind: "staging" | "publication";
+    intent: {
+      configuration: SubstrateWorkspaceConfiguration;
+      createdBy: string;
+      promotionID: string | null;
+      revision: string;
+      repository: string;
+      devcontainerPath: string;
+      runnerUUID: string | null;
+      jobHandle: string | null;
+      version: string | null;
+      environment: SubstrateIsolatedConfiguration["environment"];
+      declaration: z.infer<typeof stagingConfiguration> | null;
+      templateSHA256: string;
+    };
   };
-  atespace: Resource | null;
-  policy: Resource | null;
-  template: Resource | null;
-  atespaceAttempted: string | null;
-  policyAttempted: string | null;
-  templateAttempted: string | null;
-  atespaceRejected: boolean;
-  policyRejected: boolean;
-  templateRejected: boolean;
-};
 
 // Factory's existing Staging/promotion/publication rows commission these jobs.
 // This records their concrete native creates and uses the same Actor adapter.
@@ -95,13 +100,17 @@ export function createSubstrateIsolated(
   const editor = editorCall ?? createSubstrateControl(config.connection);
   const owner = provisionerCall ?? createSubstrateControl(config.provisioner);
   async function saved(attemptID: string, sql = database.client) {
-    const [row] = await sql<Provision[]>`
-      SELECT owner_id AS "ownerID",kind,generation::float8 AS generation,runtime_attempt_id AS "attemptID",
-        intent,atespace,policy,template,atespace_attempted_at::text AS "atespaceAttempted",
-        policy_attempted_at::text AS "policyAttempted",template_attempted_at::text AS "templateAttempted",
-        atespace_rejected AS "atespaceRejected",policy_rejected AS "policyRejected",template_rejected AS "templateRejected"
-      FROM factory.substrate_isolated WHERE runtime_attempt_id=${attemptID} AND project_id=${config.projectID}`;
-    if (!row || runtimeIdentity(row.ownerID, row.generation).attemptID !== row.attemptID)
+    const [selected] = await drizzleTransaction(sql)
+      .select()
+      .from(substrateIsolated)
+      .where(
+        and(
+          eq(substrateIsolated.runtimeAttemptId, attemptID),
+          eq(substrateIsolated.projectId, config.projectID),
+        ),
+      );
+    const row = selected as Provision | undefined;
+    if (!row || runtimeIdentity(row.ownerId, row.generation).attemptID !== row.runtimeAttemptId)
       throw new Error("Native isolated identity differs from its immutable provisioning intent");
     retainedSubstrateConfiguration(config, row.intent.configuration);
     return row;
@@ -115,7 +124,7 @@ export function createSubstrateIsolated(
       deployment: selected.deployment,
       database: selected.database,
       projectID: selected.projectID,
-      isolatedID: row.ownerID,
+      isolatedID: row.ownerId,
       isolatedKind: row.kind,
       promotionID: row.intent.promotionID,
       generation: row.generation,
@@ -135,32 +144,44 @@ export function createSubstrateIsolated(
     };
     return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor);
   }
-  async function absent(call: SubstrateCall, method: string, request: unknown) {
-    try {
-      return await call(method, request);
-    } catch (error) {
-      if (error instanceof SubstrateRPCError && error.code === "NotFound") return null;
-      throw error;
-    }
-  }
   async function provision(
     purpose: SubstrateIsolatedOwner,
     userID: string,
     sql: Database["client"],
   ) {
-    const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
-    if (db?.name !== config.database)
+    const db = drizzleTransaction(sql);
+    const [currentDatabase] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
+    if (currentDatabase?.name !== config.database)
       throw new Error("Native isolated database differs from its installation");
-    const [previous] = await sql<Provision[]>`
-      SELECT runtime_attempt_id AS "attemptID",generation::float8 AS generation,intent
-      FROM factory.substrate_isolated WHERE owner_id=${purpose.isolatedID} AND kind=${purpose.isolatedKind}
-        AND project_id=${config.projectID} ORDER BY generation DESC LIMIT 1`;
+    const [previous] = await db
+      .select({
+        attemptID: substrateIsolated.runtimeAttemptId,
+        generation: substrateIsolated.generation,
+        intent: query<Provision["intent"]>`${substrateIsolated.intent}`,
+      })
+      .from(substrateIsolated)
+      .where(
+        and(
+          eq(substrateIsolated.ownerId, purpose.isolatedID),
+          eq(substrateIsolated.kind, purpose.isolatedKind),
+          eq(substrateIsolated.projectId, config.projectID),
+        ),
+      )
+      .orderBy(desc(substrateIsolated.generation))
+      .limit(1);
     const [retired] =
       previous && purpose.isolatedKind === "staging" && !purpose.promotionID
-        ? await sql`SELECT attempt.id FROM factory.runtime_attempt attempt
-            JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-            WHERE attempt.id=${previous.attemptID} AND attempt.state='stopped'
-              AND binding.deleted_at IS NOT NULL`
+        ? await db
+            .select({ id: runtimeAttempt.id })
+            .from(runtimeAttempt)
+            .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+            .where(
+              and(
+                eq(runtimeAttempt.id, previous.attemptID),
+                eq(runtimeAttempt.state, "stopped"),
+                isNotNull(substrateBinding.deletedAt),
+              ),
+            )
         : [];
     const prior = retired ? undefined : previous;
     const generation = retired ? (previous?.generation ?? 0) + 1 : (prior?.generation ?? 1);
@@ -174,9 +195,18 @@ export function createSubstrateIsolated(
     if (!prior) await capacity?.requireReady(substrateResourceReservation(selected));
     const [currentEnvironment] =
       purpose.isolatedKind === "staging"
-        ? await sql<{ version: number; secretKey: string | null }[]>`
-            SELECT version::float8 AS version,secret_key AS "secretKey" FROM factory.project_environment
-            WHERE project_id=${config.projectID} AND environment='main-preview'`
+        ? await db
+            .select({
+              version: projectEnvironment.version,
+              secretKey: projectEnvironment.secretKey,
+            })
+            .from(projectEnvironment)
+            .where(
+              and(
+                eq(projectEnvironment.projectId, config.projectID),
+                eq(projectEnvironment.environment, "main-preview"),
+              ),
+            )
         : [];
     const environment = prior?.intent.environment ?? {
       environment:
@@ -306,104 +336,73 @@ export function createSubstrateIsolated(
     if (!prior)
       await sql.begin(async (tx) => {
         await substrateIsolatedAuthorityIn(tx, config.projectID, purpose, userID, attemptID);
-        await tx`INSERT INTO factory.substrate_isolated(owner_id,kind,project_id,generation,runtime_attempt_id,intent)
-        VALUES(${purpose.isolatedID},${purpose.isolatedKind},${config.projectID},${generation},${attemptID},${JSON.stringify(intent)}::text::jsonb)`;
+        await drizzleTransaction(tx).insert(substrateIsolated).values({
+          ownerId: purpose.isolatedID,
+          kind: purpose.isolatedKind,
+          projectId: config.projectID,
+          generation,
+          runtimeAttemptId: attemptID,
+          intent,
+        });
       });
     let row = await saved(attemptID, sql);
     if (!isDeepStrictEqual(row.intent, intent))
       throw new Error("Native isolated inputs differ from their immutable provisioning intent");
-    const bindings = [{ role: "editor", members: [selected.editorPrincipal] }];
-    for (const kind of ["atespace", "policy", "template"] as const) {
+    const checks = boundNativeProvisioningChecks(
+      "isolated",
+      atespace,
+      selected.editorPrincipal,
+      template,
+      intent.templateSHA256,
+    );
+    const identity = eq(substrateIsolated.runtimeAttemptId, attemptID);
+    for (const kind of boundNativeProvisioningKinds) {
       if (row[`${kind}Rejected`])
         throw new Error("Native isolated Create was rejected; foreign resources are never adopted");
       const call = kind === "template" ? editor : owner;
-      const getMethod =
-        kind === "atespace"
-          ? "GetAtespace"
-          : kind === "policy"
-            ? "GetAtespaceAccessPolicy"
-            : "GetActorTemplate";
-      const getRequest =
-        kind === "atespace"
-          ? { atespace: { name: atespace } }
-          : kind === "policy"
-            ? { atespace: { name: atespace }, name: "default" }
-            : { actorTemplate: { atespace, name: "runtime" } };
-      const createRequest =
-        kind === "atespace"
-          ? { atespace: { metadata: { name: atespace } } }
-          : kind === "policy"
-            ? {
-                atespace: { name: atespace },
-                accessPolicy: { metadata: { name: "default" }, bindings },
-              }
-            : { actorTemplate: template };
-      if (!row[`${kind}Attempted`]) {
-        if (await absent(call, getMethod, getRequest))
+      const { getMethod, getRequest, createMethod, createRequest, requireOriginal } = checks(kind);
+      if (!row[`${kind}AttemptedAt`]) {
+        if (await absentBoundNativeResource(call, getMethod, getRequest))
           throw new Error("Preexisting native isolated resource was not adopted");
         await sql.begin((tx) =>
           substrateIsolatedAuthorityIn(tx, config.projectID, purpose, userID, attemptID),
         );
-        await sql.unsafe(
-          `UPDATE factory.substrate_isolated SET ${kind}_attempted_at=now() WHERE runtime_attempt_id=$1`,
-          [attemptID],
-        );
+        await db
+          .update(substrateIsolated)
+          .set({ [`${kind}AttemptedAt`]: query`now()` })
+          .where(identity);
         row = await saved(attemptID, sql);
         try {
-          const created = resource.parse(
-            await call(getMethod.replace("Get", "Create"), createRequest),
+          const created = boundNativeProvisioningResource.parse(
+            await call(createMethod, createRequest),
           );
-          requireOriginal(
-            created,
-            null,
-            row[`${kind}Attempted`],
-            kind === "atespace" ? atespace : kind === "policy" ? "default" : "runtime",
-            kind === "template" ? atespace : undefined,
-          );
-          if (kind === "template" && substrateTemplateSHA256(created) !== intent.templateSHA256)
-            throw new Error("Native isolated template differs from its frozen intent");
-          if (kind === "policy" && !isDeepStrictEqual(created["bindings"], bindings))
-            throw new Error("Native isolated Editor grant differs from intent");
-          await sql.unsafe(
-            `UPDATE factory.substrate_isolated SET ${kind}=$1::text::jsonb WHERE runtime_attempt_id=$2`,
-            [
-              JSON.stringify(kind === "template" ? { metadata: created.metadata } : created),
-              attemptID,
-            ],
-          );
+          requireOriginal(created, null, row[`${kind}AttemptedAt`]);
+          await db
+            .update(substrateIsolated)
+            .set({
+              [kind]: kind === "template" ? { metadata: created.metadata } : created,
+            })
+            .where(identity);
         } catch (error) {
-          if (
-            error instanceof SubstrateRPCError &&
-            ["AlreadyExists", "PermissionDenied", "Unauthenticated", "InvalidArgument"].includes(
-              error.code,
-            )
-          )
-            await sql.unsafe(
-              `UPDATE factory.substrate_isolated SET ${kind}_rejected=true WHERE runtime_attempt_id=$1`,
-              [attemptID],
-            );
+          if (boundNativeCreateRejected(error))
+            await db
+              .update(substrateIsolated)
+              .set({ [`${kind}Rejected`]: true })
+              .where(identity);
           throw error;
         }
         row = await saved(attemptID, sql);
       }
       const observer = kind === "template" || row.policy ? editor : owner;
-      const actual = resource.parse(await observer(getMethod, getRequest));
-      requireOriginal(
-        actual,
-        row[kind],
-        row[`${kind}Attempted`],
-        kind === "atespace" ? atespace : kind === "policy" ? "default" : "runtime",
-        kind === "template" ? atespace : undefined,
-      );
-      if (kind === "template" && substrateTemplateSHA256(actual) !== intent.templateSHA256)
-        throw new Error("Native isolated template differs from its frozen intent");
-      if (kind === "policy" && !isDeepStrictEqual(actual["bindings"], bindings))
-        throw new Error("Native isolated Editor grant differs from intent");
+      const actual = boundNativeProvisioningResource.parse(await observer(getMethod, getRequest));
+      requireOriginal(actual, row[kind], row[`${kind}AttemptedAt`]);
       if (!row[kind]) {
-        await sql.unsafe(
-          `UPDATE factory.substrate_isolated SET ${kind}=$1::text::jsonb WHERE runtime_attempt_id=$2`,
-          [JSON.stringify(kind === "template" ? { metadata: actual.metadata } : actual), attemptID],
-        );
+        await db
+          .update(substrateIsolated)
+          .set({
+            [kind]: kind === "template" ? { metadata: actual.metadata } : actual,
+          })
+          .where(identity);
         row = await saved(attemptID, sql);
       }
     }
@@ -413,40 +412,70 @@ export function createSubstrateIsolated(
   }
   return {
     async forAttempt(attemptID: string) {
-      const [row] = await database.client`
-        SELECT provision.runtime_attempt_id FROM factory.substrate_isolated provision
-        JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id
-        WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
-          AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL AND attempt.isolated_kind::text=provision.kind`;
+      const [row] = await database.db
+        .select({ attemptID: substrateIsolated.runtimeAttemptId })
+        .from(substrateIsolated)
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, substrateIsolated.runtimeAttemptId))
+        .where(
+          and(
+            eq(runtimeAttempt.id, attemptID),
+            eq(runtimeAttempt.projectId, config.projectID),
+            isNull(runtimeAttempt.workspaceId),
+            isNull(runtimeAttempt.changeId),
+            eq(query`${runtimeAttempt.isolatedKind}::text`, substrateIsolated.kind),
+          ),
+        );
       return row ? execution(await saved(attemptID)) : undefined;
     },
     async stage(userID: string, promotionID?: string) {
       const sql = database.coordination();
+      const db = drizzleTransaction(sql);
       const key = promotionID ? `native-isolated:${promotionID}` : `staging:${config.projectID}`;
       let row: Provision;
       try {
         await sql`SELECT pg_advisory_lock(hashtext(${key}))`;
         await sql.begin((tx) => projectAuthorityIn(tx, userID, config.projectID));
         if (!promotionID) {
-          const [preview] = await sql<{ revision: string; attemptID: string | null }[]>`
-            SELECT revision,runtime_attempt_id AS "attemptID" FROM factory.staging_preview WHERE project_id=${config.projectID}`;
+          const [preview] = await db
+            .select({
+              revision: stagingPreview.revision,
+              attemptID: stagingPreview.runtimeAttemptId,
+            })
+            .from(stagingPreview)
+            .where(eq(stagingPreview.projectId, config.projectID));
           if (preview?.attemptID) {
-            const [current] = await sql<{ state: string; native: boolean }[]>`
-              SELECT state,substrate AS native FROM factory.runtime_attempt WHERE id=${preview.attemptID}`;
-            if (!current?.native)
+            const [current] = await db
+              .select({ state: runtimeAttempt.state })
+              .from(runtimeAttempt)
+              .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+              .where(eq(runtimeAttempt.id, preview.attemptID));
+            if (!current)
               throw new Error("Staging must use its original native execution identity");
             if (!["stopped", "create-intended"].includes(current.state)) return preview.attemptID;
           }
           if (!preview) {
-            const [project] = await sql<{ repository: string; branch: string }[]>`
-              SELECT repository_url AS repository,default_branch AS branch FROM factory.project WHERE id=${config.projectID}`;
-            if (!project) throw new Error("Staging Project is unavailable");
-            const revision = await resolveRepositoryRevision(project.repository, project.branch);
-            await readContract(project.repository, revision);
+            const [selectedProject] = await db
+              .select({
+                repository: project.repositoryUrl,
+                branch: project.defaultBranch,
+              })
+              .from(project)
+              .where(eq(project.id, config.projectID));
+            if (!selectedProject) throw new Error("Staging Project is unavailable");
+            const revision = await resolveRepositoryRevision(
+              selectedProject.repository,
+              selectedProject.branch,
+            );
+            await readContract(selectedProject.repository, revision);
             await sql.begin(async (tx) => {
               await projectAuthorityIn(tx, userID, config.projectID);
-              await tx`INSERT INTO factory.staging_preview(project_id,revision) VALUES(${config.projectID},${revision})
-                ON CONFLICT(project_id) DO NOTHING`;
+              await drizzleTransaction(tx)
+                .insert(stagingPreview)
+                .values({
+                  projectId: config.projectID,
+                  revision,
+                })
+                .onConflictDoNothing({ target: stagingPreview.projectId });
             });
           }
         }
@@ -489,11 +518,23 @@ export function createSubstrateIsolated(
       return execution(row).start(userID);
     },
     async recover() {
-      const rows = await database.client<{ id: string; state: string }[]>`
-        SELECT attempt.id,attempt.state FROM factory.runtime_attempt attempt
-        JOIN factory.substrate_isolated provision ON provision.runtime_attempt_id=attempt.id
-        WHERE attempt.project_id=${config.projectID}
-          AND attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed')`;
+      const rows = await database.db
+        .select({ id: runtimeAttempt.id, state: runtimeAttempt.state })
+        .from(runtimeAttempt)
+        .innerJoin(substrateIsolated, eq(substrateIsolated.runtimeAttemptId, runtimeAttempt.id))
+        .where(
+          and(
+            eq(runtimeAttempt.projectId, config.projectID),
+            inArray(runtimeAttempt.state, [
+              "create-intended",
+              "starting",
+              "ready",
+              "stop-intended",
+              "stopping",
+              "cleanup-failed",
+            ]),
+          ),
+        );
       for (const row of rows) {
         const runtime = await this.forAttempt(row.id);
         if (["stop-intended", "stopping", "cleanup-failed"].includes(row.state))
@@ -505,23 +546,4 @@ export function createSubstrateIsolated(
       }
     },
   };
-}
-
-function requireOriginal(
-  value: Resource,
-  prior: Resource | null,
-  attempted: string | null,
-  name: string,
-  atespace?: string,
-) {
-  if (
-    !attempted ||
-    value.metadata.name !== name ||
-    value.metadata.atespace !== atespace ||
-    Date.parse(value.metadata.createTime) < Date.parse(attempted) ||
-    (prior &&
-      (prior.metadata.uid !== value.metadata.uid ||
-        prior.metadata.version !== value.metadata.version))
-  )
-    throw new Error("Native isolated provisioning resource differs from its original identity");
 }

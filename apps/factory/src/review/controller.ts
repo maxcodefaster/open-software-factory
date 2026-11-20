@@ -1,3 +1,5 @@
+import { and, desc, eq, inArray, isNotNull, sql as query } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
 import {
@@ -10,7 +12,21 @@ import {
   pendingReviewThreads,
   visualReviewSchema,
 } from "../../../../packages/conversation-domain/src/visual-review";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  candidateReview,
+  reviewFeedback,
+  reviewFeedbackCommand,
+  reviewFeedbackMessage,
+  reviewMedia,
+  reviewScenario,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { assertMessageAttachmentsIn, freezeFeedbackAttachmentsIn } from "../attachments/store";
@@ -79,40 +95,66 @@ export function createVisualReviewController(
   ) {
     return database.client.begin(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`visual-review:${input.commandId}`}))`;
-      const [previous] = await sql<{ feedbackId: string | null; turnId: string | null }[]>`
-        SELECT feedback_id AS "feedbackId",turn_id AS "turnId"
-        FROM factory.review_feedback_command WHERE id=${input.commandId}`;
+      const db = drizzleTransaction(sql);
+      const [previous] = await db
+        .select({
+          feedbackId: reviewFeedbackCommand.feedbackId,
+          turnId: reviewFeedbackCommand.turnId,
+        })
+        .from(reviewFeedbackCommand)
+        .where(eq(reviewFeedbackCommand.id, input.commandId));
       if (previous) {
         await reviewChangeIn(sql, changeID, userID);
-        const [same] = await sql`SELECT id FROM factory.review_feedback_command
-          WHERE id=${input.commandId} AND change_id=${changeID} AND actor_id=${userID}
-            AND input=${JSON.stringify(input)}::jsonb`;
+        const [same] = await db
+          .select({ id: reviewFeedbackCommand.id })
+          .from(reviewFeedbackCommand)
+          .where(
+            and(
+              eq(reviewFeedbackCommand.id, input.commandId),
+              eq(reviewFeedbackCommand.changeId, changeID),
+              eq(reviewFeedbackCommand.actorId, userID),
+              query`${reviewFeedbackCommand.input}=${JSON.stringify(input)}::jsonb`,
+            ),
+          );
         if (!same) throw new CommandError("conflict", "Feedback command changed input");
         return previous;
       }
       await reviewChangeIn(sql, changeID, userID, true);
       const result = await work(sql);
-      await sql`INSERT INTO factory.review_feedback_command(id,change_id,actor_id,input,feedback_id,turn_id)
-        VALUES(${input.commandId},${changeID},${userID},${JSON.stringify(input)}::jsonb,
-          ${result.feedbackId ?? null},${result.turnId ?? null})`;
+      await db.insert(reviewFeedbackCommand).values({
+        id: input.commandId,
+        changeId: changeID,
+        actorId: userID,
+        input,
+        feedbackId: result.feedbackId ?? null,
+        turnId: result.turnId ?? null,
+      });
       return result;
     });
   }
   return {
     async tools(turnID: string) {
-      const [bundle] =
-        await database.client`SELECT id FROM factory.review_feedback_command WHERE turn_id=${turnID}`;
+      const [bundle] = await database.db
+        .select({ id: reviewFeedbackCommand.id })
+        .from(reviewFeedbackCommand)
+        .where(eq(reviewFeedbackCommand.turnId, turnID));
       return bundle ? feedbackToolCatalogue : [];
     },
     async call(turnID: string, ownerToken: string, raw: unknown): Promise<BuildBrowserResult> {
       const call = feedbackToolCallInput.parse(raw);
       let result: BuildBrowserResult | undefined;
       const allowed = await turns.validateExecution(turnID, ownerToken, async (sql) => {
-        const [bundle] = await sql<
-          { changeID: string; userID: string; selection: { id: string; version: number }[] }[]
-        >`
-          SELECT change_id AS "changeID",actor_id AS "userID",input->'feedback' AS selection
-          FROM factory.review_feedback_command WHERE turn_id=${turnID}`;
+        const db = drizzleTransaction(sql);
+        const [bundle] = await db
+          .select({
+            changeID: reviewFeedbackCommand.changeId,
+            userID: reviewFeedbackCommand.actorId,
+            selection: query<
+              { id: string; version: number }[]
+            >`${reviewFeedbackCommand.input}->'feedback'`,
+          })
+          .from(reviewFeedbackCommand)
+          .where(eq(reviewFeedbackCommand.turnId, turnID));
         if (!bundle) throw new CommandError("forbidden", "This turn has no human revision batch");
         await reviewChangeIn(sql, bundle.changeID, bundle.userID, true);
         if (call.name === "feedback_list") {
@@ -121,19 +163,26 @@ export function createVisualReviewController(
         }
         const selected = bundle.selection.find((item) => item.id === call.arguments.feedbackId);
         if (!selected) throw new CommandError("forbidden", "Thread is not in this revision batch");
-        const [feedback] = await sql<
-          {
-            kind: string;
-            version: number;
-            state: string;
-            mediaID: string | null;
-            context: unknown;
-          }[]
-        >`
-          SELECT kind,version,state,media_id AS "mediaID",jsonb_build_object('id',feedback.id,
-            'commit',commit_sha,'annotation',annotation,'messages',(SELECT jsonb_agg(body ORDER BY created_at,id)
-              FROM factory.review_feedback_message WHERE feedback_id=feedback.id)) AS context
-          FROM factory.review_feedback feedback WHERE id=${selected.id} AND change_id=${bundle.changeID}`;
+        const [feedback] = await db
+          .select({
+            kind: reviewFeedback.kind,
+            version: reviewFeedback.version,
+            state: reviewFeedback.state,
+            mediaID: reviewFeedback.mediaId,
+            context: query<unknown>`jsonb_build_object('id',${reviewFeedback.id},
+            'commit',${reviewFeedback.commitSha},'annotation',${reviewFeedback.annotation},
+            'messages',(${db
+              .select({
+                messages: query`jsonb_agg(${reviewFeedbackMessage.body}
+              ORDER BY ${reviewFeedbackMessage.createdAt},${reviewFeedbackMessage.id})`,
+              })
+              .from(reviewFeedbackMessage)
+              .where(eq(reviewFeedbackMessage.feedbackId, reviewFeedback.id))}))`,
+          })
+          .from(reviewFeedback)
+          .where(
+            and(eq(reviewFeedback.id, selected.id), eq(reviewFeedback.changeId, bundle.changeID)),
+          );
         if (!feedback) throw new CommandError("not-found", "Feedback not found");
         const alreadyImplemented =
           feedback.state === "implemented" && feedback.version === selected.version + 1;
@@ -153,7 +202,10 @@ export function createVisualReviewController(
               "Thread changed or is resolved. Ask the human to recheck.",
             );
           if (!alreadyImplemented)
-            await sql`UPDATE factory.review_feedback SET state='implemented',version=version+1 WHERE id=${selected.id}`;
+            await db
+              .update(reviewFeedback)
+              .set({ state: "implemented", version: query`${reviewFeedback.version}+1` })
+              .where(eq(reviewFeedback.id, selected.id));
           result = {
             content: [
               {
@@ -194,38 +246,95 @@ export function createVisualReviewController(
       return database.client.begin(async (sql) => {
         const change = await reviewChangeIn(sql, changeID, userID);
         const feedback = await feedbackIn(sql, changeID);
-        const [recording] = await sql`
-          SELECT id,state,commit_sha AS "commitSha",duration_ms AS "durationMs",reason,review_id AS "reviewId"
-          FROM factory.review_media WHERE change_id=${changeID} AND kind='recording'
-          ORDER BY CASE WHEN state='complete' THEN 0 ELSE 1 END,created_at DESC,id DESC LIMIT 1`;
-        const [review] = await sql<
-          { id: string }[]
-        >`SELECT COALESCE(finding_source_id,id) AS id FROM factory.candidate_review
-          WHERE change_id=${changeID} ORDER BY created_at DESC,ordinal DESC LIMIT 1`;
-        const [busy] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
-          AND state IN ('pending','dispatching','running','uncertain') LIMIT 1`;
+        const db = drizzleTransaction(sql);
+        const [recording] = await db
+          .select({
+            id: reviewMedia.id,
+            state: reviewMedia.state,
+            commitSha: reviewMedia.commitSha,
+            durationMs: reviewMedia.durationMs,
+            reason: reviewMedia.reason,
+            reviewId: reviewMedia.reviewId,
+          })
+          .from(reviewMedia)
+          .where(and(eq(reviewMedia.changeId, changeID), eq(reviewMedia.kind, "recording")))
+          .orderBy(
+            query`CASE WHEN ${reviewMedia.state}='complete' THEN 0 ELSE 1 END`,
+            desc(reviewMedia.createdAt),
+            desc(reviewMedia.id),
+          )
+          .limit(1);
+        const [review] = await db
+          .select({
+            id: query<string>`COALESCE(${candidateReview.findingSourceId},${candidateReview.id})`,
+          })
+          .from(candidateReview)
+          .where(eq(candidateReview.changeId, changeID))
+          .orderBy(desc(candidateReview.createdAt), desc(candidateReview.ordinal))
+          .limit(1);
+        const [busy] = await db
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.changeId, changeID),
+              inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+            ),
+          )
+          .limit(1);
+        const following = alias(reviewScenario, "following");
+        const nextCase = db
+          .select({ nextMs: following.mediaStartedMs })
+          .from(following)
+          .where(
+            and(
+              eq(following.reviewId, reviewScenario.reviewId),
+              query`(${following.startedAt},${following.id})>(${reviewScenario.startedAt},${reviewScenario.id})`,
+              query`${following.observationKind} IS DISTINCT FROM 'source'`,
+              isNotNull(following.mediaStartedMs),
+              query`${following.mediaSessionId} IS NOT DISTINCT FROM ${reviewMedia.browserSessionId}`,
+            ),
+          )
+          .orderBy(following.startedAt, following.id)
+          .limit(1)
+          .as("next_case");
         const scenarios = recording
-          ? await sql`
-              SELECT scenario.id,title,category,observation_kind AS "observationKind",expected,observed,
-                LEAST(COALESCE(media.duration_ms,0),COALESCE(media_started_ms,0))::float8 AS "startedMs",
-                LEAST(COALESCE(media.duration_ms,0),GREATEST(COALESCE(media_started_ms,0),
-                  COALESCE(next_case.next_ms,media.duration_ms,0)))::float8 AS "endedMs",
-                (media_started_ms IS NOT NULL AND media_session_id IS NOT DISTINCT FROM media.browser_session_id)
-                  AS "hasRecordingPosition",status
-              FROM factory.review_scenario scenario JOIN factory.review_media media ON media.review_id=scenario.review_id
-              LEFT JOIN LATERAL (
-                SELECT following.media_started_ms AS next_ms FROM factory.review_scenario following
-                WHERE following.review_id=scenario.review_id
-                  AND (following.started_at,following.id)>(scenario.started_at,scenario.id)
-                  AND following.observation_kind IS DISTINCT FROM 'source'
-                  AND following.media_started_ms IS NOT NULL
-                  AND following.media_session_id IS NOT DISTINCT FROM media.browser_session_id
-                ORDER BY following.started_at,following.id LIMIT 1
-              ) next_case ON true
-              WHERE media.id=${recording["id"] as string} ORDER BY started_at,scenario.id`
+          ? await db
+              .select({
+                id: reviewScenario.id,
+                title: reviewScenario.title,
+                category: reviewScenario.category,
+                observationKind: reviewScenario.observationKind,
+                expected: reviewScenario.expected,
+                observed: reviewScenario.observed,
+                startedMs: query<number>`LEAST(COALESCE(${reviewMedia.durationMs},0),COALESCE(${reviewScenario.mediaStartedMs},0))::float8`,
+                endedMs: query<number>`LEAST(COALESCE(${reviewMedia.durationMs},0),GREATEST(COALESCE(${reviewScenario.mediaStartedMs},0),
+                COALESCE(${nextCase.nextMs},${reviewMedia.durationMs},0)))::float8`,
+                hasRecordingPosition: query<boolean>`(${reviewScenario.mediaStartedMs} IS NOT NULL
+                AND ${reviewScenario.mediaSessionId} IS NOT DISTINCT FROM ${reviewMedia.browserSessionId})`,
+                status: reviewScenario.status,
+              })
+              .from(reviewScenario)
+              .innerJoin(reviewMedia, eq(reviewMedia.reviewId, reviewScenario.reviewId))
+              .leftJoinLateral(nextCase, query`true`)
+              .where(eq(reviewMedia.id, recording.id))
+              .orderBy(reviewScenario.startedAt, reviewScenario.id)
           : review
-            ? await sql`SELECT id,title,category,observation_kind AS "observationKind",expected,observed,0::float8 AS "startedMs",NULL::float8 AS "endedMs",status
-              FROM factory.review_scenario WHERE review_id=${review.id} ORDER BY started_at,id`
+            ? await db
+                .select({
+                  id: reviewScenario.id,
+                  title: reviewScenario.title,
+                  category: reviewScenario.category,
+                  observationKind: reviewScenario.observationKind,
+                  expected: reviewScenario.expected,
+                  observed: reviewScenario.observed,
+                  startedMs: query<number>`0::float8`,
+                  endedMs: query<null>`NULL::float8`,
+                  status: reviewScenario.status,
+                })
+                .from(reviewScenario)
+                .where(eq(reviewScenario.reviewId, review.id))
+                .orderBy(reviewScenario.startedAt, reviewScenario.id)
             : [];
         return visualReviewSchema.parse({
           feedback,
@@ -244,20 +353,27 @@ export function createVisualReviewController(
       return command(changeID, userID, input, async (sql) => {
         const change = await reviewChangeIn(sql, changeID, userID, true);
         await assertMessageAttachmentsIn(sql, change.projectID, userID, input.body);
+        const db = drizzleTransaction(sql);
         let commitSHA = change.commitSHA;
         let annotation = input.annotation;
         if (input.annotation) {
           const [media] = input.annotation.mediaId
-            ? await sql<
-                {
-                  commitSHA: string;
-                  attemptID: string | null;
-                  context: Record<string, unknown> | null;
-                }[]
-              >`
-            SELECT commit_sha AS "commitSHA",runtime_attempt_id AS "attemptID",source_context AS context FROM factory.review_media
-            WHERE id=${input.annotation.mediaId} AND change_id=${changeID} AND kind='still'
-              AND state='complete' AND created_by=${userID}`
+            ? await db
+                .select({
+                  commitSHA: reviewMedia.commitSha,
+                  attemptID: reviewMedia.runtimeAttemptId,
+                  context: query<Record<string, unknown> | null>`${reviewMedia.sourceContext}`,
+                })
+                .from(reviewMedia)
+                .where(
+                  and(
+                    eq(reviewMedia.id, input.annotation.mediaId),
+                    eq(reviewMedia.changeId, changeID),
+                    eq(reviewMedia.kind, "still"),
+                    eq(reviewMedia.state, "complete"),
+                    eq(reviewMedia.createdBy, userID),
+                  ),
+                )
             : [];
           if (input.annotation.mediaId && !media)
             throw new CommandError("conflict", "Annotation needs its saved original frame");
@@ -281,9 +397,10 @@ export function createVisualReviewController(
             const attemptID = input.annotation.attemptId ?? media?.attemptID;
             if (!attemptID || (media && media.attemptID !== attemptID))
               throw new CommandError("conflict", "Preview context changed its Runtime Attempt");
-            const [attempt] = await sql<{ commitSHA: string }[]>`
-              SELECT revision AS "commitSHA" FROM factory.runtime_attempt
-              WHERE id=${attemptID} AND change_id=${changeID}`;
+            const [attempt] = await db
+              .select({ commitSHA: runtimeAttempt.revision })
+              .from(runtimeAttempt)
+              .where(and(eq(runtimeAttempt.id, attemptID), eq(runtimeAttempt.changeId, changeID)));
             if (!attempt?.commitSHA)
               throw new CommandError("conflict", "Preview does not belong to this Ticket Change");
             commitSHA = attempt.commitSHA;
@@ -299,12 +416,21 @@ export function createVisualReviewController(
           }
         }
         const id = crypto.randomUUID();
-        await sql`INSERT INTO factory.review_feedback(id,change_id,author_id,kind,commit_sha,annotation,media_id)
-          VALUES(${id},${changeID},${userID},${input.kind},${commitSHA},
-            ${annotation ? JSON.stringify(annotation) : null}::jsonb,
-            ${input.annotation?.mediaId ?? null})`;
-        await sql`INSERT INTO factory.review_feedback_message(id,feedback_id,author_id,body)
-          VALUES(${crypto.randomUUID()},${id},${userID},${input.body})`;
+        await db.insert(reviewFeedback).values({
+          id,
+          changeId: changeID,
+          authorId: userID,
+          kind: input.kind,
+          commitSha: commitSHA,
+          annotation: annotation ?? null,
+          mediaId: input.annotation?.mediaId ?? null,
+        });
+        await db.insert(reviewFeedbackMessage).values({
+          id: crypto.randomUUID(),
+          feedbackId: id,
+          authorId: userID,
+          body: input.body,
+        });
         return { feedbackId: id };
       });
     },
@@ -321,19 +447,33 @@ export function createVisualReviewController(
             "conflict",
             "Feedback changed. Reload before replying or resolving.",
           );
+        const db = drizzleTransaction(sql);
         if (input.action !== "reply") {
           if (feedback.kind !== "thread")
             throw new CommandError("conflict", "Comments do not resolve");
           if (feedback.authorID !== userID)
             await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
-          await sql`UPDATE factory.review_feedback SET state=${input.action === "resolve" ? "resolved" : "open"},
-            resolved_by=${input.action === "resolve" ? userID : null},version=version+1 WHERE id=${input.feedbackId}`;
+          await db
+            .update(reviewFeedback)
+            .set({
+              state: input.action === "resolve" ? "resolved" : "open",
+              resolvedBy: input.action === "resolve" ? userID : null,
+              version: query`${reviewFeedback.version}+1`,
+            })
+            .where(eq(reviewFeedback.id, input.feedbackId));
         } else {
           if (!input.body) throw new CommandError("conflict", "Reply cannot be empty");
           await assertMessageAttachmentsIn(sql, change.projectID, userID, input.body);
-          await sql`INSERT INTO factory.review_feedback_message(id,feedback_id,author_id,body)
-            VALUES(${crypto.randomUUID()},${input.feedbackId},${userID},${input.body})`;
-          await sql`UPDATE factory.review_feedback SET version=version+1 WHERE id=${input.feedbackId}`;
+          await db.insert(reviewFeedbackMessage).values({
+            id: crypto.randomUUID(),
+            feedbackId: input.feedbackId,
+            authorId: userID,
+            body: input.body,
+          });
+          await db
+            .update(reviewFeedback)
+            .set({ version: query`${reviewFeedback.version}+1` })
+            .where(eq(reviewFeedback.id, input.feedbackId));
         }
         return { feedbackId: input.feedbackId };
       });

@@ -1,3 +1,4 @@
+import { and, eq, inArray, sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import { resolveMCPChoice } from "../../../../packages/conversation-domain/src/mcp-library";
@@ -5,7 +6,19 @@ import {
   defaultAutofixInstructions,
   type inputDelegation,
 } from "../../../../packages/conversation-domain/src/monitoring";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  change,
+  mcpLibrary,
+  monitoringHook,
+  monitoringIncident,
+  monitoringPolicy,
+  requirementApproval,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { createMCPLibrary } from "../mcp/controller";
@@ -40,9 +53,10 @@ export async function monitoringAssignmentIn(
   userId: string,
 ): Promise<MCPAssignment> {
   const library = createMCPLibrary(database);
-  const [entry] = await sql<
-    { scope: string }[]
-  >`SELECT scope FROM factory.mcp_library WHERE id=${connectionId}`;
+  const [entry] = await drizzleTransaction(sql)
+    .select({ scope: mcpLibrary.scope })
+    .from(mcpLibrary)
+    .where(eq(mcpLibrary.id, connectionId));
   if (!entry || entry.scope === "personal")
     throw new CommandError(
       "conflict",
@@ -143,15 +157,22 @@ export async function inputTicketAssignmentsIn(
   projectId: string,
   userId: string,
 ) {
-  const [policy] = await sql<
-    {
-      sourceAssignments: MCPAssignment[] | null;
-      assignment: MCPAssignment | null;
-    }[]
-  >`SELECT policy.source_assignments AS "sourceAssignments",policy.assignment
-    FROM factory.monitoring_incident event JOIN factory.monitoring_policy policy ON policy.id=event.policy_id
-    WHERE event.ticket_id=${ticketId} AND event.project_id=${projectId}`;
-  const assignments = policy ? retainedInputAssignments(policy) : [];
+  const [policy] = await drizzleTransaction(sql)
+    .select({
+      sourceAssignments: monitoringPolicy.sourceAssignments,
+      assignment: monitoringPolicy.assignment,
+    })
+    .from(monitoringIncident)
+    .innerJoin(monitoringPolicy, eq(monitoringPolicy.id, monitoringIncident.policyId))
+    .where(
+      and(eq(monitoringIncident.ticketId, ticketId), eq(monitoringIncident.projectId, projectId)),
+    );
+  const assignments = policy
+    ? retainedInputAssignments({
+        sourceAssignments: policy.sourceAssignments as MCPAssignment[] | null,
+        assignment: policy.assignment as MCPAssignment | null,
+      })
+    : [];
   await validateInputAssignmentsIn(database, sql, assignments, projectId, userId);
   return assignments;
 }
@@ -161,35 +182,64 @@ export async function monitoringAuthorityIn(
   sql: DatabaseTransaction,
   incidentId: string,
 ): Promise<MonitoringAuthority> {
-  const [incident] = await sql<
-    (Omit<MonitoringAuthority, "assignments"> & {
-      hookId: string;
-      hookVersion: number;
-      assignment: MCPAssignment | null;
-      sourceAssignments: MCPAssignment[] | null;
-    })[]
-  >`
-    SELECT incident.id,incident.project_id AS "projectId",incident.policy_id AS "policyId",
-      incident.hook_id AS "hookId",incident.hook_version::float8 AS "hookVersion",
-      policy.delegated_by AS "userId",policy.assignment,policy.source_assignments AS "sourceAssignments",
-      policy.source_ids AS "sourceIds",coalesce(policy.instructions,${defaultAutofixInstructions}) AS instructions,
-      policy.delegation
-    FROM factory.monitoring_incident incident JOIN factory.monitoring_policy policy ON policy.id=incident.policy_id
-    WHERE incident.id=${incidentId} AND incident.state IN ('queued','diagnosing','implementing')`;
+  const db = drizzleTransaction(sql);
+  const [incident] = await db
+    .select({
+      id: monitoringIncident.id,
+      projectId: monitoringIncident.projectId,
+      policyId: monitoringIncident.policyId,
+      hookId: monitoringIncident.hookId,
+      hookVersion: monitoringIncident.hookVersion,
+      userId: monitoringPolicy.delegatedBy,
+      assignment: monitoringPolicy.assignment,
+      sourceAssignments: monitoringPolicy.sourceAssignments,
+      sourceIds: monitoringPolicy.sourceIds,
+      instructions: query<string>`coalesce(${monitoringPolicy.instructions},${defaultAutofixInstructions})`,
+      delegation: monitoringPolicy.delegation,
+    })
+    .from(monitoringIncident)
+    .innerJoin(monitoringPolicy, eq(monitoringPolicy.id, monitoringIncident.policyId))
+    .where(
+      and(
+        eq(monitoringIncident.id, incidentId),
+        inArray(monitoringIncident.state, ["queued", "diagnosing", "implementing"]),
+      ),
+    );
   if (!incident) throw new CommandError("not-found", "Monitoring incident not found");
-  const [hook] = await sql`SELECT id FROM factory.monitoring_hook WHERE id=${incident.hookId}
-    AND project_id=${incident.projectId} AND enabled AND version=${incident.hookVersion}
-    AND policy_id=${incident.policyId} FOR SHARE`;
+  const [hook] = await db
+    .select({ id: monitoringHook.id })
+    .from(monitoringHook)
+    .where(
+      and(
+        eq(monitoringHook.id, incident.hookId),
+        eq(monitoringHook.projectId, incident.projectId),
+        eq(monitoringHook.enabled, true),
+        eq(monitoringHook.version, incident.hookVersion),
+        eq(monitoringHook.policyId, incident.policyId),
+      ),
+    )
+    .for("share");
   if (!hook) throw new CommandError("conflict", "Monitoring delegation changed or was disabled");
-  await manageMonitoringIn(sql, incident.userId, incident.projectId, incident.delegation);
-  const assignments = retainedInputAssignments(incident);
+  const delegation = incident.delegation as MonitoringAuthority["delegation"];
+  await manageMonitoringIn(sql, incident.userId, incident.projectId, delegation);
+  const assignments = retainedInputAssignments({
+    sourceAssignments: incident.sourceAssignments as MCPAssignment[] | null,
+    assignment: incident.assignment as MCPAssignment | null,
+  });
   await validateInputAssignmentsIn(database, sql, assignments, incident.projectId, incident.userId);
   if (incident.delegation === "application-fix-and-delivery" && !assignments.length)
     throw new CommandError("conflict", "Automatic fixes require a connected read-only source");
-  const [active] = await sql`SELECT id FROM factory.monitoring_incident WHERE id=${incidentId}
-    AND state IN ('queued','diagnosing','implementing')`;
+  const [active] = await db
+    .select({ id: monitoringIncident.id })
+    .from(monitoringIncident)
+    .where(
+      and(
+        eq(monitoringIncident.id, incidentId),
+        inArray(monitoringIncident.state, ["queued", "diagnosing", "implementing"]),
+      ),
+    );
   if (!active) throw new CommandError("conflict", "Monitoring work was stopped");
-  return { ...incident, assignments };
+  return { ...incident, delegation, assignments };
 }
 
 export async function monitoringChangeAuthorityIn(
@@ -198,12 +248,23 @@ export async function monitoringChangeAuthorityIn(
   changeId: string,
   incidentId: string,
 ) {
-  const [basis] = await sql`SELECT change.id FROM factory.change change
-    JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
-    JOIN factory.monitoring_incident incident ON incident.id=approval.monitoring_incident_id
-    WHERE change.id=${changeId} AND incident.id=${incidentId}
-      AND incident.ticket_id=change.ticket_id AND incident.project_id=change.project_id
-      AND incident.policy_id=approval.monitoring_policy_id`;
+  const [basis] = await drizzleTransaction(sql)
+    .select({ id: change.id })
+    .from(change)
+    .innerJoin(requirementApproval, eq(requirementApproval.id, change.requirementApprovalId))
+    .innerJoin(
+      monitoringIncident,
+      eq(monitoringIncident.id, requirementApproval.monitoringIncidentId),
+    )
+    .where(
+      and(
+        eq(change.id, changeId),
+        eq(monitoringIncident.id, incidentId),
+        eq(monitoringIncident.ticketId, change.ticketId),
+        eq(monitoringIncident.projectId, change.projectId),
+        eq(monitoringIncident.policyId, requirementApproval.monitoringPolicyId),
+      ),
+    );
   if (!basis)
     throw new CommandError("conflict", "Autofix no longer matches its delegated requirements");
   const authority = await monitoringAuthorityIn(database, sql, incidentId);

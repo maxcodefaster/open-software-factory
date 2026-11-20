@@ -287,6 +287,8 @@ test.each(["failed", "pre-dispatch failed"] as const)(
         FOR EACH ROW EXECUTE FUNCTION factory.owned_terminal_hold()`;
       await latch`SELECT pg_advisory_lock(hashtext('owned-terminal-projection'))`;
       latchHeld = true;
+      const [latchBackend] = await latch<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (!latchBackend) throw new Error("Owned projection lock backend is missing");
       const commandID = crypto.randomUUID();
       creating = callFactoryFunction(
         process.base,
@@ -319,7 +321,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
         async () => {
           const rows = await database.client<{ pid: number }[]>`
           SELECT pid FROM pg_stat_activity WHERE datname = current_database()
-            AND wait_event = 'advisory' AND query LIKE '%UPDATE factory.change_agent_session%'
+            AND ${latchBackend.pid}=ANY(pg_blocking_pids(pid))
             AND pid <> pg_backend_pid()`;
           return rows[0]?.pid;
         },

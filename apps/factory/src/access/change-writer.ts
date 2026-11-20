@@ -1,8 +1,18 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, eq, inArray, isNotNull, notInArray, or, sql as query } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeCommitOperation,
+  changeWriter,
+  developmentWorkspace,
+  runtimeAttempt,
+  workspaceSharedDocument,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./controller";
-import { writerActivity } from "./writer-activity";
 import { workspaceAuthorityIn } from "./workspace";
+import { writerActivity } from "./writer-activity";
 
 export async function lockChangeWriterIn(sql: DatabaseTransaction, changeID: string) {
   // Admission already orders Change before membership. Source and handoff use
@@ -40,18 +50,37 @@ export async function claimAgentWriterIn(
   commissionerID: string,
 ) {
   const writer = await lockChangeWriterIn(sql, changeID);
-  const [sharedDraft] =
-    await sql`SELECT document.path FROM factory.workspace_shared_document document
-    JOIN factory.development_workspace workspace ON workspace.id=document.workspace_id
-    WHERE workspace.change_id=${changeID} AND (document.dirty OR document.conflict) LIMIT 1`;
+  const db = drizzleTransaction(sql);
+  const [sharedDraft] = await db
+    .select({ path: workspaceSharedDocument.path })
+    .from(workspaceSharedDocument)
+    .innerJoin(
+      developmentWorkspace,
+      eq(developmentWorkspace.id, workspaceSharedDocument.workspaceId),
+    )
+    .where(
+      and(
+        eq(developmentWorkspace.changeId, changeID),
+        or(workspaceSharedDocument.dirty, workspaceSharedDocument.conflict),
+      ),
+    )
+    .limit(1);
   if (sharedDraft)
     throw new CommandError(
       "conflict",
       "Save or resolve shared editor buffers before commissioning background Coding.",
     );
-  const [integration] =
-    await sql`SELECT id FROM factory.change_commit_operation WHERE change_id=${changeID}
-    AND source='integration' AND state NOT IN ('succeeded','failed') LIMIT 1`;
+  const [integration] = await db
+    .select({ id: changeCommitOperation.id })
+    .from(changeCommitOperation)
+    .where(
+      and(
+        eq(changeCommitOperation.changeId, changeID),
+        eq(changeCommitOperation.source, "integration"),
+        notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+      ),
+    )
+    .limit(1);
   if (integration)
     throw new CommandError(
       "conflict",
@@ -108,17 +137,37 @@ export async function claimAgentWriterIn(
     // processes. A completed no-change commit permits another explicit prompt,
     // but its previous runtime must be fully fenced before the next writer grant.
     // Uncertain work and unconfirmed Stop remain ineligible.
-    const [previous] =
-      await sql`SELECT id FROM factory.agent_turn WHERE id=${writer.turnID} AND state IN ('completed','stopped','failed')`;
+    const [previous] = writer.turnID
+      ? await db
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, writer.turnID),
+              inArray(agentTurn.state, ["completed", "stopped", "failed"]),
+            ),
+          )
+      : [];
     if (!settled || !previous)
       throw new CommandError("conflict", "The previous Agent writer has not been safely released");
     fencePrevious ||= Boolean(settled.requiresFence);
   }
-  await sql`UPDATE factory.change_writer SET state='agent-preparing',turn_id=${turnID},user_id=NULL,
-    fence_required=fence_required OR ${fencePrevious},fence_attempt_id=CASE WHEN fence_required THEN fence_attempt_id ELSE (SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}) END,
-    requested_by=NULL,request_id=NULL,
-    handoff_kind='takeover',
-    epoch=epoch+1,updated_at=now() WHERE change_id=${changeID}`;
+  await db
+    .update(changeWriter)
+    .set({
+      state: "agent-preparing",
+      turnId: turnID,
+      userId: null,
+      fenceRequired: query`${changeWriter.fenceRequired} OR ${fencePrevious}`,
+      fenceAttemptId: query`CASE WHEN ${changeWriter.fenceRequired} THEN ${changeWriter.fenceAttemptId}
+      ELSE (${db.select({ id: change.runtimeAttemptId }).from(change).where(eq(change.id, changeID))}) END`,
+      requestedBy: null,
+      requestId: null,
+      handoffKind: "takeover",
+      epoch: query`${changeWriter.epoch}+1`,
+      updatedAt: query`now()`,
+    })
+    .where(eq(changeWriter.changeId, changeID));
 }
 
 export async function workspaceWriteAuthorityIn(
@@ -126,15 +175,15 @@ export async function workspaceWriteAuthorityIn(
   workspaceID: string,
   userID: string,
 ) {
-  const [workspace] = await sql<
-    {
-      projectID: string;
-      kind: string;
-      ownerID: string | null;
-      changeID: string | null;
-    }[]
-  >`SELECT project_id AS "projectID",kind,owner_user_id AS "ownerID",change_id AS "changeID"
-    FROM factory.development_workspace WHERE id=${workspaceID}`;
+  const [workspace] = await drizzleTransaction(sql)
+    .select({
+      projectID: developmentWorkspace.projectId,
+      kind: developmentWorkspace.kind,
+      ownerID: developmentWorkspace.ownerUserId,
+      changeID: developmentWorkspace.changeId,
+    })
+    .from(developmentWorkspace)
+    .where(eq(developmentWorkspace.id, workspaceID));
   if (!workspace) throw new CommandError("not-found", "Workspace not found");
   const writer = workspace.changeID ? await lockChangeWriterIn(sql, workspace.changeID) : null;
   const access = await workspaceAuthorityIn(sql, workspaceID, userID, true);
@@ -158,8 +207,17 @@ export async function runtimeWriteAuthorityIn(
   attemptID: string,
   userID: string,
 ) {
-  const [attempt] = await sql<{ workspaceID: string }[]>`SELECT workspace_id AS "workspaceID"
-    FROM factory.runtime_attempt WHERE id=${attemptID} AND state='ready' AND workspace_id IS NOT NULL`;
-  if (!attempt) throw new CommandError("conflict", "Runtime writing authority is unavailable");
+  const [attempt] = await drizzleTransaction(sql)
+    .select({ workspaceID: runtimeAttempt.workspaceId })
+    .from(runtimeAttempt)
+    .where(
+      and(
+        eq(runtimeAttempt.id, attemptID),
+        eq(runtimeAttempt.state, "ready"),
+        isNotNull(runtimeAttempt.workspaceId),
+      ),
+    );
+  if (!attempt?.workspaceID)
+    throw new CommandError("conflict", "Runtime writing authority is unavailable");
   return workspaceWriteAuthorityIn(sql, attempt.workspaceID, userID);
 }

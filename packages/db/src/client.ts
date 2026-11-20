@@ -8,7 +8,7 @@ import { drizzle, PostgresJsDatabase, PostgresJsSession } from "drizzle-orm/post
 import postgres from "postgres";
 import * as schema from "./schema";
 
-type DatabaseConnection = postgres.Sql | postgres.TransactionSql;
+type DatabaseConnection = postgres.Sql | postgres.TransactionSql | postgres.ReservedSql;
 export type DatabaseTransaction = postgres.TransactionSql;
 const databases = new WeakMap<DatabaseConnection, PostgresJsDatabase<typeof schema>>();
 const tables = extractTablesRelationalConfig<ExtractTablesWithRelations<typeof schema>>(
@@ -23,11 +23,19 @@ const relationalSchema = {
 const dialect = new PgDialect();
 
 /** Bind typed queries to the caller's existing connection, without opening another transaction. */
+export function drizzleTransaction(
+  client: postgres.ReservedSql,
+): Omit<PostgresJsDatabase<typeof schema>, "transaction">;
+export function drizzleTransaction(
+  client: postgres.Sql | postgres.TransactionSql,
+): PostgresJsDatabase<typeof schema>;
 export function drizzleTransaction(client: DatabaseConnection) {
   const existing = databases.get(client);
   if (existing) return existing;
   // The public driver constructor configures pool serializers. Transactions have
   // no pool options; Drizzle's native session binds their unsafe/begin methods.
+  // Reserved connections expose only queries. Their owner sends BEGIN/COMMIT
+  // explicitly; they must not call Drizzle's transaction helper on another pool.
   const db =
     "options" in client
       ? drizzle(client, { schema })

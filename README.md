@@ -250,6 +250,13 @@ source/controller/UI receipt, including Connector and Substrate bridge checks. I
 product acceptance. Native runtime and clean-install commands are in [scripts/runtime](scripts/runtime/README.md)
 and the [chart guide](deploy/helm/factory/README.md). GitHub checks run only for releases or by request.
 
+For an affected controller check, select its exact path. Database-only checks skip the application
+build; compiled endpoint checks retain it:
+
+```sh
+mise exec -- bun run test:controllers test/integration/inbox.test.ts
+```
+
 Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode and Forgejo.
 [AGENTS.md](AGENTS.md) holds contributor rules. Report bugs in GitHub Issues and vulnerabilities
 through [SECURITY.md](SECURITY.md). [Apache-2.0](LICENSE); bundled assets keep their own notices.

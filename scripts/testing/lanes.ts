@@ -103,6 +103,15 @@ export function integrationNeedsApplicationBuild(path: string) {
     "mcp-library.test.ts",
     "mcp-oauth.test.ts",
     "mcp-cancellation.test.ts",
+    "agent-read.test.ts",
+    "agent-turn-store.test.ts",
+    "coding-source-dispatch-fence.test.ts",
+    "change-document-drizzle.test.ts",
+    "delivery-controller-drizzle.test.ts",
+    "inbox.test.ts",
+    "skills-controllers-drizzle.test.ts",
+    "substrate-drizzle.test.ts",
+    "substrate-bound-provisioning.test.ts",
   ].includes(basename(path));
 }
 export function integrationLane(path: string) {

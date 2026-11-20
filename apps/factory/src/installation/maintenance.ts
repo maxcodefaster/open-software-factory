@@ -1,4 +1,10 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, inArray, isNull, lte, or, sql as expression } from "drizzle-orm";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import { agentTurn, installationMaintenance } from "../../../../packages/db/src/schema";
 import { confirmUndispatchedReviewStopsIn } from "../agent/stop";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { createUsageJournal } from "../usage/journal";
@@ -13,8 +19,10 @@ export type RetainedMaintenanceStop = {
 };
 
 export async function installationInMaintenance(database: Database) {
-  const [state] = await database.client<{ enabled: boolean }[]>`
-    SELECT enabled FROM factory.installation_maintenance WHERE singleton`;
+  const [state] = await database.db
+    .select({ enabled: installationMaintenance.enabled })
+    .from(installationMaintenance)
+    .where(eq(installationMaintenance.singleton, true));
   if (!state) throw new Error("Installation maintenance state is unavailable");
   return state.enabled;
 }
@@ -30,18 +38,29 @@ export async function beginInstallationMaintenance(
   // its lease. Reconcile only that already-expired Project execution, through
   // the normal recovery boundary. This neither retries inference nor stops a
   // live owner. The fenced admission check below still rejects all active work.
-  const expired = await database.client<{ id: string }[]>`
-    SELECT id FROM factory.agent_turn WHERE change_id IS NULL
-      AND state IN ('dispatching','running')
-      AND (owner_token IS NULL OR owner_expires_at<=clock_timestamp())`;
+  const expired = await database.db
+    .select({ id: agentTurn.id })
+    .from(agentTurn)
+    .where(
+      and(
+        isNull(agentTurn.changeId),
+        inArray(agentTurn.state, ["dispatching", "running"]),
+        or(
+          isNull(agentTurn.ownerToken),
+          lte(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+        ),
+      ),
+    );
   const turns = createAgentTurnStore(database);
   const usage = createUsageJournal(database);
   for (const { id } of expired)
     if (await turns.quarantineExpiredProject(id)) await usage.abandon(`turn:${id}`);
   await database.client.begin(async (sql) => {
-    const [state] = await sql`
-      UPDATE factory.installation_maintenance SET enabled=true,requested_at=now()
-      WHERE singleton RETURNING singleton`;
+    const [state] = await drizzleTransaction(sql)
+      .update(installationMaintenance)
+      .set({ enabled: true, requestedAt: expression`now()` })
+      .where(eq(installationMaintenance.singleton, true))
+      .returning({ singleton: installationMaintenance.singleton });
     if (!state) throw new Error("Installation maintenance state is unavailable");
     // Only the same pure, fenced no-input proof used by normal Stop. Never
     // interrupt native work or equate an unknown Session with an empty one.
@@ -56,7 +75,7 @@ export async function beginInstallationMaintenance(
         FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
         WHERE session.state='stopped' AND session.stop_pending AND session.stop_id IS NOT NULL
- AND attempt.state='paused' AND attempt.workspace_id IS NOT NULL
+          AND attempt.state='paused' AND attempt.workspace_id IS NOT NULL
         ORDER BY attempt.workspace_id,session.change_id`;
       for (const target of paused) {
         // Native lifecycle owns this same lock. Never wait for it while holding
@@ -89,6 +108,8 @@ export async function beginInstallationMaintenance(
 }
 
 export async function finishInstallationMaintenance(database: Database) {
-  await database.client`
-    UPDATE factory.installation_maintenance SET enabled=false,requested_at=NULL WHERE singleton`;
+  await database.db
+    .update(installationMaintenance)
+    .set({ enabled: false, requestedAt: null })
+    .where(eq(installationMaintenance.singleton, true));
 }

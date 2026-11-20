@@ -1,14 +1,41 @@
 import { createHash } from "node:crypto";
+import {
+  and,
+  asc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  ne,
+  notExists,
+  or,
+  sql as expression,
+} from "drizzle-orm";
 import type { z } from "zod";
 import {
   type AgentTurnCommand,
-  type AgentTurnState,
   agentTurnAuthorityInput,
   agentTurnBoundary,
   agentTurnCommandInput,
   assertAgentTurnAuthority,
 } from "../../../../packages/conversation-domain/src/agent-turn";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  agentTurnMcp,
+  change,
+  changeAgentSession,
+  changeWriter,
+  codingPause,
+  ticket,
+  ticketConversation,
+} from "../../../../packages/db/src/schema";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import { freezeAttachmentContextIn } from "../attachments/store";
@@ -19,28 +46,18 @@ import { lockConversation } from "../conversations/store";
 import { codingBudgetIn } from "../usage/policy";
 
 type Database = ReturnType<typeof createDatabase>;
-type TurnRow = {
-  id: string;
-  command_id: string;
-  input: unknown;
-  input_digest: string;
-  authority: unknown;
-  state: AgentTurnState;
-  owner_token: string | null;
-  owner_expires_at: Date | string | null;
-  outcome_summary: string | null;
-};
+type TurnRow = typeof agentTurn.$inferSelect;
 
 function turn(row: TurnRow) {
   return {
     id: row.id,
-    commandId: row.command_id,
+    commandId: row.commandId,
     command: agentTurnCommandInput.parse(row.input),
     authority: agentTurnAuthorityInput.parse(row.authority),
     state: row.state,
-    ownerToken: row.owner_token,
-    ownerExpiresAt: row.owner_expires_at,
-    outcomeSummary: row.outcome_summary,
+    ownerToken: row.ownerToken,
+    ownerExpiresAt: row.ownerExpiresAt?.toISOString() ?? null,
+    outcomeSummary: row.outcomeSummary,
   };
 }
 export type AgentTurnRecord = ReturnType<typeof turn>;
@@ -65,15 +82,20 @@ async function currentAuthorityIn(
   renewingPreparation = false,
 ) {
   const { command, authority } = record;
+  const db = drizzleTransaction(sql);
   if (authority.mode === "build" && "changeId" in command) {
     // Writer transitions take Change before membership. Agent validation must
     // keep this order rather than deadlocking a concurrent human save/handoff.
     await lockChangeWriterIn(sql, command.changeId);
   } else if (command.ticketId) {
-    const [ticket] = await sql<{ trashed: boolean }[]>`SELECT
-      (trashed_at IS NOT NULL OR converted_to_epic_id IS NOT NULL) AS trashed
-      FROM factory.ticket WHERE id=${command.ticketId} FOR SHARE`;
-    if (!ticket || ticket.trashed) return false;
+    const [currentTicket] = await db
+      .select({
+        trashed: expression<boolean>`${ticket.trashedAt} IS NOT NULL OR ${ticket.convertedToEpicId} IS NOT NULL`,
+      })
+      .from(ticket)
+      .where(eq(ticket.id, command.ticketId))
+      .for("share");
+    if (!currentTicket || currentTicket.trashed) return false;
   }
   try {
     await projectAuthorityIn(sql, command.createdBy, command.projectId);
@@ -97,15 +119,23 @@ async function currentAuthorityIn(
     return current?.mode === authority.mode && current.version === authority.conversationVersion;
   }
   if (!("changeId" in command)) return false;
-  const locked = await sql<Array<{ id: string }>>`
-    SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
-      WHERE change.id = ${command.changeId} AND change.ticket_id = ${command.ticketId}
-        AND change.project_id = ${command.projectId} FOR UPDATE OF change, ticket`;
+  const locked = await db
+    .select({ id: change.id })
+    .from(change)
+    .innerJoin(ticket, eq(ticket.id, change.ticketId))
+    .where(
+      and(
+        eq(change.id, command.changeId),
+        eq(change.ticketId, command.ticketId),
+        eq(change.projectId, command.projectId),
+      ),
+    )
+    .for("update");
   if (!locked[0]) return false;
-  const [writer] = await sql<
-    { state: string; turnID: string | null }[]
-  >`SELECT state,turn_id AS "turnID"
-    FROM factory.change_writer WHERE change_id=${command.changeId}`;
+  const [writer] = await db
+    .select({ state: changeWriter.state, turnID: changeWriter.turnId })
+    .from(changeWriter)
+    .where(eq(changeWriter.changeId, command.changeId));
   if (
     writer &&
     (["human", "handoff"].includes(writer.state) ||
@@ -163,11 +193,16 @@ async function currentAuthorityIn(
               AND writer.state='agent-preparing' AND writer.fence_required
               AND writer.fence_attempt_id=attempt.id))`;
   if (stopping[0]) return false;
-  const conversations = await sql<
-    Array<{ id: string; mode: string; version: number; contextID: string | null }>
-  >`
-    SELECT id, mode, version::float8 AS version,active_coding_context_id AS "contextID" FROM factory.ticket_conversation
-      WHERE ticket_id = ${command.ticketId} FOR UPDATE`;
+  const conversations = await db
+    .select({
+      id: ticketConversation.id,
+      mode: ticketConversation.mode,
+      version: ticketConversation.version,
+      contextID: ticketConversation.activeCodingContextId,
+    })
+    .from(ticketConversation)
+    .where(eq(ticketConversation.ticketId, command.ticketId))
+    .for("update");
   if (command.conversationId === null)
     return conversations.length === 0 && authority.conversationVersion === null;
   return (
@@ -185,14 +220,32 @@ export function createAgentTurnStore(database: Database) {
     ownerToken: string,
     forward?: (sql: DatabaseTransaction) => Promise<void>,
   ) {
-    const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
-      AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
-      AND state IN ('pending', 'dispatching', 'running') FOR UPDATE`;
+    const db = drizzleTransaction(sql);
+    const rows = await db
+      .select()
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.id, id),
+          eq(agentTurn.ownerToken, ownerToken),
+          gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+          inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+        ),
+      )
+      .for("update");
     if (!rows[0] || !(await currentAuthorityIn(database, sql, turn(rows[0])))) return false;
     // Authority locks can outlast the lease. Recheck after the last lock wait.
-    const live = await sql<{ id: string }[]>`SELECT id FROM factory.agent_turn
-      WHERE id = ${id} AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
-        AND state IN ('pending', 'dispatching', 'running')`;
+    const live = await db
+      .select({ id: agentTurn.id })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.id, id),
+          eq(agentTurn.ownerToken, ownerToken),
+          gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+          inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+        ),
+      );
     if (!live[0]) return false;
     await forward?.(sql);
     return true;
@@ -202,8 +255,17 @@ export function createAgentTurnStore(database: Database) {
     persist: (sql: DatabaseTransaction, current: boolean) => Promise<void>,
   ) {
     return database.client.begin(async (sql) => {
-      const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
-        AND change_id IS NOT NULL AND state = 'completed' FOR UPDATE`;
+      const rows = await drizzleTransaction(sql)
+        .select()
+        .from(agentTurn)
+        .where(
+          and(
+            eq(agentTurn.id, id),
+            isNotNull(agentTurn.changeId),
+            eq(agentTurn.state, "completed"),
+          ),
+        )
+        .for("update");
       if (!rows[0]) return false;
       const current = await currentAuthorityIn(database, sql, turn(rows[0]));
       await persist(sql, current);
@@ -236,11 +298,13 @@ export function createAgentTurnStore(database: Database) {
       throw new CommandError("forbidden", "Autofix must use its recorded Project delegation");
     const digest = fingerprint(command);
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${command.commandId}`}))`;
-    const existing = await transaction<TurnRow[]>`
-          SELECT * FROM factory.agent_turn WHERE command_id = ${command.commandId}
-        `;
+    const db = drizzleTransaction(transaction);
+    const existing = await db
+      .select()
+      .from(agentTurn)
+      .where(eq(agentTurn.commandId, command.commandId));
     if (existing[0]) {
-      if (existing[0].input_digest !== digest) {
+      if (existing[0].inputDigest !== digest) {
         throw new CommandError(
           "conflict",
           "The Agent command identity was reused with different input",
@@ -249,42 +313,75 @@ export function createAgentTurnStore(database: Database) {
       return { turn: turn(existing[0]), replayed: true };
     }
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${agentTurnBoundary(command)}))`;
-    const active = await transaction<Array<{ id: string }>>`
-          SELECT id FROM factory.agent_turn WHERE project_id = ${command.projectId}
-            AND ticket_id IS NOT DISTINCT FROM ${command.ticketId}
-            AND (${command.ticketId}::uuid IS NOT NULL OR created_by = ${command.createdBy})
-            AND (CASE WHEN change_id IS NULL THEN input->>'contextId' ELSE NULL END)
-              IS NOT DISTINCT FROM ${!("changeId" in command) ? (command.contextId ?? null) : null}
-            AND (state IN ('pending', 'dispatching', 'running') OR (change_id IS NOT NULL AND state = 'uncertain'))
-        `;
+    const active = await db
+      .select({ id: agentTurn.id })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.projectId, command.projectId),
+          expression`${agentTurn.ticketId} IS NOT DISTINCT FROM ${command.ticketId}::uuid`,
+          command.ticketId !== null ? undefined : eq(agentTurn.createdBy, command.createdBy),
+          expression`(CASE WHEN ${agentTurn.changeId} IS NULL THEN ${agentTurn.input}->>'contextId' ELSE NULL END)
+        IS NOT DISTINCT FROM ${!("changeId" in command) ? (command.contextId ?? null) : null}::text`,
+          or(
+            inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+            and(isNotNull(agentTurn.changeId), eq(agentTurn.state, "uncertain")),
+          ),
+        ),
+      );
     if (active[0])
       throw new CommandError(
         "conflict",
         "An active or unresolved Agent turn already owns this conversation",
       );
-    const rows = await transaction<TurnRow[]>`
-          INSERT INTO factory.agent_turn(
-            id, command_id, project_id, ticket_id, conversation_id, change_id, created_by,
-            input, input_digest, authority
-          ) VALUES (
-            ${crypto.randomUUID()}, ${command.commandId}, ${command.projectId}, ${command.ticketId},
-            ${command.conversationId}, ${"changeId" in command ? command.changeId : null}, ${command.createdBy},
-            ${JSON.stringify(command)}::jsonb, ${digest}, ${JSON.stringify(authority)}::jsonb
-          ) RETURNING *
-        `;
+    const rows = await db
+      .insert(agentTurn)
+      .values({
+        id: crypto.randomUUID(),
+        commandId: command.commandId,
+        projectId: command.projectId,
+        ticketId: command.ticketId,
+        conversationId: command.conversationId,
+        changeId: "changeId" in command ? command.changeId : null,
+        createdBy: command.createdBy,
+        input: command,
+        inputDigest: digest,
+        authority,
+      })
+      .returning();
     if (!rows[0]) throw new Error("Agent Turn admission was not recorded");
     const record = turn(rows[0]);
     if (!(authority.mode === "build" && authority.review)) {
       const [initial] =
         authority.mode === "build" && "changeId" in command
-          ? await transaction<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
-            WHERE change_id=${command.changeId} AND id<>${record.id} AND input->>'kind'<>'change-review'
-            ORDER BY created_at,id LIMIT 1`
+          ? await db
+              .select({ id: agentTurn.id })
+              .from(agentTurn)
+              .where(
+                and(
+                  eq(agentTurn.changeId, command.changeId),
+                  ne(agentTurn.id, record.id),
+                  expression`${agentTurn.input}->>'kind' <> 'change-review'`,
+                ),
+              )
+              .orderBy(asc(agentTurn.createdAt), asc(agentTurn.id))
+              .limit(1)
           : [];
       if (initial)
-        await transaction`INSERT INTO factory.agent_turn_mcp(turn_id,connection_id,credential_epoch,revision_id,policy_version,tools,required)
-          SELECT ${record.id},connection_id,credential_epoch,revision_id,policy_version,tools,required
-          FROM factory.agent_turn_mcp WHERE turn_id=${initial.id}`;
+        await db.insert(agentTurnMcp).select(
+          db
+            .select({
+              turnId: expression<string>`${record.id}::uuid`.as("turn_id"),
+              connectionId: agentTurnMcp.connectionId,
+              credentialEpoch: agentTurnMcp.credentialEpoch,
+              revisionId: agentTurnMcp.revisionId,
+              policyVersion: agentTurnMcp.policyVersion,
+              tools: agentTurnMcp.tools,
+              required: agentTurnMcp.required,
+            })
+            .from(agentTurnMcp)
+            .where(eq(agentTurnMcp.turnId, initial.id)),
+        );
       else {
         const inputSources =
           monitoring?.assignments ??
@@ -298,9 +395,15 @@ export function createAgentTurnStore(database: Database) {
               )
             : []);
         for (const source of inputSources) {
-          await transaction`INSERT INTO factory.agent_turn_mcp(turn_id,connection_id,credential_epoch,revision_id,policy_version,tools,required)
-            VALUES(${record.id},${source.connectionId},${source.credentialEpoch},${source.revisionId},
-              ${source.policyVersion},${JSON.stringify(source.tools)}::jsonb,true)`;
+          await db.insert(agentTurnMcp).values({
+            turnId: record.id,
+            connectionId: source.connectionId,
+            credentialEpoch: source.credentialEpoch,
+            revisionId: source.revisionId,
+            policyVersion: source.policyVersion,
+            tools: source.tools,
+            required: true,
+          });
         }
         await createMCPLibrary(database).admitIn(
           transaction,
@@ -320,9 +423,12 @@ export function createAgentTurnStore(database: Database) {
   return {
     admitIn,
     async resumePendingIn(sql: DatabaseTransaction, id: string) {
-      const [row] = await sql<
-        TurnRow[]
-      >`SELECT * FROM factory.agent_turn WHERE id=${id} AND state='pending' FOR UPDATE`;
+      const db = drizzleTransaction(sql);
+      const [row] = await db
+        .select()
+        .from(agentTurn)
+        .where(and(eq(agentTurn.id, id), eq(agentTurn.state, "pending")))
+        .for("update");
       if (!row || !(await currentAuthorityIn(database, sql, turn(row))))
         throw new CommandError("conflict", "Paused work no longer has execution authority");
       const budget = await codingBudgetIn(sql, turn(row).command.projectId, true);
@@ -331,7 +437,10 @@ export function createAgentTurnStore(database: Database) {
           "conflict",
           "Increase the Coding allowance or wait for its monthly reset before resuming",
         );
-      await sql`UPDATE factory.coding_pause SET resumed_by_turn_id=${id} WHERE turn_id=${id} AND resumed_by_turn_id IS NULL`;
+      await db
+        .update(codingPause)
+        .set({ resumedByTurnId: id })
+        .where(and(eq(codingPause.turnId, id), isNull(codingPause.resumedByTurnId)));
       return id;
     },
     async admit(
@@ -345,44 +454,76 @@ export function createAgentTurnStore(database: Database) {
     },
 
     async getByCommand(commandID: string, transaction?: DatabaseTransaction) {
-      const sql = transaction ?? database.client;
-      const rows = await sql<TurnRow[]>`
-        SELECT * FROM factory.agent_turn WHERE command_id = ${commandID}
-      `;
+      const rows = await drizzleTransaction(transaction ?? database.client)
+        .select()
+        .from(agentTurn)
+        .where(eq(agentTurn.commandId, commandID));
       return rows[0] ? turn(rows[0]) : null;
     },
 
     async get(id: string) {
-      const rows = await database.client<
-        TurnRow[]
-      >`SELECT * FROM factory.agent_turn WHERE id = ${id}`;
+      const rows = await database.db.select().from(agentTurn).where(eq(agentTurn.id, id));
       return rows[0] ? turn(rows[0]) : null;
     },
 
     async claimPending(id: string, milliseconds = 30_000) {
       const duration = leaseDuration(milliseconds);
-      const rows = await database.client<TurnRow[]>`
-        UPDATE factory.agent_turn SET owner_token = ${crypto.randomUUID()},
-          owner_expires_at = clock_timestamp() + ${duration} * interval '1 millisecond', updated_at = now()
-        WHERE id = ${id} AND state = 'pending'
-          AND NOT EXISTS(SELECT 1 FROM factory.coding_pause WHERE turn_id=${id} AND resumed_by_turn_id IS NULL)
-          AND (owner_token IS NULL OR owner_expires_at <= clock_timestamp())
-        RETURNING *
-      `;
+      const rows = await database.db
+        .update(agentTurn)
+        .set({
+          ownerToken: crypto.randomUUID(),
+          ownerExpiresAt: expression`clock_timestamp() + ${duration} * interval '1 millisecond'`,
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(agentTurn.id, id),
+            eq(agentTurn.state, "pending"),
+            notExists(
+              database.db
+                .select({ id: codingPause.turnId })
+                .from(codingPause)
+                .where(and(eq(codingPause.turnId, id), isNull(codingPause.resumedByTurnId))),
+            ),
+            or(
+              isNull(agentTurn.ownerToken),
+              lte(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          ),
+        )
+        .returning();
       return rows[0] ? turn(rows[0]) : null;
     },
 
     async releasePending(id: string, ownerToken: string) {
-      await database.client`UPDATE factory.agent_turn SET owner_token=NULL,owner_expires_at=NULL,updated_at=now()
-        WHERE id=${id} AND state='pending' AND owner_token=${ownerToken}`;
+      await database.db
+        .update(agentTurn)
+        .set({ ownerToken: null, ownerExpiresAt: null, updatedAt: expression`now()` })
+        .where(
+          and(
+            eq(agentTurn.id, id),
+            eq(agentTurn.state, "pending"),
+            eq(agentTurn.ownerToken, ownerToken),
+          ),
+        );
     },
 
     async failRevokedPendingPreparation(id: string, ownerToken: string, summary: string) {
       if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
       return database.client.begin(async (sql) => {
-        const [owned] = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
-          WHERE id=${id} AND state='pending' AND owner_token=${ownerToken}
-            AND owner_expires_at>clock_timestamp() FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [owned] = await db
+          .select()
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "pending"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .for("update");
         if (!owned) return false;
         const record = turn(owned);
         if (
@@ -393,38 +534,92 @@ export function createAgentTurnStore(database: Database) {
           return false;
         // A Source/predecessor fence can legitimately wait. Record only revoked
         // admission authority, and let every published Stop settle its own Turn.
-        const failed = await sql<{ id: string }[]>`UPDATE factory.agent_turn turn
-          SET state='failed',outcome_summary=${summary},owner_token=NULL,owner_expires_at=NULL,updated_at=now()
-          WHERE turn.id=${id} AND turn.state='pending' AND turn.owner_token=${ownerToken}
-            AND turn.owner_expires_at>clock_timestamp()
-            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session
-              WHERE session.change_id=${record.command.changeId} AND session.stop_pending)
-          RETURNING turn.id`;
+        const failed = await db
+          .update(agentTurn)
+          .set({
+            state: "failed",
+            outcomeSummary: summary,
+            ownerToken: null,
+            ownerExpiresAt: null,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "pending"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+              notExists(
+                db
+                  .select({ id: changeAgentSession.changeId })
+                  .from(changeAgentSession)
+                  .where(
+                    and(
+                      eq(changeAgentSession.changeId, record.command.changeId),
+                      eq(changeAgentSession.stopPending, true),
+                    ),
+                  ),
+              ),
+            ),
+          )
+          .returning({ id: agentTurn.id });
         return failed.length === 1;
       });
     },
 
     async beginDispatch(id: string, ownerToken: string) {
       return database.client.begin(async (sql) => {
-        const owned = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
-          WHERE id = ${id} AND state = 'pending' AND owner_token = ${ownerToken}
-            AND owner_expires_at > clock_timestamp() FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const owned = await db
+          .select()
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "pending"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .for("update");
         if (!owned[0] || !(await currentAuthorityIn(database, sql, turn(owned[0])))) return null;
         const record = turn(owned[0]);
         if (record.authority.mode === "build") {
           const budget = await codingBudgetIn(sql, record.command.projectId, true);
           if (!budget.allowed) {
-            await sql`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${id},${budget.reason})
-              ON CONFLICT(turn_id) DO UPDATE SET reason=EXCLUDED.reason,resumed_by_turn_id=NULL,created_at=now()`;
-            await sql`UPDATE factory.agent_turn SET owner_token=NULL,owner_expires_at=NULL,updated_at=now() WHERE id=${id}`;
+            const reason = budget.reason;
+            if (
+              reason !== "accounting-incomplete" &&
+              reason !== "coding-budget-used" &&
+              reason !== "finish-reserve-used"
+            )
+              throw new Error("Coding allowance denial has no valid pause reason");
+            await db
+              .insert(codingPause)
+              .values({ turnId: id, reason })
+              .onConflictDoUpdate({
+                target: codingPause.turnId,
+                set: { reason, resumedByTurnId: null, createdAt: expression`now()` },
+              });
+            await db
+              .update(agentTurn)
+              .set({ ownerToken: null, ownerExpiresAt: null, updatedAt: expression`now()` })
+              .where(eq(agentTurn.id, id));
             return null;
           }
         }
-        const rows = await sql<
-          TurnRow[]
-        >`UPDATE factory.agent_turn SET state = 'dispatching', updated_at = now()
-          WHERE id = ${id} AND state = 'pending' AND owner_token = ${ownerToken}
-            AND owner_expires_at > clock_timestamp() RETURNING *`;
+        const rows = await db
+          .update(agentTurn)
+          .set({ state: "dispatching", updatedAt: expression`now()` })
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "pending"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .returning();
         return rows[0] ? turn(rows[0]) : null;
       });
     },
@@ -442,13 +637,26 @@ export function createAgentTurnStore(database: Database) {
       const duration = leaseDuration(milliseconds);
       // Recovery may observe an external operation, but never acquires permission
       // to repeat it. A still-live owner and terminal decisions remain untouched.
-      const rows = await database.client<TurnRow[]>`
-        UPDATE factory.agent_turn SET state = 'running', owner_token = ${crypto.randomUUID()},
-          owner_expires_at = clock_timestamp() + ${duration} * interval '1 millisecond', updated_at = now()
-        WHERE id = ${id} AND change_id IS NOT NULL
-          AND state IN ('dispatching', 'running', 'uncertain')
-          AND (owner_token IS NULL OR owner_expires_at <= clock_timestamp())
-        RETURNING *`;
+      const rows = await database.db
+        .update(agentTurn)
+        .set({
+          state: "running",
+          ownerToken: crypto.randomUUID(),
+          ownerExpiresAt: expression`clock_timestamp() + ${duration} * interval '1 millisecond'`,
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(agentTurn.id, id),
+            isNotNull(agentTurn.changeId),
+            inArray(agentTurn.state, ["dispatching", "running", "uncertain"]),
+            or(
+              isNull(agentTurn.ownerToken),
+              lte(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          ),
+        )
+        .returning();
       return rows[0] ? turn(rows[0]) : null;
     },
 
@@ -465,42 +673,82 @@ export function createAgentTurnStore(database: Database) {
     async quarantineExpiredProject(id: string) {
       // The provider has no recoverable operation identity. Lease loss permits
       // recording uncertainty, never submitting the admitted input again.
-      const rows = await database.client<Array<{ id: string }>>`
-        UPDATE factory.agent_turn SET state = 'uncertain', owner_token = NULL, owner_expires_at = NULL,
-          outcome_summary = 'The provider outcome was lost after dispatch. Retry requires a new explicit attempt.',
-          updated_at = now()
-        WHERE id = ${id} AND change_id IS NULL AND state IN ('dispatching', 'running')
-          AND (owner_token IS NULL OR owner_expires_at <= clock_timestamp()) RETURNING id`;
+      const rows = await database.db
+        .update(agentTurn)
+        .set({
+          state: "uncertain",
+          ownerToken: null,
+          ownerExpiresAt: null,
+          outcomeSummary:
+            "The provider outcome was lost after dispatch. Retry requires a new explicit attempt.",
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(agentTurn.id, id),
+            isNull(agentTurn.changeId),
+            inArray(agentTurn.state, ["dispatching", "running"]),
+            or(
+              isNull(agentTurn.ownerToken),
+              lte(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          ),
+        )
+        .returning({ id: agentTurn.id });
       return rows.length === 1;
     },
 
     async renew(id: string, ownerToken: string, milliseconds = 30_000) {
       const duration = leaseDuration(milliseconds);
       return database.client.begin(async (sql) => {
-        const [owned] = await sql<
-          TurnRow[]
-        >`SELECT * FROM factory.agent_turn WHERE id=${id} AND owner_token=${ownerToken} FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [owned] = await db
+          .select()
+          .from(agentTurn)
+          .where(and(eq(agentTurn.id, id), eq(agentTurn.ownerToken, ownerToken)))
+          .for("update");
         // Renew only the current pending preparation while its previous input
         // settles. Ordinary execution validation still rejects that Stop.
         if (!owned || !(await currentAuthorityIn(database, sql, turn(owned), true))) return false;
-        const rows = await sql<Array<{ id: string }>>`
-        UPDATE factory.agent_turn SET owner_expires_at = clock_timestamp() + ${duration} * interval '1 millisecond',
-          updated_at = now()
-        WHERE id = ${id} AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
-          AND state IN ('pending', 'dispatching', 'running') RETURNING id
-      `;
+        const rows = await db
+          .update(agentTurn)
+          .set({
+            ownerExpiresAt: expression`clock_timestamp() + ${duration} * interval '1 millisecond'`,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+              inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+            ),
+          )
+          .returning({ id: agentTurn.id });
         return rows.length === 1;
       });
     },
 
     async failPending(id: string, ownerToken: string, summary: string) {
       if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
-      const rows = await database.client<Array<{ id: string }>>`
-        UPDATE factory.agent_turn SET state = 'failed', outcome_summary = ${summary},
-          owner_token = NULL, owner_expires_at = NULL, updated_at = now()
-        WHERE id = ${id} AND state = 'pending' AND owner_token = ${ownerToken}
-          AND owner_expires_at > clock_timestamp() RETURNING id
-      `;
+      const rows = await database.db
+        .update(agentTurn)
+        .set({
+          state: "failed",
+          outcomeSummary: summary,
+          ownerToken: null,
+          ownerExpiresAt: null,
+          updatedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(agentTurn.id, id),
+            eq(agentTurn.state, "pending"),
+            eq(agentTurn.ownerToken, ownerToken),
+            gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+          ),
+        )
+        .returning({ id: agentTurn.id });
       return rows.length === 1;
     },
 
@@ -510,9 +758,18 @@ export function createAgentTurnStore(database: Database) {
     async failUnboundStartup(id: string, ownerToken: string, summary: string) {
       if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
       return database.client.begin(async (sql) => {
-        const [owned] = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
-          WHERE id=${id} AND state='pending' AND owner_token=${ownerToken}
-            AND owner_expires_at<=clock_timestamp() FOR UPDATE`;
+        const [owned] = await drizzleTransaction(sql)
+          .select()
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "pending"),
+              eq(agentTurn.ownerToken, ownerToken),
+              lte(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .for("update");
         if (!owned) return false;
         const record = turn(owned);
         if (
@@ -548,22 +805,46 @@ export function createAgentTurnStore(database: Database) {
       persistOutcome: (sql: DatabaseTransaction) => Promise<void>,
     ) {
       return database.client.begin(async (sql) => {
-        const admitted = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
-          AND state = 'dispatching' AND owner_token = ${ownerToken}
-          AND owner_expires_at > clock_timestamp() FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const admitted = await db
+          .select()
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "dispatching"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .for("update");
         if (!admitted[0] || !(await currentAuthorityIn(database, sql, turn(admitted[0]))))
           return false;
-        const rows = await sql<
-          Array<{ id: string }>
-        >`UPDATE factory.agent_turn SET state = 'running', updated_at = now()
-          WHERE id = ${id} AND state = 'dispatching' AND owner_token = ${ownerToken}
-            AND owner_expires_at > clock_timestamp() RETURNING id`;
+        const rows = await db
+          .update(agentTurn)
+          .set({ state: "running", updatedAt: expression`now()` })
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.state, "dispatching"),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .returning({ id: agentTurn.id });
         if (!rows[0]) return false;
         await persistOutcome(sql);
-        const owned = await sql<
-          Array<{ id: string }>
-        >`SELECT id FROM factory.agent_turn WHERE id = ${id}
-          AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp() AND state = 'running'`;
+        const owned = await db
+          .select({ id: agentTurn.id })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+              eq(agentTurn.state, "running"),
+            ),
+          );
         if (!owned[0])
           throw new CommandError("conflict", "Agent ownership expired while recording dispatch");
         return true;
@@ -582,21 +863,41 @@ export function createAgentTurnStore(database: Database) {
         throw new Error("Only a completed Agent turn may publish product effects");
       }
       return database.client.begin(async (transaction) => {
-        const owned = await transaction<TurnRow[]>`
-          SELECT * FROM factory.agent_turn WHERE id = ${id} AND owner_token = ${ownerToken}
-            AND owner_expires_at > clock_timestamp() AND state IN ('dispatching', 'running')
-          FOR UPDATE
-        `;
+        const db = drizzleTransaction(transaction);
+        const owned = await db
+          .select()
+          .from(agentTurn)
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+              inArray(agentTurn.state, ["dispatching", "running"]),
+            ),
+          )
+          .for("update");
         if (!owned[0]) return false;
         if (persistOutcome && !(await currentAuthorityIn(database, transaction, turn(owned[0]))))
           return false;
         await persistOutcome?.(transaction);
-        const settled = await transaction<Array<{ id: string }>>`
-          UPDATE factory.agent_turn SET state = ${state}::factory.agent_turn_state,
-            outcome_summary = ${summary}, owner_token = NULL, owner_expires_at = NULL, updated_at = now()
-          WHERE id = ${id} AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
-            AND state IN ('dispatching', 'running') RETURNING id
-        `;
+        const settled = await db
+          .update(agentTurn)
+          .set({
+            state,
+            outcomeSummary: summary,
+            ownerToken: null,
+            ownerExpiresAt: null,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(agentTurn.id, id),
+              eq(agentTurn.ownerToken, ownerToken),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+              inArray(agentTurn.state, ["dispatching", "running"]),
+            ),
+          )
+          .returning({ id: agentTurn.id });
         if (!settled[0]) {
           // Throwing rolls back effects if ownership expired while the transaction ran.
           throw new CommandError("conflict", "Agent turn ownership expired before settlement");

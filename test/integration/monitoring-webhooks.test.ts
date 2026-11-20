@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
+import { monitoringDigest, monitoringSignals } from "../../apps/factory/src/monitoring/payload";
 import { createMonitoringRoutes } from "../../apps/factory/src/monitoring/routes";
 import { factoryProcess } from "../fixtures/factory-process";
+import { monitoringFixture } from "../fixtures/monitoring";
 import { fixtureValue } from "../fixtures/value";
 
 test("monitoring binds a shared source and Project, deduplicates occurrences and fences changed delegation", async () => {
@@ -174,5 +176,70 @@ test("monitoring binds a shared source and Project, deduplicates occurrences and
   } finally {
     await database.client.end();
     await fixture.dispose();
+  }
+});
+
+test("Input intake serializes the fifty-unsettled bound, rolls back overflow and still counts duplicates", async () => {
+  const f = await monitoringFixture();
+  const key = fixtureValue(f.url.split("/").at(-1), "owned webhook key");
+  const receive = (fingerprints: string[]) =>
+    f.controller.receive(
+      f.hookId,
+      key,
+      monitoringDigest(fingerprints),
+      fingerprints.flatMap((fingerprint) =>
+        monitoringSignals({ title: "Owned bounded request", fingerprint }),
+      ),
+    );
+  const count = async () => {
+    const [row] = await f.database.client<{ count: number }[]>`
+      SELECT count(*)::integer AS count FROM factory.monitoring_incident WHERE hook_id=${f.hookId}`;
+    return row?.count;
+  };
+  try {
+    expect(
+      await receive(Array.from({ length: 49 }, (_, index) => `request-${index}`)),
+    ).toMatchObject({
+      accepted: 49,
+    });
+    // All three unsettled states consume the same bound.
+    await f.database.client`UPDATE factory.monitoring_incident SET state='diagnosing'
+      WHERE hook_id=${f.hookId} AND fingerprint=${monitoringSignals({ fingerprint: "request-0" })[0]?.fingerprint ?? ""}`;
+    await f.database.client`UPDATE factory.monitoring_incident SET state='implementing'
+      WHERE hook_id=${f.hookId} AND fingerprint=${monitoringSignals({ fingerprint: "request-1" })[0]?.fingerprint ?? ""}`;
+    await expect(receive(["overflow-first", "overflow-second"])).rejects.toThrow("50 unsettled");
+    expect(await count()).toBe(49);
+    const [rate] = await f.database.client<{ receivedCount: number }[]>`
+      SELECT received_count AS "receivedCount" FROM factory.monitoring_hook WHERE id=${f.hookId}`;
+    expect(rate?.receivedCount).toBe(1);
+
+    const competing = await Promise.allSettled([receive(["last-a"]), receive(["last-b"])]);
+    expect(competing.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(competing.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(await count()).toBe(50);
+    expect(await receive(["request-0"])).toMatchObject({ accepted: 0, duplicates: 1 });
+    expect(await count()).toBe(50);
+    expect(
+      await f.controller.receive(
+        f.hookId,
+        key,
+        monitoringDigest("resolved"),
+        monitoringSignals({ title: "Owned resolved", fingerprint: "ignored", status: "resolved" }),
+      ),
+    ).toMatchObject({ accepted: 0, duplicates: 0, ignored: 1 });
+
+    await f.database.client`UPDATE factory.monitoring_incident SET state='prepared'
+      WHERE hook_id=${f.hookId} AND fingerprint=${monitoringSignals({ fingerprint: "request-1" })[0]?.fingerprint ?? ""}`;
+    expect(await receive(["after-settlement"])).toMatchObject({ accepted: 1 });
+    expect(await count()).toBe(51);
+    await f.database.client`UPDATE factory.monitoring_hook
+      SET received_count=120,received_window=now()-interval '2 minutes' WHERE id=${f.hookId}`;
+    expect(await receive(["request-0"])).toMatchObject({ limited: false, duplicates: 1 });
+    const [reset] = await f.database.client<{ count: number; current: boolean }[]>`
+      SELECT received_count AS count,received_window > now()-interval '1 minute' AS current
+      FROM factory.monitoring_hook WHERE id=${f.hookId}`;
+    expect(reset).toEqual({ count: 1, current: true });
+  } finally {
+    await f.dispose();
   }
 });

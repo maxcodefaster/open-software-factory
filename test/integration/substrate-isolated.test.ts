@@ -110,8 +110,32 @@ async function isolatedFixture() {
         expect(saved?.[key]).not.toBeNull();
       } else if (kind === "Actor") {
         const [saved] = await f.database.client`
-          SELECT create_attempted_at FROM factory.substrate_binding WHERE runtime_attempt_id=${attemptID}`;
+          SELECT binding.create_attempted_at,attempt.workspace_id,attempt.change_id,attempt.verification_id,
+            attempt.isolated_kind::text=isolated.kind AS exact_kind,
+            CASE WHEN isolated.kind='publication' THEN EXISTS(
+              SELECT 1 FROM factory.release_attempt WHERE id=isolated.owner_id AND runtime_attempt_id=attempt.id)
+            WHEN binding.intent->>'promotionID' IS NOT NULL THEN EXISTS(
+              SELECT 1 FROM factory.promotion_operation
+              WHERE id=(binding.intent->>'promotionID')::uuid AND replacement_runtime_attempt_id=attempt.id
+                AND state='starting')
+            ELSE EXISTS(SELECT 1 FROM factory.staging_preview
+              WHERE project_id=attempt.project_id AND runtime_attempt_id=attempt.id) END AS linked,
+            CASE WHEN isolated.kind='staging' THEN (
+              SELECT declaration=isolated.intent->'declaration' FROM factory.staging_configuration
+              WHERE runtime_attempt_id=attempt.id) ELSE true END AS exact_declaration
+          FROM factory.substrate_binding binding
+          JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id
+          JOIN factory.substrate_isolated isolated ON isolated.runtime_attempt_id=attempt.id
+          WHERE binding.runtime_attempt_id=${attemptID}`;
         expect(saved?.["create_attempted_at"]).not.toBeNull();
+        expect(saved).toMatchObject({
+          workspace_id: null,
+          change_id: null,
+          verification_id: null,
+          exact_kind: true,
+          linked: true,
+          exact_declaration: true,
+        });
       }
       if (method === rejected)
         throw new SubstrateRPCError("PermissionDenied", "owned rejected Create");
@@ -122,13 +146,16 @@ async function isolatedFixture() {
             ? request["egressPolicy"]
             : request[`${kind[0]?.toLowerCase()}${kind.slice(1)}`];
       if (!spec) throw new Error("Missing owned native resource");
+      const [clock] = await f.database.client<{ at: string }[]>`
+        SELECT clock_timestamp()::text AS at`;
+      if (!clock) throw new Error("Owned native creation clock is unavailable");
       const value = {
         ...spec,
         metadata: {
           ...(spec["metadata"] as object),
           uid: crypto.randomUUID(),
           version: "1",
-          createTime: new Date().toISOString(),
+          createTime: new Date(clock.at).toISOString(),
         },
       };
       if (kind === "Actor") Object.assign(value, { status: { state: "ACTOR_STATE_SUSPENDED" } });

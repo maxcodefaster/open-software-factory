@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   claimAgentWriterIn,
+  lockChangeWriterIn,
   workspaceWriteAuthorityIn,
 } from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
@@ -15,6 +16,141 @@ import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 import { fixtureValue } from "../fixtures/value";
 import { guardWriterCoordination } from "../fixtures/writer-coordination";
+
+test("Agent writer claim shares rollback and increments the native epoch without losing its retained fence", async () => {
+  const owned = await fixture();
+  try {
+    await owned.database.client`UPDATE factory.change_writer SET epoch=9007199254740993,
+      fence_required=true,fence_attempt_id=${owned.attemptID},
+      updated_at='2026-11-20 00:00:00.000123+00' WHERE change_id=${owned.changeID}`;
+    const read = () => owned.database.client`SELECT state,epoch::text,turn_id,fence_required,
+      fence_attempt_id,updated_at::text FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+    const before = await read();
+    const turnID = crypto.randomUUID();
+    await expect(
+      owned.database.client.begin(async (sql) => {
+        await claimAgentWriterIn(sql, owned.changeID, turnID, owned.userID);
+        const [writer] = await sql`SELECT state,epoch::text,turn_id,fence_required,fence_attempt_id
+        FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+        expect(writer).toMatchObject({
+          state: "agent-preparing",
+          epoch: "9007199254740994",
+          turn_id: turnID,
+          fence_required: true,
+          fence_attempt_id: owned.attemptID,
+        });
+        throw new Error("Owned writer rollback");
+      }),
+    ).rejects.toThrow("Owned writer rollback");
+    expect(await read()).toEqual(before);
+    expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+}, 30_000);
+
+test("editing approval rechecks its exact request epoch after real Change lock contention", async () => {
+  const owned = await fixture();
+  const requesterID = crypto.randomUUID();
+  const release = Promise.withResolvers<void>();
+  let holder: Promise<unknown> | undefined;
+  let contender: Promise<unknown> | undefined;
+  let grants = 0;
+  const writers = createChangeWriterController({
+    database: owned.database,
+    agentUsername: "owned-control",
+    runtime: { stop: async () => {}, get: async () => ({ state: "stopped" }) },
+    stopAgent: async () => {},
+    protect: async (_changeID, users) => {
+      if (users.length) grants++;
+    },
+  });
+  try {
+    await owned.database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${requesterID},'Owned requester',${`writer-${requesterID}@factory.local`},true)`;
+    await owned.database
+      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${owned.projectID},${requesterID},'developer',${owned.userID})`;
+    const human = await writers.takeOver(owned.changeID, owned.userID, crypto.randomUUID());
+    const requestID = crypto.randomUUID();
+    await writers.request(owned.changeID, requesterID, requestID, human.epoch);
+    await writers.request(owned.changeID, requesterID, crypto.randomUUID(), human.epoch);
+    expect((await writers.status(owned.changeID, owned.userID)).requests).toHaveLength(1);
+    const entered = Promise.withResolvers<number>();
+    holder = owned.database.client.begin(async (sql) => {
+      await lockChangeWriterIn(sql, owned.changeID);
+      const [connection] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (!connection) throw new Error("Owned writer lock connection missing");
+      await sql`UPDATE factory.change_writer SET epoch=epoch+1 WHERE change_id=${owned.changeID}`;
+      entered.resolve(connection.pid);
+      await release.promise;
+    });
+    const holderPID = await entered.promise;
+    const commandID = crypto.randomUUID();
+    contender = writers.approve(owned.changeID, owned.userID, commandID, requestID, human.epoch);
+    const rejected = contender.then(
+      () => {
+        throw new Error("Stale editing approval succeeded");
+      },
+      (cause: unknown) => cause,
+    );
+    try {
+      await eventually(
+        async () => {
+          const [wait] = await owned.database.client<{ blocked: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+            WHERE ${holderPID} = ANY(pg_blocking_pids(pid))) AS blocked`;
+          return wait?.blocked;
+        },
+        (blocked) => blocked === true,
+        "Editing approval did not contend on the actual Change lock",
+      );
+    } finally {
+      release.resolve();
+    }
+    await holder;
+    expect(await rejected).toMatchObject({
+      message: expect.stringContaining("writer is active or changed"),
+    });
+    expect(grants).toBe(1);
+    const [stale] = await owned.database
+      .client`SELECT command_id FROM factory.change_editing_decision
+      WHERE command_id=${commandID}`;
+    expect(stale).toBeUndefined();
+    expect(await writers.status(owned.changeID, owned.userID)).toMatchObject({
+      state: "human",
+      epoch: human.epoch + 1,
+      canWrite: true,
+    });
+    const currentRequestID = crypto.randomUUID();
+    await writers.request(owned.changeID, requesterID, currentRequestID, human.epoch + 1);
+    const transferred = await writers.approve(
+      owned.changeID,
+      owned.userID,
+      crypto.randomUUID(),
+      currentRequestID,
+      human.epoch + 1,
+    );
+    expect(transferred).toMatchObject({
+      state: "human",
+      epoch: human.epoch + 3,
+      canWrite: false,
+      actor: { user: { id: requesterID } },
+    });
+    const requests = await owned.database.client`SELECT id,state FROM factory.change_editing_request
+      WHERE change_id=${owned.changeID} ORDER BY writer_epoch`;
+    expect([...requests]).toEqual([
+      { id: requestID, state: "superseded" },
+      { id: currentRequestID, state: "accepted" },
+    ]);
+    expect(grants).toBe(2);
+    expect(owned.requests()).toBe(0);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([holder, contender]);
+    await owned.dispose();
+  }
+}, 30_000);
 
 test.each(["continue", "stop"] as const)(
   "an admitted Build waits for previous writer teardown before %s without a new command",

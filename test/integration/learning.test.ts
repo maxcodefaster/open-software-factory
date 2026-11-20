@@ -1126,6 +1126,60 @@ test("Review now of private work needs only its owner and never reviews shared c
   });
 }, 90_000);
 
+test("proposal persistence failure rolls back review settlement without releasing retained cases for another call", async () => {
+  await reviewNowFixture(
+    async ({ database, owned, service, calls, worker, fresh }) => {
+      await fresh("rollback:work-review");
+      await service.reviewNow(owned.userID, reviewNow(owned.projectID, 1));
+      await worker.sweep();
+      await database.client`CREATE FUNCTION factory.reject_owned_learning_proposal() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned proposal persistence failed'; END $$`;
+      await database.client`CREATE TRIGGER reject_owned_learning_proposal BEFORE INSERT
+        ON factory.learning_proposal FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_learning_proposal()`;
+      await worker.sweep();
+      const [review] = await database.client<{ id: string; state: string; result: unknown }[]>`
+        SELECT id,state,result FROM factory.learning_review WHERE kind='work'`;
+      expect(review).toMatchObject({ state: "uncertain", result: null });
+      const [source] = await database.client<{ batch: string; snapshot: LearningCase }[]>`
+        SELECT batch_id AS batch,snapshot FROM factory.learning_case WHERE id='rollback:work-review'`;
+      expect(source?.batch).toBe(review?.id);
+      expect(source?.snapshot.id).toBe("rollback:work-review");
+      expect(await database.client`SELECT id FROM factory.learning_proposal`).toHaveLength(0);
+      await database.client`DROP TRIGGER reject_owned_learning_proposal ON factory.learning_proposal`;
+      await database.client`DROP FUNCTION factory.reject_owned_learning_proposal()`;
+      const retained =
+        await database.client`SELECT * FROM factory.learning_review WHERE kind='work'`;
+      for (let sweep = 0; sweep < 3; sweep++) await worker.sweep();
+      expect(calls).toEqual(["calibration", "work"]);
+      expect(
+        await database.client`SELECT * FROM factory.learning_review WHERE kind='work'`,
+      ).toEqual(retained);
+    },
+    (cases) => ({
+      cases: cases.map((source) => ({
+        caseId: source.id,
+        fulfillment: "supported",
+        verification: "unknown",
+        rework: "necessary",
+        explanation: "The answer agrees with the retained source.",
+        evidenceIds: source.evidence.map((item) => item.id),
+      })),
+      findings: [],
+      proposals: [
+        {
+          title: "Retain the exact source limit",
+          target: "knowledge",
+          caseIds: cases.map((source) => source.id),
+          evidenceIds: ["healthy:source"],
+          change: "Record the exact retry limit.",
+          expectedEffect: "Avoid repeating the lookup.",
+          validation: "Compare the saved limit to the cited source.",
+        },
+      ],
+    }),
+  );
+}, 60_000);
+
 test("legacy per-call Wiki cases stay retained but no longer count toward metrics or selection", async () => {
   await reviewNowFixture(async ({ database, owned, service, calls, worker, fresh }) => {
     const generation = crypto.randomUUID();

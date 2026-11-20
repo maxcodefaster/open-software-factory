@@ -331,3 +331,169 @@ test("a changed Conversation mode fences pending dispatch and admission cannot b
     await owned.dispose();
   }
 });
+
+test("Drizzle admission retains JSON objects, normalized Unicode input and string lease timestamps", async () => {
+  const owned = await fixture();
+  try {
+    const command = { ...owned.command, text: '  Prüfe 界 "quoted" \\ path\n🙂  ' };
+    const { turn } = await owned.store().admit(command, {
+      mode: "investigate",
+      conversationVersion: 1,
+      modelId: "  owned-model  ",
+    });
+    const normalized = { ...command, text: command.text.trim() };
+    expect(turn.command).toEqual(normalized);
+    expect(turn.authority).toEqual({
+      ...owned.authority,
+      modelId: "owned-model",
+    });
+    const [stored] = await owned.database.client<
+      { input: unknown; authority: unknown; json: string; bytes: number; chars: number }[]
+    >`SELECT input,authority,input::text AS json,octet_length(input::text) AS bytes,
+      length(input::text) AS chars FROM factory.agent_turn WHERE id=${turn.id}`;
+    expect(stored?.input).toEqual(normalized);
+    expect(stored?.authority).toEqual(turn.authority);
+    expect(stored?.bytes).toBe(Buffer.byteLength(stored?.json ?? "", "utf8"));
+    expect(stored?.bytes).toBeGreaterThan(stored?.chars ?? 0);
+    const owner = await owned.store().claimPending(turn.id);
+    if (!owner?.ownerToken || !owner.ownerExpiresAt) throw new Error("Owned lease required");
+    expect(typeof owner.ownerExpiresAt).toBe("string");
+    expect(new Date(owner.ownerExpiresAt).toISOString()).toBe(owner.ownerExpiresAt);
+    expect((await owned.store().get(turn.id))?.ownerExpiresAt).toBe(owner.ownerExpiresAt);
+    expect((await owned.store().getByCommand(command.commandId))?.ownerExpiresAt).toBe(
+      owner.ownerExpiresAt,
+    );
+    expect(await owned.store().renew(turn.id, owner.ownerToken, 60_000)).toBe(true);
+    expect(await owned.store().beginDispatch(turn.id, owner.ownerToken)).toMatchObject({
+      state: "dispatching",
+      ownerExpiresAt: expect.any(String),
+    });
+    const summary = "界".repeat(2_000);
+    expect(await owned.store().settle(turn.id, owner.ownerToken, "completed", summary)).toBe(true);
+    expect(await owned.store().get(turn.id)).toMatchObject({
+      outcomeSummary: summary,
+      ownerToken: null,
+      ownerExpiresAt: null,
+    });
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("the native authority byte limit still rejects a multibyte JSON object accepted by the DTO", async () => {
+  const owned = await fixture();
+  try {
+    const revisions = Array.from({ length: 16 }, () => crypto.randomUUID());
+    const authority = {
+      ...owned.authority,
+      modelId: "界".repeat(200),
+      modelConnection: { connectionID: crypto.randomUUID(), version: 1 },
+      skillRevisionIds: revisions,
+      requiredSkillRevisionIds: revisions,
+    };
+    expect(JSON.stringify(authority).length).toBeLessThan(2_000);
+    expect(Buffer.byteLength(JSON.stringify(authority), "utf8")).toBeGreaterThan(2_000);
+    await expect(owned.store().admit(owned.command, authority)).rejects.toMatchObject({
+      cause: { code: "23514", constraint_name: "agent_turn_authority_check" },
+    });
+    expect(await owned.store().getByCommand(owned.command.commandId)).toBeNull();
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("Drizzle admission and reads stay inside the caller's native savepoint", async () => {
+  const owned = await fixture();
+  try {
+    await owned.database.client.begin(async (transaction) => {
+      await expect(
+        transaction.savepoint(async (savepoint) => {
+          const { turn } = await owned.store().admitIn(savepoint, owned.command, owned.authority);
+          expect(
+            await owned.store().getByCommand(owned.command.commandId, savepoint),
+          ).toMatchObject({
+            id: turn.id,
+          });
+          throw new Error("Rollback only the admission savepoint");
+        }),
+      ).rejects.toThrow("Rollback only the admission savepoint");
+      expect(await owned.store().getByCommand(owned.command.commandId, transaction)).toBeNull();
+      await owned.store().admitIn(transaction, owned.command, owned.authority);
+    });
+    expect(await owned.store().getByCommand(owned.command.commandId)).toMatchObject({
+      state: "pending",
+    });
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("markRunning rolls back its product callback when the exact owner expires during persistence", async () => {
+  const owned = await fixture();
+  try {
+    const { turn } = await owned.store().admit(owned.command, owned.authority);
+    const owner = await owned.store().claimPending(turn.id);
+    if (!owner?.ownerToken) throw new Error("Owned lease required");
+    await owned.store().beginDispatch(turn.id, owner.ownerToken);
+    await expect(
+      owned.store().markRunning(turn.id, owner.ownerToken, async (sql) => {
+        await appendConversationEntry(sql, owned.command.conversationId, {
+          kind: "agent-message",
+          actor: "project-agent",
+          mode: "investigate",
+          body: "Dispatch persistence must roll back",
+          payload: {},
+          citations: [],
+          inReplyToEntryId: null,
+          requirementRevisionId: null,
+        });
+        await sql`UPDATE factory.agent_turn SET owner_expires_at=clock_timestamp()-interval '1 second'
+          WHERE id=${turn.id}`;
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(await owned.store().get(turn.id)).toMatchObject({
+      state: "dispatching",
+      ownerToken: owner.ownerToken,
+    });
+    expect(
+      await owned.database.client`SELECT id FROM factory.conversation_entry
+        WHERE conversation_id=${owned.command.conversationId}`,
+    ).toHaveLength(0);
+    expect(await owned.store().markRunning(turn.id, owner.ownerToken, async () => {})).toBe(true);
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("expired Project inference stays uncertain and cannot acquire external recovery authority", async () => {
+  const owned = await fixture();
+  try {
+    const { turn } = await owned.store().admit(owned.command, owned.authority);
+    const owner = await owned.store().claimPending(turn.id);
+    if (!owner?.ownerToken) throw new Error("Owned lease required");
+    await owned.store().beginDispatch(turn.id, owner.ownerToken);
+    expect(await owned.store().quarantineExpiredProject(turn.id)).toBe(false);
+    await owned.database
+      .client`UPDATE factory.agent_turn SET owner_expires_at=clock_timestamp()-interval '1 second'
+      WHERE id=${turn.id}`;
+    expect(await owned.store().claimExternalRecovery(turn.id)).toBeNull();
+    expect(await owned.store().quarantineExpiredProject(turn.id)).toBe(true);
+    expect(await owned.store().quarantineExpiredProject(turn.id)).toBe(false);
+    expect(await owned.store().claimPending(turn.id)).toBeNull();
+    expect(await owned.store().claimExternalRecovery(turn.id)).toBeNull();
+    expect(await owned.store().get(turn.id)).toMatchObject({
+      state: "uncertain",
+      ownerToken: null,
+      ownerExpiresAt: null,
+      outcomeSummary: expect.stringContaining("new explicit attempt"),
+    });
+    const replay = await owned.store().admit(owned.command, owned.authority);
+    expect(replay).toMatchObject({ replayed: true, turn: { id: turn.id, state: "uncertain" } });
+    const explicit = await owned
+      .store()
+      .admit({ ...owned.command, commandId: crypto.randomUUID() }, owned.authority);
+    expect(explicit.turn.id).not.toBe(turn.id);
+  } finally {
+    await owned.dispose();
+  }
+});

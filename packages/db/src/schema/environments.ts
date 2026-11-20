@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { EnvironmentManifest } from "../../../project-domain/src/environment";
 import {
   bigint,
   check,
@@ -48,7 +49,7 @@ export const environmentWrite = factorySchema.table(
     environment: text("environment").$type<"development" | "main-preview">().notNull(),
     baseVersion: bigint("base_version", { mode: "number" }).notNull(),
     fingerprint: text("fingerprint").notNull(),
-    manifest: jsonb("manifest").notNull(),
+    manifest: jsonb("manifest").$type<EnvironmentManifest>().notNull(),
     secretKey: text("secret_key").notNull(),
     state: text("state")
       .$type<"write-intended" | "committed" | "discarded">()
@@ -92,7 +93,10 @@ export const projectEnvironment = factorySchema.table(
     projectId: uuid("project_id").notNull(),
     environment: text("environment").$type<"development" | "main-preview">().notNull(),
     version: bigint("version", { mode: "number" }).default(0).notNull(),
-    manifest: jsonb("manifest").default({ variables: [], registries: [] }).notNull(),
+    manifest: jsonb("manifest")
+      .$type<EnvironmentManifest>()
+      .default({ variables: [], registries: [] })
+      .notNull(),
     secretKey: text("secret_key"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

@@ -1,7 +1,24 @@
 import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { and, desc, eq, inArray, isNull, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  branchCreateOperation,
+  change,
+  changeCommitOperation,
+  developmentWorkspace,
+  projectEnvironment,
+  project as projectModel,
+  runtimeAttempt,
+  substrateBinding,
+  substrateWorkspace,
+  ticket as ticketModel,
+} from "../../../../packages/db/src/schema";
 import {
   runtimeConnectorTokens,
   runtimeIdentity,
@@ -179,12 +196,27 @@ export function createSubstrateWorkspaces(
     generation: number,
     sql: typeof database.client | DatabaseTransaction = database.client,
   ) {
-    const [row] = await sql<
-      Provision[]
-    >`SELECT generation::float8 AS generation,intent,atespace,policy,template,
-      atespace_attempted_at::text AS "atespaceAttempted",policy_attempted_at::text AS "policyAttempted",template_attempted_at::text AS "templateAttempted",
-      atespace_rejected AS "atespaceRejected",policy_rejected AS "policyRejected",template_rejected AS "templateRejected"
-      FROM factory.substrate_workspace WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        generation: substrateWorkspace.generation,
+        intent: query<Provision["intent"]>`${substrateWorkspace.intent}`,
+        atespace: query<Resource | null>`${substrateWorkspace.atespace}`,
+        policy: query<Resource | null>`${substrateWorkspace.policy}`,
+        template: query<Resource | null>`${substrateWorkspace.template}`,
+        atespaceAttempted: query<string | null>`${substrateWorkspace.atespaceAttemptedAt}::text`,
+        policyAttempted: query<string | null>`${substrateWorkspace.policyAttemptedAt}::text`,
+        templateAttempted: query<string | null>`${substrateWorkspace.templateAttemptedAt}::text`,
+        atespaceRejected: substrateWorkspace.atespaceRejected,
+        policyRejected: substrateWorkspace.policyRejected,
+        templateRejected: substrateWorkspace.templateRejected,
+      })
+      .from(substrateWorkspace)
+      .where(
+        and(
+          eq(substrateWorkspace.workspaceId, workspaceID),
+          eq(substrateWorkspace.generation, generation),
+        ),
+      );
     if (!row) throw new Error("Native provisioning configuration differs from immutable intent");
     retainedConfiguration(row.intent.configuration);
     return row;
@@ -223,21 +255,41 @@ export function createSubstrateWorkspaces(
       attemptID: string,
       sql: typeof database.client | DatabaseTransaction = database.client,
     ) {
-      const [attempt] = await sql<
-        { workspaceID: string; generation: string }[]
-      >`SELECT a.workspace_id AS "workspaceID",a.generation::text AS generation
-        FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.id=${attemptID} AND a.project_id=${config.projectID}`;
+      const [attempt] = await drizzleTransaction(sql)
+        .select({
+          workspaceID: substrateWorkspace.workspaceId,
+          generation: runtimeAttempt.generation,
+        })
+        .from(runtimeAttempt)
+        .innerJoin(
+          substrateWorkspace,
+          and(
+            eq(substrateWorkspace.workspaceId, runtimeAttempt.workspaceId),
+            eq(substrateWorkspace.generation, runtimeAttempt.generation),
+          ),
+        )
+        .where(
+          and(eq(runtimeAttempt.id, attemptID), eq(runtimeAttempt.projectId, config.projectID)),
+        );
       if (!attempt) return undefined;
       return execution(
         attempt.workspaceID,
-        await saved(attempt.workspaceID, Number(attempt.generation), sql),
+        await saved(attempt.workspaceID, attempt.generation, sql),
       );
     },
     async recover() {
-      const attempts = await database.client<
-        { id: string }[]
-      >`SELECT a.id FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation
-        WHERE a.project_id=${config.projectID} ORDER BY a.created_at,a.id`;
+      const attempts = await database.db
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .innerJoin(
+          substrateWorkspace,
+          and(
+            eq(substrateWorkspace.workspaceId, runtimeAttempt.workspaceId),
+            eq(substrateWorkspace.generation, runtimeAttempt.generation),
+          ),
+        )
+        .where(eq(runtimeAttempt.projectId, config.projectID))
+        .orderBy(runtimeAttempt.createdAt, runtimeAttempt.id);
       for (const attempt of attempts) {
         try {
           await (await this.forAttempt(attempt.id))?.recover();
@@ -281,26 +333,34 @@ export function createSubstrateWorkspaces(
       let generation = 1;
       let attemptID = runtimeIdentity(workspaceID, generation).attemptID;
       const sql = database.coordination();
+      const db = drizzleTransaction(sql);
       let row: Provision;
       let startRecorded = false;
       try {
         await sql`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceID}`}))`;
-        const [latest] = await sql<
-          Provision[]
-        >`SELECT generation::float8 AS generation,intent FROM factory.substrate_workspace
-          WHERE workspace_id=${workspaceID} ORDER BY generation DESC LIMIT 1`;
+        const [latest] = await db
+          .select({
+            generation: substrateWorkspace.generation,
+            intent: query<Provision["intent"]>`${substrateWorkspace.intent}`,
+          })
+          .from(substrateWorkspace)
+          .where(eq(substrateWorkspace.workspaceId, workspaceID))
+          .orderBy(desc(substrateWorkspace.generation))
+          .limit(1);
         const originalConfiguration = latest
           ? retainedConfiguration(latest.intent.configuration)
           : desiredConfiguration;
-        const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
-        if (db?.name !== originalConfiguration.database)
+        const [currentDatabase] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
+        if (currentDatabase?.name !== originalConfiguration.database)
           throw new Error("Native provisioning requires its explicitly owned database");
         await sql.begin(async (tx) => {
           if (changeID) await projectAuthorityIn(tx, userID, originalConfiguration.projectID);
           else await projectDevelopmentAuthorityIn(tx, userID, originalConfiguration.projectID);
           if (recordStart) {
-            const [existing] =
-              await tx`SELECT id FROM factory.development_workspace WHERE id=${workspaceID}`;
+            const [existing] = await drizzleTransaction(tx)
+              .select({ id: developmentWorkspace.id })
+              .from(developmentWorkspace)
+              .where(eq(developmentWorkspace.id, workspaceID));
             if (existing) {
               await recordStart(tx, workspaceID);
               startRecorded = true;
@@ -311,11 +371,21 @@ export function createSubstrateWorkspaces(
         generation = latest?.generation ?? 1;
         attemptID = runtimeIdentity(workspaceID, generation).attemptID;
         if (latest && sources && originalConfiguration.deployment === "fresh-workspaces") {
-          const [predecessor] = await sql<
-            { state: string; actorUID: string | null; deleted: boolean }[]
-          >`SELECT a.state,b.actor_uid::text AS "actorUID",b.deleted_at IS NOT NULL AS deleted
-            FROM factory.runtime_attempt a LEFT JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-            WHERE a.id=${attemptID} AND a.workspace_id=${workspaceID} AND a.generation=${generation}`;
+          const [predecessor] = await db
+            .select({
+              state: runtimeAttempt.state,
+              actorUID: substrateBinding.actorUid,
+              deleted: query<boolean>`${substrateBinding.deletedAt} IS NOT NULL`,
+            })
+            .from(runtimeAttempt)
+            .leftJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+            .where(
+              and(
+                eq(runtimeAttempt.id, attemptID),
+                eq(runtimeAttempt.workspaceId, workspaceID),
+                eq(runtimeAttempt.generation, generation),
+              ),
+            );
           if (predecessor?.state === "stopped") {
             if (!predecessor.deleted || !predecessor.actorUID)
               throw new CommandError(
@@ -347,15 +417,20 @@ export function createSubstrateWorkspaces(
           ? retainedConfiguration(prior.intent.configuration)
           : desiredConfiguration;
         const atespace = `fa-${attemptID.replaceAll("-", "")}`;
+        const provisionIdentity = and(
+          eq(substrateWorkspace.workspaceId, workspaceID),
+          eq(substrateWorkspace.generation, generation),
+        );
         if (!prior && !recordStart)
           await capacity?.requireReady(substrateResourceReservation(config));
-        const [workspace] = await sql<
-          {
-            owner: string | null;
-            changeID: string | null;
-            branch: string;
-          }[]
-        >`SELECT owner_user_id AS owner,change_id AS "changeID",source_branch AS branch FROM factory.development_workspace WHERE id=${workspaceID}`;
+        const [workspace] = await db
+          .select({
+            owner: developmentWorkspace.ownerUserId,
+            changeID: developmentWorkspace.changeId,
+            branch: developmentWorkspace.sourceBranch,
+          })
+          .from(developmentWorkspace)
+          .where(eq(developmentWorkspace.id, workspaceID));
         if (workspace && (changeID ? workspace.changeID !== changeID : !workspace.owner))
           throw new CommandError("conflict", "Retained Workspace is never converted or adopted");
         if (prior && config.deployment === "fresh-workspaces") {
@@ -370,9 +445,10 @@ export function createSubstrateWorkspaces(
             await sql.begin((tx) =>
               substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true),
             );
-            const [project] = await sql<
-              { repository: string }[]
-            >`SELECT repository_url AS repository FROM factory.project WHERE id=${config.projectID}`;
+            const [project] = await db
+              .select({ repository: projectModel.repositoryUrl })
+              .from(projectModel)
+              .where(eq(projectModel.id, config.projectID));
             if (project?.repository !== original.intent.repositoryURL)
               throw new Error(
                 "Native Workspace repository differs from its original provisioning intent",
@@ -417,22 +493,47 @@ export function createSubstrateWorkspaces(
           }
         }
         const [ticket] = changeID
-          ? await sql<{ id: string; revision: string; branch: string }[]>`
-          SELECT c.ticket_id AS id,COALESCE(
-            (SELECT commit_sha FROM factory.change_commit_operation
-              WHERE change_id=c.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
-            c.base_sha) AS revision,c.branch_name AS branch
-          FROM factory.change c JOIN factory.ticket t ON t.id=c.ticket_id
-          JOIN factory.branch_create_operation b ON b.change_id=c.id
-          WHERE c.id=${changeID} AND c.project_id=${config.projectID}
-            AND c.state IN ('starting','active','failed') AND c.cancel_requested_at IS NULL
-            AND t.trashed_at IS NULL AND b.state='succeeded' AND b.observed_head_sha=c.base_sha`
+          ? await db
+              .select({
+                id: change.ticketId,
+                revision: query<string>`coalesce((${db
+                  .select({ sha: changeCommitOperation.commitSha })
+                  .from(changeCommitOperation)
+                  .where(
+                    and(
+                      eq(changeCommitOperation.changeId, change.id),
+                      eq(changeCommitOperation.state, "succeeded"),
+                    ),
+                  )
+                  .orderBy(desc(changeCommitOperation.sequence))
+                  .limit(1)}), ${change.baseSha})`,
+                branch: change.branchName,
+              })
+              .from(change)
+              .innerJoin(ticketModel, eq(ticketModel.id, change.ticketId))
+              .innerJoin(branchCreateOperation, eq(branchCreateOperation.changeId, change.id))
+              .where(
+                and(
+                  eq(change.id, changeID),
+                  eq(change.projectId, config.projectID),
+                  inArray(change.state, ["starting", "active", "failed"]),
+                  isNull(change.cancelRequestedAt),
+                  isNull(ticketModel.trashedAt),
+                  eq(branchCreateOperation.state, "succeeded"),
+                  eq(branchCreateOperation.observedHeadSha, change.baseSha),
+                ),
+              )
           : [];
         if (changeID && !ticket)
           throw new CommandError("conflict", "Approved Ticket branch is not ready");
-        const [project] = await sql<
-          { repository: string; branch: string; devcontainerPath: string }[]
-        >`SELECT repository_url AS repository,default_branch AS branch,devcontainer_path AS "devcontainerPath" FROM factory.project WHERE id=${config.projectID}`;
+        const [project] = await db
+          .select({
+            repository: projectModel.repositoryUrl,
+            branch: projectModel.defaultBranch,
+            devcontainerPath: projectModel.devcontainerPath,
+          })
+          .from(projectModel)
+          .where(eq(projectModel.id, config.projectID));
         if (!project) throw new CommandError("not-found", "Project not found");
         const revision = workspace
           ? await sql.begin(async (tx) => {
@@ -445,9 +546,18 @@ export function createSubstrateWorkspaces(
         if (!readContract)
           throw new Error("Native Workspace requires the normal Project System Contract reader");
         const systemContract = await readContract(project.repository, revision);
-        const [currentEnvironment] = await sql<
-          { version: number; secretKey: string | null }[]
-        >`SELECT version::float8 AS version,secret_key AS "secretKey" FROM factory.project_environment WHERE project_id=${config.projectID} AND environment='development'`;
+        const [currentEnvironment] = await db
+          .select({
+            version: projectEnvironment.version,
+            secretKey: projectEnvironment.secretKey,
+          })
+          .from(projectEnvironment)
+          .where(
+            and(
+              eq(projectEnvironment.projectId, config.projectID),
+              eq(projectEnvironment.environment, "development"),
+            ),
+          );
         const environment = prior?.intent.environment ??
           currentEnvironment ?? { version: 0, secretKey: null };
         const appName = (id: string) => (id === systemContract.primaryApp ? "app" : `app-${id}`);
@@ -550,10 +660,28 @@ export function createSubstrateWorkspaces(
           systemContract,
         };
         await sql.begin(async (tx) => {
+          const transaction = drizzleTransaction(tx);
           if (!workspace && ticket && changeID)
-            await tx`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${config.projectID},'ticket',${ticket.id},${changeID},${branch},${revision},${userID})`;
+            await transaction.insert(developmentWorkspace).values({
+              id: workspaceID,
+              projectId: config.projectID,
+              kind: "ticket",
+              ticketId: ticket.id,
+              changeId: changeID,
+              sourceBranch: branch,
+              sourceRevision: revision,
+              createdBy: userID,
+            });
           else if (!workspace)
-            await tx`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${config.projectID},'personal',${userID},${branch},${revision},${userID})`;
+            await transaction.insert(developmentWorkspace).values({
+              id: workspaceID,
+              projectId: config.projectID,
+              kind: "personal",
+              ownerUserId: userID,
+              sourceBranch: branch,
+              sourceRevision: revision,
+              createdBy: userID,
+            });
           await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
           if ((await substrateWorkspaceRevisionIn(tx, workspaceID)) !== revision)
             throw new CommandError(
@@ -561,7 +689,9 @@ export function createSubstrateWorkspaces(
               "Workspace execution revision changed before native provisioning",
             );
           if (!prior)
-            await tx`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent) VALUES(${workspaceID},${generation},${JSON.stringify(intent)}::text::jsonb)`;
+            await transaction
+              .insert(substrateWorkspace)
+              .values({ workspaceId: workspaceID, generation, intent });
           // An explicit first Start can now retain its command in the same commit
           // as the real Workspace and native intent, without weakening their FK.
           if (recordStart && !startRecorded) await recordStart(tx, workspaceID);
@@ -584,17 +714,23 @@ export function createSubstrateWorkspaces(
           if (await absent(owner, "GetAtespace", spaceRef))
             throw new Error("Preexisting Atespace was not adopted");
           await authorize();
-          await sql`UPDATE factory.substrate_workspace SET atespace_attempted_at=now() WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          await db
+            .update(substrateWorkspace)
+            .set({ atespaceAttemptedAt: query`now()` })
+            .where(provisionIdentity);
           row = await saved(workspaceID, generation, sql);
           try {
             const created = resource.parse(
               await owner("CreateAtespace", { atespace: { metadata: { name: atespace } } }),
             );
             requireOriginal(created, null, row.atespaceAttempted, atespace);
-            await sql`UPDATE factory.substrate_workspace SET atespace=${JSON.stringify(created)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+            await db.update(substrateWorkspace).set({ atespace: created }).where(provisionIdentity);
           } catch (error) {
             if (rejected(error))
-              await sql`UPDATE factory.substrate_workspace SET atespace_rejected=true WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+              await db
+                .update(substrateWorkspace)
+                .set({ atespaceRejected: true })
+                .where(provisionIdentity);
             throw error;
           }
           row = await saved(workspaceID, generation, sql);
@@ -605,14 +741,17 @@ export function createSubstrateWorkspaces(
         const space = resource.parse(await (row.policy ? editor : owner)("GetAtespace", spaceRef));
         requireOriginal(space, row.atespace, row.atespaceAttempted, atespace);
         if (!row.atespace)
-          await sql`UPDATE factory.substrate_workspace SET atespace=${JSON.stringify(space)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          await db.update(substrateWorkspace).set({ atespace: space }).where(provisionIdentity);
         const policyRef = { ...spaceRef, name: "default" };
         const bindings = [{ role: "editor", members: [config.editorPrincipal] }];
         if (!row.policyAttempted) {
           if (await absent(owner, "GetAtespaceAccessPolicy", policyRef))
             throw new Error("Preexisting native grant was not adopted");
           await authorize();
-          await sql`UPDATE factory.substrate_workspace SET policy_attempted_at=now() WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          await db
+            .update(substrateWorkspace)
+            .set({ policyAttemptedAt: query`now()` })
+            .where(provisionIdentity);
           row = await saved(workspaceID, generation, sql);
           try {
             const created = resource.parse(
@@ -624,10 +763,13 @@ export function createSubstrateWorkspaces(
             requireOriginal(created, null, row.policyAttempted, "default");
             if (!isDeepStrictEqual(created["bindings"], bindings))
               throw new Error("Native editor grant differs from its provisioning intent");
-            await sql`UPDATE factory.substrate_workspace SET policy=${JSON.stringify(created)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+            await db.update(substrateWorkspace).set({ policy: created }).where(provisionIdentity);
           } catch (error) {
             if (rejected(error))
-              await sql`UPDATE factory.substrate_workspace SET policy_rejected=true WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+              await db
+                .update(substrateWorkspace)
+                .set({ policyRejected: true })
+                .where(provisionIdentity);
             throw error;
           }
           row = await saved(workspaceID, generation, sql);
@@ -639,13 +781,16 @@ export function createSubstrateWorkspaces(
         if (!isDeepStrictEqual(policy["bindings"], bindings))
           throw new Error("Native editor grant differs from its provisioning intent");
         if (!row.policy)
-          await sql`UPDATE factory.substrate_workspace SET policy=${JSON.stringify(policy)}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          await db.update(substrateWorkspace).set({ policy }).where(provisionIdentity);
         const templateRef = { actorTemplate: { atespace, name: "runtime" } };
         if (!row.templateAttempted) {
           if (await absent(editor, "GetActorTemplate", templateRef))
             throw new Error("Preexisting ActorTemplate was not adopted");
           await authorize();
-          await sql`UPDATE factory.substrate_workspace SET template_attempted_at=now() WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          await db
+            .update(substrateWorkspace)
+            .set({ templateAttemptedAt: query`now()` })
+            .where(provisionIdentity);
           row = await saved(workspaceID, generation, sql);
           try {
             const created = resource.parse(
@@ -656,10 +801,16 @@ export function createSubstrateWorkspaces(
               throw new Error(
                 "Native ActorTemplate spec differs from immutable provisioning intent",
               );
-            await sql`UPDATE factory.substrate_workspace SET template=${JSON.stringify({ metadata: created.metadata })}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+            await db
+              .update(substrateWorkspace)
+              .set({ template: { metadata: created.metadata } })
+              .where(provisionIdentity);
           } catch (error) {
             if (rejected(error))
-              await sql`UPDATE factory.substrate_workspace SET template_rejected=true WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+              await db
+                .update(substrateWorkspace)
+                .set({ templateRejected: true })
+                .where(provisionIdentity);
             throw error;
           }
           row = await saved(workspaceID, generation, sql);
@@ -670,7 +821,10 @@ export function createSubstrateWorkspaces(
           throw new Error("Native ActorTemplate spec differs from immutable provisioning intent");
         if (!row.template) {
           // Store only public native metadata; never persist role capabilities or source URLs from the template env.
-          await sql`UPDATE factory.substrate_workspace SET template=${JSON.stringify({ metadata: actual.metadata })}::text::jsonb WHERE workspace_id=${workspaceID} AND generation=${generation}`;
+          await db
+            .update(substrateWorkspace)
+            .set({ template: { metadata: actual.metadata } })
+            .where(provisionIdentity);
         }
         row = await saved(workspaceID, generation, sql);
         if (project.repository.startsWith("file://"))

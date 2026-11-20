@@ -54,6 +54,7 @@ for (const previousSubmission of [false, true]) {
       const prepareEntered = Promise.withResolvers<void>();
       const prepareResult = Promise.withResolvers<void>();
       const originalClient = owned.database.client;
+      const originalUnsafe = originalClient.unsafe;
       const originalRequest = owned.hub.request.bind(owned.hub);
       const originalOperation = owned.hub.parentOperation.bind(owned.hub);
       let armed = false;
@@ -117,21 +118,31 @@ for (const previousSubmission of [false, true]) {
             SELECT state FROM factory.change_commit_operation WHERE id=${accepted.turn?.id ?? ""}`;
           expect(settled?.state).toBe("failed");
         }
-        owned.database.client = new Proxy(originalClient, {
+        originalClient.unsafe = new Proxy(originalUnsafe, {
           apply(target, receiver, args) {
             const result = Reflect.apply(target, receiver, args);
-            const parts = args[0] as TemplateStringsArray;
+            const query = String(args[0]);
             if (
               !armed ||
               boundary !== "before Session read" ||
-              !parts.join("").includes('SELECT intent.turn_id AS "turnID"')
+              !query.includes(
+                'from "factory"."change_agent_turn_intent" inner join "factory"."agent_turn"',
+              ) ||
+              !query.includes('"factory"."agent_turn"."input"')
             )
               return result;
-            return (async () => {
-              const rows = await result;
-              await settleBetweenReads();
-              return rows;
-            })();
+            // Interleave at the real Drizzle driver boundary after the history
+            // read finishes, before the getter opens its Session snapshot.
+            return new Proxy(result, {
+              get(target, property, receiver) {
+                if (property !== "values") return Reflect.get(target, property, receiver);
+                return async () => {
+                  const rows = await target.values();
+                  await settleBetweenReads();
+                  return rows;
+                };
+              },
+            });
           },
         });
         owned.hub.request = async (...args) => {
@@ -185,6 +196,7 @@ for (const previousSubmission of [false, true]) {
         ).toHaveLength(0);
       } finally {
         armed = false;
+        originalClient.unsafe = originalUnsafe;
         owned.database.client = originalClient;
         owned.hub.request = originalRequest;
         owned.hub.parentOperation = originalOperation;

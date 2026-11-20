@@ -1,6 +1,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { and, asc, desc, eq, sql as expression, isNull, lt, lte, or } from "drizzle-orm";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  knowledgeGeneration,
+  project as projectTable,
+  wikiSourceUpdate,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
@@ -32,7 +38,7 @@ export function createWikiSourceUpdates(options: {
   reconcile(projectID: string): Promise<void>;
   prepareProject?(projectID: string): Promise<void>;
 }) {
-  const sql = options.database.client;
+  const db = options.database.db;
   const receiver = new URL(options.receiverURL);
   if (
     !["http:", "https:"].includes(receiver.protocol) ||
@@ -43,9 +49,10 @@ export function createWikiSourceUpdates(options: {
     throw new Error("Wiki webhook receiver and signing key must be configured securely");
   let draining: Promise<void> | undefined;
   async function project(projectID: string) {
-    const [row] = await sql<Array<{ url: string; branch: string }>>`
-      SELECT repository_url AS url,default_branch AS branch FROM factory.project WHERE id=${projectID}
-    `;
+    const [row] = await db
+      .select({ url: projectTable.repositoryUrl, branch: projectTable.defaultBranch })
+      .from(projectTable)
+      .where(eq(projectTable.id, projectID));
     if (!row) throw new CommandError("not-found", "Project not found");
     return {
       ...row,
@@ -56,12 +63,27 @@ export function createWikiSourceUpdates(options: {
     const current = await project(projectID);
     const target = new URL(`/api/wiki/source-events/${projectID}`, receiver).href;
     // Persist deterministic external intent before querying or creating a hook.
-    await sql`INSERT INTO factory.wiki_source_update(project_id,target_url) VALUES(${projectID},${target})
-      ON CONFLICT(project_id) DO UPDATE SET target_url=EXCLUDED.target_url,updated_at=now()`;
+    await db
+      .insert(wikiSourceUpdate)
+      .values({ projectId: projectID, targetUrl: target })
+      .onConflictDoUpdate({
+        target: wikiSourceUpdate.projectId,
+        set: { targetUrl: target, updatedAt: expression`now()` },
+      });
     const lease = crypto.randomUUID();
-    const claimed =
-      await sql`UPDATE factory.wiki_source_update SET hook_lease=${lease},hook_lease_until=now()+interval '60 seconds'
-      WHERE project_id=${projectID} AND (hook_lease_until IS NULL OR hook_lease_until<now()) RETURNING project_id`;
+    const claimed = await db
+      .update(wikiSourceUpdate)
+      .set({ hookLease: lease, hookLeaseUntil: expression`now()+interval '60 seconds'` })
+      .where(
+        and(
+          eq(wikiSourceUpdate.projectId, projectID),
+          or(
+            isNull(wikiSourceUpdate.hookLeaseUntil),
+            lt(wikiSourceUpdate.hookLeaseUntil, expression`now()`),
+          ),
+        ),
+      )
+      .returning({ projectId: wikiSourceUpdate.projectId });
     if (!claimed.length) return;
     try {
       const matches = (await options.forge.listPushHooks(current.repository)).filter(
@@ -78,14 +100,27 @@ export function createWikiSourceUpdates(options: {
             current.branch,
           )
         : await options.forge.createPushHook(current.repository, target, secret, current.branch);
-      await sql`UPDATE factory.wiki_source_update SET hook_id=${id},hook_state='ready',failure=NULL
-        WHERE project_id=${projectID} AND hook_lease=${lease}`;
+      await db
+        .update(wikiSourceUpdate)
+        .set({ hookId: id, hookState: "ready", failure: null })
+        .where(
+          and(eq(wikiSourceUpdate.projectId, projectID), eq(wikiSourceUpdate.hookLease, lease)),
+        );
     } catch {
       // Never blind-retry an ambiguous create. The next ensure discovers the exact target first.
-      await sql`UPDATE factory.wiki_source_update SET hook_state='failed',failure='Wiki source hook setup needs retry.'
-        WHERE project_id=${projectID} AND hook_lease=${lease}`;
+      await db
+        .update(wikiSourceUpdate)
+        .set({ hookState: "failed", failure: "Wiki source hook setup needs retry." })
+        .where(
+          and(eq(wikiSourceUpdate.projectId, projectID), eq(wikiSourceUpdate.hookLease, lease)),
+        );
     } finally {
-      await sql`UPDATE factory.wiki_source_update SET hook_lease=NULL,hook_lease_until=NULL WHERE project_id=${projectID} AND hook_lease=${lease}`;
+      await db
+        .update(wikiSourceUpdate)
+        .set({ hookLease: null, hookLeaseUntil: null })
+        .where(
+          and(eq(wikiSourceUpdate.projectId, projectID), eq(wikiSourceUpdate.hookLease, lease)),
+        );
     }
   }
   async function receive(request: Request, projectID: string): Promise<Response> {
@@ -141,10 +176,16 @@ export function createWikiSourceUpdates(options: {
       return new Response(null, { status: 403 });
     if (parsed.data.ref !== `refs/heads/${current.branch}` || /^0+$/.test(parsed.data.after))
       return new Response(null, { status: 204 });
-    const rows = await sql`UPDATE factory.wiki_source_update SET event_version=event_version+1,
-      next_attempt_at=CASE WHEN handled_version=event_version THEN now()+interval '1 second'
-        ELSE LEAST(next_attempt_at,now()+interval '1 second') END,updated_at=now()
-      WHERE project_id=${projectID} RETURNING project_id`;
+    const rows = await db
+      .update(wikiSourceUpdate)
+      .set({
+        eventVersion: expression`${wikiSourceUpdate.eventVersion}+1`,
+        nextAttemptAt: expression`CASE WHEN ${wikiSourceUpdate.handledVersion}=${wikiSourceUpdate.eventVersion}
+          THEN now()+interval '1 second' ELSE LEAST(${wikiSourceUpdate.nextAttemptAt},now()+interval '1 second') END`,
+        updatedAt: expression`now()`,
+      })
+      .where(eq(wikiSourceUpdate.projectId, projectID))
+      .returning({ projectId: wikiSourceUpdate.projectId });
     if (!rows.length) return new Response(null, { status: 503 });
     // The same signed event admits image preparation independently of Wiki inference.
     await options.prepareProject?.(projectID);
@@ -155,30 +196,60 @@ export function createWikiSourceUpdates(options: {
   async function drain() {
     if (draining) return draining;
     const task = (async () => {
-      const pending = await sql<Array<{ id: string; version: string }>>`
-        SELECT project_id AS id,event_version::text AS version FROM factory.wiki_source_update
-        WHERE handled_version<event_version AND next_attempt_at<=now() ORDER BY updated_at LIMIT 20
-      `;
+      const pending = await db
+        .select({
+          id: wikiSourceUpdate.projectId,
+          version: expression<string>`${wikiSourceUpdate.eventVersion}::text`,
+        })
+        .from(wikiSourceUpdate)
+        .where(
+          and(
+            lt(wikiSourceUpdate.handledVersion, wikiSourceUpdate.eventVersion),
+            lte(wikiSourceUpdate.nextAttemptAt, expression`now()`),
+          ),
+        )
+        .orderBy(asc(wikiSourceUpdate.updatedAt))
+        .limit(20);
       for (const row of pending) {
         try {
           await options.reconcile(row.id);
           const current = await project(row.id);
           const head = await options.forge.getDefaultBranch(current.repository);
-          const [generation] = await sql<
-            Array<{ state: string; commit: string }>
-          >`SELECT state,source_commit_sha AS commit FROM factory.knowledge_generation
-            WHERE project_id=${row.id} ORDER BY created_at DESC LIMIT 1`;
+          const [generation] = await db
+            .select({
+              state: knowledgeGeneration.state,
+              commit: knowledgeGeneration.sourceCommitSha,
+            })
+            .from(knowledgeGeneration)
+            .where(eq(knowledgeGeneration.projectId, row.id))
+            .orderBy(desc(knowledgeGeneration.createdAt))
+            .limit(1);
           if (
             generation?.state !== "succeeded" ||
             generation.commit !== head.headSha ||
             head.name !== current.branch
           ) {
-            await sql`UPDATE factory.wiki_source_update SET next_attempt_at=now()+interval '15 seconds' WHERE project_id=${row.id}`;
+            await db
+              .update(wikiSourceUpdate)
+              .set({ nextAttemptAt: expression`now()+interval '15 seconds'` })
+              .where(eq(wikiSourceUpdate.projectId, row.id));
             continue;
           }
-          await sql`UPDATE factory.wiki_source_update SET handled_version=GREATEST(handled_version,${row.version}::bigint),failure=NULL WHERE project_id=${row.id}`;
+          await db
+            .update(wikiSourceUpdate)
+            .set({
+              handledVersion: expression`GREATEST(${wikiSourceUpdate.handledVersion},${row.version}::bigint)`,
+              failure: null,
+            })
+            .where(eq(wikiSourceUpdate.projectId, row.id));
         } catch {
-          await sql`UPDATE factory.wiki_source_update SET next_attempt_at=now()+interval '30 seconds',failure='Wiki source update will retry.' WHERE project_id=${row.id}`;
+          await db
+            .update(wikiSourceUpdate)
+            .set({
+              nextAttemptAt: expression`now()+interval '30 seconds'`,
+              failure: "Wiki source update will retry.",
+            })
+            .where(eq(wikiSourceUpdate.projectId, row.id));
         }
       }
     })();
@@ -190,7 +261,10 @@ export function createWikiSourceUpdates(options: {
     }
   }
   async function repair() {
-    const projects = await sql<Array<{ id: string }>>`SELECT id FROM factory.project ORDER BY id`;
+    const projects = await db
+      .select({ id: projectTable.id })
+      .from(projectTable)
+      .orderBy(asc(projectTable.id));
     for (const row of projects) {
       try {
         await ensure(row.id);

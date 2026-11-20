@@ -149,7 +149,99 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
         cleanupError = String(values[0]);
       return [];
     },
-    { begin: async <T>(operation: (sql: unknown) => Promise<T>) => operation(client) },
+    {
+      begin: async <T>(operation: (sql: unknown) => Promise<T>) => operation(client),
+      unsafe(text: string, parameters: unknown[]) {
+        async function execute(): Promise<unknown[][] & { count?: number }> {
+          if (text.startsWith("select") && text.includes("count(*)")) return [[0]];
+          if (text.startsWith("select exists") && text.includes('from "factory"."merge_operation"'))
+            return [[!repair]];
+          if (text.startsWith("select") && text.includes('inner join "factory"."ticket"'))
+            return [
+              [
+                "change",
+                "project",
+                "ticket",
+                "Ticket",
+                "",
+                "factory/change",
+                baseSHA,
+                state,
+                false,
+                "user",
+                "http://forge/factory/repo.git",
+                "main",
+                commitSHA,
+                "ticket-runtime",
+                null,
+                null,
+              ],
+            ];
+          if (text.startsWith('update "factory"."verification"') && text.includes("returning")) {
+            if (text.includes('returning "diagnosis"')) {
+              const encoded = parameters.find(
+                (value) => typeof value === "string" && value.startsWith('{"kind":'),
+              );
+              recordedDiagnosis = encoded ? JSON.parse(String(encoded)) : null;
+              return [[recordedDiagnosis]];
+            }
+            if (
+              !superseded ||
+              (supersededState === "cancelled" && !supersededRunner && supersededStopped)
+            )
+              return [];
+            expect(parameters).toContain(commitSHA);
+            supersededState = "cancelled";
+            return [["old-verification", "old-verification-runtime", supersededRunner || null]];
+          }
+          if (text.startsWith("select") && text.includes('from "factory"."pull_request_operation"'))
+            return [["pr", "succeeded", "1", "http://forge/pr/1"]];
+          if (text.startsWith("select") && text.includes('from "factory"."merge_operation"'))
+            return [["merge", mergeState, commitSHA, baseSHA, "1", null, null]];
+          if (text.startsWith("select") && text.includes('from "factory"."runtime_attempt"')) {
+            expect(parameters).toEqual(["old-verification-runtime"]);
+            return [[supersededStopped ? "stopped" : "ready", false]];
+          }
+          if (text.startsWith("select") && text.includes('from "factory"."verification"')) {
+            if (parameters.includes("succeeded")) return [];
+            return [
+              [
+                verificationID,
+                recordedDiagnosis ? "failed" : "running",
+                "1",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                repairAcknowledged ? "now" : null,
+                recordedDiagnosis,
+              ],
+            ];
+          }
+          if (text.startsWith("select") && text.includes('from "factory"."change_agent_session"'))
+            return text.includes("stop_pending") ? [[sessionState, false]] : [[sessionState]];
+          if (text.startsWith('update "factory"."verification"')) {
+            if (text.includes('"runner_id" = $1') && parameters[0] === null) supersededRunner = "";
+            if (text.includes('"repair_prompted_at" = now()')) repairAcknowledged = true;
+          }
+          if (text.startsWith('update "factory"."merge_operation"')) {
+            if (parameters[0] === "succeeded" && failMergePersistence) {
+              failMergePersistence = false;
+              throw new Error("database write lost after merge");
+            }
+            mergeState = String(parameters[0]);
+          }
+          if (text.startsWith('update "factory"."change"') && parameters.includes("delivering"))
+            state = "delivering";
+          return Object.assign([], { count: 1 });
+        }
+        const result = execute();
+        return Object.assign(result, { values: () => result });
+      },
+    },
   );
   const forge = {
     observeVerification: async () => verificationReceipt(commitSHA),

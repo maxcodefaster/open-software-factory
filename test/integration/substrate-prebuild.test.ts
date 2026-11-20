@@ -121,6 +121,29 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
           metadata: await metadata("default", atespace),
         };
       else if (kind === "Actor") {
+        const [admitted] = await f.database.client`
+          SELECT attempt.workspace_id,attempt.change_id,attempt.verification_id,
+            attempt.isolated_kind,preparation.state,preparation.runtime_attempt_id,
+            environment.environment,environment.version=preparation.environment_version AS exact_environment,
+            binding.intent->'environment' AS retained_environment
+          FROM factory.runtime_attempt attempt
+          JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+          JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=attempt.id
+          WHERE attempt.id=${attemptID}`;
+        expect(admitted).toMatchObject({
+          workspace_id: null,
+          change_id: null,
+          verification_id: null,
+          isolated_kind: "prebuild",
+          state: "running",
+          runtime_attempt_id: attemptID,
+          exact_environment: true,
+        });
+        expect(admitted?.["retained_environment"]).toMatchObject({
+          environment: admitted?.["environment"],
+          version: expect.any(Number),
+        });
         actor = nativeActor.parse({
           ...(body["actor"] as object),
           metadata: await metadata(`runtime-${attemptID.replaceAll("-", "")}`, atespace),

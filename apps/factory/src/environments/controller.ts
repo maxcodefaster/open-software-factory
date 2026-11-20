@@ -1,5 +1,15 @@
 import { createHmac } from "node:crypto";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import { and, asc, desc, eq, sql as expression } from "drizzle-orm";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  environmentWrite as environmentWriteTable,
+  projectEnvironment,
+  projectImagePreparation,
+} from "../../../../packages/db/src/schema";
 import {
   type EnvironmentBundle,
   type EnvironmentManifest,
@@ -16,17 +26,17 @@ import { CommandError } from "../command-error";
 import { type EnvironmentSecrets, emptyEnvironment, type StoredEnvironment } from "./openbao";
 
 type Database = ReturnType<typeof createDatabase>;
-type SettingsRow = { version: number; manifest: EnvironmentManifest; secretKey: string | null };
-type WriteRow = {
+type SettingsRow = Pick<
+  typeof projectEnvironment.$inferSelect,
+  "version" | "manifest" | "secretKey"
+>;
+type WriteRow = Pick<
+  typeof environmentWriteTable.$inferSelect,
+  "environment" | "baseVersion" | "fingerprint" | "secretKey" | "state" | "createdBy"
+> & {
   commandID: string;
   projectID: string;
-  environment: ProjectEnvironment;
-  baseVersion: number;
-  fingerprint: string;
   manifest: EnvironmentManifest;
-  secretKey: string;
-  state: "write-intended" | "committed" | "discarded";
-  createdBy: string;
 };
 
 export function createEnvironmentController(
@@ -51,17 +61,37 @@ export function createEnvironmentController(
     projectID: string,
     environment: ProjectEnvironment,
   ): Promise<SettingsRow> {
-    const [row] = await sql<SettingsRow[]>`SELECT version::float8 AS version, manifest,
-      secret_key AS "secretKey" FROM factory.project_environment
-      WHERE project_id=${projectID} AND environment=${environment}`;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        version: projectEnvironment.version,
+        manifest: projectEnvironment.manifest,
+        secretKey: projectEnvironment.secretKey,
+      })
+      .from(projectEnvironment)
+      .where(
+        and(
+          eq(projectEnvironment.projectId, projectID),
+          eq(projectEnvironment.environment, environment),
+        ),
+      );
     return row ?? { version: 0, manifest: { variables: [], registries: [] }, secretKey: null };
   }
   async function writeRow(sql: DatabaseTransaction, commandID: string) {
-    const [row] = await sql<WriteRow[]>`SELECT command_id AS "commandID", project_id AS "projectID",
-      environment, base_version::float8 AS "baseVersion", fingerprint, manifest,
-      secret_key AS "secretKey", state, created_by AS "createdBy"
-      FROM factory.environment_write WHERE command_id=${commandID}`;
-    return row;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        commandID: environmentWriteTable.commandId,
+        projectID: environmentWriteTable.projectId,
+        environment: environmentWriteTable.environment,
+        baseVersion: environmentWriteTable.baseVersion,
+        fingerprint: environmentWriteTable.fingerprint,
+        manifest: environmentWriteTable.manifest,
+        secretKey: environmentWriteTable.secretKey,
+        state: environmentWriteTable.state,
+        createdBy: environmentWriteTable.createdBy,
+      })
+      .from(environmentWriteTable)
+      .where(eq(environmentWriteTable.commandId, commandID));
+    return row ? { ...row, manifest: environmentManifest.parse(row.manifest) } : undefined;
   }
   async function settle(row: WriteRow, stored: StoredEnvironment) {
     if (
@@ -86,17 +116,37 @@ export function createEnvironmentController(
         if (!(cause instanceof CommandError) || !["forbidden", "not-found"].includes(cause.code))
           throw cause;
         // Keep the encrypted external result, but never publish it after authority loss.
-        await sql`UPDATE factory.environment_write SET state='discarded' WHERE command_id=${intent.commandID}`;
+        await drizzleTransaction(sql)
+          .update(environmentWriteTable)
+          .set({ state: "discarded" })
+          .where(eq(environmentWriteTable.commandId, intent.commandID));
         return false;
       }
       const active = await current(sql, row.projectID, row.environment);
       if (active.version !== row.baseVersion) throw conflict();
-      await sql`INSERT INTO factory.project_environment(project_id, environment, version, manifest, secret_key)
-        VALUES (${row.projectID}, ${row.environment}, ${row.baseVersion + 1}, ${JSON.stringify(row.manifest)}::jsonb, ${row.secretKey})
-        ON CONFLICT (project_id, environment) DO UPDATE SET version=EXCLUDED.version,
-          manifest=EXCLUDED.manifest, secret_key=EXCLUDED.secret_key, updated_at=now()`;
-      await sql`UPDATE factory.environment_write SET state='committed', committed_at=now()
-        WHERE command_id=${row.commandID}`;
+      const db = drizzleTransaction(sql);
+      await db
+        .insert(projectEnvironment)
+        .values({
+          projectId: row.projectID,
+          environment: row.environment,
+          version: row.baseVersion + 1,
+          manifest: row.manifest,
+          secretKey: row.secretKey,
+        })
+        .onConflictDoUpdate({
+          target: [projectEnvironment.projectId, projectEnvironment.environment],
+          set: {
+            version: row.baseVersion + 1,
+            manifest: row.manifest,
+            secretKey: row.secretKey,
+            updatedAt: expression`now()`,
+          },
+        });
+      await db
+        .update(environmentWriteTable)
+        .set({ state: "committed", committedAt: expression`now()` })
+        .where(eq(environmentWriteTable.commandId, row.commandID));
       return true;
     });
   }
@@ -109,13 +159,29 @@ export function createEnvironmentController(
       const canManage = await projectAuthorityIn(sql, userID, projectID);
       if (!canManage) await projectDevelopmentAuthorityIn(sql, userID, projectID);
       const row = await current(sql, projectID, environment);
-      const [pending] = await sql<
-        Array<{ commandID: string }>
-      >`SELECT command_id AS "commandID" FROM factory.environment_write
-        WHERE project_id=${projectID} AND environment=${environment} AND state='write-intended'`;
-      const [preparation] = await sql<
-        Array<{ state: "pending" | "running" | "succeeded" | "unsupported" | "failed" }>
-      >`SELECT state FROM factory.project_image_preparation WHERE project_id=${projectID} AND environment=${environment} AND environment_version=${row.version} ORDER BY created_at DESC LIMIT 1`;
+      const db = drizzleTransaction(sql);
+      const [pending] = await db
+        .select({ commandID: environmentWriteTable.commandId })
+        .from(environmentWriteTable)
+        .where(
+          and(
+            eq(environmentWriteTable.projectId, projectID),
+            eq(environmentWriteTable.environment, environment),
+            eq(environmentWriteTable.state, "write-intended"),
+          ),
+        );
+      const [preparation] = await db
+        .select({ state: projectImagePreparation.state })
+        .from(projectImagePreparation)
+        .where(
+          and(
+            eq(projectImagePreparation.projectId, projectID),
+            eq(projectImagePreparation.environment, environment),
+            eq(projectImagePreparation.environmentVersion, row.version),
+          ),
+        )
+        .orderBy(desc(projectImagePreparation.createdAt))
+        .limit(1);
       return {
         ...environmentManifest.parse(row.manifest),
         environment,
@@ -161,8 +227,16 @@ export function createEnvironmentController(
       }
       const active = await current(sql, projectID, environment);
       if (active.version !== input.version) throw conflict();
-      const [pending] = await sql`SELECT command_id FROM factory.environment_write
-        WHERE project_id=${projectID} AND environment=${environment} AND state='write-intended'`;
+      const [pending] = await drizzleTransaction(sql)
+        .select({ commandID: environmentWriteTable.commandId })
+        .from(environmentWriteTable)
+        .where(
+          and(
+            eq(environmentWriteTable.projectId, projectID),
+            eq(environmentWriteTable.environment, environment),
+            eq(environmentWriteTable.state, "write-intended"),
+          ),
+        );
       if (pending) throw conflict();
       const previous = active.secretKey ? await secrets.read(active.secretKey) : undefined;
       if (active.secretKey && !previous)
@@ -187,9 +261,16 @@ export function createEnvironmentController(
         state: "write-intended",
         createdBy: userID,
       };
-      await sql`INSERT INTO factory.environment_write(command_id, project_id, environment, base_version,
-        fingerprint, manifest, secret_key, created_by) VALUES (${row.commandID}, ${projectID}, ${environment},
-        ${row.baseVersion}, ${fingerprint}, ${JSON.stringify(row.manifest)}::jsonb, ${row.secretKey}, ${userID})`;
+      await drizzleTransaction(sql).insert(environmentWriteTable).values({
+        commandId: row.commandID,
+        projectId: projectID,
+        environment,
+        baseVersion: row.baseVersion,
+        fingerprint,
+        manifest: row.manifest,
+        secretKey: row.secretKey,
+        createdBy: userID,
+      });
       return { row, bundle };
     });
     if (admission.row.state === "committed") return get(projectID, userID, environment);
@@ -252,16 +333,21 @@ export function createEnvironmentController(
         )
           throw conflict();
         // Fence late external acknowledgements. Current settings and stored values are not deleted.
-        await sql`UPDATE factory.environment_write SET state='discarded' WHERE command_id=${commandID}`;
+        await drizzleTransaction(sql)
+          .update(environmentWriteTable)
+          .set({ state: "discarded" })
+          .where(eq(environmentWriteTable.commandId, commandID));
       });
       return get(projectID, userID, environment);
     },
     async recover() {
       if (!secrets.configured) return;
-      const rows = await database.client<
-        Array<{ commandID: string }>
-      >`SELECT command_id AS "commandID"
-        FROM factory.environment_write WHERE state='write-intended' ORDER BY created_at LIMIT 32`;
+      const rows = await database.db
+        .select({ commandID: environmentWriteTable.commandId })
+        .from(environmentWriteTable)
+        .where(eq(environmentWriteTable.state, "write-intended"))
+        .orderBy(asc(environmentWriteTable.createdAt))
+        .limit(32);
       for (const { commandID } of rows) {
         const row = await database.client.begin((sql) => writeRow(sql, commandID));
         if (row?.state !== "write-intended") continue;

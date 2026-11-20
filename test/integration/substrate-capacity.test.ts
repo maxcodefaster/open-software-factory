@@ -261,6 +261,7 @@ test.each(["amd64", "arm64"] as const)(
     let creates = 0;
     let lose = true;
     let reject = false;
+    let interruptBeforeDispatch = true;
     const resources = { cpuMilli: 2000, memoryMiB: 4096 };
     const config: SubstrateInstallationConfiguration = {
       deployment: "fresh-workspaces",
@@ -323,8 +324,13 @@ test.each(["amd64", "arm64"] as const)(
       else if (args[1] === "nodes") value = { items: nodes };
       else if (args[1] === "pods") value = { items: pods };
       else if (args[1] === "sandboxconfig") value = fixture.sandbox;
-      else if (args[1] === "workerpool") value = pools.get(args[2] ?? "");
-      else throw Error(`Unexpected native capacity command ${args.join(" ")}`);
+      else if (args[1] === "workerpool") {
+        if (interruptBeforeDispatch) {
+          interruptBeforeDispatch = false;
+          throw Error("owned undispatched pool observation");
+        }
+        value = pools.get(args[2] ?? "");
+      } else throw Error(`Unexpected native capacity command ${args.join(" ")}`);
       return { exitCode: 0, stdout: value === undefined ? "" : JSON.stringify(value), stderr: "" };
     };
     const capacity = createSubstrateCapacity(f.database, config, run);
@@ -333,6 +339,34 @@ test.each(["amd64", "arm64"] as const)(
       expect((await capacity.ensure()).ready).toHaveLength(0);
       expect(calls).toHaveLength(0);
       await finishInstallationMaintenance(f.database);
+      await expect(capacity.ensure()).rejects.toThrow("owned undispatched pool observation");
+      const [undispatched] = await f.database.client`
+        SELECT attempted_at,intent FROM factory.substrate_worker_capacity`;
+      expect(undispatched?.["attempted_at"]).toBeNull();
+      expect(creates).toBe(0);
+      const freshNode = nodes[0];
+      if (!freshNode) throw Error("No undispatched capacity node");
+      const freshBoot = freshNode.status.nodeInfo.bootID;
+      freshNode.status.nodeInfo.bootID = crypto.randomUUID();
+      await expect(capacity.ensure()).rejects.toThrow("node identity or boot changed");
+      expect(creates).toBe(0);
+      freshNode.status.nodeInfo.bootID = freshBoot;
+      pods.push({
+        metadata: { uid: crypto.randomUUID() },
+        spec: {
+          nodeName: freshNode.metadata.name,
+          containers: [
+            {
+              name: "reserved-before-dispatch",
+              resources: { requests: { cpu: "1", memory: "1Gi" } },
+            },
+          ],
+        },
+        status: { phase: "Running" },
+      });
+      await expect(capacity.ensure()).rejects.toThrow("budget no longer fits");
+      expect(creates).toBe(0);
+      pods.pop();
       await expect(capacity.ensure()).rejects.toThrow("owned lost pool reply");
       expect(creates).toBe(1);
       const first = pools.entries().next().value;

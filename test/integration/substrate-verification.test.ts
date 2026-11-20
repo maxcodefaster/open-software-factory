@@ -94,8 +94,23 @@ test("native Verification continues initial capacity rejection on its exact-job 
         ).not.toBeNull();
       else if (kind === "Actor") {
         const [binding] = await f.database
-          .client`SELECT create_attempted_at FROM factory.substrate_binding WHERE runtime_attempt_id=${provisioningAttemptID}`;
+          .client`SELECT binding.create_attempted_at,attempt.workspace_id,attempt.change_id,
+            attempt.verification_id,attempt.isolated_kind,verification.runtime_attempt_id,
+            verification.state,attempt.revision=verification.commit_sha AS exact_commit
+          FROM factory.substrate_binding binding
+          JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id
+          JOIN factory.verification verification ON verification.id=attempt.verification_id
+          WHERE binding.runtime_attempt_id=${provisioningAttemptID}`;
         expect(binding?.["create_attempted_at"]).not.toBeNull();
+        expect(binding).toMatchObject({
+          workspace_id: null,
+          change_id: null,
+          verification_id: verificationID,
+          isolated_kind: "verification",
+          runtime_attempt_id: provisioningAttemptID,
+          state: "runner-starting",
+          exact_commit: true,
+        });
       }
       const spec =
         kind === "AtespaceAccessPolicy"
@@ -104,13 +119,16 @@ test("native Verification continues initial capacity rejection on its exact-job 
             ? request["egressPolicy"]
             : request[`${kind[0]?.toLowerCase()}${kind.slice(1)}`];
       if (!spec) throw new Error(`Missing owned ${kind} declaration`);
+      const [clock] = await f.database.client<{ at: string }[]>`
+        SELECT clock_timestamp()::text AS at`;
+      if (!clock) throw new Error("Owned native creation clock is unavailable");
       const value = {
         ...spec,
         metadata: {
           ...(spec["metadata"] as object),
           uid: crypto.randomUUID(),
           version: "1",
-          createTime: new Date().toISOString(),
+          createTime: new Date(clock.at).toISOString(),
         },
       };
       if (kind === "Actor") Object.assign(value, { status: { state: "ACTOR_STATE_SUSPENDED" } });

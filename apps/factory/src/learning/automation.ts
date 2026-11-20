@@ -1,4 +1,18 @@
 import { createHash } from "node:crypto";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  gte,
+  isNotNull,
+  isNull,
+  lt,
+  notExists,
+  or,
+  sql as typedSQL,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import {
   applyLearningEdit,
@@ -21,7 +35,19 @@ import {
 } from "../../../../packages/conversation-domain/src/learning-comparison";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  learningApplication,
+  learningPolicy,
+  learningReview,
+  learningTrial,
+  learningTrialStep,
+  learningProposal as proposalTable,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { knownModelRejection } from "../models/execution-policy";
 import type { ResolvedModelConnection } from "../models/native";
@@ -87,9 +113,20 @@ export function createLearningAutomation(
     await learningAuthorityIn(sql, row.actorId, row);
     if (!(await learningEnabledIn(sql, row.projectId, row.ownerId)))
       throw new CommandError("forbidden", "Learning is paused");
-    const [policy] = await sql`SELECT scope_key FROM factory.learning_policy
-      WHERE project_id=${row.projectId} AND owner_id IS NOT DISTINCT FROM ${row.ownerId}::uuid
-        AND automatic_skills AND version=${row.policyVersion} AND updated_by=${row.actorId}`;
+    const [policy] = await drizzleTransaction(sql)
+      .select({ scopeKey: learningPolicy.scopeKey })
+      .from(learningPolicy)
+      .where(
+        and(
+          eq(learningPolicy.projectId, row.projectId),
+          row.ownerId === null
+            ? isNull(learningPolicy.ownerId)
+            : eq(learningPolicy.ownerId, row.ownerId),
+          eq(learningPolicy.automaticSkills, true),
+          eq(learningPolicy.version, row.policyVersion),
+          eq(learningPolicy.updatedBy, row.actorId),
+        ),
+      );
     if (!policy) throw new CommandError("forbidden", "Automatic Skill permission changed");
   }
   async function loadedIn(
@@ -99,6 +136,7 @@ export function createLearningAutomation(
     choiceVersion?: number,
   ) {
     await sql`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`;
+    const db = drizzleTransaction(sql);
     const target = currentTarget(row, edit);
     const loaded = await targets.current(sql, target, row.actorId, row.projectId);
     const content = loaded.content;
@@ -124,22 +162,41 @@ export function createLearningAutomation(
     if (choiceVersion !== undefined && loaded.choices[0]?.version !== choiceVersion)
       throw new CommandError("conflict", "Skill activation changed during comparison");
     if (row.phase === "recover") {
-      const [application] = await sql`SELECT id FROM factory.learning_application
-        WHERE id=${row.applicationId} AND state='applied' AND comparison_id IS NOT NULL
-          AND applied_revision_id=${row.appliedRevisionId}`;
+      const [application] = await db
+        .select({ id: learningApplication.id })
+        .from(learningApplication)
+        .where(
+          and(
+            // A recovery candidate always carries both identities. Preserve SQL's
+            // non-match for a missing identity instead of matching a shared null.
+            eq(learningApplication.id, typedSQL`${row.applicationId}::uuid`),
+            eq(learningApplication.state, "applied"),
+            isNotNull(learningApplication.comparisonId),
+            eq(learningApplication.appliedRevisionId, typedSQL`${row.appliedRevisionId}::uuid`),
+          ),
+        );
       if (!application) throw new CommandError("conflict", "Applied guidance changed");
       const activation = z.array(learningActivation).parse(row.activation);
       if (activation.length !== 1 || activation[0]?.afterVersion !== loaded.choices[0]?.version)
         throw new CommandError("conflict", "A newer Skill choice blocks automatic recovery");
     } else {
-      const [proposal] =
-        await sql`SELECT id FROM factory.learning_proposal WHERE id=${row.proposalId} AND state='proposed'`;
+      const [proposal] = await db
+        .select({ id: proposalTable.id })
+        .from(proposalTable)
+        .where(and(eq(proposalTable.id, row.proposalId), eq(proposalTable.state, "proposed")));
       if (!proposal) throw new CommandError("conflict", "The proposal already has a decision");
-      const [reverted] =
-        await sql`SELECT application.id FROM factory.learning_application application
-        JOIN factory.learning_proposal proposal ON proposal.id=application.proposal_id
-        WHERE application.state='reverted' AND application.target->>'id'=${target.id}
-          AND proposal.content->'edit'->>'after'=${edit.after} LIMIT 1`;
+      const [reverted] = await db
+        .select({ id: learningApplication.id })
+        .from(learningApplication)
+        .innerJoin(proposalTable, eq(proposalTable.id, learningApplication.proposalId))
+        .where(
+          and(
+            eq(learningApplication.state, "reverted"),
+            eq(typedSQL<string>`${learningApplication.target}->>'id'`, target.id),
+            eq(typedSQL<string>`${proposalTable.content}->'edit'->>'after'`, edit.after),
+          ),
+        )
+        .limit(1);
       if (reverted)
         throw new CommandError("conflict", "A reverted edit cannot be automatically repeated");
     }
@@ -148,36 +205,69 @@ export function createLearningAutomation(
   async function admit(row: Candidate) {
     return database.client.begin(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning-trial:${row.proposalId}:${row.phase}`}))`;
-      const [existing] =
-        await sql`SELECT id FROM factory.learning_trial WHERE proposal_id=${row.proposalId} AND phase=${row.phase}`;
+      const db = drizzleTransaction(sql);
+      const [existing] = await db
+        .select({ id: learningTrial.id })
+        .from(learningTrial)
+        .where(
+          and(eq(learningTrial.proposalId, row.proposalId), eq(learningTrial.phase, row.phase)),
+        );
       if (existing) return null; // A failed or uncertain comparison is never paid again.
       await grantIn(sql, row);
       const proposal = learningProposal.parse(row.content);
       if (!proposal.edit) return null;
       const edit = proposal.edit;
       const loaded = await loadedIn(sql, row, edit);
-      const [busy] = await sql`SELECT id FROM factory.learning_trial WHERE state='running'
-        AND input->'edit'->'target'->>'id'=${edit.target.id}`;
+      const [busy] = await db
+        .select({ id: learningTrial.id })
+        .from(learningTrial)
+        .where(
+          and(
+            eq(learningTrial.state, "running"),
+            eq(typedSQL<string>`${learningTrial.input}->'edit'->'target'->>'id'`, edit.target.id),
+          ),
+        );
       if (busy) return null;
       const baselineTarget = currentTarget(row, edit);
       const revisionId = baselineTarget.revisionId;
-      const reviews = await sql<
-        {
-          input: unknown;
-          result: unknown;
-          laterThanProposal: boolean;
-          afterGrant: boolean;
-        }[]
-      >`
-        SELECT review.input,review.result,
-          (review.created_at>(SELECT created_at FROM factory.learning_review WHERE id=${row.reviewId})) AS "laterThanProposal",
-          (review.created_at>=(SELECT updated_at FROM factory.learning_policy
-            WHERE project_id=${row.projectId} AND owner_id IS NOT DISTINCT FROM ${row.ownerId}::uuid)) AS "afterGrant"
-        FROM factory.learning_review review
-        WHERE review.project_id=${row.projectId} AND review.owner_id IS NOT DISTINCT FROM ${row.ownerId}::uuid
-          AND review.developer_only=${row.developerOnly} AND review.kind='work' AND review.state='completed'
-          AND NOT(review.input @> '[{"activity":"setup"}]'::jsonb)
-        ORDER BY review.created_at DESC LIMIT 12`;
+      const originalReview = alias(learningReview, "original_review");
+      const originalCreatedAt = db
+        .select({ createdAt: originalReview.createdAt })
+        .from(originalReview)
+        .where(eq(originalReview.id, row.reviewId));
+      const grantedAt = db
+        .select({ updatedAt: learningPolicy.updatedAt })
+        .from(learningPolicy)
+        .where(
+          and(
+            eq(learningPolicy.projectId, row.projectId),
+            row.ownerId === null
+              ? isNull(learningPolicy.ownerId)
+              : eq(learningPolicy.ownerId, row.ownerId),
+          ),
+        );
+      const reviews = await db
+        .select({
+          input: learningReview.input,
+          result: learningReview.result,
+          laterThanProposal: typedSQL<boolean>`${gt(learningReview.createdAt, originalCreatedAt)}`,
+          afterGrant: typedSQL<boolean>`${gte(learningReview.createdAt, grantedAt)}`,
+        })
+        .from(learningReview)
+        .where(
+          and(
+            eq(learningReview.projectId, row.projectId),
+            row.ownerId === null
+              ? isNull(learningReview.ownerId)
+              : eq(learningReview.ownerId, row.ownerId),
+            eq(learningReview.developerOnly, row.developerOnly),
+            eq(learningReview.kind, "work"),
+            eq(learningReview.state, "completed"),
+            typedSQL<boolean>`not(${learningReview.input} @> '[{"activity":"setup"}]'::jsonb)`,
+          ),
+        )
+        .orderBy(desc(learningReview.createdAt))
+        .limit(12);
       const pool: { source: LearningCase; problem: boolean; healthy: boolean }[] = [];
       let freshLinkedProblem = false;
       for (const review of reviews) {
@@ -274,16 +364,38 @@ export function createLearningAutomation(
       });
       if (Buffer.byteLength(JSON.stringify(plan)) > 192 * 1024) return null;
       const model = await dependencies.modelIn(sql, row, row.actorId);
-      const [calibrated] = await sql`SELECT id FROM factory.learning_review
-        WHERE judge_key=${model.judgeKey} AND kind='calibration' AND state='completed' AND calibrated`;
+      const [calibrated] = await db
+        .select({ id: learningReview.id })
+        .from(learningReview)
+        .where(
+          and(
+            eq(learningReview.judgeKey, model.judgeKey),
+            eq(learningReview.kind, "calibration"),
+            eq(learningReview.state, "completed"),
+            eq(learningReview.calibrated, true),
+          ),
+        );
       if (!calibrated) return null;
       const id = crypto.randomUUID(),
         token = crypto.randomUUID();
-      await sql`INSERT INTO factory.learning_trial(id,proposal_id,phase,actor_id,policy_version,model_id,model_connection,judge_key,
-        rubric,input,input_digest,owner_token,owner_expires_at)
-        VALUES(${id},${row.proposalId},${row.phase},${row.actorId},${row.policyVersion},${model.modelId},
-          ${JSON.stringify(model.reference ?? { endpoint: model.fallback?.baseURL, provider: model.fallback?.provider })}::jsonb,${model.judgeKey},${comparisonRubric},
-          ${JSON.stringify(plan)}::jsonb,${digest(plan)},${token},now()+interval '2 minutes')`;
+      await db.insert(learningTrial).values({
+        id,
+        proposalId: row.proposalId,
+        phase: row.phase,
+        actorId: row.actorId,
+        policyVersion: row.policyVersion,
+        modelId: model.modelId,
+        modelConnection: model.reference ?? {
+          endpoint: model.fallback?.baseURL,
+          provider: model.fallback?.provider,
+        },
+        judgeKey: model.judgeKey,
+        rubric: comparisonRubric,
+        input: plan,
+        inputDigest: digest(plan),
+        ownerToken: token,
+        ownerExpiresAt: typedSQL`now()+interval '2 minutes'`,
+      });
       return { ...row, id, token, plan, model };
     });
   }
@@ -294,9 +406,18 @@ export function createLearningAutomation(
       controller.signal.throwIfAborted();
       await grantIn(sql, admitted);
       await loadedIn(sql, admitted, admitted.plan.edit, admitted.plan.activationVersion);
-      const [lease] =
-        await sql`UPDATE factory.learning_trial SET owner_expires_at=now()+interval '2 minutes'
-        WHERE id=${admitted.id} AND owner_token=${admitted.token} AND state='running' AND owner_expires_at>now() RETURNING id`;
+      const [lease] = await drizzleTransaction(sql)
+        .update(learningTrial)
+        .set({ ownerExpiresAt: typedSQL`now()+interval '2 minutes'` })
+        .where(
+          and(
+            eq(learningTrial.id, admitted.id),
+            eq(learningTrial.ownerToken, admitted.token),
+            eq(learningTrial.state, "running"),
+            gt(learningTrial.ownerExpiresAt, typedSQL`now()`),
+          ),
+        )
+        .returning({ id: learningTrial.id });
       if (!lease) throw new CommandError("conflict", "Comparison ownership expired");
     };
     const authorize = () => database.client.begin(authorizeIn).then(() => {});
@@ -327,8 +448,9 @@ export function createLearningAutomation(
         // the judge's actual response artifacts. No inferred retry after a crash.
         await database.client.begin(async (sql) => {
           await authorizeIn(sql);
-          await sql`INSERT INTO factory.learning_trial_step(trial_id,stage,input,input_digest)
-            VALUES(${admitted.id},${stage},${JSON.stringify(input)}::jsonb,${digest(input)})`;
+          await drizzleTransaction(sql)
+            .insert(learningTrialStep)
+            .values({ trialId: admitted.id, stage, input, inputDigest: digest(input) });
         });
         const result = await run(
           recordedMastraUsage(database, {
@@ -342,8 +464,16 @@ export function createLearningAutomation(
         );
         await database.client.begin(async (sql) => {
           await authorizeIn(sql);
-          await sql`UPDATE factory.learning_trial_step SET state='completed',result=${JSON.stringify(result)}::jsonb,completed_at=now()
-            WHERE trial_id=${admitted.id} AND stage=${stage} AND state='running'`;
+          await drizzleTransaction(sql)
+            .update(learningTrialStep)
+            .set({ state: "completed", result, completedAt: typedSQL`now()` })
+            .where(
+              and(
+                eq(learningTrialStep.trialId, admitted.id),
+                eq(learningTrialStep.stage, stage),
+                eq(learningTrialStep.state, "running"),
+              ),
+            );
         });
         return result;
       }
@@ -377,9 +507,18 @@ export function createLearningAutomation(
       );
       const passed = comparisonPassed(admitted.plan, grade);
       await database.client.begin(async (sql) => {
-        await sql`SELECT id FROM factory.learning_proposal WHERE id=${admitted.proposalId} FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        await db
+          .select({ id: proposalTable.id })
+          .from(proposalTable)
+          .where(eq(proposalTable.id, admitted.proposalId))
+          .for("update");
         if (admitted.applicationId)
-          await sql`SELECT id FROM factory.learning_application WHERE id=${admitted.applicationId} FOR UPDATE`;
+          await db
+            .select({ id: learningApplication.id })
+            .from(learningApplication)
+            .where(eq(learningApplication.id, admitted.applicationId))
+            .for("update");
         await authorizeIn(sql);
         let decision: "applied" | "reverted" | "kept" = "kept";
         if (passed) {
@@ -390,12 +529,28 @@ export function createLearningAutomation(
               projectId: admitted.projectId,
               revisionId: crypto.randomUUID(),
             });
-            await sql`INSERT INTO factory.learning_application(id,proposal_id,target,edit_digest,activation,applied_revision_id,applied_version,applied_by,comparison_id)
-              VALUES(${crypto.randomUUID()},${admitted.proposalId},${JSON.stringify(admitted.plan.edit.target)}::jsonb,
-                ${learningEditDigest(admitted.plan.edit)},${JSON.stringify(saved.activation)}::jsonb,
-                ${saved.revisionId},${saved.version},${admitted.actorId},${admitted.id})`;
-            await sql`UPDATE factory.learning_proposal SET state='applied',decision_id=${admitted.id},decided_by=${admitted.actorId},decided_at=now()
-              WHERE id=${admitted.proposalId} AND state='proposed'`;
+            await db.insert(learningApplication).values({
+              id: crypto.randomUUID(),
+              proposalId: admitted.proposalId,
+              target: admitted.plan.edit.target,
+              editDigest: learningEditDigest(admitted.plan.edit),
+              activation: saved.activation,
+              appliedRevisionId: saved.revisionId,
+              appliedVersion: saved.version,
+              appliedBy: admitted.actorId,
+              comparisonId: admitted.id,
+            });
+            await db
+              .update(proposalTable)
+              .set({
+                state: "applied",
+                decisionId: admitted.id,
+                decidedBy: admitted.actorId,
+                decidedAt: typedSQL`now()`,
+              })
+              .where(
+                and(eq(proposalTable.id, admitted.proposalId), eq(proposalTable.state, "proposed")),
+              );
             decision = "applied";
           } else {
             const target = currentTarget(admitted, admitted.plan.edit);
@@ -408,15 +563,39 @@ export function createLearningAutomation(
               projectId: admitted.projectId,
               revisionId: crypto.randomUUID(),
             });
-            await sql`UPDATE factory.learning_application SET state='reverted',reverted_revision_id=${saved.revisionId},
-              reverted_version=${saved.version},reverted_by=${admitted.actorId},reverted_at=now(),reverted_comparison_id=${admitted.id}
-              WHERE id=${admitted.applicationId} AND state='applied'`;
+            await db
+              .update(learningApplication)
+              .set({
+                state: "reverted",
+                revertedRevisionId: saved.revisionId,
+                revertedVersion: saved.version,
+                revertedBy: admitted.actorId,
+                revertedAt: typedSQL`now()`,
+                revertedComparisonId: admitted.id,
+              })
+              .where(
+                and(
+                  eq(learningApplication.id, typedSQL`${admitted.applicationId}::uuid`),
+                  eq(learningApplication.state, "applied"),
+                ),
+              );
             decision = "reverted";
           }
         }
-        await sql`UPDATE factory.learning_trial SET state='completed',
-          result=${JSON.stringify({ passed, decision, cases: grade.cases })}::jsonb,completed_at=now()
-          WHERE id=${admitted.id} AND owner_token=${admitted.token} AND state='running'`;
+        await db
+          .update(learningTrial)
+          .set({
+            state: "completed",
+            result: { passed, decision, cases: grade.cases },
+            completedAt: typedSQL`now()`,
+          })
+          .where(
+            and(
+              eq(learningTrial.id, admitted.id),
+              eq(learningTrial.ownerToken, admitted.token),
+              eq(learningTrial.state, "running"),
+            ),
+          );
       });
     } catch (cause) {
       const rejected = cause instanceof LearningResultRejected;
@@ -424,18 +603,28 @@ export function createLearningAutomation(
         knownModelRejection(cause) || cause instanceof CommandError || rejected
           ? "failed"
           : "uncertain";
-      await database.client`UPDATE factory.learning_trial SET state=${state},
-        reason=${
-          cause instanceof CommandError
-            ? cause.message
-            : rejected
-              ? learningRejectionReason(
-                  cause,
-                  "The comparison grade did not match the replayed responses, so it was discarded. It will not be repeated automatically.",
-                )
-              : "The comparison did not finish. It will not be repeated automatically."
-        },completed_at=now()
-        WHERE id=${admitted.id} AND state='running' AND owner_token=${admitted.token}`;
+      await database.db
+        .update(learningTrial)
+        .set({
+          state,
+          reason:
+            cause instanceof CommandError
+              ? cause.message
+              : rejected
+                ? learningRejectionReason(
+                    cause,
+                    "The comparison grade did not match the replayed responses, so it was discarded. It will not be repeated automatically.",
+                  )
+                : "The comparison did not finish. It will not be repeated automatically.",
+          completedAt: typedSQL`now()`,
+        })
+        .where(
+          and(
+            eq(learningTrial.id, admitted.id),
+            eq(learningTrial.state, "running"),
+            eq(learningTrial.ownerToken, admitted.token),
+          ),
+        );
       await abandon(admitted.id);
     } finally {
       clearInterval(renewalTimer);
@@ -444,40 +633,97 @@ export function createLearningAutomation(
     }
   }
   async function abandon(id: string) {
-    const steps = await database.client<
-      { stage: number }[]
-    >`UPDATE factory.learning_trial_step SET state='uncertain',completed_at=now()
-      WHERE trial_id=${id} AND state='running' RETURNING stage`;
+    const steps = await database.db
+      .update(learningTrialStep)
+      .set({ state: "uncertain", completedAt: typedSQL`now()` })
+      .where(and(eq(learningTrialStep.trialId, id), eq(learningTrialStep.state, "running")))
+      .returning({ stage: learningTrialStep.stage });
     for (const step of steps)
       await createUsageJournal(database).abandon(`learning-trial:${id}:${step.stage}`);
   }
   return {
     async sweep() {
       if (closed) return false;
-      const expired = await database.client<
-        { id: string }[]
-      >`UPDATE factory.learning_trial SET state='uncertain',completed_at=now(),
-        reason='Comparison ownership expired. No paid step will be replayed.' WHERE state='running' AND owner_expires_at<now() RETURNING id`;
+      const expired = await database.db
+        .update(learningTrial)
+        .set({
+          state: "uncertain",
+          completedAt: typedSQL`now()`,
+          reason: "Comparison ownership expired. No paid step will be replayed.",
+        })
+        .where(
+          and(
+            eq(learningTrial.state, "running"),
+            lt(learningTrial.ownerExpiresAt, typedSQL`now()`),
+          ),
+        )
+        .returning({ id: learningTrial.id });
       for (const item of expired) await abandon(item.id);
-      const rows = await database.client<Candidate[]>`
-        SELECT proposal.id AS "proposalId",proposal.review_id AS "reviewId",proposal.content,review.project_id AS "projectId",review.owner_id AS "ownerId",
-          review.developer_only AS "developerOnly",policy.version AS "policyVersion",policy.updated_by AS "actorId",
-          CASE WHEN application.id IS NULL THEN 'adopt' ELSE 'recover' END AS phase,
-          application.id AS "applicationId",application.applied_revision_id AS "appliedRevisionId",
-          application.applied_version AS "appliedVersion",application.activation,
-          (review.created_at>=policy.updated_at) AS "proposalAfterGrant"
-        FROM factory.learning_proposal proposal JOIN factory.learning_review review ON review.id=proposal.review_id
-        JOIN factory.learning_policy policy ON policy.project_id=review.project_id AND policy.owner_id IS NOT DISTINCT FROM review.owner_id
-        LEFT JOIN factory.learning_application application ON application.proposal_id=proposal.id
-        WHERE policy.enabled AND policy.automatic_skills AND review.kind='work' AND review.state='completed'
-          AND NOT(review.input @> '[{"activity":"setup"}]'::jsonb)
-          AND proposal.content->'edit'->'target'->>'kind'='skill' AND proposal.content->'edit'->'target'->>'field'='instructions'
-          AND ((proposal.state='proposed' AND application.id IS NULL) OR
-            (application.state='applied' AND application.comparison_id IS NOT NULL))
-          AND NOT EXISTS(SELECT 1 FROM factory.learning_trial trial WHERE trial.proposal_id=proposal.id
-            AND trial.phase=CASE WHEN application.id IS NULL THEN 'adopt' ELSE 'recover' END)
-          AND proposal.id::text>${cursor}
-        ORDER BY proposal.id LIMIT 24`;
+      const phase = typedSQL<
+        Candidate["phase"]
+      >`case when ${learningApplication.id} is null then 'adopt' else 'recover' end`;
+      const rows: Candidate[] = await database.db
+        .select({
+          proposalId: proposalTable.id,
+          reviewId: proposalTable.reviewId,
+          content: proposalTable.content,
+          projectId: learningReview.projectId,
+          ownerId: learningReview.ownerId,
+          developerOnly: learningReview.developerOnly,
+          policyVersion: learningPolicy.version,
+          actorId: learningPolicy.updatedBy,
+          phase,
+          applicationId: learningApplication.id,
+          appliedRevisionId: learningApplication.appliedRevisionId,
+          appliedVersion: learningApplication.appliedVersion,
+          activation: learningApplication.activation,
+          proposalAfterGrant: typedSQL<boolean>`${gte(learningReview.createdAt, learningPolicy.updatedAt)}`,
+        })
+        .from(proposalTable)
+        .innerJoin(learningReview, eq(learningReview.id, proposalTable.reviewId))
+        .innerJoin(
+          learningPolicy,
+          and(
+            eq(learningPolicy.projectId, learningReview.projectId),
+            typedSQL<boolean>`${learningPolicy.ownerId} is not distinct from ${learningReview.ownerId}`,
+          ),
+        )
+        .leftJoin(learningApplication, eq(learningApplication.proposalId, proposalTable.id))
+        .where(
+          and(
+            eq(learningPolicy.enabled, true),
+            eq(learningPolicy.automaticSkills, true),
+            eq(learningReview.kind, "work"),
+            eq(learningReview.state, "completed"),
+            typedSQL<boolean>`not(${learningReview.input} @> '[{"activity":"setup"}]'::jsonb)`,
+            eq(typedSQL<string>`${proposalTable.content}->'edit'->'target'->>'kind'`, "skill"),
+            eq(
+              typedSQL<string>`${proposalTable.content}->'edit'->'target'->>'field'`,
+              "instructions",
+            ),
+            or(
+              and(eq(proposalTable.state, "proposed"), isNull(learningApplication.id)),
+              and(
+                eq(learningApplication.state, "applied"),
+                isNotNull(learningApplication.comparisonId),
+              ),
+            ),
+            notExists(
+              database.db
+                .select({ id: learningTrial.id })
+                .from(learningTrial)
+                .where(
+                  and(
+                    eq(learningTrial.proposalId, proposalTable.id),
+                    eq(learningTrial.phase, phase),
+                  ),
+                ),
+            ),
+            gt(typedSQL<string>`${proposalTable.id}::text`, cursor),
+          ),
+        )
+        .orderBy(proposalTable.id)
+        .limit(24);
       if (!rows.length) {
         cursor = "";
         return false;

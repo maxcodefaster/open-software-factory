@@ -4,11 +4,183 @@ import type {
   EnvironmentSecrets,
   StoredEnvironment,
 } from "../../apps/factory/src/environments/openbao";
+import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import type { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { candidateReviewCallInput } from "../../packages/conversation-domain/src/candidate-review";
 import { environmentMetadata } from "../../packages/project-domain/src/environment";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { eventually } from "../fixtures/factory-process";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
+
+test("feedback CRUD rolls back its command snapshot and rejects a stale reply after real row contention", async () => {
+  const f = await candidateReviewFixture();
+  const review = createVisualReviewController(f.database);
+  const release = Promise.withResolvers<void>();
+  let holder: Promise<unknown> | undefined;
+  let contender: Promise<unknown> | undefined;
+  try {
+    await f.database.client.unsafe(`CREATE FUNCTION factory.owned_feedback_rollback() RETURNS trigger
+      LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'Owned feedback command rollback'; END$$;
+      CREATE TRIGGER owned_feedback_rollback BEFORE INSERT ON factory.review_feedback_command
+      FOR EACH ROW EXECUTE FUNCTION factory.owned_feedback_rollback()`);
+    await expect(
+      review.create(f.changeID, f.userID, {
+        commandId: crypto.randomUUID(),
+        kind: "thread",
+        body: "Must roll back with its command",
+      }),
+    ).rejects.toThrow();
+    const [rollback] = await f.database.client<
+      { feedback: number; messages: number; commands: number }[]
+    >`
+      SELECT (SELECT count(*)::int FROM factory.review_feedback WHERE change_id=${f.changeID}) AS feedback,
+        (SELECT count(*)::int FROM factory.review_feedback_message) AS messages,
+        (SELECT count(*)::int FROM factory.review_feedback_command WHERE change_id=${f.changeID}) AS commands`;
+    expect(rollback).toEqual({ feedback: 0, messages: 0, commands: 0 });
+    await f.database.client.unsafe(`DROP TRIGGER owned_feedback_rollback ON factory.review_feedback_command;
+      DROP FUNCTION factory.owned_feedback_rollback()`);
+    const input = {
+      commandId: crypto.randomUUID(),
+      kind: "thread",
+      body: "Owned exact candidate feedback",
+    };
+    const created = await review.create(f.changeID, f.userID, input);
+    const feedbackID = created.feedbackId;
+    if (!feedbackID) throw new Error("Owned feedback identity missing");
+    expect(await review.create(f.changeID, f.userID, input)).toMatchObject(created);
+    await expect(
+      review.create(f.changeID, f.userID, { ...input, body: "Changed command input" }),
+    ).rejects.toThrow("Feedback command changed input");
+    const entered = Promise.withResolvers<number>();
+    holder = f.database.client.begin(async (sql) => {
+      await sql`SELECT id FROM factory.review_feedback WHERE id=${feedbackID} FOR UPDATE`;
+      const [connection] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (!connection) throw new Error("Owned feedback lock connection missing");
+      await sql`UPDATE factory.review_feedback SET version=version+1 WHERE id=${feedbackID}`;
+      entered.resolve(connection.pid);
+      await release.promise;
+    });
+    const holderPID = await entered.promise;
+    const staleCommandID = crypto.randomUUID();
+    contender = review.update(f.changeID, f.userID, {
+      commandId: staleCommandID,
+      feedbackId: feedbackID,
+      expectedVersion: 1,
+      action: "reply",
+      body: "Stale reply",
+    });
+    const rejected = contender.then(
+      () => {
+        throw new Error("Stale feedback reply succeeded");
+      },
+      (cause: unknown) => cause,
+    );
+    try {
+      await eventually(
+        async () => {
+          const [wait] = await f.database.client<{ blocked: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+            WHERE ${holderPID} = ANY(pg_blocking_pids(pid))) AS blocked`;
+          return wait?.blocked;
+        },
+        (blocked) => blocked === true,
+        "Feedback update did not contend on its actual row lock",
+      );
+    } finally {
+      release.resolve();
+    }
+    await holder;
+    expect(await rejected).toMatchObject({ message: expect.stringContaining("Feedback changed") });
+    const [stale] = await f.database
+      .client`SELECT id FROM factory.review_feedback_command WHERE id=${staleCommandID}`;
+    expect(stale).toBeUndefined();
+    const reply = {
+      commandId: crypto.randomUUID(),
+      feedbackId: feedbackID,
+      expectedVersion: 2,
+      action: "reply",
+      body: "Current reply",
+    };
+    await review.update(f.changeID, f.userID, reply);
+    await review.update(f.changeID, f.userID, reply);
+    await review.update(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      feedbackId: feedbackID,
+      expectedVersion: 3,
+      action: "resolve",
+    });
+    expect((await review.get(f.changeID, f.userID)).feedback).toMatchObject([
+      {
+        id: feedbackID,
+        commitSha: f.commit,
+        state: "resolved",
+        version: 4,
+        messages: [{ body: input.body }, { body: reply.body }],
+      },
+    ]);
+    expect(f.requests()).toBe(0);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([holder, contender]);
+    await f.dispose();
+  }
+}, 30_000);
+
+test("review projections keep native microsecond ordering, finding lineage and recording scenario bounds", async () => {
+  const f = await candidateReviewFixture();
+  const review = createVisualReviewController(f.database);
+  try {
+    const sourceID = crypto.randomUUID();
+    const retryID = crypto.randomUUID();
+    await f.database
+      .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,
+      created_by,ordinal,created_at) VALUES
+      (${sourceID},${f.verificationID},${f.changeID},${f.commit},${"a".repeat(40)},${f.userID},2,
+        '2050-01-01 00:00:00.000002+00'),
+      (${retryID},${f.verificationID},${f.changeID},${f.commit},${"a".repeat(40)},${f.userID},3,
+        '2050-01-01 00:00:00.000001+00')`;
+    await f.database
+      .client`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected,
+      observation_kind,media_started_ms,started_at) VALUES
+      (${sourceID},'z-first','First','normal',1,'Original candidate','app',20,'2050-01-01 00:00:00.000001+00'),
+      (${sourceID},'source-case','Source','normal',1,'Source only','source',30,'2050-01-01 00:00:00.000002+00'),
+      (${sourceID},'a-next','Next','boundary',1,'Later app case','app',80,'2050-01-01 00:00:00.000003+00'),
+      (${retryID},'retry-case','Retry','normal',1,'Other review','app',0,'2050-01-01 00:00:00.000001+00')`;
+    const fallback = await review.get(f.changeID, f.userID);
+    expect(fallback.scenarios.map((item) => item.id)).toEqual(["z-first", "source-case", "a-next"]);
+    expect(fallback.scenarios.every((item) => item.startedMs === 0 && item.endedMs === null)).toBe(
+      true,
+    );
+    const findingID = crypto.randomUUID();
+    await f.database
+      .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,
+      created_by,ordinal,finding_source_id,created_at)
+      VALUES(${findingID},${f.verificationID},${f.changeID},${f.commit},${"a".repeat(40)},${f.userID},4,
+        ${sourceID},'2050-01-01 00:00:00.000003+00')`;
+    const recordingID = crypto.randomUUID();
+    await f.database
+      .client`INSERT INTO factory.review_media(id,change_id,review_id,created_by,kind,commit_sha,state,
+      byte_length,sha256,duration_ms,created_at) VALUES
+      (${recordingID},${f.changeID},${sourceID},${f.userID},'recording',${f.commit},'complete',1,${"a".repeat(64)},100,
+        '2050-01-01 00:00:00.000001+00'),
+      (${crypto.randomUUID()},${f.changeID},${findingID},${f.userID},'recording',${f.commit},'unavailable',NULL,NULL,NULL,
+        '2050-01-01 00:00:00.000003+00')`;
+    const playback = await review.get(f.changeID, f.userID);
+    expect(playback).toMatchObject({
+      recording: { id: recordingID, commitSha: f.commit, durationMs: 100 },
+      recordingCurrent: true,
+      currentCommitSha: f.commit,
+    });
+    expect(playback.scenarios).toMatchObject([
+      { id: "z-first", startedMs: 20, endedMs: 80, hasRecordingPosition: true },
+      { id: "source-case", startedMs: 30, endedMs: 80, hasRecordingPosition: true },
+      { id: "a-next", startedMs: 80, endedMs: 100, hasRecordingPosition: true },
+    ]);
+    expect(f.requests()).toBe(0);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
 
 function actions(input: Record<string, unknown> = {}) {
   const parsed = candidateReviewCallInput.parse({

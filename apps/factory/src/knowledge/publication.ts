@@ -1,4 +1,12 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, asc, eq, sql as expression } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  knowledgeGeneration,
+  knowledgePage,
+  knowledgePageAlias,
+  knowledgeRevision,
+  project,
+} from "../../../../packages/db/src/schema";
 import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
 import type {
   WikiGenerationOutput,
@@ -10,6 +18,28 @@ import { WikiHumanEditConflict } from "./generation-failure";
 export class WikiPublicationConflict extends Error {}
 
 export type WikiPublicationSnapshot = WikiPageSnapshot & { generatedBody: string };
+
+export async function wikiPublicationSnapshotsIn(
+  db: Pick<ReturnType<typeof createDatabase>["db"], "select">,
+  projectID: string,
+): Promise<WikiPublicationSnapshot[]> {
+  return db
+    .select({
+      id: knowledgePage.id,
+      slug: knowledgePage.slug,
+      title: knowledgePage.title,
+      body: knowledgePage.currentBody,
+      generatedBody: knowledgePage.generatedBody,
+      version: knowledgePage.version,
+      revisionId: knowledgePage.currentRevisionId,
+      parentId: knowledgePage.parentId,
+      state: knowledgePage.state,
+      citations: knowledgePage.citations,
+    })
+    .from(knowledgePage)
+    .where(eq(knowledgePage.projectId, projectID))
+    .orderBy(asc(knowledgePage.sortOrder), asc(knowledgePage.id));
+}
 
 function mergePublicationPage(
   previous: Pick<WikiPublicationSnapshot, "body" | "generatedBody"> | undefined,
@@ -52,24 +82,37 @@ export async function publishWikiPackage(
 ) {
   return database.client.begin(async (transaction) => {
     await projectAuthorityIn(transaction, input.userID, input.projectID);
-    await transaction`SELECT id FROM factory.project WHERE id=${input.projectID} FOR UPDATE`;
-    const [intent] =
-      await transaction`SELECT id FROM factory.knowledge_generation WHERE id=${input.generationID} AND attempt_id=${input.attemptID} AND state='running' FOR UPDATE`;
+    const db = drizzleTransaction(transaction);
+    await db
+      .select({ id: project.id })
+      .from(project)
+      .where(eq(project.id, input.projectID))
+      .for("update");
+    const [intent] = await db
+      .select({ id: knowledgeGeneration.id })
+      .from(knowledgeGeneration)
+      .where(
+        and(
+          eq(knowledgeGeneration.id, input.generationID),
+          eq(knowledgeGeneration.attemptId, input.attemptID),
+          eq(knowledgeGeneration.state, "running"),
+        ),
+      )
+      .for("update");
     if (!intent) throw new WikiPublicationConflict("Wiki execution no longer owns publication");
-    const locked = await transaction<
-      Array<{
-        id: string;
-        version: number;
-        revisionId: string | null;
-        state: string;
-        body: string;
-        generatedBody: string;
-      }>
-    >`
-      SELECT id,version::integer AS version,current_revision_id AS "revisionId",state,
-        current_body AS body,generated_body AS "generatedBody"
-      FROM factory.knowledge_page WHERE project_id=${input.projectID} ORDER BY id FOR UPDATE
-    `;
+    const locked = await db
+      .select({
+        id: knowledgePage.id,
+        version: knowledgePage.version,
+        revisionId: knowledgePage.currentRevisionId,
+        state: knowledgePage.state,
+        body: knowledgePage.currentBody,
+        generatedBody: knowledgePage.generatedBody,
+      })
+      .from(knowledgePage)
+      .where(eq(knowledgePage.projectId, input.projectID))
+      .orderBy(asc(knowledgePage.id))
+      .for("update");
     if (
       locked.length !== input.pages.length ||
       locked.some(
@@ -93,8 +136,18 @@ export async function publishWikiPackage(
       return id;
     };
     for (const page of input.output.pages.filter((page) => !page.id)) {
-      await transaction`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,citations,created_by,sort_order)
-        VALUES(${identity(page.slug)},${input.projectID},${page.slug},${page.title},${page.body},${page.body},${input.commitSha},${JSON.stringify(page.sources.map((path) => ({ path, commitSha: input.commitSha })))}::jsonb,${input.userID},${input.pages.length + input.output.pages.indexOf(page)})`;
+      await db.insert(knowledgePage).values({
+        id: identity(page.slug),
+        projectId: input.projectID,
+        slug: page.slug,
+        title: page.title,
+        currentBody: page.body,
+        generatedBody: page.body,
+        sourceCommitSha: input.commitSha,
+        citations: page.sources.map((path) => ({ path, commitSha: input.commitSha })),
+        createdBy: input.userID,
+        sortOrder: input.pages.length + input.output.pages.indexOf(page),
+      });
     }
     let count = 0;
     for (const generated of input.output.pages) {
@@ -104,34 +157,76 @@ export async function publishWikiPackage(
       if (page && page.title === generated.title && page.body === merged.body) continue;
       const pageID = page?.id ?? identity(generated.slug),
         revisionID = crypto.randomUUID();
-      const citations = JSON.stringify(
-        generated.sources.map((path) => ({ path, commitSha: input.commitSha })),
+      const citations = generated.sources.map((path) => ({ path, commitSha: input.commitSha }));
+      await db.insert(knowledgeRevision).select(
+        db
+          .select({
+            id: expression<string>`${revisionID}::uuid`.as("id"),
+            pageId: expression<string>`${pageID}::uuid`.as("page_id"),
+            ordinal: expression<number>`coalesce(max(${knowledgeRevision.ordinal}),0)+1`.as(
+              "ordinal",
+            ),
+            kind: expression<"generated">`'generated'::factory.knowledge_revision_kind`.as("kind"),
+            title: expression<string>`${generated.title}`.as("title"),
+            body: expression<string>`${merged.body}`.as("body"),
+            generatedBody: expression<string>`${merged.generatedBody}`.as("generated_body"),
+            sourceCommitSha: expression<string>`${input.commitSha}`.as("source_commit_sha"),
+            citations: expression<unknown>`${JSON.stringify(citations)}::jsonb`.as("citations"),
+            generationId: expression<string>`${input.generationID}::uuid`.as("generation_id"),
+            createdBy: expression<string>`${input.userID}::uuid`.as("created_by"),
+            createdAt: expression<Date>`now()`.as("created_at"),
+          })
+          .from(knowledgeRevision)
+          .where(eq(knowledgeRevision.pageId, pageID)),
       );
-      const [next] = await transaction<
-        Array<{ ordinal: number }>
-      >`SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM factory.knowledge_revision WHERE page_id=${pageID}`;
-      await transaction`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,citations,generation_id,created_by)
-        VALUES(${revisionID},${pageID},${Number(next?.ordinal ?? 1)},'generated',${generated.title},${merged.body},${merged.generatedBody},${input.commitSha},${citations}::jsonb,${input.generationID},${input.userID})`;
-      await transaction`UPDATE factory.knowledge_page SET title=${generated.title},version=version+${page ? 1 : 0},current_revision_id=${revisionID},current_body=${merged.body},generated_body=${merged.generatedBody},source_commit_sha=${input.commitSha},citations=${citations}::jsonb,updated_at=now() WHERE id=${pageID}`;
+      await db
+        .update(knowledgePage)
+        .set({
+          title: generated.title,
+          version: expression`${knowledgePage.version}+${page ? 1 : 0}`,
+          currentRevisionId: revisionID,
+          currentBody: merged.body,
+          generatedBody: merged.generatedBody,
+          sourceCommitSha: input.commitSha,
+          citations,
+          updatedAt: expression`now()`,
+        })
+        .where(eq(knowledgePage.id, pageID));
       if (!page) {
-        await transaction`UPDATE factory.knowledge_page SET parent_id=${generated.parentSlug ? identity(generated.parentSlug) : null} WHERE id=${pageID}`;
-        await transaction`INSERT INTO factory.knowledge_page_alias(project_id,slug,page_id) VALUES(${input.projectID},${generated.slug},${pageID})`;
+        await db
+          .update(knowledgePage)
+          .set({ parentId: generated.parentSlug ? identity(generated.parentSlug) : null })
+          .where(eq(knowledgePage.id, pageID));
+        await db.insert(knowledgePageAlias).values({
+          projectId: input.projectID,
+          slug: generated.slug,
+          pageId: pageID,
+        });
       }
       count++;
     }
-    await transaction`UPDATE factory.knowledge_generation SET page_count=COALESCE(page_count,0)+${count},conflict_count=0,updated_at=now(),
-      progress=CASE WHEN ${input.complete} AND progress IS NOT NULL
-        THEN progress||jsonb_build_object('phase','done','topicsDone',progress->'topicsTotal','currentTopic',NULL)
-        ELSE progress END,
-      state=CASE WHEN ${input.complete} THEN 'succeeded'::factory.knowledge_generation_state ELSE state END,
-      completed_at=CASE WHEN ${input.complete} THEN now() ELSE completed_at END
-      WHERE id=${input.generationID} AND attempt_id=${input.attemptID} AND state='running'`;
-    return Array.from(
-      await transaction<WikiPublicationSnapshot[]>`
-      SELECT id,slug,title,current_body AS body,generated_body AS "generatedBody",version::integer AS version,
-        current_revision_id AS "revisionId",parent_id AS "parentId",state,citations
-      FROM factory.knowledge_page WHERE project_id=${input.projectID} ORDER BY sort_order,id
-    `,
-    );
+    await db
+      .update(knowledgeGeneration)
+      .set({
+        pageCount: expression`coalesce(${knowledgeGeneration.pageCount},0)+${count}`,
+        conflictCount: 0,
+        updatedAt: expression`now()`,
+        progress: input.complete
+          ? expression`CASE WHEN ${knowledgeGeneration.progress} IS NOT NULL
+              THEN ${knowledgeGeneration.progress}||jsonb_build_object(
+                'phase','done','topicsDone',${knowledgeGeneration.progress}->'topicsTotal','currentTopic',NULL)
+              ELSE ${knowledgeGeneration.progress} END`
+          : knowledgeGeneration.progress,
+        state: input.complete ? "succeeded" : knowledgeGeneration.state,
+        completedAt: input.complete ? expression`now()` : knowledgeGeneration.completedAt,
+      })
+      .where(
+        and(
+          eq(knowledgeGeneration.id, input.generationID),
+          eq(knowledgeGeneration.attemptId, input.attemptID),
+          eq(knowledgeGeneration.state, "running"),
+        ),
+      );
+    return wikiPublicationSnapshotsIn(db, input.projectID);
   });
 }

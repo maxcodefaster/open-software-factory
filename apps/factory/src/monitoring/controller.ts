@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { and, asc, count, desc, eq, inArray, lt, or, sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
@@ -7,7 +8,17 @@ import {
   monitoringSave,
   monitoringView,
 } from "../../../../packages/conversation-domain/src/monitoring";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  monitoringCommand,
+  monitoringHook,
+  monitoringIncident,
+  monitoringPolicy,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import {
@@ -45,11 +56,20 @@ export function createMonitoringController(
     action: string,
     input: unknown,
   ) {
-    await sql`SELECT pg_advisory_xact_lock(hashtext(${`monitoring-command:${commandId}`}))`;
-    const [old] = await sql<
-      { userId: string; projectId: string; hookId: string; action: string; digest: string }[]
-    >`SELECT actor_id AS "userId",project_id AS "projectId",hook_id AS "hookId",action,input_digest AS digest
-      FROM factory.monitoring_command WHERE id=${commandId}`;
+    const db = drizzleTransaction(sql);
+    await db.execute(
+      query`SELECT pg_advisory_xact_lock(hashtext(${`monitoring-command:${commandId}`}))`,
+    );
+    const [old] = await db
+      .select({
+        userId: monitoringCommand.actorId,
+        projectId: monitoringCommand.projectId,
+        hookId: monitoringCommand.hookId,
+        action: monitoringCommand.action,
+        digest: monitoringCommand.inputDigest,
+      })
+      .from(monitoringCommand)
+      .where(eq(monitoringCommand.id, commandId));
     if (
       old &&
       (old.userId !== userId ||
@@ -73,8 +93,16 @@ export function createMonitoringController(
     action: string,
     input: unknown,
   ) {
-    await sql`INSERT INTO factory.monitoring_command(id,project_id,hook_id,actor_id,action,input_digest)
-      VALUES(${commandId},${projectId},${hookId},${userId},${action},${monitoringDigest(input)})`;
+    await drizzleTransaction(sql)
+      .insert(monitoringCommand)
+      .values({
+        id: commandId,
+        projectId,
+        hookId,
+        actorId: userId,
+        action,
+        inputDigest: monitoringDigest(input),
+      });
   }
   const authorityIn = (sql: DatabaseTransaction, incidentId: string) =>
     monitoringAuthorityIn(database, sql, incidentId);
@@ -83,6 +111,7 @@ export function createMonitoringController(
     authorize: (incidentId: string) => database.client.begin((sql) => authorityIn(sql, incidentId)),
     async view(projectId: string, userId: string) {
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         const manager = await projectAuthorityIn(sql, userId, projectId);
         let developer = false;
         try {
@@ -91,23 +120,34 @@ export function createMonitoringController(
         } catch (cause) {
           if (!(cause instanceof CommandError) || cause.code !== "forbidden") throw cause;
         }
-        const hooks =
-          await sql`SELECT hook.id,hook.name,hook.version::float8 AS version,hook.enabled,
-          policy.delegated_by AS "delegatedBy",policy.id AS "policyId",policy.assignment,
-          policy.source_assignments AS "sourceAssignments",policy.source_ids AS "connectionIds",
-          coalesce(policy.instructions,${defaultAutofixInstructions}) AS instructions,policy.delegation
-          FROM factory.monitoring_hook hook JOIN factory.monitoring_policy policy ON policy.id=hook.policy_id
-          WHERE hook.project_id=${projectId} ORDER BY hook.name,hook.id`;
+        const hooks = await db
+          .select({
+            id: monitoringHook.id,
+            name: monitoringHook.name,
+            version: monitoringHook.version,
+            enabled: monitoringHook.enabled,
+            delegatedBy: monitoringPolicy.delegatedBy,
+            policyId: monitoringPolicy.id,
+            assignment: monitoringPolicy.assignment,
+            sourceAssignments: monitoringPolicy.sourceAssignments,
+            connectionIds: monitoringPolicy.sourceIds,
+            instructions: query<string>`coalesce(${monitoringPolicy.instructions},${defaultAutofixInstructions})`,
+            delegation: monitoringPolicy.delegation,
+          })
+          .from(monitoringHook)
+          .innerJoin(monitoringPolicy, eq(monitoringPolicy.id, monitoringHook.policyId))
+          .where(eq(monitoringHook.projectId, projectId))
+          .orderBy(asc(monitoringHook.name), asc(monitoringHook.id));
         const checked = [];
         for (const hook of hooks) {
           let delegationCurrent = false;
-          if (hook["enabled"]) {
+          if (hook.enabled) {
             try {
               await manageIn(
                 sql,
-                String(hook["delegatedBy"]),
+                hook.delegatedBy,
                 projectId,
-                hook["delegation"] === "prepare-ticket"
+                hook.delegation === "prepare-ticket"
                   ? "prepare-ticket"
                   : "application-fix-and-delivery",
               );
@@ -115,11 +155,11 @@ export function createMonitoringController(
                 database,
                 sql,
                 retainedInputAssignments({
-                  sourceAssignments: hook["sourceAssignments"] as MCPAssignment[] | null,
-                  assignment: hook["assignment"] as MCPAssignment | null,
+                  sourceAssignments: hook.sourceAssignments as MCPAssignment[] | null,
+                  assignment: hook.assignment as MCPAssignment | null,
                 }),
                 projectId,
-                String(hook["delegatedBy"]),
+                hook.delegatedBy,
               );
               delegationCurrent = true;
             } catch (cause) {
@@ -127,24 +167,35 @@ export function createMonitoringController(
             }
           }
           const assignments = retainedInputAssignments({
-            sourceAssignments: hook["sourceAssignments"] as MCPAssignment[] | null,
-            assignment: hook["assignment"] as MCPAssignment | null,
+            sourceAssignments: hook.sourceAssignments as MCPAssignment[] | null,
+            assignment: hook.assignment as MCPAssignment | null,
           });
           checked.push({
             ...hook,
             sourceIds: assignments.map((source) => source.connectionId),
             connectionIds:
-              hook["sourceAssignments"] === null
+              hook.sourceAssignments === null
                 ? assignments.map((source) => source.connectionId)
-                : hook["connectionIds"],
+                : hook.connectionIds,
             delegationCurrent,
           });
         }
-        const incidents =
-          await sql`SELECT id,hook_id AS "hookId",title,state,occurrences::float8 AS occurrences,reason,
-          ticket_id AS "ticketId",received_at::text AS "receivedAt",last_seen_at::text AS "lastSeenAt"
-          FROM factory.monitoring_incident WHERE project_id=${projectId}
-          ORDER BY last_seen_at DESC,id LIMIT 50`;
+        const incidents = await db
+          .select({
+            id: monitoringIncident.id,
+            hookId: monitoringIncident.hookId,
+            title: monitoringIncident.title,
+            state: monitoringIncident.state,
+            occurrences: monitoringIncident.occurrences,
+            reason: monitoringIncident.reason,
+            ticketId: monitoringIncident.ticketId,
+            receivedAt: query<string>`${monitoringIncident.receivedAt}::text`,
+            lastSeenAt: query<string>`${monitoringIncident.lastSeenAt}::text`,
+          })
+          .from(monitoringIncident)
+          .where(eq(monitoringIncident.projectId, projectId))
+          .orderBy(desc(monitoringIncident.lastSeenAt), asc(monitoringIncident.id))
+          .limit(50);
         return monitoringView.parse({
           canManage: manager,
           canDelegate: manager && developer,
@@ -157,6 +208,7 @@ export function createMonitoringController(
     async save(projectId: string, userId: string, value: z.input<typeof monitoringSave>) {
       const input = monitoringSave.parse(value);
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await manageIn(sql, userId, projectId, input.delegation);
         const replay = await replayIn(
           sql,
@@ -167,10 +219,15 @@ export function createMonitoringController(
           "save",
           input,
         );
-        const [old] = await sql<
-          { projectId: string; version: number; digest: string }[]
-        >`SELECT project_id AS "projectId",version::float8 AS version,secret_digest AS digest
-          FROM factory.monitoring_hook WHERE id=${input.id} FOR UPDATE`;
+        const [old] = await db
+          .select({
+            projectId: monitoringHook.projectId,
+            version: monitoringHook.version,
+            digest: monitoringHook.secretDigest,
+          })
+          .from(monitoringHook)
+          .where(eq(monitoringHook.id, input.id))
+          .for("update");
         if (old && old.projectId !== projectId)
           throw new CommandError("not-found", "Webhook not found");
         if (replay)
@@ -196,16 +253,36 @@ export function createMonitoringController(
           );
         const policyId = crypto.randomUUID();
         if (old)
-          await sql`UPDATE factory.monitoring_hook SET name=${input.name},enabled=${input.enabled},
-            policy_id=${policyId},version=version+1 WHERE id=${input.id}`;
+          await db
+            .update(monitoringHook)
+            .set({
+              name: input.name,
+              enabled: input.enabled,
+              policyId,
+              version: query<number>`${monitoringHook.version}+1`,
+            })
+            .where(eq(monitoringHook.id, input.id));
         else
-          await sql`INSERT INTO factory.monitoring_hook(id,project_id,name,enabled,version,secret_digest,policy_id)
-            VALUES(${input.id},${projectId},${input.name},${input.enabled},1,
-              ${monitoringDigest(key(input.id, input.commandId))},${policyId})`;
-        await sql`INSERT INTO factory.monitoring_policy(id,hook_id,connection_id,assignment,delegated_by,delegation,
-          instructions,source_ids,source_assignments)
-          VALUES(${policyId},${input.id},NULL,NULL,${userId},${input.delegation},
-            ${input.instructions},${input.connectionIds},${JSON.stringify(assignments)}::jsonb)`;
+          await db.insert(monitoringHook).values({
+            id: input.id,
+            projectId,
+            name: input.name,
+            enabled: input.enabled,
+            version: 1,
+            secretDigest: monitoringDigest(key(input.id, input.commandId)),
+            policyId,
+          });
+        await db.insert(monitoringPolicy).values({
+          id: policyId,
+          hookId: input.id,
+          connectionId: null,
+          assignment: null,
+          delegatedBy: userId,
+          delegation: input.delegation,
+          instructions: input.instructions,
+          sourceIds: input.connectionIds,
+          sourceAssignments: assignments,
+        });
         await recordIn(sql, userId, projectId, input.id, input.commandId, "save", input);
         return { url: old ? null : webhook(input.id, input.commandId) };
       });
@@ -219,12 +296,14 @@ export function createMonitoringController(
     ) {
       const input = monitoringChange.parse(value);
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await projectAuthorityIn(sql, userId, projectId, true);
         const replay = await replayIn(sql, userId, projectId, id, input.commandId, action, input);
-        const [old] = await sql<
-          { version: number; digest: string }[]
-        >`SELECT version::float8 AS version,secret_digest AS digest
-          FROM factory.monitoring_hook WHERE id=${id} AND project_id=${projectId} FOR UPDATE`;
+        const [old] = await db
+          .select({ version: monitoringHook.version, digest: monitoringHook.secretDigest })
+          .from(monitoringHook)
+          .where(and(eq(monitoringHook.id, id), eq(monitoringHook.projectId, projectId)))
+          .for("update");
         if (!old) throw new CommandError("not-found", "Webhook not found");
         if (replay)
           return {
@@ -237,17 +316,24 @@ export function createMonitoringController(
           throw new CommandError("conflict", "Webhook changed. Reload before changing it");
         // Rotation also disables execution. A fresh explicit save/delegation is
         // required, rather than carrying queued work across a leaked key.
-        await sql`UPDATE factory.monitoring_hook SET enabled=false,version=version+1,
-          secret_digest=${action === "rotate" ? monitoringDigest(key(id, input.commandId)) : old.digest}
-          WHERE id=${id}`;
+        await db
+          .update(monitoringHook)
+          .set({
+            enabled: false,
+            version: query<number>`${monitoringHook.version}+1`,
+            secretDigest:
+              action === "rotate" ? monitoringDigest(key(id, input.commandId)) : old.digest,
+          })
+          .where(eq(monitoringHook.id, id));
         await recordIn(sql, userId, projectId, id, input.commandId, action, input);
         return { url: action === "rotate" ? webhook(id, input.commandId) : null };
       });
     },
     async authenticate(id: string, presented: string) {
-      const [hook] = await database.client<
-        { digest: string; enabled: boolean }[]
-      >`SELECT secret_digest AS digest,enabled FROM factory.monitoring_hook WHERE id=${id}`;
+      const [hook] = await database.db
+        .select({ digest: monitoringHook.secretDigest, enabled: monitoringHook.enabled })
+        .from(monitoringHook)
+        .where(eq(monitoringHook.id, id));
       const expected = Buffer.from(hook?.digest ?? "0".repeat(64), "hex");
       const candidate = Buffer.from(monitoringDigest(presented), "hex");
       return Boolean(timingSafeEqual(expected, candidate) && hook?.enabled);
@@ -259,16 +345,18 @@ export function createMonitoringController(
       signals: MonitoringSignal[],
     ) {
       const result = await database.client.begin(async (sql) => {
-        const [hook] = await sql<
-          {
-            projectId: string;
-            policyId: string;
-            version: number;
-            digest: string;
-            enabled: boolean;
-          }[]
-        >`SELECT project_id AS "projectId",policy_id AS "policyId",version::float8 AS version,
-          secret_digest AS digest,enabled FROM factory.monitoring_hook WHERE id=${id} FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [hook] = await db
+          .select({
+            projectId: monitoringHook.projectId,
+            policyId: monitoringHook.policyId,
+            version: monitoringHook.version,
+            digest: monitoringHook.secretDigest,
+            enabled: monitoringHook.enabled,
+          })
+          .from(monitoringHook)
+          .where(eq(monitoringHook.id, id))
+          .for("update");
         if (
           !hook?.enabled ||
           !timingSafeEqual(
@@ -277,11 +365,15 @@ export function createMonitoringController(
           )
         )
           throw new CommandError("not-found", "Webhook not found");
-        const [rate] = await sql`UPDATE factory.monitoring_hook
-          SET received_count=CASE WHEN received_window < now()-interval '1 minute' THEN 1 ELSE received_count+1 END,
-            received_window=CASE WHEN received_window < now()-interval '1 minute' THEN now() ELSE received_window END
-          WHERE id=${id} AND (received_window < now()-interval '1 minute' OR received_count < 120)
-          RETURNING id`;
+        const expired = lt(monitoringHook.receivedWindow, query`now()-interval '1 minute'`);
+        const [rate] = await db
+          .update(monitoringHook)
+          .set({
+            receivedCount: query<number>`CASE WHEN ${expired} THEN 1 ELSE ${monitoringHook.receivedCount}+1 END`,
+            receivedWindow: query<Date>`CASE WHEN ${expired} THEN now() ELSE ${monitoringHook.receivedWindow} END`,
+          })
+          .where(and(eq(monitoringHook.id, id), or(expired, lt(monitoringHook.receivedCount, 120))))
+          .returning({ id: monitoringHook.id });
         if (!rate)
           return {
             projectId: hook.projectId,
@@ -298,24 +390,49 @@ export function createMonitoringController(
             ignored++;
             continue;
           }
-          const [duplicate] =
-            await sql`UPDATE factory.monitoring_incident SET occurrences=occurrences+1,last_seen_at=now()
-            WHERE hook_id=${id} AND fingerprint=${signal.fingerprint} RETURNING id`;
+          const [duplicate] = await db
+            .update(monitoringIncident)
+            .set({
+              occurrences: query<number>`${monitoringIncident.occurrences}+1`,
+              lastSeenAt: query<Date>`now()`,
+            })
+            .where(
+              and(
+                eq(monitoringIncident.hookId, id),
+                eq(monitoringIncident.fingerprint, signal.fingerprint),
+              ),
+            )
+            .returning({ id: monitoringIncident.id });
           if (duplicate) {
             duplicates++;
             continue;
           }
-          const [queued] = await sql<{ count: number }[]>`SELECT count(*)::integer AS count
-            FROM factory.monitoring_incident WHERE hook_id=${id} AND state IN ('queued','diagnosing','implementing')`;
+          const [queued] = await db
+            .select({ count: count() })
+            .from(monitoringIncident)
+            .where(
+              and(
+                eq(monitoringIncident.hookId, id),
+                inArray(monitoringIncident.state, ["queued", "diagnosing", "implementing"]),
+              ),
+            );
           if (Number(queued?.count) >= 50)
             throw new CommandError(
               "conflict",
               "This Input has 50 unsettled requests. Resolve them before sending more",
             );
-          await sql`INSERT INTO factory.monitoring_incident(id,hook_id,project_id,policy_id,hook_version,
-            fingerprint,payload_digest,title,reference,context)
-            VALUES(${crypto.randomUUID()},${id},${hook.projectId},${hook.policyId},${hook.version},
-              ${signal.fingerprint},${payloadDigest},${signal.title},${signal.reference},${signal.context})`;
+          await db.insert(monitoringIncident).values({
+            id: crypto.randomUUID(),
+            hookId: id,
+            projectId: hook.projectId,
+            policyId: hook.policyId,
+            hookVersion: hook.version,
+            fingerprint: signal.fingerprint,
+            payloadDigest,
+            title: signal.title,
+            reference: signal.reference,
+            context: signal.context,
+          });
           accepted++;
         }
         return { projectId: hook.projectId, limited: false, accepted, duplicates, ignored };

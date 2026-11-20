@@ -130,6 +130,15 @@ test("database-only feature checks skip the application build while endpoint che
     "mcp-library",
     "mcp-oauth",
     "mcp-cancellation",
+    "agent-read",
+    "agent-turn-store",
+    "coding-source-dispatch-fence",
+    "change-document-drizzle",
+    "delivery-controller-drizzle",
+    "inbox",
+    "skills-controllers-drizzle",
+    "substrate-drizzle",
+    "substrate-bound-provisioning",
   ])
     expect(integrationNeedsApplicationBuild(`test/integration/${name}.test.ts`)).toBe(false);
   expect(integrationNeedsApplicationBuild("test/integration/server-function-runtime.test.ts")).toBe(

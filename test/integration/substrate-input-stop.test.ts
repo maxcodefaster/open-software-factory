@@ -1,4 +1,3 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
@@ -16,6 +15,7 @@ import {
 import { objectDigest, type PrivateObjects } from "../../apps/factory/src/storage/objects";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
 import {
   type SubstrateCall,
@@ -491,9 +491,19 @@ test.each([
       }
       expect(saved?.["resume_attempted_at"]).not.toBeNull();
       if (expected) {
+        const [completion] = await f.database.client`
+          SELECT binding.checkpoint,source.checkpoint->>'id' AS source_id,
+            operation.completed_at>=operation.resume_attempted_at
+              AND operation.completed_at<=clock_timestamp() AS database_clock
+          FROM factory.substrate_input_stop operation
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=operation.runtime_attempt_id
+          JOIN factory.substrate_source source ON source.workspace_id=operation.workspace_id
+          WHERE operation.runtime_attempt_id=${f.attemptID}`;
         expect(saved?.["completed_at"]).not.toBeNull();
         expect(saved?.["completed_checkpoint"].generation).toBe(2);
-        expect(saved?.["completed_source_checkpoint_id"]).toBeTruthy();
+        expect(saved?.["completed_checkpoint"]).toEqual(completion?.["checkpoint"]);
+        expect(saved?.["completed_source_checkpoint_id"]).toBe(completion?.["source_id"]);
+        expect(completion?.["database_clock"]).toBe(true);
         expect(suspends).toBe(2);
         expect(sourceExports).toBe(3);
       } else expect(saved?.["completed_at"]).toBeNull();
