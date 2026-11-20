@@ -2,7 +2,7 @@ import { expect } from "bun:test";
 import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
-import { systemSkillSettingsView } from "../../packages/conversation-domain/src/skill-inheritance";
+import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { eventually } from "./factory-process";
 import type { releaseInstallation } from "./release-installation";
 import { callFactoryFunction } from "./server-functions";
@@ -24,19 +24,23 @@ export async function releaseDependent(fixture: Fixture) {
   const admin = await fixture.login("admin");
   const started = performance.now();
   if (!state.buildSkillID) {
-    const catalogue = systemSkillSettingsView.parse(
-      await serverCall(callFactoryFunction(fixture.base, "getSystemSkills", [], { cookie: admin })),
+    const catalogue = skillLibraryView.parse(
+      await serverCall(callFactoryFunction(fixture.base, "getSkillLibrary", [], { cookie: admin })),
     );
     const key = "release-exact-implementation";
     const revision =
-      catalogue.revisions.find((value) => value.content.key === key) ??
-      skillRevisionInput.parse(
-        await serverCall(
+      catalogue.entries
+        .flatMap((value) => value.revisions)
+        .find((value) => value.content.key === key) ??
+      (await (async () => {
+        const saved = await serverCall(
           callFactoryFunction(
             fixture.base,
-            "publishSkill",
+            "saveSkill",
             [
               {
+                libraryId: crypto.randomUUID(),
+                scope: "system",
                 revisionId: crypto.randomUUID(),
                 expectedRevision: 0,
                 content: {
@@ -64,37 +68,83 @@ export async function releaseDependent(fixture: Fixture) {
             ],
             { cookie: admin },
           ),
-        ),
-      );
+        );
+        return skillRevisionInput.parse(
+          await serverCall(
+            callFactoryFunction(fixture.base, "getSkillRevision", [saved.revisionId], {
+              cookie: admin,
+            }),
+          ),
+        );
+      })());
     state.buildSkillID = revision.id;
     await fixture.save("dependent-skill-published", 0);
   }
   if (!state.dependentCommandID) {
-    const skills = await serverCall(
-      callFactoryFunction(fixture.base, "getSystemSkills", [], { cookie: admin }),
+    const skills = skillLibraryView.parse(
+      await serverCall(callFactoryFunction(fixture.base, "getSkillLibrary", [], { cookie: admin })),
     );
-    await serverCall(
-      callFactoryFunction(
-        fixture.base,
-        "saveSystemSkills",
-        [
-          {
-            ...skills.settings,
-            build: { required: [state.buildSkillID], optional: [], selected: [] },
-          },
-        ],
-        { cookie: admin },
-      ),
+    const entry = skills.entries.find((value) =>
+      value.revisions.some((revision) => revision.id === state.buildSkillID),
     );
+    if (!entry) throw new Error("Owned dependent Skill library missing");
+    for (const choice of skills.choices.filter(
+      (value) =>
+        value.scope === "system" &&
+        value.role === "build" &&
+        value.libraryId !== entry.id &&
+        value.state !== "disable",
+    ))
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveSkillChoice",
+          [
+            {
+              libraryId: choice.libraryId,
+              revisionId: choice.revisionId,
+              scope: "system",
+              role: "build",
+              state: "disable",
+              expectedVersion: choice.version,
+            },
+          ],
+          { cookie: admin },
+        ),
+      );
+    const current = skills.choices.find(
+      (value) => value.scope === "system" && value.role === "build" && value.libraryId === entry.id,
+    );
+    if (current?.state !== "required" || current.revisionId !== state.buildSkillID)
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveSkillChoice",
+          [
+            {
+              libraryId: entry.id,
+              revisionId: state.buildSkillID,
+              scope: "system",
+              role: "build",
+              state: "required",
+              expectedVersion: current?.version ?? 0,
+            },
+          ],
+          { cookie: admin },
+        ),
+      );
     const denied = await callFactoryFunction(
       fixture.base,
-      "savePersonalSkills",
+      "saveSkillChoice",
       [
-        projectID,
         {
-          version: 0,
-          planning: [],
-          build: [crypto.randomUUID()],
+          libraryId: entry.id,
+          revisionId: state.buildSkillID,
+          projectId: projectID,
+          scope: "personal",
+          role: "build",
+          state: "disable",
+          expectedVersion: 0,
         },
       ],
       { cookie: developer },

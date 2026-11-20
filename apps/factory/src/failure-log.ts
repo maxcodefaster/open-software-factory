@@ -15,8 +15,21 @@ export function describeFailure(cause: unknown, depth = 0): string {
       .filter((line) => line.trimStart().startsWith("at "))
       .slice(0, 4)
       .join("\n");
-    text = `${cause.name}: ${cause.message}${frames ? `\n${frames}` : ""}`;
-    if (cause.cause !== undefined) text += `\ncaused by ${describeFailure(cause.cause, depth + 1)}`;
+    if (/^Failed query:/i.test(cause.message)) {
+      const code =
+        cause.cause &&
+        typeof cause.cause === "object" &&
+        "code" in cause.cause &&
+        typeof cause.cause.code === "string" &&
+        /^[A-Z0-9]{5}$/.test(cause.cause.code)
+          ? ` SQLSTATE ${cause.cause.code}`
+          : "";
+      text = `Database query failed${code}${frames ? `\n${frames}` : ""}`;
+    } else {
+      text = `${cause.name}: ${cause.message}${frames ? `\n${frames}` : ""}`;
+      if (cause.cause !== undefined)
+        text += `\ncaused by ${describeFailure(cause.cause, depth + 1)}`;
+    }
   } else text = typeof cause === "string" ? cause : (JSON.stringify(cause) ?? String(cause));
   for (const [pattern, replacement] of secretPatterns) text = text.replace(pattern, replacement);
   return text.length > 2000 ? `${text.slice(0, 2000)}…` : text;

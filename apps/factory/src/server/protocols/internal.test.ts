@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import type postgres from "postgres";
+import { drizzleTransaction } from "../../../../../packages/db/src/client";
+import { runtimeSourceCapability } from "../../runtime/git-http";
 import { createInternalProtocol } from "./internal";
 
 test("native Source restore remains available but retired fixture-rescue paths are not routed", async () => {
@@ -33,3 +36,68 @@ test("native Source restore remains available but retired fixture-rescue paths a
   }
   expect(calls).toEqual([`restore:${attemptID}`]);
 });
+
+test.each([
+  { kind: null, verificationID: null, owner: "substrate_workspace" },
+  { kind: "prebuild", verificationID: null, owner: "substrate_prebuild" },
+  { kind: "verification", verificationID: crypto.randomUUID(), owner: "substrate_verification" },
+  { kind: "staging", verificationID: null, owner: "substrate_isolated" },
+  { kind: "publication", verificationID: null, owner: "substrate_isolated" },
+])(
+  "runtime Source grant routing preserves lifecycle predicates and transaction binding: %j",
+  async ({ kind, verificationID, owner }) => {
+    const attemptID = crypto.randomUUID();
+    const queries: Array<{ text: string; parameters: unknown[] }> = [];
+    const grants: Array<{ text: string; parameters: unknown[] }> = [];
+    let found = true;
+    let transactions = 0;
+    const transaction = ((strings: TemplateStringsArray, ...parameters: unknown[]) => {
+      grants.push({ text: strings.join("?"), parameters });
+      return Promise.resolve([]);
+    }) as unknown as postgres.TransactionSql;
+    const client = {
+      unsafe(text: string, parameters: unknown[]) {
+        queries.push({ text, parameters });
+        return {
+          values: async () =>
+            found ? [["https://owned.invalid/source.git", verificationID, kind]] : [],
+        };
+      },
+      async begin<T>(callback: (sql: postgres.TransactionSql) => Promise<T>) {
+        transactions++;
+        return callback(transaction);
+      },
+    } as unknown as postgres.Sql;
+    const protocol = createInternalProtocol({
+      factoryOrigin: "https://factory.test",
+      database: { client, db: drizzleTransaction(client) },
+    } as unknown as Parameters<typeof createInternalProtocol>[0]);
+    const request = (capability = runtimeSourceCapability(attemptID)) =>
+      new Request(
+        `https://factory.test/internal/runtime-source/${attemptID}/${capability}/info/refs`,
+      );
+    const invalid = runtimeSourceCapability(attemptID).startsWith("0") ? "1" : "0";
+    expect((await protocol(request(invalid.repeat(64)))).status).toBe(404);
+    expect(queries).toHaveLength(0);
+    expect(transactions).toBe(0);
+    expect((await protocol(request())).status).toBe(404);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.text).toContain('from "factory"."runtime_attempt"');
+    expect(queries[0]?.text).toContain(
+      'inner join "factory"."project" on "factory"."project"."id" = "factory"."runtime_attempt"."project_id"',
+    );
+    expect(queries[0]?.text).toContain('"runtime_attempt"."id" = $1');
+    expect(queries[0]?.text).toContain('"runtime_attempt"."state" in ($2, $3)');
+    expect(queries[0]?.text).toContain('"runtime_attempt"."stop_intended_at" is null');
+    expect(queries[0]?.parameters).toEqual([attemptID, "create-intended", "starting", 1]);
+    expect(transactions).toBe(1);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]?.text).toContain(`factory.${owner}`);
+    expect(grants[0]?.parameters).toContain(attemptID);
+    found = false;
+    expect((await protocol(request())).status).toBe(404);
+    expect(queries).toHaveLength(2);
+    expect(transactions).toBe(1);
+    expect(grants).toHaveLength(1);
+  },
+);

@@ -3,12 +3,94 @@ import { createHash } from "node:crypto";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { changeIdentity } from "../../packages/change-domain/src/change";
+import { change as changeModel } from "../../packages/db/src/schema";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { substrateFixture } from "../fixtures/substrate";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
+
+test("Zero's admitted Change lookup is Ticket-keyed and uses the same planning transaction", async () => {
+  const f = await substrateFixture("a".repeat(40), "ticket");
+  const zero = zeroDrizzle(zeroSchema, f.database.db);
+  const ctx = { userId: f.userID, systemManager: false };
+  const prerequisiteID = crypto.randomUUID();
+  const pendingID = crypto.randomUUID();
+  const pendingApprovalID = crypto.randomUUID();
+  const pendingChange = changeIdentity(pendingID, pendingApprovalID);
+  const args = (ticketId: string, prerequisiteId = prerequisiteID) => ({
+    projectId: f.projectID,
+    ticketId,
+    prerequisiteId,
+    expectedVersion: 1,
+  });
+  const add = (ticketID: string, prerequisiteId = prerequisiteID) =>
+    zero.transaction((tx) =>
+      zeroServerMutators.dependencies.add.fn({ tx, ctx, args: args(ticketID, prerequisiteId) }),
+    );
+  try {
+    for (const id of [prerequisiteID, pendingID])
+      await f.database.client`INSERT INTO factory.ticket(id,project_id,title,created_by)
+        VALUES(${id},${f.projectID},'Owned unadmitted prerequisite',${f.userID})`;
+    await expect(add(f.ticketID)).rejects.toThrow("already been admitted");
+    await f.database.client`UPDATE factory.change SET state='cancelled',cancelled_at=now()
+      WHERE id=${f.changeID}`;
+    await expect(add(f.ticketID)).rejects.toThrow("already been admitted");
+    await add(prerequisiteID, f.ticketID);
+    const content = JSON.stringify({
+      summary: "Owned pending admission",
+      acceptanceCriteria: ["Keep dependency edits bound to their planning transaction"],
+      nonGoals: [],
+    });
+    const revisionID = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.requirement_revision(
+      id,ticket_id,ordinal,canonical_content,content_digest,created_by)
+      VALUES(${revisionID},${pendingID},1,${content},
+        ${createHash("sha256").update(content).digest("hex")},${f.userID})`;
+    await f.database.client`INSERT INTO factory.requirement_approval(
+      id,ticket_id,requirement_revision_id,approved_by)
+      VALUES(${pendingApprovalID},${pendingID},${revisionID},${f.userID})`;
+    await expect(
+      zero.transaction(async (tx) => {
+        if (tx.location !== "server") throw new Error("Missing server planning transaction");
+        await tx.dbTransaction.wrappedTransaction.insert(changeModel).values({
+          id: pendingChange.changeID,
+          projectId: f.projectID,
+          ticketId: pendingID,
+          requirementApprovalId: pendingApprovalID,
+          branchName: pendingChange.branchName,
+          baseSha: "a".repeat(40),
+          state: "active",
+          createdBy: f.userID,
+        });
+        await zeroServerMutators.dependencies.add.fn({ tx, ctx, args: args(pendingID) });
+      }),
+    ).rejects.toThrow("already been admitted");
+    expect(
+      await f.database.client`SELECT id FROM factory.change WHERE id=${pendingChange.changeID}`,
+    ).toHaveLength(0);
+    expect(
+      await f.database.client`SELECT ticket_id FROM factory.ticket_dependency
+        WHERE ticket_id IN (${f.ticketID},${pendingID})`,
+    ).toHaveLength(0);
+    const versions = await f.database.client<{ version: number }[]>`
+      SELECT version::int AS version FROM factory.ticket WHERE id IN (${f.ticketID},${pendingID})`;
+    expect(versions.map((row) => row.version)).toEqual([1, 1]);
+    await expect(
+      zero.transaction((tx) =>
+        zeroServerMutators.dependencies.add.fn({
+          tx,
+          ctx: { ...ctx, userId: crypto.randomUUID() },
+          args: args(pendingID),
+        }),
+      ),
+    ).rejects.toThrow("Project not found");
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
 
 function changeController(
   database: Parameters<typeof createChangeController>[0],

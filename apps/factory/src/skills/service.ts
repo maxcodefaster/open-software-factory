@@ -1,9 +1,5 @@
 import type { z } from "zod";
 import type { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
-import type {
-  personalSkillSettingsInput,
-  projectSkillSettingsInput,
-} from "../../../../packages/conversation-domain/src/skill-inheritance";
 import {
   type skillChoiceInput,
   type skillLibrarySaveInput,
@@ -12,8 +8,6 @@ import {
 import {
   type SkillRole,
   skillInvocationViewInput,
-  type skillPublishInput,
-  type systemSkillSettingsInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import type { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
@@ -84,41 +78,6 @@ export function createSkillService(
     },
     sourceUpdate(userID: string, id: string, projectID?: string) {
       return skills.library.checkSource(id, userID, projectID);
-    },
-    async inherited(userID: string, projectID: string) {
-      await project(userID, projectID);
-      return skills.getInherited(projectID, userID);
-    },
-    async saveProject(
-      userID: string,
-      projectID: string,
-      input: z.output<typeof projectSkillSettingsInput>,
-    ) {
-      await project(userID, projectID);
-      return skills.setProject(projectID, userID, input);
-    },
-    async savePersonal(
-      userID: string,
-      projectID: string,
-      input: z.output<typeof personalSkillSettingsInput>,
-    ) {
-      await project(userID, projectID);
-      return skills.setPersonal(projectID, userID, input);
-    },
-    async system(userID: string) {
-      await access.requireSystemManager(userID);
-      return skills.getSystem(userID);
-    },
-    async publish(userID: string, input: z.output<typeof skillPublishInput>) {
-      await access.requireSystemManager(userID);
-      const revision = await skills.publish(input, userID);
-      if (!revision)
-        throw new CommandError("unavailable", "Skill publication outcome is unconfirmed");
-      return revision;
-    },
-    async saveSystem(userID: string, input: z.output<typeof systemSkillSettingsInput>) {
-      await access.requireSystemManager(userID);
-      return skills.setSystem(input, userID);
     },
     async setPublication(userID: string, id: string, published: boolean) {
       await access.requireSystemManager(userID);

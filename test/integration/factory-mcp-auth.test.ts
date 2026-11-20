@@ -93,6 +93,26 @@ test("native MCP OAuth registers a public PKCE client without changing the Forge
       code_challenge: new Bun.CryptoHasher("sha256").update(verifier).digest("base64url"),
     }))
       authorization.searchParams.set(key, value);
+    const consentRequest = new Request(fixture.base, { headers: { cookie } });
+    const consentQuery = authorization.search.slice(1);
+    expect(await identity.mcpConsentDetails(consentRequest, consentQuery)).toMatchObject({
+      clientID: client.client_id,
+      name: "Owned MCP client",
+      scopes: ["factory:read", "factory:work", "offline_access"],
+    });
+    await database.client`UPDATE auth."oauthClient" SET name=NULL WHERE "clientId"=${client.client_id}`;
+    expect(await identity.mcpConsentDetails(consentRequest, consentQuery)).toMatchObject({
+      name: "MCP client",
+    });
+    for (const disabled of [true, null]) {
+      await database.client`UPDATE auth."oauthClient" SET disabled=${disabled} WHERE "clientId"=${client.client_id}`;
+      await expect(identity.mcpConsentDetails(consentRequest, consentQuery)).rejects.toThrow();
+    }
+    await database.client`UPDATE auth."oauthClient" SET disabled=false,"tokenEndpointAuthMethod"=NULL
+      WHERE "clientId"=${client.client_id}`;
+    await expect(identity.mcpConsentDetails(consentRequest, consentQuery)).rejects.toThrow();
+    await database.client`UPDATE auth."oauthClient" SET name='Owned MCP client',"tokenEndpointAuthMethod"='none'
+      WHERE "clientId"=${client.client_id}`;
     const missingPKCE = new URL(authorization);
     missingPKCE.searchParams.delete("code_challenge");
     missingPKCE.searchParams.delete("code_challenge_method");

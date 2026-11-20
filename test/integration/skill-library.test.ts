@@ -260,8 +260,12 @@ test("product authors keep a private cross-Project library; managers share exact
         project,
       ),
     ).rejects.toThrow("elsewhere");
-    const inspectLegacy = await skills.getInherited(project, collaborator);
-    expect(inspectLegacy.revisions.some((revision) => revision.id === nextRevision)).toBe(false);
+    const inspected = await skills.getLibrary(collaborator, project);
+    expect(
+      inspected.entries.some((entry) =>
+        entry.revisions.some((revision) => revision.id === nextRevision),
+      ),
+    ).toBe(false);
   } finally {
     await database.client.end();
     await fixture.dispose();

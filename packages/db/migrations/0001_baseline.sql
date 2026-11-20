@@ -3533,19 +3533,6 @@ CREATE TABLE "factory"."personal_model_settings" (
 	CONSTRAINT "personal_model_settings_version_check" CHECK (version > 0)
 );
 
-CREATE TABLE "factory"."personal_skill_settings" (
-	"project_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"version" bigint NOT NULL,
-	"planning" jsonb,
-	"build" jsonb,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "personal_skill_settings_pkey" PRIMARY KEY("project_id","user_id"),
-	CONSTRAINT "personal_skill_settings_build_check" CHECK ((build IS NULL) OR (jsonb_typeof(build) = 'array'::text)),
-	CONSTRAINT "personal_skill_settings_planning_check" CHECK ((planning IS NULL) OR (jsonb_typeof(planning) = 'array'::text)),
-	CONSTRAINT "personal_skill_settings_version_check" CHECK (version > 0)
-);
-
 CREATE TABLE "factory"."project" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"slug" text NOT NULL,
@@ -3756,18 +3743,6 @@ CREATE TABLE "factory"."project_setup_readiness" (
 	CONSTRAINT "project_setup_readiness_command_id_key" UNIQUE("command_id"),
 	CONSTRAINT "project_setup_readiness_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text])),
 	CONSTRAINT "project_setup_readiness_task_check" CHECK (task = ANY (ARRAY['configuration'::text, 'development-secrets'::text, 'preview-secrets'::text, 'protection'::text, 'hook'::text, 'wiki'::text, 'development'::text, 'preview-image'::text, 'main-preview'::text]))
-);
-
-CREATE TABLE "factory"."project_skill_settings" (
-	"project_id" uuid PRIMARY KEY NOT NULL,
-	"version" bigint NOT NULL,
-	"planning" jsonb NOT NULL,
-	"build" jsonb NOT NULL,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_skill_settings_build_check" CHECK (jsonb_typeof(build) = 'object'::text),
-	CONSTRAINT "project_skill_settings_planning_check" CHECK (jsonb_typeof(planning) = 'object'::text),
-	CONSTRAINT "project_skill_settings_version_check" CHECK (version > 0)
 );
 
 CREATE TABLE "factory"."promotion_operation" (
@@ -4553,19 +4528,6 @@ CREATE TABLE "factory"."substrate_workspace" (
 	CONSTRAINT "substrate_workspace_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text)
 );
 
-CREATE TABLE "factory"."system_skill_settings" (
-	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"version" bigint NOT NULL,
-	"planning" jsonb NOT NULL,
-	"build" jsonb NOT NULL,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "system_skill_settings_build_check" CHECK (jsonb_typeof(build) = 'object'::text),
-	CONSTRAINT "system_skill_settings_planning_check" CHECK (jsonb_typeof(planning) = 'object'::text),
-	CONSTRAINT "system_skill_settings_singleton_check" CHECK ((singleton)),
-	CONSTRAINT "system_skill_settings_version_check" CHECK (version > 0)
-);
-
 CREATE TABLE "factory"."technical_design_revision" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"ticket_id" uuid NOT NULL,
@@ -5182,8 +5144,6 @@ ALTER TABLE "factory"."personal_git_operation" ADD CONSTRAINT "personal_git_oper
 ALTER TABLE "factory"."personal_git_operation" ADD CONSTRAINT "personal_git_operation_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."personal_model_settings" ADD CONSTRAINT "personal_model_settings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."personal_model_settings" ADD CONSTRAINT "personal_model_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."personal_skill_settings" ADD CONSTRAINT "personal_skill_settings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."personal_skill_settings" ADD CONSTRAINT "personal_skill_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."project" ADD CONSTRAINT "project_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_delivery_policy" ADD CONSTRAINT "project_delivery_policy_delegated_by_fkey" FOREIGN KEY ("delegated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_delivery_policy" ADD CONSTRAINT "project_delivery_policy_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
@@ -5209,8 +5169,6 @@ ALTER TABLE "factory"."project_setup_inspection" ADD CONSTRAINT "project_setup_i
 ALTER TABLE "factory"."project_setup_inspection" ADD CONSTRAINT "project_setup_inspection_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "factory"."project_setup_inspection"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_setup_inspection" ADD CONSTRAINT "project_setup_inspection_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."project_setup_readiness" ADD CONSTRAINT "project_setup_readiness_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."project_skill_settings" ADD CONSTRAINT "project_skill_settings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."project_skill_settings" ADD CONSTRAINT "project_skill_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_previous_runtime_attempt_id_fkey" FOREIGN KEY ("previous_runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
@@ -5306,7 +5264,6 @@ ALTER TABLE "factory"."substrate_prebuild" ADD CONSTRAINT "substrate_prebuild_pr
 ALTER TABLE "factory"."substrate_source" ADD CONSTRAINT "substrate_source_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."substrate_verification" ADD CONSTRAINT "substrate_verification_verification_id_fkey" FOREIGN KEY ("verification_id") REFERENCES "factory"."verification"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."substrate_workspace" ADD CONSTRAINT "substrate_workspace_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."system_skill_settings" ADD CONSTRAINT "system_skill_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."technical_design_revision" ADD CONSTRAINT "technical_design_revision_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."technical_design_revision" ADD CONSTRAINT "technical_design_revision_planning_turn_id_fkey" FOREIGN KEY ("planning_turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."technical_design_revision" ADD CONSTRAINT "technical_design_revision_previous_revision_id_fkey" FOREIGN KEY ("previous_revision_id") REFERENCES "factory"."technical_design_revision"("id") ON DELETE no action ON UPDATE no action;
@@ -5924,5 +5881,5 @@ INSERT INTO factory.installation_maintenance(singleton) VALUES(true);
 INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid());
 
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'9a62a9089885131a1e4bb870c16076f2b5b13cc678b036844fd2db5d385c3307');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'78b12848b03193723796e33faf117391b6d21a999b87b1db14d43c6bff00f547');
 COMMIT;

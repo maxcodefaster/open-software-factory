@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
+import { librarySkillsAvailable } from "../../packages/conversation-domain/src/skill-library";
 import type { SkillContent } from "../../packages/conversation-domain/src/skills";
 import { drizzleTransaction } from "../../packages/db/src/client";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
@@ -226,8 +227,8 @@ test("library CRUD preserves private scopes, immutable copies, cover CAS and pro
       f.skills.library.inspect(next.revisionId, f.manager, f.project),
     ).rejects.toMatchObject({ status: 404 });
     expect(
-      (await f.skills.getInherited(f.project, f.manager)).revisions.some(
-        (row) => row.id === next.revisionId,
+      (await f.skills.getLibrary(f.manager, f.project)).entries.some((row) =>
+        row.revisions.some((revision) => revision.id === next.revisionId),
       ),
     ).toBe(false);
     await expect(
@@ -335,110 +336,123 @@ test("library choices pin exact revisions, lock required assignments and retain 
   }
 });
 
-test("system publication and inherited settings keep numeric CAS, nulls, empty arrays and matched manager grants", async () => {
+test("blocker availability matches admission for a retracted personal version without contaminating shared background work", async () => {
   const f = await fixture();
   try {
-    const first = crypto.randomUUID(),
-      second = crypto.randomUUID();
-    const publish = {
-      revisionId: first,
-      expectedRevision: 0,
-      content: f.content("system-baseline"),
-    };
-    expect(await f.skills.publish(publish, f.admin)).toMatchObject({
-      id: first,
-      revision: 1,
-      published: true,
-    });
-    expect(await f.skills.publish(publish, f.admin)).toMatchObject({ id: first, revision: 1 });
-    await expect(
-      f.skills.publish(
-        { ...publish, content: { ...publish.content, instructions: "Changed input" } },
-        f.admin,
-      ),
-    ).rejects.toMatchObject({ status: 409 });
-    await expect(
-      f.skills.publish({ ...publish, revisionId: crypto.randomUUID() }, f.admin),
-    ).rejects.toMatchObject({ status: 409 });
-    await f.skills.publish(
-      { revisionId: second, expectedRevision: 0, content: f.content("system-optional") },
-      f.admin,
+    const input = f.save();
+    await f.skills.library.save(input, f.author);
+    await f.skills.chooseLibrary(
+      {
+        libraryId: input.libraryId,
+        revisionId: input.revisionId,
+        scope: "personal",
+        projectId: f.project,
+        role: "planning",
+        state: "enable",
+        expectedVersion: 0,
+      },
+      f.author,
     );
-    const empty = { required: [], optional: [], selected: [] };
-    const system = {
-      version: 0,
-      planning: { required: [first], optional: [second], selected: [second] },
-      build: empty,
+    const next = {
+      ...input,
+      revisionId: crypto.randomUUID(),
+      expectedRevision: 1,
+      content: {
+        ...input.content,
+        instructions: "New publication must not replace the pinned revision",
+      },
     };
-    expect((await f.skills.setSystem(system, f.admin)).settings).toMatchObject({ version: 1 });
-    await expect(f.skills.setSystem(system, f.admin)).rejects.toMatchObject({ status: 409 });
-    const inheritedRule = { required: [], optional: null, selected: null };
-    const project = {
-      version: 0,
-      planning: { required: [second], optional: [], selected: [] },
-      build: inheritedRule,
+    await f.skills.library.save(next, f.author);
+    await f.skills.setPublication(input.revisionId, false, f.admin);
+    const view = await f.skills.getLibrary(f.author, f.project);
+    expect(librarySkillsAvailable(view.entries, view.choices, "planning")).toBe(false);
+    await expect(f.resolve()).rejects.toMatchObject({ code: "unavailable", status: 503 });
+    expect(librarySkillsAvailable(view.entries, view.choices, "planning", false)).toBe(true);
+    expect((await f.resolve(false)).revisionIds).not.toContain(input.revisionId);
+    expect((await f.resolve(false)).revisionIds).not.toContain(next.revisionId);
+    expect((await f.skills.load([input.revisionId]))[0]).toMatchObject({
+      content: input.content,
+      published: false,
+      revision: 1,
+    });
+    await f.skills.setPublication(input.revisionId, true, f.admin);
+    const restored = await f.skills.getLibrary(f.author, f.project);
+    expect(librarySkillsAvailable(restored.entries, restored.choices, "planning")).toBe(true);
+    expect((await f.resolve()).revisionIds).toContain(input.revisionId);
+    expect((await f.resolve()).revisionIds).not.toContain(next.revisionId);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("canonical capabilities, required locks and Reset preserve other library choices", async () => {
+  const f = await fixture();
+  try {
+    await f.skills.getLibrary(f.author, f.project);
+    const input = f.save("system", "system-baseline");
+    await f.skills.library.save(input, f.admin);
+    const choice = {
+      libraryId: input.libraryId,
+      revisionId: input.revisionId,
+      scope: "system",
+      role: "planning",
+      state: "required",
+      expectedVersion: 0,
     };
-    await expect(f.skills.setProject(f.project, f.author, project)).rejects.toMatchObject({
+    await expect(f.skills.library.save(f.save("system"), f.manager)).rejects.toMatchObject({
       status: 403,
     });
-    const view = await f.skills.setProject(f.project, f.manager, project);
-    expect(view.project).toEqual({ ...project, version: 1 });
-    expect(view.effective.planning.required).toEqual([
-      { revisionId: first, source: "system" },
-      { revisionId: second, source: "project" },
-    ]);
-    await expect(f.skills.setProject(f.project, f.manager, project)).rejects.toMatchObject({
-      status: 409,
-    });
-    await expect(
-      f.skills.setProject(f.project, f.manager, {
-        ...project,
-        version: 1,
-        planning: { required: [first], optional: [], selected: [] },
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-    const reset = await f.skills.setProject(f.project, f.manager, {
-      version: 1,
-      planning: inheritedRule,
-      build: inheritedRule,
-    });
-    expect(reset.project.version).toBe(2);
-    const personal = await f.skills.setPersonal(f.project, f.author, {
-      version: 0,
-      planning: [],
-      build: null,
-    });
-    expect(personal.personal).toEqual({ version: 1, planning: [], build: null });
-    await expect(
-      f.skills.setPersonal(f.project, f.author, { version: 0, planning: null, build: null }),
-    ).rejects.toMatchObject({ status: 409 });
+    await expect(f.skills.chooseLibrary(choice, f.manager)).rejects.toMatchObject({ status: 403 });
+    await f.skills.chooseLibrary(choice, f.admin);
+    for (const [scope, actor] of [
+      ["project", f.manager],
+      ["personal", f.author],
+    ] as const)
+      await expect(
+        f.skills.chooseLibrary({ ...choice, projectId: f.project, scope, state: "enable" }, actor),
+      ).rejects.toThrow("required");
+    const second = f.save("project", "project-baseline");
+    await f.skills.library.save(second, f.manager);
+    const project = {
+      ...choice,
+      libraryId: second.libraryId,
+      revisionId: second.revisionId,
+      projectId: f.project,
+      scope: "project",
+      state: "enable",
+    };
+    await expect(f.skills.chooseLibrary(project, f.author)).rejects.toMatchObject({ status: 403 });
+    await f.skills.chooseLibrary(project, f.manager);
+    const personal = { ...project, scope: "personal", state: "disable" };
+    await f.skills.chooseLibrary(personal, f.author);
+    expect((await f.resolve()).revisionIds).not.toContain(second.revisionId);
+    expect((await f.resolve(false)).revisionIds).toContain(second.revisionId);
+    await expect(f.skills.chooseLibrary(personal, f.author)).rejects.toMatchObject({ status: 409 });
+    await f.skills.chooseLibrary({ ...personal, state: "inherit", expectedVersion: 1 }, f.author);
+    expect((await f.resolve()).revisionIds).toContain(second.revisionId);
+    expect((await f.resolve()).requiredRevisionIds).toContain(input.revisionId);
     expect(
-      (await f.skills.setPersonal(f.project, f.author, { version: 1, planning: null, build: [] }))
-        .personal,
-    ).toEqual({ version: 2, planning: null, build: [] });
-    expect((await f.skills.getInherited(f.project, f.manager)).personal).toEqual({
-      version: 0,
-      planning: null,
-      build: null,
-    });
-    await f.skills.setPublication(second, false, f.admin);
+      (await f.skills.getLibrary(f.manager, f.project)).choices.some(
+        (row) => row.scope === "personal",
+      ),
+    ).toBe(false);
     await expect(
-      f.skills.setPersonal(f.project, f.author, { version: 2, planning: [second], build: null }),
-    ).rejects.toMatchObject({ status: 409 });
+      f.skills.setPublication(second.revisionId, false, f.manager),
+    ).rejects.toMatchObject({ status: 403 });
+    await f.skills.setPublication(second.revisionId, false, f.admin);
+    const withdrawn = await f.skills.getLibrary(f.author, f.project);
+    expect(librarySkillsAvailable(withdrawn.entries, withdrawn.choices, "planning")).toBe(false);
+    await expect(f.resolve()).rejects.toMatchObject({ status: 503 });
+    await f.skills.setPublication(second.revisionId, true, f.admin);
+    const restored = await f.skills.getLibrary(f.author, f.project);
+    expect(librarySkillsAvailable(restored.entries, restored.choices, "planning")).toBe(true);
     await expect(
       f.skills.setPublication(crypto.randomUUID(), false, f.admin),
     ).rejects.toMatchObject({ status: 404 });
-    await expect(f.skills.getSystem(f.manager)).rejects.toMatchObject({ status: 403 });
-    await f.client`UPDATE factory.system_skill_settings SET version=9007199254740990`;
-    const large = (await f.skills.getSystem(f.admin)).settings;
-    expect(large.version).toBe(9007199254740990);
-    expect(
-      (await f.skills.setSystem({ ...large, planning: empty }, f.admin)).settings.version,
-    ).toBe(Number.MAX_SAFE_INTEGER);
     await f.client`DELETE FROM factory.project_membership WHERE project_id=${f.project} AND user_id=${f.author}`;
-    await expect(f.skills.getInherited(f.project, f.author)).rejects.toMatchObject({ status: 404 });
+    await expect(f.skills.getLibrary(f.author, f.project)).rejects.toMatchObject({ status: 404 });
     await expect(
-      f.skills.setPersonal(f.project, f.author, { version: 2, planning: null, build: null }),
+      f.skills.chooseLibrary({ ...personal, expectedVersion: 2 }, f.author),
     ).rejects.toMatchObject({ status: 404 });
   } finally {
     await f.dispose();
@@ -453,12 +467,8 @@ test("disabled accounts cannot inspect, admit choices or use retained administra
         f.admin,
       ]);
       await expect(f.skills.getLibrary(f.admin, f.project)).rejects.toMatchObject({ status: 403 });
-      await expect(f.skills.getSystem(f.admin)).rejects.toMatchObject({ status: 403 });
       await expect(
-        f.skills.publish(
-          { revisionId: crypto.randomUUID(), expectedRevision: 0, content: f.content() },
-          f.admin,
-        ),
+        f.skills.setPublication(crypto.randomUUID(), false, f.admin),
       ).rejects.toMatchObject({ status: 403 });
       await expect(f.skills.library.save(f.save(), f.admin)).rejects.toMatchObject({ status: 403 });
       await expect(f.skills.library.preview({}, f.admin)).rejects.toMatchObject({ status: 403 });
@@ -467,7 +477,7 @@ test("disabled accounts cannot inspect, admit choices or use retained administra
       ]);
     }
     await f.client`UPDATE factory.account_access SET directory_disabled_at=now() WHERE user_id=${f.author}`;
-    await expect(f.skills.getInherited(f.project, f.author)).rejects.toMatchObject({ status: 403 });
+    await expect(f.skills.getLibrary(f.author, f.project)).rejects.toMatchObject({ status: 403 });
     await expect(f.skills.invocations(f.project, f.author, "planning")).rejects.toMatchObject({
       status: 403,
     });
@@ -551,8 +561,8 @@ test("shared Ticket evidence reveals only its exact admitted private revision an
     expect((await f.skills.library.inspect(input.revisionId, f.manager, f.project)).published).toBe(
       false,
     );
-    await f.skills.getInherited(f.project, f.author);
-    await f.skills.getSystem(f.admin);
+    await f.skills.getLibrary(f.author, f.project);
+    await f.skills.getLibrary(f.admin);
     await f.skills.invocations(f.project, f.author, "planning");
     const [count] = await f.client<
       { count: number }[]
@@ -567,7 +577,7 @@ test("shared Ticket evidence reveals only its exact admitted private revision an
   }
 });
 
-test("Drizzle uses the caller's transaction and savepoint, including revision and settings rollback", async () => {
+test("Drizzle uses the caller's transaction and savepoint, including immutable revision rollback", async () => {
   const f = await fixture();
   try {
     const input = f.save();
@@ -668,7 +678,7 @@ test("competing library saves wait on the real advisory lock and only one expect
   }
 });
 
-test("competing choices and all settings CAS writes cannot replace a winner", async () => {
+test("competing per-library choices at every scope cannot replace a winner", async () => {
   const f = await fixture();
   try {
     await f.skills.getLibrary(f.author, f.project);
@@ -683,19 +693,24 @@ test("competing choices and all settings CAS writes cannot replace a winner", as
       revisionId: input.revisionId,
       expectedVersion: 0,
     };
-    const empty = { required: [], optional: [], selected: [] };
-    const inherit = { required: [], optional: null, selected: null };
-    for (const race of [
-      () => f.skills.chooseLibrary(choice, f.author, f.project),
-      () => f.skills.setSystem({ version: 0, planning: empty, build: empty }, f.admin),
-      () =>
-        f.skills.setProject(f.project, f.manager, {
-          version: 0,
-          planning: inherit,
-          build: inherit,
-        }),
-      () => f.skills.setPersonal(f.project, f.author, { version: 0, planning: null, build: null }),
-    ]) {
+    const systemInput = f.save("system");
+    await f.skills.library.save(systemInput, f.admin);
+    for (const [scope, actor, libraryId, revisionId] of [
+      ["personal", f.author, input.libraryId, input.revisionId],
+      ["project", f.manager, systemInput.libraryId, systemInput.revisionId],
+      ["system", f.admin, systemInput.libraryId, systemInput.revisionId],
+    ] as const) {
+      const race = () =>
+        f.skills.chooseLibrary(
+          {
+            ...choice,
+            scope,
+            libraryId,
+            revisionId,
+            ...(scope === "system" ? { projectId: undefined } : {}),
+          },
+          actor,
+        );
       const results = await Promise.allSettled([race(), race()]);
       expect(results.filter((row) => row.status === "fulfilled")).toHaveLength(1);
       expect(results.find((row) => row.status === "rejected")).toMatchObject({
@@ -714,11 +729,6 @@ test("competing choices and all settings CAS writes cannot replace a winner", as
         (row) => row.libraryId === input.libraryId,
       )?.version,
     ).toBe(Number.MAX_SAFE_INTEGER);
-    expect((await f.skills.getInherited(f.project, f.author)).personal).toEqual({
-      version: 1,
-      planning: null,
-      build: null,
-    });
   } finally {
     await f.dispose();
   }
@@ -729,12 +739,21 @@ test("Change invocations keep the first approved exact revisions, skip review au
   try {
     const first = crypto.randomUUID(),
       next = crypto.randomUUID();
-    await f.skills.publish(
-      { revisionId: first, expectedRevision: 0, content: f.content("change-guidance") },
+    const libraryId = crypto.randomUUID();
+    await f.skills.library.save(
+      {
+        libraryId,
+        scope: "system",
+        revisionId: first,
+        expectedRevision: 0,
+        content: f.content("change-guidance"),
+      },
       f.admin,
     );
-    await f.skills.publish(
+    await f.skills.library.save(
       {
+        libraryId,
+        scope: "system",
         revisionId: next,
         expectedRevision: 1,
         content: { ...f.content("change-guidance"), instructions: "Future guidance" },

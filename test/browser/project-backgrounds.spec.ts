@@ -265,7 +265,9 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
       held.resolve();
       await released.promise;
     });
-    await held.promise;
+    // A rejected lock acquisition must fail the test, not leave its readiness
+    // Promise pending until the entire browser timeout expires.
+    await Promise.race([held.promise, heldSave]);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(choices(page).first()).toContainText("Moonlit Landscape");
     await expand(page).click();

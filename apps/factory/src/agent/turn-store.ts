@@ -214,12 +214,25 @@ async function currentAuthorityIn(
 }
 
 export function createAgentTurnStore(database: Database) {
+  async function lockTurnChangeIn(sql: DatabaseTransaction, id: string) {
+    const [scope] = await drizzleTransaction(sql)
+      .select({ changeID: agentTurn.changeId })
+      .from(agentTurn)
+      .where(eq(agentTurn.id, id));
+    // The immutable linkage selects a lock, never execution authority. Writer
+    // transitions already hold Change before Turn; renewal and validation must
+    // follow that order too. The owned row and current authority are read below
+    // after this wait, including a fresh lease-expiry check.
+    if (scope?.changeID) await lockChangeWriterIn(sql, scope.changeID);
+  }
+
   async function validateExecutionIn(
     sql: DatabaseTransaction,
     id: string,
     ownerToken: string,
     forward?: (sql: DatabaseTransaction) => Promise<void>,
   ) {
+    await lockTurnChangeIn(sql, id);
     const db = drizzleTransaction(sql);
     const rows = await db
       .select()
@@ -255,6 +268,7 @@ export function createAgentTurnStore(database: Database) {
     persist: (sql: DatabaseTransaction, current: boolean) => Promise<void>,
   ) {
     return database.client.begin(async (sql) => {
+      await lockTurnChangeIn(sql, id);
       const rows = await drizzleTransaction(sql)
         .select()
         .from(agentTurn)
@@ -423,6 +437,7 @@ export function createAgentTurnStore(database: Database) {
   return {
     admitIn,
     async resumePendingIn(sql: DatabaseTransaction, id: string) {
+      await lockTurnChangeIn(sql, id);
       const db = drizzleTransaction(sql);
       const [row] = await db
         .select()
@@ -511,6 +526,7 @@ export function createAgentTurnStore(database: Database) {
     async failRevokedPendingPreparation(id: string, ownerToken: string, summary: string) {
       if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
       return database.client.begin(async (sql) => {
+        await lockTurnChangeIn(sql, id);
         const db = drizzleTransaction(sql);
         const [owned] = await db
           .select()
@@ -569,6 +585,7 @@ export function createAgentTurnStore(database: Database) {
 
     async beginDispatch(id: string, ownerToken: string) {
       return database.client.begin(async (sql) => {
+        await lockTurnChangeIn(sql, id);
         const db = drizzleTransaction(sql);
         const owned = await db
           .select()
@@ -701,6 +718,7 @@ export function createAgentTurnStore(database: Database) {
     async renew(id: string, ownerToken: string, milliseconds = 30_000) {
       const duration = leaseDuration(milliseconds);
       return database.client.begin(async (sql) => {
+        await lockTurnChangeIn(sql, id);
         const db = drizzleTransaction(sql);
         const [owned] = await db
           .select()
@@ -758,6 +776,7 @@ export function createAgentTurnStore(database: Database) {
     async failUnboundStartup(id: string, ownerToken: string, summary: string) {
       if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
       return database.client.begin(async (sql) => {
+        await lockTurnChangeIn(sql, id);
         const [owned] = await drizzleTransaction(sql)
           .select()
           .from(agentTurn)
@@ -805,6 +824,7 @@ export function createAgentTurnStore(database: Database) {
       persistOutcome: (sql: DatabaseTransaction) => Promise<void>,
     ) {
       return database.client.begin(async (sql) => {
+        await lockTurnChangeIn(sql, id);
         const db = drizzleTransaction(sql);
         const admitted = await db
           .select()
@@ -863,6 +883,7 @@ export function createAgentTurnStore(database: Database) {
         throw new Error("Only a completed Agent turn may publish product effects");
       }
       return database.client.begin(async (transaction) => {
+        if (persistOutcome) await lockTurnChangeIn(transaction, id);
         const db = drizzleTransaction(transaction);
         const owned = await db
           .select()

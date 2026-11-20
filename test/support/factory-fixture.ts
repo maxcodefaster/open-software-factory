@@ -82,6 +82,13 @@ export async function deleteFactoryProject(
         throw Error(
           "UI fixture deletion requires its explicitly owned disposable database; retained data was not changed",
         );
+      // Browser autosave can still own a Ticket when teardown begins. Keep the
+      // same Change/Ticket-before-Project order as editing and admission instead
+      // of locking the parent and later deadlocking on a child/FK check.
+      await transaction`SELECT id FROM factory.change WHERE project_id=${projectID}
+        ORDER BY id FOR UPDATE`;
+      await transaction`SELECT id FROM factory.ticket WHERE project_id=${projectID}
+        ORDER BY id FOR UPDATE`;
       await transaction`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE`;
       await transaction`SELECT binding.runtime_attempt_id FROM factory.substrate_binding binding
         JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id
@@ -222,8 +229,7 @@ export async function deleteFactoryProject(
       await transaction`DELETE FROM factory.epic WHERE project_id = ${projectID}`;
       await transaction`DELETE FROM factory.personal_model_settings WHERE project_id = ${projectID}`;
       await transaction`DELETE FROM factory.project_model_settings WHERE project_id = ${projectID}`;
-      await transaction`DELETE FROM factory.personal_skill_settings WHERE project_id = ${projectID}`;
-      await transaction`DELETE FROM factory.project_skill_settings WHERE project_id = ${projectID}`;
+      await transaction`DELETE FROM factory.skill_library_choice WHERE context_id = ${projectID}`;
       await transaction`DELETE FROM factory.project_membership WHERE project_id = ${projectID}`;
       await transaction`DELETE FROM factory.project WHERE id = ${projectID}`;
     });

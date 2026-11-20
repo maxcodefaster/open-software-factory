@@ -181,12 +181,6 @@ const serviceFunctions = {
     acceptSkillSharing: "accept",
     getSkillRevision: "revision",
     checkSkillSourceUpdate: "sourceUpdate",
-    getInheritedSkills: "inherited",
-    saveProjectSkills: "saveProject",
-    savePersonalSkills: "savePersonal",
-    getSystemSkills: "system",
-    publishSkill: "publish",
-    saveSystemSkills: "saveSystem",
     setSkillPublication: "setPublication",
   },
   setup: {

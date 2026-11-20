@@ -61,6 +61,9 @@ Learning reviews completed work and compact native tool evidence, including repe
 Its proposals need approval before adoption; repeated calls alone do not prove wasted work.
 Personal Skills stay private in personal Project conversations. Exact Skill versions admitted to
 shared Ticket work are inspectable by that Project's members; this does not share the private library.
+Skills use one per-library choice model for settings, configuration checks and admission.
+System and Project managers can require exact versions; lower scopes cannot override those choices.
+Changing publication or defaults does not rewrite guidance already admitted to a turn.
 
 ## Use a local agent with Factory compute
 
@@ -221,8 +224,8 @@ Schema-backed Drizzle queries cover Project setup, Models, Ticket authoring, Cod
 Delivery, Source and IDE access, Workspace sharing/commands/files, Monitoring, Knowledge, Learning,
 Releases and attachment/media storage. `drizzleTransaction` binds queries to the existing
 Postgres.js transaction, including nested savepoints, or an explicitly reserved connection.
-It does not open a second connection. Remaining direct queries include native locks,
-compound authority predicates and unfinished feature conversions. Zero reuses its
+It does not open a second connection. Remaining direct queries own native locks,
+compound authority predicates, aggregates, search and native PostgreSQL expressions. Zero reuses its
 database provider per connection pool, not a user's authorization context.
 Its eight planning tables are generated from an explicit Drizzle column allowlist with
 `bun run zero:generate`; `bun run zero:check` rejects drift. Authorization joins remain explicit.

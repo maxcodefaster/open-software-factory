@@ -1180,8 +1180,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(async ({ context }) => {
-  // Stop this fixture's UI polling before deleting its Project and Change rows.
-  await context.close();
+  // Stop UI polling before deleting rows. Playwright owns this Context and
+  // finishes its trace after afterEach; leave Context disposal to that fixture.
+  await Promise.all(context.pages().map((page) => page.close()));
   for (const id of additionalProjectIDs) await deleteFactoryProject(id);
   additionalProjectIDs = [];
   if (projectID) await deleteFactoryProject(projectID);
@@ -2572,7 +2573,7 @@ test("aligns workspace and Agent Minimize geometry and preserves the Agent contr
   await page.mouse.move(0, 0);
   expect(await toggle.evaluate((element) => element.matches(":hover"))).toBe(false);
   expect(await toggle.locator("svg").innerHTML()).not.toBe(closedIcon);
-  expect(await controlStyle()).toEqual(closedStyle);
+  await expect.poll(controlStyle).toEqual(closedStyle);
   for (const width of [1440, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     const geometry = async (container: string) =>

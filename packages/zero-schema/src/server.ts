@@ -95,10 +95,11 @@ export const zeroServerMutators = defineMutators({
       if (target.trashedAt) throw new Error("Restore the prerequisite Ticket before linking");
       if (target.convertedToEpicId)
         throw new Error("Link an Epic member instead of the original intent");
-      const admitted = await db.execute(
-        sql`SELECT id FROM factory.change WHERE ticket_id = ${args.ticketId}::uuid`,
-      );
-      if (admitted.length)
+      const admitted = await db.query.change.findFirst({
+        columns: { id: true },
+        where: (row, { eq }) => eq(row.ticketId, args.ticketId),
+      });
+      if (admitted)
         throw new Error(
           "Implementation has already been admitted. Create a new Ticket for new prerequisites.",
         );

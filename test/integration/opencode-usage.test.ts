@@ -1,3 +1,4 @@
+import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   createOpenCodeClient,
@@ -547,11 +548,9 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
     // This owned usage fixture has no native package installer. Initialize its
     // own empty guidance just like the default Change fixture; package loading
     // is proved separately by the native Skill cases.
-    const empty = JSON.stringify({ required: [], optional: [], selected: [] });
-    await database.client`INSERT INTO factory.system_skill_settings(singleton,version,planning,build,updated_by)
-      VALUES(true,1,${empty}::jsonb,${empty}::jsonb,${owned.userID})
-      ON CONFLICT(singleton) DO UPDATE SET version=factory.system_skill_settings.version+1,
-        planning=EXCLUDED.planning,build=EXCLUDED.build,updated_by=EXCLUDED.updated_by`;
+    await database.client.begin((sql) =>
+      disableStarterSkillsIn(sql, owned.userID, owned.projectID, database),
+    );
     owned.hub.request = (_attempt, _channel, request, path) =>
       native.transport(request, path ?? new URL(request.url).pathname);
     await native.control("/usage", "POST");

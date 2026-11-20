@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
@@ -20,15 +21,13 @@ test.each([
       const runtime = f.controller();
       await runtime.startPersisted(f.changeID, f.userID);
       const sessionID = `ses_owned_usage_${f.changeID.replaceAll("-", "")}`;
-      const empty = JSON.stringify({ required: [], optional: [], selected: [] });
       await database.client.begin(async (sql) => {
         await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
         await sql`UPDATE factory.change SET state='active' WHERE id=${f.changeID}`;
         await sql`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,epoch=epoch+1 WHERE change_id=${f.changeID}`;
         await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)
           VALUES(${f.changeID},${f.attemptID},${sessionID},'committed',now(),${f.userID})`;
-        await sql`INSERT INTO factory.system_skill_settings(singleton,version,planning,build,updated_by)
-          VALUES(true,1,${empty}::jsonb,${empty}::jsonb,${f.userID})`;
+        await disableStarterSkillsIn(sql, f.userID, f.projectID, database);
       });
       const admitted = await createChangeAdmission(database, "factory-coding-model").admit(
         f.changeID,

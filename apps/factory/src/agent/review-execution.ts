@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { and, asc, desc, eq, lte, sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import type { reviewExecutionArgumentsInput } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { changeCommitOperation, runtimeAttempt } from "../../../../packages/db/src/schema";
 import {
   environmentManifest,
   environmentMetadata,
@@ -198,23 +200,46 @@ export function createReviewExecutionReader(
   secrets?: EnvironmentSecrets,
 ) {
   return async (scope: Scope, input: ExecutionRead) => {
-    const [candidate] = await database.client<
-      { completedAt: string; workspaceID: string | null }[]
-    >`
-      SELECT operation.completed_at::text AS "completedAt",attempt.workspace_id AS "workspaceID"
-      FROM factory.change_commit_operation operation
-      JOIN factory.runtime_attempt attempt ON attempt.id=${scope.attemptID}
-      WHERE operation.change_id=${scope.changeID} AND operation.commit_sha=${scope.commitSHA}
-        AND operation.state='succeeded' ORDER BY operation.sequence DESC LIMIT 1`;
+    const [candidate] = await database.db
+      .select({
+        completedAt: query<string>`${changeCommitOperation.completedAt}::text`,
+        workspaceID: runtimeAttempt.workspaceId,
+      })
+      .from(changeCommitOperation)
+      .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, scope.attemptID))
+      .where(
+        and(
+          eq(changeCommitOperation.changeId, scope.changeID),
+          eq(changeCommitOperation.commitSha, scope.commitSHA),
+          eq(changeCommitOperation.state, "succeeded"),
+        ),
+      )
+      .orderBy(desc(changeCommitOperation.sequence))
+      .limit(1);
     if (!candidate) throw new Error("Exact candidate execution receipts are unavailable");
     if (input.section === "receipts") {
-      const commits = await database.client`
-        SELECT id,sequence,state,commit_sha AS commit,expected_parent_sha AS "expectedParent",
-          observed_remote_sha AS "observedRemote",runtime_attempt_id AS "runtimeID",
-          source,completed_at AS "completedAt"
-        FROM factory.change_commit_operation WHERE change_id=${scope.changeID}
-          AND created_at<=${candidate.completedAt}::timestamptz ORDER BY sequence
-        LIMIT 33 OFFSET ${input.offset}`;
+      const commits = await database.db
+        .select({
+          id: changeCommitOperation.id,
+          sequence: changeCommitOperation.sequence,
+          state: changeCommitOperation.state,
+          commit: changeCommitOperation.commitSha,
+          expectedParent: changeCommitOperation.expectedParentSha,
+          observedRemote: changeCommitOperation.observedRemoteSha,
+          runtimeID: changeCommitOperation.runtimeAttemptId,
+          source: changeCommitOperation.source,
+          completedAt: query<string | null>`${changeCommitOperation.completedAt}::text`,
+        })
+        .from(changeCommitOperation)
+        .where(
+          and(
+            eq(changeCommitOperation.changeId, scope.changeID),
+            lte(changeCommitOperation.createdAt, query`${candidate.completedAt}::timestamptz`),
+          ),
+        )
+        .orderBy(asc(changeCommitOperation.sequence))
+        .limit(33)
+        .offset(input.offset);
       return {
         candidate: scope.commitSHA,
         commits: commits.slice(0, 32),

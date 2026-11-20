@@ -1,3 +1,5 @@
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { project, runtimeAttempt } from "../../../../../packages/db/src/schema";
 import { factoryRequestURL } from "../../request-origin";
 import {
   runtimeSourcePath,
@@ -99,21 +101,22 @@ export function createInternalProtocol(services: InternalServices) {
         const capability = runtimeSource[2];
         if (!attemptID || !capability || !validRuntimeSourceCapability(attemptID, capability))
           return new Response("Not found", { status: 404 });
-        const rows = await database.client<
-          Array<{
-            repositoryUrl: string;
-            verificationID: string | null;
-            isolatedKind: string | null;
-          }>
-        >`
-        SELECT project.repository_url AS "repositoryUrl",attempt.verification_id AS "verificationID",attempt.isolated_kind AS "isolatedKind"
-        FROM factory.runtime_attempt attempt
-        JOIN factory.project project ON project.id = attempt.project_id
-        WHERE attempt.id = ${attemptID}
-          AND attempt.state IN ('create-intended', 'starting')
-          AND attempt.stop_intended_at IS NULL
-      `;
-        const repository = rows[0];
+        const [repository] = await database.db
+          .select({
+            repositoryUrl: project.repositoryUrl,
+            verificationID: runtimeAttempt.verificationId,
+            isolatedKind: runtimeAttempt.isolatedKind,
+          })
+          .from(runtimeAttempt)
+          .innerJoin(project, eq(project.id, runtimeAttempt.projectId))
+          .where(
+            and(
+              eq(runtimeAttempt.id, attemptID),
+              inArray(runtimeAttempt.state, ["create-intended", "starting"]),
+              isNull(runtimeAttempt.stopIntendedAt),
+            ),
+          )
+          .limit(1);
         if (!repository) return new Response("Not found", { status: 404 });
         const granted = await database.client
           .begin(async (sql) => {

@@ -11,6 +11,7 @@ test("Factory native OIDC issuer registers one intended client and signs develop
   const previousBase = process.env["FACTORY_BASE_URL"];
   process.env["FACTORY_BASE_URL"] = fixture.base;
   const identity = createFactoryAuth(database);
+  const nativeCreateClient = identity.auth.api.adminCreateOAuthClient;
   let server: ReturnType<typeof Bun.serve> | undefined;
   const cookies = (response: Response) =>
     response.headers
@@ -39,16 +40,51 @@ test("Factory native OIDC issuer registers one intended client and signs develop
     );
     const callback = "https://forge.example.test/user/oauth2/Factory/callback";
     const headers = new Headers({ cookie: administrator });
+    Object.assign(identity.auth.api, {
+      adminCreateOAuthClient: async () => {
+        throw new Error("Owned client creation was not acknowledged");
+      },
+    });
+    await expect(identity.ensureForgeClient(headers, callback)).rejects.toThrow(
+      "Owned client creation was not acknowledged",
+    );
+    expect(
+      (await database.client`SELECT state,observed_at FROM factory.forge_identity_intent`).map(
+        (row) => ({ state: row["state"], observed_at: row["observed_at"] }),
+      ),
+    ).toEqual([expect.objectContaining({ state: "create-intended", observed_at: null })]);
+    expect(await database.client`SELECT id FROM auth."oauthClient"`).toHaveLength(0);
+    Object.assign(identity.auth.api, {
+      adminCreateOAuthClient: async (input: Parameters<typeof nativeCreateClient>[0]) => {
+        await nativeCreateClient(input);
+        throw new Error("Owned client creation reply was lost");
+      },
+    });
     expect(await identity.ensureForgeClient(headers, callback)).toBe(forgeClientID);
+    Object.assign(identity.auth.api, { adminCreateOAuthClient: nativeCreateClient });
     // Recover a lost outcome from the exact native client, including after auth restart.
-    await database.client`UPDATE factory.forge_identity_intent SET state='create-intended'`;
+    await database.client`UPDATE factory.forge_identity_intent SET state='create-intended',
+      observed_at='2026-11-20 00:00:00.123456+00'::timestamptz`;
+    const [intended] = await database.client`
+      SELECT client_id,redirect_uri,intended_by,created_at::text,observed_at::text
+      FROM factory.forge_identity_intent`;
     expect(await createFactoryAuth(database).ensureForgeClient(headers, callback)).toBe(
       forgeClientID,
     );
     expect(
       await database.client`SELECT client_id FROM factory.forge_identity_intent WHERE state='ready'`,
     ).toHaveLength(1);
+    expect(
+      (
+        await database.client`SELECT client_id,redirect_uri,intended_by,created_at::text,observed_at::text
+          FROM factory.forge_identity_intent`
+      )[0],
+    ).toEqual(intended);
     expect(await database.client`SELECT id FROM auth."oauthClient"`).toHaveLength(1);
+    // Keep the existing registered-client NULL semantics; public MCP client reads reject NULL.
+    await database.client`UPDATE auth."oauthClient" SET disabled=NULL WHERE "clientId"=${forgeClientID}`;
+    expect(await identity.ensureForgeClient(headers, callback)).toBe(forgeClientID);
+    await database.client`UPDATE auth."oauthClient" SET disabled=false WHERE "clientId"=${forgeClientID}`;
     const [client] = await database.client<
       { secret: string }[]
     >`SELECT "clientSecret" AS secret FROM auth."oauthClient"`;
@@ -223,6 +259,7 @@ test("Factory native OIDC issuer registers one intended client and signs develop
     // Native code-replay protection also revokes tokens issued by that authorization.
     expect((await exchange(code ?? "", verifier)).status).not.toBe(200);
   } finally {
+    Object.assign(identity.auth.api, { adminCreateOAuthClient: nativeCreateClient });
     await server?.stop(true);
     if (previousBase === undefined) delete process.env["FACTORY_BASE_URL"];
     else process.env["FACTORY_BASE_URL"] = previousBase;

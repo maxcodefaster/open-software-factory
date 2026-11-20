@@ -191,6 +191,97 @@ function actions(input: Record<string, unknown> = {}) {
   return parsed.arguments;
 }
 
+test("execution receipts use the last successful exact candidate and preserve microsecond cutoffs and pages", async () => {
+  const f = await candidateReviewFixture();
+  let nativeReads = 0;
+  const read = createReviewExecutionReader(f.database, {
+    async request() {
+      nativeReads++;
+      throw new Error("Receipt reads must not contact native history");
+    },
+  });
+  const scope = {
+    id: f.reviewID,
+    changeID: f.changeID,
+    commitSHA: f.commit,
+    attemptID: f.attemptID,
+  };
+  try {
+    await f.database.client`INSERT INTO factory.change_commit_operation(
+      id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
+      observed_remote_sha,commit_message,idempotency_key,state,source,repository_path,
+      repository_blob_sha,repository_content,content_digest,created_by,created_at,completed_at)
+      SELECT gen_random_uuid(),change.id,CASE WHEN sequence=3 THEN NULL ELSE ${f.attemptID}::uuid END,
+        sequence,change.branch_name,change.base_sha,
+        CASE WHEN sequence IN (2,38) THEN NULL WHEN sequence IN (34,35,36) THEN ${f.commit}
+          ELSE ${"c".repeat(40)} END,
+        CASE WHEN sequence IN (2,38) THEN NULL WHEN sequence IN (34,35,36) THEN ${f.commit}
+          ELSE ${"c".repeat(40)} END,
+        'Private receipt message',change.id::text || ':receipt:' || sequence::text,
+        CASE WHEN sequence=38 THEN 'commit-intended' WHEN sequence IN (2,36) THEN 'failed'
+          ELSE 'succeeded' END::factory.change_commit_state,
+        CASE WHEN sequence=3 THEN 'repository-document' WHEN sequence=4 THEN 'integration'
+          WHEN sequence=5 THEN 'workspace' ELSE 'agent' END::factory.change_commit_source,
+        CASE WHEN sequence=3 THEN 'README.md' END,
+        CASE WHEN sequence=3 THEN ${"b".repeat(40)} END,
+        CASE WHEN sequence=3 THEN 'Private repository content' END,
+        CASE WHEN sequence=3 THEN ${"e".repeat(64)} END,change.created_by,
+        CASE WHEN sequence IN (36,37) THEN '2050-01-01 00:00:00.000003+00'
+          WHEN sequence=35 THEN '2050-01-01 00:00:00.000002+00'
+          ELSE '2050-01-01 00:00:00.000001+00' END::timestamptz,
+        CASE WHEN sequence=38 THEN NULL WHEN sequence=34 THEN '2050-01-01 00:00:00.000004+00'
+          WHEN sequence=36 THEN '2050-01-01 00:00:00.000006+00'
+          WHEN sequence=35 THEN '2050-01-01 00:00:00.000002+00'
+          ELSE '2050-01-01 00:00:00.000001+00' END::timestamptz
+      FROM factory.change change CROSS JOIN generate_series(2,38) AS sequence
+      WHERE change.id=${f.changeID}`;
+    const first = await read(scope, actions({ section: "receipts" }));
+    if (!("commits" in first)) throw new Error("Missing candidate receipts");
+    expect(first.nextOffset).toBe(32);
+    expect(first.commits.map((commit) => commit.sequence)).toEqual(
+      Array.from({ length: 32 }, (_, index) => index + 1),
+    );
+    expect(first.commits[1]).toEqual({
+      id: expect.any(String),
+      sequence: 2,
+      state: "failed",
+      commit: null,
+      expectedParent: "a".repeat(40),
+      observedRemote: null,
+      runtimeID: f.attemptID,
+      source: "agent",
+      completedAt: "2050-01-01 00:00:00.000001+00",
+    });
+    expect(first.commits[2]).toMatchObject({ source: "repository-document", runtimeID: null });
+    expect(first.commits[3]).toMatchObject({ source: "integration" });
+    expect(first.commits[4]).toMatchObject({ source: "workspace" });
+    expect(JSON.stringify(first)).not.toContain("Private");
+    const second = await read(scope, actions({ section: "receipts", offset: 32 }));
+    if (!("commits" in second)) throw new Error("Missing receipt continuation");
+    expect(second.commits.map((commit) => commit.sequence)).toEqual([33, 34, 35, 38]);
+    expect(second.nextOffset).toBeNull();
+    expect(second.commits[1]?.completedAt).toBe("2050-01-01 00:00:00.000004+00");
+    expect(second.commits[2]?.completedAt).toBe("2050-01-01 00:00:00.000002+00");
+    expect(second.commits[3]?.completedAt).toBeNull();
+    expect(await read(scope, actions({ section: "receipts", offset: 36 }))).toMatchObject({
+      commits: [],
+      nextOffset: null,
+    });
+    for (const missing of [
+      { commitSHA: "f".repeat(40) },
+      { changeID: crypto.randomUUID() },
+      { attemptID: crypto.randomUUID() },
+    ])
+      await expect(
+        read({ ...scope, ...missing }, actions({ section: "receipts" })),
+      ).rejects.toThrow("Exact candidate execution receipts are unavailable");
+    expect(nativeReads).toBe(0);
+    expect(f.requests()).toBe(0);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
 test("execution history uses only recorded implementation ancestry, bounded pages and redacted inputs", async () => {
   const stored = new Map<string, StoredEnvironment>();
   let incorrectFingerprint = false;

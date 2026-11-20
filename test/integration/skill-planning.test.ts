@@ -8,8 +8,15 @@ import { appendConversationEntry } from "../../apps/factory/src/conversations/st
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
-import { fixture as buildFixture, buildModelID } from "../fixtures/change-agent-turns";
+import {
+  type SkillContent,
+  skillRevisionInput,
+} from "../../packages/conversation-domain/src/skills";
+import {
+  fixture as buildFixture,
+  buildModelID,
+  disableStarterSkillsIn,
+} from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import {
   decodeFactoryResponse as decodeResponse,
@@ -25,6 +32,49 @@ const providerRequest = z
     messages: z.array(z.object({ role: z.string(), content: z.unknown() }).passthrough()),
   })
   .passthrough();
+
+const testLibraries = new WeakMap<object, Map<string, string>>();
+async function saveSystemSkill(
+  skills: ReturnType<typeof createSkillController>,
+  input: {
+    revisionId: string;
+    expectedRevision: number;
+    content: SkillContent;
+  },
+  actor: string,
+) {
+  const libraries = testLibraries.get(skills) ?? new Map<string, string>();
+  testLibraries.set(skills, libraries);
+  const libraryId = libraries.get(input.content.key) ?? crypto.randomUUID();
+  libraries.set(input.content.key, libraryId);
+  await skills.library.save({ ...input, libraryId, scope: "system" }, actor);
+  return skills.library.inspect(input.revisionId, actor);
+}
+async function requireSkill(
+  skills: ReturnType<typeof createSkillController>,
+  revisionId: string,
+  role: "planning" | "build",
+) {
+  const view = await skills.getLibrary(administrator);
+  const entry = view.entries.find((row) =>
+    row.revisions.some((revision) => revision.id === revisionId),
+  );
+  if (!entry) throw new Error("Owned Skill missing");
+  const current = view.choices.find(
+    (row) => row.libraryId === entry.id && row.scope === "system" && row.role === role,
+  );
+  await skills.chooseLibrary(
+    {
+      libraryId: entry.id,
+      revisionId,
+      scope: "system",
+      role,
+      state: "required",
+      expectedVersion: current?.version ?? 0,
+    },
+    administrator,
+  );
+}
 
 async function fixture(live = false) {
   const initial = {
@@ -180,6 +230,7 @@ async function fixture(live = false) {
     await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${projectID}, ${`skills-${projectID.slice(0, 8)}`}, 'Owned Skill Project', 'https://example.invalid/skill.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by) VALUES (${projectID}, ${userID}, 'developer', ${administrator})`;
+    await database.client.begin((sql) => disableStarterSkillsIn(sql, userID, projectID, database));
     const cookie = await processFixture.signIn();
     await database.client`INSERT INTO auth.account(id, account_id, provider_id, user_id, password)
       SELECT ${crypto.randomUUID()}, ${userID}, 'credential', ${userID}, password FROM auth.account WHERE user_id = ${administrator} AND provider_id = 'credential'`;
@@ -245,59 +296,51 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
   try {
     const id = crypto.randomUUID();
     const publication = {
+      libraryId: crypto.randomUUID(),
+      scope: "system",
       revisionId: id,
       expectedRevision: 0,
       content: requirementsInterviewSkill,
     };
     expect(
-      await owned.command("publishSkill", [
+      await owned.command("saveSkill", [
         {
           ...publication,
           content: { ...requirementsInterviewSkill, scripts: ["run.sh"] },
         },
       ]),
     ).toMatchObject({ ok: false, status: 400 });
-    expect(await owned.command("publishSkill", [publication])).toMatchObject({ ok: true });
-    expect(await owned.command("publishSkill", [publication])).toMatchObject({ ok: true });
+    expect(await owned.command("saveSkill", [publication])).toMatchObject({ ok: true });
+    expect(await owned.command("saveSkill", [publication])).toMatchObject({ ok: true });
     expect(
-      await owned.command("publishSkill", [
+      await owned.command("saveSkill", [
         {
           ...publication,
           content: { ...requirementsInterviewSkill, name: "Different input" },
         },
       ]),
     ).toMatchObject({ ok: false, status: 409 });
-    const { settings } = await owned.skills.getSystem(administrator);
     await expect(
-      owned.skills.publish(
-        {
-          ...publication,
-          revisionId: crypto.randomUUID(),
-          content: { ...requirementsInterviewSkill, key: "unauthorized" },
-        },
+      owned.skills.library.save(
+        { ...publication, libraryId: crypto.randomUUID(), revisionId: crypto.randomUUID() },
         owned.userID,
       ),
     ).rejects.toMatchObject({ code: "forbidden" });
+    const choice = {
+      libraryId: publication.libraryId,
+      revisionId: id,
+      scope: "system",
+      role: "planning",
+      state: "required",
+      expectedVersion: 0,
+    };
     await expect(
-      owned.skills.setSystem(
-        { ...settings, build: { required: [id], optional: [], selected: [] } },
-        administrator,
-      ),
+      owned.skills.chooseLibrary({ ...choice, role: "build" }, administrator),
     ).rejects.toMatchObject({ code: "conflict" });
-    await expect(
-      owned.skills.setSystem(
-        { ...settings, planning: { required: [id], optional: [], selected: [] } },
-        owned.userID,
-      ),
-    ).rejects.toMatchObject({ code: "forbidden" });
-    expect(
-      await owned.command("saveSystemSkills", [
-        {
-          ...settings,
-          planning: { required: [id], optional: [], selected: [] },
-        },
-      ]),
-    ).toMatchObject({ ok: true });
+    await expect(owned.skills.chooseLibrary(choice, owned.userID)).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    expect(await owned.command("saveSkillChoice", [choice])).toMatchObject({ ok: true });
     const commandID = crypto.randomUUID();
     await owned.agent.setMode(owned.projectID, undefined, "plan", owned.userID);
     await owned.agent.message(
@@ -382,15 +425,12 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
   const owned = await fixture();
   try {
     const id = crypto.randomUUID();
-    await owned.skills.publish(
+    await saveSystemSkill(
+      owned.skills,
       { revisionId: id, expectedRevision: 0, content: requirementsInterviewSkill },
       administrator,
     );
-    const { settings } = await owned.skills.getSystem(administrator);
-    await owned.skills.setSystem(
-      { ...settings, planning: { required: [id], optional: [], selected: [] } },
-      administrator,
-    );
+    await requireSkill(owned.skills, id, "planning");
     const conversation = await owned.agent.setMode(
       owned.projectID,
       undefined,
@@ -435,7 +475,8 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
       ),
     );
     const replacementID = crypto.randomUUID();
-    await owned.skills.publish(
+    await saveSystemSkill(
+      owned.skills,
       {
         revisionId: replacementID,
         expectedRevision: 1,
@@ -467,9 +508,7 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
     ).rejects.toMatchObject({ code: "unavailable" });
     expect(await turns.getByCommand(failedCommand)).toBeNull();
     const unchanged = skillRevisionInput.parse(
-      (await owned.skills.getSystem(administrator)).revisions.find(
-        (revision) => revision.id === id,
-      ),
+      await owned.skills.library.inspect(id, administrator),
     );
     expect(unchanged.content.instructions).toBe(requirementsInterviewSkill.instructions);
     expect(unchanged.published).toBe(false);
@@ -493,158 +532,79 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
   }
 }, 30_000);
 
-test("scoped Skill commands enforce required baselines, permitted optional choices, Reset, membership and CAS", async () => {
+test("canonical Skill commands enforce required baselines, per-library Reset, membership and CAS", async () => {
   const owned = await fixture();
   try {
-    const baseline = crypto.randomUUID();
-    const optional = crypto.randomUUID();
-    const spare = crypto.randomUUID();
-    for (const [index, revisionId] of [baseline, optional, spare].entries()) {
-      await owned.skills.publish(
-        {
-          revisionId,
-          expectedRevision: 0,
-          content: { ...requirementsInterviewSkill, key: `owned-skill-${index}` },
-        },
-        administrator,
-      );
-    }
-    const { settings } = await owned.skills.getSystem(administrator);
-    await owned.skills.setSystem(
-      {
-        ...settings,
-        planning: { required: [baseline], optional: [optional, spare], selected: [optional] },
-      },
-      administrator,
-    );
-    const view = await owned.skills.getInherited(owned.projectID, owned.userID);
-    expect(view.effective.planning.required).toEqual([{ revisionId: baseline, source: "system" }]);
-    expect(await owned.command("getSystemSkills", [], "developer")).toMatchObject({
+    const publication = {
+      libraryId: crypto.randomUUID(),
+      revisionId: crypto.randomUUID(),
+      scope: "system",
+      expectedRevision: 0,
+      content: requirementsInterviewSkill,
+    };
+    expect(await owned.command("saveSkill", [publication])).toMatchObject({ ok: true });
+    const choice = {
+      libraryId: publication.libraryId,
+      revisionId: publication.revisionId,
+      role: "planning",
+      scope: "system",
+      state: "required",
+      expectedVersion: 0,
+    };
+    expect(await owned.command("saveSkillChoice", [choice])).toMatchObject({ ok: true });
+    const personal = { ...choice, scope: "personal", projectId: owned.projectID, state: "disable" };
+    expect(await owned.command("saveSkillChoice", [personal], "developer")).toMatchObject({
       ok: false,
-      status: 403,
+      status: 409,
     });
     expect(
-      await owned.command("saveProjectSkills", [owned.projectID, view.project], "developer"),
-    ).toMatchObject({ ok: false, status: 403 });
-    expect(
-      await owned.command(
-        "savePersonalSkills",
-        [owned.projectID, { ...view.personal, required: [] }],
-        "developer",
-      ),
+      await owned.command("saveSkillChoice", [{ ...personal, state: "invalid" }], "developer"),
     ).toMatchObject({ ok: false, status: 400 });
-    expect(
-      await owned.command(
-        "savePersonalSkills",
-        [owned.projectID, { ...view.personal, planning: [baseline] }],
-        "developer",
-      ),
-    ).toMatchObject({ ok: false, status: 409 });
-    const personal = { ...view.personal, planning: [spare] };
-    const concurrent = await Promise.all([
-      owned.command("savePersonalSkills", [owned.projectID, personal], "developer"),
-      owned.command("savePersonalSkills", [owned.projectID, personal], "developer"),
-    ]);
-    expect(concurrent.map((response) => (response.ok ? 200 : response.status)).sort()).toEqual([
-      200, 409,
-    ]);
-    expect(
-      (await owned.skills.getInherited(owned.projectID, owned.userID)).effective.planning.selected,
-    ).toEqual([spare]);
-    expect(
-      (await owned.skills.getInherited(owned.projectID, administrator)).effective.planning.selected,
-    ).toEqual([optional]);
-    await owned.database
-      .client`UPDATE factory.project_membership SET manage_project = true WHERE project_id = ${owned.projectID} AND user_id = ${owned.userID}`;
-    const narrowed = {
-      ...view.project,
-      planning: { required: [], optional: [optional], selected: null },
+    const optional = {
+      ...publication,
+      libraryId: crypto.randomUUID(),
+      revisionId: crypto.randomUUID(),
+      content: { ...requirementsInterviewSkill, key: "owned-optional" },
     };
-    expect(
-      await owned.command("saveProjectSkills", [owned.projectID, narrowed], "developer"),
-    ).toMatchObject({ ok: true });
-    expect(
-      await owned.command("saveProjectSkills", [owned.projectID, narrowed], "developer"),
-    ).toMatchObject({ ok: false, status: 409 });
-    const afterRestriction = await owned.skills.getInherited(owned.projectID, owned.userID);
-    expect(afterRestriction.effective.planning.selected).toEqual([]);
-    expect(afterRestriction.effective.planning.ignoredReason).not.toBeNull();
-    expect(
-      await owned.command(
-        "savePersonalSkills",
-        [owned.projectID, { ...afterRestriction.personal, planning: null }],
-        "developer",
-      ),
-    ).toMatchObject({ ok: true });
-    expect(
-      (await owned.skills.getInherited(owned.projectID, owned.userID)).effective.planning.selected,
-    ).toEqual([optional]);
-    const latest = await owned.skills.getInherited(owned.projectID, owned.userID);
-    expect(
-      await owned.command(
-        "saveProjectSkills",
-        [
-          owned.projectID,
-          { ...latest.project, planning: { required: [baseline], optional: null, selected: null } },
-        ],
-        "developer",
-      ),
-    ).toMatchObject({ ok: false, status: 409 });
-    expect(
-      await owned.command(
-        "saveProjectSkills",
-        [
-          owned.projectID,
-          {
-            ...latest.project,
-            planning: { required: [optional], optional: [spare], selected: [spare] },
-          },
-        ],
-        "developer",
-      ),
-    ).toMatchObject({ ok: true });
-    const promoted = await owned.skills.getInherited(owned.projectID, owned.userID);
-    expect(promoted.effective.planning.required).toEqual([
-      { revisionId: baseline, source: "system" },
-      { revisionId: optional, source: "project" },
+    expect(await owned.command("saveSkill", [optional])).toMatchObject({ ok: true });
+    const own = {
+      ...personal,
+      libraryId: optional.libraryId,
+      revisionId: optional.revisionId,
+      state: "enable",
+    };
+    const race = await Promise.all([
+      owned.command("saveSkillChoice", [own], "developer"),
+      owned.command("saveSkillChoice", [own], "developer"),
     ]);
+    expect(race.map((result) => (result.ok ? 200 : result.status)).sort()).toEqual([200, 409]);
     expect(
       await owned.command(
-        "savePersonalSkills",
-        [owned.projectID, { ...promoted.personal, planning: [] }],
+        "saveSkillChoice",
+        [{ ...own, state: "inherit", expectedVersion: 1 }],
         "developer",
       ),
     ).toMatchObject({ ok: true });
-    expect(
-      (await owned.skills.getInherited(owned.projectID, owned.userID)).effective.planning.required,
-    ).toHaveLength(2);
-    await owned.skills.setPublication(spare, false, administrator);
-    const withdrawn = await owned.skills.getInherited(owned.projectID, owned.userID);
-    expect(
-      await owned.command(
-        "savePersonalSkills",
-        [owned.projectID, { ...withdrawn.personal, planning: [spare] }],
-        "developer",
-      ),
-    ).toMatchObject({ ok: false, status: 409 });
+    const ids = await owned.database.client.begin((sql) =>
+      owned.skills.resolve("planning", sql, { projectID: owned.projectID, userID: owned.userID }),
+    );
+    expect(ids).toEqual([publication.revisionId]);
     const otherProject = crypto.randomUUID();
-    await owned.database
-      .client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${otherProject}, ${`other-${otherProject.slice(0, 8)}`}, 'Other Project', 'https://example.invalid/other.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
-    expect(await owned.command("getInheritedSkills", [otherProject], "developer")).toMatchObject({
+    expect(await owned.command("getSkillLibrary", [otherProject], "developer")).toMatchObject({
       ok: false,
       status: 404,
     });
     expect(
-      await owned.command("saveProjectSkills", [otherProject, view.project], "developer"),
+      await owned.command("saveSkillChoice", [{ ...own, projectId: otherProject }], "developer"),
     ).toMatchObject({ ok: false, status: 404 });
     await owned.database
-      .client`DELETE FROM factory.project_membership WHERE project_id = ${owned.projectID} AND user_id = ${owned.userID}`;
-    expect(await owned.command("getInheritedSkills", [owned.projectID], "developer")).toMatchObject(
-      { ok: false, status: 404 },
-    );
+      .client`DELETE FROM factory.project_membership WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    expect(await owned.command("getSkillLibrary", [owned.projectID], "developer")).toMatchObject({
+      ok: false,
+      status: 404,
+    });
     expect(
-      await owned.command("savePersonalSkills", [owned.projectID, withdrawn.personal], "developer"),
+      await owned.command("saveSkillChoice", [{ ...own, expectedVersion: 2 }], "developer"),
     ).toMatchObject({ ok: false, status: 404 });
   } finally {
     await owned.dispose();
@@ -658,6 +618,10 @@ test("Build installs exact native packages, records actual loading and keeps the
     await processFixture.start();
     owned = await buildFixture(undefined, undefined, processFixture.connect());
     const skills = createSkillController(owned.database);
+    const current = owned;
+    await owned.database.client.begin((sql) =>
+      disableStarterSkillsIn(sql, current.userID, current.projectID, current.database),
+    );
     const revisionID = crypto.randomUUID();
     const content = {
       ...requirementsInterviewSkill,
@@ -672,12 +636,12 @@ test("Build installs exact native packages, records actual loading and keeps the
         },
       ],
     };
-    await skills.publish({ revisionId: revisionID, expectedRevision: 0, content }, administrator);
-    const { settings } = await skills.getSystem(administrator);
-    await skills.setSystem(
-      { ...settings, build: { required: [revisionID], optional: [], selected: [] } },
+    await saveSystemSkill(
+      skills,
+      { revisionId: revisionID, expectedRevision: 0, content },
       administrator,
     );
+    await requireSkill(skills, revisionID, "build");
     const commandID = crypto.randomUUID();
     const controller = owned.controller();
     await controller.prompt(
@@ -715,7 +679,8 @@ test("Build installs exact native packages, records actual loading and keeps the
         value: Buffer.from(firstIntent.skillManifest?.files[0]?.body ?? "", "base64").toString(),
       },
     ]);
-    await skills.publish(
+    await saveSystemSkill(
+      skills,
       {
         revisionId: crypto.randomUUID(),
         expectedRevision: 1,
@@ -784,15 +749,12 @@ test.skipIf(process.env["FACTORY_LIVE_SKILL_PLAN"] !== "1")(
     const owned = await fixture(true);
     try {
       const revisionID = crypto.randomUUID();
-      await owned.skills.publish(
+      await saveSystemSkill(
+        owned.skills,
         { revisionId: revisionID, expectedRevision: 0, content: requirementsInterviewSkill },
         administrator,
       );
-      const { settings } = await owned.skills.getSystem(administrator);
-      await owned.skills.setSystem(
-        { ...settings, planning: { required: [revisionID], optional: [], selected: [] } },
-        administrator,
-      );
+      await requireSkill(owned.skills, revisionID, "planning");
       await owned.agent.setMode(owned.projectID, undefined, "plan", owned.userID);
       const commandID = crypto.randomUUID();
       const response = await owned.agent.message(

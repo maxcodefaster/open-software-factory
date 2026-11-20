@@ -31,12 +31,15 @@ test("chat Skill discovery follows eligible guidance and freezes an existing Cha
     handle: async (request, options) => entry.default.fetch(request, options),
   });
   const revisionID = crypto.randomUUID();
+  const libraryID = crypto.randomUUID();
   const [administrator] = await owned.database.client<{ id: string }[]>`
     SELECT user_id AS id FROM factory.administrator LIMIT 1`;
   if (!administrator) throw new Error("Owned Skill administrator missing");
   try {
-    await skills.publish(
+    await skills.library.save(
       {
+        libraryId: libraryID,
+        scope: "system",
         revisionId: revisionID,
         expectedRevision: 0,
         content: {
@@ -51,17 +54,18 @@ test("chat Skill discovery follows eligible guidance and freezes an existing Cha
       },
       administrator.id,
     );
-    const empty = { required: [], optional: [], selected: [] };
-    const chosen = { required: [], optional: [revisionID], selected: [revisionID] };
-    const initial = await skills.getSystem(administrator.id);
-    await skills.setSystem(
-      {
-        version: initial.settings.version,
-        planning: chosen,
-        build: chosen,
-      },
-      administrator.id,
-    );
+    for (const role of ["planning", "build"])
+      await skills.chooseLibrary(
+        {
+          libraryId: libraryID,
+          revisionId: revisionID,
+          scope: "system",
+          role,
+          state: "enable",
+          expectedVersion: 0,
+        },
+        administrator.id,
+      );
     const planned = await skills.invocations(owned.projectID, owned.userID, "planning");
     expect(planned.skills).toEqual([
       {
@@ -77,15 +81,18 @@ test("chat Skill discovery follows eligible guidance and freezes an existing Cha
       kind: "change-start",
       commandId: crypto.randomUUID(),
     });
-    const current = await skills.getSystem(administrator.id);
-    await skills.setSystem(
-      {
-        version: current.settings.version,
-        planning: empty,
-        build: empty,
-      },
-      administrator.id,
-    );
+    for (const role of ["planning", "build"])
+      await skills.chooseLibrary(
+        {
+          libraryId: libraryID,
+          revisionId: revisionID,
+          scope: "system",
+          role,
+          state: "disable",
+          expectedVersion: 1,
+        },
+        administrator.id,
+      );
     expect((await skills.invocations(owned.projectID, owned.userID, "planning")).skills).toEqual(
       [],
     );

@@ -6,9 +6,9 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import {
-  inheritedSkillSettingsView,
-  systemSkillSettingsView,
-} from "../../packages/conversation-domain/src/skill-inheritance";
+  librarySkillAssignments,
+  skillLibraryView,
+} from "../../packages/conversation-domain/src/skill-library";
 import { eventually } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { releaseBuild, releaseInspection } from "../fixtures/release-build";
@@ -248,42 +248,76 @@ test.skipIf(!installationName)(
       expect(
         await callFactoryFunction(fixture.base, "getModelSettings", [], { cookie: developer }),
       ).toMatchObject({ ok: false, status: 403 });
-      const skills = systemSkillSettingsView.parse(
+      const skills = skillLibraryView.parse(
         await serverCall(
-          callFactoryFunction(fixture.base, "getSystemSkills", [], { cookie: admin }),
+          callFactoryFunction(fixture.base, "getSkillLibrary", [], { cookie: admin }),
         ),
       );
-      const planning = skills.revisions.find(
-        (value) => value.content.key === requirementsInterviewSkill.key && value.published,
+      const entry = skills.entries.find(
+        (value) =>
+          value.scope === "system" &&
+          value.revisions.some(
+            (revision) => revision.content.key === requirementsInterviewSkill.key,
+          ),
       );
-      if (!planning) throw new Error("Installation's published interview Skill is missing");
+      const planning = entry?.revisions.find((value) => value.published);
+      if (!entry || !planning)
+        throw new Error("Installation's published interview Skill is missing");
       state.planningSkillID = planning.id;
+      for (const choice of skills.choices.filter((value) => value.scope === "system"))
+        if (!(choice.libraryId === entry.id && choice.role === "planning"))
+          await serverCall(
+            callFactoryFunction(
+              fixture.base,
+              "saveSkillChoice",
+              [
+                {
+                  libraryId: choice.libraryId,
+                  revisionId: choice.revisionId,
+                  scope: "system",
+                  role: choice.role,
+                  state: "disable",
+                  expectedVersion: choice.version,
+                },
+              ],
+              { cookie: admin },
+            ),
+          );
+      const current = skills.choices.find(
+        (value) =>
+          value.libraryId === entry.id && value.scope === "system" && value.role === "planning",
+      );
       await serverCall(
         callFactoryFunction(
           fixture.base,
-          "saveSystemSkills",
+          "saveSkillChoice",
           [
             {
-              version: skills.settings.version,
-              planning: { required: [planning.id], optional: [], selected: [] },
-              build: { required: [], optional: [], selected: [] },
+              libraryId: entry.id,
+              revisionId: planning.id,
+              scope: "system",
+              role: "planning",
+              state: "required",
+              expectedVersion: current?.version ?? 0,
             },
           ],
           { cookie: admin },
         ),
       );
-      const projectSkills = inheritedSkillSettingsView.parse(
+      const projectSkills = skillLibraryView.parse(
         await serverCall(
-          callFactoryFunction(fixture.base, "getInheritedSkills", [project.id], {
+          callFactoryFunction(fixture.base, "getSkillLibrary", [project.id], {
             cookie: manager,
           }),
         ),
       );
-      expect(projectSkills.effective.planning.required.map((value) => value.revisionId)).toEqual([
-        planning.id,
-      ]);
       expect(
-        await callFactoryFunction(fixture.base, "getInheritedSkills", [project.id], {
+        librarySkillAssignments(projectSkills.entries, projectSkills.choices, "planning")
+          .filter((value) => value.required)
+          .map((value) => value.revisionId),
+      ).toEqual([planning.id]);
+      expect(
+        await callFactoryFunction(fixture.base, "getSkillLibrary", [project.id], {
           cookie: outsider,
         }),
       ).toMatchObject({ ok: false, status: 404 });

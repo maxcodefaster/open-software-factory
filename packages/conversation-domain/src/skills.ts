@@ -135,15 +135,6 @@ export const skillContentInput = z
   });
 export type SkillContent = z.infer<typeof skillContentInput>;
 
-export const skillPublishInput = z
-  .object({
-    revisionId: z.uuid(),
-    expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    content: skillContentInput,
-  })
-  .strict();
-export type SkillPublish = z.infer<typeof skillPublishInput>;
-
 export const skillRevisionInput = z.object({
   id: z.uuid(),
   revision: z.number().int().positive(),
@@ -152,35 +143,6 @@ export const skillRevisionInput = z.object({
   published: z.boolean(),
 });
 export type SkillRevision = z.infer<typeof skillRevisionInput>;
-
-export const skillRoleSettingsInput = z
-  .object({
-    required: skillRevisionIDsInput,
-    optional: skillRevisionIDsInput,
-    selected: skillRevisionIDsInput,
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.required.some((id) => value.optional.includes(id)))
-      context.addIssue({ code: "custom", message: "A Skill cannot be both required and optional" });
-    if (value.selected.some((id) => !value.optional.includes(id)))
-      context.addIssue({
-        code: "custom",
-        message: "Selected Skills must be permitted optional revisions",
-      });
-    if (value.required.length + value.optional.length > 16)
-      context.addIssue({ code: "custom", message: "At most 16 Skills per role" });
-  });
-export type SkillRoleSettings = z.infer<typeof skillRoleSettingsInput>;
-
-export const systemSkillSettingsInput = z
-  .object({
-    version: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    planning: skillRoleSettingsInput,
-    build: skillRoleSettingsInput,
-  })
-  .strict();
-export type SystemSkillSettings = z.infer<typeof systemSkillSettingsInput>;
 
 export function skillInstructionText(revisions: SkillRevision[]) {
   return revisions

@@ -1,3 +1,4 @@
+import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -192,10 +193,9 @@ test.each(cases)(
         // This transport/Git fixture owns an empty instruction selection.
         // It is not the native Skill-installation proof, and must not inherit
         // first-use library defaults merely because its database is external.
-        const empty = JSON.stringify({ required: [], optional: [], selected: [] });
-        await owned.database
-          .client`INSERT INTO factory.system_skill_settings(singleton,version,planning,build,updated_by)
-          VALUES(true,1,${empty}::jsonb,${empty}::jsonb,${owned.userID}) ON CONFLICT DO NOTHING`;
+        await owned.database.client.begin((sql) =>
+          disableStarterSkillsIn(sql, owned.userID, owned.projectID, owned.database),
+        );
       } catch (cause) {
         await databaseProcess.dispose();
         throw cause;

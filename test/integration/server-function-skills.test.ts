@@ -66,20 +66,9 @@ test("compiled Skill functions bind the actor, validate exact revisions and fenc
         record("preview-repository", args);
         return { content, warnings: [] };
       },
-      async publish(...args) {
-        record("publish", args);
-        return revision;
-      },
       async setPublication(...args) {
         record("publication", args);
-        return {
-          settings: {
-            version: 1,
-            planning: { required: [], optional: [], selected: [] },
-            build: { required: [], optional: [], selected: [] },
-          },
-          revisions: [revision],
-        };
+        return { revisionId: revisionID, published: false };
       },
       async invocations(...args) {
         record("invocations", args);
@@ -102,18 +91,6 @@ test("compiled Skill functions bind the actor, validate exact revisions and fenc
       async sourceUpdate(...args) {
         record("source-update", args);
         return { current: true as const };
-      },
-      async saveSystem(...args) {
-        record("system", args);
-        return { settings: args[1], revisions: [] };
-      },
-      async saveProject(...args) {
-        record("project", args);
-        throw new Error("Not admitted during maintenance");
-      },
-      async savePersonal(...args) {
-        record("personal", args);
-        throw new Error("Not admitted during maintenance");
       },
     },
   } satisfies { [K in keyof FactoryServices]?: Partial<FactoryServices[K]> };
@@ -164,13 +141,6 @@ test("compiled Skill functions bind the actor, validate exact revisions and fenc
     commit: "a".repeat(40),
     path: "skills/owned/SKILL.md",
   };
-  const empty = { required: [], optional: [], selected: [] };
-  const system = { version: 0, planning: empty, build: empty };
-  const inherited = {
-    version: 0,
-    planning: { required: [], optional: null, selected: null },
-    build: { required: [], optional: null, selected: null },
-  };
   for (const [name, args] of [
     ["saveSkill", [save]],
     ["saveSkillChoice", [choice]],
@@ -178,11 +148,7 @@ test("compiled Skill functions bind the actor, validate exact revisions and fenc
     ["acceptSkillSharing", [sharingID]],
     ["previewSkillImport", [files]],
     ["previewRepositorySkill", [repository]],
-    ["publishSkill", [{ revisionId: revisionID, expectedRevision: 0, content }]],
     ["setSkillPublication", [revisionID, false]],
-    ["saveSystemSkills", [system]],
-    ["saveProjectSkills", [project, inherited]],
-    ["savePersonalSkills", [project, { version: 0, planning: null, build: null }]],
   ] as Array<[string, unknown[]]>)
     expect(await call(name, args)).toMatchObject({ ok: false, status: 503 });
   expect(effects).toEqual([]);

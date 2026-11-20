@@ -94,13 +94,31 @@ export function librarySkillAssignments(
   entries: SkillLibraryEntry[],
   choices: LibraryChoice[],
   role: "planning" | "build",
+  personal = true,
 ) {
-  return entries.flatMap((entry) => {
-    const choice = resolveLibraryChoice(choices, entry.id, role);
+  const assignments = entries.flatMap((entry) => {
+    if (!personal && entry.scope === "personal") return [];
+    const choice = resolveLibraryChoice(choices, entry.id, role, personal);
     if (!choice || choice.state === "disable") return [];
     const revision = entry.revisions.find((item) => item.id === choice.revisionId);
     if (!revision?.published || !revision.content.roles.includes(role))
       throw new Error("An enabled skill version is unavailable");
     return [{ revisionId: revision.id, required: choice.state === "required" }];
   });
+  if (assignments.length > 16) throw new Error("At most 16 skills can be enabled per role");
+  return assignments;
+}
+
+export function librarySkillsAvailable(
+  entries: SkillLibraryEntry[],
+  choices: LibraryChoice[],
+  role: "planning" | "build",
+  personal = true,
+) {
+  try {
+    librarySkillAssignments(entries, choices, role, personal);
+    return true;
+  } catch {
+    return false;
+  }
 }

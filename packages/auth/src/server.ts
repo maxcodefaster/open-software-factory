@@ -5,12 +5,19 @@ import { APIError, betterAuth, getCurrentAdapter } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { parseCookies } from "better-auth/cookies";
 import { constantTimeEqual, makeSignature } from "better-auth/crypto";
-import type { createDatabase } from "../../db/src/client";
+import { and, DrizzleQueryError, eq, isNotNull, ne, or, sql as expression } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../db/src/client";
 import {
   accountAccess,
+  administrator,
+  authAccount,
+  authSession,
+  authUser,
   betterAuthSchema,
   externalIdentity,
+  forgeIdentityIntent,
   identitySetup,
+  oauthClient,
 } from "../../db/src/schema";
 import { forgeBackchannelMetadata, forgeBackchannelOrigin } from "./backchannel";
 import { factoryForgeIssuer, forgeClientID, forgeClientSecret } from "./forge-issuer";
@@ -46,6 +53,12 @@ function recentPasswordFailures(userID: string) {
   return recent;
 }
 const developmentAdministratorPassword = "factory-local-password";
+
+function authWriteFailure(cause: unknown): never {
+  // Preserve SQLSTATE for callers without Drizzle's password-bearing query parameters.
+  if (cause instanceof DrizzleQueryError && cause.cause) throw cause.cause;
+  throw cause;
+}
 
 export function createFactoryAuth(
   database: Database,
@@ -274,8 +287,16 @@ export function createFactoryAuth(
         .string()
         .startsWith(factoryMCPClientPrefix)
         .parse(parameters.get("client_id"));
-      const [registered] = await client<{ name: string | null }[]>`
-        SELECT name FROM auth."oauthClient" WHERE "clientId"=${clientID} AND NOT disabled AND "tokenEndpointAuthMethod"='none'`;
+      const [registered] = await db
+        .select({ name: oauthClient.name })
+        .from(oauthClient)
+        .where(
+          and(
+            eq(oauthClient.clientId, clientID),
+            eq(oauthClient.disabled, false),
+            eq(oauthClient.tokenEndpointAuthMethod, "none"),
+          ),
+        );
       if (!registered) throw new APIError("NOT_FOUND");
       return {
         clientID,
@@ -328,30 +349,41 @@ export function createFactoryAuth(
     },
     async ensureForgeClient(headers: Headers, redirectURI: string) {
       const session = await this.requireFresh(new Request(baseURL, { headers }));
-      const [manager] =
-        await client`SELECT user_id FROM factory.administrator WHERE user_id=${session.user.id}`;
+      const [manager] = await db
+        .select({ userID: administrator.userId })
+        .from(administrator)
+        .where(eq(administrator.userId, session.user.id));
       if (!manager) throw new APIError("FORBIDDEN");
       await client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtextextended('factory-forgejo-client',0))`;
-        await sql`INSERT INTO factory.forge_identity_intent(client_id,redirect_uri,intended_by,state)
-          VALUES(${forgeClientID},${redirectURI},${session.user.id},'create-intended') ON CONFLICT DO NOTHING`;
-        const [intent] = await sql<
-          { redirectURI: string }[]
-        >`SELECT redirect_uri AS "redirectURI" FROM factory.forge_identity_intent WHERE client_id=${forgeClientID}`;
+        const transaction = drizzleTransaction(sql);
+        await transaction
+          .insert(forgeIdentityIntent)
+          .values({
+            clientId: forgeClientID,
+            redirectUri: redirectURI,
+            intendedBy: session.user.id,
+            state: "create-intended",
+          })
+          .onConflictDoNothing();
+        const [intent] = await transaction
+          .select({ redirectURI: forgeIdentityIntent.redirectUri })
+          .from(forgeIdentityIntent)
+          .where(eq(forgeIdentityIntent.clientId, forgeClientID));
         if (intent?.redirectURI !== redirectURI)
           throw new Error("Forgejo callback differs from its intended identity");
       });
       async function recordedClient() {
-        const [previous] = await client<
-          {
-            redirectUris: string[];
-            disabled: boolean;
-            secret: string;
-            pkce: boolean;
-            method: string;
-          }[]
-        >`
-          SELECT "redirectUris",disabled,"clientSecret" AS secret,"requirePKCE" AS pkce,"tokenEndpointAuthMethod" AS method FROM auth."oauthClient" WHERE "clientId"=${forgeClientID}`;
+        const [previous] = await db
+          .select({
+            redirectUris: oauthClient.redirectUris,
+            disabled: oauthClient.disabled,
+            secret: oauthClient.clientSecret,
+            pkce: oauthClient.requirePKCE,
+            method: oauthClient.tokenEndpointAuthMethod,
+          })
+          .from(oauthClient)
+          .where(eq(oauthClient.clientId, forgeClientID));
         if (!previous) return false;
         const expected = new Bun.CryptoHasher("sha256")
           .update(forgeClientSecret(secret))
@@ -392,7 +424,13 @@ export function createFactoryAuth(
         }
       }
       if (!(await recordedClient())) throw new Error("Forgejo client creation is not confirmed");
-      await client`UPDATE factory.forge_identity_intent SET state='ready',observed_at=COALESCE(observed_at,now()) WHERE client_id=${forgeClientID}`;
+      await db
+        .update(forgeIdentityIntent)
+        .set({
+          state: "ready",
+          observedAt: expression`COALESCE(${forgeIdentityIntent.observedAt},now())`,
+        })
+        .where(eq(forgeIdentityIntent.clientId, forgeClientID));
       return forgeClientID;
     },
     async matchesOAuthState(request: Request) {
@@ -458,11 +496,10 @@ export function createFactoryAuth(
             await context.password.hash(password),
           );
       }
-      await client`
-        INSERT INTO factory.administrator(user_id)
-        VALUES (${existing?.user.id ?? administratorID})
-        ON CONFLICT DO NOTHING
-      `;
+      await db
+        .insert(administrator)
+        .values({ userId: existing?.user.id ?? administratorID })
+        .onConflictDoNothing();
     },
     async createManagedUser(input: { name: string; email: string; password: string }) {
       if (policy.provider || policy.emergencyOnly)
@@ -471,17 +508,29 @@ export function createFactoryAuth(
         });
       const context = await auth.$context;
       const password = await context.password.hash(input.password);
-      return client.begin(async (sql) => {
-        const id = crypto.randomUUID();
-        const users = await sql<Array<{ id: string; name: string; email: string }>>`
-          INSERT INTO auth."user"(id, name, email, email_verified)
-          VALUES (${id}, ${input.name}, ${input.email.toLowerCase()}, true)
-          RETURNING id, name, email
-        `;
-        await sql`INSERT INTO auth.account(id, account_id, provider_id, user_id, password)
-          VALUES (${crypto.randomUUID()}, ${id}, 'credential', ${id}, ${password})`;
-        return users[0];
-      });
+      return client
+        .begin(async (sql) => {
+          const id = crypto.randomUUID();
+          const transaction = drizzleTransaction(sql);
+          const users = await transaction
+            .insert(authUser)
+            .values({
+              id,
+              name: input.name,
+              email: input.email.toLowerCase(),
+              emailVerified: true,
+            })
+            .returning({ id: authUser.id, name: authUser.name, email: authUser.email });
+          await transaction.insert(authAccount).values({
+            id: crypto.randomUUID(),
+            accountId: id,
+            providerId: "credential",
+            userId: id,
+            password,
+          });
+          return users[0];
+        })
+        .catch(authWriteFailure);
     },
     /**
      * Self-service password rotation. Better Auth's own /change-password stays blocked; this is the
@@ -495,10 +544,14 @@ export function createFactoryAuth(
     ) {
       const refusal = checkPasswordChange(input);
       if (refusal) throw new PasswordChangeError("refused", passwordChangeMessage(refusal));
-      const [session] = await client<
-        { loginMethod: string; authenticatedAt: Date | string; expiresAt: Date | string }[]
-      >`SELECT login_method AS "loginMethod", authenticated_at AS "authenticatedAt", expires_at AS "expiresAt"
-        FROM auth.session WHERE id=${sessionID} AND user_id=${userID}`;
+      const [session] = await db
+        .select({
+          loginMethod: authSession.loginMethod,
+          authenticatedAt: authSession.authenticatedAt,
+          expiresAt: authSession.expiresAt,
+        })
+        .from(authSession)
+        .where(and(eq(authSession.id, sessionID), eq(authSession.userId, userID)));
       if (!session || new Date(session.expiresAt).getTime() <= Date.now())
         throw new PasswordChangeError(
           "unavailable",
@@ -509,8 +562,10 @@ export function createFactoryAuth(
           "unavailable",
           "Sign in again before changing protected settings.",
         );
-      const [credential] = await client<{ id: string; password: string | null }[]>`
-        SELECT id, password FROM auth.account WHERE user_id=${userID} AND provider_id='credential'`;
+      const [credential] = await db
+        .select({ id: authAccount.id, password: authAccount.password })
+        .from(authAccount)
+        .where(and(eq(authAccount.userId, userID), eq(authAccount.providerId, "credential")));
       if (
         !credential?.password ||
         (session.loginMethod !== "password" && session.loginMethod !== "emergency")
@@ -541,10 +596,18 @@ export function createFactoryAuth(
         throw new PasswordChangeError("wrong-password", "The current password is incorrect.");
       }
       const hash = await context.password.hash(input.newPassword);
-      await client.begin(async (sql) => {
-        await sql`UPDATE auth.account SET password=${hash}, updated_at=now() WHERE id=${credential.id}`;
-        await sql`DELETE FROM auth.session WHERE user_id=${userID} AND id<>${sessionID}`;
-      });
+      await client
+        .begin(async (sql) => {
+          const transaction = drizzleTransaction(sql);
+          await transaction
+            .update(authAccount)
+            .set({ password: hash, updatedAt: expression`now()` })
+            .where(eq(authAccount.id, credential.id));
+          await transaction
+            .delete(authSession)
+            .where(and(eq(authSession.userId, userID), ne(authSession.id, sessionID)));
+        })
+        .catch(authWriteFailure);
       passwordChangeFailures.delete(userID);
     },
     async session(request: Request) {
@@ -557,13 +620,20 @@ export function createFactoryAuth(
           Date.now() - new Date(session.session.authenticatedAt).getTime() > 24 * 60 * 60_000)
       )
         return null;
-      const prohibited = await client`SELECT user_id FROM factory.account_access
-        WHERE user_id=${session.user.id}
-          AND (disabled_at IS NOT NULL OR directory_disabled_at IS NOT NULL)`;
+      const prohibited = await db
+        .select({ userID: accountAccess.userId })
+        .from(accountAccess)
+        .where(
+          and(
+            eq(accountAccess.userId, session.user.id),
+            or(isNotNull(accountAccess.disabledAt), isNotNull(accountAccess.directoryDisabledAt)),
+          ),
+        );
       if (prohibited.length) return null;
-      const administrators = await client<{ user_id: string }[]>`
-        SELECT user_id FROM factory.administrator WHERE user_id = ${session.user.id}
-      `;
+      const administrators = await db
+        .select({ userID: administrator.userId })
+        .from(administrator)
+        .where(eq(administrator.userId, session.user.id));
       return { ...session, systemManager: Boolean(administrators[0]) };
     },
   };

@@ -24,6 +24,14 @@ describe("plainErrorMessage", () => {
       "Name is already used in this Project.",
     );
   });
+  test("database query failures never disclose SQL or bound lease and credential values", () => {
+    const raw =
+      'Failed query: select "owner_token" from "factory"."agent_turn" where "owner_token" = $1\nparams: private-lease-529,private-key';
+    const expected =
+      "Factory could not confirm its saved state. Check the current status before starting another action.";
+    expect(plainErrorMessage(raw)).toBe(expected);
+    expect(plainFailureMessage(raw)).toBe(expected);
+  });
 });
 
 describe("untilReachable", () => {

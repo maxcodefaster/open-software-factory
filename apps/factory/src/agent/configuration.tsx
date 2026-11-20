@@ -1,11 +1,14 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
 import type { InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
-import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
+import {
+  librarySkillsAvailable,
+  type SkillLibraryView,
+} from "../../../../packages/conversation-domain/src/skill-library";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
 import { getProjectModels } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
-import { getInheritedSkills } from "../server-functions/skills";
+import { getSkillLibrary } from "../server-functions/skills";
 import { projectFailureNotice } from "./failure-notice";
 
 export function AgentBlockers(props: {
@@ -17,7 +20,7 @@ export function AgentBlockers(props: {
 }) {
   const [configuration, setConfiguration] = createSignal<{
     models: InheritedModelSettingsView;
-    skills: InheritedSkillSettings;
+    skills: SkillLibraryView;
   }>();
   const [error, setError] = createSignal("");
   const [refresh, setRefresh] = createSignal(0);
@@ -38,7 +41,7 @@ export function AgentBlockers(props: {
       currentRequest = abort;
       void Promise.all([
         serverCall(getProjectModels({ ...{ signal: abort.signal }, data: [projectID] })),
-        serverCall(getInheritedSkills({ ...{ signal: abort.signal }, data: [projectID] })),
+        serverCall(getSkillLibrary({ ...{ signal: abort.signal }, data: [projectID] })),
       ])
         .then(([models, skills]) => {
           if (!abort.signal.aborted) setConfiguration({ models, skills });
@@ -58,7 +61,7 @@ export function AgentBlockers(props: {
     if (!value) return undefined;
     return {
       model: value.models.effective[role()],
-      skills: value.skills.effective[role()],
+      skillsAvailable: librarySkillsAvailable(value.skills.entries, value.skills.choices, role()),
       providerConfigured: value.models.system.connection.configured,
     };
   };
@@ -69,7 +72,7 @@ export function AgentBlockers(props: {
       return "Provider not configured. Ask a System Manager to configure the server credentials.";
     if (!retainedBuild() && !value.model.available)
       return "Default model is not permitted. Ask a manager to change the role default or allowed models.";
-    if (!retainedBuild() && !value.skills.available)
+    if (!retainedBuild() && !value.skillsAvailable)
       return "An assigned Skill is unavailable. Ask a manager to restore publication or change the assignment.";
     return undefined;
   };

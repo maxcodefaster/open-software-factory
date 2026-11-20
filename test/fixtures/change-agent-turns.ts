@@ -4,6 +4,7 @@ import { createChangeWriterController } from "../../apps/factory/src/access/writ
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import { createSkillController } from "../../apps/factory/src/skills/controller";
 import type { DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
@@ -14,6 +15,23 @@ import { fixtureValue } from "./value";
 
 const { FACTORY_AGENT_MODEL_ID } = process.env;
 export const buildModelID = FACTORY_AGENT_MODEL_ID ?? "factory-coding-model";
+
+// Owned transport fixtures opt out of starter defaults through canonical Project choices.
+export async function disableStarterSkillsIn(
+  sql: DatabaseTransaction,
+  userID: string,
+  projectID: string,
+  database: ReturnType<typeof createDatabase>,
+) {
+  const skills = createSkillController(database);
+  const view = await skills.getLibraryIn(sql, userID, projectID);
+  for (const choice of view.choices.filter(
+    (item) => item.scope === "system" && item.state === "enable",
+  ))
+    await sql`INSERT INTO factory.skill_library_choice(library_id,scope,context_id,user_id,role,state,revision_id,version)
+      VALUES(${choice.libraryId},'project',${projectID},'00000000-0000-0000-0000-000000000000',
+        ${choice.role},'disable',${choice.revisionId},1) ON CONFLICT DO NOTHING`;
+}
 
 // Actual controller, published OpenCode client and PostgreSQL. External acceptance is injected.
 export async function fixture(
@@ -72,8 +90,6 @@ export async function fixture(
       if (host) {
         await sql`INSERT INTO auth."user"(id, name, email, email_verified) VALUES (${host.id}, 'Owned fixture administrator', ${`fixture-admin-${host.id}@factory.local`}, true)`;
         await sql`INSERT INTO factory.administrator(user_id) VALUES (${host.id})`;
-        const empty = JSON.stringify({ required: [], optional: [], selected: [] });
-        await sql`INSERT INTO factory.system_skill_settings(singleton, version, planning, build, updated_by) VALUES (true, 1, ${empty}::jsonb, ${empty}::jsonb, ${host.id})`;
       }
       await sql`INSERT INTO auth."user"(id, name, email, email_verified)
       VALUES (${userID}, 'Owned Build Admission', ${`build-turn-${suffix}@factory.local`}, true)`;
@@ -82,6 +98,7 @@ export async function fixture(
         'https://owned-build.factory.invalid/owned/owned-build.git', 'main', '.devcontainer/devcontainer.json', ${userID})`;
       await sql`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
         VALUES (${projectID}, ${userID}, 'developer', ${userID})`;
+      if (host) await disableStarterSkillsIn(sql, userID, projectID, database);
       await sql`INSERT INTO factory.ticket(id, project_id, title, created_by)
       VALUES (${ticketID}, ${projectID}, 'Owned Build regression', ${userID})`;
       await sql`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
@@ -605,8 +622,7 @@ export async function fixture(
           // is disposed. Do not rewrite provenance or delete shared guidance to remove a user.
           await sql`DELETE FROM auth."user" WHERE id = ${userID} AND email = ${`build-turn-${suffix}@factory.local`}
             AND NOT EXISTS(SELECT 1 FROM factory.skill_revision WHERE created_by=${userID})
-            AND NOT EXISTS(SELECT 1 FROM factory.skill_publication WHERE updated_by=${userID})
-            AND NOT EXISTS(SELECT 1 FROM factory.system_skill_settings WHERE updated_by=${userID})`;
+            AND NOT EXISTS(SELECT 1 FROM factory.skill_publication WHERE updated_by=${userID})`;
         });
         if (stopFailure) throw stopFailure;
       } finally {

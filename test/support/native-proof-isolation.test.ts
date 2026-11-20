@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
-test("owned UI hosts and compiled-function browser runners disable implicit workspace dotenv loading", async () => {
+test("owned UI hosts and the maintained browser runner disable implicit workspace dotenv loading", async () => {
   for (const file of [
     "test/browser/mcp-library.spec.ts",
     "test/browser/monitoring-settings.spec.ts",
@@ -13,15 +13,8 @@ test("owned UI hosts and compiled-function browser runners disable implicit work
       true,
     );
   }
-  for (const file of [
-    "test/integration/server-functions.test.ts",
-    "test/integration/chat-factory-browser.test.ts",
-  ]) {
-    const source = await readFile(file, "utf8");
-    expect(
-      /process.execPath,\s*"--no-env-file",\s*"node_modules\/@playwright\/test\/cli.js"/.test(
-        source,
-      ),
-    ).toBe(true);
-  }
+  const source = await readFile("scripts/testing/browser.ts", "utf8");
+  expect(
+    /process.execPath,\s*"--no-env-file",\s*"node_modules\/@playwright\/test\/cli.js"/.test(source),
+  ).toBe(true);
 });

@@ -102,33 +102,6 @@ export const skillRevision = factorySchema.table(
   ],
 );
 
-export const projectSkillSettings = factorySchema.table(
-  "project_skill_settings",
-  {
-    projectId: uuid("project_id").primaryKey().notNull(),
-    version: bigint("version", { mode: "number" }).notNull(),
-    planning: jsonb("planning").notNull(),
-    build: jsonb("build").notNull(),
-    updatedBy: uuid("updated_by").notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.projectId],
-      foreignColumns: [project.id],
-      name: "project_skill_settings_project_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.updatedBy],
-      foreignColumns: [authUser.id],
-      name: "project_skill_settings_updated_by_fkey",
-    }),
-    check("project_skill_settings_build_check", sql`jsonb_typeof(build) = 'object'::text`),
-    check("project_skill_settings_planning_check", sql`jsonb_typeof(planning) = 'object'::text`),
-    check("project_skill_settings_version_check", sql`version > 0`),
-  ],
-);
-
 export const skillLibraryCover = factorySchema.table(
   "skill_library_cover",
   {
@@ -211,63 +184,6 @@ export const skillShareProposal = factorySchema.table(
       "skill_share_proposal_target_check",
       sql`target = ANY (ARRAY['system'::text, 'project'::text])`,
     ),
-  ],
-);
-
-export const systemSkillSettings = factorySchema.table(
-  "system_skill_settings",
-  {
-    singleton: boolean("singleton").default(true).primaryKey().notNull(),
-    version: bigint("version", { mode: "number" }).notNull(),
-    planning: jsonb("planning").notNull(),
-    build: jsonb("build").notNull(),
-    updatedBy: uuid("updated_by").notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.updatedBy],
-      foreignColumns: [authUser.id],
-      name: "system_skill_settings_updated_by_fkey",
-    }),
-    check("system_skill_settings_build_check", sql`jsonb_typeof(build) = 'object'::text`),
-    check("system_skill_settings_planning_check", sql`jsonb_typeof(planning) = 'object'::text`),
-    check("system_skill_settings_singleton_check", sql`(singleton)`),
-    check("system_skill_settings_version_check", sql`version > 0`),
-  ],
-);
-
-export const personalSkillSettings = factorySchema.table(
-  "personal_skill_settings",
-  {
-    projectId: uuid("project_id").notNull(),
-    userId: uuid("user_id").notNull(),
-    version: bigint("version", { mode: "number" }).notNull(),
-    planning: jsonb("planning"),
-    build: jsonb("build"),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.projectId],
-      foreignColumns: [project.id],
-      name: "personal_skill_settings_project_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [authUser.id],
-      name: "personal_skill_settings_user_id_fkey",
-    }).onDelete("cascade"),
-    primaryKey({ columns: [table.projectId, table.userId], name: "personal_skill_settings_pkey" }),
-    check(
-      "personal_skill_settings_build_check",
-      sql`(build IS NULL) OR (jsonb_typeof(build) = 'array'::text)`,
-    ),
-    check(
-      "personal_skill_settings_planning_check",
-      sql`(planning IS NULL) OR (jsonb_typeof(planning) = 'array'::text)`,
-    ),
-    check("personal_skill_settings_version_check", sql`version > 0`),
   ],
 );
 

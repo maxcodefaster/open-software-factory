@@ -15,10 +15,7 @@ import {
   defaultLibraryCover,
   libraryCoverInput,
 } from "../../../../packages/conversation-domain/src/library-covers";
-import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import {
-  type LibraryChoice,
-  librarySkillIds,
   resolveLibraryChoice,
   type SkillLibraryView,
   skillChoiceInput,
@@ -47,7 +44,6 @@ import {
   skillPublication,
   skillRevision,
   skillShareProposal,
-  systemSkillSettings,
 } from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
 import { CommandError } from "../command-error";
@@ -59,7 +55,6 @@ import {
 import { checkSkillSourceUpdate, previewRepositorySkill, previewSkillImport } from "./import";
 import { starterSkills } from "./starters";
 
-type RetainedSettings = Pick<InheritedSkillSettings, "system" | "project" | "personal">;
 const nil = "00000000-0000-0000-0000-000000000000";
 const hash = (content: SkillContent) =>
   createHash("sha256").update(JSON.stringify(content)).digest("hex");
@@ -165,10 +160,6 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       .from(administrator)
       .orderBy(administrator.userId)
       .limit(1);
-    const [oldSettings] = await db
-      .select({ singleton: systemSkillSettings.singleton })
-      .from(systemSkillSettings)
-      .where(eq(systemSkillSettings.singleton, true));
     for (const starter of starterSkills) {
       const [existing] = await db
         .select({ id: skillLibrary.id })
@@ -195,7 +186,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         skillContentInput.parse(starter.content),
         admin?.id ?? userId,
       );
-      if (starter.enabled && !oldSettings)
+      if (starter.enabled)
         for (const role of starter.content.roles)
           await db.insert(skillLibraryChoice).values({
             libraryId: library.id,
@@ -213,7 +204,6 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     sql: DatabaseTransaction,
     userId: string,
     projectId?: string,
-    legacy?: RetainedSettings,
   ): Promise<SkillLibraryView> {
     const access = await capabilities(sql, userId, projectId);
     const all = await libraries(sql);
@@ -275,48 +265,6 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
           ),
         )
     ).map((row) => skillChoiceView.parse(row));
-    // Translate retained whole-list settings into per-skill choices without rewriting history.
-    if (legacy)
-      for (const role of ["planning", "build"] as const)
-        for (const library of visible) {
-          const ids = rows.filter((row) => row.libraryId === library.id).map((row) => row.id);
-          const global = legacy.system[role];
-          const base = [...global.required, ...global.optional].find((id) => ids.includes(id));
-          if (!base) continue;
-          const add = (
-            scope: LibraryChoice["scope"],
-            state: LibraryChoice["state"],
-            revisionId: string,
-          ) => {
-            if (
-              !choices.some(
-                (item) =>
-                  item.libraryId === library.id && item.role === role && item.scope === scope,
-              )
-            )
-              choices.push({ libraryId: library.id, scope, role, state, revisionId, version: 0 });
-          };
-          add(
-            "system",
-            global.required.includes(base)
-              ? "required"
-              : global.selected.includes(base)
-                ? "enable"
-                : "disable",
-            base,
-          );
-          const project = legacy.project[role];
-          if (project.required.includes(base)) add("project", "required", base);
-          else if (
-            (project.optional !== null && !project.optional.includes(base)) ||
-            (project.selected !== null && !project.selected.includes(base))
-          )
-            add("project", "disable", base);
-          else if (project.selected?.includes(base)) add("project", "enable", base);
-          const personal = legacy.personal[role];
-          if (personal !== null)
-            add("personal", personal.includes(base) ? "enable" : "disable", base);
-        }
     const proposals = skillLibraryView.shape.proposals.parse(
       await db
         .select({
@@ -404,16 +352,11 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       await database.client.begin((sql) => requireActiveAccountIn(sql, userId));
       return repository ? previewRepositorySkill(value) : previewSkillImport(value);
     },
-    async viewIn(
-      sql: DatabaseTransaction,
-      userId: string,
-      projectId?: string,
-      legacy?: RetainedSettings,
-    ) {
+    async viewIn(sql: DatabaseTransaction, userId: string, projectId?: string) {
       await lock(sql);
       await capabilities(sql, userId, projectId);
       await seed(sql, userId);
-      return viewIn(sql, userId, projectId, legacy);
+      return viewIn(sql, userId, projectId);
     },
     async saveIn(sql: DatabaseTransaction, value: unknown, userId: string) {
       const input = skillLibrarySaveInput.parse(value);
@@ -470,12 +413,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         return saveLibraryCoverIn(sql, "skill", input, userId);
       });
     },
-    async chooseIn(
-      sql: DatabaseTransaction,
-      value: unknown,
-      userId: string,
-      legacy?: (sql: DatabaseTransaction) => Promise<RetainedSettings>,
-    ) {
+    async chooseIn(sql: DatabaseTransaction, value: unknown, userId: string) {
       const input = skillChoiceInput.parse(value);
       await lock(sql);
       await authority(sql, userId, input.scope, input.projectId);
@@ -483,7 +421,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         throw new CommandError("conflict", "Select a Project for skill choices");
       if (input.state === "required" && input.scope === "personal")
         throw new CommandError("conflict", "Only managers can require a skill");
-      const view = await viewIn(sql, userId, input.projectId, await legacy?.(sql));
+      const view = await viewIn(sql, userId, input.projectId);
       const entry = view.entries.find((item) => item.id === input.libraryId);
       if (
         !entry ||
@@ -549,12 +487,8 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         });
       return { saved: true };
     },
-    async choose(
-      value: unknown,
-      userId: string,
-      legacy?: (sql: DatabaseTransaction) => Promise<RetainedSettings>,
-    ) {
-      return database.client.begin((sql) => this.chooseIn(sql, value, userId, legacy));
+    async choose(value: unknown, userId: string) {
+      return database.client.begin((sql) => this.chooseIn(sql, value, userId));
     },
     async propose(
       id: string,
@@ -729,6 +663,5 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         return skillRevisionInput.parse(row);
       });
     },
-    resolveIds: librarySkillIds,
   };
 }

@@ -106,6 +106,8 @@ export function integrationNeedsApplicationBuild(path: string) {
     "agent-read.test.ts",
     "agent-turn-store.test.ts",
     "coding-source-dispatch-fence.test.ts",
+    "fixture-cleanup.test.ts",
+    "native-ui-fixture.test.ts",
     "change-document-drizzle.test.ts",
     "delivery-controller-drizzle.test.ts",
     "inbox.test.ts",

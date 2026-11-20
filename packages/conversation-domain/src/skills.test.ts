@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { requirementsInterviewSkill } from "../../../apps/factory/src/skills/reviewed";
-import { skillContentInput, skillInstructionText, skillRoleSettingsInput } from "./skills";
+import { skillContentInput, skillInstructionText, skillRevisionIDsInput } from "./skills";
 
 test("reviewed planning Skill retains pinned provenance, licence and its bundled reference", () => {
   const content = skillContentInput.parse(requirementsInterviewSkill);
@@ -49,16 +49,11 @@ test("references accept only bundled instruction paths, never executable or trav
   ).toBe(false);
 });
 
-test("role settings reject duplicate, contradictory and unapproved optional selections", () => {
+test("admitted revision lists reject duplicates and more than sixteen Skills", () => {
   const id = crypto.randomUUID();
+  expect(skillRevisionIDsInput.safeParse([id, id]).success).toBe(false);
   expect(
-    skillRoleSettingsInput.safeParse({ required: [id], optional: [id], selected: [] }).success,
-  ).toBe(false);
-  expect(
-    skillRoleSettingsInput.safeParse({ required: [], optional: [], selected: [id] }).success,
-  ).toBe(false);
-  expect(
-    skillRoleSettingsInput.safeParse({ required: [id, id], optional: [], selected: [] }).success,
+    skillRevisionIDsInput.safeParse(Array.from({ length: 17 }, () => crypto.randomUUID())).success,
   ).toBe(false);
 });
 

@@ -41,6 +41,8 @@ export async function untilReachable<T>(call: () => Promise<T>, limitMs = 60_000
 export const genericFailure = "Factory could not complete that action. Try again.";
 export const sessionExpiredMessage =
   "Your session expired. Reload the page and sign in again; your drafts are retained.";
+const databaseFailureMessage =
+  "Factory could not confirm its saved state. Check the current status before starting another action.";
 
 // Provider and network failures arrive as codes. Only stored failure text passes through these
 // rules, never a message that quotes a title or other text a person wrote.
@@ -96,6 +98,7 @@ const plainRules: readonly (readonly [RegExp, string])[] = [
 
 /** Replaces transport, runtime and bookkeeping error text with a sentence a person can act on. */
 export function plainErrorMessage(message: string) {
+  if (/^Failed query:/i.test(message)) return databaseFailureMessage;
   if (/failed to fetch|networkerror|load failed|network request failed/i.test(message))
     return unreachableMessage;
   for (const [pattern, replacement] of plainRules) if (pattern.test(message)) return replacement;
@@ -104,6 +107,7 @@ export function plainErrorMessage(message: string) {
 
 /** Plain wording for a stored failure, which can also carry provider codes. */
 export function plainFailureMessage(message: string) {
+  if (/^Failed query:/i.test(message)) return databaseFailureMessage;
   for (const [pattern, replacement] of providerRules) if (pattern.test(message)) return replacement;
   return plainErrorMessage(message);
 }

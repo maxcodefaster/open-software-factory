@@ -8,7 +8,7 @@ const rotated = "rotated-password-for-owned-test";
 
 test("self-service password change rotates the hash, keeps this session, ends the others and never logs passwords", async () => {
   const fixture = await factoryProcess();
-  const database = fixture.connect();
+  const database = fixture.connect(1);
   const previousBase = process.env["FACTORY_BASE_URL"];
   process.env["FACTORY_BASE_URL"] = fixture.base;
   const identity = createFactoryAuth(database);
@@ -120,8 +120,38 @@ test("self-service password change rotates the hash, keeps this session, ends th
       /Sign in again/,
     );
 
+    await database.client`UPDATE auth.session SET
+      authenticated_at=date_trunc('second',now())+interval '0.123456 seconds',
+      expires_at=date_trunc('second',now())+interval '1 day 0.654321 seconds'
+      WHERE id=${current}`;
+    const [beforeSession] = await database.client`
+      SELECT authenticated_at::text,expires_at::text FROM auth.session WHERE id=${current}`;
+    const [beforeCredential] = await database.client`
+      SELECT password,updated_at::text FROM auth.account
+      WHERE user_id=${person.id} AND provider_id='credential'`;
+    await database.client`CREATE FUNCTION factory.reject_owned_password_cleanup() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned password cleanup failed'; END $$`;
+    await database.client`CREATE TRIGGER reject_owned_password_cleanup BEFORE DELETE ON auth.session
+      FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_password_cleanup()`;
+    await expect(identity.changePassword(person.id, current, input(initial))).rejects.toThrow();
+    expect(
+      (
+        await database.client`SELECT password,updated_at::text FROM auth.account
+          WHERE user_id=${person.id} AND provider_id='credential'`
+      )[0],
+    ).toEqual(beforeCredential);
+    expect(await count()).toBe(3);
+    await database.client`DROP TRIGGER reject_owned_password_cleanup ON auth.session`;
+    await database.client`DROP FUNCTION factory.reject_owned_password_cleanup()`;
+
     await identity.changePassword(person.id, current, input(initial));
     expect(await count()).toBe(1);
+    expect(
+      (
+        await database.client`SELECT authenticated_at::text,expires_at::text FROM auth.session
+          WHERE id=${current}`
+      )[0],
+    ).toEqual(beforeSession);
     expect(await sessionID(here.cookie)).toBe(current);
     expect(
       await identity.auth.api.getSession({ headers: new Headers({ cookie: other.cookie }) }),
@@ -193,6 +223,89 @@ test("self-service password change rotates the hash, keeps this session, ends th
     expect(logged.join("\n")).not.toContain(rotated);
   } finally {
     Object.assign(console, originals);
+    if (previousBase === undefined) delete process.env["FACTORY_BASE_URL"];
+    else process.env["FACTORY_BASE_URL"] = previousBase;
+    await database.client.end({ timeout: 2 });
+    await fixture.dispose();
+  }
+}, 60_000);
+
+test("managed account creation is atomic and Factory session reads recheck account status and administrator grants", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect(1);
+  const previousBase = process.env["FACTORY_BASE_URL"];
+  process.env["FACTORY_BASE_URL"] = fixture.base;
+  const identity = createFactoryAuth(database);
+  const nativeGetSession = identity.auth.api.getSession;
+  const input = {
+    name: "Owned 'account' 東京",
+    email: "Atomic@password.test",
+    password: initial,
+  };
+  try {
+    await identity.bootstrap();
+    await identity.bootstrap();
+    expect(await database.client`SELECT user_id FROM factory.administrator`).toHaveLength(1);
+    await database.client`CREATE FUNCTION factory.reject_owned_account_insert() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned credential insert failed'; END $$`;
+    await database.client`CREATE TRIGGER reject_owned_account_insert BEFORE INSERT ON auth.account
+      FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_account_insert()`;
+    await expect(identity.createManagedUser(input)).rejects.toMatchObject({ code: "P0001" });
+    expect(
+      await database.client`SELECT id FROM auth."user" WHERE email=${input.email.toLowerCase()}`,
+    ).toHaveLength(0);
+    await database.client`DROP TRIGGER reject_owned_account_insert ON auth.account`;
+    await database.client`DROP FUNCTION factory.reject_owned_account_insert()`;
+
+    const person = await identity.createManagedUser(input);
+    if (!person) throw new Error("Owned account creation was not confirmed");
+    expect(person).toEqual({
+      id: expect.any(String),
+      name: input.name,
+      email: input.email.toLowerCase(),
+    });
+    await expect(identity.createManagedUser(input)).rejects.toMatchObject({ code: "23505" });
+    expect(
+      await database.client`SELECT id FROM auth."user" WHERE email=${person.email}`,
+    ).toHaveLength(1);
+    expect(
+      (
+        await database.client`SELECT account_id,provider_id FROM auth.account WHERE user_id=${person.id}`
+      ).map((row) => ({ account_id: row["account_id"], provider_id: row["provider_id"] })),
+    ).toEqual([expect.objectContaining({ account_id: person.id, provider_id: "credential" })]);
+    const response = await identity.auth.handler(
+      new Request(`${fixture.base}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { origin: fixture.base, "content-type": "application/json" },
+        body: JSON.stringify({ email: person.email, password: initial }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const cookie = response.headers
+      .getSetCookie()
+      .map((value) => value.split(";")[0])
+      .join("; ");
+    const request = new Request(fixture.base, { headers: { cookie } });
+    expect(await identity.session(request)).toMatchObject({ systemManager: false });
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${person.id})`;
+    expect(await identity.session(request)).toMatchObject({ systemManager: true });
+    await database.client`DELETE FROM factory.administrator WHERE user_id=${person.id}`;
+    expect(await identity.session(request)).toMatchObject({ systemManager: false });
+
+    const observed = await nativeGetSession({ headers: request.headers });
+    if (!observed) throw new Error("Owned native session missing");
+    // Even a previously observed native session must be checked against current account status.
+    Object.assign(identity.auth.api, { getSession: async () => observed });
+    await database.client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${person.id}`;
+    expect(await identity.session(request)).toBeNull();
+    await database.client`UPDATE factory.account_access SET disabled_at=NULL,directory_disabled_at=now()
+      WHERE user_id=${person.id}`;
+    expect(await identity.session(request)).toBeNull();
+    await database.client`UPDATE factory.account_access SET directory_disabled_at=NULL
+      WHERE user_id=${person.id}`;
+    expect(await identity.session(request)).toMatchObject({ systemManager: false });
+  } finally {
+    Object.assign(identity.auth.api, { getSession: nativeGetSession });
     if (previousBase === undefined) delete process.env["FACTORY_BASE_URL"];
     else process.env["FACTORY_BASE_URL"] = previousBase;
     await database.client.end({ timeout: 2 });

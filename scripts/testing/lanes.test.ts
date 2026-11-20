@@ -133,6 +133,8 @@ test("database-only feature checks skip the application build while endpoint che
     "agent-read",
     "agent-turn-store",
     "coding-source-dispatch-fence",
+    "fixture-cleanup",
+    "native-ui-fixture",
     "change-document-drizzle",
     "delivery-controller-drizzle",
     "inbox",

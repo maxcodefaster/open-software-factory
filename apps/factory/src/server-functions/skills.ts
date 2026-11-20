@@ -2,18 +2,12 @@ import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
 import {
-  personalSkillSettingsInput,
-  projectSkillSettingsInput,
-} from "../../../../packages/conversation-domain/src/skill-inheritance";
-import {
   skillChoiceInput,
   skillLibrarySaveInput,
 } from "../../../../packages/conversation-domain/src/skill-library";
 import {
   type SkillRole,
-  skillPublishInput,
   skillRoleInput,
-  systemSkillSettingsInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import { repositorySkillImportInput, skillImportInput, skillShareInput } from "../skills/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
@@ -129,65 +123,6 @@ export const checkSkillSourceUpdate = createServerFn({ method: "POST" })
       return context.skills.sourceUpdate(context.actorID, identity, project);
     });
   });
-export const getInheritedSkills = createServerFn({ method: "POST" })
-  .validator((args: [projectID: string]) => args)
-  .handler(async ({ data: [projectID] }) => {
-    return factoryFunction(async () => {
-      const project = z.uuid().parse(projectID);
-      const context = factoryFunctionContext();
-      return context.skills.inherited(context.actorID, project);
-    });
-  });
-export const saveProjectSkills = createServerFn({ method: "POST" })
-  .validator((args: [projectID: string, input: z.input<typeof projectSkillSettingsInput>]) => args)
-  .handler(async ({ data: [projectID, input] }) => {
-    return factoryFunction(async () => {
-      const project = z.uuid().parse(projectID);
-      const command = projectSkillSettingsInput.parse(input);
-      const context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.skills.saveProject(context.actorID, project, command);
-    });
-  });
-export const savePersonalSkills = createServerFn({ method: "POST" })
-  .validator((args: [projectID: string, input: z.input<typeof personalSkillSettingsInput>]) => args)
-  .handler(async ({ data: [projectID, input] }) => {
-    return factoryFunction(async () => {
-      const project = z.uuid().parse(projectID);
-      const command = personalSkillSettingsInput.parse(input);
-      const context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.skills.savePersonal(context.actorID, project, command);
-    });
-  });
-export const getSystemSkills = createServerFn({ method: "POST" })
-  .validator((args: never[]) => args)
-  .handler(async () => {
-    return factoryFunction(async () => {
-      const context = factoryFunctionContext();
-      return context.skills.system(context.actorID);
-    });
-  });
-export const publishSkill = createServerFn({ method: "POST" })
-  .validator((args: [input: z.input<typeof skillPublishInput>]) => args)
-  .handler(async ({ data: [input] }) => {
-    return factoryFunction(async () => {
-      const command = skillPublishInput.parse(input);
-      const context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.skills.publish(context.actorID, command);
-    });
-  });
-export const saveSystemSkills = createServerFn({ method: "POST" })
-  .validator((args: [input: z.input<typeof systemSkillSettingsInput>]) => args)
-  .handler(async ({ data: [input] }) => {
-    return factoryFunction(async () => {
-      const command = systemSkillSettingsInput.parse(input);
-      const context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.skills.saveSystem(context.actorID, command);
-    });
-  });
 export const setSkillPublication = createServerFn({ method: "POST" })
   .validator((args: [id: string, published: boolean]) => args)
   .handler(async ({ data: [id, published] }) => {
@@ -200,10 +135,4 @@ export const setSkillPublication = createServerFn({ method: "POST" })
     });
   });
 
-registerSharedReads(
-  getSkillLibrary,
-  getSkillInvocations,
-  getSkillRevision,
-  getInheritedSkills,
-  getSystemSkills,
-);
+registerSharedReads(getSkillLibrary, getSkillInvocations, getSkillRevision);

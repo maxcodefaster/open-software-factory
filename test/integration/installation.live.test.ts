@@ -118,9 +118,11 @@ test.skipIf(!name)(
     const skill = await serverCall(
       callFactoryFunction(
         base,
-        "publishSkill",
+        "saveSkill",
         [
           {
+            libraryId: crypto.randomUUID(),
+            scope: "system",
             revisionId: skillID,
             expectedRevision: 0,
             content: requirementsInterviewSkill,
@@ -145,7 +147,7 @@ test.skipIf(!name)(
     );
     const usersBefore = await serverCall(callFactoryFunction(base, "getAccounts", [], { cookie }));
     const skillBefore = await serverCall(
-      callFactoryFunction(base, "getSystemSkills", [], { cookie }),
+      callFactoryFunction(base, "getSkillLibrary", [], { cookie }),
     );
     const extraVolume = `${composeProject(installation)}_unknown-guard`;
     await writeFile(
@@ -212,7 +214,7 @@ test.skipIf(!name)(
     expect(await serverCall(callFactoryFunction(base, "getModelSettings", [], { cookie }))).toEqual(
       settings,
     );
-    expect(await serverCall(callFactoryFunction(base, "getSystemSkills", [], { cookie }))).toEqual(
+    expect(await serverCall(callFactoryFunction(base, "getSkillLibrary", [], { cookie }))).toEqual(
       skillBefore,
     );
     expect(await serverCall(callFactoryFunction(base, "getAccounts", [], { cookie }))).toEqual(

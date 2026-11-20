@@ -30,6 +30,7 @@ test("admitted configuration is readable, private to Project members, and distin
   const ticketID = crypto.randomUUID();
   const conversationID = crypto.randomUUID();
   const revisionID = crypto.randomUUID();
+  const libraryID = crypto.randomUUID();
   const short = projectID.slice(0, 8);
   const title = `Configuration QA ${short}`;
   const password = "owned-configuration-browser-password";
@@ -112,8 +113,10 @@ test("admitted configuration is readable, private to Project members, and distin
     await database.client`INSERT INTO factory.ticket_conversation(id, project_id, ticket_id, mode, created_by)
       VALUES (${conversationID}, ${projectID}, ${ticketID}, 'plan', ${member.id})`;
     const skills = createSkillController(database);
-    await skills.publish(
+    await skills.library.save(
       {
+        libraryId: libraryID,
+        scope: "system",
         revisionId: revisionID,
         expectedRevision: 0,
         content: {
@@ -180,20 +183,38 @@ test("admitted configuration is readable, private to Project members, and distin
     await composer.fill("Retain this draft while inspecting configuration.");
     await developer.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
     const skillDefaults = await serverCall(
-      browserFunction(developer, "getInheritedSkills", [projectID]),
+      browserFunction(developer, "getSkillLibrary", [projectID]),
     );
     let skillUnavailable = true;
     await mockFactoryFunctions(developer, {
       skills: {
-        async inherited() {
+        async library() {
           if (!skillUnavailable)
-            return serverCall(browserFunction(developer, "getInheritedSkills", [projectID]));
+            return serverCall(browserFunction(developer, "getSkillLibrary", [projectID]));
           return {
             ...skillDefaults,
-            effective: {
-              ...skillDefaults.effective,
-              planning: { ...skillDefaults.effective.planning, available: false },
-            },
+            entries: skillDefaults.entries.map((entry) =>
+              entry.id === libraryID
+                ? {
+                    ...entry,
+                    revisions: entry.revisions.map((revision) => ({
+                      ...revision,
+                      published: false,
+                    })),
+                  }
+                : entry,
+            ),
+            choices: [
+              ...skillDefaults.choices,
+              {
+                libraryId: libraryID,
+                revisionId: revisionID,
+                scope: "personal" as const,
+                role: "planning" as const,
+                state: "enable" as const,
+                version: 1,
+              },
+            ],
           };
         },
       },
@@ -259,8 +280,11 @@ test("admitted configuration is readable, private to Project members, and distin
           throw new Error("Owned configuration fixture acquired a runtime; cleanup refused");
         }
         await sql`SET LOCAL session_replication_role = replica`;
+        await sql`DELETE FROM factory.skill_library_revision WHERE library_id = ${libraryID}`;
+        await sql`DELETE FROM factory.skill_library_cover WHERE library_id = ${libraryID}`;
+        await sql`DELETE FROM factory.skill_library WHERE id = ${libraryID}`;
         await sql`DELETE FROM factory.skill_publication WHERE revision_id = ${revisionID}`;
-        await sql`DELETE FROM factory.skill_revision WHERE id = ${revisionID} AND skill_key = ${`config-qa-${short}`}`;
+        await sql`DELETE FROM factory.skill_revision WHERE id = ${revisionID} AND skill_key = ${`library-${libraryID}`}`;
         // Restore constraints and cascades before deleting owned identities.
         await sql`SET LOCAL session_replication_role = origin`;
         for (const user of users) {

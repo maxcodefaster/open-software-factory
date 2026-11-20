@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { DrizzleQueryError } from "drizzle-orm";
 import { describeFailure, reportFailure } from "./failure-log";
 
 test("failure descriptions keep the cause chain and drop credentials", () => {
@@ -25,4 +26,18 @@ test("reported failures reach the log with their context", () => {
   } finally {
     log.mockRestore();
   }
+});
+
+test("database failure logs retain SQLSTATE and stack without query text or parameter values", () => {
+  const cause = Object.assign(new Error("private-error-detail"), { code: "40P01" });
+  const failure = new DrizzleQueryError(
+    'select "owner_token" from "factory"."agent_turn" where "owner_token" = $1',
+    ["private-lease", "private-provider-key"],
+    cause,
+  );
+  const text = describeFailure(failure);
+  expect(text).toContain("40P01");
+  expect(text).toContain("at ");
+  expect(text).not.toContain("private-");
+  expect(text).not.toContain("owner_token");
 });

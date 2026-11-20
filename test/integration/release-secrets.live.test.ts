@@ -51,9 +51,9 @@ test.skipIf(!installation)(
         ),
         await serverCall(callFactoryFunction(f.base, "getModelSettings", [], { cookie: admin })),
         await serverCall(
-          callFactoryFunction(f.base, "getInheritedSkills", [project], { cookie: developer }),
+          callFactoryFunction(f.base, "getSkillLibrary", [project], { cookie: developer }),
         ),
-        await serverCall(callFactoryFunction(f.base, "getSystemSkills", [], { cookie: admin })),
+        await serverCall(callFactoryFunction(f.base, "getSkillLibrary", [], { cookie: admin })),
       ])
         f.noSecrets(JSON.stringify(result));
       expect(
@@ -154,8 +154,8 @@ test.skipIf(!installation)(
           "getBootstrap",
           "getProjectModels",
           "getModelSettings",
-          "getInheritedSkills",
-          "getSystemSkills",
+          "getSkillLibrary",
+          "getSkillLibrary",
         ],
         runtimeIDs: runtimes.map(({ id }) => id),
         nativeTemplates: templates,

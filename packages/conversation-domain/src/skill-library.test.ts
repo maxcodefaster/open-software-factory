@@ -9,7 +9,13 @@ import {
 import { requirementsInterviewSkill } from "../../../apps/factory/src/skills/reviewed";
 import { starterSkills } from "../../../apps/factory/src/skills/starters";
 import { fixtureValue } from "../../../test/fixtures/value";
-import { type LibraryChoice, librarySkillIds, resolveLibraryChoice } from "./skill-library";
+import {
+  type LibraryChoice,
+  librarySkillAssignments,
+  librarySkillIds,
+  librarySkillsAvailable,
+  resolveLibraryChoice,
+} from "./skill-library";
 import { skillContentInput } from "./skills";
 
 test("per-skill choices inherit later defaults, lock required versions, and reset one override", () => {
@@ -52,6 +58,114 @@ test("per-skill choices inherit later defaults, lock required versions, and rese
     version: 1,
   });
   expect(resolveLibraryChoice(choices, second, "planning")?.state).toBe("enable");
+});
+
+test("admission rejects an enabled unpublished exact version even when a newer version is published", () => {
+  const libraryId = crypto.randomUUID();
+  const revisionId = crypto.randomUUID();
+  const entries = [
+    {
+      id: libraryId,
+      scope: "system" as const,
+      ownerId: null,
+      projectId: null,
+      editable: false,
+      revisions: [false, true].map((published) => ({
+        id: published ? crypto.randomUUID() : revisionId,
+        revision: published ? 2 : 1,
+        content: requirementsInterviewSkill,
+        digest: "a".repeat(64),
+        published,
+      })),
+    },
+  ];
+  const choices: LibraryChoice[] = [
+    {
+      libraryId,
+      revisionId,
+      role: "planning",
+      scope: "system",
+      state: "enable",
+      version: 1,
+    },
+  ];
+  expect(() => librarySkillAssignments(entries, choices, "planning")).toThrow("unavailable");
+  expect(librarySkillsAvailable(entries, choices, "planning")).toBe(false);
+  choices[0] = { ...fixtureValue(choices[0], "choice"), state: "disable" };
+  expect(librarySkillAssignments(entries, choices, "planning")).toEqual([]);
+  expect(librarySkillsAvailable(entries, choices, "planning")).toBe(true);
+});
+
+test("availability and admission agree on role eligibility, missing versions and the sixteen-library bound", () => {
+  const entries = Array.from({ length: 17 }, () => ({
+    id: crypto.randomUUID(),
+    scope: "system" as const,
+    ownerId: null,
+    projectId: null,
+    editable: false,
+    revisions: [
+      {
+        id: crypto.randomUUID(),
+        revision: 1,
+        content: requirementsInterviewSkill,
+        digest: "a".repeat(64),
+        published: true,
+      },
+    ],
+  }));
+  const choices: LibraryChoice[] = entries.map((entry) => ({
+    libraryId: entry.id,
+    revisionId: fixtureValue(entry.revisions[0], "revision").id,
+    scope: "system",
+    role: "planning",
+    state: "required",
+    version: 1,
+  }));
+  expect(() => librarySkillAssignments(entries, choices, "planning")).toThrow("At most 16");
+  expect(librarySkillsAvailable(entries, choices, "planning")).toBe(false);
+  expect(librarySkillsAvailable(entries.slice(0, 16), choices, "planning")).toBe(true);
+  const entry = fixtureValue(entries[0], "entry");
+  const choice = fixtureValue(choices[0], "choice");
+  expect(librarySkillsAvailable([entry], [{ ...choice, role: "build" }], "build")).toBe(false);
+  expect(
+    librarySkillsAvailable([entry], [{ ...choice, revisionId: crypto.randomUUID() }], "planning"),
+  ).toBe(false);
+});
+
+test("shared Ticket/background admission excludes personal-only choices and private libraries", () => {
+  const entry = {
+    id: crypto.randomUUID(),
+    scope: "personal" as const,
+    ownerId: crypto.randomUUID(),
+    projectId: null,
+    editable: true,
+    revisions: [
+      {
+        id: crypto.randomUUID(),
+        revision: 1,
+        content: requirementsInterviewSkill,
+        digest: "a".repeat(64),
+        published: false,
+      },
+    ],
+  };
+  const choice: LibraryChoice = {
+    libraryId: entry.id,
+    revisionId: fixtureValue(entry.revisions[0], "revision").id,
+    scope: "personal",
+    role: "planning",
+    state: "enable",
+    version: 1,
+  };
+  expect(librarySkillsAvailable([entry], [choice], "planning")).toBe(false);
+  expect(librarySkillsAvailable([entry], [choice], "planning", false)).toBe(true);
+  expect(librarySkillAssignments([entry], [choice], "planning", false)).toEqual([]);
+  expect(
+    librarySkillAssignments([entry], [{ ...choice, scope: "project" }], "planning", false),
+  ).toEqual([]);
+  const shared = { ...entry, scope: "system" as const, ownerId: null };
+  const system = { ...choice, scope: "system" as const, state: "disable" as const };
+  expect(librarySkillAssignments([shared], [system, choice], "planning", false)).toEqual([]);
 });
 test("old immutable text parses without defaults or changed digest", () => {
   const digest = (value: unknown) =>

@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql as expression } from "drizzle-orm";
-import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import {
+  claimAgentWriterIn,
+  lockChangeWriterIn,
+} from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
@@ -945,6 +948,61 @@ test("owned fixture joins held work and cleans up even when Stop persistence thr
     await isolated.dispose();
   }
 });
+
+test("lease renewal shares the Change-before-turn lock order with execution validation", async () => {
+  const owned = await fixture();
+  const locked = Promise.withResolvers<number>();
+  const proceed = Promise.withResolvers<void>();
+  let writer: Promise<boolean> | undefined;
+  let renewal: Promise<boolean> | undefined;
+  try {
+    const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+      owned.changeID,
+      owned.userID,
+      {
+        kind: "change-prompt",
+        commandId: crypto.randomUUID(),
+        text: "Retain one lock order while preparing Coding",
+      },
+    );
+    const store = createAgentTurnStore(owned.database);
+    const owner = await store.claimPending(turn.id, 60_000);
+    if (!owner?.ownerToken) throw new Error("Owned claim required");
+    const ownerToken = owner.ownerToken;
+    writer = owned.database.client
+      .begin(async (sql) => {
+        await lockChangeWriterIn(sql, owned.changeID);
+        const [connection] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        if (!connection) throw new Error("Owned writer connection required");
+        locked.resolve(connection.pid);
+        await proceed.promise;
+        return store.validateExecutionIn(sql, turn.id, ownerToken);
+      })
+      .catch((cause: unknown) => {
+        locked.reject(cause);
+        throw cause;
+      });
+    const writerPID = await locked.promise;
+    renewal = store.renew(turn.id, ownerToken, 60_000);
+    await until(
+      async () =>
+        (
+          await owned.database.client`SELECT pid FROM pg_stat_activity
+            WHERE ${writerPID} = ANY(pg_blocking_pids(pid))`
+        ).length > 0,
+      500,
+    );
+    proceed.resolve();
+    expect(await writer).toBe(true);
+    expect(await renewal).toBe(true);
+    expect(await store.validateExecution(turn.id, ownerToken)).toBe(true);
+    expect(owned.requests()).toBe(0);
+  } finally {
+    proceed.resolve();
+    await Promise.allSettled([writer, renewal]);
+    await owned.dispose();
+  }
+}, 30_000);
 
 test("execution validation rejects a lease that expires during an authority lock wait", async () => {
   const owned = await fixture();
