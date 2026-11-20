@@ -3,7 +3,7 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import type { createDatabase } from "../../packages/db/src/client";
 import { factoryProcess } from "../fixtures/factory-process";
 

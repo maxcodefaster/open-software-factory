@@ -4,13 +4,14 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { chromium } from "@playwright/test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
 import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -26,8 +27,9 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
     const providerKey = process.env["FACTORY_MODEL_API_KEY"];
     if (!modelId || !providerURL || !providerKey)
       throw new Error("Browser Build needs the configured deployed model");
-    const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
-    const browserToolsImage = (await readFile(".factory/browser-tools-image", "utf8")).trim();
+    const artifacts = await requirePublishedRuntimeArtifacts(".factory");
+    const runtimeHostImage = artifacts["runtime-host"];
+    const browserToolsImage = artifacts["browser-tools"];
     const forgejoToken = (await readFile(".factory/forgejo-token", "utf8")).trim();
     const projectID = crypto.randomUUID();
     const ticketID = crypto.randomUUID();

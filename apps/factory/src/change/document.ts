@@ -1,12 +1,18 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
   TicketFollowUpInput,
 } from "../../../../packages/requirement-domain/src/document";
-import { canonicalRequirementContent } from "../../../../packages/requirement-domain/src/requirement";
+import {
+  canonicalRequirementContent,
+  requirementDigest,
+} from "../../../../packages/requirement-domain/src/requirement";
+import {
+  appendTicketAuthoringIn,
+  insertInitialTicketIn,
+} from "../../../../packages/ticket-authoring/src/authoring";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
@@ -77,10 +83,18 @@ export function createTicketDocumentController(
         >`SELECT canonical_content AS canonical FROM factory.requirement_revision WHERE id = ${input.requirementRevisionId} AND ticket_id = ${ticketID}`;
         const canonical = document?.canonical ?? revision?.canonical;
         if (!canonical) throw new CommandError("conflict", "Requirements are unavailable");
-        await sql`INSERT INTO factory.ticket(id, project_id, epic_id, title, description, state, created_by)
-          VALUES (${input.commandId}, ${ticket.projectID}, ${ticket.epicID}, ${`Follow-up: ${ticket.title}`.slice(0, 200)}, ${ticket.description}, 'ready', ${userID})`;
-        await sql`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
-          VALUES (${crypto.randomUUID()}, ${input.commandId}, 1, ${canonical}, ${createHash("sha256").update(canonical).digest("hex")}, ${userID})`;
+        await insertInitialTicketIn(drizzleTransaction(sql), {
+          id: input.commandId,
+          projectId: ticket.projectID,
+          epicId: ticket.epicID,
+          title: `Follow-up: ${ticket.title}`.slice(0, 200),
+          description: ticket.description,
+          state: "ready",
+          createdBy: userID,
+          authoring: {
+            requirement: { id: crypto.randomUUID(), canonicalContent: canonical },
+          },
+        });
         await sql`INSERT INTO factory.ticket_follow_up(ticket_id, source_ticket_id, source_document_id, source_revision_id)
           VALUES (${input.commandId}, ${ticketID}, ${document?.id ?? null}, ${input.requirementRevisionId})`;
         return { ticketId: input.commandId };
@@ -91,8 +105,7 @@ export function createTicketDocumentController(
       const canonical = complete.success
         ? canonicalRequirementContent(complete.data)
         : JSON.stringify(input.requirement);
-      const digest = (value: string) => createHash("sha256").update(value).digest("hex");
-      const inputDigest = digest(JSON.stringify(input));
+      const inputDigest = requirementDigest(JSON.stringify(input));
       return database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${input.commandId}`}))`;
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${ticketID}`}))`;
@@ -197,16 +210,29 @@ export function createTicketDocumentController(
           // admitted base above still fences concurrent edits and superseded proposals.
         }
         let revisionID = input.requirementRevisionId;
+        let requirement: { id: string; ordinal: number } | undefined;
         if (!approvals.length && complete.success && latest?.canonical !== canonical) {
           revisionID = input.commandId;
-          await sql`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
-            VALUES (${revisionID}, ${ticketID}, ${(latest?.ordinal ?? 0) + 1}, ${canonical}, ${digest(canonical)}, ${userID})`;
+          requirement = { id: revisionID, ordinal: (latest?.ordinal ?? 0) + 1 };
         }
         if (!approvals.length && !complete.success) revisionID = null;
         const ordinal = Math.max(current[0]?.ordinal ?? 0, latest?.ordinal ?? 0) + 1;
-        await sql`INSERT INTO factory.ticket_document_revision(
-          id, ticket_id, ordinal, title, description, canonical_content, content_digest, requirement_revision_id, input_digest, created_by, author_kind, proposal_entry_id)
-          VALUES (${input.commandId}, ${ticketID}, ${ordinal}, ${input.title}, ${input.description}, ${canonical}, ${digest(canonical)}, ${revisionID}, ${inputDigest}, ${userID}, ${input.proposalEntryId ? "ai" : "human"}, ${input.proposalEntryId ?? null})`;
+        await appendTicketAuthoringIn(drizzleTransaction(sql), {
+          ticketId: ticketID,
+          createdBy: userID,
+          title: input.title,
+          description: input.description,
+          canonicalContent: canonical,
+          ...(requirement ? { requirement } : {}),
+          document: {
+            id: input.commandId,
+            ordinal,
+            requirementRevisionId: revisionID,
+            inputDigest,
+            authorKind: input.proposalEntryId ? "ai" : "human",
+            ...(input.proposalEntryId ? { proposalEntryId: input.proposalEntryId } : {}),
+          },
+        });
         await sql`UPDATE factory.ticket SET title = ${input.title}, description = ${input.description},
           state = CASE WHEN state IN ('inbox','backlog') AND ${complete.success} THEN 'ready' ELSE state END,
           version = version + 1, updated_at = now() WHERE id = ${ticketID}`;

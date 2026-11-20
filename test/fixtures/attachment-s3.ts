@@ -1,10 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
-import upstream from "../../upstream.json";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 
-export const attachmentS3Image = upstream.garage.image;
+export const attachmentS3Image = imagePins.garage;
 
 async function docker(...args: string[]) {
   const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });

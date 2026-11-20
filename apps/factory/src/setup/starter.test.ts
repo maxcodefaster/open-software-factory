@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
+import imagePins from "../../../../deploy/helm/factory/image-pins.json";
 import upstream from "../../../../upstream.json";
 import { starterFiles } from "./starter";
 
@@ -46,9 +47,6 @@ test("the authored Starter uses the selected exact toolchain and database images
   const manifest = JSON.parse(content("package.json"));
   const factory = await Bun.file(new URL("../../../../package.json", import.meta.url)).json();
   const compose = parse(content(".devcontainer/compose.yaml"));
-  const local = parse(
-    await readFile(new URL("../../../../deploy/local/compose.yaml", import.meta.url), "utf8"),
-  );
   expect(manifest.engines.node).toBe(upstream.nodeDevelopment.version);
   for (const name of ["solid-js", "@solidjs/web"]) {
     expect(manifest.dependencies[name]).toBe(factory.dependencies[name]);
@@ -72,5 +70,5 @@ test("the authored Starter uses the selected exact toolchain and database images
   ).toBe(false);
   expect(files.some((file) => /(^|\/)\.env/.test(file.path))).toBe(false);
   expect(compose.services.app.image).toBe(upstream.nodeDevelopment.image);
-  expect(compose.services.postgres.image).toBe(local.services.postgres.image);
+  expect(compose.services.postgres.image).toBe(imagePins.postgres);
 });

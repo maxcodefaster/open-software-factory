@@ -36,6 +36,23 @@ import { attachmentContextIn, readableAttachmentIn } from "../attachments/store"
 import { createAttachmentTools } from "../attachments/tools";
 import type { ChangeView } from "../change/types";
 import { CommandError } from "../command-error";
+import {
+  contextCommandIn,
+  contextsIn,
+  contextTranscriptIn,
+  insertContextIn,
+} from "../conversations/contexts";
+import {
+  appendConversationEntry,
+  type Citation,
+  type ConversationEntry,
+  type ConversationRow,
+  ensureConversationIn,
+  findConversation,
+  lockConversation,
+  readConversation,
+  readConversationEntries,
+} from "../conversations/store";
 import { reportFailure } from "../failure-log";
 import { codeReadInput } from "../knowledge/code-read";
 import type { createKnowledgeController } from "../knowledge/controller";
@@ -60,15 +77,6 @@ import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { generateProjectResponse } from "./adapter";
 import { ProjectContextLimitError } from "./context";
-import { contextIn, contextsIn } from "./conversation-contexts";
-import {
-  appendConversationEntry,
-  type Citation,
-  type ConversationEntry,
-  type ConversationRow,
-  ensureConversationIn,
-  lockConversation,
-} from "./conversation-store";
 import { persistProjectOutput } from "./effects";
 import { createEpicConfirmation } from "./epic-confirmation";
 import { isRequirementsInterview, planningRequest } from "./interview-intent";
@@ -165,34 +173,11 @@ export function createProjectAgentController(
   }
 
   async function conversation(projectID: string, ticketID: string | undefined, userID: string) {
-    const rows = await database.client<ConversationRow[]>`
-      SELECT id, project_id AS "projectId", ticket_id AS "ticketId", mode,
-        version::integer AS version
-      FROM factory.ticket_conversation
-      WHERE project_id = ${projectID}
-        AND (
-          (${ticketID ?? null}::uuid IS NULL AND ticket_id IS NULL AND created_by = ${userID})
-          OR ticket_id = ${ticketID ?? null}
-        )
-      LIMIT 1
-    `;
-    return rows[0];
+    return findConversation(database, projectID, ticketID, userID);
   }
 
   async function conversationByID(conversationID: string, contextID?: string) {
-    const rows = await database.client<ConversationRow[]>`
-      SELECT id, project_id AS "projectId", ticket_id AS "ticketId", mode,
-        version::integer AS version,active_coding_context_id AS "activeCodingContextId"
-      FROM factory.ticket_conversation WHERE id = ${conversationID}
-    `;
-    const current = rows[0];
-    if (!current || !contextID) return current;
-    const context = await database.client.begin((sql) => contextIn(sql, conversationID, contextID));
-    return {
-      ...current,
-      contextId: contextID,
-      ...(context.kind === "research" ? { mode: context.mode, version: 1 } : {}),
-    };
+    return readConversation(database, conversationID, contextID);
   }
 
   async function ensureConversation(
@@ -206,18 +191,7 @@ export function createProjectAgentController(
   }
 
   async function entries(conversationID: string, contextID?: string) {
-    const context = contextID
-      ? await database.client.begin((sql) => contextIn(sql, conversationID, contextID))
-      : undefined;
-    return database.client<ConversationEntry[]>`
-      SELECT id, ordinal::integer AS ordinal, kind, actor, mode, body, payload, citations,
-        in_reply_to_entry_id AS "inReplyToEntryId",
-        requirement_revision_id AS "requirementRevisionId", created_at AS "createdAt"
-      FROM factory.conversation_entry
-      WHERE conversation_id = ${conversationID}
-        AND payload->>'contextId' IS NOT DISTINCT FROM ${context?.original ? null : (contextID ?? null)}
-      ORDER BY ordinal
-    `;
+    return readConversationEntries(database, conversationID, contextID);
   }
 
   async function appendEntry(
@@ -303,11 +277,7 @@ export function createProjectAgentController(
       current.mode === "build" &&
       (current.contextId ?? null) !== (current.activeCodingContextId ?? null)
     ) {
-      const [archive] = await database.client<
-        { transcript: Record<string, unknown> }[]
-      >`SELECT transcript
-        FROM factory.conversation_context WHERE conversation_id=${current.id} AND
-        (id=${current.contextId ?? null} OR (${current.contextId ?? null}::uuid IS NULL AND original)) LIMIT 1`;
+      const archive = await contextTranscriptIn(database.client, current.id, current.contextId);
       codingHistory = archive?.transcript ?? null;
       if (archive && archive.transcript["messagesAvailable"] !== true && retainedMessages) {
         const observed = await retainedMessages(current.id, current.contextId);
@@ -1131,25 +1101,23 @@ export function createProjectAgentController(
       const id = await database.client.begin(async (sql) => {
         const root = await ensureConversationIn(sql, projectID, ticketID, userID);
         await lockConversation(sql, root.id);
-        const [previous] = await sql<
-          { id: string; conversationID: string; userID: string; kind: string }[]
-        >`
-          SELECT id,conversation_id AS "conversationID",created_by AS "userID",kind
-          FROM factory.conversation_context WHERE command_id=${commandID}`;
-        if (previous) {
-          if (
-            previous.conversationID !== root.id ||
-            previous.userID !== userID ||
-            previous.kind !== "research"
-          )
-            throw new CommandError("conflict", "This conversation command has different input.");
-          return previous.id;
-        }
+        const previous = await contextCommandIn(sql, {
+          conversationID: root.id,
+          commandID,
+          createdBy: userID,
+          kind: "research",
+        });
+        if (previous) return previous;
         const id = crypto.randomUUID();
-        await sql`INSERT INTO factory.conversation_context(id,conversation_id,command_id,kind,ordinal,title,created_by,mode)
-          VALUES(${id},${root.id},${commandID},'research',
-            (SELECT COALESCE(MAX(ordinal),0)+1 FROM factory.conversation_context WHERE conversation_id=${root.id}),
-            'New conversation',${userID},${ticketID && root.mode === "build" ? "investigate" : "plan"})`;
+        await insertContextIn(sql, {
+          id,
+          conversationID: root.id,
+          commandID,
+          kind: "research",
+          title: "New conversation",
+          createdBy: userID,
+          mode: ticketID && root.mode === "build" ? "investigate" : "plan",
+        });
         return id;
       });
       return this.get(projectID, ticketID, userID, id);

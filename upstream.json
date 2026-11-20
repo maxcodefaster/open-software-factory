@@ -11,17 +11,14 @@
     }
   },
   "garage": {
-    "version": "2.3.0",
-    "image": "docker.io/dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690"
+    "version": "2.3.0"
   },
   "openbao": {
-    "version": "2.7.1",
-    "image": "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
+    "version": "2.7.1"
   },
   "rclone": {
     "version": "1.74.1",
-    "image": "docker.io/rclone/rclone:1.74.1@sha256:eb8788b795f0009324e9572b0e2acb9b56885327c2746b07d67a9d3b893a6602",
-    "note": "Index digest (amd64 and arm64). Mirrors the object store and copies backup sets in the Helm chart's backup CronJob; deploy/helm/factory/templates/backup.yaml repeats this pin and a chart test compares them."
+    "note": "Mirrors the object store and copies backup sets in the Helm chart's backup CronJob. The shared service index digest (amd64 and arm64) is owned by deploy/helm/factory/image-pins.json."
   },
   "sqlite": {
     "version": "3.54.1",

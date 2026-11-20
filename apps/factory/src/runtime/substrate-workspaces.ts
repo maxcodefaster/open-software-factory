@@ -23,6 +23,7 @@ import {
 import upstream from "../../../../upstream.json";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
@@ -153,6 +154,7 @@ export function createSubstrateWorkspaces(
   readContract?: (repository: string, revision: string) => Promise<SystemContract>,
   sources?: SubstrateSourceHandoff,
   capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "requireReady">,
+  shutdownCoding = createCodingRuntimeShutdown(database, hub),
 ) {
   const config = configuration.parse(input);
   const desiredConfiguration = config;
@@ -214,7 +216,7 @@ export function createSubstrateWorkspaces(
         app.id === row.intent.systemContract.primaryApp ? "app" : `app-${app.id}`,
       ),
     };
-    return createSubstrateExecution(database, hub, secret, bound, editor, sources);
+    return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor, sources);
   }
   return {
     matchesProject: (id: string) => id === config.projectID,

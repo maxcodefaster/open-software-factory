@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import upstream from "../../upstream.json";
 import { buildModelID } from "./change-agent-turns";
 
@@ -51,7 +52,7 @@ export async function pinnedOpenCode(
 ) {
   artifactImage ??=
     process.env["FACTORY_OPENCODE_TEST_IMAGE"] ??
-    (await readFile(resolve(".factory/build-runtime-host-image"), "utf8")).trim();
+    (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
   // The default proof runs the same packaged OpenCode 2 server as Build.
   // Only an explicitly supplied candidate binary uses the upgrade harness.
   const packaged = !serverBinary;

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { retainLearningArtifactsIn } from "../../apps/factory/src/learning/artifacts";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
 import { createLearningService } from "../../apps/factory/src/learning/service";
@@ -1311,6 +1312,12 @@ test("an uncertain paid review is never replayed, and private proposals require 
     const released = (await service.decide(owned.userID, { ...command, releasePrivate: true })) as {
       ticketId: string;
     };
+    expect(await service.decide(owned.userID, { ...command, releasePrivate: true })).toEqual(
+      released,
+    );
+    await expect(
+      service.decide(owned.userID, { ...command, releasePrivate: false }),
+    ).rejects.toThrow("identity was reused");
     const [ticket] =
       await database.client`SELECT description FROM factory.ticket WHERE id=${released.ticketId}`;
     expect(ticket?.["description"]).toContain(content.change);
@@ -1318,6 +1325,57 @@ test("an uncertain paid review is never replayed, and private proposals require 
     expect(
       await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${released.ticketId}`,
     ).toHaveLength(0);
+    const [authored] = await database.client`
+      SELECT revision.ordinal AS "revisionOrdinal",revision.canonical_content AS canonical,
+        revision.content_digest AS digest,revision.created_by AS "revisionAuthor",
+        document.ordinal AS "documentOrdinal",document.title,document.description,
+        document.canonical_content AS "documentCanonical",document.content_digest AS "documentDigest",
+        document.input_digest AS "inputDigest",document.created_by AS "documentAuthor",
+        document.author_kind AS "authorKind",document.proposal_entry_id AS "proposalEntryID"
+      FROM factory.requirement_revision revision JOIN factory.ticket_document_revision document
+        ON document.requirement_revision_id=revision.id WHERE revision.ticket_id=${released.ticketId}`;
+    const canonical = JSON.stringify({
+      acceptanceCriteria: [content.validation],
+      nonGoals: [
+        "Do not weaken security, confirmed requirements, independent review or protected Verification gates.",
+        "Keep .forgejo/workflows/factory-verification.yml unchanged. Optimize project checks, tests or auxiliary CI instead.",
+      ],
+      summary: content.change,
+    });
+    const digest = createHash("sha256").update(canonical).digest("hex");
+    expect(authored).toEqual({
+      revisionOrdinal: 1,
+      canonical,
+      digest,
+      revisionAuthor: owned.userID,
+      documentOrdinal: 1,
+      title: content.title,
+      description: ticket?.["description"],
+      documentCanonical: canonical,
+      documentDigest: digest,
+      inputDigest: digest,
+      documentAuthor: owned.userID,
+      authorKind: "ai",
+      proposalEntryID: null,
+    });
+    expect(JSON.stringify(authored)).not.toContain(source.id);
+    expect(
+      await database.client`SELECT id FROM factory.ticket_conversation WHERE ticket_id=${released.ticketId} AND mode='plan'`,
+    ).toHaveLength(1);
+    expect(
+      await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${released.ticketId}`,
+    ).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.change WHERE ticket_id=${released.ticketId}`,
+    ).toHaveLength(0);
+    const [decision] = await database.client`
+      SELECT decision_id,decided_by,ticket_id,state FROM factory.learning_proposal WHERE id=${proposal}`;
+    expect(decision).toEqual({
+      decision_id: command.commandId,
+      decided_by: owned.userID,
+      ticket_id: released.ticketId,
+      state: "ticket-created",
+    });
   } finally {
     worker?.close();
     if (previous.url === undefined) delete process.env["FACTORY_MODEL_BASE_URL"];

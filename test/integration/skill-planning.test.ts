@@ -4,7 +4,7 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";

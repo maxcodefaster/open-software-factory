@@ -9,6 +9,7 @@ import type { createForgejoClient, ForgeRepository } from "../../packages/forge/
 import { releaseContract, releasePackageOwner } from "../../packages/project-domain/src/release";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { nativeActor } from "../../packages/runtime-kubernetes/src/substrate-control";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { requireOwnedProjectSourceRetention } from "./editor-source-resources";
 import { eventually, factoryProcess } from "./factory-process";
@@ -39,7 +40,7 @@ export async function publicationRuntimeProof(input: {
       FACTORY_FORGEJO_PUBLIC_URL: input.publicOrigin,
     },
   );
-  const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
+  const runtimeHostImage = (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
   const directory = resolve(".factory/test-results/releases", `runtime-${id}`);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const bao = await localOpenBao(directory);

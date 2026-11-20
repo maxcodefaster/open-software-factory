@@ -378,6 +378,11 @@ async function contentFixture(repo: Awaited<ReturnType<typeof repository>>) {
     join(repo.root, "upstream.json"),
     await readFile(resolve(import.meta.dir, "../../upstream.json")),
   );
+  await mkdir(join(repo.root, "deploy/helm/factory"), { recursive: true });
+  await writeFile(
+    join(repo.root, "deploy/helm/factory/image-pins.json"),
+    await readFile(resolve(import.meta.dir, "../../deploy/helm/factory/image-pins.json")),
+  );
   const { loadFixture } = await import(join(repo.root, "scripts/kubernetes/restore-rehearsal.ts"));
   const privateRoot = join(repo.root, "private");
   const owner = "a".repeat(32);

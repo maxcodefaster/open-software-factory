@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import {
@@ -172,7 +173,15 @@ export async function substrateFixture(
     atespace,
     hub,
     execution(call?: SubstrateCall, sources?: SubstrateSourceHandoff) {
-      return createSubstrateExecution(database, hub, "owned-native-secret", config, call, sources);
+      return createSubstrateExecution(
+        database,
+        hub,
+        "owned-native-secret",
+        config,
+        createCodingRuntimeShutdown(database, hub),
+        call,
+        sources,
+      );
     },
     async controller(call: SubstrateCall, sources?: SubstrateSourceHandoff) {
       // Controller tests begin with positively observed native provisioning,

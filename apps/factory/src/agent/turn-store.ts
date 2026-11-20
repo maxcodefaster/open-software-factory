@@ -16,7 +16,7 @@ import { freezeAttachmentContextIn } from "../attachments/store";
 import { CommandError } from "../command-error";
 import { createMCPLibrary } from "../mcp/controller";
 import { inputTicketAssignmentsIn, monitoringChangeAuthorityIn } from "../monitoring/authority";
-import { lockConversation } from "../project-agent/conversation-store";
+import { lockConversation } from "../conversations/store";
 import { codingBudgetIn } from "../usage/policy";
 
 type Database = ReturnType<typeof createDatabase>;

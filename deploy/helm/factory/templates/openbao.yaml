@@ -1,5 +1,5 @@
 {{- $localStatus := "bao status -address=https://127.0.0.1:8200 -ca-cert=/bao/tls/ca.crt >/dev/null; result=$?; test \"$result\" -eq 0 -o \"$result\" -eq 2" -}}
-{{- $openbaoImage := "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf" -}}
+{{- $openbaoImage := include "factory.serviceImage" (dict "root" . "name" "openbao") -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

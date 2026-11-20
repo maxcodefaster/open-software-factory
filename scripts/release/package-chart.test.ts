@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import { runtimeArtifactNames } from "../factory/artifacts";
 import { packageFactoryChart, releaseChartFiles } from "./package-chart";
 
@@ -44,7 +45,7 @@ test("malformed and legacy release inputs refuse rather than adding a worker com
 test("real Helm packaging carries the complete Actor artifact set and no architecture worker values", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-native-package-test-"));
   const run = async (args: string[]) => {
-    const process = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+    const process = Bun.spawn(args, { cwd: directory, stdout: "pipe", stderr: "pipe" });
     const [exit, stdout, stderr] = await Promise.all([
       process.exited,
       new Response(process.stdout).text(),
@@ -67,6 +68,9 @@ test("real Helm packaging carries the complete Actor artifact set and no archite
     expect(JSON.parse(content.stdout)).toEqual(artifacts);
     expect(Object.keys(JSON.parse(content.stdout))).toEqual([...runtimeArtifactNames]);
     expect(content.stdout).not.toContain("workspace-files");
+    const pins = await run(["tar", "-xzOf", packaged.chart, "factory/image-pins.json"]);
+    expect(pins.exit).toBe(0);
+    expect(JSON.parse(pins.stdout)).toEqual(imagePins);
     const files = await run(["tar", "-tzf", packaged.chart]);
     expect(files.exit).toBe(0);
     expect(files.stdout).not.toContain("values.arm64.yaml");
@@ -103,6 +107,30 @@ test("real Helm packaging carries the complete Actor artifact set and no archite
     ]);
     expect(rendered.exit).toBe(0);
     expect(rendered.stdout).not.toContain("FACTORY_FACTORYBOX");
+    for (const image of Object.values(imagePins)) expect(rendered.stdout).toContain(image);
+    const isolated = join(directory, "standalone");
+    await mkdir(isolated);
+    expect((await run(["tar", "-xzf", packaged.chart, "-C", isolated])).exit).toBe(0);
+    await writeFile(
+      join(isolated, "factory/image-pins.json"),
+      JSON.stringify({ ...imagePins, zero: "untrusted:latest" }),
+    );
+    const invalidPins = await run([
+      "helm",
+      "template",
+      "native",
+      join(isolated, "factory"),
+      "--set",
+      "publicURL=https://factory.example",
+      "--set",
+      "forgejoPublicURL=https://git.factory.example",
+      "--set",
+      "substrate.workspaceConfigurationSecret=owned-native",
+      "--set",
+      "substrate.provisionerTokenSecret=owned-owner",
+    ]);
+    expect(invalidPins.exit).not.toBe(0);
+    expect(invalidPins.stderr).toContain("zero service image must be pinned");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -83,6 +83,15 @@ resources:
 {{- $value | quote -}}
 {{- end -}}
 
+{{- define "factory.serviceImage" -}}
+{{- $pins := mustFromJson (required "The chart must carry image-pins.json" (.root.Files.Get "image-pins.json")) -}}
+{{- $image := required (printf "Missing approved %s service image" .name) (get $pins .name) -}}
+{{- if not (regexMatch "^[a-zA-Z0-9.:/_-]+@sha256:[a-f0-9]{64}$" $image) -}}
+{{- fail (printf "The approved %s service image must be pinned by @sha256 digest" .name) -}}
+{{- end -}}
+{{- $image -}}
+{{- end -}}
+
 {{- define "factory.credentialsSecret" -}}
 {{- default (printf "%s-credentials" (include "factory.name" .)) .Values.existingSecrets.credentials -}}
 {{- end -}}

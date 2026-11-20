@@ -222,8 +222,11 @@ export function createAgentController(
     });
   }
 
-  async function row(changeID: string) {
-    const rows = await database.client<AgentRow[]>`
+  async function row(
+    changeID: string,
+    sql: Database["client"] | AgentTurnTransaction = database.client,
+  ) {
+    const rows = await sql<AgentRow[]>`
       SELECT change.id AS "changeID", change.project_id AS "projectID",
         change.ticket_id AS "ticketID", ticket.title AS "ticketTitle",
         change.branch_name AS "branchName", change.base_sha AS "baseSHA",
@@ -1655,15 +1658,6 @@ export function createAgentController(
       >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
         JOIN factory.change change ON change.runtime_attempt_id=waiting.attempt_id WHERE change.id=${changeID}`;
       const turn = await readTurnObservation(database, { changeID, ...(turnID ? { turnID } : {}) });
-      if (turn?.state === "completed") {
-        const [emptyCommit] = await database.client<Array<{ summary: string }>>`
-          SELECT last_error AS summary FROM factory.change_commit_operation
-          WHERE id = ${turn.id} AND change_id = ${changeID} AND state = 'failed' AND commit_sha IS NULL
-            AND last_error IN (${noChangesToSubmit}, ${noChangesToSubmit + earlierSubmissionUnchanged})`;
-        // Native completion precedes Git observation. Project that exact
-        // no-change result without rewriting the immutable terminal turn.
-        if (emptyCommit) turn.summary = emptyCommit.summary;
-      }
       const intents = history
         ? await database.client<
             Array<{
@@ -1705,7 +1699,40 @@ export function createAgentController(
         AND pause.resumed_by_turn_id IS NULL AND turn.state IN ('pending','dispatching','running','failed')
         AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${changeID} AND (stop_pending OR state='stopped'))
         ORDER BY pause.created_at DESC LIMIT 1`;
-      const session = await row(changeID);
+      // Git settlement updates the operation and Session together. Capture them
+      // in one read snapshot so native history latency cannot split that outcome.
+      // Release the pooled connection before any native transcript request.
+      const { session, operations, pendingCommits, emptyCommit } = await database.client.begin(
+        "isolation level repeatable read read only",
+        async (sql) => {
+          const session = await row(changeID, sql);
+          const operations = await sql<Array<{ commitSHA: string | null }>>`
+            SELECT commit_sha AS "commitSHA" FROM factory.change_commit_operation
+            WHERE change_id = ${changeID} AND state = 'succeeded'
+            ORDER BY sequence DESC LIMIT 1
+          `;
+          const pendingCommits = await sql<
+            Array<{
+              id: string;
+              state: "commit-intended" | "committed" | "push-intended";
+              lastError: string | null;
+            }>
+          >`SELECT id, state, last_error AS "lastError" FROM factory.change_commit_operation
+            WHERE change_id = ${changeID} AND source = 'agent'
+              AND state IN ('commit-intended', 'committed', 'push-intended') LIMIT 1`;
+          const [emptyCommit] =
+            turn?.state === "completed"
+              ? await sql<Array<{ summary: string }>>`
+                  SELECT last_error AS summary FROM factory.change_commit_operation
+                  WHERE id = ${turn.id} AND change_id = ${changeID} AND state = 'failed' AND commit_sha IS NULL
+                    AND last_error IN (${noChangesToSubmit}, ${noChangesToSubmit + earlierSubmissionUnchanged})`
+              : [];
+          return { session, operations, pendingCommits, emptyCommit };
+        },
+      );
+      // Project only this exact Turn's empty commit, never a newer candidate's
+      // diagnostic onto historical turns or back into immutable turn history.
+      if (turn && emptyCommit) turn.summary = emptyCommit.summary;
       if (!session) {
         bindActivity(changeID);
         return {
@@ -1813,26 +1840,12 @@ export function createAgentController(
           // Unavailable live activity must not block persisted completion or Stop state.
         }
       }
-      const operations = await database.client<Array<{ commitSHA: string | null }>>`
-        SELECT commit_sha AS "commitSHA" FROM factory.change_commit_operation
-        WHERE change_id = ${changeID} AND state = 'succeeded'
-        ORDER BY sequence DESC LIMIT 1
-      `;
       const failed = turn?.state === "uncertain" || turn?.state === "failed";
       const preparingNewTurn = Boolean(
         turn &&
           turn.id !== session.activeTurnID &&
           (turn.state === "pending" || turn.state === "dispatching"),
       );
-      const pendingCommits = await database.client<
-        Array<{
-          id: string;
-          state: "commit-intended" | "committed" | "push-intended";
-          lastError: string | null;
-        }>
-      >`SELECT id, state, last_error AS "lastError" FROM factory.change_commit_operation
-        WHERE change_id = ${changeID} AND source = 'agent'
-          AND state IN ('commit-intended', 'committed', 'push-intended') LIMIT 1`;
       return {
         codingPause: codingPause ?? null,
         computeWait: waiting?.reason ?? null,

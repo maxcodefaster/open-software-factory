@@ -12,7 +12,7 @@ export const openBaoPolicy =
 export const backupPolicy =
   'path "sys/storage/raft/snapshot" { capabilities = ["read"] }\npath "auth/token/renew-self" { capabilities = ["update"] }';
 // Writes only the two policies and two AppRoles below. It cannot touch mounts, seal state or its own
-// policy, and its token lives 15 minutes. Changing this policy needs a root-token adoption.
+// policy, and its token lives 15 minutes. Initial bootstrap fixes this administrator's authority.
 export const adminPolicy = [
   'path "sys/policies/acl/factory-environments" { capabilities = ["create", "read", "update"] }',
   'path "sys/policies/acl/factory-backup" { capabilities = ["create", "read", "update"] }',
@@ -23,8 +23,7 @@ export const adminPolicy = [
   'path "auth/approle/role/factory-backup/secret-id/lookup" { capabilities = ["update"] }',
   'path "auth/token/revoke-self" { capabilities = ["update"] }',
 ].join("\n");
-// The version covers what the admin identity can rewrite. A later admin policy edit would ship
-// as a new role and needs the same adoption as an installation that predates the admin identity.
+// The version covers only the policies the retained administrator identity can rewrite.
 export const openBaoPolicyVersion = new Bun.CryptoHasher("sha256")
   .update(openBaoPolicy)
   .update("\0")
@@ -77,22 +76,17 @@ async function privateWrite(file: string, content: unknown) {
   await rename(temporary, file);
 }
 
-export type OpenBaoRecovery = { address: string; close(): Promise<void> };
 export type OpenBaoLogin = z.output<typeof loginSchema>;
 
 // Bootstrap is infrastructure work. Only the scoped, renewable AppRole token is
 // handed to the running application; the root token is revoked before readiness.
 // A least-privilege backup login is returned for the backup Job. Later policy updates use a
-// short-lived `factory-admin` AppRole. An installation without it, created before that role
-// existed, is adopted once: the retained unseal key mints a root token through the quorum-only
-// generate-root endpoints, which OpenBao 2.7 disables on the shared listener. `openRecovery`
-// (or `refreshPolicy` for a listener that enabled them) supplies the address that serves them.
+// short-lived retained `factory-admin` AppRole. Missing administrator credentials refuse an
+// upgrade without generating another root token or changing the retained store's identity.
 export async function bootstrapOpenBao(input: {
   directory: string;
   address: string;
   caFile: string;
-  refreshPolicy?: boolean;
-  openRecovery?: () => Promise<OpenBaoRecovery>;
   fetch?: (url: URL, options: RequestInit) => Promise<Response>;
 }) {
   await mkdir(input.directory, { recursive: true, mode: 0o700 });
@@ -100,15 +94,9 @@ export async function bootstrapOpenBao(input: {
   if (address.protocol !== "https:" || address.username || address.password)
     throw new Error("OpenBao requires authenticated TLS");
   const ca = await readFile(input.caFile, "utf8");
-  async function api(
-    path: string,
-    body?: unknown,
-    token?: string,
-    method?: "DELETE",
-    base: URL = address,
-  ) {
+  async function api(path: string, body?: unknown, token?: string) {
     const options = {
-      method: method ?? (body === undefined ? "GET" : "POST"),
+      method: body === undefined ? "GET" : "POST",
       redirect: "error" as const,
       // Initial Raft election and barrier creation may use the native 90-second
       // request window. Aborting this write early can lose the only unseal keys.
@@ -117,7 +105,7 @@ export async function bootstrapOpenBao(input: {
       headers: { "content-type": "application/json", ...(token ? { "X-Vault-Token": token } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     };
-    const response = await (input.fetch ?? fetch)(new URL(`/v1/${path}`, base), options);
+    const response = await (input.fetch ?? fetch)(new URL(`/v1/${path}`, address), options);
     if (!response.ok) {
       await response.body?.cancel();
       throw new BootstrapHTTPError(response.status, path);
@@ -198,8 +186,8 @@ export async function bootstrapOpenBao(input: {
     }
   }
 
-  // The same writes run with a root token (first bootstrap, adoption) or the admin token. Each is
-  // idempotent, so a restart after a lost response repeats them safely.
+  // The same writes run with the initial root token or the retained admin token. Each is
+  // idempotent, so interrupted bootstrap and policy upgrades reuse their original credentials.
   async function ensureLogin(
     role: string,
     files: { login: string; intent: string },
@@ -269,47 +257,6 @@ export async function bootstrapOpenBao(input: {
     await writeFile(policyFile, openBaoPolicyVersion, { mode: 0o600 });
   }
 
-  async function adopt() {
-    const recovery = input.openRecovery ? await input.openRecovery() : undefined;
-    const base = recovery ? new URL(recovery.address) : address;
-    const root = (path: string, body?: unknown, token?: string, method?: "DELETE") =>
-      api(path, body, token, method, base);
-    try {
-      const status = z
-        .object({ started: z.boolean() })
-        .parse(await root("sys/generate-root/attempt"));
-      if (status.started)
-        throw new Error("OpenBao has an active root generation; progress was preserved");
-      const attempt = z
-        .object({ nonce: z.string(), otp: z.string() })
-        .parse(await root("sys/generate-root/attempt", {}));
-      let token: string | undefined;
-      try {
-        const result = z.object({ complete: z.literal(true), encoded_token: z.string() }).parse(
-          await root("sys/generate-root/update", {
-            nonce: attempt.nonce,
-            key: bootstrap.keys_base64[0],
-          }),
-        );
-        const bytes = Buffer.from(result.encoded_token, "base64");
-        const otp = Buffer.from(attempt.otp);
-        if (bytes.length !== otp.length) throw new Error("OpenBao root encoding is invalid");
-        token = Buffer.from(bytes.map((value, index) => value ^ (otp[index] ?? 0))).toString();
-        await provisionRoot(token);
-      } finally {
-        if (token) await root("auth/token/revoke-self", {}, token);
-        // Cancellation is restricted to the exact attempt created above.
-        const current = z
-          .object({ started: z.boolean(), nonce: z.string().optional() })
-          .parse(await root("sys/generate-root/attempt"));
-        if (current.started && current.nonce === attempt.nonce)
-          await root("sys/generate-root/attempt", undefined, undefined, "DELETE");
-      }
-    } finally {
-      await recovery?.close();
-    }
-  }
-
   if (bootstrap.root_token) {
     await provisionRoot(bootstrap.root_token);
   } else if (
@@ -328,8 +275,6 @@ export async function bootstrapOpenBao(input: {
       } finally {
         await api("auth/token/revoke-self", {}, token).catch(() => undefined);
       }
-    } else if (input.refreshPolicy || input.openRecovery) {
-      await adopt();
     }
   }
   if (
@@ -338,7 +283,7 @@ export async function bootstrapOpenBao(input: {
     (await retained(adminFile)) === null
   )
     throw new Error(
-      "OpenBao policy update needs its controlled maintenance bootstrap; data was preserved",
+      "OpenBao policy update requires its retained administrator AppRole; data was preserved",
     );
   const oldToken = (await retained(tokenFile))?.trim();
   const renewed = oldToken

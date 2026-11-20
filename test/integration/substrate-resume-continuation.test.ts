@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import {
   createSubstrateExecution,
   type SubstrateConfiguration,
@@ -210,6 +211,7 @@ test.each([
           f.hub,
           "owned-native-secret",
           configuration,
+          createCodingRuntimeShutdown(f.database, f.hub),
           call,
         ).recover();
       };

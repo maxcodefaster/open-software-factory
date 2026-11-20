@@ -5,7 +5,7 @@ import {
 } from "../../apps/factory/src/agent/turn-store";
 import { connectFactoryMCP, createFactoryTicketCommand } from "../../apps/factory/src/mcp/factory";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { readResearch, searchResearch } from "../../apps/factory/src/project-agent/research";
 import { factoryProcess } from "../fixtures/factory-process";
 

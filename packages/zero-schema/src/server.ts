@@ -3,16 +3,16 @@ import type { DrizzleTransaction } from "@rocicorp/zero/server/adapters/drizzle"
 import { and, eq, sql } from "drizzle-orm";
 import type { createDatabase } from "../../db/src/client";
 import { epic, project, ticket, ticketDependency } from "../../db/src/schema";
+import { createPlanningTicketIn } from "../../ticket-authoring/src/authoring";
 import { dependencyWouldCycle } from "../../ticket-domain/src/dependency";
 import { canPlanTicket } from "../../ticket-domain/src/ticket";
 import { ticketDependencyValidator } from "./dependencies";
 import { assignTicketEpicValidator, createEpicValidator, updateEpicValidator } from "./epics";
 import { knowledgePageIconValidator, moveKnowledgePageValidator } from "./knowledge";
 import { moveKnowledgePage, setKnowledgePageIcon } from "./knowledge-server";
+import { projectBackgroundValidator } from "./projects";
 import type { FactoryZeroContext, FactoryZeroSchema } from "./schema";
 import { createTicketValidator, moveTicketValidator, updateTicketValidator } from "./tickets";
-import { createPlanningTicketIn } from "../../db/src/planning-ticket";
-import { projectBackgroundValidator } from "./projects";
 
 type Database = ReturnType<typeof createDatabase>["db"];
 type WrappedTransaction = DrizzleTransaction<Database>;
@@ -246,7 +246,7 @@ export const zeroServerMutators = defineMutators({
     }),
     create: defineMutator(createTicketValidator, async ({ tx, ctx, args }) => {
       const db = drizzleTransaction(tx);
-      await createPlanningTicketIn((statement) => db.execute(statement), ctx.userId, args);
+      await createPlanningTicketIn(db, ctx.userId, args);
     }),
     update: defineMutator(updateTicketValidator, async ({ tx, ctx, args }) => {
       const db = drizzleTransaction(tx);

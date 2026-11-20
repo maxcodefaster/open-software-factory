@@ -13,8 +13,12 @@ import {
   maxCalibrationGrades,
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { createRequirementRevision } from "../../../../packages/requirement-domain/src/requirement";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  canonicalRequirementContent,
+  requirementDigest,
+} from "../../../../packages/requirement-domain/src/requirement";
+import { insertInitialTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
@@ -547,27 +551,30 @@ export function createLearningService(database: Database) {
               ? `\n\nExact Settings edit request. Review it in the owning settings; this is not a repository implementation task.\nTarget ${JSON.stringify(content.edit.target)}\n\nBefore\n${content.edit.before}\n\nAfter\n${content.edit.after}`
               : ""
           }`;
-          const revision = createRequirementRevision({
-            id: crypto.randomUUID(),
-            ticketId,
-            ordinal: 1,
-            content: {
-              summary: content.change,
-              acceptanceCriteria: [content.validation],
-              nonGoals: [
-                "Do not weaken security, confirmed requirements, independent review or protected Verification gates.",
-                "Keep .forgejo/workflows/factory-verification.yml unchanged. Optimize project checks, tests or auxiliary CI instead.",
-              ],
+          const canonical = canonicalRequirementContent({
+            summary: content.change,
+            acceptanceCriteria: [content.validation],
+            nonGoals: [
+              "Do not weaken security, confirmed requirements, independent review or protected Verification gates.",
+              "Keep .forgejo/workflows/factory-verification.yml unchanged. Optimize project checks, tests or auxiliary CI instead.",
+            ],
+          });
+          await insertInitialTicketIn(drizzleTransaction(sql), {
+            id: ticketId,
+            projectId: proposal.projectId,
+            title: content.title,
+            description,
+            state: "ready",
+            createdBy: userId,
+            authoring: {
+              requirement: { id: crypto.randomUUID(), canonicalContent: canonical },
+              document: {
+                id: crypto.randomUUID(),
+                inputDigest: requirementDigest(canonical),
+                authorKind: "ai",
+              },
             },
           });
-          await sql`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
-            VALUES(${ticketId},${proposal.projectId},${content.title},${description},'ready',${userId})`;
-          await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by)
-            VALUES(${revision.id},${ticketId},1,${revision.canonicalContent},${revision.contentDigest},${userId})`;
-          await sql`INSERT INTO factory.ticket_document_revision(id,ticket_id,ordinal,title,description,canonical_content,
-            content_digest,requirement_revision_id,input_digest,created_by,author_kind)
-            VALUES(${crypto.randomUUID()},${ticketId},1,${content.title},${description},${revision.canonicalContent},
-              ${revision.contentDigest},${revision.id},${revision.contentDigest},${userId},'ai')`;
           await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
             VALUES(${crypto.randomUUID()},${proposal.projectId},${ticketId},'plan',${userId})`;
         }

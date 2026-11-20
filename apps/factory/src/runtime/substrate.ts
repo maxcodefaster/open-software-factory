@@ -19,7 +19,7 @@ import {
   substrateConnection,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
-import { createOpenCodeClient } from "../agent/opencode-client";
+import type { CodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import {
   type PendingWriterHandoff,
   type RetainedStopTarget,
@@ -28,7 +28,6 @@ import {
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { admitComputeIn } from "../usage/compute";
-import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import { templateInitialSourceRole } from "../workspace/source-role-fence";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
 import type { RuntimeHub } from "./hub";
@@ -353,6 +352,7 @@ export function createSubstrateExecution(
     | SubstrateVerificationConfiguration
     | SubstratePrebuildConfiguration
     | SubstrateIsolatedConfiguration,
+  shutdownCoding: CodingRuntimeShutdown,
   rpc?: SubstrateCall,
   sources?: SubstrateSourceHandoff,
 ) {
@@ -1604,20 +1604,7 @@ export function createSubstrateExecution(
         let saved = await binding(sql);
         if (saved.deleted) return;
         if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
-        // Terminal turns can still receive auxiliary consumption. Retain their
-        // bounded native log replay before Pause/Stop revokes the live channel.
-        // A missing log is unknown coverage, never evidence of zero usage.
-        const usage = createRecordedOpenCodeUsage(database);
-        if (hub.connected(attemptID)) {
-          try {
-            const client = createOpenCodeClient((request, path) =>
-              hub.request(attemptID, "agent", request, path),
-            );
-            await usage.drainAttempt(attemptID, client);
-          } catch {
-            await usage.markUnavailable(attemptID);
-          }
-        } else await usage.markUnavailable(attemptID);
+        await shutdownCoding(attemptID);
         if (workspaceID && config.deployment === "fresh-workspaces") {
           if (!sources || !saved.actorUID)
             throw new CommandError(

@@ -12,7 +12,7 @@ import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { requirementsInterviewSkill } from "../skills/reviewed";
 import { generateProjectResponse } from "./adapter";
-import type { ConversationEntry } from "./conversation-store";
+import type { ConversationEntry } from "../conversations/store";
 
 // Explicit opt-in. Controlled source facts, real admitted provider configuration,
 // no mutations to retained Tickets, no LLM grader and no automatic paid retries.

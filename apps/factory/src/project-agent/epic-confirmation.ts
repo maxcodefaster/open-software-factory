@@ -4,8 +4,9 @@ import {
   confirmEpicProposalInput,
   epicProposalInput,
 } from "../../../../packages/conversation-domain/src/epic-proposal";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../../../packages/requirement-domain/src/requirement";
+import { insertInitialTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 
@@ -178,15 +179,26 @@ export function createEpicConfirmation(database: ReturnType<typeof createDatabas
         if (member.existingTicketId) {
           await sql`UPDATE factory.ticket SET epic_id=${epicID},version=version+1,updated_at=now() WHERE id=${id}`;
         } else {
-          const canonical = canonicalRequirementContent(member.requirement);
-          const contentDigest = createHash("sha256").update(canonical).digest("hex");
-          const revisionID = proposalIdentity(entryID, `${member.key}:revision`);
-          await sql`INSERT INTO factory.ticket(id,project_id,epic_id,title,description,state,created_by)
-            VALUES(${id},${projectID},${epicID},${member.title},${member.description},'ready',${userID})`;
-          await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by)
-            VALUES(${revisionID},${id},1,${canonical},${contentDigest},${userID})`;
-          await sql`INSERT INTO factory.ticket_document_revision(id,ticket_id,ordinal,title,description,canonical_content,content_digest,requirement_revision_id,input_digest,created_by,author_kind)
-            VALUES(${proposalIdentity(entryID, `${member.key}:document`)},${id},1,${member.title},${member.description},${canonical},${contentDigest},${revisionID},${digest},${userID},'ai')`;
+          await insertInitialTicketIn(drizzleTransaction(sql), {
+            id,
+            projectId: projectID,
+            epicId: epicID,
+            title: member.title,
+            description: member.description,
+            state: "ready",
+            createdBy: userID,
+            authoring: {
+              requirement: {
+                id: proposalIdentity(entryID, `${member.key}:revision`),
+                canonicalContent: canonicalRequirementContent(member.requirement),
+              },
+              document: {
+                id: proposalIdentity(entryID, `${member.key}:document`),
+                inputDigest: digest,
+                authorKind: "ai",
+              },
+            },
+          });
         }
       }
       for (const member of input.proposal.members) {

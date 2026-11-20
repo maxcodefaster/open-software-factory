@@ -14,6 +14,7 @@ import {
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import {
   createChangeAgentStop,
   type PendingWriterHandoff,
@@ -79,6 +80,7 @@ export function createRuntimeController(
     apiURL: FACTORY_FORGEJO_API_URL,
     token: FACTORY_FORGEJO_TOKEN,
   });
+  const shutdownCoding = createCodingRuntimeShutdown(database, hub);
   const projects = new Map<
     string,
     {
@@ -128,6 +130,7 @@ export function createRuntimeController(
         readContract,
         options.sources,
         options.capacity,
+        shutdownCoding,
       ),
       verification: createSubstrateVerification(
         database,
@@ -137,6 +140,7 @@ export function createRuntimeController(
         options.call,
         options.provisionerCall,
         options.capacity,
+        shutdownCoding,
       ),
       prebuild: createSubstratePrebuild(
         database,
@@ -146,6 +150,7 @@ export function createRuntimeController(
         options.call,
         options.provisionerCall,
         options.capacity,
+        shutdownCoding,
       ),
       isolated: createSubstrateIsolated(
         database,
@@ -156,6 +161,7 @@ export function createRuntimeController(
         options.call,
         options.provisionerCall,
         options.capacity,
+        shutdownCoding,
       ),
     };
     projects.set(projectID, owners);

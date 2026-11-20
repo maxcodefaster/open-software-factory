@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
@@ -282,6 +283,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
           f.hub,
           "owned-native-secret",
           { ...config, ...(changed ? { templateVersion: "99" } : {}) },
+          createCodingRuntimeShutdown(f.database, f.hub),
           call,
           source,
         );

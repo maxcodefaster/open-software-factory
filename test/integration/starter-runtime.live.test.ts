@@ -1,16 +1,17 @@
 import { expect, test } from "bun:test";
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { starterDelivery } from "../fixtures/starter-delivery";
 import { starterPreviewBrowser } from "../fixtures/starter-preview-browser";
 import { starterSetupDesktop } from "../fixtures/starter-setup-desktop";
@@ -37,7 +38,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
     const token = (await readFile(".factory/forgejo-token", "utf8")).trim();
     const factory = await factoryProcess(
       {
-        runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
+        runtimeHostImage: (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"],
         forgejoToken: token,
       },
       {

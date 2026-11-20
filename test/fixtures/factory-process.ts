@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
 import { runEnvironmentCommand } from "../../packages/runtime-kubernetes/src/command";
@@ -6,6 +6,7 @@ import {
   kubernetesCommand,
   kubernetesConnectionEnvironment,
 } from "../../packages/runtime-kubernetes/src/config";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import {
   readResetResources,
   requireResetResourcesAbsent,
@@ -99,18 +100,14 @@ export async function factoryProcess(
       modelOverrides ?? {},
     );
   }
-  const publishedRuntimeImages = liveRuntime
-    ? Object.fromEntries(
-        await Promise.all(
-          [
-            ["FACTORY_BROWSER_TOOLS_IMAGE", "browser-tools"],
-            ["FACTORY_DEVELOPER_IDE_IMAGE", "developer-ide"],
-          ].map(async ([key, name]) => [
-            key,
-            (await readFile(`.factory/${name}-image`, "utf8")).trim(),
-          ]),
-        ),
-      )
+  const publishedArtifacts = liveRuntime
+    ? await requirePublishedRuntimeArtifacts(".factory")
+    : null;
+  const publishedRuntimeImages = publishedArtifacts
+    ? {
+        FACTORY_BROWSER_TOOLS_IMAGE: publishedArtifacts["browser-tools"],
+        FACTORY_DEVELOPER_IDE_IMAGE: publishedArtifacts["developer-ide"],
+      }
     : {};
   const container = `factory-owned-commit-process-${id}`;
   const processes: ReturnType<typeof Bun.spawn>[] = [];

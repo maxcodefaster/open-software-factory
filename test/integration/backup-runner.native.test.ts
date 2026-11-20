@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import upstream from "../../upstream.json";
 
 test("pinned Linux backup exec preserves writer stdin and isolates watchdog descriptors", async () => {
@@ -54,7 +55,7 @@ test("pinned Linux backup exec preserves writer stdin and isolates watchdog desc
         `type=bind,src=${resolve("deploy/helm/factory/files/backup")},dst=/scripts,readonly`,
         "--entrypoint",
         "sh",
-        upstream.rclone.image,
+        imagePins.rclone,
         "-c",
         `set -eu
        exec 9>/tmp/writer.lock

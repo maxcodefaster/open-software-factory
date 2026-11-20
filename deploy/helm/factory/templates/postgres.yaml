@@ -30,7 +30,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: postgres
-          image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+          image: {{ include "factory.serviceImage" (dict "root" . "name" "postgres") | quote }}
           # Detect lost Pod connections, including idle advisory-lock owners.
           # Healthy idle sessions and long-running native work have no idle expiry.
           args:

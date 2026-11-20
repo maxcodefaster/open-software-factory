@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { parse, parseAllDocuments } from "yaml";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import upstream from "../../upstream.json";
 
 const chart = "deploy/helm/factory";
@@ -377,13 +378,12 @@ test("the planning cache uses an explicit small worker count rather than host CP
 
 test("all standard service images retain the maintained exact upstream pins", async () => {
   const all = await resources();
-  const compose = parse(await readFile("deploy/local/compose.yaml", "utf8"));
   const expected = {
-    postgres: compose.services.postgres.image,
-    forgejo: compose.services.forgejo.image,
-    zero: compose.services["zero-cache"].image,
-    openbao: upstream.openbao.image,
-    objects: upstream.garage.image,
+    postgres: imagePins.postgres,
+    forgejo: imagePins.forgejo,
+    zero: imagePins.zero,
+    openbao: imagePins.openbao,
+    objects: imagePins.garage,
   };
   for (const [role, image] of Object.entries(expected)) {
     const workload = all.find(
@@ -1373,7 +1373,6 @@ test("backups are on by default and write to one dedicated retained claim", asyn
 
 test("backup images are pinned and match the maintained service pins", async () => {
   const all = await resources();
-  const compose = parse(await readFile("deploy/local/compose.yaml", "utf8"));
   const pod = workloads(all).find((item) => item.kind === "CronJob")?.spec.template.spec;
   const images = new Map(
     [...(pod?.initContainers ?? []), ...(pod?.containers ?? [])].map((container) => [
@@ -1384,14 +1383,14 @@ test("backup images are pinned and match the maintained service pins", async () 
   expect(
     workloads(all).find((workload) => workload.metadata.name === "portable-postgres")?.spec.template
       .spec.containers[0]?.image,
-  ).toBe(compose.services.postgres.image);
-  expect(images.get("stage-bao")).toBe(upstream.openbao.image);
-  for (const name of ["own-backup", "backup"]) expect(images.get(name)).toBe(upstream.rclone.image);
+  ).toBe(imagePins.postgres);
+  expect(images.get("stage-bao")).toBe(imagePins.openbao);
+  for (const name of ["own-backup", "backup"]) expect(images.get(name)).toBe(imagePins.rclone);
   // Both static tools come from the application, not an extra image or live package install.
   expect(images.get("stage-kubectl")).toBe(applicationImage);
   for (const [name, image] of images)
     if (name !== "stage-kubectl") expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
-  expect(upstream.rclone.image).toContain(`:${upstream.rclone.version}@sha256:`);
+  expect(imagePins.rclone).toContain(`:${upstream.rclone.version}@sha256:`);
 });
 
 test("the backup ServiceAccount may only exec into the exact PostgreSQL and Forgejo Pods", async () => {

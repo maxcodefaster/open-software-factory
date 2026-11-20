@@ -32,11 +32,11 @@ afterAll(async () => {
   await disposeDatabase?.();
 }, 60_000);
 
-async function ownedBuild() {
+async function ownedBuild(connections = 3) {
   const previousURL = process.env["DATABASE_URL"];
   try {
     process.env["DATABASE_URL"] = databaseURL;
-    return await fixture(undefined, undefined, createDatabase(3));
+    return await fixture(undefined, undefined, createDatabase(connections));
   } finally {
     if (previousURL === undefined) delete process.env["DATABASE_URL"];
     else process.env["DATABASE_URL"] = previousURL;
@@ -44,6 +44,157 @@ async function ownedBuild() {
 }
 
 for (const previousSubmission of [false, true]) {
+  test.each(["before Session read", "during native history read"] as const)(
+    `no-change projection captures one outcome with ${previousSubmission ? "an earlier submission" : "no earlier submission"}: %s`,
+    async (boundary) => {
+      // One pooled connection also catches a snapshot held across native history:
+      // the real commit settlement must acquire it before that read may return.
+      const owned = await ownedBuild(1);
+      const controller = owned.controller();
+      const prepareEntered = Promise.withResolvers<void>();
+      const prepareResult = Promise.withResolvers<void>();
+      const originalClient = owned.database.client;
+      const originalRequest = owned.hub.request.bind(owned.hub);
+      const originalOperation = owned.hub.parentOperation.bind(owned.hub);
+      let armed = false;
+      let injected = false;
+      let earlierTurnID: string | undefined;
+      let earlierSummary: string | null | undefined;
+      try {
+        if (previousSubmission) {
+          const earlier = await controller.prompt(
+            owned.changeID,
+            "Implement the approved change",
+            owned.userID,
+            crypto.randomUUID(),
+          );
+          earlierTurnID = earlier.turn?.id;
+          await owned.requested;
+          owned.finish("Implemented the approved change and ran its checks.");
+          owned.release();
+          earlierSummary = (
+            await eventually(
+              () => controller.get(owned.changeID),
+              (view) => view.state === "committed",
+              "Earlier submission did not settle",
+            )
+          ).turn?.summary;
+          await owned.nextInput();
+        }
+        owned.hub.parentOperation = async (attempt, operation, beforeSend) => {
+          if (operation.action !== "git-prepare-commit")
+            return originalOperation(attempt, operation, beforeSend);
+          await beforeSend?.(() => {});
+          prepareEntered.resolve();
+          await prepareResult.promise;
+          throw new RuntimeParentOperationError(
+            "git-prepare-commit",
+            "workspace has no changes to commit",
+          );
+        };
+        const commandID = crypto.randomUUID();
+        const accepted = await controller.prompt(
+          owned.changeID,
+          "Read the repository without changing files.",
+          owned.userID,
+          commandID,
+        );
+        await owned.requested;
+        owned.finish("Inspected the repository. No files were changed.");
+        owned.release();
+        await prepareEntered.promise;
+        const pending = await controller.get(owned.changeID);
+        expect(pending.commitOperation?.state).toBe("commit-intended");
+        const terminal = await owned.turn(commandID);
+
+        async function settleBetweenReads() {
+          armed = false;
+          injected = true;
+          prepareResult.resolve();
+          // Join the already running candidate owner, not a retry or a new Turn.
+          await controller.shutdown();
+          const [settled] = await originalClient<{ state: string }[]>`
+            SELECT state FROM factory.change_commit_operation WHERE id=${accepted.turn?.id ?? ""}`;
+          expect(settled?.state).toBe("failed");
+        }
+        owned.database.client = new Proxy(originalClient, {
+          apply(target, receiver, args) {
+            const result = Reflect.apply(target, receiver, args);
+            const parts = args[0] as TemplateStringsArray;
+            if (
+              !armed ||
+              boundary !== "before Session read" ||
+              !parts.join("").includes('SELECT intent.turn_id AS "turnID"')
+            )
+              return result;
+            return (async () => {
+              const rows = await result;
+              await settleBetweenReads();
+              return rows;
+            })();
+          },
+        });
+        owned.hub.request = async (...args) => {
+          if (
+            armed &&
+            boundary === "during native history read" &&
+            args[2].method === "GET" &&
+            new URL(args[2].url).pathname.endsWith("/message")
+          )
+            await settleBetweenReads();
+          return originalRequest(...args);
+        };
+        armed = true;
+        const captured = await controller.get(owned.changeID);
+        expect(injected).toBe(true);
+        const diagnostic =
+          "This turn changed no files, so there is nothing new to submit." +
+          (previousSubmission ? " The earlier submission is unchanged." : "");
+        expect({
+          state: captured.state,
+          summary: captured.turn?.summary,
+          lastError: captured.lastError,
+          commitOperation: captured.commitOperation?.state ?? null,
+        }).toEqual(
+          boundary === "before Session read"
+            ? {
+                state: "waiting",
+                summary: diagnostic,
+                lastError: diagnostic,
+                commitOperation: null,
+              }
+            : {
+                state: "waiting",
+                summary: pending.turn?.summary,
+                lastError: pending.lastError,
+                commitOperation: "commit-intended",
+              },
+        );
+        expect(await owned.turn(commandID)).toEqual(terminal);
+        expect((await controller.get(owned.changeID, undefined, false)).turn?.summary).toBe(
+          diagnostic,
+        );
+        if (earlierTurnID)
+          expect((await controller.get(owned.changeID, earlierTurnID, false)).turn?.summary).toBe(
+            earlierSummary ?? null,
+          );
+        expect(owned.requests()).toBe(previousSubmission ? 2 : 1);
+        expect(owned.interrupts()).toBe(0);
+        expect(
+          await originalClient`SELECT id FROM factory.verification WHERE change_id=${owned.changeID}`,
+        ).toHaveLength(0);
+      } finally {
+        armed = false;
+        owned.database.client = originalClient;
+        owned.hub.request = originalRequest;
+        owned.hub.parentOperation = originalOperation;
+        prepareResult.resolve();
+        await controller.shutdown();
+        await owned.dispose();
+      }
+    },
+  );
+
   test(`a native read-only turn reports no submission with ${previousSubmission ? "an earlier submission" : "no earlier submission"}`, async () => {
     const owned = await ownedBuild();
     const controller = owned.controller();

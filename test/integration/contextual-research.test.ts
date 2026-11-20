@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
-import { createEpicConfirmation } from "../../apps/factory/src/project-agent/epic-confirmation";
+import {
+  createEpicConfirmation,
+  proposalIdentity,
+} from "../../apps/factory/src/project-agent/epic-confirmation";
 import { readResearch, searchResearch } from "../../apps/factory/src/project-agent/research";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
@@ -485,6 +488,41 @@ test("Epic confirmation is atomic, versioned and replayable; converts intent and
       confirm(owned.projectID, entryID, owned.userID, input),
     ]);
     expect(a).toEqual(b);
+    expect(a).toEqual({
+      epicId: proposalIdentity(entryID, "epic"),
+      ticketIds: [owned.ticketID, proposalIdentity(entryID, "export")],
+    });
+    const [authored] = await db.client`
+      SELECT revision.id AS "revisionID",revision.ordinal AS "revisionOrdinal",
+        revision.canonical_content AS canonical,revision.content_digest AS "contentDigest",
+        revision.created_by AS "revisionAuthor",document.id AS "documentID",
+        document.ordinal AS "documentOrdinal",document.title,document.description,
+        document.canonical_content AS "documentCanonical",document.content_digest AS "documentDigest",
+        document.input_digest AS "inputDigest",document.created_by AS "documentAuthor",
+        document.author_kind AS "authorKind",document.proposal_entry_id AS "proposalEntryID"
+      FROM factory.requirement_revision revision JOIN factory.ticket_document_revision document
+        ON document.requirement_revision_id=revision.id WHERE revision.ticket_id=${proposalIdentity(entryID, "export")}`;
+    const canonical = canonicalRequirementContent(requirement);
+    expect(authored).toEqual({
+      revisionID: proposalIdentity(entryID, "export:revision"),
+      revisionOrdinal: 1,
+      canonical,
+      contentDigest: createHash("sha256").update(canonical).digest("hex"),
+      revisionAuthor: owned.userID,
+      documentID: proposalIdentity(entryID, "export:document"),
+      documentOrdinal: 1,
+      title: "Export invoice",
+      description: "Create export",
+      documentCanonical: canonical,
+      documentDigest: createHash("sha256").update(canonical).digest("hex"),
+      inputDigest: createHash("sha256").update(JSON.stringify(proposal)).digest("hex"),
+      documentAuthor: owned.userID,
+      authorKind: "ai",
+      proposalEntryID: null,
+    });
+    expect(
+      await db.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${proposalIdentity(entryID, "export")}`,
+    ).toHaveLength(0);
     const [state] =
       await db.client`SELECT converted_to_epic_id FROM factory.ticket WHERE id=${origin}`;
     expect(state?.["converted_to_epic_id"]).toBe(a.epicId);

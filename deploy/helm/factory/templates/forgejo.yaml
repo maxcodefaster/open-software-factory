@@ -35,7 +35,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: forgejo
-          image: codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8
+          image: {{ include "factory.serviceImage" (dict "root" . "name" "forgejo") | quote }}
           securityContext:
             runAsNonRoot: true
             {{- include "factory.containerSecurity" . | nindent 12 }}

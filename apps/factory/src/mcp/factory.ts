@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
-import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { createPlanningTicketIn } from "../../../../packages/db/src/planning-ticket";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { versionSuggestions } from "../../../../packages/project-domain/src/release";
+import { createPlanningTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
 import { type AgentTurnRecord, createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { appendConversationEntry } from "../project-agent/conversation-store";
+import { appendConversationEntry } from "../conversations/store";
 import { projectReadInput, projectSearchInput } from "../project-agent/research";
 import type { MCPSourceTool } from "./sources";
 
@@ -35,7 +34,6 @@ export function canCreateFactoryTicket(turn: AgentTurnRecord) {
 
 export function createFactoryTicketCommand(database: ReturnType<typeof createDatabase>) {
   const turns = createAgentTurnStore(database);
-  const dialect = new PgDialect();
   return async (turnID: string, ownerToken: string, value: unknown, signal: AbortSignal) => {
     const input = factoryCreateTicketInput.parse(value);
     signal.throwIfAborted();
@@ -66,20 +64,13 @@ export function createFactoryTicketCommand(database: ReturnType<typeof createDat
         outcome = previous.payload.factoryAction.result;
         return;
       }
-      outcome = await createPlanningTicketIn(
-        async (statement) => {
-          const query = dialect.sqlToQuery(statement);
-          return sql.unsafe(query.sql, query.params as string[]);
-        },
-        turn.command.createdBy,
-        {
-          id: ticketID(turnID, input.key),
-          projectId: turn.command.projectId,
-          title: input.title,
-          description: input.description,
-          state: input.stage === "ideas" ? "inbox" : "ready",
-        },
-      );
+      outcome = await createPlanningTicketIn(drizzleTransaction(sql), turn.command.createdBy, {
+        id: ticketID(turnID, input.key),
+        projectId: turn.command.projectId,
+        title: input.title,
+        description: input.description,
+        state: input.stage === "ideas" ? "inbox" : "ready",
+      });
       // The receipt and Ticket commit together, even if the model later fails.
       await appendConversationEntry(sql, conversationID, {
         kind: "agent-message",

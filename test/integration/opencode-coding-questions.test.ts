@@ -8,12 +8,13 @@ import {
   ensureOpenCodeMessageBoundary,
   promptRecordedOpenCodeInput,
 } from "../../apps/factory/src/agent/opencode-client";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { docker, observe } from "../fixtures/pinned-opencode";
 
 test("Factory Coding excludes native question forms while retaining text clarification and follow-up", async () => {
   const image =
     process.env["FACTORY_OPENCODE_TEST_IMAGE"] ??
-    (await readFile(resolve(".factory/build-runtime-host-image"), "utf8")).trim();
+    (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
   if (!/^(?:[a-zA-Z0-9.:/-]+@)?sha256:[a-f0-9]{64}$/.test(image))
     throw new Error("Owned question proof requires the exact pinned runtime image");
   const id = crypto.randomUUID();

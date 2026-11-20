@@ -1,4 +1,4 @@
-{{- $zeroImage := "docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1" -}}
+{{- $zeroImage := include "factory.serviceImage" (dict "root" . "name" "zero") -}}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.zeroSyncWorkers)) -}}
 {{- fail "zeroSyncWorkers must be a positive integer" -}}
 {{- end -}}
@@ -40,7 +40,7 @@ spec:
       initContainers:
         {{- include "factory.ownVolume" (dict "image" $zeroImage "path" "/data" "uid" 1000 "gid" 1000) | nindent 8 }}
         - name: wait-for-factory-schema
-          image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+          image: {{ include "factory.serviceImage" (dict "root" . "name" "postgres") | quote }}
           command:
             - sh
             - -c

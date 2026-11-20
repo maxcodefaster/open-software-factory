@@ -24,7 +24,7 @@ import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from 
 import { invokedSkills, nativeSkillId } from "../skills/native";
 import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
 import { ProjectContextLimitError, projectModelContext } from "./context";
-import type { ConversationEntry } from "./conversation-store";
+import type { ConversationEntry } from "../conversations/store";
 import {
   projectReadInput,
   projectSearchInput,

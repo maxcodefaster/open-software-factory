@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import {
   type Execute,
   images,
@@ -236,20 +237,20 @@ test("isolated restore launches only quarantined data services and offline clien
     forgejo: ["sh", images["forgejo"] ?? "", "-c", "while :; do sleep 3600; done"],
     garage: [
       "/garage",
-      upstream.garage.image,
+      imagePins.garage,
       "-c",
       "/control/garage.toml",
       "server",
       "--single-node",
       "--default-bucket",
     ],
-    rclone: ["sh", upstream.rclone.image, "-c", "while :; do sleep 3600; done"],
-    openbao: ["/usr/bin/bao", upstream.openbao.image, "server", "-config=/control/bao.json"],
+    rclone: ["sh", imagePins.rclone, "-c", "while :; do sleep 3600; done"],
+    openbao: ["/usr/bin/bao", imagePins.openbao, "server", "-config=/control/bao.json"],
     "bao-client": ["node", upstream.node.image, "-e", "setInterval(()=>{},2147483647)"],
   };
   for (const role of ["postgres", "forgejo"])
     expect(await readFile(`deploy/helm/factory/templates/${role}.yaml`, "utf8")).toContain(
-      images[role] ?? "",
+      `"name" "${role}"`,
     );
   const plan = resourcePlan(fixture);
   const byName = new Map(plan.map((r) => [r.name, r]));
@@ -367,6 +368,7 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
     await readFile("scripts/kubernetes/restore-rehearsal.ts", "utf8"),
   );
   const allowed = new Set([
+    "../../deploy/helm/factory/image-pins.json",
     "../../upstream.json",
     "node:crypto",
     "node:fs",

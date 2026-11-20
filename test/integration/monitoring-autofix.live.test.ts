@@ -1,19 +1,20 @@
 import { expect, test } from "bun:test";
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
 import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { ensureLocalForgeIdentity } from "../../scripts/factory/forge-identity";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { monitoringNativeSource, ownedMonitoringForge } from "../fixtures/monitoring-native";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 const stateInput = z
@@ -92,7 +93,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
     const bao = await localOpenBao(directory);
     const baoConfiguration = await bao.start();
     const forgeHost = await ownedMonitoringForge(directory, state.id);
-    const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
+    const runtimeHostImage = (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
     const factory = await factoryProcess(
       { runtimeHostImage, forgejoToken: forgeHost.token },
       {

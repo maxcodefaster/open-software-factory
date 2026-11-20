@@ -1,12 +1,15 @@
+import type postgres from "postgres";
 import type { z } from "zod";
 import type {
   ConversationMode,
   sourceCitationInput,
 } from "../../../../packages/conversation-domain/src/conversation";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { contextIn } from "./conversation-contexts";
+import { contextIn } from "./contexts";
+
+type Database = ReturnType<typeof createDatabase>;
 
 export type ConversationRow = {
   id: string;
@@ -34,7 +37,7 @@ export type ConversationEntry = {
 };
 
 export async function ensureConversationIn(
-  sql: AgentTurnTransaction,
+  sql: postgres.TransactionSql,
   projectID: string,
   ticketID: string | undefined,
   userID: string,
@@ -78,7 +81,7 @@ export async function ensureConversationIn(
 }
 
 export async function appendConversationEntry(
-  transaction: AgentTurnTransaction,
+  transaction: postgres.TransactionSql,
   conversationID: string,
   entry: Omit<ConversationEntry, "id" | "ordinal" | "createdAt"> & {
     createdBy?: string;
@@ -109,7 +112,7 @@ export async function appendConversationEntry(
 }
 
 export async function lockConversation(
-  transaction: AgentTurnTransaction,
+  transaction: postgres.TransactionSql,
   conversationID: string,
   contextID?: string,
 ) {
@@ -123,4 +126,63 @@ export async function lockConversation(
     return { ...rows[0], mode: context.mode, version: 1, contextId: contextID };
   }
   return rows[0];
+}
+
+export async function findConversation(
+  database: Database,
+  projectID: string,
+  ticketID: string | undefined,
+  userID: string,
+) {
+  const rows = await database.client<ConversationRow[]>`
+    SELECT id, project_id AS "projectId", ticket_id AS "ticketId", mode,
+      version::integer AS version
+    FROM factory.ticket_conversation
+    WHERE project_id = ${projectID}
+      AND (
+        (${ticketID ?? null}::uuid IS NULL AND ticket_id IS NULL AND created_by = ${userID})
+        OR ticket_id = ${ticketID ?? null}
+      )
+    LIMIT 1
+  `;
+  return rows[0];
+}
+
+export async function readConversation(
+  database: Database,
+  conversationID: string,
+  contextID?: string,
+) {
+  const rows = await database.client<ConversationRow[]>`
+    SELECT id, project_id AS "projectId", ticket_id AS "ticketId", mode,
+      version::integer AS version,active_coding_context_id AS "activeCodingContextId"
+    FROM factory.ticket_conversation WHERE id = ${conversationID}
+  `;
+  const current = rows[0];
+  if (!current || !contextID) return current;
+  const context = await database.client.begin((sql) => contextIn(sql, conversationID, contextID));
+  return {
+    ...current,
+    contextId: contextID,
+    ...(context.kind === "research" ? { mode: context.mode, version: 1 } : {}),
+  };
+}
+
+export async function readConversationEntries(
+  database: Database,
+  conversationID: string,
+  contextID?: string,
+) {
+  const context = contextID
+    ? await database.client.begin((sql) => contextIn(sql, conversationID, contextID))
+    : undefined;
+  return database.client<ConversationEntry[]>`
+    SELECT id, ordinal::integer AS ordinal, kind, actor, mode, body, payload, citations,
+      in_reply_to_entry_id AS "inReplyToEntryId",
+      requirement_revision_id AS "requirementRevisionId", created_at AS "createdAt"
+    FROM factory.conversation_entry
+    WHERE conversation_id = ${conversationID}
+      AND payload->>'contextId' IS NOT DISTINCT FROM ${context?.original ? null : (contextID ?? null)}
+    ORDER BY ordinal
+  `;
 }

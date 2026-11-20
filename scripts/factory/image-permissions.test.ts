@@ -25,6 +25,7 @@ test("the Factory image makes packaged code readable without exposing private st
     "scripts/kubernetes/start.ts",
     "templates/starter/README.md",
     "deploy/substrate/pins.json",
+    "deploy/helm/factory/image-pins.json",
     "package.json",
     "upstream.json",
     "LICENSE",

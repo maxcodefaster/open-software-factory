@@ -2,9 +2,98 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { drizzleTransaction } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import {
+  createPlanningTicketIn,
+  insertInitialTicketIn,
+} from "../../packages/ticket-authoring/src/authoring";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+
+test("initial Ticket authoring uses the caller transaction and keeps planning replay checks", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const input = {
+      id: crypto.randomUUID(),
+      projectId: owned.projectID,
+      title: "Initial authoring",
+      description: "Save requirements without starting work.",
+      state: "ready" as const,
+    };
+    const authoring = {
+      requirement: {
+        id: crypto.randomUUID(),
+        canonicalContent: canonicalRequirementContent({
+          summary: input.description,
+          acceptanceCriteria: ["The text is retained."],
+          nonGoals: [],
+        }),
+      },
+      document: {
+        id: crypto.randomUUID(),
+        inputDigest: "a".repeat(64),
+        authorKind: "ai" as const,
+      },
+    };
+    await expect(
+      database.client.begin(async (sql) => {
+        await insertInitialTicketIn(drizzleTransaction(sql), {
+          ...input,
+          createdBy: owned.userID,
+          authoring,
+        });
+        throw new Error("Caller rejected publication");
+      }),
+    ).rejects.toThrow("Caller rejected publication");
+    for (const rows of [
+      await database.client`SELECT id FROM factory.ticket WHERE id=${input.id}`,
+      await database.client`SELECT id FROM factory.requirement_revision WHERE id=${authoring.requirement.id}`,
+      await database.client`SELECT id FROM factory.ticket_document_revision WHERE id=${authoring.document.id}`,
+    ])
+      expect(rows).toHaveLength(0);
+
+    const create = (value = input, userID = owned.userID) =>
+      database.client.begin((sql) =>
+        createPlanningTicketIn(drizzleTransaction(sql), userID, value),
+      );
+    const [first, second] = await Promise.all([create(), create()]);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      id: input.id,
+      projectId: owned.projectID,
+      title: input.title,
+      state: "ready",
+    });
+    await expect(create({ ...input, title: "Conflicting intent" })).rejects.toThrow(
+      "different content",
+    );
+    await expect(create(input, crypto.randomUUID())).rejects.toThrow("Project not found");
+    await expect(
+      database.client.begin((sql) =>
+        insertInitialTicketIn(drizzleTransaction(sql), {
+          ...input,
+          createdBy: owned.userID,
+          authoring,
+        }),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "23505" } });
+    expect(
+      await database.client`SELECT id FROM factory.requirement_revision WHERE ticket_id=${input.id}`,
+    ).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.ticket_document_revision WHERE ticket_id=${input.id}`,
+    ).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${input.id}`,
+    ).toHaveLength(0);
+  } finally {
+    await database.client.end();
+    await host.dispose();
+  }
+}, 60_000);
 
 test("complete manual requirements move an Idea without approval or inference", async () => {
   const host = await factoryProcess();
@@ -233,52 +322,99 @@ test("post-start human edits are immutable documents, never new Build scope or i
   }
 }, 60_000);
 
-test("delivered follow-up is linked, retry-safe and unapproved; it never reuses delivered Build", async () => {
-  const process = await factoryProcess();
-  const db = process.connect();
-  try {
-    const owned = await fixture(undefined, undefined, db);
-    const documents = createTicketDocumentController(db);
-    const input = {
-      commandId: crypto.randomUUID(),
-      expectedDocumentId: null,
-      requirementRevisionId: owned.revisionID,
-    };
-    await expect(documents.followUp(owned.ticketID, owned.userID, input)).rejects.toThrow(
-      "delivered",
-    );
-    await db.client`UPDATE factory.change SET state = 'delivered' WHERE id = ${owned.changeID}`;
-    const first = await documents.followUp(owned.ticketID, owned.userID, input);
-    expect(await documents.followUp(owned.ticketID, owned.userID, input)).toEqual(first);
-    const [result] = await db.client<
-      Array<{
-        sourceID: string;
-        projectID: string;
-        approved: number;
-        changes: number;
-        revisions: number;
-      }>
-    >`
+test.each([false, true])(
+  "delivered follow-up is linked, retry-safe and unapproved with document=%s",
+  async (withDocument) => {
+    const process = await factoryProcess();
+    const db = process.connect();
+    try {
+      const owned = await fixture(undefined, undefined, db);
+      const documents = createTicketDocumentController(db);
+      const revised = {
+        summary: "Saved follow-up intent",
+        acceptanceCriteria: ["Retain the revised document, not the delivered scope."],
+        nonGoals: ["Do not restart the delivered Build."],
+      };
+      const document = withDocument
+        ? await documents.save(owned.ticketID, owned.userID, {
+            commandId: crypto.randomUUID(),
+            expectedVersion: 1,
+            expectedDocumentId: null,
+            requirementRevisionId: owned.revisionID,
+            title: "Revised wording",
+            description: "Saved document for subsequent work.",
+            requirement: revised,
+          })
+        : null;
+      const input = {
+        commandId: crypto.randomUUID(),
+        expectedDocumentId: document?.id ?? null,
+        requirementRevisionId: owned.revisionID,
+      };
+      await expect(documents.followUp(owned.ticketID, owned.userID, input)).rejects.toThrow(
+        "delivered",
+      );
+      await db.client`UPDATE factory.change SET state = 'delivered' WHERE id = ${owned.changeID}`;
+      const first = await documents.followUp(owned.ticketID, owned.userID, input);
+      expect(await documents.followUp(owned.ticketID, owned.userID, input)).toEqual(first);
+      const [result] = await db.client<
+        Array<{
+          sourceID: string;
+          projectID: string;
+          approved: number;
+          changes: number;
+          revisions: number;
+          documents: number;
+          title: string;
+          description: string;
+          canonical: string;
+          digest: string;
+          ordinal: number;
+          createdBy: string;
+          sourceDocumentID: string | null;
+          sourceRevisionID: string;
+        }>
+      >`
       SELECT follow.source_ticket_id AS "sourceID", ticket.project_id AS "projectID",
+        follow.source_document_id AS "sourceDocumentID",follow.source_revision_id AS "sourceRevisionID",
+        ticket.title,ticket.description,revision.canonical_content AS canonical,revision.content_digest AS digest,
+        revision.ordinal,revision.created_by AS "createdBy",
         (SELECT count(*)::integer FROM factory.requirement_approval WHERE ticket_id = ticket.id) AS approved,
         (SELECT count(*)::integer FROM factory.change WHERE ticket_id = ticket.id) AS changes,
-        (SELECT count(*)::integer FROM factory.requirement_revision WHERE ticket_id = ticket.id) AS revisions
-      FROM factory.ticket ticket JOIN factory.ticket_follow_up follow ON follow.ticket_id = ticket.id WHERE ticket.id = ${first.ticketId}`;
-    expect(result).toEqual({
-      sourceID: owned.ticketID,
-      projectID: owned.projectID,
-      approved: 0,
-      changes: 0,
-      revisions: 1,
-    });
-    await expect(
-      documents.followUp(owned.ticketID, owned.userID, {
-        ...input,
-        expectedDocumentId: crypto.randomUUID(),
-      }),
-    ).rejects.toThrow("different work");
-  } finally {
-    await db.client.end();
-    await process.dispose();
-  }
-}, 60_000);
+        (SELECT count(*)::integer FROM factory.requirement_revision WHERE ticket_id = ticket.id) AS revisions,
+        (SELECT count(*)::integer FROM factory.ticket_document_revision WHERE ticket_id = ticket.id) AS documents
+      FROM factory.ticket ticket JOIN factory.ticket_follow_up follow ON follow.ticket_id = ticket.id
+      JOIN factory.requirement_revision revision ON revision.ticket_id=ticket.id WHERE ticket.id = ${first.ticketId}`;
+      const [original] = await db.client<{ canonical: string }[]>`
+      SELECT canonical_content AS canonical FROM factory.requirement_revision WHERE id=${owned.revisionID}`;
+      if (!original) throw new Error("Owned original Requirements are missing");
+      const canonical = withDocument ? canonicalRequirementContent(revised) : original.canonical;
+      expect(result).toEqual({
+        sourceID: owned.ticketID,
+        projectID: owned.projectID,
+        sourceDocumentID: document?.id ?? null,
+        sourceRevisionID: owned.revisionID,
+        title: withDocument ? "Follow-up: Revised wording" : "Follow-up: Owned Build regression",
+        description: withDocument ? "Saved document for subsequent work." : "",
+        canonical,
+        digest: createHash("sha256").update(canonical).digest("hex"),
+        ordinal: 1,
+        createdBy: owned.userID,
+        approved: 0,
+        changes: 0,
+        revisions: 1,
+        documents: 0,
+      });
+      await expect(
+        documents.followUp(owned.ticketID, owned.userID, {
+          ...input,
+          expectedDocumentId: crypto.randomUUID(),
+        }),
+      ).rejects.toThrow("different work");
+    } finally {
+      await db.client.end();
+      await process.dispose();
+    }
+  },
+  60_000,
+);

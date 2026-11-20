@@ -1,4 +1,4 @@
-import type { ConversationEntry } from "./conversation-store";
+import type { ConversationEntry } from "../conversations/store";
 
 export const projectContextByteLimit = 96 * 1024;
 

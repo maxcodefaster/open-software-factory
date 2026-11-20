@@ -13,6 +13,7 @@ import {
   SubstrateRPCError,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
+import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import { CommandError } from "../command-error";
 import { runtimeSourceCapability } from "./git-http";
 import type { RuntimeHub } from "./hub";
@@ -67,6 +68,7 @@ export function createSubstratePrebuild(
   editorCall?: SubstrateCall,
   provisionerCall?: SubstrateCall,
   capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "requireReady">,
+  shutdownCoding = createCodingRuntimeShutdown(database, hub),
 ) {
   const config = substrateWorkspaceConfiguration(input);
   const editor = editorCall ?? createSubstrateControl(config.connection);
@@ -107,7 +109,7 @@ export function createSubstratePrebuild(
       templateSHA256: row.intent.templateSHA256,
       environment: row.intent.environment,
     };
-    return createSubstrateExecution(database, hub, secret, bound, editor);
+    return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor);
   }
   async function absent(call: SubstrateCall, method: string, request: unknown) {
     try {

@@ -10,8 +10,6 @@ import {
   openBaoPolicyVersion,
 } from "./openbao-bootstrap";
 
-const recoveryAddress = "https://127.0.0.1:38210";
-
 function allowed(policy: string, path: string, capability: string) {
   return [...policy.matchAll(/path "([^"]+)" \{ capabilities = \[([^\]]*)\] \}/g)].some(
     (match) => match[1] === path && match[2]?.includes(`"${capability}"`),
@@ -22,8 +20,6 @@ class Bao {
   initialized = false;
   sealed = true;
   rootActive = true;
-  // OpenBao 2.7 serves generate-root only on a listener that enables it.
-  sharedGenerateRoot = false;
   initializedCount = 0;
   secretsCreated: Record<string, number> = {};
   tokensCreated = 0;
@@ -31,16 +27,16 @@ class Bao {
   policies: Record<string, string> = {};
   roles: Record<string, unknown> = {};
   tokens: Record<string, string> = {};
-  rootAttempt: { nonce: string; otp: string } | null = null;
-  rootGenerations = 0;
   lose: string | null = null;
+  reject: string | null = null;
   mounts: Record<string, unknown> = {};
   auth: Record<string, unknown> = {};
   calls: string[] = [];
 
   fetch = async (url: URL, options: RequestInit) => {
     const path = url.pathname.replace("/v1/", "");
-    this.calls.push(url.origin === recoveryAddress ? `recovery:${path}` : path);
+    this.calls.push(path);
+    if (path === this.reject) return new Response(null, { status: 403 });
     const body = options.body ? JSON.parse(String(options.body)) : undefined;
     const supplied = new Headers(options.headers).get("X-Vault-Token") ?? "";
     const ok = (value?: unknown) =>
@@ -73,30 +69,6 @@ class Bao {
         return ok({ initialized: true, sealed: this.sealed });
       case path === "auth/token/lookup-self":
         return this.rootActive ? ok({ data: {} }) : forbidden();
-      case path.startsWith("sys/generate-root/"): {
-        if (url.origin !== recoveryAddress && !this.sharedGenerateRoot)
-          return Response.json({ errors: ["unsupported operation"] }, { status: 405 });
-        if (path === "sys/generate-root/attempt") {
-          if (options.method === "DELETE") {
-            this.rootAttempt = null;
-            return ok();
-          }
-          if (options.method === "POST") {
-            this.rootAttempt = { nonce: "attempt-nonce", otp: "o".repeat(26) };
-            return ok({ started: true, ...this.rootAttempt });
-          }
-          return ok({ started: this.rootAttempt !== null, nonce: this.rootAttempt?.nonce });
-        }
-        expect(body.key).toBe("retained-unseal-key");
-        expect(body.nonce).toBe(this.rootAttempt?.nonce);
-        const token = `generated-root-token-${String(++this.rootGenerations).padStart(5, "0")}`;
-        this.tokens[token] = "root";
-        const otp = Buffer.from(this.rootAttempt?.otp ?? "");
-        const encoded = Buffer.from(
-          Buffer.from(token).map((value, index) => value ^ (otp[index] ?? 0)),
-        );
-        return ok({ complete: true, encoded_token: encoded.toString("base64") });
-      }
       case path === "sys/mounts":
         return authorized("read") ? ok(this.mounts) : forbidden();
       case path === "sys/mounts/factory":
@@ -112,7 +84,8 @@ class Bao {
       case path.startsWith("sys/policies/acl/"):
         if (!authorized("update")) return forbidden();
         this.policies[path.split("/").pop() as string] = body.policy;
-        return ok();
+        result = ok();
+        break;
       case /^auth\/approle\/role\/[^/]+$/.test(path):
         if (!authorized("update")) return forbidden();
         this.roles[path.split("/").pop() as string] = body;
@@ -234,15 +207,19 @@ test("a lost initialization response never authorizes resetting the encrypted st
   });
 });
 
-test("a lost AppRole creation response is recovered using the same persisted intended secret", async () => {
-  await fixture(async (input, bao) => {
-    bao.lose = "auth/approle/role/factory-environments/custom-secret-id";
-    await expect(bootstrapOpenBao(input)).rejects.toThrow("Response lost");
-    await bootstrapOpenBao(input);
-    expect(bao.secretsCreated["factory-environments"]).toBe(1);
-    expect(bao.initializedCount).toBe(1);
-  });
-});
+test.each(["factory-environments", "factory-backup", "factory-admin"])(
+  "interrupted initial bootstrap reuses the persisted %s secret",
+  async (role) => {
+    await fixture(async (input, bao) => {
+      bao.lose = `auth/approle/role/${role}/custom-secret-id`;
+      await expect(bootstrapOpenBao(input)).rejects.toThrow("Response lost");
+      await bootstrapOpenBao(input);
+      expect(bao.secretsCreated[role]).toBe(1);
+      expect(bao.initializedCount).toBe(1);
+      expect(bao.rootActive).toBe(false);
+    });
+  },
+);
 
 test("a lost root-revocation response is observed without recreating root or application credentials", async () => {
   await fixture(async (input, bao) => {
@@ -323,109 +300,119 @@ test("a retained installation updates policies after an upgrade through the admi
       [],
     );
     expect(bao.tokens["factory-admin-token"]).toBeUndefined();
-    expect(bao.rootGenerations).toBe(0);
-  });
-});
-
-async function legacy(input: Parameters<typeof bootstrapOpenBao>[0], bao: Bao) {
-  await bootstrapOpenBao(input);
-  for (const name of [
-    "factory-backup-login.json",
-    "factory-admin-login.json",
-    "openbao-backup-secret-id.json",
-    "openbao-admin-secret-id.json",
-  ])
-    await rm(resolve(input.directory, name));
-  await writeFile(resolve(input.directory, "factory-policy-version"), "older-policy");
-  for (const name of ["factory-backup", "factory-admin"]) {
-    delete bao.policies[name];
-    delete bao.roles[name];
-    delete bao.secretIDs[name];
-  }
-  bao.secretsCreated = {};
-}
-
-test("an installation that predates the admin identity needs a controlled adoption", async () => {
-  await fixture(async (input, bao) => {
-    await legacy(input, bao);
-    await expect(bootstrapOpenBao(input)).rejects.toThrow("controlled maintenance");
-    expect(bao.rootGenerations).toBe(0);
-  });
-});
-
-test("refreshing policy on the shared listener fails where OpenBao 2.7 disables generate-root", async () => {
-  await fixture(async (input, bao) => {
-    await legacy(input, bao);
-    await expect(bootstrapOpenBao({ ...input, refreshPolicy: true })).rejects.toThrow(
-      "sys/generate-root/attempt returned HTTP 405",
-    );
-  });
-});
-
-test("adoption mints root with the retained key over the recovery listener, then revokes it", async () => {
-  await fixture(async (input, bao) => {
-    await legacy(input, bao);
-    let closed = 0;
-    const result = await bootstrapOpenBao({
-      ...input,
-      openRecovery: async () => ({
-        address: recoveryAddress,
-        close: async () => {
-          closed++;
-        },
-      }),
-    });
-    expect(closed).toBe(1);
-    expect(bao.rootAttempt).toBeNull();
     expect(Object.values(bao.tokens)).not.toContain("root");
-    expect(bao.calls.filter((call) => call.startsWith("recovery:"))).toContain(
-      "recovery:sys/generate-root/update",
+  });
+});
+
+test("a lost policy-upgrade response revokes the admin token and retries with retained logins", async () => {
+  await fixture(async (input, bao) => {
+    const first = await bootstrapOpenBao(input);
+    const before = await secrets(input.directory);
+    await writeFile(resolve(input.directory, "factory-policy-version"), "older-policy");
+    bao.calls.length = 0;
+    bao.lose = "sys/policies/acl/factory-backup";
+    await expect(bootstrapOpenBao(input)).rejects.toThrow("Response lost");
+    expect(bao.tokens["factory-admin-token"]).toBeUndefined();
+    expect(await readFile(resolve(input.directory, "factory-policy-version"), "utf8")).toBe(
+      "older-policy",
     );
-    expect(
-      bao.calls.filter((call) => /generate-root/.test(call) && !call.startsWith("recovery:")),
-    ).toEqual([]);
-    expect(bao.policies["factory-backup"]).toBe(backupPolicy);
-    expect(bao.policies["factory-admin"]).toBe(adminPolicy);
-    expect(result.backup.secret_id).toBe(bao.secretIDs["factory-backup"] as string);
-    expect(bao.secretsCreated["factory-environments"] ?? 0).toBe(0);
+    expect((await bootstrapOpenBao(input)).backup).toEqual(first.backup);
+    expect(await secrets(input.directory)).toEqual(before);
     expect(await readFile(resolve(input.directory, "factory-policy-version"), "utf8")).toBe(
       openBaoPolicyVersion,
     );
-    // Afterwards the admin identity handles later updates without the recovery listener.
-    await writeFile(resolve(input.directory, "factory-policy-version"), "older-policy");
-    await bootstrapOpenBao(input);
-    expect(bao.rootGenerations).toBe(1);
+    expect(bao.secretsCreated).toEqual({
+      "factory-environments": 1,
+      "factory-backup": 1,
+      "factory-admin": 1,
+    });
+    expect(bao.calls.some((call) => /generate-root|sys\/mounts|sys\/auth$/.test(call))).toBe(false);
   });
 });
 
-test("an adoption interrupted before it finished is repeated with the same credentials", async () => {
+test("a missing backup login is recovered with its original intended secret through the admin", async () => {
   await fixture(async (input, bao) => {
-    await legacy(input, bao);
-    const recovery = async () => ({ address: recoveryAddress, close: async () => {} });
-    bao.lose = "auth/approle/role/factory-backup/custom-secret-id";
-    await expect(bootstrapOpenBao({ ...input, openRecovery: recovery })).rejects.toThrow(
-      "Response lost",
-    );
-    expect(Object.values(bao.tokens)).not.toContain("root");
-    await bootstrapOpenBao({ ...input, openRecovery: recovery });
+    const first = await bootstrapOpenBao(input);
+    await rm(resolve(input.directory, "factory-backup-login.json"));
+    bao.calls.length = 0;
+    const second = await bootstrapOpenBao(input);
+    expect(second.backup).toEqual(first.backup);
     expect(bao.secretsCreated["factory-backup"]).toBe(1);
-    expect(bao.rootGenerations).toBe(2);
-    expect((await secrets(input.directory)).backup.secret_id).toBe(
-      bao.secretIDs["factory-backup"] as string,
-    );
+    expect(bao.tokens["factory-admin-token"]).toBeUndefined();
+    expect(bao.calls.some((call) => /generate-root|sys\/mounts|sys\/auth$/.test(call))).toBe(false);
   });
 });
 
-test("an active root generation by someone else is never cancelled", async () => {
+test.each(["older-policy", openBaoPolicyVersion])(
+  "missing retained administrator refuses startup without root recovery for policy %s",
+  async (version) => {
+    await fixture(async (input, bao) => {
+      await bootstrapOpenBao(input);
+      await rm(resolve(input.directory, "factory-admin-login.json"));
+      await writeFile(resolve(input.directory, "factory-policy-version"), version);
+      const paths = [
+        "bootstrap.json",
+        "factory-login.json",
+        "factory-token",
+        "factory-backup-login.json",
+        "factory-policy-version",
+      ].map((name) => resolve(input.directory, name));
+      const before = await Promise.all(paths.map((path) => readFile(path, "utf8")));
+      bao.calls.length = 0;
+      await expect(bootstrapOpenBao(input)).rejects.toThrow("retained administrator AppRole");
+      expect(await Promise.all(paths.map((path) => readFile(path, "utf8")))).toEqual(before);
+      expect(bao.calls).toEqual(["sys/seal-status", "sys/health"]);
+      expect(bao.initializedCount).toBe(1);
+      expect(Object.values(bao.tokens)).not.toContain("root");
+    });
+  },
+);
+
+test("a refused administrator login leaves the old policy marker and original credentials", async () => {
   await fixture(async (input, bao) => {
-    await legacy(input, bao);
-    bao.rootAttempt = { nonce: "foreign", otp: "x".repeat(26) };
-    await expect(
-      bootstrapOpenBao({
-        ...input,
-        openRecovery: async () => ({ address: recoveryAddress, close: async () => {} }),
-      }),
-    ).rejects.toThrow("active root generation");
-    expect(bao.rootAttempt?.nonce).toBe("foreign");
+    await bootstrapOpenBao(input);
+    const before = await secrets(input.directory);
+    await writeFile(resolve(input.directory, "factory-policy-version"), "older-policy");
+    bao.reject = "auth/approle/login";
+    bao.calls.length = 0;
+    await expect(bootstrapOpenBao(input)).rejects.toThrow("returned HTTP 403");
+    expect(await secrets(input.directory)).toEqual(before);
+    expect(await readFile(resolve(input.directory, "factory-policy-version"), "utf8")).toBe(
+      "older-policy",
+    );
+    expect(bao.calls).toEqual(["sys/seal-status", "sys/health", "auth/approle/login"]);
+    expect(bao.initializedCount).toBe(1);
+  });
+});
+
+test("a nonrenewable application token is replaced using the retained AppRole", async () => {
+  await fixture(async (input, bao) => {
+    await bootstrapOpenBao(input);
+    const before = await secrets(input.directory);
+    bao.reject = "auth/token/renew-self";
+    bao.calls.length = 0;
+    await bootstrapOpenBao(input);
+    expect(bao.tokensCreated).toBe(2);
+    expect(await secrets(input.directory)).toEqual(before);
+    expect(bao.calls).toEqual([
+      "sys/seal-status",
+      "sys/health",
+      "auth/token/renew-self",
+      "auth/approle/login",
+    ]);
+    expect(bao.initializedCount).toBe(1);
+  });
+});
+
+test("an empty store with retained keys is refused without reinitializing", async () => {
+  await fixture(async (input, bao) => {
+    await bootstrapOpenBao(input);
+    const keys = await readFile(resolve(input.directory, "bootstrap.json"), "utf8");
+    bao.initialized = false;
+    bao.calls.length = 0;
+    await expect(bootstrapOpenBao(input)).rejects.toThrow("retained keys were preserved");
+    expect(await readFile(resolve(input.directory, "bootstrap.json"), "utf8")).toBe(keys);
+    expect(bao.calls).toEqual(["sys/seal-status"]);
+    expect(bao.initializedCount).toBe(1);
   });
 });

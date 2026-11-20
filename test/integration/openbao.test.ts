@@ -81,8 +81,15 @@ test("pinned OpenBao encrypts persistent values, limits Factory credentials and 
     await docker("restart", service.container);
     await service.start();
     expect(await adapter.read(key)).toEqual(value);
-    // Refresh only the Factory ACL after root revocation, without replacing encrypted data.
-    await service.start(true);
+    // Owned policy-version drift exercises the scoped administrator upgrade after root revocation.
+    const policyFile = join(service.directory, "factory-policy-version");
+    const policyVersion = await readFile(policyFile, "utf8");
+    const adminFile = join(service.directory, "factory-admin-login.json");
+    const adminLogin = await readFile(adminFile, "utf8");
+    await writeFile(policyFile, "owned-outdated-policy-version", { mode: 0o600 });
+    await service.start();
+    expect(await readFile(policyFile, "utf8")).toBe(policyVersion);
+    expect(await readFile(adminFile, "utf8")).toBe(adminLogin);
     expect(await adapter.read(key)).toEqual(value);
     const kv = createOpenBaoKV({
       address: configuration.FACTORY_OPENBAO_URL,

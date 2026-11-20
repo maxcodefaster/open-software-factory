@@ -8,7 +8,7 @@ import { createAttachmentRoutes } from "../../apps/factory/src/attachments/route
 import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewService } from "../../apps/factory/src/review/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";

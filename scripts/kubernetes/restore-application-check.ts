@@ -6,6 +6,7 @@ import * as https from "node:https";
 import { isIP } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { checkServerIdentity } from "node:tls";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import { type Receipt as BackupReceipt, invocation, memberPath } from "./restore-rehearsal";
 import { type ProjectReader, projectRows, readRestoredProjects } from "./restore-zero-projects";
 
@@ -15,8 +16,7 @@ const sha = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const name = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const functions = ["getBootstrap", "getTicketDetail", "saveTicketDocument"] as const;
-const zeroImage =
-  "docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1";
+const zeroImage = imagePins.zero;
 type FunctionName = (typeof functions)[number];
 type Identity = { name: string; uid: string };
 type Digest = { rows: number; sha256: string };

@@ -2,18 +2,17 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import upstream from "../../upstream.json";
 import type { Output, RunOptions } from "../owned-client-process";
 import { matchesRestoreSourceContract } from "./restore-source-contract";
 
 export const images: Record<string, string> = {
-  postgres:
-    "docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8",
-  forgejo:
-    "codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8",
-  garage: upstream.garage.image,
-  openbao: upstream.openbao.image,
-  rclone: upstream.rclone.image,
+  postgres: imagePins.postgres,
+  forgejo: imagePins.forgejo,
+  garage: imagePins.garage,
+  openbao: imagePins.openbao,
+  rclone: imagePins.rclone,
   tools: upstream.node.image,
 };
 // Reviewed native source profiles, not a caller-supplied revision allowlist. Every archive

@@ -87,9 +87,11 @@ export function controllerNeedsDatabase(path: string) {
   return !selfContainedControllerTests.has(path.split("/").at(-1) ?? "");
 }
 export function integrationNeedsApplicationBuild(path: string) {
-  return !["backup-runner.native.test.ts", "substrate-rootless-proxy.native.test.ts"].includes(
-    basename(path),
-  );
+  return ![
+    "backup-runner.native.test.ts",
+    "substrate-rootless-proxy.native.test.ts",
+    "openbao.test.ts",
+  ].includes(basename(path));
 }
 export function integrationLane(path: string) {
   const name = basename(path).replace(/\.test\.ts$/, "");

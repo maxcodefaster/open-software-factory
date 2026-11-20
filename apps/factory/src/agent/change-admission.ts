@@ -19,7 +19,7 @@ import { requireDeliveredPrerequisites } from "../change/dependencies";
 import { CommandError } from "../command-error";
 import { codingReasoningIn } from "../models/controller";
 import { monitoringChangeAuthorityIn } from "../monitoring/authority";
-import { ensureConversationIn } from "../project-agent/conversation-store";
+import { ensureConversationIn } from "../conversations/store";
 import { createSkillController } from "../skills/controller";
 import {
   nativeInputSkills,

@@ -185,6 +185,15 @@ mise exec -- bun run factory:up
 Open http://127.0.0.1:3000. The launcher prints the generated administrator-password file.
 Configure model connections in Settings. Calls send context to the model provider you select.
 
+Source-launcher test lanes using `factory-mutation/runtime-fixture` need explicit preparation
+after their owned disposable installation starts. Ordinary `factory:up` does not seed or repair it:
+
+```sh
+mise exec -- bun scripts/factory/index.ts prepare-fixture --disposable YOUR_PROOF --confirm YOUR_PROOF
+```
+
+Preparation never removes branch protection. Do not rerun preparation over retained release work.
+
 The complete `runtime-artifacts.json` contains four roles: `runtime-host`, `browser-tools`,
 `developer-ide` and `substrate-runtime`. Native `workloadImage` must match that Actor artifact exactly.
 Source-development publication consumes the supplied native Actor and browser images. It builds

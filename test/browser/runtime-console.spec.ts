@@ -8,6 +8,7 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { requestFunction } from "../fixtures/server-functions";
@@ -424,7 +425,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
     await writeEvidenceJSON("runtime-theme-before", {
       editorBackground,
       expected: "rgb(245, 246, 242)",
-      runtimeImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
+      runtimeImage: (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"],
     });
   }
   await expect.soft(editor).toHaveCSS("background-color", "rgb(245, 246, 242)");
@@ -723,7 +724,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
         ideHTTPRequests,
       });
       await writeEvidenceJSON("runtime-retained-resources", {
-        runtimeImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
+        runtimeImage: (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"],
         samples: resourceSamples,
         conditions:
           "Chromium CDP Runtime.getHeapUsage and Memory.getDOMCounters, real Ticket Workspace, single shared-renderer samples without forced GC. The IDE has no separate CDP target in this run. V8 heap and renderer-wide DOM counters, not total RSS, CPU or Sandbox memory, not isolated IDE cost or a before/after savings claim. IDE HTTP counts are cumulative routed requests including normal Run polling; document-load counts identify boot/navigation, not background traffic.",
@@ -892,7 +893,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
   );
   expect(await page.locator(".factory-desktop").evaluate((desktop) => desktop.scrollTop)).toBe(0);
   await writeEvidenceJSON("runtime-layout", {
-    runtimeImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
+    runtimeImage: (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"],
     layouts,
     previewSwitchDocumentLoads,
     minimizeDocumentLoads: ideDocumentLoads - minimizeLoads,

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createInboxService } from "../../apps/factory/src/inbox/service";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { mentionText } from "../../packages/ticket-domain/src/attention";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { fixture } from "../fixtures/change-agent-turns";

@@ -1,3 +1,5 @@
+import imagePins from "../../deploy/helm/factory/image-pins.json";
+
 const digestReference = /^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/;
 
 export async function inspectCurrentContainers<T>(
@@ -70,4 +72,11 @@ export function requireComposePins(config: { services: Record<string, { image?: 
       "Factory local Compose must contain only its pinned PostgreSQL, Forgejo and Zero services",
     );
   for (const service of Object.values(config.services)) requirePinnedImage(service.image);
+  for (const [name, image] of Object.entries({
+    postgres: imagePins.postgres,
+    forgejo: imagePins.forgejo,
+    "zero-cache": imagePins.zero,
+  }))
+    if (config.services[name]?.image !== image)
+      throw new Error(`Factory local ${name} image differs from its approved service pin`);
 }

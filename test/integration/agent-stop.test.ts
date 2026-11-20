@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
-import { ensureConversationIn } from "../../apps/factory/src/project-agent/conversation-store";
+import { ensureConversationIn } from "../../apps/factory/src/conversations/store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 

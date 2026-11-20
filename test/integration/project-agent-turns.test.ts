@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import * as timers from "node:timers/promises";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import type { ProjectAgentOutput } from "../../packages/conversation-domain/src/conversation";
 import { factoryProcess } from "../fixtures/factory-process";
 

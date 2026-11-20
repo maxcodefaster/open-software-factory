@@ -6,7 +6,7 @@ import { createChangeController } from "../../apps/factory/src/change/controller
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createTicketService } from "../../apps/factory/src/change/service";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
 import { admittedTicketContext } from "../../apps/factory/src/project-agent/ticket-context";
 import { renderArchitectureDiagrams } from "../../apps/factory/src/technical-design/diagrams";

@@ -4,7 +4,7 @@ import type { TechnicalPlanningBase } from "../../../../packages/requirement-dom
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { saveTechnicalDesignIn } from "../technical-design/store";
-import { appendConversationEntry, lockConversation } from "./conversation-store";
+import { appendConversationEntry, lockConversation } from "../conversations/store";
 
 export async function persistProjectOutput(
   transaction: AgentTurnTransaction,

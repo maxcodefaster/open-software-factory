@@ -500,7 +500,7 @@ To copy sets off the cluster, create a Secret with an `rclone.conf` key that def
 (S3-compatible or Azure Blob, for example `[offsite]` with `type = azureblob`), then set
 `backup.remote.existingSecret` and `backup.remote.path` (`offsite:container/factory`). The upload
 uses `rclone copy`, so deletion is the remote's lifecycle rule. The image is
-`docker.io/rclone/rclone`, pinned by digest in `upstream.json`.
+`docker.io/rclone/rclone`, pinned by digest in the chart's `image-pins.json`.
 
 ### OpenBao identities
 
@@ -1225,6 +1225,12 @@ The released chart carries `runtime-artifacts.json`, also supplied as
 `factory-runtime-artifacts-<version>.json`. Chart packaging no longer supplies per-architecture
 Factorybox worker values. Runtime trust, Editor/Owner identities and TLS origins remain explicit
 operator inputs, not fabricated release defaults.
+
+Source-development startup and native proofs read the same complete `runtime-artifacts.json`.
+Per-role image files are not publication state. Replacing the bundle changes defaults for future
+creates without rewriting retained installation or Runtime Attempt identities. The chart's
+nonsecret `image-pins.json` owns shared data-service image pins for development, Helm and restore
+checks. Released charts carry that file and render without the source repository.
 
 The Actor package check is networkless and checks architecture, executable versions and packaged
 bootstrap files. It does not start private Docker or a native Actor and is not lifecycle proof.

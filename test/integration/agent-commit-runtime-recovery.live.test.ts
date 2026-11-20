@@ -1,17 +1,18 @@
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal as terminal } from "../fixtures/runtime-access";
 import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -34,7 +35,7 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
       const selectedModel = process.env["FACTORY_LIVE_MODEL_ID"];
       const modelID = selectedModel ?? process.env["FACTORY_AGENT_MODEL_ID"];
       if (!modelID) throw new Error("Live gate requires a Build model");
-      const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
+      const runtimeHostImage = (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
       const forgejoToken = (await readFile(".factory/forgejo-token", "utf8")).trim();
       const processFixture = await factoryProcess({ runtimeHostImage, forgejoToken });
       const database = processFixture.connect();

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { emergencyAdministratorID } from "../../packages/auth/src/policy";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { proveLocalOpenCodeMCP } from "../fixtures/local-opencode-mcp";
@@ -49,7 +50,7 @@ test(
       documentPath = `collaboration-${runID}.txt`;
     const directory = resolve(".factory/test-results/external-mcp/live", id);
     await mkdir(directory, { recursive: true });
-    const runtimeHostImage = (await readFile(".factory/runtime-host-image", "utf8")).trim();
+    const runtimeHostImage = (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
     const forge = await ownedMonitoringForge(directory, id, undefined, publicForgeOrigin);
     const api = createForgejoClient({ apiURL: `${forge.origin}/api/v1/`, token: forge.token });
     const repository = { owner: forge.owner, name: `external-mcp-${id.slice(0, 8)}` };

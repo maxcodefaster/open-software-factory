@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import {
   type Execute,
   forgejoWitnessProgram,
@@ -697,10 +698,12 @@ test("the data-service pins match the chart and never include a Factory applicat
     ["garage", "objects.yaml"],
     ["openbao", "openbao.yaml"],
     ["rclone", "backup.yaml"],
-  ] as const)
+  ] as const) {
+    expect(images[component]).toBe(imagePins[component]);
     expect(await readFile(`deploy/helm/factory/templates/${path}`, "utf8")).toContain(
-      images[component] ?? "",
+      `"name" "${component}"`,
     );
+  }
   expect(Object.keys(images).sort()).toEqual([
     "forgejo",
     "garage",

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import type {
   AgentTurnAuthority,
   AgentTurnCommand,

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+    image: ${FACTORY_POSTGRES_IMAGE:?Factory launcher supplies the approved PostgreSQL image}
     command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_DB: factory
@@ -19,7 +19,7 @@ services:
     volumes:
       - factory-postgres:/var/lib/postgresql/data
   forgejo:
-    image: codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8
+    image: ${FACTORY_FORGEJO_IMAGE:?Factory launcher supplies the approved Forgejo image}
     environment:
       FORGEJO__database__DB_TYPE: sqlite3
       FORGEJO__database__PATH: /var/lib/gitea/data/forgejo.db
@@ -50,7 +50,7 @@ services:
       - forgejo-data:/var/lib/gitea
       - forgejo-config:/etc/gitea
   zero-cache:
-    image: docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1
+    image: ${FACTORY_ZERO_IMAGE:?Factory launcher supplies the approved Zero image}
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,7 +1,6 @@
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { requirePinnedImage } from "./preflight";
 
 export const runtimeArtifactNames = [
   "runtime-host",
@@ -59,7 +58,7 @@ export async function installRuntimeArtifacts(directory: string, bundle: unknown
 }
 
 // A normal restart reuses immutable artifacts. Publication is explicit, not a
-// side effect of opening Factory. Missing/partial first-install state builds once.
+// side effect of opening Factory. Only a missing bundle permits first-install publication.
 export async function publishedRuntimeArtifacts(directory: string) {
   const bundle = await readFile(resolve(directory, "runtime-artifacts.json"), "utf8").catch(
     (cause: NodeJS.ErrnoException) => {
@@ -67,18 +66,12 @@ export async function publishedRuntimeArtifacts(directory: string) {
       throw cause;
     },
   );
-  if (bundle !== null) return runtimeArtifactsSchema.parse(JSON.parse(bundle));
-  const references: Record<string, string> = {};
-  for (const name of runtimeArtifactNames) {
-    const value = await readFile(resolve(directory, `${name}-image`), "utf8").catch(
-      (cause: NodeJS.ErrnoException) => {
-        if (cause.code === "ENOENT") return null;
-        throw cause;
-      },
-    );
-    if (value === null) return null;
-    requirePinnedImage(value.trim());
-    references[name] = value.trim();
-  }
-  return runtimeArtifactsSchema.parse(references);
+  return bundle === null ? null : runtimeArtifactsSchema.parse(JSON.parse(bundle));
+}
+
+export async function requirePublishedRuntimeArtifacts(directory: string) {
+  const artifacts = await publishedRuntimeArtifacts(directory);
+  if (!artifacts)
+    throw new Error("Publish the complete runtime-artifacts.json bundle before startup or proof");
+  return artifacts;
 }

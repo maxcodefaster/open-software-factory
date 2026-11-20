@@ -1,18 +1,19 @@
 import { expect, test } from "bun:test";
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createProjectSetupController } from "../../apps/factory/src/setup/controller";
 import { createImportSecrets } from "../../apps/factory/src/setup/secrets";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { assistedImportRuntime } from "../fixtures/assisted-import-runtime";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
@@ -110,7 +111,7 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
         ]);
         factory = await factoryProcess(
           {
-            runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
+            runtimeHostImage: (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"],
             forgejoToken: token,
           },
           {
@@ -350,7 +351,9 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
       factory = await factoryProcess(
         runtimeProof
           ? {
-              runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
+              runtimeHostImage: (await requirePublishedRuntimeArtifacts(".factory"))[
+                "runtime-host"
+              ],
               forgejoToken: token,
             }
           : undefined,

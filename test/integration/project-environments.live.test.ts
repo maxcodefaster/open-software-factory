@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { substrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -32,11 +33,10 @@ test("registered Project automatically prebuilds and uses exact secure Developme
   const directory = await mkdtemp(join(tmpdir(), "factory-owned-environment-proof-"));
   const bao = await localOpenBao(directory);
   const configuration = await bao.start();
-  const image = (name: string) =>
-    readFile(`.factory/${name}-image`, "utf8").then((value) => value.trim());
+  const runtimeArtifacts = await requirePublishedRuntimeArtifacts(".factory");
   const forgeToken = (await readFile(tokenFile, "utf8")).trim();
   const factory = await factoryProcess(
-    { runtimeHostImage: await image("runtime-host"), forgejoToken: forgeToken },
+    { runtimeHostImage: runtimeArtifacts["runtime-host"], forgejoToken: forgeToken },
     {
       ...configuration,
       FACTORY_MODEL_BASE_URL: "http://127.0.0.1:9/v1",

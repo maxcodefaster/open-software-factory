@@ -1,8 +1,8 @@
 import { chmod, lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import upstream from "../../upstream.json";
-import { bootstrapOpenBao, openBaoPolicyVersion } from "./openbao-bootstrap";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
+import { bootstrapOpenBao } from "./openbao-bootstrap";
 
 const identitySchema = z
   .object({
@@ -130,7 +130,7 @@ export async function localOpenBao(stateDirectory: string) {
   const address = `https://127.0.0.1:${identity.port}`;
   const caFile = resolve(await command(["mkcert", "-CAROOT"]), "rootCA.pem");
 
-  async function startConfigured(refreshPolicy = false) {
+  async function start() {
     if (!(await owned("volume", volume))) {
       await docker(
         "volume",
@@ -166,7 +166,7 @@ export async function localOpenBao(stateDirectory: string) {
         `type=volume,source=${volume},target=/bao/data`,
         "--entrypoint",
         "/bin/sh",
-        upstream.openbao.image,
+        imagePins.openbao,
         "-ec",
         'chown "$1" /bao/data; chmod 0700 /bao/data',
         "owned-openbao-volume",
@@ -178,8 +178,8 @@ export async function localOpenBao(stateDirectory: string) {
       if (currentUser !== runtimeUser)
         throw new Error("OpenBao runtime user differs from its retained identity");
       const image = await docker("inspect", "--format", "{{.Config.Image}}", container);
-      if (image !== upstream.openbao.image) {
-        await docker("pull", upstream.openbao.image);
+      if (image !== imagePins.openbao) {
+        await docker("pull", imagePins.openbao);
         await docker("stop", container);
         await docker("rm", container);
       }
@@ -199,7 +199,7 @@ export async function localOpenBao(stateDirectory: string) {
         `type=volume,source=${volume},target=/bao/data,readonly`,
         "--entrypoint",
         "/bin/sh",
-        upstream.openbao.image,
+        imagePins.openbao,
         "-ec",
         "stat -c '%u:%g' /bao/data",
       );
@@ -233,12 +233,12 @@ export async function localOpenBao(stateDirectory: string) {
         `127.0.0.1:${identity.port}:8200`,
         "--entrypoint",
         "/usr/bin/bao",
-        upstream.openbao.image,
+        imagePins.openbao,
         "server",
         "-config=/bao/config/config.json",
       );
-    } else await docker(refreshPolicy ? "restart" : "start", container);
-    const credentials = await bootstrapOpenBao({ directory, address, caFile, refreshPolicy });
+    } else await docker("start", container);
+    const credentials = await bootstrapOpenBao({ directory, address, caFile });
     return {
       FACTORY_OPENBAO_URL: address,
       FACTORY_OPENBAO_TOKEN_FILE: credentials.tokenFile,
@@ -247,32 +247,7 @@ export async function localOpenBao(stateDirectory: string) {
     };
   }
   return {
-    async start(refreshPolicy = false) {
-      const existingLogin = await lstat(resolve(directory, "factory-login.json")).catch(
-        () => undefined,
-      );
-      const installedPolicy = await readFile(
-        resolve(directory, "factory-policy-version"),
-        "utf8",
-      ).catch(() => "");
-      if (!refreshPolicy && (!existingLogin || installedPolicy === openBaoPolicyVersion))
-        return startConfigured();
-      // Quorum-only recovery is enabled solely for this owned local ACL update.
-      const recoveryConfig = structuredClone(config);
-      Object.assign(recoveryConfig.listener.tcp, {
-        disable_unauthed_generate_root_endpoints: false,
-      });
-      await writeConfig(recoveryConfig);
-      try {
-        return await startConfigured(true);
-      } finally {
-        await writeConfig(config);
-        if (await owned("container", container)) {
-          await docker("restart", container);
-          await startConfigured();
-        }
-      }
-    },
+    start,
     container,
     volume,
     directory,

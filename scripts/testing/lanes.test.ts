@@ -28,6 +28,7 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(integrationLane("test/integration/substrate-source.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/substrate-adapter.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/project-environments.live.test.ts")).toBe("live");
+  expect(integrationLane("test/integration/openbao.test.ts")).toBe("native");
   expect(browserLane("agent-turn-live.spec.ts")).toBe("paid");
   expect(browserLane("project-agent.spec.ts")).toBe("paid");
   expect(browserLane("runtime-console.spec.ts")).toBe("native");
@@ -92,6 +93,7 @@ test("self-contained protocol and PostgreSQL proofs do not acquire an unused sha
   }
   expect(controllerNeedsDatabase("test/integration/substrate-source.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/openbao.test.ts")).toBe(false);
+  expect(integrationNeedsApplicationBuild("test/integration/openbao.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/postgres-baseline.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-knowledge.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-workspaces.test.ts")).toBe(

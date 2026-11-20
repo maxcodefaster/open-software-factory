@@ -1,5 +1,6 @@
-import { chmod, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
@@ -10,9 +11,10 @@ import {
   localRuntimeDefaults,
   publishedRuntimeArtifacts,
   type RuntimeArtifacts,
+  requirePublishedRuntimeArtifacts,
   runtimeArtifactEnvironment,
-  runtimeArtifactsSchema,
 } from "./artifacts";
+import { prepareForgejoFixture, requireForgeFixtureInstallation } from "./forge-fixture";
 import { ensureLocalForgeIdentity } from "./forge-identity";
 import { installForgeBrowserLogout } from "./forge-logout";
 import {
@@ -52,10 +54,15 @@ import {
   stopFactoryServerContainer,
 } from "./server-container";
 import { localForgeIdentityEndpoints, localServerSettings } from "./server-settings";
-import { localStarterCompose, nativeStarterImages, starterImagesSchema } from "./starter-images";
+import { nativeStarterImages, starterImagesSchema } from "./starter-images";
 import { disposeRuntimeStorageCheck, requireWritableRuntimeStorage } from "./storage-readiness";
 
 const root = resolve(import.meta.dir, "../..");
+Object.assign(process.env, {
+  FACTORY_POSTGRES_IMAGE: imagePins.postgres,
+  FACTORY_FORGEJO_IMAGE: imagePins.forgejo,
+  FACTORY_ZERO_IMAGE: imagePins.zero,
+});
 process.env["FACTORY_FORGEJO_IMPORT_DOMAINS"] =
   projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"])
     .map((origin) => new URL(origin).hostname)
@@ -86,29 +93,27 @@ if (
   requireResetConfirmation(null, confirmation, flags.includes("--data"));
 if (disposableName && action === "publish-runtime")
   throw new Error("Disposable installations reuse approved published runtime images");
-if (!["up", "restart", "reset", "status", "publish-runtime"].includes(action ?? ""))
+if (
+  !["up", "restart", "reset", "status", "publish-runtime", "prepare-fixture"].includes(action ?? "")
+)
   throw new Error("Unknown Factory action");
+if (action === "prepare-fixture" && (!disposableName || confirmation !== disposableName))
+  throw new Error("Fixture preparation requires --disposable NAME --confirm NAME");
 if (disposableName && action === "up") requireModelConfiguration(process.env);
-const installationArtifacts =
-  disposableName && action === "up" ? await publishedRuntimeArtifacts(sharedStateDirectory) : null;
 const installation = disposableName
   ? action === "up"
-    ? await createInstallation(root, disposableName, {
-        runtimeImage:
-          installationArtifacts?.["runtime-host"] ??
-          (await readFile(resolve(sharedStateDirectory, "runtime-host-image"), "utf8")).trim(),
-        browserImage:
-          installationArtifacts?.["browser-tools"] ??
-          (await readFile(resolve(sharedStateDirectory, "browser-tools-image"), "utf8")).trim(),
-      })
+    ? await requirePublishedRuntimeArtifacts(sharedStateDirectory).then((artifacts) =>
+        createInstallation(root, disposableName, {
+          runtimeImage: artifacts["runtime-host"],
+          browserImage: artifacts["browser-tools"],
+        }),
+      )
     : await loadInstallation(root, disposableName)
   : null;
+if (action === "prepare-fixture") requireForgeFixtureInstallation(installation, confirmation);
 const stateDirectory = installation
   ? installationDirectory(root, installation.name)
   : sharedStateDirectory;
-const runtimeImageFile = resolve(stateDirectory, "runtime-host-image");
-const browserImageFile = resolve(stateDirectory, "browser-tools-image");
-const developerIDEImageFile = resolve(sharedStateDirectory, "developer-ide-image");
 const serverPIDFile = resolve(stateDirectory, "server.pid");
 const forgejoTokenFile = resolve(stateDirectory, "forgejo-token");
 const forgejoAdminTokenFile = resolve(stateDirectory, "forgejo-admin-token");
@@ -301,15 +306,12 @@ async function publishRuntimeHost() {
   );
   try {
     await waitForRegistry({ forward, host: registryHost, caFile: rootCA });
-    let runtimeReference = "";
     const published: Record<string, string> = {};
-    const outputs: Array<{ path: string; reference: string }> = [];
     for (const artifact of [
       {
         name: "runtime-host",
         repository: registryRepository,
         metadata: metadataFile,
-        state: runtimeImageFile,
         dockerfile: "deploy/runtime-host/Dockerfile",
         target: "runtime-host",
       },
@@ -317,7 +319,6 @@ async function publishRuntimeHost() {
         name: "developer-ide",
         repository: `${registryHost}/open-factory/developer-ide`,
         metadata: resolve(sharedStateDirectory, "developer-ide-metadata.json"),
-        state: developerIDEImageFile,
         dockerfile: "deploy/runtime-host/Dockerfile",
         target: "developer-ide",
       },
@@ -337,8 +338,6 @@ async function publishRuntimeHost() {
         caFile: rootCA,
       });
       published[artifact.name] = reference;
-      outputs.push({ path: artifact.state, reference });
-      if (artifact.name === "runtime-host") runtimeReference = reference;
     }
     // Actor architecture is independent of the control-plane host. Use the
     // exact upstream HTTPS registries, not the old port-5000 fixture mirror.
@@ -350,9 +349,7 @@ async function publishRuntimeHost() {
     published["substrate-runtime"] = requireNativeInstallation().workloadImage;
     published["browser-tools"] = nativeBrowserImage;
     await requireAvailableRuntimeArtifacts(published);
-    await installRuntimeArtifacts(sharedStateDirectory, published);
-    for (const output of outputs) await writeFile(output.path, `${output.reference}\n`);
-    return runtimeReference;
+    return installRuntimeArtifacts(sharedStateDirectory, published);
   } finally {
     forward.kill();
   }
@@ -467,182 +464,21 @@ async function ensureForgejo() {
     if (!token) throw new Error("Forgejo returned no mutation token");
     await writeFile(forgejoTokenFile, `${token}\n`, { mode: 0o600 });
   }
-  const authorization = `Bearer ${token}`;
-  const repositoryAPI = `${forgejoBaseURL}/api/v1/repos/factory-mutation/runtime-fixture`;
-  const starterImages = starterImagesSchema.parse(
-    JSON.parse(await readFile(starterImagesFile, "utf8")),
-  );
-  const fixtureContent = async (path: string) => {
-    const content = await readFile(resolve(root, "test/fixtures/runtime-project", path), "utf8");
-    return path === ".devcontainer/compose.yaml"
-      ? localStarterCompose(content, starterImages)
-      : content;
-  };
-  async function ensureFixtureFile(path: string, message: string) {
-    const expected = await fixtureContent(path);
-    const endpoint = `${repositoryAPI}/contents/${path}`;
-    let missing = false;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const existing = await fetch(`${endpoint}?ref=main`, { headers: { authorization } });
-      if (existing.status === 404) {
-        missing = true;
-        break;
-      }
-      if (!existing.ok) throw new Error(`Forgejo fixture lookup failed with ${existing.status}`);
-      const value = (await existing.json()) as { content?: string; sha?: string };
-      if (!value.content || !value.sha) {
-        await Bun.sleep(250);
-        continue;
-      }
-      if (value.content && Buffer.from(value.content, "base64").toString() === expected) return;
-      const updateFile = () =>
-        fetch(endpoint, {
-          method: "PUT",
-          headers: { authorization, "content-type": "application/json" },
-          body: JSON.stringify({
-            branch: "main",
-            message,
-            content: Buffer.from(expected).toString("base64"),
-            sha: value.sha,
-          }),
-        });
-      let updated = await updateFile();
-      if (updated.status === 403) {
-        const removedProtection = await fetch(`${repositoryAPI}/branch_protections/main`, {
-          method: "DELETE",
-          headers: { authorization },
-        });
-        if (!removedProtection.ok && removedProtection.status !== 404) {
-          throw new Error(
-            `Forgejo fixture branch-protection cleanup failed with ${removedProtection.status}`,
-          );
-        }
-        updated = await updateFile();
-      }
-      if (!updated.ok) throw new Error(`Forgejo fixture update failed with ${updated.status}`);
-      return;
-    }
-    if (!missing) throw new Error("Forgejo fixture content did not settle after repository push");
-    const created = await fetch(endpoint, {
-      method: "POST",
-      headers: { authorization, "content-type": "application/json" },
-      body: JSON.stringify({
-        branch: "main",
-        message,
-        content: Buffer.from(expected).toString("base64"),
-      }),
-    });
-    if (!created.ok) throw new Error(`Forgejo fixture creation failed with ${created.status}`);
-  }
-  async function ensureFixtureFiles() {
-    await ensureFixtureFile(
-      ".devcontainer/compose.yaml",
-      "Use locally published exact Starter images",
-    );
-    await ensureFixtureFile(
-      ".forgejo/workflows/factory-verification.yml",
-      "Update Factory Verification workflow",
-    );
-    await ensureFixtureFile(".factory/system.json", "Update Factory System Contract");
-    await ensureFixtureFile("src/worker.mjs", "Add Factory fixture worker");
-  }
-  async function ensureLocalFixtureFiles() {
-    const destination = resolve(stateDirectory, "runtime-fixture-repository");
-    const repository = await stat(resolve(destination, ".git")).catch(() => null);
-    if (!repository?.isDirectory()) return;
-    const paths = [".factory/system.json", "src/worker.mjs", ".devcontainer/compose.yaml"];
-    for (const path of paths) {
-      const content = await fixtureContent(path);
-      const target = resolve(destination, path);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, content);
-    }
-    const changed = await command(
-      ["git", "-C", destination, "status", "--porcelain", "--", ...paths],
-      { quiet: true },
-    );
-    if (!changed) return;
-    await command(["git", "-C", destination, "add", "--", ...paths]);
-    await command([
-      "git",
-      "-C",
-      destination,
-      "-c",
-      "user.name=Factory",
-      "-c",
-      "user.email=factory@example.invalid",
-      "commit",
-      "-m",
-      "Update Factory runtime fixture",
-      "--",
-      ...paths,
-    ]);
-  }
-  const existing = await fetch(repositoryAPI, { headers: { authorization } });
-  if (existing.status === 404) {
-    const created = await fetch(`${forgejoBaseURL}/api/v1/user/repos`, {
-      method: "POST",
-      headers: { authorization, "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "runtime-fixture",
-        private: false,
-        auto_init: false,
-        default_branch: "main",
-      }),
-    });
-    if (!created.ok && created.status !== 409) {
-      throw new Error(`Forgejo repository bootstrap failed with ${created.status}`);
-    }
-  } else if (!existing.ok) {
-    throw new Error(`Forgejo repository lookup failed with ${existing.status}`);
-  }
-  const main = await fetch(`${repositoryAPI}/branches/main`, { headers: { authorization } });
-  if (main.ok) {
-    await ensureFixtureFiles();
-    await ensureLocalFixtureFiles();
-    return token;
-  }
-  if (main.status !== 404) throw new Error(`Forgejo main branch lookup failed with ${main.status}`);
-  const destination = resolve(stateDirectory, "runtime-fixture-repository");
-  await rm(destination, { recursive: true, force: true });
-  await mkdir(destination, { recursive: true });
-  await command(["cp", "-R", `${resolve(root, "test/fixtures/runtime-project")}/.`, destination]);
-  await writeFile(
-    resolve(destination, ".devcontainer/compose.yaml"),
-    await fixtureContent(".devcontainer/compose.yaml"),
-  );
-  await command(["git", "init", "--initial-branch=main", destination]);
-  await command(["git", "-C", destination, "add", "."]);
-  await command([
-    "git",
-    "-C",
-    destination,
-    "-c",
-    "user.name=Factory",
-    "-c",
-    "user.email=factory@example.invalid",
-    "commit",
-    "-m",
-    "runtime fixture",
-  ]);
-  await command([
-    "git",
-    "-C",
-    destination,
-    "remote",
-    "add",
-    "origin",
-    `${forgejoBaseURL}/factory-mutation/runtime-fixture.git`,
-  ]);
-  await command(["git", "-C", destination, "push", "origin", "HEAD:main"], {
-    env: {
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "http.extraHeader",
-      GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`${username}:${token}`).toString("base64")}`,
-    },
-  });
-  await ensureFixtureFiles();
   return token;
+}
+
+async function prepareFixture() {
+  requireForgeFixtureInstallation(installation, confirmation);
+  await validateComposeOwnership();
+  await prepareForgejoFixture({
+    root,
+    installation,
+    confirmation,
+    token: (await readFile(forgejoTokenFile, "utf8")).trim(),
+    starterImages: starterImagesSchema.parse(JSON.parse(await readFile(starterImagesFile, "utf8"))),
+    command,
+  });
+  console.log(`Prepared the runtime test fixture in disposable installation ${installation?.name}`);
 }
 
 async function ensureForgeAdministrator() {
@@ -692,37 +528,11 @@ async function ensureForgeAdministrator() {
   return created;
 }
 
-async function publishedBrowserImage() {
-  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
-  const browserImage =
-    process.env["FACTORY_BROWSER_TOOLS_IMAGE"] ??
-    localRuntimeDefaults(artifacts, installation).browserImage ??
-    (await readFile(browserImageFile, "utf8")).trim();
-  if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(browserImage))
-    throw new Error("Published browser tools image is not pinned");
-  return browserImage;
-}
-
-async function publishedDeveloperIDEImage() {
-  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
-  const editor =
-    process.env["FACTORY_DEVELOPER_IDE_IMAGE"] ??
-    artifacts?.["developer-ide"] ??
-    (await readFile(developerIDEImageFile, "utf8")).trim();
-  requirePinnedImage(editor);
-  return editor;
-}
-
-async function configuredRuntimeArtifacts(runtimeImage: string) {
+async function configuredRuntimeArtifacts() {
   const native = requireNativeInstallation();
-  const published = await publishedRuntimeArtifacts(sharedStateDirectory);
-  if (published) requireNativeRuntimeArtifact(native, published);
-  return runtimeArtifactsSchema.parse({
-    "runtime-host": runtimeImage,
-    "browser-tools": await publishedBrowserImage(),
-    "developer-ide": await publishedDeveloperIDEImage(),
-    "substrate-runtime": native.workloadImage,
-  });
+  const artifacts = await requirePublishedRuntimeArtifacts(sharedStateDirectory);
+  requireNativeRuntimeArtifact(native, artifacts);
+  return artifacts;
 }
 
 async function startServer(
@@ -863,9 +673,8 @@ async function up() {
   if (published) {
     await writeFile(starterImagesFile, JSON.stringify(nativeStarterImages()), { mode: 0o600 });
   }
-  const runtimeImage =
-    localRuntimeDefaults(published, installation).runtimeImage ?? (await publishRuntimeHost());
-  const artifacts = await configuredRuntimeArtifacts(runtimeImage);
+  if (!published) await publishRuntimeHost();
+  const artifacts = await configuredRuntimeArtifacts();
   await requireAvailableRuntimeArtifacts(artifacts);
   await selectServerImage();
   await completeFactoryStartup({
@@ -936,12 +745,7 @@ async function selectServerImage() {
 
 async function restart() {
   await preflight();
-  const runtimeImage =
-    localRuntimeDefaults(await publishedRuntimeArtifacts(sharedStateDirectory), installation)
-      .runtimeImage ?? (await readFile(runtimeImageFile, "utf8")).trim();
-  if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(runtimeImage))
-    throw new Error("Published runtime host is not pinned");
-  const artifacts = await configuredRuntimeArtifacts(runtimeImage);
+  const artifacts = await configuredRuntimeArtifacts();
   await requireAvailableRuntimeArtifacts(artifacts);
   await selectServerImage();
   await completeFactoryStartup({
@@ -968,7 +772,7 @@ async function status() {
   }).catch(() => null);
   const runtimeImage =
     localRuntimeDefaults(await publishedRuntimeArtifacts(sharedStateDirectory), installation)
-      .runtimeImage ?? (await readFile(runtimeImageFile, "utf8").catch(() => "not published"));
+      .runtimeImage ?? "not published";
   console.log(`server: ${response?.ok ? "ready" : "stopped"}`);
   console.log(`runtime host: ${runtimeImage.trim()}`);
   await command([...composeArguments, "ps"]);
@@ -1167,18 +971,19 @@ const lock = await open(lockFile, "wx", 0o600).catch(() => {
 });
 try {
   await lock.writeFile(String(process.pid));
-  await configureInstallation();
+  if (action !== "prepare-fixture") await configureInstallation();
   if (action === "up") await up();
   else if (action === "publish-runtime") {
     await requireRegistryStorage();
     await kubectl(["get", "service/registry", "-n", namespace], undefined, true);
     await publishRuntimeHost();
     console.log(
-      "Published exact execution, browser and independent source artifacts; Factory and existing runtimes unchanged",
+      "Published the complete runtime artifact bundle; Factory and existing runtimes unchanged",
     );
   } else if (action === "restart") await restart();
   else if (action === "status") await status();
   else if (action === "reset") await reset();
+  else if (action === "prepare-fixture") await prepareFixture();
 } finally {
   await lock.close();
   await rm(lockFile, { force: true });

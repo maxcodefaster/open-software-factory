@@ -5,7 +5,7 @@ import upstream from "../../upstream.json";
 import { createSessionArchives } from "../../apps/factory/src/agent/session-archive-store";
 import { readNativeSessionArchive } from "../../apps/factory/src/agent/session-archive";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { ensureConversationIn } from "../../apps/factory/src/project-agent/conversation-store";
+import { ensureConversationIn } from "../../apps/factory/src/conversations/store";
 import { fixture } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
 import { memoryPrivateObjects } from "../fixtures/private-objects";

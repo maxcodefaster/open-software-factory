@@ -16,6 +16,7 @@ import {
 import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
 import type { SystemContract } from "../../../../packages/system-contract/src/system-contract";
 import { projectAuthorityIn } from "../access/controller";
+import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import { runtimeAppOrigins } from "./app-origins";
 import { substrateRepositoryCloneURL } from "./endpoints";
 import {
@@ -88,6 +89,7 @@ export function createSubstrateIsolated(
   editorCall?: SubstrateCall,
   provisionerCall?: SubstrateCall,
   capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "requireReady">,
+  shutdownCoding = createCodingRuntimeShutdown(database, hub),
 ) {
   const config = substrateWorkspaceConfiguration(input);
   const editor = editorCall ?? createSubstrateControl(config.connection);
@@ -131,7 +133,7 @@ export function createSubstrateIsolated(
       environment: row.intent.environment,
       ...(declaration ? { declaredApps: declaration.channels.map((channel) => channel.name) } : {}),
     };
-    return createSubstrateExecution(database, hub, secret, bound, editor);
+    return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor);
   }
   async function absent(call: SubstrateCall, method: string, request: unknown) {
     try {

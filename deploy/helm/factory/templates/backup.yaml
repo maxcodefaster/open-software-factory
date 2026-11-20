@@ -6,8 +6,8 @@ A failed step leaves a marker and does not stop the next one; finalization fails
 PostgreSQL and Forgejo commands run in their existing Pods; only the runner writes backup data.
 */ -}}
 {{- $name := include "factory.name" . }}
-{{- $openbaoImage := "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf" }}
-{{- $rcloneImage := "docker.io/rclone/rclone:1.74.1@sha256:eb8788b795f0009324e9572b0e2acb9b56885327c2746b07d67a9d3b893a6602" }}
+{{- $openbaoImage := include "factory.serviceImage" (dict "root" . "name" "openbao") }}
+{{- $rcloneImage := include "factory.serviceImage" (dict "root" . "name" "rclone") }}
 {{- $retention := int .Values.backup.retention }}
 {{- if or (ne (toString .Values.backup.retention) (printf "%d" $retention)) (lt $retention 1) }}
 {{- fail "backup.retention must be a positive whole number of backup sets to keep" }}

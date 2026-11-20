@@ -3,7 +3,7 @@ import { createCodingContexts } from "../../apps/factory/src/agent/conversation-
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
+import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";

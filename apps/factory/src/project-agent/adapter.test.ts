@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { requirementsInterviewSkill } from "../skills/reviewed";
 import { generateProjectResponse } from "./adapter";
-import type { ConversationEntry } from "./conversation-store";
+import type { ConversationEntry } from "../conversations/store";
 
 test("native Project Agent preserves structured context and sends current input once", async () => {
   let captured = "";

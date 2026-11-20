@@ -1,5 +1,5 @@
 import type { AgentTurnCommand } from "../../../../packages/conversation-domain/src/agent-turn";
-import type { ConversationEntry } from "./conversation-store";
+import type { ConversationEntry } from "../conversations/store";
 
 export function isRequirementsInterview(
   command: Extract<AgentTurnCommand, { kind: "project-message" | "project-answer" }>,

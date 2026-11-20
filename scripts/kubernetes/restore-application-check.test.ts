@@ -17,6 +17,7 @@ import type * as https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DetailedPeerCertificate } from "node:tls";
+import imagePins from "../../deploy/helm/factory/image-pins.json";
 import {
   type ApplicationFixture,
   type ApplicationWitnesses,
@@ -460,8 +461,7 @@ function target(f: Fixture) {
               ? [
                   {
                     name: "zero",
-                    image:
-                      "docker.io/rocicorp/zero:1.12.0@sha256:213d3bc4c667458c2ca6b65c963db4e484298dc25586f3cd93033bbdeaf32cb1",
+                    image: imagePins.zero,
                     env: [
                       ...["ZERO_UPSTREAM_DB", "ZERO_CVR_DB", "ZERO_CHANGE_DB"].map((name) => ({
                         name,

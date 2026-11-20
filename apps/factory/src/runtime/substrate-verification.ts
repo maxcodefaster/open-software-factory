@@ -13,6 +13,7 @@ import {
   SubstrateRPCError,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
+import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import { substrateRepositoryCloneURL } from "./endpoints";
 import { runtimeSourceCapability } from "./git-http";
 import type { RuntimeHub } from "./hub";
@@ -68,6 +69,7 @@ export function createSubstrateVerification(
   editorCall?: SubstrateCall,
   provisionerCall?: SubstrateCall,
   capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "requireReady">,
+  shutdownCoding = createCodingRuntimeShutdown(database, hub),
 ) {
   const config = substrateWorkspaceConfiguration(input);
   const desiredConfiguration = config;
@@ -113,7 +115,7 @@ export function createSubstrateVerification(
       templateSHA256: row.intent.templateSHA256,
       environment: row.intent.environment,
     };
-    return createSubstrateExecution(database, hub, secret, bound, editor);
+    return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor);
   }
   async function absent(call: SubstrateCall, method: string, request: unknown) {
     try {
