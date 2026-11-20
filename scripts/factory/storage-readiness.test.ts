@@ -476,7 +476,9 @@ test("a verified probe resumes its exact cleanup after a delayed reclaimer witho
       await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
         "volume cleanup is not confirmed",
       );
-      const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
+      const previous = JSON.parse(
+        await readFile(join(directory, "storage-readiness.json"), "utf8"),
+      );
       // The provisioner settles its original deletion after Factory's observation timed out.
       cluster.resources.delete(cluster.key("PersistentVolume", previous.volume.name));
       cluster.keepVolume = false;
