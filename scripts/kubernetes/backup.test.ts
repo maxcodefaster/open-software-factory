@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseAllDocuments } from "yaml";
 
@@ -120,6 +120,23 @@ except BlockingIOError:
       "setsid",
       "#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n",
     );
+  const sleep = Bun.which("sleep");
+  if (!sleep) throw new Error("The backup fixture requires sleep");
+  await writeFile(`${root}/watchdog-owner`, "");
+  await executable(
+    "sleep",
+    `#!/bin/sh
+case "$1" in
+  0|*.*) exec '${sleep}' "$@" ;;
+esac
+exec 7>"$FIXTURE/watchdog-owner"
+printf '%s\\n' "$$" >> "$FIXTURE/watchdogs.pid"
+if [ "\${DETACH_WATCHDOG:-0}" = 1 ]; then
+  exec setsid '${sleep}' "$@"
+fi
+exec '${sleep}' "$@"
+`,
+  );
   await writeFile(`${root}/tmp/forgejo-db.sql`, "fixture forgejo database");
   await writeFile(`${root}/tmp/forgejo.sqlite3`, "fixture full SQLite snapshot");
   await writeFile(`${root}/tmp/app.ini`, "fixture original configuration");
@@ -268,7 +285,7 @@ esac
 `,
   );
   const children: Array<{
-    child: Pick<Bun.Subprocess, "exitCode" | "kill">;
+    child: Pick<Bun.Subprocess, "exitCode" | "exited" | "kill">;
     result: Promise<[number, string, string]>;
   }> = [];
   function start(
@@ -324,6 +341,28 @@ esac
     const probe = start("probe", {}, ["sh", "-c", `exec 9>>'${backup}/.lock'; flock 9`]);
     expect((await probe.result)[0]).toBe(0);
   };
+  async function stopWatchdogs() {
+    const journal = Bun.file(`${root}/watchdogs.pid`);
+    if (!(await journal.exists())) return;
+    for (const pid of new Set((await journal.text()).trim().split("\n").map(Number))) {
+      if (!Number.isSafeInteger(pid) || pid <= 1) throw new Error("Invalid owned watchdog PID");
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
+        throw error;
+      }
+      // Check the open ownership descriptor, not a possibly reused PID or shared group.
+      let owned = false;
+      if (process.platform === "linux") {
+        owned = (await readlink(`/proc/${pid}/fd/7`).catch(() => "")) === `${root}/watchdog-owner`;
+      } else {
+        const files = Bun.spawnSync(["lsof", "-a", "-p", String(pid), "-d", "7", "-Fn"]);
+        owned = files.stdout.toString().split("\n").includes(`n${root}/watchdog-owner`);
+      }
+      if (owned) process.kill(pid, "SIGKILL");
+    }
+  }
   return {
     root,
     backup,
@@ -339,12 +378,48 @@ esac
       for (const running of children) {
         if (running.child.exitCode === null) running.child.kill("SIGTERM");
       }
+      await Promise.all(children.map((running) => running.child.exited));
+      await stopWatchdogs();
       await Promise.all(children.map((running) => running.result));
       await unlocked();
       await rm(root, { recursive: true, force: true });
     },
   };
 }
+
+test("an orphaned exec watchdog cannot retain the writer lock or output streams", async () => {
+  const f = await fixture();
+  const unrelated = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  try {
+    const first = f.start("first", { DETACH_WATCHDOG: "1" }, [
+      "sh",
+      "-c",
+      `exec 9>>'${f.backup}/.lock'
+flock -n 9
+exec sh '${f.scripts}/run.sh' exec watchdog-isolation sh -c 'while [ ! -f "$FIXTURE/first.release" ]; do sleep 0.02; done'`,
+    ]);
+    await until(() => Bun.file(`${f.root}/watchdogs.pid`).exists());
+    await f.release("first");
+    const outcome = await Promise.race([first.result, Bun.sleep(750).then(() => null)]);
+    const probe = await f.start("probe", {}, [
+      "sh",
+      "-c",
+      `exec 9>>'${f.backup}/.lock'; flock -n 9`,
+    ]).result;
+    expect({ exit: outcome?.[0] ?? null, lockAvailable: probe[0] === 0 }).toEqual({
+      exit: 0,
+      lockAvailable: true,
+    });
+  } finally {
+    try {
+      await f.close();
+      expect(() => process.kill(unrelated.pid, 0)).not.toThrow();
+    } finally {
+      unrelated.kill("SIGKILL");
+      await unrelated.exited;
+    }
+  }
+}, 10_000);
 
 test.each(["sync", "copy"])(
   "overlapping backup entry cannot change .current or objects during %s",

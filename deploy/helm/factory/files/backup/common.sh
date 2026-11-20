@@ -52,7 +52,7 @@ exec_call() {
   child=''
   timer=''
   cleanup() {
-    # The timer has its own group so its sleep cannot survive cleanup or hold fd 9.
+    # Keep timer cleanup separate from the writer's process group.
     if [ -n "$timer" ]; then
       kill -KILL "$timer" 2> /dev/null || true
       kill -KILL "-$timer" 2> /dev/null || true
@@ -85,7 +85,9 @@ exec_call() {
   setsid "$@" <&8 8<&- &
   child=$!
   exec 8<&-
-  setsid sh -c 'sleep "$1"; kill -USR1 "$2"' sh "$seconds" "$$" &
+  # The watchdog never writes backup data. Even if its sleep outlives cleanup,
+  # it must not retain the writer lock or prevent archive/log readers seeing EOF.
+  setsid sh -c 'sleep "$1"; kill -USR1 "$2"' sh "$seconds" "$$" < /dev/null > /dev/null 2>&1 9>&- &
   timer=$!
   wait "$child"
   status=$?

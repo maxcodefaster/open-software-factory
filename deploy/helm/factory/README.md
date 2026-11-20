@@ -389,9 +389,11 @@ before changing `.current`, any set or the object mirror. Inspect that Job's log
 deliberately after the active backup finishes. Do not remove the lock file.
 
 One runner holds the lock through every step, completion, pruning and offsite copy. Its local
-child processes inherit the lock descriptor, so killing the runner cannot admit another backup
+writer processes inherit the lock descriptor, so killing the runner cannot admit another backup
 while a surviving child still writes. Termination signals reach the current step's process group.
 The lock releases when its last inherited descriptor closes; no stale-lock cleanup is needed.
+The exec watchdog closes that descriptor and uses `/dev/null` for its standard streams, so a
+surviving timer cannot retain the writer lock or keep archive and log streams open.
 Each `kubectl exec` call logs its phase, start and exit status. `backup.execTimeoutSeconds`
 (default 1800, a positive whole number) bounds one exec attempt, including connection, command,
 archive transfer and remote exit-status completion. This is a wall-clock limit, not an idle limit.
@@ -403,8 +405,9 @@ while later steps run. Neither a timeout nor apparently complete archive bytes p
 or upload. `kubectl --request-timeout` alone does not bound an upgraded exec stream.
 Disconnecting a client cannot confirm that its remote command stopped; inspect the named phase
 and data-service Pod when diagnosing a timeout.
-`mise exec -- bun run test:native backup-runner.native` checks binary stdin and inherited lock
-access in the pinned Linux runner image without a cluster. It does not qualify a backup or restore.
+`mise exec -- bun run test:native backup-runner.native` checks binary stdin, inherited writer-lock
+access and watchdog descriptor isolation in the pinned Linux runner image without a cluster.
+It does not qualify a backup or restore.
 One Pod takes every part in this order, so the object mirror always contains the objects the
 database dump refers to:
 

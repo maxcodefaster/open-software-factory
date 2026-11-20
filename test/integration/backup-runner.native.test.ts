@@ -3,7 +3,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import upstream from "../../upstream.json";
 
-test("pinned Linux backup exec preserves binary stdin and the inherited writer lock", async () => {
+test("pinned Linux backup exec preserves writer stdin and isolates watchdog descriptors", async () => {
   const id = crypto.randomUUID();
   const name = `factory-backup-stdin-${id}`;
   const input = Buffer.concat([
@@ -60,7 +60,25 @@ test("pinned Linux backup exec preserves binary stdin and the inherited writer l
        exec 9>/tmp/writer.lock
        flock -n 9
        cat > /tmp/input
-       sh /scripts/run.sh exec binary-input sh -c 'test -e /proc/self/fd/9; cat' < /tmp/input`,
+       sh /scripts/run.sh exec binary-input sh -c 'test -e /proc/self/fd/9; cat' < /tmp/input
+       sh /scripts/run.sh exec watchdog-fds sh -c 'touch /tmp/ready; while ! test -f /tmp/release; do sleep 0.02; done' > /tmp/output 2> /tmp/diagnostics &
+       call=$!
+       timer=''
+       n=0
+       while [ -z "$timer" ]; do
+         n=$((n + 1)); test "$n" -lt 200
+         for pid in $(cat "/proc/$call/task/$call/children"); do
+           case "$(tr '\\0' ' ' < "/proc/$pid/cmdline")" in
+             *'sleep "$1"; kill -USR1 "$2"'*) timer=$pid ;;
+           esac
+         done
+         [ -n "$timer" ] || sleep 0.02
+       done
+       test ! -e "/proc/$timer/fd/9"
+       test "$(readlink "/proc/$timer/fd/1")" = /dev/null
+       test "$(readlink "/proc/$timer/fd/2")" = /dev/null
+       touch /tmp/release
+       wait "$call"`,
       ],
       { stdin: new Blob([input]), stdout: "pipe", stderr: "pipe", timeout: 15_000 },
     );
