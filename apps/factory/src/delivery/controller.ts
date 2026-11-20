@@ -1,3 +1,4 @@
+import type { TransactionSql } from "postgres";
 import type { z } from "zod";
 import type { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
 import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
@@ -731,6 +732,35 @@ export function createDeliveryController(
     `;
     const operation = rows[0];
     if (!operation || operation.state === "failed") return;
+    const ensurePromotion = async (transaction: TransactionSql) => {
+      // Imported Projects need not have opened Main Preview before their first
+      // Delivery. Initialize only its empty selection, never replace an
+      // existing Preview, and persist the Promotion before starting compute.
+      await transaction`
+        INSERT INTO factory.staging_preview(project_id,revision)
+        SELECT ${change.projectID},${operation.commitSHA}
+        WHERE EXISTS(SELECT 1 FROM factory.merge_operation
+          WHERE id=${operation.id} AND state='succeeded')
+        ON CONFLICT(project_id) DO NOTHING
+      `;
+      await transaction`
+        INSERT INTO factory.promotion_operation(
+          id,change_id,project_id,commit_sha,previous_runtime_attempt_id
+        )
+        SELECT ${crypto.randomUUID()},${change.id},${change.projectID},${operation.commitSHA},
+          runtime_attempt_id FROM factory.staging_preview
+        WHERE project_id=${change.projectID}
+          AND EXISTS(SELECT 1 FROM factory.merge_operation
+            WHERE id=${operation.id} AND state='succeeded')
+        ON CONFLICT(change_id,ordinal) DO NOTHING
+      `;
+    };
+    if (operation.state === "succeeded") {
+      // Continue the confirmed outcome without repeating its external merge.
+      // The same insert also closes an interrupted first-Delivery admission.
+      await database.client.begin(ensurePromotion);
+      return;
+    }
     const outcomeUnknown = operation.state === "ambiguous" || operation.state === "executing";
     if (operation.state !== "succeeded") {
       const pullRequest = await forge.getPullRequest(
@@ -811,14 +841,7 @@ export function createDeliveryController(
               observed_default_sha = ${merged.headSha}, completed_at = now(), updated_at = now(),
               last_error = NULL WHERE id = ${operation.id}
           `;
-          await transaction`
-            INSERT INTO factory.promotion_operation(
-              id, change_id, project_id, commit_sha, previous_runtime_attempt_id
-            )
-            SELECT ${crypto.randomUUID()}, ${change.id}, ${change.projectID}, ${operation.commitSHA},
-              runtime_attempt_id FROM factory.staging_preview WHERE project_id = ${change.projectID}
-            ON CONFLICT(change_id,ordinal) DO NOTHING
-          `;
+          await ensurePromotion(transaction);
           await transaction`
             UPDATE factory.change SET state = 'delivering', failure = NULL, version = version + 1
             WHERE id = ${change.id}

@@ -81,7 +81,7 @@ async function deliveryFixture() {
       controllers,
       sha,
       forge,
-      async approvedMerge() {
+      async approvedMerge(state: "pending" | "succeeded" = "succeeded") {
         await database.client`INSERT INTO factory.verification(
           id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,completed_at)
           VALUES(${owned.verificationID},${owned.changeID},${sha},1,'owned-exact-promotion',
@@ -116,7 +116,9 @@ async function deliveryFixture() {
           id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,
           idempotency_key,state,observed_default_sha,completed_at)
           VALUES(${crypto.randomUUID()},${owned.changeID},${approval},1,${"a".repeat(40)},
-            ${sha},${crypto.randomUUID()},'succeeded',${sha},now())`;
+            ${sha},${crypto.randomUUID()},${state}::factory.merge_operation_state,
+            ${state === "succeeded" ? sha : null},
+            CASE WHEN ${state}='succeeded' THEN now() ELSE NULL END)`;
         await database.client`UPDATE factory.change SET state='delivering' WHERE id=${owned.changeID}`;
       },
       setHead(value: string) {
@@ -617,6 +619,82 @@ test.each(["head", "base"] as const)(
         await f.database
           .client`SELECT id FROM factory.merge_operation WHERE change_id = ${f.owned.changeID}`,
       ).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  },
+  60_000,
+);
+
+test.each(["pending", "succeeded"] as const)(
+  "first Delivery creates one Promotion without a previous Staging after a %s merge",
+  async (state) => {
+    const f = await deliveryFixture();
+    try {
+      await f.approvedMerge(state);
+      if (state === "succeeded") f.setBase(f.sha);
+      const merges: string[] = [];
+      const starts: string[] = [];
+      const controller = createDeliveryController(
+        f.database,
+        {
+          startVerification: async () => null,
+          startStagingReplacement: async (id, userID) => {
+            starts.push(id);
+            await f.native.startStaging(userID, id);
+            return null;
+          },
+          stop: async () => null,
+        },
+        { prompt: async () => null },
+        async () => {},
+        {
+          client: {
+            ...f.forge,
+            mergeFastForward: async (_repository, _number, commit) => {
+              merges.push(commit);
+              f.setBase(commit);
+              return { name: "main", headSha: commit };
+            },
+          },
+          owner: "owned",
+        },
+      );
+      f.controllers.add(controller);
+      expect(
+        await f.database.client`SELECT project_id FROM factory.staging_preview
+          WHERE project_id=${f.owned.projectID}`,
+      ).toHaveLength(0);
+      await controller.reconcile(f.owned.changeID);
+      const promotions = await f.database.client`
+        SELECT id,commit_sha,previous_runtime_attempt_id,replacement_runtime_attempt_id,state,ordinal
+        FROM factory.promotion_operation WHERE change_id=${f.owned.changeID}`;
+      expect(promotions).toHaveLength(1);
+      expect(promotions[0]).toMatchObject({
+        commit_sha: f.sha,
+        previous_runtime_attempt_id: null,
+        state: "starting",
+        ordinal: 1,
+      });
+      expect(promotions[0]?.["replacement_runtime_attempt_id"]).toBeString();
+      expect(starts).toEqual([promotions[0]?.["id"]]);
+      expect(merges).toEqual(state === "pending" ? [f.sha] : []);
+      const savedMerge = await f.database.client`
+        SELECT * FROM factory.merge_operation WHERE change_id=${f.owned.changeID}`;
+      await controller.reconcile(f.owned.changeID);
+      expect(
+        await f.database.client`SELECT id FROM factory.promotion_operation
+          WHERE change_id=${f.owned.changeID}`,
+      ).toHaveLength(1);
+      expect(starts).toEqual([promotions[0]?.["id"]]);
+      expect(
+        await f.database.client`SELECT * FROM factory.merge_operation
+          WHERE change_id=${f.owned.changeID}`,
+      ).toEqual(savedMerge);
+      const [preview] = await f.database.client`
+        SELECT revision,runtime_attempt_id FROM factory.staging_preview
+        WHERE project_id=${f.owned.projectID}`;
+      expect(preview).toEqual({ revision: f.sha, runtime_attempt_id: null });
     } finally {
       await f.close();
     }

@@ -581,6 +581,7 @@ export async function fixture(
             (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.runtime_environment_intent WHERE runtime_attempt_id IN
             (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.staging_preview WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
           await sql`DELETE FROM factory.project_environment WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.environment_write WHERE project_id=${projectID}`;
