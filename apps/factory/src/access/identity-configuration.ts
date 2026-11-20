@@ -1,8 +1,19 @@
 import { createHmac } from "node:crypto";
+import { and, count, desc, eq, inArray, isNotNull, ne, or, sql as typedSQL } from "drizzle-orm";
 import { z } from "zod";
 import type { IdentityPolicy } from "../../../../packages/auth/src/policy";
 import { createFactoryAuth } from "../../../../packages/auth/src/server";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  administrator,
+  authSession,
+  identityConfiguration as configurationTable,
+  identitySetup,
+} from "../../../../packages/db/src/schema";
 import {
   type IdentityConfiguration,
   identityConfiguration,
@@ -76,16 +87,30 @@ export function createIdentityConfiguration(
   let activeVersion = 0;
   let recoveringActive = false;
   const candidates = new Map<string, ReturnType<typeof createFactoryAuth>>();
+  const setupFields = {
+    id: identitySetup.id,
+    baseVersion: identitySetup.baseVersion,
+    metadata: typedSQL<Setup["metadata"]>`${identitySetup.metadata}`,
+    fingerprint: identitySetup.fingerprint,
+    secretKey: identitySetup.secretKey,
+    createdBy: identitySetup.createdBy,
+    state: typedSQL<Setup["state"]>`${identitySetup.state}`,
+    tested: typedSQL<boolean>`${isNotNull(identitySetup.testedAt)}`,
+  };
   async function manager(sql: DatabaseTransaction, userID: string) {
     await requireActiveAccountIn(sql, userID);
-    const [row] =
-      await sql`SELECT user_id FROM factory.administrator WHERE user_id=${userID} FOR SHARE`;
+    const [row] = await drizzleTransaction(sql)
+      .select({ userId: administrator.userId })
+      .from(administrator)
+      .where(eq(administrator.userId, userID))
+      .for("share");
     if (!row) throw new CommandError("forbidden", "System Manager access required");
   }
   async function setup(id: string) {
-    const [row] = await database.client<
-      Setup[]
-    >`SELECT id,base_version::float8 AS "baseVersion",metadata,fingerprint,secret_key AS "secretKey",created_by AS "createdBy",state,tested_at IS NOT NULL AS tested FROM factory.identity_setup WHERE id=${id}`;
+    const [row] = await database.db
+      .select(setupFields)
+      .from(identitySetup)
+      .where(eq(identitySetup.id, id));
     if (!row) throw new CommandError("not-found", "Sign-in setup not found");
     return row;
   }
@@ -99,9 +124,10 @@ export function createIdentityConfiguration(
     return value.configuration;
   }
   async function refresh() {
-    const [current] = await database.client<
-      Array<{ version: number; setupID: string }>
-    >`SELECT version::float8 AS version,setup_id AS "setupID" FROM factory.identity_configuration WHERE singleton`;
+    const [current] = await database.db
+      .select({ version: configurationTable.version, setupID: configurationTable.setupId })
+      .from(configurationTable)
+      .where(eq(configurationTable.singleton, true));
     if (!current || (current.version === activeVersion && !recoveringActive)) return;
     const row = await setup(current.setupID);
     try {
@@ -127,7 +153,10 @@ export function createIdentityConfiguration(
   async function resume(row: Setup) {
     const configuration = await stored(row);
     if (row.state === "write-intended")
-      await database.client`UPDATE factory.identity_setup SET state='saved' WHERE id=${row.id} AND state='write-intended'`;
+      await database.db
+        .update(identitySetup)
+        .set({ state: "saved" })
+        .where(and(eq(identitySetup.id, row.id), eq(identitySetup.state, "write-intended")));
     if (row.state === "write-intended" || row.state === "saved")
       candidates.set(
         row.id,
@@ -145,9 +174,12 @@ export function createIdentityConfiguration(
       await this.recover();
     },
     async recover() {
-      const rows = await database.client<
-        Array<{ id: string }>
-      >`SELECT id FROM factory.identity_setup WHERE state IN ('saved','write-intended') ORDER BY created_at LIMIT 16`;
+      const rows = await database.db
+        .select({ id: identitySetup.id })
+        .from(identitySetup)
+        .where(inArray(identitySetup.state, ["saved", "write-intended"]))
+        .orderBy(identitySetup.createdAt)
+        .limit(16);
       for (const row of rows) {
         const input = await setup(row.id);
         try {
@@ -254,15 +286,29 @@ export function createIdentityConfiguration(
     async view(userID: string) {
       await database.client.begin((sql) => manager(sql, userID));
       await refresh();
-      const [current] = await database.client<
-        Array<{ setupID: string }>
-      >`SELECT setup_id AS "setupID" FROM factory.identity_configuration WHERE singleton`;
+      const [current] = await database.db
+        .select({ setupID: configurationTable.setupId })
+        .from(configurationTable)
+        .where(eq(configurationTable.singleton, true));
       const metadata: ReturnType<typeof identityMetadata> = current
         ? (await setup(current.setupID)).metadata
         : { mode: "local", sessionDays: 7, directoryEnabled: false, directorySubjectClaim: "oid" };
-      const rows = await database.client<
-        Setup[]
-      >`SELECT id,metadata,state,tested_at IS NOT NULL AS tested FROM factory.identity_setup WHERE created_by=${userID} AND state IN ('write-intended','saved') ORDER BY created_at DESC LIMIT 16`;
+      const rows = await database.db
+        .select({
+          id: setupFields.id,
+          metadata: setupFields.metadata,
+          state: setupFields.state,
+          tested: setupFields.tested,
+        })
+        .from(identitySetup)
+        .where(
+          and(
+            eq(identitySetup.createdBy, userID),
+            inArray(identitySetup.state, ["write-intended", "saved"]),
+          ),
+        )
+        .orderBy(desc(identitySetup.createdAt))
+        .limit(16);
       return identityConfigurationView.parse({
         version: activeVersion,
         ...metadata,
@@ -303,23 +349,27 @@ export function createIdentityConfiguration(
         .digest("hex");
       const row = await database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtextextended('factory-identity-configuration',0))`;
+        const db = drizzleTransaction(sql);
         await manager(sql, userID);
-        const [old] = await sql<
-          Array<{ id: string; fingerprint: string; createdBy: string }>
-        >`SELECT id,fingerprint,created_by AS "createdBy" FROM factory.identity_setup WHERE id=${input.commandID}`;
+        const [old] = await db
+          .select(setupFields)
+          .from(identitySetup)
+          .where(eq(identitySetup.id, input.commandID));
         if (old) {
           if (old.fingerprint !== fingerprint || old.createdBy !== userID)
             throw new CommandError("conflict", "Sign-in save identity was reused");
-          return setup(input.commandID);
+          return old;
         }
-        const [current] = await sql<
-          Array<{ version: number }>
-        >`SELECT version::float8 AS version FROM factory.identity_configuration WHERE singleton`;
+        const [current] = await db
+          .select({ version: configurationTable.version })
+          .from(configurationTable)
+          .where(eq(configurationTable.singleton, true));
         if ((current?.version ?? 0) !== input.version)
           throw new CommandError("conflict", "Sign-in settings changed. Reload before saving");
-        const [unfinished] = await sql<
-          Array<{ count: number }>
-        >`SELECT count(*)::int AS count FROM factory.identity_setup WHERE state IN ('saved','write-intended')`;
+        const [unfinished] = await db
+          .select({ count: count() })
+          .from(identitySetup)
+          .where(inArray(identitySetup.state, ["saved", "write-intended"]));
         if ((unfinished?.count ?? 0) >= 16)
           throw new CommandError(
             "conflict",
@@ -327,7 +377,15 @@ export function createIdentityConfiguration(
           );
         const metadata = identityMetadata(input.configuration);
         const secretKey = `identity/${input.commandID}`;
-        await sql`INSERT INTO factory.identity_setup(id,base_version,metadata,fingerprint,secret_key,created_by,state) VALUES(${input.commandID},${input.version},${JSON.stringify(metadata)}::jsonb,${fingerprint},${secretKey},${userID},'write-intended')`;
+        await db.insert(identitySetup).values({
+          id: input.commandID,
+          baseVersion: input.version,
+          metadata,
+          fingerprint,
+          secretKey,
+          createdBy: userID,
+          state: "write-intended",
+        });
         return {
           id: input.commandID,
           baseVersion: input.version,
@@ -358,13 +416,18 @@ export function createIdentityConfiguration(
       createFactoryAuth(database, policy(configuration));
       await database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtextextended('factory-identity-configuration',0))`;
+        const db = drizzleTransaction(sql);
         await manager(sql, userID);
-        const [target] = await sql<
-          Array<{ state: string; tested: boolean }>
-        >`SELECT state,tested_at IS NOT NULL AS tested FROM factory.identity_setup WHERE id=${commandID} AND created_by=${userID} FOR UPDATE`;
-        const [current] = await sql<
-          Array<{ version: number; setupID: string }>
-        >`SELECT version::float8 AS version,setup_id AS "setupID" FROM factory.identity_configuration WHERE singleton FOR UPDATE`;
+        const [target] = await db
+          .select({ state: setupFields.state, tested: setupFields.tested })
+          .from(identitySetup)
+          .where(and(eq(identitySetup.id, commandID), eq(identitySetup.createdBy, userID)))
+          .for("update");
+        const [current] = await db
+          .select({ version: configurationTable.version, setupID: configurationTable.setupId })
+          .from(configurationTable)
+          .where(eq(configurationTable.singleton, true))
+          .for("update");
         if (current?.setupID === commandID) return;
         if (
           target?.state !== "saved" ||
@@ -375,11 +438,31 @@ export function createIdentityConfiguration(
             "conflict",
             "Complete the sign-in check before activating this configuration",
           );
-        await sql`UPDATE factory.identity_setup SET state='superseded' WHERE state='active'`;
-        await sql`UPDATE factory.identity_setup SET state='active' WHERE id=${commandID}`;
-        await sql`INSERT INTO factory.identity_configuration(singleton,version,setup_id,activated_by) VALUES(true,${row.baseVersion + 1},${commandID},${userID}) ON CONFLICT(singleton) DO UPDATE SET version=EXCLUDED.version,setup_id=EXCLUDED.setup_id,activated_by=EXCLUDED.activated_by,activated_at=now()`;
+        await db
+          .update(identitySetup)
+          .set({ state: "superseded" })
+          .where(eq(identitySetup.state, "active"));
+        await db
+          .update(identitySetup)
+          .set({ state: "active" })
+          .where(eq(identitySetup.id, commandID));
+        const activated = { version: row.baseVersion + 1, setupId: commandID, activatedBy: userID };
+        await db
+          .insert(configurationTable)
+          .values({ singleton: true, ...activated })
+          .onConflictDoUpdate({
+            target: configurationTable.singleton,
+            set: { ...activated, activatedAt: typedSQL`now()` },
+          });
         // Existing password sessions cannot become a bypass for newly enabled company SSO.
-        await sql`DELETE FROM auth.session WHERE user_id<>'01994a7d-0000-7000-8000-000000000001' OR login_method='identity-test'`;
+        await db
+          .delete(authSession)
+          .where(
+            or(
+              ne(authSession.userId, "01994a7d-0000-7000-8000-000000000001"),
+              eq(authSession.loginMethod, "identity-test"),
+            ),
+          );
       });
       await refresh();
       return this.view(userID);

@@ -4,7 +4,7 @@ import { CommandError } from "../../apps/factory/src/command-error";
 import { createDeliveryCoordination } from "../../apps/factory/src/delivery/coordination";
 import { createChangeIntegration } from "../../apps/factory/src/delivery/integration";
 import { substrateWorkspaceGrantIn } from "../../apps/factory/src/runtime/substrate-grant";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import {
@@ -55,7 +55,6 @@ function controllerFixture(cause: unknown, retained: Partial<Operation> = {}, ma
   const client = Object.assign(
     async (parts: TemplateStringsArray, ...values: unknown[]) => {
       const text = parts.join("?");
-      if (text.includes("SELECT operation.id")) return [{ ...op }];
       if (text.includes("SELECT change.project_id"))
         return [{ projectID: "owned-project", available: true }];
       if (text.includes("SELECT state,epoch::text")) return [{ state: "agent", epoch: "4" }];
@@ -68,13 +67,47 @@ function controllerFixture(cause: unknown, retained: Partial<Operation> = {}, ma
       throw new Error(`Unexpected integration startup query: ${text}`);
     },
     {
+      unsafe(text: string, values: unknown[]) {
+        let rows: unknown[][] = [];
+        if (text.startsWith('select "factory"."change_commit_operation"."id"')) {
+          rows = [
+            [
+              op.id,
+              op.changeID,
+              op.attemptID,
+              op.parent,
+              op.base,
+              op.branch,
+              op.message,
+              op.state,
+              op.sha,
+              op.error,
+              op.userID,
+              op.repository,
+            ],
+          ];
+        } else if (text.startsWith('update "factory".')) {
+          writes.push({ text, values });
+          if (text.startsWith('update "factory"."change_commit_operation"') && matched)
+            rows = [[op.id]];
+        } else if (text.includes('"auth"."user"')) rows = [[op.userID]];
+        else if (text.includes('"factory"."account_access"')) rows = [[null, null]];
+        else if (text.includes('"factory"."project_membership"')) rows = [["developer", false]];
+        else if (text.includes('"factory"."administrator"')) rows = [];
+        else if (text.includes('"factory"."project"')) rows = [["owned-project"]];
+        else throw Error(`Unexpected typed startup query: ${text}`);
+        const result = Promise.resolve(rows);
+        return Object.assign(result, { values: () => result });
+      },
       async begin<T>(run: (sql: typeof client) => Promise<T>): Promise<T> {
         return run(client);
       },
     },
   );
+  const database = { client } as unknown as Parameters<typeof createChangeIntegration>[0];
+  database.db = drizzleTransaction(database.client);
   const controller = createChangeIntegration(
-    { client } as unknown as Parameters<typeof createChangeIntegration>[0],
+    database,
     {
       parentOperation: async () => {
         frames++;
@@ -116,10 +149,10 @@ test("controller: forbidden startup retires an undispatched intent with an actio
   expect(f.starts()).toBe(1);
   expect(f.frames()).toBe(0);
   expect(f.writes).toHaveLength(2);
-  expect(f.writes[0]?.text).toContain("UPDATE factory.change_commit_operation");
-  expect(f.writes[0]?.text).toContain("'failed'");
+  expect(f.writes[0]?.text).toContain('update "factory"."change_commit_operation"');
+  expect(f.writes[0]?.values).toContain("failed");
   expect(f.writes[0]?.values).toContain(f.op.id);
-  expect(f.writes[1]?.text).toContain("UPDATE factory.change");
+  expect(f.writes[1]?.text).toContain('update "factory"."change"');
   expect(f.writes[1]?.values).toContain(f.op.changeID);
   expect(f.writes[1]?.values.some((value) => String(value).includes("Take over editing"))).toBe(
     true,
@@ -144,7 +177,7 @@ test("controller: a concurrently changed intent cannot publish a Change failure"
   expect(await f.controller.reconcile(f.op.changeID, main)).toBe(false);
   expect(f.frames()).toBe(0);
   expect(f.writes).toHaveLength(1);
-  expect(f.writes[0]?.text).toContain("UPDATE factory.change_commit_operation");
+  expect(f.writes[0]?.text).toContain('update "factory"."change_commit_operation"');
 });
 
 // Reuse a lane-owned server when supplied; standalone runs own exactly one server.

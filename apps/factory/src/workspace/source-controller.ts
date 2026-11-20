@@ -1,4 +1,21 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, sql as expression, gt, notExists, or } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  branchCreateOperation,
+  change,
+  developmentWorkspace,
+  project,
+  runtimeAttempt,
+  substrateBinding,
+  substrateSource,
+  ticket,
+  workspaceSharedDocument,
+} from "../../../../packages/db/src/schema";
 import type { WorkspaceSourceState } from "../../../../packages/workspace-domain/src/source";
 import {
   personalWorkspaceIdentity,
@@ -40,33 +57,47 @@ export function createWorkspaceSourceController(
   >();
   let closed = false;
   async function nativeRow(workspaceID: string, sql: SourceSQL = database.client) {
-    const [current] = await sql<
-      {
-        workspaceID: string;
-        projectName: string;
-        kind: string;
-        ticketTitle: string | null;
-        attemptID: string | null;
-        generation: string | null;
-        ready: boolean;
-        sourceOwner: "actor" | "service" | null;
-        sourceWritable: boolean | null;
-        sourceEpoch: string | null;
-      }[]
-    >`SELECT w.id AS "workspaceID",p.name AS "projectName",w.kind,t.title AS "ticketTitle",
-      a.id AS "attemptID",a.generation::text AS generation,
-      (a.state='ready' AND a.stop_intended_at IS NULL AND b.actor_uid IS NOT NULL
-        AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
-        AND (s.owner='service' OR s.actor_uid=b.actor_uid)) AS ready,
-      s.owner AS "sourceOwner",s.writable AS "sourceWritable",s.writer_epoch::text AS "sourceEpoch"
-      FROM factory.development_workspace w JOIN factory.project p ON p.id=w.project_id
-      LEFT JOIN factory.ticket t ON t.id=w.ticket_id
-      LEFT JOIN factory.runtime_attempt a ON a.workspace_id=w.id
-        AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
-          WHERE newer.workspace_id=w.id AND newer.generation>a.generation)
-      LEFT JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-      LEFT JOIN factory.substrate_source s ON s.workspace_id=w.id
-      WHERE w.id=${workspaceID}`;
+    const db = drizzleTransaction(sql);
+    const newer = alias(runtimeAttempt, "newer");
+    const [current] = await db
+      .select({
+        workspaceID: developmentWorkspace.id,
+        projectName: project.name,
+        kind: developmentWorkspace.kind,
+        ticketTitle: ticket.title,
+        attemptID: runtimeAttempt.id,
+        generation: expression<string | null>`${runtimeAttempt.generation}::text`,
+        ready: expression<boolean>`(${runtimeAttempt.state}='ready'
+          AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${substrateBinding.actorUid} IS NOT NULL
+          AND ${substrateBinding.deleteIntendedAt} IS NULL AND ${substrateBinding.deletedAt} IS NULL
+          AND (${substrateSource.owner}='service' OR ${substrateSource.actorUid}=${substrateBinding.actorUid}))`,
+        sourceOwner: substrateSource.owner,
+        sourceWritable: substrateSource.writable,
+        sourceEpoch: expression<string | null>`${substrateSource.writerEpoch}::text`,
+      })
+      .from(developmentWorkspace)
+      .innerJoin(project, eq(project.id, developmentWorkspace.projectId))
+      .leftJoin(ticket, eq(ticket.id, developmentWorkspace.ticketId))
+      .leftJoin(
+        runtimeAttempt,
+        and(
+          eq(runtimeAttempt.workspaceId, developmentWorkspace.id),
+          notExists(
+            db
+              .select({ id: newer.id })
+              .from(newer)
+              .where(
+                and(
+                  eq(newer.workspaceId, developmentWorkspace.id),
+                  gt(newer.generation, runtimeAttempt.generation),
+                ),
+              ),
+          ),
+        ),
+      )
+      .leftJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+      .leftJoin(substrateSource, eq(substrateSource.workspaceId, developmentWorkspace.id))
+      .where(eq(developmentWorkspace.id, workspaceID));
     return current ?? null;
   }
   async function view(
@@ -127,14 +158,22 @@ export function createWorkspaceSourceController(
       const { workspaceID } = ticketWorkspaceIdentity(changeID);
       await database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${workspaceID}`}))`;
-        const [change] = await sql<{ projectID: string; state: string; ready: boolean }[]>`
-          SELECT c.project_id AS "projectID",c.state,
-            b.state='succeeded' AND b.observed_head_sha=c.base_sha AS ready
-          FROM factory.change c JOIN factory.branch_create_operation b ON b.change_id=c.id
-          WHERE c.id=${changeID} FOR SHARE OF c`;
-        if (!change) throw new CommandError("not-found", "Change not found");
-        await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
-        if (!change.ready || !["starting", "active", "failed"].includes(change.state))
+        // PostgreSQL's OF lock target must be an unqualified relation name.
+        const sourceChange = alias(change, "source_change");
+        const [currentChange] = await drizzleTransaction(sql)
+          .select({
+            projectID: sourceChange.projectId,
+            state: sourceChange.state,
+            ready: expression<boolean>`${branchCreateOperation.state}='succeeded'
+              AND ${branchCreateOperation.observedHeadSha}=${sourceChange.baseSha}`,
+          })
+          .from(sourceChange)
+          .innerJoin(branchCreateOperation, eq(branchCreateOperation.changeId, sourceChange.id))
+          .where(eq(sourceChange.id, changeID))
+          .for("share", { of: sourceChange });
+        if (!currentChange) throw new CommandError("not-found", "Change not found");
+        await projectDevelopmentAuthorityIn(sql, userID, currentChange.projectID);
+        if (!currentChange.ready || !["starting", "active", "failed"].includes(currentChange.state))
           throw new CommandError("unavailable", "Change source is not ready for editing");
         if (!(await nativeRow(workspaceID, sql)))
           throw new CommandError(
@@ -151,8 +190,10 @@ export function createWorkspaceSourceController(
       commission?: SourceRoleFence,
     ) {
       const fence = async (sql: DatabaseTransaction) => {
-        const [workspace] = await sql<{ id: string }[]>`
-          SELECT id FROM factory.development_workspace WHERE change_id=${changeID}`;
+        const [workspace] = await drizzleTransaction(sql)
+          .select({ id: developmentWorkspace.id })
+          .from(developmentWorkspace)
+          .where(eq(developmentWorkspace.changeId, changeID));
         if (!workspace) {
           if (commission?.mode === "dispatch")
             throw new CommandError("unavailable", "Current Source Workspace is unavailable");
@@ -169,6 +210,8 @@ export function createWorkspaceSourceController(
           );
         const current = await nativeRow(workspace.id, sql);
         if (commission?.mode === "dispatch") {
+          // One atomic admission predicate binds the live turn lease, writer,
+          // OpenCode session and original native Source before fencing input.
           const [binding] = await sql`SELECT a.id FROM factory.runtime_attempt a
             JOIN factory.change change ON change.id=a.change_id AND change.runtime_attempt_id=a.id
               AND change.project_id=a.project_id
@@ -266,10 +309,27 @@ export function createWorkspaceSourceController(
                 input.path,
                 ...(typeof input.destination === "string" ? [input.destination] : []),
               ];
-              const [dirty] = await sql`SELECT path FROM factory.workspace_shared_document
-                WHERE workspace_id=${workspaceID} AND (dirty OR conflict) AND EXISTS(
-                  SELECT 1 FROM unnest(${paths}::text[]) target
-                  WHERE path=target OR starts_with(path,target||'/')) LIMIT 1`;
+              const [dirty] = await drizzleTransaction(sql)
+                .select({ path: workspaceSharedDocument.path })
+                .from(workspaceSharedDocument)
+                .where(
+                  and(
+                    eq(workspaceSharedDocument.workspaceId, workspaceID),
+                    or(
+                      eq(workspaceSharedDocument.dirty, true),
+                      eq(workspaceSharedDocument.conflict, true),
+                    ),
+                    or(
+                      ...paths.map((path) =>
+                        or(
+                          eq(workspaceSharedDocument.path, path),
+                          expression`starts_with(${workspaceSharedDocument.path},${path}||'/')`,
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+                .limit(1);
               if (dirty)
                 throw new CommandError(
                   "conflict",

@@ -2,8 +2,8 @@ import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as timers from "node:timers/promises";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import type { ProjectAgentOutput } from "../../packages/conversation-domain/src/conversation";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -1400,6 +1400,87 @@ test("interview answers are admitted once and invalid answers leave no turn or i
           crypto.randomUUID(),
         ),
     ).rejects.toMatchObject({ code: "conflict" });
+    expect(await owned.turns()).toHaveLength(2);
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("Interview supersession compares exact nullable context identity and ignores separate research", async () => {
+  const owned = await fixture(answer);
+  const controller = owned.controller();
+  try {
+    owned.release();
+    const root = await controller.setMode(owned.projectID, undefined, "plan", owned.userID);
+    if (!root) throw new Error("Conversation required");
+    const research = await controller.newConversation(
+      owned.projectID,
+      undefined,
+      owned.userID,
+      crypto.randomUUID(),
+    );
+    const contextID = research?.contextId;
+    if (!contextID) throw new Error("Research context required");
+    const question = async (contextId?: string) =>
+      owned.database.client.begin((transaction) =>
+        appendConversationEntry(transaction, root.id, {
+          kind: "question",
+          actor: "project-agent",
+          mode: "plan",
+          body: "Keep the manual scope?",
+          payload: {
+            question: {
+              type: "free-text",
+              prompt: "Keep the manual scope?",
+              placeholder: "Answer",
+            },
+          },
+          citations: [],
+          inReplyToEntryId: null,
+          requirementRevisionId: null,
+          ...(contextId ? { contextId } : {}),
+        }),
+      );
+    const direction = async (contextId?: string, intent?: string) =>
+      owned.database.client.begin((transaction) =>
+        appendConversationEntry(transaction, root.id, {
+          kind: "user-message",
+          actor: "user",
+          mode: "plan",
+          body: "Separate authored direction",
+          payload: { ...(intent ? { intent } : {}) },
+          citations: [],
+          inReplyToEntryId: null,
+          requirementRevisionId: null,
+          createdBy: owned.userID,
+          ...(contextId ? { contextId } : {}),
+        }),
+      );
+    const respond = (id: string, contextId?: string) =>
+      controller.answer(
+        owned.projectID,
+        undefined,
+        id,
+        { selectedOptionIds: [], customText: "Keep it manual" },
+        owned.userID,
+        crypto.randomUUID(),
+        contextId,
+      );
+    const original = await question();
+    await direction(contextID);
+    await direction(undefined, "project-research");
+    expect(owned.requests()).toBe(0);
+    await respond(original.id);
+    const current = await question(contextID);
+    await direction();
+    await direction(contextID, "project-research");
+    await expect(respond(current.id)).rejects.toThrow("question not found");
+    await respond(current.id, contextID);
+    const obsolete = await question(contextID);
+    await direction(contextID, "requirements-interview");
+    await expect(respond(obsolete.id, contextID)).rejects.toThrow("direction changed");
+    expect(owned.requests()).toBe(2);
+    expect((await owned.entries()).filter((entry) => entry.kind === "answer")).toHaveLength(2);
     expect(await owned.turns()).toHaveLength(2);
   } finally {
     await owned.dispose();

@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createModelConnections } from "../../apps/factory/src/models/connections";
-import type { ModelSecrets, StoredModelConnection } from "../../apps/factory/src/models/secrets";
-import { factoryProcess } from "../fixtures/factory-process";
-import type { ModelProbeResult } from "../../packages/conversation-domain/src/model-connection";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
+import type { ModelSecrets, StoredModelConnection } from "../../apps/factory/src/models/secrets";
+import type { ModelProbeResult } from "../../packages/conversation-domain/src/model-connection";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test("role probes are admitted once, replay without inference and fence delayed settings writes", async () => {
   const process = await factoryProcess();
@@ -262,6 +262,117 @@ test("restart recovers stored provider write without resubmitting or losing acti
   }
 }, 60_000);
 
+test("probe recovery retains exact model attribution, settles only expired usage and never infers on replay", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const manager = crypto.randomUUID();
+  const connectionID = crypto.randomUUID();
+  const stored = new Map<string, StoredModelConnection>();
+  let calls = 0;
+  const controller = createModelConnections(
+    database,
+    {
+      configured: true,
+      read: async (key) => stored.get(key),
+      create: async (key, value) => {
+        stored.set(key, value);
+      },
+    },
+    "owned-probe-recovery",
+    [],
+    async () => {
+      calls++;
+      throw new Error("Recovery and replay must not start inference");
+    },
+  );
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${manager},'Owned recovery',${`${manager}@model.test`})`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
+    await controller.save(manager, {
+      commandID: crypto.randomUUID(),
+      connectionID,
+      version: 0,
+      provider: "anthropic",
+      endpoint: null,
+      apiKey: "owned-probe-recovery-key",
+    });
+    const expired = crypto.randomUUID();
+    const fresh = crypto.randomUUID();
+    const withoutUsage = crypto.randomUUID();
+    for (const commandID of [expired, fresh, withoutUsage])
+      await database.client`INSERT INTO factory.model_role_probe
+        (command_id,role,connection_id,connection_version,model_id,settings_version,created_by,state,created_at)
+        VALUES(${commandID},'planning',${connectionID},1,${`owned-${commandID}`},0,${manager},'probing',
+          CASE WHEN ${commandID === fresh} THEN now() ELSE now()-interval '31 seconds' END)`;
+    for (const commandID of [expired, fresh])
+      await database.client`INSERT INTO factory.usage_operation
+        (id,project_id,user_id,purpose,engine,provider,model,created_at)
+        SELECT ${`probe:${commandID}`},NULL,${manager},'probe','mastra','anthropic',model_id,created_at
+        FROM factory.model_role_probe WHERE command_id=${commandID}`;
+    const [before] = await database.client`SELECT created_at FROM factory.usage_operation
+      WHERE id=${`probe:${expired}`}`;
+    await controller.recover();
+    const [recovered] = await database.client`SELECT state,result FROM factory.model_role_probe
+      WHERE command_id=${expired}`;
+    expect(recovered?.["state"]).toBe("uncertain");
+    expect(recovered?.["result"]).toMatchObject({
+      status: "unavailable",
+      modelId: `owned-${expired}`,
+    });
+    const [usage] =
+      await database.client`SELECT user_id,project_id,provider,model,outcome,settled_at
+      FROM factory.usage_operation WHERE id=${`probe:${expired}`}`;
+    expect(usage).toMatchObject({
+      user_id: manager,
+      project_id: null,
+      provider: "anthropic",
+      model: `owned-${expired}`,
+      outcome: "unknown",
+    });
+    expect(usage?.["settled_at"]).not.toBeNull();
+    const [entry] = await database.client`SELECT source,outcome,counters,occurred_at
+      FROM factory.usage_entry WHERE operation_id=${`probe:${expired}`}`;
+    expect(entry).toMatchObject({ source: "unobserved", outcome: "unknown" });
+    expect(Date.parse(String(entry?.["occurred_at"]))).toBe(
+      Date.parse(String(before?.["created_at"])),
+    );
+    expect(
+      (
+        await database.client`SELECT state FROM factory.model_role_probe WHERE command_id=${fresh}`
+      )[0]?.["state"],
+    ).toBe("probing");
+    expect(
+      (
+        await database.client`SELECT settled_at FROM factory.usage_operation WHERE id=${`probe:${fresh}`}`
+      )[0]?.["settled_at"],
+    ).toBeNull();
+    const replay = {
+      commandID: expired,
+      connectionID,
+      version: 1,
+      settingsVersion: 0,
+      role: "planning" as const,
+      modelId: `owned-${expired}`,
+      confirmInference: true as const,
+    };
+    expect(
+      (await controller.selectRole(manager, replay, new AbortController().signal)).status,
+    ).toBe("unavailable");
+    await controller.get(connectionID, manager);
+    await controller.list(manager);
+    await controller.roles(manager);
+    await controller.recover();
+    expect(calls).toBe(0);
+    expect(
+      await database.client`SELECT event_id FROM factory.usage_entry WHERE operation_id=${`probe:${expired}`}`,
+    ).toHaveLength(1);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 15_000);
+
 test("Coding model and reasoning adopt atomically after the exact probe and fence changed replays", async () => {
   const process = await factoryProcess();
   const database = process.connect();
@@ -374,6 +485,7 @@ test("Coding model and reasoning adopt atomically after the exact probe and fenc
       new AbortController().signal,
     );
     const changed = await settings.get();
+    expect(changed.planningModelId).toBe(adopted.planningModelId);
     expect(changed.rules.build).toEqual({
       models: ["owned-sol", "gpt-4"],
       allowOverride: false,

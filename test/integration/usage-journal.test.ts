@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
+import { drizzleTransaction } from "../../packages/db/src/client";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -31,6 +32,24 @@ test("usage journal serializes replay, freezes attribution/rates and retains twe
     occurredAt: "2026-10-11T12:00:00.000Z",
   };
   try {
+    await expect(
+      database.client.begin(async (transaction) => {
+        const nested = createUsageJournal({
+          ...database,
+          client: transaction,
+          db: drizzleTransaction(transaction),
+        });
+        await nested.begin({ ...operation, id: "owned:rolled-back" });
+        await nested.record("owned:rolled-back", observation);
+        expect(
+          await transaction`SELECT event_id FROM factory.usage_entry WHERE operation_id='owned:rolled-back'`,
+        ).toHaveLength(1);
+        throw new Error("Owned usage rollback");
+      }),
+    ).rejects.toThrow("Owned usage rollback");
+    expect(
+      await database.client`SELECT id FROM factory.usage_operation WHERE id='owned:rolled-back'`,
+    ).toHaveLength(0);
     await journal.begin(operation);
     await Promise.all(
       Array.from({ length: 8 }, () =>
@@ -64,6 +83,17 @@ test("usage journal serializes replay, freezes attribution/rates and retains twe
       Array<{ cost: string }>
     >`SELECT nano_usd::text AS cost FROM factory.usage_entry WHERE event_id='step:2'`;
     expect(second?.cost).toBe("729000");
+    await journal.record(operation.id, {
+      ...observation,
+      eventID: "step:precise",
+      occurredAt: "2026-10-11T12:00:00.123456Z",
+    });
+    const [precise] = await database.client<{ micros: string }[]>`
+      SELECT to_char(occurred_at AT TIME ZONE 'UTC','US') AS micros
+      FROM factory.usage_entry WHERE operation_id=${operation.id} AND event_id='step:precise'`;
+    expect(precise?.micros).toBe("123456");
+    await journal.advance(operation.id, "session", 1);
+    expect(await journal.cursor(operation.id, "session")).toBe(10);
     await expect(
       (async () => {
         await database.client`UPDATE factory.usage_operation SET model='other' WHERE id=${operation.id}`;

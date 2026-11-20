@@ -2,8 +2,23 @@ import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, mkdtemp, open, readFile, rename, rmdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { and, eq, sql as expression, gt, isNull, notExists } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  change,
+  changeWriter,
+  developmentWorkspace,
+  runtimeAttempt,
+  substrateBinding,
+  substrateSource,
+  ticket,
+} from "../../../../packages/db/src/schema";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
@@ -123,11 +138,23 @@ export function createSubstrateSources(
     workspaceID: string,
     sql: SQL = database.client,
   ): Promise<SubstrateSourceLease | null> {
-    const [row] = await sql<
-      SubstrateSourceLease[]
-    >`SELECT workspace_id AS "workspaceID",actor_uid::text AS "actorUID",owner,writer_epoch::float8 AS "writerEpoch",writable,generation::float8 AS generation,checkpoint_id::text AS "checkpointID",checkpoint,service_base::text AS "serviceBase" FROM factory.substrate_source WHERE workspace_id=${workspaceID}`;
-    if (row?.checkpoint) row.checkpoint = checkpoint.parse(row.checkpoint);
-    return row ?? null;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        workspaceID: substrateSource.workspaceId,
+        actorUID: substrateSource.actorUid,
+        owner: expression<SubstrateSourceLease["owner"]>`${substrateSource.owner}`,
+        writerEpoch: substrateSource.writerEpoch,
+        writable: substrateSource.writable,
+        generation: substrateSource.generation,
+        checkpointID: substrateSource.checkpointId,
+        checkpoint: substrateSource.checkpoint,
+        serviceBase: substrateSource.serviceBase,
+      })
+      .from(substrateSource)
+      .where(eq(substrateSource.workspaceId, workspaceID));
+    return row
+      ? { ...row, checkpoint: row.checkpoint ? checkpoint.parse(row.checkpoint) : null }
+      : null;
   }
   async function sourceRequest(
     workspaceID: string,
@@ -256,16 +283,19 @@ export function createSubstrateSources(
     }
   }
   async function writer(row: SubstrateSourceLease, sql: SQL) {
-    const [workspace] = await sql<
-      { kind: string; epoch: number | null; writable: boolean | null }[]
-    >`SELECT w.kind,c.epoch::float8 AS epoch,
-      (c.state='human' AND change.state IN ('starting','active','failed')
-        AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL) AS writable
-      FROM factory.development_workspace w
-      LEFT JOIN factory.change_writer c ON c.change_id=w.change_id
-      LEFT JOIN factory.change change ON change.id=w.change_id
-      LEFT JOIN factory.ticket ticket ON ticket.id=w.ticket_id
-      WHERE w.id=${row.workspaceID}`;
+    const [workspace] = await drizzleTransaction(sql)
+      .select({
+        kind: developmentWorkspace.kind,
+        epoch: changeWriter.epoch,
+        writable: expression<boolean | null>`(${changeWriter.state}='human'
+          AND ${change.state} IN ('starting','active','failed')
+          AND ${change.cancelRequestedAt} IS NULL AND ${ticket.trashedAt} IS NULL)`,
+      })
+      .from(developmentWorkspace)
+      .leftJoin(changeWriter, eq(changeWriter.changeId, developmentWorkspace.changeId))
+      .leftJoin(change, eq(change.id, developmentWorkspace.changeId))
+      .leftJoin(ticket, eq(ticket.id, developmentWorkspace.ticketId))
+      .where(eq(developmentWorkspace.id, row.workspaceID));
     if (!workspace || (workspace.kind !== "personal" && !workspace.epoch))
       throw new CommandError("unavailable", "Current Source writing authority is unavailable");
     return {
@@ -387,7 +417,21 @@ export function createSubstrateSources(
     if (!row || row.owner !== owner) throw new CommandError("conflict", "Source owner changed");
     if (row.writable) {
       const id = crypto.randomUUID();
-      await sql`UPDATE factory.substrate_source SET writer_epoch=writer_epoch+1,writable=false,checkpoint_id=${id} WHERE workspace_id=${workspaceID} AND owner=${owner} AND writer_epoch=${row.writerEpoch} AND writable`;
+      await drizzleTransaction(sql)
+        .update(substrateSource)
+        .set({
+          writerEpoch: expression`${substrateSource.writerEpoch}+1`,
+          writable: false,
+          checkpointId: id,
+        })
+        .where(
+          and(
+            eq(substrateSource.workspaceId, workspaceID),
+            eq(substrateSource.owner, owner),
+            eq(substrateSource.writerEpoch, row.writerEpoch),
+            eq(substrateSource.writable, true),
+          ),
+        );
       row = await lease(workspaceID, sql);
     }
     if (!row || row.writable || !row.checkpointID)
@@ -466,9 +510,20 @@ export function createSubstrateSources(
       throw new Error("Source manifest confirmation failed");
     for (let i = 0; i < bundle.chunks.length; i++)
       checkedBundle(await objects.read(objectKey(saved, `chunk-${i}`)), saved, i);
-    const result =
-      await sql`UPDATE factory.substrate_source SET generation=${saved.generation},checkpoint=${JSON.stringify(saved)}::text::jsonb WHERE workspace_id=${row.workspaceID} AND writer_epoch=${row.writerEpoch} AND owner=${row.owner} AND NOT writable AND checkpoint_id=${saved.id}`;
-    if (result.count !== 1)
+    const result = await drizzleTransaction(sql)
+      .update(substrateSource)
+      .set({ generation: saved.generation, checkpoint: saved })
+      .where(
+        and(
+          eq(substrateSource.workspaceId, row.workspaceID),
+          eq(substrateSource.writerEpoch, row.writerEpoch),
+          eq(substrateSource.owner, row.owner),
+          eq(substrateSource.writable, false),
+          eq(substrateSource.checkpointId, saved.id),
+        ),
+      )
+      .returning({ workspaceID: substrateSource.workspaceId });
+    if (result.length !== 1)
       throw new CommandError("conflict", "Source confirmation lost its writer fence");
     const confirmed = await lease(row.workspaceID, sql);
     if (!confirmed) throw new CommandError("unavailable", "Confirmed Source owner is missing");
@@ -483,9 +538,28 @@ export function createSubstrateSources(
     if (!row.checkpoint || row.checkpoint.id !== row.checkpointID || row.writable)
       throw new CommandError("conflict", "Source generation is not confirmed");
     revoke(row.workspaceID);
-    const result =
-      await sql`UPDATE factory.substrate_source SET owner=${owner},actor_uid=${actorUID},writer_epoch=writer_epoch+1,writable=true,checkpoint_id=NULL,service_base=CASE WHEN ${owner}='service' THEN ${row.checkpointID}::uuid ELSE service_base END WHERE workspace_id=${row.workspaceID} AND actor_uid=${row.actorUID} AND owner=${row.owner} AND writer_epoch=${row.writerEpoch} AND NOT writable AND checkpoint_id=${row.checkpointID}`;
-    if (result.count !== 1)
+    const result = await drizzleTransaction(sql)
+      .update(substrateSource)
+      .set({
+        owner,
+        actorUid: actorUID,
+        writerEpoch: expression`${substrateSource.writerEpoch}+1`,
+        writable: true,
+        checkpointId: null,
+        serviceBase: owner === "service" ? row.checkpointID : substrateSource.serviceBase,
+      })
+      .where(
+        and(
+          eq(substrateSource.workspaceId, row.workspaceID),
+          eq(substrateSource.actorUid, row.actorUID),
+          eq(substrateSource.owner, row.owner),
+          eq(substrateSource.writerEpoch, row.writerEpoch),
+          eq(substrateSource.writable, false),
+          eq(substrateSource.checkpointId, row.checkpointID),
+        ),
+      )
+      .returning({ workspaceID: substrateSource.workspaceId });
+    if (result.length !== 1)
       throw new CommandError("conflict", "Source owner transfer lost its epoch");
   }
   return {
@@ -522,10 +596,15 @@ export function createSubstrateSources(
       }
     },
     async attach(workspaceID: string, actorUID: string, sql: SQL) {
-      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid) VALUES(${workspaceID},${actorUID}) ON CONFLICT(workspace_id) DO NOTHING`;
+      await drizzleTransaction(sql)
+        .insert(substrateSource)
+        .values({ workspaceId: workspaceID, actorUid: actorUID })
+        .onConflictDoNothing({ target: substrateSource.workspaceId });
       const row = await lease(workspaceID, sql);
       if (!row) throw new Error("Source owner is missing");
       if (row.actorUID === actorUID) return;
+      // Authorize this exact native successor in one read of both generations
+      // and their frozen provisioning identities before exporting or changing UID.
       const [successor] = await sql<{ id: string }[]>`
         SELECT current.id FROM factory.runtime_attempt predecessor
         JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
@@ -687,16 +766,46 @@ export function createSubstrateSources(
         );
     },
     async restoreEndpoint(request: Request, attemptID: string) {
-      const [attempt] = await database.client<
-        {
-          workspaceID: string;
-          projectID: string;
-          userID: string;
-          token: string;
-          actorUID: string;
-          generation: number;
-        }[]
-      >`SELECT a.workspace_id AS "workspaceID",a.project_id AS "projectID",a.created_by AS "userID",a.parent_connector_token_hash AS token,b.actor_uid::text AS "actorUID",a.generation::float8 AS generation FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.project_id=a.project_id AND w.change_id IS NOT DISTINCT FROM a.change_id WHERE a.id=${attemptID} AND a.state='starting' AND a.stop_intended_at IS NULL AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt n WHERE n.workspace_id=a.workspace_id AND n.generation>a.generation)`;
+      const newer = alias(runtimeAttempt, "newer");
+      const [attempt] = await database.db
+        .select({
+          workspaceID: developmentWorkspace.id,
+          projectID: runtimeAttempt.projectId,
+          userID: runtimeAttempt.createdBy,
+          token: runtimeAttempt.parentConnectorTokenHash,
+          actorUID: substrateBinding.actorUid,
+          generation: runtimeAttempt.generation,
+        })
+        .from(runtimeAttempt)
+        .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+        .innerJoin(
+          developmentWorkspace,
+          and(
+            eq(developmentWorkspace.id, runtimeAttempt.workspaceId),
+            eq(developmentWorkspace.projectId, runtimeAttempt.projectId),
+            expression`${developmentWorkspace.changeId} IS NOT DISTINCT FROM ${runtimeAttempt.changeId}`,
+          ),
+        )
+        .where(
+          and(
+            eq(runtimeAttempt.id, attemptID),
+            eq(runtimeAttempt.state, "starting"),
+            isNull(runtimeAttempt.stopIntendedAt),
+            isNull(substrateBinding.deleteIntendedAt),
+            isNull(substrateBinding.deletedAt),
+            notExists(
+              database.db
+                .select({ id: newer.id })
+                .from(newer)
+                .where(
+                  and(
+                    eq(newer.workspaceId, runtimeAttempt.workspaceId),
+                    gt(newer.generation, runtimeAttempt.generation),
+                  ),
+                ),
+            ),
+          ),
+        );
       const auth = request.headers.get("authorization")?.replace(/^Bearer /, "");
       if (
         !attempt ||
@@ -725,12 +834,19 @@ export function createSubstrateSources(
       )
         return new Response(null, { status: 409 });
       if (row.checkpoint && row.checkpoint.actorUID !== attempt.actorUID) {
-        const [predecessor] = await database.client`
-          SELECT old_binding.actor_uid FROM factory.runtime_attempt predecessor
-          JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
-          WHERE predecessor.workspace_id=${attempt.workspaceID} AND predecessor.generation=${attempt.generation - 1}
-            AND predecessor.state='stopped' AND old_binding.deleted_at IS NOT NULL
-            AND old_binding.actor_uid=${row.checkpoint.actorUID}`;
+        const [predecessor] = await database.db
+          .select({ actorUID: substrateBinding.actorUid })
+          .from(runtimeAttempt)
+          .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+          .where(
+            and(
+              eq(runtimeAttempt.workspaceId, attempt.workspaceID),
+              eq(runtimeAttempt.generation, attempt.generation - 1),
+              eq(runtimeAttempt.state, "stopped"),
+              expression`${substrateBinding.deletedAt} IS NOT NULL`,
+              eq(substrateBinding.actorUid, row.checkpoint.actorUID),
+            ),
+          );
         if (!predecessor) return new Response(null, { status: 409 });
       }
       const url = new URL(request.url);

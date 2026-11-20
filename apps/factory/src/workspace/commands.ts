@@ -1,11 +1,17 @@
 import { createHmac } from "node:crypto";
+import { and, desc, eq, inArray, notInArray, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
-  workspaceCommandInput,
-  workspaceCommandRead,
+  authUser,
+  workspaceCommand,
+  workspaceTerminalOperation,
+} from "../../../../packages/db/src/schema";
+import {
   type WorkspaceCommandInput,
   type WorkspaceCommandRead,
+  workspaceCommandInput,
+  workspaceCommandRead,
 } from "../../../../packages/workspace-domain/src/commands";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
@@ -51,6 +57,18 @@ type CommandRow = {
   kind: "shell" | "terminal";
 };
 const terminalStates = ["exited", "cancelled", "failed", "interrupted"];
+const commandFields = {
+  id: workspaceCommand.id,
+  workspaceID: workspaceCommand.workspaceId,
+  attemptID: workspaceCommand.runtimeAttemptId,
+  actorID: workspaceCommand.actorId,
+  digest: workspaceCommand.inputDigest,
+  state: workspaceCommand.state,
+  attempted: query<boolean>`${workspaceCommand.dispatchAttemptedAt} IS NOT NULL`,
+  result: workspaceCommand.result,
+  kind: workspaceCommand.kind,
+};
+const terminal = (state: string) => terminalStates.some((value) => value === state);
 
 export function createWorkspaceCommands(
   database: ReturnType<typeof createDatabase>,
@@ -63,9 +81,10 @@ export function createWorkspaceCommands(
   let closing = false;
   const ready = createWorkspaceComputeAccess(database, hub, runtime, () => closing);
   async function row(id: string) {
-    const [record] = await database.client<CommandRow[]>`SELECT id,workspace_id AS "workspaceID",
-      runtime_attempt_id AS "attemptID",actor_id AS "actorID",input_digest AS digest,state,
-      dispatch_attempted_at IS NOT NULL AS attempted,result,kind FROM factory.workspace_command WHERE id=${id}`;
+    const [record] = await database.db
+      .select(commandFields)
+      .from(workspaceCommand)
+      .where(eq(workspaceCommand.id, id));
     if (!record) throw new CommandError("not-found", "Command not found");
     return record;
   }
@@ -94,9 +113,17 @@ export function createWorkspaceCommands(
             : null,
     };
     // A late start acknowledgement must not overwrite an already observed final outcome.
-    await database.client`UPDATE factory.workspace_command SET state=${value.state},result=${JSON.stringify(result)}::text::jsonb,updated_at=now()
-      WHERE id=${value.id} AND runtime_attempt_id=${attemptID} AND input_digest=${value.digest}
-        AND state NOT IN ('exited','cancelled','failed','interrupted')`;
+    await database.db
+      .update(workspaceCommand)
+      .set({ state: value.state, result, updatedAt: query`now()` })
+      .where(
+        and(
+          eq(workspaceCommand.id, value.id),
+          eq(workspaceCommand.runtimeAttemptId, attemptID),
+          eq(workspaceCommand.inputDigest, value.digest),
+          notInArray(workspaceCommand.state, terminalStates),
+        ),
+      );
   }
   const unsubscribe = hub.onCommandState((attemptID, data) => {
     let value: unknown;
@@ -158,13 +185,18 @@ export function createWorkspaceCommands(
       z.number().int().nonnegative().max(100000).parse(offset);
       z.number().int().positive().max(100).parse(limit);
       await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, userID));
-      const rows = await database.client<
-        (CommandRow & { actorName: string; createdAt: string })[]
-      >`SELECT command.id,command.workspace_id AS "workspaceID",command.runtime_attempt_id AS "attemptID",
-        command.actor_id AS "actorID",left(person.name,160) AS "actorName",command.input_digest AS digest,command.state,command.kind,
-        command.dispatch_attempted_at IS NOT NULL AS attempted,command.result,command.created_at::text AS "createdAt"
-        FROM factory.workspace_command command JOIN auth."user" person ON person.id=command.actor_id
-        WHERE command.workspace_id=${workspaceID} ORDER BY command.created_at DESC,command.id DESC OFFSET ${offset} LIMIT ${limit + 1}`;
+      const rows = await database.db
+        .select({
+          ...commandFields,
+          actorName: query<string>`left(${authUser.name},160)`,
+          createdAt: query<string>`${workspaceCommand.createdAt}::text`,
+        })
+        .from(workspaceCommand)
+        .innerJoin(authUser, eq(authUser.id, workspaceCommand.actorId))
+        .where(eq(workspaceCommand.workspaceId, workspaceID))
+        .orderBy(desc(workspaceCommand.createdAt), desc(workspaceCommand.id))
+        .offset(offset)
+        .limit(limit + 1);
       return {
         commands: rows.slice(0, limit).map((row) => ({
           ...view(row),
@@ -197,27 +229,32 @@ export function createWorkspaceCommands(
         await database.client.begin((sql) =>
           workspaceWriteAuthorityIn(sql, input.workspaceID, userID),
         );
-        const [previous] = await database.client<
-          { id: string }[]
-        >`SELECT id FROM factory.workspace_command WHERE id=${input.requestID}`;
+        const [previous] = await database.db
+          .select({ id: workspaceCommand.id })
+          .from(workspaceCommand)
+          .where(eq(workspaceCommand.id, input.requestID));
         const attemptID = previous
           ? (await row(input.requestID)).attemptID
           : await ready(input.workspaceID, userID);
         const claimed = await database.client.begin(async (sql) => {
           await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
-          await sql`INSERT INTO factory.workspace_command(id,workspace_id,runtime_attempt_id,actor_id,input_digest,kind)
-          VALUES(${input.requestID},${input.workspaceID},${attemptID},${userID},${digest},${kind}) ON CONFLICT(id) DO NOTHING`;
-          const [current] = await sql<
-            {
-              digest: string;
-              actorID: string;
-              workspaceID: string;
-              state: string;
-              attempted: boolean;
-            }[]
-          >`
-          SELECT input_digest AS digest,actor_id AS "actorID",workspace_id AS "workspaceID",state,
-            dispatch_attempted_at IS NOT NULL AS attempted FROM factory.workspace_command WHERE id=${input.requestID} FOR UPDATE`;
+          const db = drizzleTransaction(sql);
+          await db
+            .insert(workspaceCommand)
+            .values({
+              id: input.requestID,
+              workspaceId: input.workspaceID,
+              runtimeAttemptId: attemptID,
+              actorId: userID,
+              inputDigest: digest,
+              kind,
+            })
+            .onConflictDoNothing({ target: workspaceCommand.id });
+          const [current] = await db
+            .select(commandFields)
+            .from(workspaceCommand)
+            .where(eq(workspaceCommand.id, input.requestID))
+            .for("update");
           if (
             !current ||
             current.digest !== digest ||
@@ -228,8 +265,15 @@ export function createWorkspaceCommands(
               "conflict",
               "This command identity already records different input or ownership",
             );
-          if (current.attempted || terminalStates.includes(current.state)) return false;
-          await sql`UPDATE factory.workspace_command SET state='dispatching',dispatch_attempted_at=now(),updated_at=now() WHERE id=${input.requestID}`;
+          if (current.attempted || terminal(current.state)) return false;
+          await db
+            .update(workspaceCommand)
+            .set({
+              state: "dispatching",
+              dispatchAttemptedAt: query`now()`,
+              updatedAt: query`now()`,
+            })
+            .where(eq(workspaceCommand.id, input.requestID));
           return true;
         });
         const record = await row(input.requestID);
@@ -253,8 +297,15 @@ export function createWorkspaceCommands(
           );
         } catch {
           // Persisted dispatch forbids automatic replay, including after a lost transport response.
-          await database.client`UPDATE factory.workspace_command SET state='uncertain',updated_at=now()
-          WHERE id=${record.id} AND state IN ('start-intended','dispatching','starting')`;
+          await database.db
+            .update(workspaceCommand)
+            .set({ state: "uncertain", updatedAt: query`now()` })
+            .where(
+              and(
+                eq(workspaceCommand.id, record.id),
+                inArray(workspaceCommand.state, ["start-intended", "dispatching", "starting"]),
+              ),
+            );
         }
         await authorized(userID, record);
         return view(await row(record.id));
@@ -270,7 +321,7 @@ export function createWorkspaceCommands(
       const record = await row(z.uuid().parse(commandID));
       await authorized(userID, record);
       let observed = false;
-      if (!terminalStates.includes(record.state) && hub.connected(record.attemptID)) {
+      if (!terminal(record.state) && hub.connected(record.attemptID)) {
         try {
           await call(
             userID,
@@ -284,11 +335,18 @@ export function createWorkspaceCommands(
           if (cause instanceof CommandError && ["forbidden", "not-found"].includes(cause.code))
             throw cause;
         }
-      } else if (!terminalStates.includes(record.state)) {
+      } else if (!terminal(record.state)) {
         const attempt = await runtime.get(record.attemptID);
         if (attempt?.state === "stopped")
-          await database.client`UPDATE factory.workspace_command SET state='interrupted',updated_at=now()
-            WHERE id=${record.id} AND state NOT IN ('exited','cancelled','failed','interrupted')`;
+          await database.db
+            .update(workspaceCommand)
+            .set({ state: "interrupted", updatedAt: query`now()` })
+            .where(
+              and(
+                eq(workspaceCommand.id, record.id),
+                notInArray(workspaceCommand.state, terminalStates),
+              ),
+            );
       }
       await authorized(userID, record);
       return { ...view(await row(record.id)), observation: observed ? "current" : "retained" };
@@ -332,7 +390,7 @@ export function createWorkspaceCommands(
       if (expectedKind && record.kind !== expectedKind)
         throw new CommandError("not-found", "Execution handle has another kind");
       await authorized(userID, record, true);
-      if (terminalStates.includes(record.state)) return view(record);
+      if (terminal(record.state)) return view(record);
       await call(
         userID,
         record,
@@ -378,15 +436,29 @@ export function createWorkspaceCommands(
       const digest = createHmac("sha256", signingKey).update(JSON.stringify(input)).digest("hex");
       const previous = await database.client.begin(async (sql) => {
         await workspaceWriteAuthorityIn(sql, record.workspaceID, userID);
-        const [created] =
-          await sql`INSERT INTO factory.workspace_terminal_operation(id,command_id,actor_id,action,input_digest)
-          VALUES(${input.requestID},${record.id},${userID},${input.action},${digest}) ON CONFLICT(id) DO NOTHING RETURNING id`;
+        const db = drizzleTransaction(sql);
+        const [created] = await db
+          .insert(workspaceTerminalOperation)
+          .values({
+            id: input.requestID,
+            commandId: record.id,
+            actorId: userID,
+            action: input.action,
+            inputDigest: digest,
+          })
+          .onConflictDoNothing({ target: workspaceTerminalOperation.id })
+          .returning({ id: workspaceTerminalOperation.id });
         if (created) return undefined;
-        const [existing] = await sql<
-          { commandID: string; actorID: string; action: string; digest: string; result: unknown }[]
-        >`
-          SELECT command_id AS "commandID",actor_id AS "actorID",action,input_digest AS digest,result
-          FROM factory.workspace_terminal_operation WHERE id=${input.requestID}`;
+        const [existing] = await db
+          .select({
+            commandID: workspaceTerminalOperation.commandId,
+            actorID: workspaceTerminalOperation.actorId,
+            action: workspaceTerminalOperation.action,
+            digest: workspaceTerminalOperation.inputDigest,
+            result: workspaceTerminalOperation.result,
+          })
+          .from(workspaceTerminalOperation)
+          .where(eq(workspaceTerminalOperation.id, input.requestID));
         if (
           !existing ||
           existing.commandID !== record.id ||
@@ -422,7 +494,10 @@ export function createWorkspaceCommands(
         return { requestID: input.requestID, state: "uncertain" };
       }
       const result = view(await row(record.id));
-      await database.client`UPDATE factory.workspace_terminal_operation SET result=${JSON.stringify(result)}::text::jsonb,completed_at=now() WHERE id=${input.requestID}`;
+      await database.db
+        .update(workspaceTerminalOperation)
+        .set({ result, completedAt: query`now()` })
+        .where(eq(workspaceTerminalOperation.id, input.requestID));
       await authorized(userID, record);
       return result;
     },

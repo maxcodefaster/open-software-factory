@@ -1,4 +1,14 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, sql as query } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  change as changeModel,
+  executionPolicyCommand,
+  promotionOperation,
+  runtimeAttempt,
+  stagingPreview,
+  ticket,
+  verification,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
 import type { RuntimeAttemptView } from "../runtime/types";
 
@@ -20,28 +30,28 @@ export function createDeliveryPromotion(
 ) {
   const bounded = (value: string) => (value.length <= 2000 ? value : `${value.slice(0, 1999)}…`);
   async function reconcilePromotion(change: PromotionChange, repository: ForgeRepository) {
-    const rows = await database.client<
-      Array<{
-        id: string;
-        commitSHA: string;
-        state: string;
-        previousAttemptID: string | null;
-        replacementAttemptID: string | null;
-        replacementState: string | null;
-        lastError: string | null;
-        retryActorID: string | null;
-      }>
-    >`
-      SELECT promotion.id, promotion.commit_sha AS "commitSHA", promotion.state, promotion.last_error AS "lastError",
-        promotion.previous_runtime_attempt_id AS "previousAttemptID",
-        promotion.replacement_runtime_attempt_id AS "replacementAttemptID",
-        attempt.state AS "replacementState", command.actor_id AS "retryActorID"
-      FROM factory.current_promotion promotion
-      LEFT JOIN factory.execution_policy_command command ON command.command_id=promotion.retry_command_id
-      LEFT JOIN factory.runtime_attempt attempt
-        ON attempt.id = promotion.replacement_runtime_attempt_id
-      WHERE promotion.change_id = ${change.id}
-    `;
+    // The native view selects the current immutable promotion attempt.
+    const rows = await database.db
+      .select({
+        id: query<string>`promotion.id`,
+        commitSHA: query<string>`promotion.commit_sha`,
+        state: query<string>`promotion.state`,
+        lastError: query<string | null>`promotion.last_error`,
+        previousAttemptID: query<string | null>`promotion.previous_runtime_attempt_id`,
+        replacementAttemptID: query<string | null>`promotion.replacement_runtime_attempt_id`,
+        replacementState: runtimeAttempt.state,
+        retryActorID: executionPolicyCommand.actorId,
+      })
+      .from(query`factory.current_promotion promotion`)
+      .leftJoin(
+        executionPolicyCommand,
+        eq(executionPolicyCommand.commandId, query`promotion.retry_command_id`),
+      )
+      .leftJoin(
+        runtimeAttempt,
+        eq(runtimeAttempt.id, query`promotion.replacement_runtime_attempt_id`),
+      )
+      .where(eq(query`promotion.change_id`, change.id));
     const promotion = rows[0];
     if (!promotion || promotion.state === "failed") return;
     if (promotion.state === "succeeded") {
@@ -53,37 +63,56 @@ export function createDeliveryPromotion(
       return;
     }
     if (["failed", "stopped", "cleanup-failed"].includes(promotion.replacementState ?? "")) {
-      await database.client`
-        UPDATE factory.promotion_operation SET state = 'failed',
-          last_error = 'Replacement Staging failed before readiness', completed_at = now(),
-          updated_at = now() WHERE id = ${promotion.id}
-      `;
+      await database.db
+        .update(promotionOperation)
+        .set({
+          state: "failed",
+          lastError: "Replacement Staging failed before readiness",
+          completedAt: query`now()`,
+          updatedAt: query`now()`,
+        })
+        .where(eq(promotionOperation.id, promotion.id));
       return;
     }
     if (promotion.replacementState !== "ready") return;
     await database.client.begin(async (transaction) => {
-      await transaction`
-        UPDATE factory.promotion_operation SET state = 'switching', updated_at = now()
-        WHERE id = ${promotion.id} AND state = 'starting'
-      `;
-      await transaction`
-        UPDATE factory.staging_preview
-        SET revision = ${promotion.commitSHA},
-          runtime_attempt_id = ${promotion.replacementAttemptID}, updated_at = now()
-        WHERE project_id = ${change.projectID}
-      `;
-      await transaction`
-        UPDATE factory.promotion_operation SET state = 'succeeded', completed_at = now(),
-          updated_at = now(), last_error = 'Delivery cleanup pending' WHERE id = ${promotion.id}
-      `;
-      await transaction`
-        UPDATE factory.change SET state = 'delivered', cancel_requested_at = now(),
-          failure = NULL, version = version + 1 WHERE id = ${change.id}
-      `;
-      await transaction`
-        UPDATE factory.ticket SET state = 'done', version = version + 1, updated_at = now()
-        WHERE id = ${change.ticketID}
-      `;
+      const db = drizzleTransaction(transaction);
+      await db
+        .update(promotionOperation)
+        .set({ state: "switching", updatedAt: query`now()` })
+        .where(
+          and(eq(promotionOperation.id, promotion.id), eq(promotionOperation.state, "starting")),
+        );
+      await db
+        .update(stagingPreview)
+        .set({
+          revision: promotion.commitSHA,
+          runtimeAttemptId: promotion.replacementAttemptID,
+          updatedAt: query`now()`,
+        })
+        .where(eq(stagingPreview.projectId, change.projectID));
+      await db
+        .update(promotionOperation)
+        .set({
+          state: "succeeded",
+          completedAt: query`now()`,
+          updatedAt: query`now()`,
+          lastError: "Delivery cleanup pending",
+        })
+        .where(eq(promotionOperation.id, promotion.id));
+      await db
+        .update(changeModel)
+        .set({
+          state: "delivered",
+          cancelRequestedAt: query`now()`,
+          failure: null,
+          version: query`${changeModel.version} + 1`,
+        })
+        .where(eq(changeModel.id, change.id));
+      await db
+        .update(ticket)
+        .set({ state: "done", version: query`${ticket.version} + 1`, updatedAt: query`now()` })
+        .where(eq(ticket.id, change.ticketID));
     });
     await cleanupDelivery(change, repository, promotion);
   }
@@ -96,21 +125,30 @@ export function createDeliveryPromotion(
     try {
       if (promotion.previousAttemptID) await runtime.stop(promotion.previousAttemptID);
       if (change.runtimeAttemptID) await runtime.stop(change.runtimeAttemptID);
-      const verifications = await database.client<
-        Array<{ runtimeAttemptID: string | null; runnerID: string | null }>
-      >`
-      SELECT runtime_attempt_id AS "runtimeAttemptID", runner_id AS "runnerID"
-      FROM factory.verification WHERE change_id = ${change.id}
-    `;
-      for (const verification of verifications) {
-        if (verification.runtimeAttemptID) await runtime.stop(verification.runtimeAttemptID);
-        if (verification.runnerID)
-          await forge.deleteRunner(repository, Number(verification.runnerID));
+      const verifications = await database.db
+        .select({
+          runtimeAttemptID: verification.runtimeAttemptId,
+          runnerID: verification.runnerId,
+        })
+        .from(verification)
+        .where(eq(verification.changeId, change.id));
+      for (const recorded of verifications) {
+        if (recorded.runtimeAttemptID) await runtime.stop(recorded.runtimeAttemptID);
+        if (recorded.runnerID) await forge.deleteRunner(repository, Number(recorded.runnerID));
       }
       await retireBranch(change.id);
-      await database.client`UPDATE factory.promotion_operation SET last_error = NULL, updated_at = now() WHERE id = ${promotion.id}`;
+      await database.db
+        .update(promotionOperation)
+        .set({ lastError: null, updatedAt: query`now()` })
+        .where(eq(promotionOperation.id, promotion.id));
     } catch (cause) {
-      await database.client`UPDATE factory.promotion_operation SET last_error = ${bounded(cause instanceof Error ? cause.message : "Delivery cleanup failed")}, updated_at = now() WHERE id = ${promotion.id}`;
+      await database.db
+        .update(promotionOperation)
+        .set({
+          lastError: bounded(cause instanceof Error ? cause.message : "Delivery cleanup failed"),
+          updatedAt: query`now()`,
+        })
+        .where(eq(promotionOperation.id, promotion.id));
     }
   }
   return reconcilePromotion;

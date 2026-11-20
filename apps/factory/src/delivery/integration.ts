@@ -1,4 +1,30 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  notInArray,
+  sql as query,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentSession,
+  changeCommitOperation,
+  project,
+  projectDeliveryQueue,
+  requirementApproval,
+  requirementRevision,
+  runtimeAttempt,
+  substrateBinding,
+  ticket,
+} from "../../../../packages/db/src/schema";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
@@ -35,30 +61,56 @@ export function createChangeIntegration(
   runtime: { startPersisted(id: string, userID: string): Promise<unknown> },
 ) {
   async function operation(changeID: string) {
-    const [row] = await database.client<Operation[]>`
-      SELECT operation.id,operation.change_id AS "changeID",operation.runtime_attempt_id AS "attemptID",
-        operation.expected_parent_sha AS parent,operation.integration_base_sha AS base,
-        operation.branch_name AS branch,operation.commit_message AS message,operation.state,
-        operation.commit_sha AS sha,operation.last_error AS error,operation.created_by AS "userID",
-        project.repository_url AS repository
-      FROM factory.change_commit_operation operation JOIN factory.change change ON change.id=operation.change_id
-      JOIN factory.project project ON project.id=change.project_id
-      WHERE operation.change_id=${changeID} AND operation.source='integration'
-      ORDER BY operation.sequence DESC LIMIT 1`;
+    const [row] = await database.db
+      .select({
+        id: changeCommitOperation.id,
+        changeID: changeCommitOperation.changeId,
+        attemptID: query<string>`${changeCommitOperation.runtimeAttemptId}`,
+        parent: changeCommitOperation.expectedParentSha,
+        base: query<string>`${changeCommitOperation.integrationBaseSha}`,
+        branch: changeCommitOperation.branchName,
+        message: changeCommitOperation.commitMessage,
+        state: changeCommitOperation.state,
+        sha: changeCommitOperation.commitSha,
+        error: changeCommitOperation.lastError,
+        userID: changeCommitOperation.createdBy,
+        repository: project.repositoryUrl,
+      })
+      .from(changeCommitOperation)
+      .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
+      .innerJoin(project, eq(project.id, change.projectId))
+      .where(
+        and(
+          eq(changeCommitOperation.changeId, changeID),
+          eq(changeCommitOperation.source, "integration"),
+        ),
+      )
+      .orderBy(desc(changeCommitOperation.sequence))
+      .limit(1);
     return row;
   }
   async function send(
     op: Operation,
     action: "git-prepare-integration" | "git-observe-commit" | "git-push",
   ) {
-    const [current] = await database.client<
-      { id: string; nativeIntent: unknown }[]
-    >`SELECT current.id,binding.intent AS "nativeIntent" FROM factory.change change
-      JOIN factory.runtime_attempt current ON current.id=change.runtime_attempt_id
-      JOIN factory.runtime_attempt original ON original.id=${op.attemptID}
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
-      WHERE change.id=${op.changeID} AND current.state='ready' AND original.workspace_id=current.workspace_id
-        AND current.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL`;
+    const currentAttempt = alias(runtimeAttempt, "current");
+    const originalAttempt = alias(runtimeAttempt, "original");
+    const [current] = await database.db
+      .select({ id: currentAttempt.id, nativeIntent: substrateBinding.intent })
+      .from(change)
+      .innerJoin(currentAttempt, eq(currentAttempt.id, change.runtimeAttemptId))
+      .innerJoin(originalAttempt, eq(originalAttempt.id, op.attemptID))
+      .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, currentAttempt.id))
+      .where(
+        and(
+          eq(change.id, op.changeID),
+          eq(currentAttempt.state, "ready"),
+          eq(originalAttempt.workspaceId, currentAttempt.workspaceId),
+          isNull(currentAttempt.stopIntendedAt),
+          isNull(substrateBinding.deleteIntendedAt),
+          isNull(substrateBinding.deletedAt),
+        ),
+      );
     if (!current)
       throw new CommandError("unavailable", "The Ticket Workspace is not ready for integration.");
     const repositoryURL = substrateRepositoryCloneURL(op.repository, current.nativeIntent);
@@ -82,31 +134,88 @@ export function createChangeIntegration(
         await database.client.begin(async (sql) => {
           const writer = await lockChangeWriterIn(sql, op.changeID);
           await projectAuthorityIn(sql, op.userID, writer.projectID);
-          const [valid] = await sql<
-            { id: string; repository: string; nativeIntent: unknown }[]
-          >`SELECT operation.id,project.repository_url AS repository,
-              binding.intent AS "nativeIntent"
-            FROM factory.change_commit_operation operation
-          JOIN factory.change change ON change.id=operation.change_id
-          JOIN factory.project project ON project.id=change.project_id
-          JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-          JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
-          JOIN factory.change_agent_session session ON session.change_id=change.id
-          JOIN factory.runtime_attempt current ON current.id=change.runtime_attempt_id
-          JOIN factory.runtime_attempt original ON original.id=operation.runtime_attempt_id
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
-          JOIN factory.project_delivery_queue queue ON queue.project_id=change.project_id AND queue.change_id=change.id
-          WHERE operation.id=${op.id} AND operation.source='integration'
-            AND operation.expected_parent_sha=${op.parent} AND operation.merge_parent_sha=${op.base}
-            AND operation.state=${action === "git-push" ? "push-intended" : "commit-intended"}
-            AND (${action !== "git-push"} OR operation.commit_sha=${op.sha})
-            AND change.state='active' AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
-            AND session.state='committed' AND NOT session.stop_pending
-            AND current.id=${current.id} AND current.state='ready' AND current.workspace_id=original.workspace_id
-            AND current.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-            AND approval.requirement_revision_id=(SELECT id FROM factory.requirement_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1)
-            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running','uncertain'))
-          FOR SHARE OF current,project`;
+          const db = drizzleTransaction(sql);
+          const [valid] = await db
+            .select({
+              id: changeCommitOperation.id,
+              repository: project.repositoryUrl,
+              nativeIntent: substrateBinding.intent,
+            })
+            .from(changeCommitOperation)
+            .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
+            .innerJoin(project, eq(project.id, change.projectId))
+            .innerJoin(ticket, eq(ticket.id, change.ticketId))
+            .innerJoin(
+              requirementApproval,
+              eq(requirementApproval.id, change.requirementApprovalId),
+            )
+            .innerJoin(changeAgentSession, eq(changeAgentSession.changeId, change.id))
+            .innerJoin(currentAttempt, eq(currentAttempt.id, change.runtimeAttemptId))
+            .innerJoin(
+              originalAttempt,
+              eq(originalAttempt.id, changeCommitOperation.runtimeAttemptId),
+            )
+            .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, currentAttempt.id))
+            .innerJoin(
+              projectDeliveryQueue,
+              and(
+                eq(projectDeliveryQueue.projectId, change.projectId),
+                eq(projectDeliveryQueue.changeId, change.id),
+              ),
+            )
+            .where(
+              and(
+                eq(changeCommitOperation.id, op.id),
+                eq(changeCommitOperation.source, "integration"),
+                eq(changeCommitOperation.expectedParentSha, op.parent),
+                eq(changeCommitOperation.mergeParentSha, op.base),
+                eq(
+                  changeCommitOperation.state,
+                  action === "git-push" ? "push-intended" : "commit-intended",
+                ),
+                action === "git-push"
+                  ? eq(changeCommitOperation.commitSha, query`${op.sha}`)
+                  : undefined,
+                eq(change.state, "active"),
+                isNull(change.cancelRequestedAt),
+                isNull(ticket.trashedAt),
+                eq(changeAgentSession.state, "committed"),
+                eq(changeAgentSession.stopPending, false),
+                eq(currentAttempt.id, current.id),
+                eq(currentAttempt.state, "ready"),
+                eq(currentAttempt.workspaceId, originalAttempt.workspaceId),
+                isNull(currentAttempt.stopIntendedAt),
+                isNull(substrateBinding.deleteIntendedAt),
+                isNull(substrateBinding.deletedAt),
+                eq(
+                  requirementApproval.requirementRevisionId,
+                  db
+                    .select({ id: requirementRevision.id })
+                    .from(requirementRevision)
+                    .where(eq(requirementRevision.ticketId, ticket.id))
+                    .orderBy(desc(requirementRevision.ordinal))
+                    .limit(1),
+                ),
+                notExists(
+                  db
+                    .select({ id: agentTurn.id })
+                    .from(agentTurn)
+                    .where(
+                      and(
+                        eq(agentTurn.changeId, change.id),
+                        inArray(agentTurn.state, [
+                          "pending",
+                          "dispatching",
+                          "running",
+                          "uncertain",
+                        ]),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            // PostgreSQL's OF list takes unqualified relation identifiers.
+            .for("share", { of: [currentAttempt, alias(project, "project")] });
           if (!valid || !writer.available || writer.state !== "agent")
             throw new CommandError(
               "conflict",
@@ -120,19 +229,36 @@ export function createChangeIntegration(
       },
     );
   }
+  async function laterSucceededCommit(changeID: string, operationID: string) {
+    const previous = alias(changeCommitOperation, "previous");
+    const [later] = await database.db
+      .select({ id: changeCommitOperation.id })
+      .from(changeCommitOperation)
+      .where(
+        and(
+          eq(changeCommitOperation.changeId, changeID),
+          gt(
+            changeCommitOperation.sequence,
+            database.db
+              .select({ sequence: previous.sequence })
+              .from(previous)
+              .where(eq(previous.id, operationID)),
+          ),
+          eq(changeCommitOperation.state, "succeeded"),
+        ),
+      )
+      .limit(1);
+    return later;
+  }
   return {
     async reconcile(changeID: string, base: string) {
       let op = await operation(changeID);
       if (op?.state === "failed" && op.error !== "integration has conflicts") {
-        const [later] = await database.client`SELECT id FROM factory.change_commit_operation
-          WHERE change_id=${changeID} AND sequence>(SELECT sequence FROM factory.change_commit_operation WHERE id=${op.id})
-            AND state='succeeded' LIMIT 1`;
+        const later = await laterSucceededCommit(changeID, op.id);
         if (!later) return false;
       }
       if (op?.state === "failed" && op.error === "integration has conflicts") {
-        const [later] = await database.client`SELECT id FROM factory.change_commit_operation
-          WHERE change_id=${changeID} AND sequence>(SELECT sequence FROM factory.change_commit_operation WHERE id=${op.id})
-            AND state='succeeded' LIMIT 1`;
+        const later = await laterSucceededCommit(changeID, op.id);
         if (!later) {
           await agent.prompt(
             changeID,
@@ -154,24 +280,86 @@ export function createChangeIntegration(
         const created = await database.client.begin(async (sql) => {
           const writer = await lockChangeWriterIn(sql, changeID);
           if (!writer.available || writer.state !== "agent") return false;
-          const [row] = await sql<{ id: string; userID: string }[]>`
-            SELECT change.id,change.created_by AS "userID" FROM factory.change change
-            JOIN factory.change_agent_session session ON session.change_id=change.id
-            JOIN factory.project_delivery_queue queue ON queue.change_id=change.id
-            WHERE change.id=${changeID} AND session.state='committed' AND NOT session.stop_pending
-              AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id AND state IN ('pending','dispatching','running','uncertain'))
-              AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id AND state NOT IN ('succeeded','failed'))`;
+          const db = drizzleTransaction(sql);
+          const [row] = await db
+            .select({
+              id: change.id,
+              userID: change.createdBy,
+              attemptID: change.runtimeAttemptId,
+              branch: change.branchName,
+            })
+            .from(change)
+            .innerJoin(changeAgentSession, eq(changeAgentSession.changeId, change.id))
+            .innerJoin(projectDeliveryQueue, eq(projectDeliveryQueue.changeId, change.id))
+            .where(
+              and(
+                eq(change.id, changeID),
+                eq(changeAgentSession.state, "committed"),
+                eq(changeAgentSession.stopPending, false),
+                notExists(
+                  db
+                    .select({ id: agentTurn.id })
+                    .from(agentTurn)
+                    .where(
+                      and(
+                        eq(agentTurn.changeId, change.id),
+                        inArray(agentTurn.state, [
+                          "pending",
+                          "dispatching",
+                          "running",
+                          "uncertain",
+                        ]),
+                      ),
+                    ),
+                ),
+                notExists(
+                  db
+                    .select({ id: changeCommitOperation.id })
+                    .from(changeCommitOperation)
+                    .where(
+                      and(
+                        eq(changeCommitOperation.changeId, change.id),
+                        notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+                      ),
+                    ),
+                ),
+              ),
+            );
           if (!row) return false;
           await projectAuthorityIn(sql, row.userID, writer.projectID);
-          await sql`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,
-            expected_parent_sha,integration_base_sha,merge_parent_sha,commit_message,idempotency_key,state,created_by,source)
-            SELECT ${crypto.randomUUID()},change.id,change.runtime_attempt_id,
-              (SELECT COALESCE(MAX(sequence),0)+1 FROM factory.change_commit_operation WHERE change_id=change.id),change.branch_name,
-              (SELECT commit_sha FROM factory.change_commit_operation WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
-              ${base},${base},'Integrate current main',${`integration:${changeID}:${base}:`} ||
-                (SELECT commit_sha FROM factory.change_commit_operation WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
-              'commit-intended',change.created_by,'integration'
-            FROM factory.change change WHERE change.id=${changeID}`;
+          const latestCommit = db
+            .select({ sha: changeCommitOperation.commitSha })
+            .from(changeCommitOperation)
+            .where(
+              and(
+                eq(changeCommitOperation.changeId, changeID),
+                eq(changeCommitOperation.state, "succeeded"),
+              ),
+            )
+            .orderBy(desc(changeCommitOperation.sequence))
+            .limit(1);
+          // The writer lock retains Change identity. Sequence and exact candidate
+          // are still read in the same INSERT snapshot as the durable intent.
+          await db.insert(changeCommitOperation).values({
+            id: crypto.randomUUID(),
+            changeId: row.id,
+            runtimeAttemptId: row.attemptID,
+            sequence: query`(${db
+              .select({
+                sequence: query<number>`coalesce(max(${changeCommitOperation.sequence}), 0) + 1`,
+              })
+              .from(changeCommitOperation)
+              .where(eq(changeCommitOperation.changeId, changeID))})`,
+            branchName: row.branch,
+            expectedParentSha: query`(${latestCommit})`,
+            integrationBaseSha: base,
+            mergeParentSha: base,
+            commitMessage: "Integrate current main",
+            idempotencyKey: query`${`integration:${changeID}:${base}:`} || (${latestCommit})`,
+            state: "commit-intended",
+            createdBy: row.userID,
+            source: "integration",
+          });
           return true;
         });
         if (!created) return false;
@@ -199,62 +387,158 @@ export function createChangeIntegration(
             if (!writer.available) return;
             // Only retire the exact still-undispatched current intent. Another
             // reconciler may have recorded dispatch while startup was pending.
-            const [retired] = await sql`UPDATE factory.change_commit_operation operation SET
-              state='failed',last_error=${failure},completed_at=now(),updated_at=now()
-              FROM factory.change change
-              WHERE operation.id=${refused.id} AND operation.change_id=change.id
-                AND change.id=${changeID} AND change.state='active' AND operation.source='integration'
-                AND operation.runtime_attempt_id=${refused.attemptID} AND operation.created_by=${refused.userID}
-                AND operation.branch_name=${refused.branch} AND operation.expected_parent_sha=${refused.parent}
-                AND operation.integration_base_sha=${refused.base} AND operation.merge_parent_sha=${refused.base}
-                AND operation.state='commit-intended' AND operation.last_error IS NULL
-                AND operation.commit_sha IS NULL AND operation.observed_remote_sha IS NULL
-                AND operation.sequence=(SELECT MAX(sequence) FROM factory.change_commit_operation WHERE change_id=${changeID})
-              RETURNING operation.id`;
+            const db = drizzleTransaction(sql);
+            const history = alias(changeCommitOperation, "history");
+            const [retired] = await db
+              .update(changeCommitOperation)
+              .set({
+                state: "failed",
+                lastError: failure,
+                completedAt: query`now()`,
+                updatedAt: query`now()`,
+              })
+              .from(change)
+              .where(
+                and(
+                  eq(changeCommitOperation.id, refused.id),
+                  eq(changeCommitOperation.changeId, change.id),
+                  eq(change.id, changeID),
+                  eq(change.state, "active"),
+                  eq(changeCommitOperation.source, "integration"),
+                  eq(changeCommitOperation.runtimeAttemptId, refused.attemptID),
+                  eq(changeCommitOperation.createdBy, refused.userID),
+                  eq(changeCommitOperation.branchName, refused.branch),
+                  eq(changeCommitOperation.expectedParentSha, refused.parent),
+                  eq(changeCommitOperation.integrationBaseSha, refused.base),
+                  eq(changeCommitOperation.mergeParentSha, refused.base),
+                  eq(changeCommitOperation.state, "commit-intended"),
+                  isNull(changeCommitOperation.lastError),
+                  isNull(changeCommitOperation.commitSha),
+                  isNull(changeCommitOperation.observedRemoteSha),
+                  eq(
+                    changeCommitOperation.sequence,
+                    db
+                      .select({ sequence: query<number>`max(${history.sequence})` })
+                      .from(history)
+                      .where(eq(history.changeId, changeID)),
+                  ),
+                ),
+              )
+              .returning({ id: changeCommitOperation.id });
             if (retired)
-              await sql`UPDATE factory.change SET failure=${failure} WHERE id=${changeID} AND state='active'`;
+              await db
+                .update(change)
+                .set({ failure })
+                .where(and(eq(change.id, changeID), eq(change.state, "active")));
           });
         }
         // Transient preparation and previously dispatched/unknown Git writes
         // retain their original evidence. A failed Start is never a replay grant.
         return false;
       }
-      const [ready] = await database.client`SELECT id FROM factory.runtime_attempt
-        WHERE id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}) AND state='ready'`;
+      const [ready] = await database.db
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .where(
+          and(
+            eq(
+              runtimeAttempt.id,
+              database.db
+                .select({ id: change.runtimeAttemptId })
+                .from(change)
+                .where(eq(change.id, changeID)),
+            ),
+            eq(runtimeAttempt.state, "ready"),
+          ),
+        );
       if (!ready) return false;
       try {
         if (op.state === "commit-intended") {
           const recovering = op.error !== null;
-          await database.client`UPDATE factory.change_commit_operation SET last_error='Integration dispatched; exact outcome pending',updated_at=now()
-            WHERE id=${op.id} AND state='commit-intended'`;
+          await database.db
+            .update(changeCommitOperation)
+            .set({
+              lastError: "Integration dispatched; exact outcome pending",
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                eq(changeCommitOperation.id, op.id),
+                eq(changeCommitOperation.state, "commit-intended"),
+              ),
+            );
           const result = await send(
             op,
             recovering ? "git-observe-commit" : "git-prepare-integration",
           );
           if (!result.commitSHA) throw new Error("Integrated commit was not confirmed.");
           op.sha = result.commitSHA;
-          await database.client`UPDATE factory.change_commit_operation SET state='push-intended',commit_sha=${op.sha},updated_at=now()
-            WHERE id=${op.id} AND state='commit-intended'`;
+          await database.db
+            .update(changeCommitOperation)
+            .set({ state: "push-intended", commitSha: op.sha, updatedAt: query`now()` })
+            .where(
+              and(
+                eq(changeCommitOperation.id, op.id),
+                eq(changeCommitOperation.state, "commit-intended"),
+              ),
+            );
         }
         const result = await send(op, "git-push");
         if (!op.sha || result.remoteSHA !== op.sha)
           throw new Error("Integrated remote commit was not confirmed.");
-        await database.client`UPDATE factory.change_commit_operation SET state='succeeded',observed_remote_sha=${op.sha},
-          last_error=NULL,completed_at=now(),updated_at=now() WHERE id=${op.id} AND state='push-intended'`;
-        await database.client`UPDATE factory.change SET failure=NULL WHERE id=${changeID} AND state='active' AND failure IS NOT NULL`;
+        await database.db
+          .update(changeCommitOperation)
+          .set({
+            state: "succeeded",
+            observedRemoteSha: op.sha,
+            lastError: null,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(changeCommitOperation.id, op.id),
+              eq(changeCommitOperation.state, "push-intended"),
+            ),
+          );
+        await database.db
+          .update(change)
+          .set({ failure: null })
+          .where(
+            and(eq(change.id, changeID), eq(change.state, "active"), isNotNull(change.failure)),
+          );
         return true;
       } catch (cause) {
         const conflict =
           cause instanceof RuntimeParentOperationError &&
           cause.message === "integration has conflicts";
         const rejected = cause instanceof CommandError && op.error === null;
-        await database.client`UPDATE factory.change_commit_operation SET
-          state=CASE WHEN ${conflict || rejected} THEN 'failed'::factory.change_commit_state ELSE state END,
-          completed_at=CASE WHEN ${conflict || rejected} THEN now() ELSE NULL END,
-          last_error=${(cause instanceof Error ? cause.message : "Integration outcome unknown").slice(0, 2000)},updated_at=now()
-          WHERE id=${op.id} AND state NOT IN ('succeeded','failed')`;
-        await database.client`UPDATE factory.change SET failure=${(cause instanceof Error ? cause.message : "Integration outcome unknown").slice(0, 2000)}
-          WHERE id=${changeID} AND state='active'`;
+        await database.db
+          .update(changeCommitOperation)
+          .set({
+            state: conflict || rejected ? "failed" : changeCommitOperation.state,
+            completedAt: conflict || rejected ? query`now()` : null,
+            lastError: (cause instanceof Error
+              ? cause.message
+              : "Integration outcome unknown"
+            ).slice(0, 2000),
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(changeCommitOperation.id, op.id),
+              notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+            ),
+          );
+        await database.db
+          .update(change)
+          .set({
+            failure: (cause instanceof Error ? cause.message : "Integration outcome unknown").slice(
+              0,
+              2000,
+            ),
+          })
+          .where(and(eq(change.id, changeID), eq(change.state, "active")));
         return false;
       }
     },

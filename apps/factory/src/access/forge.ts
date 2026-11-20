@@ -1,4 +1,19 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, exists, isNull, notExists, or, sql as typedSQL } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  accountAccess,
+  administrator,
+  authUser,
+  change as changeTable,
+  forgeAccountIntent,
+  forgeBranchIntent,
+  forgeConnection,
+  forgeGrantIntent,
+  projectMembership,
+  projectRepositoryIntent,
+  projectSetupReadiness,
+  project as projectTable,
+} from "../../../../packages/db/src/schema";
 import { type createForgejoAccess, forgeUsername } from "../../../../packages/forge/src/access";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -14,16 +29,36 @@ export function createForgeAccessReconciliation(options: {
   const origins = new Set([new URL(options.origin).origin, new URL(options.publicOrigin).origin]);
   async function protectMain(projectID: string, repository: string, branch: string) {
     const sql = database.coordination();
+    const db = drizzleTransaction(sql);
     try {
       await sql`SELECT pg_advisory_lock(hashtextextended(${`forge-branch:${projectID}:${branch}`},0))`;
-      await sql`INSERT INTO factory.forge_branch_intent(project_id,branch,writers,merger)
-        VALUES(${projectID},${branch},'{}',${owner}) ON CONFLICT(project_id,branch) DO NOTHING`;
-      const [setup] = await sql<{ pending: boolean }[]>`SELECT EXISTS(
-        SELECT 1 FROM factory.project_repository_intent intent
-        WHERE intent.project_id=${projectID} AND intent.kind='import' AND intent.state='committed'
-          AND NOT EXISTS(SELECT 1 FROM factory.project_setup_readiness task
-            WHERE task.project_id=${projectID} AND task.task='configuration' AND task.state='ready')
-      ) AS pending`;
+      await db
+        .insert(forgeBranchIntent)
+        .values({ projectId: projectID, branch, writers: [], merger: owner })
+        .onConflictDoNothing({ target: [forgeBranchIntent.projectId, forgeBranchIntent.branch] });
+      const [setup] = await db
+        .select({ projectId: projectRepositoryIntent.projectId })
+        .from(projectRepositoryIntent)
+        .where(
+          and(
+            eq(projectRepositoryIntent.projectId, projectID),
+            eq(projectRepositoryIntent.kind, "import"),
+            eq(projectRepositoryIntent.state, "committed"),
+            notExists(
+              db
+                .select({ projectId: projectSetupReadiness.projectId })
+                .from(projectSetupReadiness)
+                .where(
+                  and(
+                    eq(projectSetupReadiness.projectId, projectID),
+                    eq(projectSetupReadiness.task, "configuration"),
+                    eq(projectSetupReadiness.state, "ready"),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .limit(1);
       await forge.protectBranch({
         owner,
         repository,
@@ -33,11 +68,19 @@ export function createForgeAccessReconciliation(options: {
         // Initial setup owns the missing workflow's exact confirmed creation.
         // Do not race that merge by adding its file rule before setup is ready.
         // Omitting the field preserves existing rules; it never clears protection.
-        ...(setup?.pending
-          ? {}
-          : { protectedFiles: ".forgejo/workflows/factory-verification.yml" }),
+        ...(setup ? {} : { protectedFiles: ".forgejo/workflows/factory-verification.yml" }),
       });
-      await sql`UPDATE factory.forge_branch_intent SET confirmed=true WHERE project_id=${projectID} AND branch=${branch} AND writers='{}' AND merger=${owner}`;
+      await db
+        .update(forgeBranchIntent)
+        .set({ confirmed: true })
+        .where(
+          and(
+            eq(forgeBranchIntent.projectId, projectID),
+            eq(forgeBranchIntent.branch, branch),
+            eq(forgeBranchIntent.writers, []),
+            eq(forgeBranchIntent.merger, owner),
+          ),
+        );
     } finally {
       try {
         await sql`SELECT pg_advisory_unlock(hashtextextended(${`forge-branch:${projectID}:${branch}`},0))`;
@@ -49,17 +92,33 @@ export function createForgeAccessReconciliation(options: {
   return {
     async protectChange(changeID: string, writers: readonly string[]) {
       const sql = database.coordination();
+      const db = drizzleTransaction(sql);
       let key: string | undefined;
       try {
-        const [change] = await sql<{ projectID: string; repository: string; branch: string }[]>`
-        SELECT change.project_id AS "projectID",project.slug AS repository,change.branch_name AS branch
-        FROM factory.change change JOIN factory.project project ON project.id=change.project_id WHERE change.id=${changeID}`;
+        const [change] = await db
+          .select({
+            projectID: changeTable.projectId,
+            repository: projectTable.slug,
+            branch: changeTable.branchName,
+          })
+          .from(changeTable)
+          .innerJoin(projectTable, eq(projectTable.id, changeTable.projectId))
+          .where(eq(changeTable.id, changeID));
         if (!change) throw new Error("Forge Change branch is unavailable");
         key = `forge-branch:${change.projectID}:${change.branch}`;
         await sql`SELECT pg_advisory_lock(hashtextextended(${key},0))`;
-        await sql`INSERT INTO factory.forge_branch_intent(project_id,branch,writers,merger)
-          VALUES(${change.projectID},${change.branch},${[...writers]}::text[],${owner})
-          ON CONFLICT(project_id,branch) DO UPDATE SET writers=EXCLUDED.writers,confirmed=false,updated_at=now()`;
+        await db
+          .insert(forgeBranchIntent)
+          .values({
+            projectId: change.projectID,
+            branch: change.branch,
+            writers: [...writers],
+            merger: owner,
+          })
+          .onConflictDoUpdate({
+            target: [forgeBranchIntent.projectId, forgeBranchIntent.branch],
+            set: { writers: [...writers], confirmed: false, updatedAt: typedSQL`now()` },
+          });
         await forge.protectBranch({
           owner,
           repository: change.repository,
@@ -67,7 +126,15 @@ export function createForgeAccessReconciliation(options: {
           writers,
           merger: owner,
         });
-        await sql`UPDATE factory.forge_branch_intent SET confirmed=true WHERE project_id=${change.projectID} AND branch=${change.branch}`;
+        await db
+          .update(forgeBranchIntent)
+          .set({ confirmed: true })
+          .where(
+            and(
+              eq(forgeBranchIntent.projectId, change.projectID),
+              eq(forgeBranchIntent.branch, change.branch),
+            ),
+          );
       } finally {
         try {
           if (key) await sql`SELECT pg_advisory_unlock(hashtextextended(${key},0))`;
@@ -77,26 +144,71 @@ export function createForgeAccessReconciliation(options: {
       }
     },
     async reconcile(userID: string) {
-      const [connection] = await database.client<{ sourceID: number }[]>`
-        SELECT source_id::integer AS "sourceID" FROM factory.forge_connection WHERE state='ready'`;
+      const [connection] = await database.db
+        .select({
+          sourceID: typedSQL<number>`${forgeConnection.sourceId}::integer`,
+        })
+        .from(forgeConnection)
+        .where(eq(forgeConnection.state, "ready"));
       if (!connection) return;
       const sql = database.coordination();
+      const db = drizzleTransaction(sql);
       try {
         await sql`SELECT pg_advisory_lock(hashtextextended(${`forge-account:${userID}`},0))`;
-        const [person] = await sql<{ email: string; name: string; allowed: boolean }[]>`
-          SELECT person.email,person.name,
-            access.disabled_at IS NULL AND access.directory_disabled_at IS NULL
-              AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID})
-                OR EXISTS(SELECT 1 FROM factory.project_membership WHERE user_id=${userID} AND role='developer')) AS allowed
-          FROM auth."user" person JOIN factory.account_access access ON access.user_id=person.id WHERE person.id=${userID}`;
+        const systemManager = exists(
+          db
+            .select({ userId: administrator.userId })
+            .from(administrator)
+            .where(eq(administrator.userId, userID)),
+        );
+        const [person] = await db
+          .select({
+            email: authUser.email,
+            name: authUser.name,
+            allowed: typedSQL<boolean>`${and(
+              isNull(accountAccess.disabledAt),
+              isNull(accountAccess.directoryDisabledAt),
+              or(
+                systemManager,
+                exists(
+                  db
+                    .select({ userId: projectMembership.userId })
+                    .from(projectMembership)
+                    .where(
+                      and(
+                        eq(projectMembership.userId, userID),
+                        eq(projectMembership.role, "developer"),
+                      ),
+                    ),
+                ),
+              ),
+            )}`,
+          })
+          .from(authUser)
+          .innerJoin(accountAccess, eq(accountAccess.userId, authUser.id))
+          .where(eq(authUser.id, userID));
         if (!person) throw new Error("Factory account access is unavailable");
-        const [previous] =
-          await sql`SELECT user_id FROM factory.forge_account_intent WHERE user_id=${userID}`;
+        const [previous] = await db
+          .select({ userId: forgeAccountIntent.userId })
+          .from(forgeAccountIntent)
+          .where(eq(forgeAccountIntent.userId, userID));
         if (!person.allowed && !previous) return;
-        await sql`INSERT INTO factory.forge_account_intent(user_id,username,source_id,state)
-          VALUES(${userID},${forgeUsername(userID)},${connection.sourceID},'create-intended') ON CONFLICT DO NOTHING`;
-        const [intended] = await sql<{ username: string; sourceID: number }[]>`
-          SELECT username,source_id::integer AS "sourceID" FROM factory.forge_account_intent WHERE user_id=${userID}`;
+        await db
+          .insert(forgeAccountIntent)
+          .values({
+            userId: userID,
+            username: forgeUsername(userID),
+            sourceId: connection.sourceID,
+            state: "create-intended",
+          })
+          .onConflictDoNothing();
+        const [intended] = await db
+          .select({
+            username: forgeAccountIntent.username,
+            sourceID: typedSQL<number>`${forgeAccountIntent.sourceId}::integer`,
+          })
+          .from(forgeAccountIntent)
+          .where(eq(forgeAccountIntent.userId, userID));
         if (
           intended?.username !== forgeUsername(userID) ||
           intended.sourceID !== connection.sourceID
@@ -112,13 +224,30 @@ export function createForgeAccessReconciliation(options: {
             enabled: false,
             suspended: person.allowed,
           });
-        const everyProject = await sql<
-          { id: string; slug: string; repositoryURL: string; branch: string; grant: boolean }[]
-        >`
-          SELECT project.id,project.slug,project.repository_url AS "repositoryURL",project.default_branch AS branch,
-            ${person.allowed} AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID})
-              OR EXISTS(SELECT 1 FROM factory.project_membership WHERE project_id=project.id AND user_id=${userID} AND role='developer')) AS grant
-          FROM factory.project project ORDER BY project.id`;
+        const everyProject = await db
+          .select({
+            id: projectTable.id,
+            slug: projectTable.slug,
+            repositoryURL: projectTable.repositoryUrl,
+            branch: projectTable.defaultBranch,
+            grant: typedSQL<boolean>`${person.allowed} and ${or(
+              systemManager,
+              exists(
+                db
+                  .select({ userId: projectMembership.userId })
+                  .from(projectMembership)
+                  .where(
+                    and(
+                      eq(projectMembership.projectId, projectTable.id),
+                      eq(projectMembership.userId, userID),
+                      eq(projectMembership.role, "developer"),
+                    ),
+                  ),
+              ),
+            )}`,
+          })
+          .from(projectTable)
+          .orderBy(projectTable.id);
         // A Project hosted elsewhere has no repository here to grant on. It must not stop the
         // grants of the Projects that are.
         const projects = everyProject.filter((project) =>
@@ -142,18 +271,40 @@ export function createForgeAccessReconciliation(options: {
               repository.pathname.replace(/\.git$/, "") !== `/${owner}/${project.slug}`)
           )
             throw new Error("Factory Project repository differs from its recorded forge identity");
-          await sql`INSERT INTO factory.forge_grant_intent(project_id,user_id,desired)
-            VALUES(${project.id},${userID},${project.grant}) ON CONFLICT(project_id,user_id)
-            DO UPDATE SET desired=EXCLUDED.desired,confirmed=NULL,updated_at=now()`;
+          await db
+            .insert(forgeGrantIntent)
+            .values({ projectId: project.id, userId: userID, desired: project.grant })
+            .onConflictDoUpdate({
+              target: [forgeGrantIntent.projectId, forgeGrantIntent.userId],
+              set: { desired: project.grant, confirmed: null, updatedAt: typedSQL`now()` },
+            });
           if (project.grant) await protectMain(project.id, project.slug, project.branch);
           await forge.repositoryGrant(owner, project.slug, userID, project.grant);
-          await sql`UPDATE factory.forge_grant_intent SET confirmed=desired WHERE project_id=${project.id} AND user_id=${userID} AND desired=${project.grant}`;
+          await db
+            .update(forgeGrantIntent)
+            .set({ confirmed: forgeGrantIntent.desired })
+            .where(
+              and(
+                eq(forgeGrantIntent.projectId, project.id),
+                eq(forgeGrantIntent.userId, userID),
+                eq(forgeGrantIntent.desired, project.grant),
+              ),
+            );
         }
         // Final enablement is ordered against account disablement and membership mutations.
         await database.client.begin(async (transaction) => {
           await transaction`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
-          await transaction`SELECT user_id FROM factory.account_access WHERE user_id=${userID} FOR SHARE`;
-          await transaction`SELECT user_id FROM factory.project_membership WHERE user_id=${userID} FOR SHARE`;
+          const db = drizzleTransaction(transaction);
+          await db
+            .select({ userId: accountAccess.userId })
+            .from(accountAccess)
+            .where(eq(accountAccess.userId, userID))
+            .for("share");
+          await db
+            .select({ userId: projectMembership.userId })
+            .from(projectMembership)
+            .where(eq(projectMembership.userId, userID))
+            .for("share");
           const [current] = await transaction<
             { same: boolean; allowed: boolean }[]
           >`SELECT NOT EXISTS(
@@ -171,7 +322,14 @@ export function createForgeAccessReconciliation(options: {
             ...person,
             enabled: person.allowed,
           });
-          await transaction`UPDATE factory.forge_account_intent SET forge_user_id=${observedID ?? null},state=${person.allowed ? "ready" : "disabled"},observed_at=now() WHERE user_id=${userID}`;
+          await db
+            .update(forgeAccountIntent)
+            .set({
+              forgeUserId: observedID ?? null,
+              state: person.allowed ? "ready" : "disabled",
+              observedAt: typedSQL`now()`,
+            })
+            .where(eq(forgeAccountIntent.userId, userID));
         });
       } finally {
         try {

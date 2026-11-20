@@ -1,5 +1,16 @@
+import { and, eq, inArray, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  change,
+  changeCommitOperation,
+  changeWriter,
+  workspaceSubmission,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { lockChangeWriterIn } from "../access/change-writer";
@@ -43,9 +54,19 @@ export async function advanceCandidateCommit<T extends CandidateCommit>(
     const prepared = await prepare();
     if (!prepared.commitSHA) throw new Error("Runtime returned no commit identity");
     commitSHA = prepared.commitSHA;
-    await database.client`UPDATE factory.change_commit_operation
-      SET state='push-intended',commit_sha=${commitSHA},updated_at=now()
-      WHERE id=${candidate.id} AND state='commit-intended'`;
+    await database.db
+      .update(changeCommitOperation)
+      .set({
+        state: "push-intended",
+        commitSha: commitSHA,
+        updatedAt: query`now()`,
+      })
+      .where(
+        and(
+          eq(changeCommitOperation.id, candidate.id),
+          eq(changeCommitOperation.state, "commit-intended"),
+        ),
+      );
   }
   if (!commitSHA) throw new Error("Commit identity is missing");
   const prepared = { ...candidate, state: "push-intended", commitSHA };
@@ -71,13 +92,42 @@ export async function recordWorkspaceCandidateIn(
     writerEpoch: string;
   },
 ) {
-  await sql`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,integration_base_sha,
-    commit_message,idempotency_key,state,created_by,source)
-    VALUES(${intent.id},${intent.changeID},${intent.attemptID},(SELECT COALESCE(max(sequence),0)+1 FROM factory.change_commit_operation WHERE change_id=${intent.changeID}),
-      ${intent.branch},${intent.expectedHead},${intent.base},${intent.message},${`workspace:${intent.id}`},'commit-intended',${intent.actorID},'workspace')`;
-  await sql`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,turn_id=NULL,epoch=epoch+1,updated_at=now() WHERE change_id=${intent.changeID}`;
-  await sql`INSERT INTO factory.workspace_submission(id,workspace_id,actor_id,writer_epoch,remote_head,repository_url)
-    VALUES(${intent.id},${intent.workspaceID},${intent.actorID},${intent.writerEpoch}::bigint+1,${intent.remoteHead},${intent.repositoryURL})`;
+  const db = drizzleTransaction(sql);
+  await db.insert(changeCommitOperation).values({
+    id: intent.id,
+    changeId: intent.changeID,
+    runtimeAttemptId: intent.attemptID,
+    sequence: query`(${db
+      .select({ sequence: query<number>`COALESCE(max(${changeCommitOperation.sequence}),0)+1` })
+      .from(changeCommitOperation)
+      .where(eq(changeCommitOperation.changeId, intent.changeID))})`,
+    branchName: intent.branch,
+    expectedParentSha: intent.expectedHead,
+    integrationBaseSha: intent.base,
+    commitMessage: intent.message,
+    idempotencyKey: `workspace:${intent.id}`,
+    state: "commit-intended",
+    createdBy: intent.actorID,
+    source: "workspace",
+  });
+  await db
+    .update(changeWriter)
+    .set({
+      state: "unassigned",
+      userId: null,
+      turnId: null,
+      epoch: query`${changeWriter.epoch}+1`,
+      updatedAt: query`now()`,
+    })
+    .where(eq(changeWriter.changeId, intent.changeID));
+  await db.insert(workspaceSubmission).values({
+    id: intent.id,
+    workspaceId: intent.workspaceID,
+    actorId: intent.actorID,
+    writerEpoch: query`${intent.writerEpoch}::bigint+1`,
+    remoteHead: intent.remoteHead,
+    repositoryUrl: intent.repositoryURL,
+  });
 }
 
 export async function submitWorkspaceCandidate<T extends WorkspaceCandidate>(
@@ -124,11 +174,34 @@ export async function submitWorkspaceCandidate<T extends WorkspaceCandidate>(
       async (prepared) => {
         await database.client.begin(async (sql) => {
           const writer = await lockChangeWriterIn(sql, prepared.changeID);
-          await sql`UPDATE factory.change_commit_operation SET observed_remote_sha=${prepared.commitSHA},state='succeeded',completed_at=now(),updated_at=now(),last_error=NULL WHERE id=${prepared.id} AND state='push-intended'`;
+          const db = drizzleTransaction(sql);
+          await db
+            .update(changeCommitOperation)
+            .set({
+              observedRemoteSha: prepared.commitSHA,
+              state: "succeeded",
+              completedAt: query`now()`,
+              updatedAt: query`now()`,
+              lastError: null,
+            })
+            .where(
+              and(
+                eq(changeCommitOperation.id, prepared.id),
+                eq(changeCommitOperation.state, "push-intended"),
+              ),
+            );
           // Keep historical Turn and Session state while recording the external receipt.
           if (writer.available && writer.state === "unassigned" && writer.epoch === prepared.epoch)
-            await sql`UPDATE factory.change SET state='active',failure=NULL,version=version+1
-              WHERE id=${prepared.changeID} AND runtime_attempt_id=${prepared.attemptID} AND state IN ('starting','failed')`;
+            await db
+              .update(change)
+              .set({ state: "active", failure: null, version: query`${change.version}+1` })
+              .where(
+                and(
+                  eq(change.id, prepared.changeID),
+                  eq(change.runtimeAttemptId, prepared.attemptID),
+                  inArray(change.state, ["starting", "failed"]),
+                ),
+              );
         });
       },
     );
@@ -143,12 +216,32 @@ export async function submitWorkspaceCandidate<T extends WorkspaceCandidate>(
     )
       await database.client.begin(async (sql) => {
         const writer = await lockChangeWriterIn(sql, candidate.changeID);
-        const [failed] = await sql<
-          { id: string }[]
-        >`UPDATE factory.change_commit_operation SET state='failed',last_error=${message},completed_at=now(),updated_at=now()
-          WHERE id=${candidate.id} AND state='commit-intended' RETURNING id`;
+        const db = drizzleTransaction(sql);
+        const [failed] = await db
+          .update(changeCommitOperation)
+          .set({
+            state: "failed",
+            lastError: message,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(changeCommitOperation.id, candidate.id),
+              eq(changeCommitOperation.state, "commit-intended"),
+            ),
+          )
+          .returning({ id: changeCommitOperation.id });
         if (failed && writer.state === "unassigned" && writer.epoch === candidate.epoch)
-          await sql`UPDATE factory.change_writer SET state='human',user_id=${candidate.actorID},epoch=epoch+1,updated_at=now() WHERE change_id=${candidate.changeID}`;
+          await db
+            .update(changeWriter)
+            .set({
+              state: "human",
+              userId: candidate.actorID,
+              epoch: query`${changeWriter.epoch}+1`,
+              updatedAt: query`now()`,
+            })
+            .where(eq(changeWriter.changeId, candidate.changeID));
       });
     throw cause;
   }

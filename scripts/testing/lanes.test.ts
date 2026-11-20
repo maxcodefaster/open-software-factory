@@ -139,6 +139,16 @@ test("database-only feature checks skip the application build while endpoint che
     "skills-controllers-drizzle",
     "substrate-drizzle",
     "substrate-bound-provisioning",
+    "usage-journal",
+    "usage-policy",
+    "coding-budget",
+    "workspace-sharing",
+    "workspace-commands",
+    "workspace-container-files",
+    "substrate-source",
+    "substrate-source-access",
+    "developer-ide",
+    "developer-ide-access-recovery",
   ])
     expect(integrationNeedsApplicationBuild(`test/integration/${name}.test.ts`)).toBe(false);
   expect(integrationNeedsApplicationBuild("test/integration/server-function-runtime.test.ts")).toBe(

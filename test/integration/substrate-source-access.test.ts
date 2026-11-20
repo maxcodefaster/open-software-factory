@@ -128,3 +128,72 @@ test("native Source rechecks slow uploads, orders revocation after writes and cl
     await f.dispose();
   }
 }, 30_000);
+
+test.each(["personal", "ticket"] as const)(
+  "%s Source metadata reads retain an unstarted Workspace without creating native compute",
+  async (kind) => {
+    const f = await substrateFixture("a".repeat(40), kind);
+    f.hub.request = async () => {
+      throw new Error("An unstarted Source read must not dispatch a native request");
+    };
+    const source = createSubstrateSources(f.database, f.hub);
+    const controller = createWorkspaceSourceController(f.database, f.hub, source);
+    try {
+      const view =
+        kind === "personal"
+          ? await controller.ensurePersonal(f.projectID, f.userID)
+          : await controller.ensureChange(f.changeID, f.userID);
+      expect(view).toMatchObject({
+        workspaceID: f.workspaceID,
+        state: "preparing",
+        epoch: 1,
+      });
+      expect((await controller.get(f.workspaceID, f.userID)).serviceID).toBe(view.serviceID);
+      await expect(controller.get(crypto.randomUUID(), f.userID)).rejects.toThrow(
+        "Workspace not found",
+      );
+      expect(await source.lease(f.workspaceID)).toBeNull();
+      expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+      expect(
+        await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+      ).toHaveLength(0);
+      expect(await f.database.client`SELECT id FROM factory.development_workspace`).toHaveLength(1);
+    } finally {
+      await controller.close();
+      await f.dispose();
+    }
+  },
+  30_000,
+);
+
+test("Source shared-edit conflicts match literal path boundaries and rename destinations", async () => {
+  const f = await substrateFixture();
+  const source = createSubstrateSources(f.database, f.hub);
+  const controller = createWorkspaceSourceController(f.database, f.hub, source);
+  try {
+    await f.database.client`INSERT INTO factory.workspace_shared_document
+      (workspace_id,path,y_state,disk_version,conflict)
+      VALUES(${f.workspaceID},'dir%/unsaved.ts',${Buffer.alloc(0)},'owned-version',true)`;
+    const request = (path: string, destination?: string) =>
+      new Request("https://factory.test/source", {
+        method: "POST",
+        body: JSON.stringify({ path, destination }),
+      });
+    await expect(
+      controller.forward(f.workspaceID, f.userID, "delete", request("dir%")),
+    ).rejects.toThrow("Shared unsaved edits");
+    await expect(
+      controller.forward(f.workspaceID, f.userID, "write", request("dir%/unsaved.ts")),
+    ).rejects.toThrow("Shared unsaved edits");
+    await expect(
+      controller.forward(f.workspaceID, f.userID, "rename", request("clean", "dir%")),
+    ).rejects.toThrow("Shared unsaved edits");
+    // The literal prefix does not treat '%' as a wildcard or match 'dir' to 'dir%'.
+    await expect(
+      controller.forward(f.workspaceID, f.userID, "delete", request("dir")),
+    ).rejects.toThrow("Source is not initialized");
+  } finally {
+    await controller.close();
+    await f.dispose();
+  }
+}, 30_000);

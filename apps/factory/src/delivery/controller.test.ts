@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { verificationReceipt } from "../../../../test/fixtures/verification";
 import { createDeliveryController } from "./controller";
@@ -153,6 +153,25 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
       begin: async <T>(operation: (sql: unknown) => Promise<T>) => operation(client),
       unsafe(text: string, parameters: unknown[]) {
         async function execute(): Promise<unknown[][] & { count?: number }> {
+          if (text.startsWith('select "runtime_attempt_id", "runner_id"')) return [];
+          if (
+            text.startsWith("select") &&
+            text.includes("from factory.current_promotion promotion")
+          )
+            return state === "delivered"
+              ? [
+                  [
+                    "promotion",
+                    commitSHA,
+                    "succeeded",
+                    cleanupError,
+                    "old-staging",
+                    "new-staging",
+                    "ready",
+                    null,
+                  ],
+                ]
+              : [];
           if (text.startsWith("select") && text.includes("count(*)")) return [[0]];
           if (text.startsWith("select exists") && text.includes('from "factory"."merge_operation"'))
             return [[!repair]];
@@ -236,6 +255,11 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
           }
           if (text.startsWith('update "factory"."change"') && parameters.includes("delivering"))
             state = "delivering";
+          if (
+            text.startsWith('update "factory"."promotion_operation"') &&
+            text.includes('"last_error" = $1')
+          )
+            cleanupError = parameters[0] === null ? null : String(parameters[0]);
           return Object.assign([], { count: 1 });
         }
         const result = execute();
@@ -297,8 +321,10 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
       return null;
     },
   };
+  const database = { client } as unknown as ReturnType<typeof createDatabase>;
+  database.db = drizzleTransaction(database.client);
   const controller = createDeliveryController(
-    { client } as unknown as ReturnType<typeof createDatabase>,
+    database,
     runtime,
     {
       prompt: async (_changeID, _text, _userID, commandID, repair) => {

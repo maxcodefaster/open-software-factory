@@ -9,15 +9,14 @@ test("Project recovery joins its outstanding database observation without dispat
   let queries = 0;
   const client = Object.assign(
     async () => {
-      queries++;
-      if (queries === 1) return [{ id: "owned-turn" }];
-      throw new Error("Recovery history must use the Drizzle driver");
+      throw new Error("Recovery selection and history must use the Drizzle driver");
     },
     {
       unsafe() {
         queries++;
         return {
           values: async () => {
+            if (queries === 1) return [["owned-turn"]];
             entered.resolve();
             await finish.promise;
             return [];

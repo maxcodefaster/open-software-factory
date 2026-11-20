@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { createDeveloperIDEEdge } from "./developer-ide-edge";
 
@@ -7,31 +8,36 @@ import { createDeveloperIDEEdge } from "./developer-ide-edge";
 // PostgreSQL in test/integration/developer-ide-access-recovery.test.ts.
 function editorAccessDatabase() {
   const credentials = new Map<string, { id: string; value: string }>();
-  const execute = async (parts: TemplateStringsArray, ...values: unknown[]) => {
-    const query = parts.join("?").replace(/\s+/g, " ").trim();
+  const execute = (query: string, values: unknown[]) => {
     const key = String(values[0]);
-    if (query.includes("INSERT INTO auth.verification")) {
+    if (query.startsWith('insert into "auth"."verification"')) {
       credentials.set(String(values[1]), { id: key, value: String(values[2]) });
       return [];
     }
-    if (query.includes("SELECT value FROM auth.verification")) {
+    if (query.startsWith('select "value" from "auth"."verification"')) {
       const row = credentials.get(key);
-      return row ? [row] : [];
+      return row ? [[row.value]] : [];
     }
-    if (query.includes("DELETE FROM auth.verification WHERE identifier=")) {
+    if (query.startsWith('delete from "auth"."verification"') && query.includes('"identifier" =')) {
       const row = credentials.get(key);
       credentials.delete(key);
-      return row ? [row] : [];
+      return row ? [[row.id]] : [];
     }
-    if (query.includes("auth.verification")) return [];
-    return [{ id: "fixture-session" }];
+    if (query.includes('"auth"."verification"')) return [];
+    return [["fixture-session"]];
   };
-  const client = Object.assign(execute, {
-    async begin<T>(run: (sql: typeof execute) => Promise<T>): Promise<T> {
-      return run(execute);
+  const client = {
+    // Drizzle's existing driver consumes positional rows. This local HTTP-only
+    // stub still owns just the nonce store; PostgreSQL tests own its semantics.
+    unsafe(query: string, values: unknown[] = []) {
+      const rows = Promise.resolve(execute(query, values));
+      return Object.assign(rows, { values: () => rows });
     },
-  });
-  return { client } as unknown as Parameters<typeof createDeveloperIDEEdge>[0];
+    async begin<T>(run: (sql: typeof client) => Promise<T>): Promise<T> {
+      return run(client);
+    },
+  } as unknown as ReturnType<typeof createDatabase>["client"];
+  return { client, db: drizzleTransaction(client) } as Parameters<typeof createDeveloperIDEEdge>[0];
 }
 
 test("streamed native file POSTs survive execution-route inspection and reach source exactly once", async () => {

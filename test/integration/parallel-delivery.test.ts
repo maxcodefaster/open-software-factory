@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createImplementationOrders } from "../../apps/factory/src/change/implementation-orders";
@@ -9,15 +9,67 @@ import {
 } from "../../apps/factory/src/delivery/coordination";
 import { createChangeIntegration } from "../../apps/factory/src/delivery/integration";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
+import { createDatabase } from "../../packages/db/src/client";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
-import { candidateReviewFixture } from "../fixtures/candidate-review";
-import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { candidateReviewFixture as sharedCandidateReviewFixture } from "../fixtures/candidate-review";
+import { eventually } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
+import {
+  ownedPostgresServer,
+  ownedTestDatabase,
+  type PostgresIdentity,
+} from "../fixtures/postgres-server";
 import { fixtureValue } from "../fixtures/value";
 
 type Fixture = Awaited<ReturnType<typeof candidateReviewFixture>>;
 const main = "e".repeat(40);
 const integrated = "f".repeat(40);
+
+// These controller proofs need PostgreSQL and injected peers, not an application build.
+let postgresServer: ReturnType<typeof ownedPostgresServer> | undefined;
+afterAll(async () => {
+  await (await postgresServer)?.dispose();
+}, 60_000);
+async function candidateReviewFixture(
+  canonical?: string,
+  externalDatabase?: ReturnType<typeof createDatabase>,
+) {
+  if (externalDatabase) return sharedCandidateReviewFixture(canonical, externalDatabase);
+  const supplied = process.env["FACTORY_TEST_POSTGRES"];
+  if (!supplied) postgresServer ??= ownedPostgresServer();
+  const ownedServer = await postgresServer;
+  const identity: PostgresIdentity | undefined = supplied
+    ? JSON.parse(supplied)
+    : ownedServer?.identity;
+  if (!identity) throw Error("Owned Delivery PostgreSQL identity is missing");
+  const target = await ownedTestDatabase(identity, crypto.randomUUID());
+  const previous = process.env["DATABASE_URL"];
+  let database: ReturnType<typeof createDatabase>;
+  try {
+    process.env["DATABASE_URL"] = target.url;
+    database = createDatabase();
+  } finally {
+    if (previous === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = previous;
+  }
+  let owned: Awaited<ReturnType<typeof sharedCandidateReviewFixture>> | undefined;
+  async function dispose() {
+    try {
+      await owned?.shutdown();
+    } finally {
+      owned?.restoreEnvironment();
+      await database.client.end({ timeout: 1 });
+      await target.dispose();
+    }
+  }
+  try {
+    owned = await sharedCandidateReviewFixture(canonical, database);
+    return { ...owned, dispose };
+  } catch (cause) {
+    await dispose();
+    throw cause;
+  }
+}
 
 async function passingReview(f: Fixture, delivery: "ordinary" | "human-required" = "ordinary") {
   const turn = await f.activeReview();
@@ -191,7 +243,7 @@ test("Delivery slot release rechecks a merge intent after waiting for its row lo
         () => f.database.client<{ waiting: boolean }[]>`
           SELECT EXISTS(SELECT 1 FROM pg_stat_activity
             WHERE datname=current_database() AND pid<>pg_backend_pid()
-              AND wait_event_type='Lock' AND query LIKE '%factory.project_delivery_queue%') AS waiting`,
+              AND wait_event_type='Lock' AND query LIKE '%project_delivery_queue%') AS waiting`,
         (rows) => rows[0]?.waiting === true,
         "The original release did not reach the locked Delivery slot",
       );
@@ -464,6 +516,7 @@ test("lost integration acknowledgement observes the exact operation instead of r
       { startPersisted: async () => null },
     );
     expect(await integration.reconcile(f.changeID, main)).toBe(false);
+    expect(actions).toEqual(["git-prepare-integration"]);
     expect(await integration.reconcile(f.changeID, main)).toBe(true);
     expect(actions).toEqual(["git-prepare-integration", "git-observe-commit", "git-push"]);
     const [commit] = await f.database.client<
@@ -471,6 +524,12 @@ test("lost integration acknowledgement observes the exact operation instead of r
     >`SELECT integration_base_sha AS base,
       merge_parent_sha AS parent,state FROM factory.change_commit_operation WHERE change_id=${f.changeID} AND source='integration'`;
     expect(commit).toEqual({ base: main, parent: main, state: "succeeded" });
+    await expect(
+      Promise.resolve(f.database.client`
+      UPDATE factory.change_commit_operation SET integration_base_sha=${"c".repeat(40)}
+      WHERE change_id=${f.changeID} AND source='integration'
+    `),
+    ).rejects.toThrow("immutable");
     const [change] = await f.database.client<
       { base: string }[]
     >`SELECT base_sha AS base FROM factory.change WHERE id=${f.changeID}`;
@@ -690,14 +749,12 @@ test("a candidate awaiting human Delivery does not reclaim the queue ahead of in
 }, 60_000);
 
 test("ordinary delegated Delivery merges the reviewed commit and keeps healthy Staging until its replacement is ready", async () => {
-  const host = await factoryProcess();
-  const database = host.connect();
-  let owned: Fixture | undefined;
+  const owned = await candidateReviewFixture();
+  const database = owned.database;
   let native: Awaited<ReturnType<typeof nativeJobsFixture>> | undefined;
   let controller: ReturnType<typeof createDeliveryController> | undefined;
   try {
-    const f = await candidateReviewFixture(undefined, database);
-    owned = f;
+    const f = owned;
     const other = await additionalTicket(f, true);
     const jobs = await nativeJobsFixture(database, f.projectID);
     native = jobs;
@@ -756,8 +813,7 @@ test("ordinary delegated Delivery merges the reviewed commit and keeps healthy S
     try {
       await controller?.close();
       await native?.close();
-      await database.client.end({ timeout: 0 });
-      await host.dispose();
+      await owned.dispose();
     } finally {
       owned?.restoreEnvironment();
     }

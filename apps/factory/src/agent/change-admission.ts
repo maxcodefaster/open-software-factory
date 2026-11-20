@@ -1,3 +1,4 @@
+import { and, eq, isNotNull, isNull, notInArray, sql as query } from "drizzle-orm";
 import { z } from "zod";
 import {
   type AgentTurnCommand,
@@ -11,15 +12,32 @@ import { buildBrowserInstructions } from "../../../../packages/conversation-doma
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  changeWriter,
+  codingPause,
+  conversationContext,
+  modelConnectionVersion,
+  requirementRevision,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
 import { claimAgentWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { attachmentContextIn } from "../attachments/store";
 import { requireDeliveredPrerequisites } from "../change/dependencies";
 import { CommandError } from "../command-error";
+import { ensureConversationIn } from "../conversations/store";
 import { codingReasoningIn } from "../models/controller";
 import { monitoringChangeAuthorityIn } from "../monitoring/authority";
-import { ensureConversationIn } from "../conversations/store";
 import { createSkillController } from "../skills/controller";
 import {
   nativeInputSkills,
@@ -180,6 +198,7 @@ export function createChangeAdmission(
       return turns.admitIn(sql, command, previous.authority);
     }
     const current = await context(sql, changeID, userID);
+    const db = drizzleTransaction(sql);
     if (
       (input.contextId ?? null) !== current.contextID &&
       input.kind !== "change-repair" &&
@@ -190,17 +209,31 @@ export function createChangeAdmission(
         "The active Coding conversation changed. Keep your draft and return to the active conversation.",
       );
     const [codingContext] = current.contextID
-      ? await sql<{ nativeID: string }[]>`SELECT native_session_id AS "nativeID"
-          FROM factory.conversation_context WHERE id=${current.contextID} AND change_id=${changeID}`
+      ? await db
+          .select({ nativeID: conversationContext.nativeSessionId })
+          .from(conversationContext)
+          .where(
+            and(
+              eq(conversationContext.id, current.contextID),
+              eq(conversationContext.changeId, changeID),
+            ),
+          )
       : [];
     if (codingContext) current.sessionID = codingContext.nativeID;
     if (input.kind === "change-start" && input.codingReasoning)
       await projectDevelopmentAuthorityIn(sql, userID, current.projectID);
     else await projectAuthorityIn(sql, userID, current.projectID);
-    const paused = await sql`SELECT pause.turn_id FROM factory.coding_pause pause
-      JOIN factory.agent_turn turn ON turn.id=pause.turn_id
-      WHERE turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL
-        AND turn.input->>'contextId' IS NOT DISTINCT FROM ${current.contextID}`;
+    const paused = await db
+      .select({ turnID: codingPause.turnId })
+      .from(codingPause)
+      .innerJoin(agentTurn, eq(agentTurn.id, codingPause.turnId))
+      .where(
+        and(
+          eq(agentTurn.changeId, changeID),
+          isNull(codingPause.resumedByTurnId),
+          query`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM ${current.contextID}`,
+        ),
+      );
     if (
       paused.length &&
       input.kind !== "change-repair" &&
@@ -223,17 +256,17 @@ export function createChangeAdmission(
           : "The monthly Coding allowance is used. New work can start after reset or an allowance increase.",
       );
     await requireDeliveredPrerequisites(sql, current.projectID, current.ticketID);
-    const [firstTurn] = await sql<
-      Array<{
-        modelId: string;
-        authority: unknown;
-        skillLoading: string | null;
-      }>
-    >`
-          SELECT turn.authority->>'modelId' AS "modelId", turn.authority, intent.skill_loading AS "skillLoading" FROM factory.agent_turn turn
-          LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
-          WHERE turn.change_id = ${changeID} ORDER BY turn.created_at, turn.id LIMIT 1
-        `;
+    const [firstTurn] = await db
+      .select({
+        modelId: query<string>`${agentTurn.authority}->>'modelId'`,
+        authority: agentTurn.authority,
+        skillLoading: changeAgentTurnIntent.skillLoading,
+      })
+      .from(agentTurn)
+      .leftJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+      .where(eq(agentTurn.changeId, changeID))
+      .orderBy(agentTurn.createdAt, agentTurn.id)
+      .limit(1);
     const firstAuthority = firstTurn
       ? agentTurnAuthorityInput.parse(firstTurn.authority)
       : undefined;
@@ -279,9 +312,15 @@ export function createChangeAdmission(
           "This Change keeps its original reasoning. Start a new Change to choose different reasoning.",
         );
       const [connection] = modelConnection
-        ? await sql<Array<{ provider: string }>>`
-        SELECT provider FROM factory.model_connection_version
-        WHERE connection_id=${modelConnection.connectionID} AND version=${modelConnection.version}`
+        ? await db
+            .select({ provider: modelConnectionVersion.provider })
+            .from(modelConnectionVersion)
+            .where(
+              and(
+                eq(modelConnectionVersion.connectionId, modelConnection.connectionID),
+                eq(modelConnectionVersion.version, modelConnection.version),
+              ),
+            )
         : [];
       if ((connection?.provider ?? process.env["FACTORY_MODEL_PROVIDER"] ?? "openai") !== "openai")
         throw new CommandError(
@@ -291,8 +330,15 @@ export function createChangeAdmission(
     }
     if (budget.allowed && budget.effective.codingUSD !== null) {
       const [connection] = modelConnection
-        ? await sql<Array<{ provider: string }>>`
-        SELECT provider FROM factory.model_connection_version WHERE connection_id=${modelConnection.connectionID} AND version=${modelConnection.version}`
+        ? await db
+            .select({ provider: modelConnectionVersion.provider })
+            .from(modelConnectionVersion)
+            .where(
+              and(
+                eq(modelConnectionVersion.connectionId, modelConnection.connectionID),
+                eq(modelConnectionVersion.version, modelConnection.version),
+              ),
+            )
         : [];
       const rate = await createContractRates(database).get(
         connection?.provider ?? "openai",
@@ -332,8 +378,15 @@ export function createChangeAdmission(
     if (input.kind === "change-repair" && current.sessionState !== "committed") {
       throw new CommandError("conflict", "Automatic repair is paused. Resume Build manually.");
     }
-    const commits = await sql<Array<{ id: string }>>`SELECT id FROM factory.change_commit_operation
-          WHERE change_id = ${changeID} AND state NOT IN ('succeeded', 'failed')`;
+    const commits = await db
+      .select({ id: changeCommitOperation.id })
+      .from(changeCommitOperation)
+      .where(
+        and(
+          eq(changeCommitOperation.changeId, changeID),
+          notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+        ),
+      );
     if (commits[0])
       throw new CommandError(
         "conflict",
@@ -367,17 +420,29 @@ export function createChangeAdmission(
       },
       async (transaction, record) => {
         await claimAgentWriterIn(transaction, changeID, record.id, userID);
+        const db = drizzleTransaction(transaction);
         // A new human command owns recovery. The failed attempt and turn remain
         // immutable; runtime startup admits a new generation after safe cleanup.
-        await transaction`UPDATE factory.change SET state='starting',failure=NULL,version=version+1
-          WHERE id=${changeID} AND state='failed'`;
+        await db
+          .update(change)
+          .set({ state: "starting", failure: null, version: query`${change.version}+1` })
+          .where(and(eq(change.id, changeID), eq(change.state, "failed")));
         if (input.kind === "change-repair" && !budget.allowed)
-          await transaction`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${record.id},${budget.reason})`;
+          await db
+            .insert(codingPause)
+            .values({ turnId: record.id, reason: query`${budget.reason}` });
         if (input.kind === "change-prompt" && input.resume === true)
-          await transaction`
-          UPDATE factory.coding_pause pause SET resumed_by_turn_id=${record.id}
-          FROM factory.agent_turn turn WHERE pause.turn_id=turn.id AND turn.change_id=${changeID}
-            AND pause.resumed_by_turn_id IS NULL`;
+          await db
+            .update(codingPause)
+            .set({ resumedByTurnId: record.id })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(codingPause.turnId, agentTurn.id),
+                eq(agentTurn.changeId, changeID),
+                isNull(codingPause.resumedByTurnId),
+              ),
+            );
         const userPrompt =
           input.kind === "change-start"
             ? [
@@ -428,22 +493,39 @@ export function createChangeAdmission(
           skillLoading === "native"
             ? nativeInputSkills(userPrompt, admittedSkills, assignedSkills.requiredRevisionIds)
             : [];
-        await transaction`INSERT INTO factory.change_agent_turn_intent(
-            turn_id, change_id, session_id, prompt_id, prompt_text, bootstrap, session_title, skill_loading, skill_manifest, skill_attachments
-          ) VALUES (${record.id}, ${changeID}, ${current.sessionID ?? `ses_factory_${changeID.replaceAll("-", "")}`},
-            ${`msg_factory_${record.id.replaceAll("-", "")}`}, ${prompt}, ${input.kind === "change-start" || !current.nativeConfirmed}, ${current.title}, ${skillLoading}, ${manifest === null ? null : JSON.stringify(manifest)}::jsonb, ${JSON.stringify(attachments)}::jsonb)`;
+        await db.insert(changeAgentTurnIntent).values({
+          turnId: record.id,
+          changeId: changeID,
+          sessionId: current.sessionID ?? `ses_factory_${changeID.replaceAll("-", "")}`,
+          promptId: `msg_factory_${record.id.replaceAll("-", "")}`,
+          promptText: prompt,
+          bootstrap: input.kind === "change-start" || !current.nativeConfirmed,
+          sessionTitle: current.title,
+          skillLoading,
+          skillManifest: manifest,
+          skillAttachments: attachments,
+        });
       },
     );
   }
   return {
     admitIn,
     async terminalObservation(input: TerminalInput) {
-      const [row] = await database.client<{ epoch: string; terminal: unknown }[]>`
-        SELECT model_request_epoch::text AS epoch, terminal_outcome AS terminal
-        FROM factory.change_agent_turn_intent
-        WHERE turn_id=${input.turnID} AND change_id=${input.changeID}
-          AND session_id=${input.sessionID} AND prompt_id=${input.promptID}
-          AND runtime_attempt_id IS NOT DISTINCT FROM ${input.attemptID}::uuid`;
+      const [row] = await database.db
+        .select({
+          epoch: query<string>`${changeAgentTurnIntent.modelRequestEpoch}::text`,
+          terminal: changeAgentTurnIntent.terminalOutcome,
+        })
+        .from(changeAgentTurnIntent)
+        .where(
+          and(
+            eq(changeAgentTurnIntent.turnId, input.turnID),
+            eq(changeAgentTurnIntent.changeId, input.changeID),
+            eq(changeAgentTurnIntent.sessionId, input.sessionID),
+            eq(changeAgentTurnIntent.promptId, input.promptID),
+            query`${changeAgentTurnIntent.runtimeAttemptId} IS NOT DISTINCT FROM ${input.attemptID}::uuid`,
+          ),
+        );
       if (!row) throw new Error("Terminal observation no longer owns its recorded intent");
       const terminal = readTerminalOutcome(row.terminal, input);
       if (terminal && terminal.modelRequestEpoch !== row.epoch)
@@ -455,26 +537,44 @@ export function createChangeAdmission(
       if (!checkpoint) throw new Error("A terminal checkpoint is required");
       let saved = false;
       const allowed = await turns.validateExecution(input.turnID, ownerToken, async (sql) => {
-        const rows = await sql<{ turn_id: string }[]>`
-          UPDATE factory.change_agent_turn_intent intent
-          SET terminal_outcome=${JSON.stringify(checkpoint)}::jsonb
-          FROM factory.change_agent_session session, factory.change change,
-            factory.runtime_attempt attempt, factory.change_writer writer
-          WHERE intent.turn_id=${input.turnID} AND intent.change_id=${input.changeID}
-            AND intent.runtime_attempt_id=${checkpoint.attemptID}
-            AND intent.session_id=${input.sessionID} AND intent.prompt_id=${input.promptID}
-            AND intent.terminal_outcome IS NULL
-            AND intent.model_request_epoch=${checkpoint.modelRequestEpoch}::bigint
-            AND session.change_id=intent.change_id AND session.active_turn_id=intent.turn_id
-            AND session.opencode_session_id=intent.session_id
-            AND session.active_inbox_id=intent.prompt_id AND session.state='working'
-            AND session.native_session_confirmed_at IS NOT NULL AND NOT session.stop_pending
-            AND session.runtime_attempt_id=intent.runtime_attempt_id
-            AND change.id=intent.change_id AND change.runtime_attempt_id=intent.runtime_attempt_id
-            AND attempt.id=intent.runtime_attempt_id AND attempt.state='ready'
-            AND writer.change_id=change.id AND writer.state='agent'
-            AND writer.turn_id=intent.turn_id AND NOT writer.fence_required
-          RETURNING intent.turn_id`;
+        const rows = await drizzleTransaction(sql)
+          .update(changeAgentTurnIntent)
+          .set({ terminalOutcome: checkpoint })
+          .from(changeAgentSession)
+          .innerJoin(change, eq(change.id, changeAgentSession.changeId))
+          .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId))
+          .innerJoin(changeWriter, eq(changeWriter.changeId, change.id))
+          .where(
+            and(
+              eq(changeAgentTurnIntent.turnId, input.turnID),
+              eq(changeAgentTurnIntent.changeId, input.changeID),
+              eq(changeAgentTurnIntent.runtimeAttemptId, checkpoint.attemptID),
+              eq(changeAgentTurnIntent.sessionId, input.sessionID),
+              eq(changeAgentTurnIntent.promptId, input.promptID),
+              isNull(changeAgentTurnIntent.terminalOutcome),
+              eq(
+                changeAgentTurnIntent.modelRequestEpoch,
+                query`${checkpoint.modelRequestEpoch}::bigint`,
+              ),
+              eq(changeAgentSession.changeId, changeAgentTurnIntent.changeId),
+              eq(changeAgentSession.activeTurnId, changeAgentTurnIntent.turnId),
+              eq(changeAgentSession.opencodeSessionId, changeAgentTurnIntent.sessionId),
+              eq(changeAgentSession.activeInboxId, changeAgentTurnIntent.promptId),
+              eq(changeAgentSession.state, "working"),
+              isNotNull(changeAgentSession.nativeSessionConfirmedAt),
+              eq(changeAgentSession.stopPending, false),
+              eq(changeAgentSession.runtimeAttemptId, changeAgentTurnIntent.runtimeAttemptId),
+              eq(change.id, changeAgentTurnIntent.changeId),
+              eq(change.runtimeAttemptId, changeAgentTurnIntent.runtimeAttemptId),
+              eq(runtimeAttempt.id, changeAgentTurnIntent.runtimeAttemptId),
+              eq(runtimeAttempt.state, "ready"),
+              eq(changeWriter.changeId, change.id),
+              eq(changeWriter.state, "agent"),
+              eq(changeWriter.turnId, changeAgentTurnIntent.turnId),
+              eq(changeWriter.fenceRequired, false),
+            ),
+          )
+          .returning({ turnID: changeAgentTurnIntent.turnId });
         saved = rows.length === 1;
       });
       return allowed && saved;
@@ -483,34 +583,33 @@ export function createChangeAdmission(
       return database.client.begin((sql) => admitIn(sql, changeID, userID, input));
     },
     async intent(turnID: string) {
-      const rows = await database.client<
-        Array<{
-          turnID: string;
-          changeID: string;
-          sessionID: string;
-          promptID: string;
-          text: string;
-          bootstrap: boolean;
-          title: string;
-          attemptID: string | null;
-          skillLoading: "eager" | "native";
-          skillManifest: unknown;
-          skills: unknown;
-          criteria: number;
-          submissionPolicy: "native" | null;
-          browserTransport: "mcp" | null;
-        }>
-      >`SELECT intent.turn_id AS "turnID", intent.change_id AS "changeID", intent.session_id AS "sessionID",
-        intent.prompt_id AS "promptID", intent.prompt_text AS text, intent.bootstrap, intent.session_title AS title,
-        intent.runtime_attempt_id AS "attemptID", intent.skill_loading AS "skillLoading",
-        intent.skill_manifest AS "skillManifest", intent.skill_attachments AS skills,
-        turn.authority->>'submissionPolicy' AS "submissionPolicy",
-        turn.authority->>'browserTransport' AS "browserTransport",
-        jsonb_array_length(revision.canonical_content::jsonb->'acceptanceCriteria') AS criteria
-        FROM factory.change_agent_turn_intent intent
-        JOIN factory.agent_turn turn ON turn.id=intent.turn_id
-        JOIN factory.requirement_revision revision ON revision.id=(turn.authority->>'requirementRevisionId')::uuid
-        WHERE intent.turn_id = ${turnID}`;
+      const rows = await database.db
+        .select({
+          turnID: changeAgentTurnIntent.turnId,
+          changeID: changeAgentTurnIntent.changeId,
+          sessionID: changeAgentTurnIntent.sessionId,
+          promptID: changeAgentTurnIntent.promptId,
+          text: changeAgentTurnIntent.promptText,
+          bootstrap: changeAgentTurnIntent.bootstrap,
+          title: changeAgentTurnIntent.sessionTitle,
+          attemptID: changeAgentTurnIntent.runtimeAttemptId,
+          skillLoading: query<"eager" | "native">`${changeAgentTurnIntent.skillLoading}`,
+          skillManifest: changeAgentTurnIntent.skillManifest,
+          skills: changeAgentTurnIntent.skillAttachments,
+          submissionPolicy: query<"native" | null>`${agentTurn.authority}->>'submissionPolicy'`,
+          browserTransport: query<"mcp" | null>`${agentTurn.authority}->>'browserTransport'`,
+          criteria: query<number>`jsonb_array_length(${requirementRevision.canonicalContent}::jsonb->'acceptanceCriteria')`,
+        })
+        .from(changeAgentTurnIntent)
+        .innerJoin(agentTurn, eq(agentTurn.id, changeAgentTurnIntent.turnId))
+        .innerJoin(
+          requirementRevision,
+          eq(
+            requirementRevision.id,
+            query`(${agentTurn.authority}->>'requirementRevisionId')::uuid`,
+          ),
+        )
+        .where(eq(changeAgentTurnIntent.turnId, turnID));
       if (!rows[0]) throw new Error("Change Agent dispatch intent not found");
       return {
         ...rows[0],

@@ -112,6 +112,16 @@ export function integrationNeedsApplicationBuild(path: string) {
     "skills-controllers-drizzle.test.ts",
     "substrate-drizzle.test.ts",
     "substrate-bound-provisioning.test.ts",
+    "usage-journal.test.ts",
+    "usage-policy.test.ts",
+    "coding-budget.test.ts",
+    "workspace-sharing.test.ts",
+    "workspace-commands.test.ts",
+    "workspace-container-files.test.ts",
+    "substrate-source.test.ts",
+    "substrate-source-access.test.ts",
+    "developer-ide.test.ts",
+    "developer-ide-access-recovery.test.ts",
   ].includes(basename(path));
 }
 export function integrationLane(path: string) {

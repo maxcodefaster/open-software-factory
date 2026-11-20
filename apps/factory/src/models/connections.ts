@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { and, asc, desc, eq, sql as expression, isNull, lt } from "drizzle-orm";
 import type { z } from "zod";
 import {
   type ModelConnectionReference,
@@ -13,7 +14,20 @@ import {
 } from "../../../../packages/conversation-domain/src/model-connection";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { unknownCounters } from "../../../../packages/conversation-domain/src/usage";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  administrator,
+  modelConnectionWrite as connectionWrite,
+  modelConnectionVersion,
+  modelDefaults,
+  modelRoleConnection,
+  modelRoleProbe,
+  usageOperation,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
@@ -22,19 +36,6 @@ import { deploymentModelConnections } from "./deployment";
 import { type ResolvedModelConnection, validateModelEndpoint } from "./native";
 import { probeModel } from "./probe";
 import type { ModelSecrets, StoredModelConnection } from "./secrets";
-
-type Intent = {
-  commandID: string;
-  connectionID: string;
-  baseVersion: number;
-  provider: ModelProvider;
-  endpoint: string;
-  fingerprint: string;
-  secretKey: string;
-  state: "write-intended" | "committed";
-  createdBy: string;
-};
-type Version = { version: number; provider: ModelProvider; endpoint: string; secretKey: string };
 
 export function createModelConnections(
   database: ReturnType<typeof createDatabase>,
@@ -57,28 +58,48 @@ export function createModelConnections(
       "Model connection changed or a save is pending. Reload or retry the same save.",
     );
   async function manager(sql: DatabaseTransaction, userID: string) {
-    const [row] =
-      await sql`SELECT user_id FROM factory.administrator WHERE user_id=${userID} FOR SHARE`;
+    const [row] = await drizzleTransaction(sql)
+      .select({ userID: administrator.userId })
+      .from(administrator)
+      .where(eq(administrator.userId, userID))
+      .for("share");
     if (!row) throw new CommandError("forbidden", "System Manager access required");
   }
   async function lock(sql: DatabaseTransaction, id: string) {
     await sql`SELECT pg_advisory_xact_lock(hashtext(${`model-connection:${id}`}))`;
   }
   async function current(sql: DatabaseTransaction, id: string) {
-    const [row] = await sql<
-      Version[]
-    >`SELECT version::float8 AS version, provider, endpoint, secret_key AS "secretKey"
-      FROM factory.model_connection_version WHERE connection_id=${id} ORDER BY version DESC LIMIT 1`;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        version: modelConnectionVersion.version,
+        provider: modelConnectionVersion.provider,
+        endpoint: modelConnectionVersion.endpoint,
+        secretKey: modelConnectionVersion.secretKey,
+      })
+      .from(modelConnectionVersion)
+      .where(eq(modelConnectionVersion.connectionId, id))
+      .orderBy(desc(modelConnectionVersion.version))
+      .limit(1);
     return row;
   }
   async function intent(sql: DatabaseTransaction, commandID: string) {
-    const [row] = await sql<
-      Intent[]
-    >`SELECT command_id AS "commandID", connection_id AS "connectionID",
-      base_version::float8 AS "baseVersion", provider, endpoint, fingerprint, secret_key AS "secretKey", state, created_by AS "createdBy"
-      FROM factory.model_connection_write WHERE command_id=${commandID}`;
+    const [row] = await drizzleTransaction(sql)
+      .select({
+        commandID: connectionWrite.commandId,
+        connectionID: connectionWrite.connectionId,
+        baseVersion: connectionWrite.baseVersion,
+        provider: expression<ModelProvider>`${connectionWrite.provider}`,
+        endpoint: connectionWrite.endpoint,
+        fingerprint: connectionWrite.fingerprint,
+        secretKey: connectionWrite.secretKey,
+        state: expression<"write-intended" | "committed">`${connectionWrite.state}`,
+        createdBy: connectionWrite.createdBy,
+      })
+      .from(connectionWrite)
+      .where(eq(connectionWrite.commandId, commandID));
     return row;
   }
+  type Intent = NonNullable<Awaited<ReturnType<typeof intent>>>;
   async function settle(row: Intent, stored: StoredModelConnection) {
     if (
       stored.commandID !== row.commandID ||
@@ -92,26 +113,44 @@ export function createModelConnections(
         "Stored model connection does not match its save intent",
       );
     await database.client.begin(async (sql) => {
+      const db = drizzleTransaction(sql);
       await lock(sql, row.connectionID);
       await manager(sql, row.createdBy);
       const latest = await intent(sql, row.commandID);
       if (latest?.state === "committed") return;
       if (!latest || ((await current(sql, row.connectionID))?.version ?? 0) !== row.baseVersion)
         throw conflict();
-      await sql`INSERT INTO factory.model_connection_version(connection_id, version, provider, endpoint, secret_key, created_by)
-        VALUES (${row.connectionID}, ${row.baseVersion + 1}, ${row.provider}, ${row.endpoint}, ${row.secretKey}, ${row.createdBy})`;
-      await sql`UPDATE factory.model_connection_write SET state='committed', committed_at=now() WHERE command_id=${row.commandID}`;
+      await db.insert(modelConnectionVersion).values({
+        connectionId: row.connectionID,
+        version: row.baseVersion + 1,
+        provider: row.provider,
+        endpoint: row.endpoint,
+        secretKey: row.secretKey,
+        createdBy: row.createdBy,
+      });
+      await db
+        .update(connectionWrite)
+        .set({ state: "committed", committedAt: expression`now()` })
+        .where(eq(connectionWrite.commandId, row.commandID));
     });
   }
   async function get(connectionID: string, userID: string): Promise<ModelConnectionView> {
     return database.client.begin(async (sql) => {
       await manager(sql, userID);
       const row = await current(sql, connectionID);
-      const [pending] = await sql<
-        Array<{ commandID: string; provider: ModelProvider; endpoint: string }>
-      >`
-        SELECT command_id AS "commandID", provider, endpoint FROM factory.model_connection_write
-        WHERE connection_id=${connectionID} AND state='write-intended'`;
+      const [pending] = await drizzleTransaction(sql)
+        .select({
+          commandID: connectionWrite.commandId,
+          provider: expression<ModelProvider>`${connectionWrite.provider}`,
+          endpoint: connectionWrite.endpoint,
+        })
+        .from(connectionWrite)
+        .where(
+          and(
+            eq(connectionWrite.connectionId, connectionID),
+            eq(connectionWrite.state, "write-intended"),
+          ),
+        );
       const metadata = row ?? pending;
       if (!metadata) throw new CommandError("not-found", "Model connection not found");
       return {
@@ -125,12 +164,23 @@ export function createModelConnections(
     });
   }
   async function resolve(connectionID: string, version: number): Promise<ResolvedModelConnection> {
-    const [row] = await database.client<
-      Array<Version & { commandID: string; fingerprint: string }>
-    >`SELECT version.version::float8 AS version, version.provider, version.endpoint, version.secret_key AS "secretKey",
-      intent.command_id AS "commandID", intent.fingerprint
-      FROM factory.model_connection_version version JOIN factory.model_connection_write intent ON intent.secret_key=version.secret_key
-      WHERE version.connection_id=${connectionID} AND version.version=${version}`;
+    const [row] = await database.db
+      .select({
+        version: modelConnectionVersion.version,
+        provider: modelConnectionVersion.provider,
+        endpoint: modelConnectionVersion.endpoint,
+        secretKey: modelConnectionVersion.secretKey,
+        commandID: connectionWrite.commandId,
+        fingerprint: connectionWrite.fingerprint,
+      })
+      .from(modelConnectionVersion)
+      .innerJoin(connectionWrite, eq(connectionWrite.secretKey, modelConnectionVersion.secretKey))
+      .where(
+        and(
+          eq(modelConnectionVersion.connectionId, connectionID),
+          eq(modelConnectionVersion.version, version),
+        ),
+      );
     if (!row) throw new CommandError("unavailable", "The admitted model connection is unavailable");
     validateModelEndpoint({ provider: row.provider, endpoint: row.endpoint }, endpointOrigins);
     const stored = await secrets.read(row.secretKey);
@@ -150,14 +200,28 @@ export function createModelConnections(
     resolve,
     async roles(userID: string) {
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await manager(sql, userID);
         const result = [];
         for (const role of ["planning", "build"] as const) {
-          const [active] = await sql`SELECT connection_id AS "connectionID",
-            connection_version::float8 AS version, model_id AS "modelId"
-            FROM factory.model_role_connection WHERE role=${role}`;
-          const [check] = await sql`SELECT command_id AS "commandID", state, result
-            FROM factory.model_role_probe WHERE role=${role} ORDER BY created_at DESC, command_id DESC LIMIT 1`;
+          const [active] = await db
+            .select({
+              connectionID: modelRoleConnection.connectionId,
+              version: modelRoleConnection.connectionVersion,
+              modelId: modelRoleConnection.modelId,
+            })
+            .from(modelRoleConnection)
+            .where(eq(modelRoleConnection.role, role));
+          const [check] = await db
+            .select({
+              commandID: modelRoleProbe.commandId,
+              state: modelRoleProbe.state,
+              result: modelRoleProbe.result,
+            })
+            .from(modelRoleProbe)
+            .where(eq(modelRoleProbe.role, role))
+            .orderBy(desc(modelRoleProbe.createdAt), desc(modelRoleProbe.commandId))
+            .limit(1);
           result.push(
             modelRoleConnectionView.parse({ role, active: active ?? null, check: check ?? null }),
           );
@@ -173,24 +237,23 @@ export function createModelConnections(
       const input = modelRoleConnectionInput.parse(value);
       let reasoningEffort: CodingReasoning = "medium";
       const admitted = await database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await sql`SELECT pg_advisory_xact_lock(hashtext('factory-model-settings'))`;
         await manager(sql, userID);
-        const [previous] = await sql<
-          Array<{
-            state: string;
-            result: unknown;
-            connectionID: string;
-            version: number;
-            modelId: string;
-            role: string;
-            settingsVersion: number;
-            createdBy: string;
-            reasoningEffort: CodingReasoning | null;
-          }>
-        >`
-          SELECT state, result, connection_id AS "connectionID", connection_version::float8 AS version, model_id AS "modelId", role,
-            settings_version::float8 AS "settingsVersion", created_by AS "createdBy",
-            reasoning_effort AS "reasoningEffort" FROM factory.model_role_probe WHERE command_id=${input.commandID}`;
+        const [previous] = await db
+          .select({
+            state: modelRoleProbe.state,
+            result: modelRoleProbe.result,
+            connectionID: modelRoleProbe.connectionId,
+            version: modelRoleProbe.connectionVersion,
+            modelId: modelRoleProbe.modelId,
+            role: modelRoleProbe.role,
+            settingsVersion: modelRoleProbe.settingsVersion,
+            createdBy: modelRoleProbe.createdBy,
+            reasoningEffort: modelRoleProbe.reasoningEffort,
+          })
+          .from(modelRoleProbe)
+          .where(eq(modelRoleProbe.commandId, input.commandID));
         if (previous) {
           if (
             previous.createdBy !== userID ||
@@ -209,9 +272,10 @@ export function createModelConnections(
             );
           return modelProbeResult.parse(previous.result);
         }
-        const [defaults] = await sql<
-          Array<{ version: number }>
-        >`SELECT version::float8 AS version FROM factory.model_defaults WHERE singleton`;
+        const [defaults] = await db
+          .select({ version: modelDefaults.version })
+          .from(modelDefaults)
+          .where(eq(modelDefaults.singleton, true));
         if ((defaults?.version ?? 0) !== input.settingsVersion) throw conflict();
         if (input.role === "build")
           reasoningEffort = input.reasoningEffort ?? (await codingReasoningIn(sql));
@@ -222,8 +286,17 @@ export function createModelConnections(
             "conflict",
             "Reasoning selection is available for OpenAI Coding models only.",
           );
-        await sql`INSERT INTO factory.model_role_probe(command_id, role, connection_id, connection_version, model_id, settings_version, created_by, state, reasoning_effort)
-          VALUES (${input.commandID}, ${input.role}, ${input.connectionID}, ${input.version}, ${input.modelId}, ${input.settingsVersion}, ${userID}, 'probing', ${input.reasoningEffort ?? null})`;
+        await db.insert(modelRoleProbe).values({
+          commandId: input.commandID,
+          role: input.role,
+          connectionId: input.connectionID,
+          connectionVersion: input.version,
+          modelId: input.modelId,
+          settingsVersion: input.settingsVersion,
+          createdBy: userID,
+          state: "probing",
+          reasoningEffort: input.reasoningEffort ?? null,
+        });
         return undefined;
       });
       if (admitted) return admitted;
@@ -245,45 +318,82 @@ export function createModelConnections(
         }),
       });
       await database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await sql`SELECT pg_advisory_xact_lock(hashtext('factory-model-settings'))`;
         await lock(sql, input.connectionID);
         await manager(sql, userID);
-        const [probe] =
-          await sql`SELECT command_id FROM factory.model_role_probe WHERE command_id=${input.commandID} AND state='probing' FOR UPDATE`;
+        const [probe] = await db
+          .select({ commandID: modelRoleProbe.commandId })
+          .from(modelRoleProbe)
+          .where(
+            and(eq(modelRoleProbe.commandId, input.commandID), eq(modelRoleProbe.state, "probing")),
+          )
+          .for("update");
         if (!probe) return;
-        const [defaults] = await sql<
-          Array<{
-            version: number;
-            rules: { planning: { models: string[] }; build: { models: string[] } } | null;
-          }>
-        >`
-          SELECT version::float8 AS version, role_rules AS rules FROM factory.model_defaults WHERE singleton FOR UPDATE`;
+        const [defaults] = await db
+          .select({ version: modelDefaults.version, rules: modelDefaults.roleRules })
+          .from(modelDefaults)
+          .where(eq(modelDefaults.singleton, true))
+          .for("update");
         if (
           result.status === "ready" &&
           ((defaults?.version ?? 0) !== input.settingsVersion ||
             (await current(sql, input.connectionID))?.version !== input.version)
         )
           result.status = "superseded";
-        await sql`UPDATE factory.model_role_probe SET state='finished', result=${JSON.stringify(result)}::jsonb, finished_at=now() WHERE command_id=${input.commandID}`;
+        await db
+          .update(modelRoleProbe)
+          .set({ state: "finished", result, finishedAt: expression`now()` })
+          .where(eq(modelRoleProbe.commandId, input.commandID));
         if (result.status !== "ready") return;
-        await sql`INSERT INTO factory.model_role_connection(role, connection_id, connection_version, model_id, updated_by)
-          VALUES (${input.role}, ${input.connectionID}, ${input.version}, ${input.modelId}, ${userID})
-          ON CONFLICT (role) DO UPDATE SET connection_id=EXCLUDED.connection_id, connection_version=EXCLUDED.connection_version,
-            model_id=EXCLUDED.model_id, updated_by=EXCLUDED.updated_by, updated_at=now()`;
+        await db
+          .insert(modelRoleConnection)
+          .values({
+            role: input.role,
+            connectionId: input.connectionID,
+            connectionVersion: input.version,
+            modelId: input.modelId,
+            updatedBy: userID,
+          })
+          .onConflictDoUpdate({
+            target: modelRoleConnection.role,
+            set: {
+              connectionId: input.connectionID,
+              connectionVersion: input.version,
+              modelId: input.modelId,
+              updatedBy: userID,
+              updatedAt: expression`now()`,
+            },
+          });
         if (defaults) {
-          const column = input.role === "planning" ? "planning_model_id" : "build_model_id";
+          const column = input.role === "planning" ? "planningModelId" : "buildModelId";
           const { rules } = await createModelSettingsController(database).get(sql);
           rules[input.role].models = [...new Set([...rules[input.role].models, input.modelId])];
           if (input.role === "build") rules.build.reasoningEffort = reasoningEffort;
-          await sql`UPDATE factory.model_defaults SET ${sql(column)}=${input.modelId}, role_rules=${JSON.stringify(rules)}::jsonb, version=version+1, updated_by=${userID}, updated_at=now() WHERE singleton`;
+          await db
+            .update(modelDefaults)
+            .set({
+              [column]: input.modelId,
+              roleRules: rules,
+              version: expression`${modelDefaults.version}+1`,
+              updatedBy: userID,
+              updatedAt: expression`now()`,
+            })
+            .where(eq(modelDefaults.singleton, true));
         } else {
           const environment = modelEnvironment();
           const { rules } = await createModelSettingsController(database).get(sql);
           rules[input.role].models = [...new Set([...rules[input.role].models, input.modelId])];
           if (input.role === "build") rules.build.reasoningEffort = reasoningEffort;
-          await sql`INSERT INTO factory.model_defaults(singleton, version, planning_model_id, build_model_id, updated_by, role_rules)
-            VALUES (true, 1, ${input.role === "planning" ? input.modelId : environment.planningModelId},
-              ${input.role === "build" ? input.modelId : environment.buildModelId}, ${userID}, ${JSON.stringify(rules)}::jsonb)`;
+          await db.insert(modelDefaults).values({
+            singleton: true,
+            version: 1,
+            planningModelId:
+              input.role === "planning" ? input.modelId : environment.planningModelId,
+            buildModelId: input.role === "build" ? input.modelId : environment.buildModelId,
+            updatedBy: userID,
+            roleRules: rules,
+          });
         }
       });
       return result;
@@ -292,17 +402,22 @@ export function createModelConnections(
       role: "planning" | "build",
       sql: DatabaseTransaction,
     ): Promise<ModelConnectionReference | undefined> {
-      const [row] = await sql<
-        Array<ModelConnectionReference>
-      >`SELECT connection_id AS "connectionID", connection_version::float8 AS version FROM factory.model_role_connection WHERE role=${role}`;
+      const [row] = await drizzleTransaction(sql)
+        .select({
+          connectionID: modelRoleConnection.connectionId,
+          version: modelRoleConnection.connectionVersion,
+        })
+        .from(modelRoleConnection)
+        .where(eq(modelRoleConnection.role, role));
       return row;
     },
     async list(userID: string) {
       const ids = await database.client.begin(async (sql) => {
         await manager(sql, userID);
-        return sql<
-          Array<{ id: string }>
-        >`SELECT DISTINCT connection_id AS id FROM factory.model_connection_write ORDER BY id`;
+        return drizzleTransaction(sql)
+          .selectDistinct({ id: connectionWrite.connectionId })
+          .from(connectionWrite)
+          .orderBy(asc(connectionWrite.connectionId));
       });
       return Promise.all(ids.map(({ id }) => get(id, userID)));
     },
@@ -313,6 +428,7 @@ export function createModelConnections(
         .update(JSON.stringify({ ...input, endpoint }))
         .digest("hex");
       const row = await database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await lock(sql, input.connectionID);
         await manager(sql, userID);
         if (!secrets.configured)
@@ -337,8 +453,15 @@ export function createModelConnections(
             "conflict",
             "Create a separate connection for a different provider",
           );
-        const [pending] =
-          await sql`SELECT command_id FROM factory.model_connection_write WHERE connection_id=${input.connectionID} AND state='write-intended'`;
+        const [pending] = await db
+          .select({ commandID: connectionWrite.commandId })
+          .from(connectionWrite)
+          .where(
+            and(
+              eq(connectionWrite.connectionId, input.connectionID),
+              eq(connectionWrite.state, "write-intended"),
+            ),
+          );
         if (pending) throw conflict();
         const next: Intent = {
           commandID: input.commandID,
@@ -351,8 +474,16 @@ export function createModelConnections(
           state: "write-intended",
           createdBy: userID,
         };
-        await sql`INSERT INTO factory.model_connection_write(command_id, connection_id, base_version, provider, endpoint, fingerprint, secret_key, created_by)
-          VALUES (${next.commandID}, ${next.connectionID}, ${next.baseVersion}, ${next.provider}, ${endpoint}, ${fingerprint}, ${next.secretKey}, ${userID})`;
+        await db.insert(connectionWrite).values({
+          commandId: next.commandID,
+          connectionId: next.connectionID,
+          baseVersion: next.baseVersion,
+          provider: next.provider,
+          endpoint,
+          fingerprint,
+          secretKey: next.secretKey,
+          createdBy: userID,
+        });
         return next;
       });
       if (row.state === "committed") return get(input.connectionID, userID);
@@ -389,31 +520,45 @@ export function createModelConnections(
         structuredOutput: false,
         limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
       };
-      const abandoned = await database.client<
-        Array<{ command_id: string }>
-      >`UPDATE factory.model_role_probe SET state='uncertain', result=jsonb_set(${JSON.stringify(interrupted)}::jsonb, '{modelId}', to_jsonb(model_id)), finished_at=now()
-        WHERE state='probing' AND created_at < now() - interval '30 seconds' RETURNING command_id`;
+      const abandoned = await database.db
+        .update(modelRoleProbe)
+        .set({
+          state: "uncertain",
+          result: expression`jsonb_set(${JSON.stringify(interrupted)}::jsonb, '{modelId}', to_jsonb(${modelRoleProbe.modelId}))`,
+          finishedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(modelRoleProbe.state, "probing"),
+            lt(modelRoleProbe.createdAt, expression`now() - interval '30 seconds'`),
+          ),
+        )
+        .returning({ commandID: modelRoleProbe.commandId });
       const journal = createUsageJournal(database);
       for (const probe of abandoned) {
-        const id = `probe:${probe.command_id}`;
-        const [operation] = await database.client<
-          Array<{ created_at: Date }>
-        >`SELECT created_at FROM factory.usage_operation WHERE id=${id} AND settled_at IS NULL`;
+        const id = `probe:${probe.commandID}`;
+        const [operation] = await database.db
+          .select({ createdAt: usageOperation.createdAt })
+          .from(usageOperation)
+          .where(and(eq(usageOperation.id, id), isNull(usageOperation.settledAt)));
         if (operation) {
           await journal.record(id, {
             eventID: "unobserved",
             source: "unobserved",
             outcome: "unknown",
             counters: unknownCounters(),
-            occurredAt: new Date(operation.created_at).toISOString(),
+            occurredAt: operation.createdAt.toISOString(),
           });
           await journal.settle(id, "unknown");
         }
       }
       if (!secrets.configured) return;
-      const rows = await database.client<
-        Array<{ commandID: string }>
-      >`SELECT command_id AS "commandID" FROM factory.model_connection_write WHERE state='write-intended' ORDER BY created_at LIMIT 32`;
+      const rows = await database.db
+        .select({ commandID: connectionWrite.commandId })
+        .from(connectionWrite)
+        .where(eq(connectionWrite.state, "write-intended"))
+        .orderBy(asc(connectionWrite.createdAt))
+        .limit(32);
       for (const { commandID } of rows) {
         const row = await database.client.begin((sql) => intent(sql, commandID));
         if (row?.state !== "write-intended") continue;

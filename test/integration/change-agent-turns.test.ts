@@ -6,11 +6,61 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
+import { createDatabase, type DatabaseTransaction } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
+
+test("Build admission rolls back its typed dispatch intent and writer claim on the caller's transaction", async () => {
+  const owned = await fixture();
+  const commandID = crypto.randomUUID();
+  try {
+    const before = await owned.database
+      .client`SELECT state,epoch::text,turn_id,fence_required,fence_attempt_id,
+      updated_at::text FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+    await expect(
+      owned.database.client.begin(async (sql) => {
+        const accepted = await createChangeAdmission(owned.database, buildModelID).admitIn(
+          sql,
+          owned.changeID,
+          owned.userID,
+          {
+            kind: "change-start",
+            commandId: commandID,
+          },
+        );
+        const [intent] =
+          await sql`SELECT turn_id,change_id,session_id,prompt_id,bootstrap,skill_loading
+        FROM factory.change_agent_turn_intent WHERE turn_id=${accepted.turn.id}`;
+        expect(intent).toMatchObject({
+          turn_id: accepted.turn.id,
+          change_id: owned.changeID,
+          prompt_id: `msg_factory_${accepted.turn.id.replaceAll("-", "")}`,
+          bootstrap: true,
+          skill_loading: "native",
+        });
+        const [writer] =
+          await sql`SELECT state,turn_id FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+        expect(writer).toEqual({ state: "agent-preparing", turn_id: accepted.turn.id });
+        expect(owned.requests()).toBe(0);
+        throw new Error("Owned admission rollback");
+      }),
+    ).rejects.toThrow("Owned admission rollback");
+    expect(
+      await owned.database.client`SELECT state,epoch::text,turn_id,fence_required,fence_attempt_id,
+      updated_at::text FROM factory.change_writer WHERE change_id=${owned.changeID}`,
+    ).toEqual(before);
+    expect(await owned.turn(commandID)).toBeUndefined();
+    expect(
+      await owned.database.client`SELECT turn_id FROM factory.change_agent_turn_intent
+      WHERE change_id=${owned.changeID}`,
+    ).toHaveLength(0);
+    expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+}, 30_000);
 
 test("Build waits for OpenCode after IDE readiness without repeating a prompt", async () => {
   const owned = await fixture();

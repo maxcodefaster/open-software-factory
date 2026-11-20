@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
+import { and, eq, isNull, sql as query } from "drizzle-orm";
 import type {
   BuildBrowserCall,
   BuildBrowserResult,
@@ -11,7 +12,12 @@ import {
   checkedReviewResult,
   reviewNeedsBrowser,
 } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import { candidateReview, reviewScenario } from "../../../../packages/db/src/schema";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { CommandError } from "../command-error";
@@ -190,11 +196,18 @@ export function createCandidateReviewController(
       if (scope.evidence.some((item) => item["id"] === observation["id"])) return;
       if (scope.evidence.length >= 256)
         throw new CommandError("conflict", "Review evidence limit reached");
-      const [scenario] = await sql<{ id: string }[]>`SELECT id FROM factory.review_scenario
-        WHERE review_id=${scope.id} AND ended_at IS NULL`;
+      const db = drizzleTransaction(sql);
+      const [scenario] = await db
+        .select({ id: reviewScenario.id })
+        .from(reviewScenario)
+        .where(and(eq(reviewScenario.reviewId, scope.id), isNull(reviewScenario.endedAt)));
       const attributed = { ...observation, ...(scenario ? { scenarioId: scenario.id } : {}) };
-      await sql`UPDATE factory.candidate_review SET evidence=evidence || ${JSON.stringify([attributed])}::jsonb
-        WHERE id=${scope.id}`;
+      await db
+        .update(candidateReview)
+        .set({
+          evidence: query`${candidateReview.evidence} || ${JSON.stringify([attributed])}::jsonb`,
+        })
+        .where(eq(candidateReview.id, scope.id));
     });
   }
   function textResult(value: unknown): BuildBrowserResult {
@@ -218,8 +231,12 @@ export function createCandidateReviewController(
     async tools(turnID: string) {
       const turn = await turns.get(turnID);
       if (turn?.command.kind !== "change-review") return [];
-      const [review] = await database.client<{ checking: boolean }[]>`
-        SELECT finding_source_id IS NOT NULL AS checking FROM factory.candidate_review WHERE turn_id=${turnID}`;
+      const [review] = await database.db
+        .select({
+          checking: query<boolean>`${candidateReview.findingSourceId} IS NOT NULL`,
+        })
+        .from(candidateReview)
+        .where(eq(candidateReview.turnId, turnID));
       return candidateReviewToolCatalogue.filter((tool) =>
         review?.checking
           ? !["review_report", "review_scenario", "review_scenario_result"].includes(tool.name)
@@ -295,10 +312,18 @@ export function createCandidateReviewController(
         throw new CommandError("conflict", "This tool does not belong to this review phase");
       if (call.name === "review_finding_report") {
         return authorized(turnID, ownerToken, async (sql, current) => {
+          const db = drizzleTransaction(sql);
           const check = call.arguments;
           if (current.result) {
-            const [same] = await sql`SELECT id FROM factory.candidate_review
-              WHERE id=${current.id} AND finding_checks=${JSON.stringify(check)}::jsonb`;
+            const [same] = await db
+              .select({ id: candidateReview.id })
+              .from(candidateReview)
+              .where(
+                and(
+                  eq(candidateReview.id, current.id),
+                  query`${candidateReview.findingChecks}=${JSON.stringify(check)}::jsonb`,
+                ),
+              );
             if (!same) throw new CommandError("conflict", "The immutable finding check changed");
             return textResult("Finding check already recorded. Finish normally.");
           }
@@ -337,20 +362,25 @@ export function createCandidateReviewController(
           }
           let result = checkedReviewResult(proposal, check);
           if (result.verdict === "passed") {
-            const [original] = await sql<
-              { evidence: ReviewScope["evidence"]; uiRequired: boolean }[]
-            >`
-              SELECT evidence,ui_required AS "uiRequired" FROM factory.candidate_review WHERE id=${current.findingSourceID}`;
-            const cases = await sql<
-              {
-                id: string;
-                criterion: number;
-                category: string;
-                status: string;
-                observationKind: "app" | "source";
-              }[]
-            >`SELECT id,criterion,category,status,COALESCE(observation_kind,'app') AS "observationKind"
-              FROM factory.review_scenario WHERE review_id=${current.findingSourceID}`;
+            const [original] = await db
+              .select({
+                evidence: query<ReviewScope["evidence"]>`${candidateReview.evidence}`,
+                uiRequired: candidateReview.uiRequired,
+              })
+              .from(candidateReview)
+              .where(eq(candidateReview.id, query`${current.findingSourceID}::uuid`));
+            const cases = await db
+              .select({
+                id: reviewScenario.id,
+                criterion: reviewScenario.criterion,
+                category: reviewScenario.category,
+                status: reviewScenario.status,
+                observationKind: query<
+                  "app" | "source"
+                >`COALESCE(${reviewScenario.observationKind},'app')`,
+              })
+              .from(reviewScenario)
+              .where(eq(reviewScenario.reviewId, query`${current.findingSourceID}::uuid`));
             const rechecked = (criterion: number, kind: "app" | "source") =>
               check.criteria.some(
                 (item) =>
@@ -397,10 +427,17 @@ export function createCandidateReviewController(
                 ),
               };
           }
-          await sql`UPDATE factory.candidate_review SET finding_checks=${JSON.stringify(check)}::jsonb,
-            result=${JSON.stringify(result)}::jsonb,
-            ui_required=(SELECT ui_required FROM factory.candidate_review WHERE id=${current.findingSourceID})
-            WHERE id=${current.id} AND result IS NULL`;
+          await db
+            .update(candidateReview)
+            .set({
+              findingChecks: check,
+              result,
+              uiRequired: query`(${db
+                .select({ uiRequired: candidateReview.uiRequired })
+                .from(candidateReview)
+                .where(eq(candidateReview.id, query`${current.findingSourceID}::uuid`))})`,
+            })
+            .where(and(eq(candidateReview.id, current.id), isNull(candidateReview.result)));
           return textResult(
             "Finding check recorded. Finish normally; only confirmed blockers can request correction.",
           );
@@ -408,27 +445,48 @@ export function createCandidateReviewController(
       }
       if (call.name === "review_scenario" || call.name === "review_scenario_result") {
         return authorized(turnID, ownerToken, async (sql, current) => {
+          const db = drizzleTransaction(sql);
           if (current.result)
             throw new CommandError("conflict", "Review report is already recorded");
           if (call.name === "review_scenario") {
             const args = call.arguments;
-            const [active] = await sql`SELECT id FROM factory.review_scenario
-              WHERE review_id=${scope.id} AND ended_at IS NULL`;
-            const [count] = await sql<{ count: number }[]>`SELECT count(*)::int AS count
-              FROM factory.review_scenario WHERE review_id=${scope.id}`;
+            const [active] = await db
+              .select({ id: reviewScenario.id })
+              .from(reviewScenario)
+              .where(and(eq(reviewScenario.reviewId, scope.id), isNull(reviewScenario.endedAt)));
+            const [count] = await db
+              .select({ count: query<number>`count(*)::int` })
+              .from(reviewScenario)
+              .where(eq(reviewScenario.reviewId, scope.id));
             if (active || (count?.count ?? 0) >= 64 || args.criterion > current.criteria)
               throw new CommandError(
                 "conflict",
                 "Finish the current case; use an approved criterion and at most 64 cases",
               );
-            await sql`INSERT INTO factory.review_scenario(review_id,id,title,category,observation_kind,criterion,expected)
-              VALUES(${scope.id},${args.id},${args.title},${args.category},${args.observationKind},${args.criterion},${args.expected})`;
+            await db.insert(reviewScenario).values({
+              reviewId: scope.id,
+              id: args.id,
+              title: args.title,
+              category: args.category,
+              observationKind: args.observationKind,
+              criterion: args.criterion,
+              expected: args.expected,
+            });
           } else {
             const args = call.arguments;
-            const [scenario] = await sql<
-              { observationKind: "app" | "source" | null }[]
-            >`SELECT observation_kind AS "observationKind" FROM factory.review_scenario
-              WHERE review_id=${scope.id} AND id=${args.id} AND ended_at IS NULL FOR UPDATE`;
+            const [scenario] = await db
+              .select({
+                observationKind: query<"app" | "source" | null>`${reviewScenario.observationKind}`,
+              })
+              .from(reviewScenario)
+              .where(
+                and(
+                  eq(reviewScenario.reviewId, scope.id),
+                  eq(reviewScenario.id, args.id),
+                  isNull(reviewScenario.endedAt),
+                ),
+              )
+              .for("update");
             if (!scenario) throw new CommandError("conflict", "Case is not currently active");
             const kind = scenario.observationKind ?? "app";
             if (
@@ -463,10 +521,23 @@ export function createCandidateReviewController(
             const times = positions
               .filter((item) => item.session === mediaSession)
               .map((item) => item.time);
-            const updated = await sql`UPDATE factory.review_scenario SET ended_at=clock_timestamp(),
-              status=${args.status},observed=${args.observed},
-              media_started_ms=${times.length ? Math.min(...times) : null},media_session_id=${mediaSession ?? null}
-              WHERE review_id=${scope.id} AND id=${args.id} AND ended_at IS NULL RETURNING id`;
+            const updated = await db
+              .update(reviewScenario)
+              .set({
+                endedAt: query`clock_timestamp()`,
+                status: args.status,
+                observed: args.observed,
+                mediaStartedMs: times.length ? Math.min(...times) : null,
+                mediaSessionId: mediaSession ?? null,
+              })
+              .where(
+                and(
+                  eq(reviewScenario.reviewId, scope.id),
+                  eq(reviewScenario.id, args.id),
+                  isNull(reviewScenario.endedAt),
+                ),
+              )
+              .returning({ id: reviewScenario.id });
             if (!updated.length) throw new CommandError("conflict", "Case is not currently active");
           }
           return textResult(
@@ -511,11 +582,19 @@ export function createCandidateReviewController(
             ),
           );
         await authorized(turnID, ownerToken, async (sql, current) => {
+          const db = drizzleTransaction(sql);
           if (current.result) {
             if (JSON.stringify(current.result) !== JSON.stringify(result)) {
               // PostgreSQL jsonb changes key order, so compare in SQL instead.
-              const [same] = await sql`SELECT id FROM factory.candidate_review
-                WHERE id=${current.id} AND result=${JSON.stringify(result)}::jsonb`;
+              const [same] = await db
+                .select({ id: candidateReview.id })
+                .from(candidateReview)
+                .where(
+                  and(
+                    eq(candidateReview.id, current.id),
+                    query`${candidateReview.result}=${JSON.stringify(result)}::jsonb`,
+                  ),
+                );
               if (!same) throw new CommandError("conflict", "The immutable review report changed");
             }
             return;
@@ -537,17 +616,18 @@ export function createCandidateReviewController(
             )
               throw new CommandError("conflict", "App review needs an exact-candidate screenshot");
             if (current.coverageVersion >= 1 && result.verdict === "passed") {
-              const cases = await sql<
-                {
-                  id: string;
-                  criterion: number;
-                  category: string;
-                  status: string | null;
-                  observationKind: "app" | "source" | null;
-                }[]
-              >`
-                SELECT id,criterion,category,status,observation_kind AS "observationKind"
-                FROM factory.review_scenario WHERE review_id=${scope.id}`;
+              const cases = await db
+                .select({
+                  id: reviewScenario.id,
+                  criterion: reviewScenario.criterion,
+                  category: reviewScenario.category,
+                  status: reviewScenario.status,
+                  observationKind: query<
+                    "app" | "source" | null
+                  >`${reviewScenario.observationKind}`,
+                })
+                .from(reviewScenario)
+                .where(eq(reviewScenario.reviewId, scope.id));
               if (
                 cases.some((item) => item.status !== "passed") ||
                 result.criteria.some(
@@ -594,8 +674,10 @@ export function createCandidateReviewController(
                 );
             }
           }
-          await sql`UPDATE factory.candidate_review SET result=${JSON.stringify(result)}::jsonb,
-            ui_required=${uiRequired} WHERE id=${current.id} AND result IS NULL`;
+          await db
+            .update(candidateReview)
+            .set({ result, uiRequired })
+            .where(and(eq(candidateReview.id, current.id), isNull(candidateReview.result)));
         });
         return textResult(
           "Review report recorded. End with a brief ordinary summary. Factory still requires native settlement, exact checks and human Delivery approval.",

@@ -101,6 +101,16 @@ test("editor access survives Factory replacement without weakening single redemp
     await database.client`UPDATE auth.verification SET expires_at=now()-interval '1 second'
       WHERE identifier LIKE ${`factory-editor:${userID}:%`}`;
     expect(await server().redeem(url(expired), userID, epoch)).toBeUndefined();
+    for (const method of ["identity-test", "sso"]) {
+      await database.client`UPDATE auth.session SET login_method=${method},
+        authenticated_at=now()-interval '25 hours' WHERE id=${sessionID}`;
+      await expect(first.issue(grant())).rejects.toThrow("Editor access required");
+    }
+    await database.client`UPDATE auth.session SET login_method='sso',
+      authenticated_at=now()-interval '23 hours' WHERE id=${sessionID}`;
+    expect(await first.issue(grant())).toBeString();
+    await database.client`UPDATE auth.session SET login_method='password',
+      authenticated_at=now() WHERE id=${sessionID}`;
     const logout = await first.issue(grant());
     await database.client`DELETE FROM auth.session WHERE id=${sessionID}`;
     expect(await server().redeem(url(logout), userID, epoch)).toBeUndefined();

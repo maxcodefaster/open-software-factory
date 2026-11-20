@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, desc, eq, sql as expression, gt, inArray, like, lte, ne, or } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { authSession, authUser, authVerification } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { developerIDEOrigin } from "../developer-ide-origin";
 import { factoryRequestURL } from "../request-origin";
@@ -60,27 +62,58 @@ export function createDeveloperIDEAccess(
     return undefined;
   }
   async function load(token: string, userID: string, kind: StoredGrant["kind"]) {
-    const [row] = await database.client<{ value: string }[]>`SELECT value FROM auth.verification
-      WHERE identifier=${identifier(token, userID)} AND expires_at>now()`;
+    const [row] = await database.db
+      .select({ value: authVerification.value })
+      .from(authVerification)
+      .where(
+        and(
+          eq(authVerification.identifier, identifier(token, userID)),
+          gt(authVerification.expiresAt, expression`now()`),
+        ),
+      );
     const grant = row && decode(row.value);
     return grant?.userID === userID && grant.kind === kind ? grant : undefined;
   }
   async function revoke(token: string, userID: string) {
     forget(token);
-    await database.client`DELETE FROM auth.verification WHERE identifier=${identifier(token, userID)}`;
+    await database.db
+      .delete(authVerification)
+      .where(eq(authVerification.identifier, identifier(token, userID)));
   }
   async function save(token: string, grant: StoredGrant) {
     const evicted = await database.client.begin(async (sql) => {
+      const db = drizzleTransaction(sql);
       // Serialize the per-person bound across all Factory processes.
-      await sql`SELECT id FROM auth."user" WHERE id=${grant.userID} FOR UPDATE`;
-      await sql`DELETE FROM auth.verification WHERE identifier LIKE ${`${prefix(grant.userID)}%`}
-        AND expires_at<=now()`;
-      const evicted = await sql<{ identifier: string }[]>`DELETE FROM auth.verification WHERE id IN(
-        SELECT id FROM auth.verification WHERE identifier LIKE ${`${prefix(grant.userID)}%`}
-        ORDER BY created_at DESC,id DESC OFFSET 31) RETURNING identifier`;
-      await sql`INSERT INTO auth.verification(id,identifier,value,expires_at)
-        VALUES(${crypto.randomUUID()},${identifier(token, grant.userID)},${JSON.stringify(grant)},${new Date(grant.expires).toISOString()}::timestamptz)`;
-      return [...evicted];
+      await db
+        .select({ id: authUser.id })
+        .from(authUser)
+        .where(eq(authUser.id, grant.userID))
+        .for("update");
+      const owned = like(authVerification.identifier, `${prefix(grant.userID)}%`);
+      await db
+        .delete(authVerification)
+        .where(and(owned, lte(authVerification.expiresAt, expression`now()`)));
+      const evicted = await db
+        .delete(authVerification)
+        .where(
+          inArray(
+            authVerification.id,
+            db
+              .select({ id: authVerification.id })
+              .from(authVerification)
+              .where(owned)
+              .orderBy(desc(authVerification.createdAt), desc(authVerification.id))
+              .offset(31),
+          ),
+        )
+        .returning({ identifier: authVerification.identifier });
+      await db.insert(authVerification).values({
+        id: crypto.randomUUID(),
+        identifier: identifier(token, grant.userID),
+        value: JSON.stringify(grant),
+        expiresAt: new Date(grant.expires),
+      });
+      return evicted;
     });
     for (const [current, cached] of grants)
       if (evicted.some((row) => row.identifier === identifier(current, cached.userID)))
@@ -88,9 +121,21 @@ export function createDeveloperIDEAccess(
   }
   async function valid(grant: DeveloperIDEGrant) {
     if (grant.expires <= Date.now()) return false;
-    const sessions =
-      await database.client`SELECT id FROM auth.session WHERE id=${grant.sessionID} AND user_id=${grant.userID} AND expires_at > now()
-        AND login_method<>'identity-test' AND (login_method<>'sso' OR authenticated_at>now()-interval '24 hours')`;
+    const sessions = await database.db
+      .select({ id: authSession.id })
+      .from(authSession)
+      .where(
+        and(
+          eq(authSession.id, grant.sessionID),
+          eq(authSession.userId, grant.userID),
+          gt(authSession.expiresAt, expression`now()`),
+          ne(authSession.loginMethod, "identity-test"),
+          or(
+            ne(authSession.loginMethod, "sso"),
+            gt(authSession.authenticatedAt, expression`now()-interval '24 hours'`),
+          ),
+        ),
+      );
     if (!sessions.length) return false;
     try {
       const current = await editors.get(grant.userID);
@@ -130,8 +175,15 @@ export function createDeveloperIDEAccess(
         await revoke(token, userID);
         return undefined;
       }
-      const consumed = await database.client`DELETE FROM auth.verification
-        WHERE identifier=${identifier(token, userID)} AND expires_at>now() RETURNING id`;
+      const consumed = await database.db
+        .delete(authVerification)
+        .where(
+          and(
+            eq(authVerification.identifier, identifier(token, userID)),
+            gt(authVerification.expiresAt, expression`now()`),
+          ),
+        )
+        .returning({ id: authVerification.id });
       if (!consumed.length) return undefined;
       const accessToken = crypto.randomUUID();
       await save(accessToken, { ...grant, kind: "access" });
@@ -177,7 +229,9 @@ export function createDeveloperIDEAccess(
     },
     async revokeUser(userID: string) {
       for (const [token, grant] of grants) if (grant.userID === userID) forget(token);
-      await database.client`DELETE FROM auth.verification WHERE identifier LIKE ${`${prefix(userID)}%`}`;
+      await database.db
+        .delete(authVerification)
+        .where(like(authVerification.identifier, `${prefix(userID)}%`));
     },
     async sweep(userID?: string) {
       for (const [token, grant] of grants)
@@ -186,18 +240,26 @@ export function createDeveloperIDEAccess(
           (!(await load(token, grant.userID, "access")) || !(await valid(grant)))
         )
           await revoke(token, grant.userID);
-      await database.client`DELETE FROM auth.verification WHERE identifier LIKE 'factory-editor:%'
-        AND expires_at<=now()`;
+      await database.db
+        .delete(authVerification)
+        .where(
+          and(
+            like(authVerification.identifier, "factory-editor:%"),
+            lte(authVerification.expiresAt, expression`now()`),
+          ),
+        );
       // Account/membership revocation targets all retained nonces for that
       // person. Ordinary transport sweeps need only their local live grants,
       // not a per-credential authority round trip for every inactive person.
       if (!userID) return;
-      const rows = await database.client<{ id: string; value: string }[]>`SELECT id,value
-        FROM auth.verification WHERE identifier LIKE ${`${prefix(userID)}%`}`;
+      const rows = await database.db
+        .select({ id: authVerification.id, value: authVerification.value })
+        .from(authVerification)
+        .where(like(authVerification.identifier, `${prefix(userID)}%`));
       for (const row of rows) {
         const grant = decode(row.value);
         if (!grant || !(await valid(grant)))
-          await database.client`DELETE FROM auth.verification WHERE id=${row.id}`;
+          await database.db.delete(authVerification).where(eq(authVerification.id, row.id));
       }
     },
   };

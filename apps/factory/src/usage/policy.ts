@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { eq, or, sql as query } from "drizzle-orm";
 import {
   codingDecision,
   defaultExecutionPolicy,
@@ -7,7 +8,17 @@ import {
   executionPolicyCommand,
   tighterExecutionPolicy,
 } from "../../../../packages/conversation-domain/src/execution-policy";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  administrator,
+  executionPolicyCommand as policyCommandTable,
+  executionPolicy as policyTable,
+  usageOperation,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { computeAllocationIn } from "./compute";
@@ -34,10 +45,15 @@ export async function lockUsageIn(sql: SQL) {
   await sql`SELECT pg_advisory_xact_lock(hashtext(${usageAdmissionLock}))`;
 }
 export async function policyIn(sql: SQL, projectID: string | null) {
-  const rows = await sql<
-    Array<{ scope: string; version: string; policy: unknown; timezone: string | null }>
-  >`
-    SELECT scope,version,policy,timezone FROM factory.execution_policy WHERE scope='factory' OR scope=${projectID}`;
+  const rows = await drizzleTransaction(sql)
+    .select({
+      scope: policyTable.scope,
+      version: policyTable.version,
+      policy: policyTable.policy,
+      timezone: policyTable.timezone,
+    })
+    .from(policyTable)
+    .where(or(eq(policyTable.scope, "factory"), eq(policyTable.scope, projectID ?? query`NULL`)));
   const factory = rows.find((row) => row.scope === "factory");
   const project = rows.find((row) => row.scope === projectID);
   const factoryPolicy = factory ? executionPolicy.parse(factory.policy) : defaultExecutionPolicy();
@@ -100,8 +116,11 @@ export function createUsagePolicy(database: ReturnType<typeof createDatabase>) {
     manage: boolean,
   ) {
     await requireActiveAccountIn(sql, actorID);
-    const admin =
-      await sql`SELECT user_id FROM factory.administrator WHERE user_id=${actorID} FOR SHARE`;
+    const admin = await drizzleTransaction(sql)
+      .select({ userId: administrator.userId })
+      .from(administrator)
+      .where(eq(administrator.userId, actorID))
+      .for("share");
     if (!projectID && !admin.length)
       throw new CommandError("forbidden", "Factory usage requires System management");
     const manager = projectID ? await projectAuthorityIn(sql, actorID, projectID) : true;
@@ -168,13 +187,20 @@ export function createUsagePolicy(database: ReturnType<typeof createDatabase>) {
       return database.client.begin(async (sql) => {
         await authorize(sql, actorID, projectID, true);
         await lockUsageIn(sql);
+        const db = drizzleTransaction(sql);
         const scope = projectID ?? "factory";
-        const [old] = await sql<
-          Array<{ actor_id: string; input: unknown; result: unknown; scope: string }>
-        >`SELECT * FROM factory.execution_policy_command WHERE command_id=${input.commandID}`;
+        const [old] = await db
+          .select({
+            actorId: policyCommandTable.actorId,
+            input: policyCommandTable.input,
+            result: policyCommandTable.result,
+            scope: policyCommandTable.scope,
+          })
+          .from(policyCommandTable)
+          .where(eq(policyCommandTable.commandId, input.commandID));
         if (old) {
           if (
-            old.actor_id !== actorID ||
+            old.actorId !== actorID ||
             old.scope !== scope ||
             fingerprint(old.input) !== fingerprint(input)
           )
@@ -191,20 +217,44 @@ export function createUsagePolicy(database: ReturnType<typeof createDatabase>) {
           );
         const timezone = projectID ? null : (input.timezone ?? current.timezone);
         if (!projectID && timezone !== current.timezone) {
-          const existing =
-            await sql`SELECT id FROM factory.usage_operation WHERE purpose='coding' LIMIT 1`;
+          const existing = await db
+            .select({ id: usageOperation.id })
+            .from(usageOperation)
+            .where(eq(usageOperation.purpose, "coding"))
+            .limit(1);
           if (existing.length)
             throw new CommandError(
               "conflict",
               "The installation timezone is fixed once Coding usage exists",
             );
         }
-        await sql`INSERT INTO factory.execution_policy(scope,version,policy,timezone,updated_by)
-          VALUES(${scope},${current.version + 1},${JSON.stringify(input.policy)}::jsonb,${timezone},${actorID})
-          ON CONFLICT(scope) DO UPDATE SET version=EXCLUDED.version,policy=EXCLUDED.policy,timezone=EXCLUDED.timezone,updated_by=EXCLUDED.updated_by,updated_at=now()`;
+        await db
+          .insert(policyTable)
+          .values({
+            scope,
+            version: current.version + 1,
+            policy: input.policy,
+            timezone,
+            updatedBy: actorID,
+          })
+          .onConflictDoUpdate({
+            target: policyTable.scope,
+            set: {
+              version: current.version + 1,
+              policy: input.policy,
+              timezone,
+              updatedBy: actorID,
+              updatedAt: query`now()`,
+            },
+          });
         const result = await policyIn(sql, projectID);
-        await sql`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-          VALUES(${input.commandID},${scope},${actorID},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+        await db.insert(policyCommandTable).values({
+          commandId: input.commandID,
+          scope,
+          actorId: actorID,
+          input,
+          result,
+        });
         return result;
       });
     },

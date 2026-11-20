@@ -1,8 +1,17 @@
+import { and, eq, sql as expression, gt, inArray, isNotNull, isNull, not } from "drizzle-orm";
 import {
   type ModelConnectionReference,
   modelConnectionReference,
 } from "../../../../packages/conversation-domain/src/model-connection";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  codingPause,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
 import { runtimeModelToken } from "../../../../packages/runtime-domain/src/identity";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { json } from "../http";
@@ -37,10 +46,16 @@ export function createModelRelay(
       !["chat/completions", "responses", "messages"].includes(suffix)
     )
       return new Response("Not found", { status: 404 });
-    const [runtime] = await database.client<Array<{ generation: string }>>`
-      SELECT generation FROM factory.runtime_attempt
-      WHERE id = ${attemptID} AND change_id IS NOT NULL AND state = 'ready'
-    `;
+    const [runtime] = await database.db
+      .select({ generation: runtimeAttempt.generation })
+      .from(runtimeAttempt)
+      .where(
+        and(
+          eq(runtimeAttempt.id, attemptID),
+          isNotNull(runtimeAttempt.changeId),
+          eq(runtimeAttempt.state, "ready"),
+        ),
+      );
     if (
       !runtime ||
       (request.headers.get("authorization") !==
@@ -50,30 +65,35 @@ export function createModelRelay(
     )
       return new Response("Unauthorized", { status: 401 });
 
-    const [active] = await database.client<
-      Array<{
-        id: string;
-        ownerToken: string;
-        modelId: string;
-        modelConnection: ModelConnectionReference | null;
-        codingReasoning: string | null;
-        sessionID: string;
-        projectID: string;
-      }>
-    >`
-      SELECT turn.id,turn.project_id AS "projectID", turn.owner_token AS "ownerToken", turn.authority->>'modelId' AS "modelId", turn.authority->'modelConnection' AS "modelConnection",
-        turn.authority->>'codingReasoning' AS "codingReasoning",session.opencode_session_id AS "sessionID"
-      FROM factory.change_agent_session session
-      JOIN factory.agent_turn turn ON turn.id = session.active_turn_id
-      JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
-      JOIN factory.change change ON change.id = session.change_id
-      WHERE session.runtime_attempt_id = ${attemptID} AND intent.runtime_attempt_id = ${attemptID}
-        AND turn.change_id = session.change_id AND intent.change_id = change.id
-        AND change.runtime_attempt_id = ${attemptID} AND session.opencode_session_id = intent.session_id
-        AND NOT session.stop_pending AND session.state IN ('starting', 'working')
-        AND turn.state IN ('dispatching', 'running') AND turn.owner_expires_at > clock_timestamp()
-        AND intent.terminal_outcome IS NULL
-    `;
+    const [active] = await database.db
+      .select({
+        id: agentTurn.id,
+        projectID: agentTurn.projectId,
+        ownerToken: expression<string>`${agentTurn.ownerToken}`,
+        modelId: expression<string>`${agentTurn.authority}->>'modelId'`,
+        modelConnection: expression<ModelConnectionReference | null>`${agentTurn.authority}->'modelConnection'`,
+        codingReasoning: expression<string | null>`${agentTurn.authority}->>'codingReasoning'`,
+        sessionID: expression<string>`${changeAgentSession.opencodeSessionId}`,
+      })
+      .from(changeAgentSession)
+      .innerJoin(agentTurn, eq(agentTurn.id, changeAgentSession.activeTurnId))
+      .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+      .innerJoin(change, eq(change.id, changeAgentSession.changeId))
+      .where(
+        and(
+          eq(changeAgentSession.runtimeAttemptId, attemptID),
+          eq(changeAgentTurnIntent.runtimeAttemptId, attemptID),
+          eq(agentTurn.changeId, changeAgentSession.changeId),
+          eq(changeAgentTurnIntent.changeId, change.id),
+          eq(change.runtimeAttemptId, attemptID),
+          eq(changeAgentSession.opencodeSessionId, changeAgentTurnIntent.sessionId),
+          not(changeAgentSession.stopPending),
+          inArray(changeAgentSession.state, ["starting", "working"]),
+          inArray(agentTurn.state, ["dispatching", "running"]),
+          gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+          isNull(changeAgentTurnIntent.terminalOutcome),
+        ),
+      );
     if (!active) return json({ error: "No active Build authority for model inference" }, 403);
     let payload: Awaited<ReturnType<typeof readModelRequest>>;
     try {
@@ -108,41 +128,71 @@ export function createModelRelay(
       let upstream: Promise<Response> | undefined;
       let paused = false;
       const allowed = await turns.validateExecution(active.id, active.ownerToken, async (sql) => {
-        const [current] = await sql<Array<{ id: string }>>`
-        SELECT session.change_id AS id FROM factory.change_agent_session session
-        JOIN factory.change change ON change.id = session.change_id
-        JOIN factory.runtime_attempt runtime ON runtime.id = session.runtime_attempt_id
-        JOIN factory.change_agent_turn_intent intent ON intent.turn_id = session.active_turn_id
-        WHERE session.active_turn_id = ${active.id} AND session.runtime_attempt_id = ${attemptID}
-          AND change.runtime_attempt_id = ${attemptID} AND runtime.state = 'ready'
-          AND intent.change_id = change.id AND intent.runtime_attempt_id = ${attemptID}
-          AND intent.session_id = session.opencode_session_id
-          AND session.state IN ('starting', 'working') AND NOT session.stop_pending
-          AND intent.terminal_outcome IS NULL
-      `;
+        const db = drizzleTransaction(sql);
+        const [current] = await db
+          .select({ id: changeAgentSession.changeId })
+          .from(changeAgentSession)
+          .innerJoin(change, eq(change.id, changeAgentSession.changeId))
+          .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId))
+          .innerJoin(
+            changeAgentTurnIntent,
+            eq(changeAgentTurnIntent.turnId, changeAgentSession.activeTurnId),
+          )
+          .where(
+            and(
+              eq(changeAgentSession.activeTurnId, active.id),
+              eq(changeAgentSession.runtimeAttemptId, attemptID),
+              eq(change.runtimeAttemptId, attemptID),
+              eq(runtimeAttempt.state, "ready"),
+              eq(changeAgentTurnIntent.changeId, change.id),
+              eq(changeAgentTurnIntent.runtimeAttemptId, attemptID),
+              eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+              inArray(changeAgentSession.state, ["starting", "working"]),
+              not(changeAgentSession.stopPending),
+              isNull(changeAgentTurnIntent.terminalOutcome),
+            ),
+          );
         if (!current) return;
         const budget = await codingBudgetIn(sql, active.projectID, true);
-        const hold =
-          await sql`SELECT turn_id FROM factory.coding_pause WHERE turn_id=${active.id} AND resumed_by_turn_id IS NULL`;
+        const hold = await db
+          .select({ turnID: codingPause.turnId })
+          .from(codingPause)
+          .where(and(eq(codingPause.turnId, active.id), isNull(codingPause.resumedByTurnId)));
         if (!budget.allowed || hold.length) {
           paused = true;
-          if (!hold.length)
-            await sql`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${active.id},${budget.reason})
-            ON CONFLICT(turn_id) DO UPDATE SET reason=EXCLUDED.reason,resumed_by_turn_id=NULL,created_at=now()`;
+          if (!hold.length) {
+            const reason = budget.reason as typeof codingPause.$inferInsert.reason;
+            await db
+              .insert(codingPause)
+              .values({ turnId: active.id, reason })
+              .onConflictDoUpdate({
+                target: codingPause.turnId,
+                set: { reason, resumedByTurnId: null, createdAt: expression`now()` },
+              });
+          }
           return;
         }
         // Checkpoint and relay dispatch share the Turn lock. Advance the
         // observation epoch before dispatch so a stale native terminal read
         // cannot checkpoint over a request admitted during that observation.
         const started = performance.now();
-        const [dispatch] = await sql<{ leaseRemainingMS: number }[]>`
-          UPDATE factory.change_agent_turn_intent intent
-          SET model_request_epoch=intent.model_request_epoch+1
-          FROM factory.agent_turn turn
-          WHERE intent.turn_id=${active.id} AND intent.terminal_outcome IS NULL
-            AND turn.id=intent.turn_id AND turn.owner_token=${active.ownerToken}
-            AND turn.state IN ('dispatching','running') AND turn.owner_expires_at>clock_timestamp()
-          RETURNING EXTRACT(EPOCH FROM (turn.owner_expires_at-clock_timestamp()))::float8*1000 AS "leaseRemainingMS"`;
+        const [dispatch] = await db
+          .update(changeAgentTurnIntent)
+          .set({ modelRequestEpoch: expression`${changeAgentTurnIntent.modelRequestEpoch}+1` })
+          .from(agentTurn)
+          .where(
+            and(
+              eq(changeAgentTurnIntent.turnId, active.id),
+              isNull(changeAgentTurnIntent.terminalOutcome),
+              eq(agentTurn.id, changeAgentTurnIntent.turnId),
+              eq(agentTurn.ownerToken, active.ownerToken),
+              inArray(agentTurn.state, ["dispatching", "running"]),
+              gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            ),
+          )
+          .returning({
+            leaseRemainingMS: expression<number>`EXTRACT(EPOCH FROM (${agentTurn.ownerExpiresAt}-clock_timestamp()))::float8*1000`,
+          });
         if (!dispatch || performance.now() - started >= dispatch.leaseRemainingMS) return;
         upstream = fetch(`${resolved.baseURL?.replace(/\/$/, "")}/${suffix}`, {
           method: "POST",

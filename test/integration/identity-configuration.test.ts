@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { createIdentityConfiguration } from "../../apps/factory/src/access/identity-configuration";
 import { identityConfiguration } from "../../packages/identity-domain/src/configuration";
 import { factoryProcess } from "../fixtures/factory-process";
-import { authenticatedBootstrap } from "../fixtures/server-functions";
 import { oidcProviderFixture } from "../fixtures/oidc-provider";
 
 test("protected sign-in intent recovers response loss, replays exactly, rejects untested activation and changes session policy live", async () => {
@@ -30,13 +29,14 @@ test("protected sign-in intent recovers response loss, replays exactly, rejects 
     },
   };
   try {
-    await fixture.start();
-    const cookie = await fixture.signIn();
-    const { session } = await authenticatedBootstrap(fixture.base, { cookie });
-    const admin = session.user.id;
     const control = createIdentityConfiguration(database, "controlled-hmac-secret", secrets, [
       "https://identity.example.test",
     ]);
+    await control.bootstrap();
+    const [manager] = await database.client<{ id: string }[]>`
+      SELECT user_id AS id FROM factory.administrator`;
+    if (!manager) throw new Error("Owned emergency administrator missing");
+    const admin = manager.id;
     const input = {
       commandID: crypto.randomUUID(),
       version: 0,
@@ -89,6 +89,91 @@ test("protected sign-in intent recovers response loss, replays exactly, rejects 
     expect(JSON.stringify(rows)).not.toContain("protected-provider-secret");
     expect(JSON.stringify(await control.view(admin))).not.toContain("protected-provider-secret");
     expect(await database.client`SELECT * FROM auth."ssoProvider"`).toHaveLength(0);
+  } finally {
+    await database.client.end();
+    await fixture.dispose();
+  }
+}, 60_000);
+
+test("activation rolls back publication and session cleanup together, and concurrent candidates publish one exact version", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect(1);
+  type StoreValue = {
+    commandID: string;
+    fingerprint: string;
+    configuration: ReturnType<typeof identityConfiguration.parse>;
+  };
+  const vault = new Map<string, StoreValue>();
+  const control = createIdentityConfiguration(database, "owned-activation-key", {
+    configured: true,
+    read: async (key) => vault.get(key),
+    create: async (key, value) => {
+      vault.set(key, value);
+    },
+  });
+  try {
+    await control.bootstrap();
+    const [manager] = await database.client<
+      { id: string }[]
+    >`SELECT user_id AS id FROM factory.administrator`;
+    if (!manager) throw new Error("Owned emergency administrator missing");
+    const admin = manager.id;
+    const first = {
+      commandID: crypto.randomUUID(),
+      version: 0,
+      configuration: identityConfiguration.parse({ mode: "local", sessionDays: 14 }),
+    };
+    const second = {
+      ...first,
+      commandID: crypto.randomUUID(),
+      configuration: identityConfiguration.parse({ mode: "local", sessionDays: 30 }),
+    };
+    await control.save(admin, first);
+    await control.save(admin, first); // Replay must stay on the existing transaction even with a one-connection pool.
+    await control.save(admin, second);
+    const sessionID = crypto.randomUUID();
+    await database.client`INSERT INTO auth.session(id,user_id,token,expires_at,login_method)
+      VALUES(${sessionID},${admin},${crypto.randomUUID()},now()+interval '1 day','identity-test')`;
+    await database.client`CREATE FUNCTION factory.reject_owned_identity_cleanup() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned identity cleanup failed'; END $$`;
+    await database.client`CREATE TRIGGER reject_owned_identity_cleanup BEFORE DELETE ON auth.session
+      FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_identity_cleanup()`;
+    await expect(control.activate(admin, first.commandID)).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: "Owned identity cleanup failed" }),
+    });
+    expect(
+      await database.client`SELECT singleton FROM factory.identity_configuration`,
+    ).toHaveLength(0);
+    const saved = await database.client<
+      { id: string; state: string }[]
+    >`SELECT id,state FROM factory.identity_setup`;
+    expect(saved).toHaveLength(2);
+    expect(saved.every((row) => row.state === "saved")).toBe(true);
+    expect(await database.client`SELECT id FROM auth.session WHERE id=${sessionID}`).toHaveLength(
+      1,
+    );
+    await database.client`DROP TRIGGER reject_owned_identity_cleanup ON auth.session`;
+    await database.client`DROP FUNCTION factory.reject_owned_identity_cleanup()`;
+    const result = await Promise.allSettled(
+      [first, second].map((input) => control.activate(admin, input.commandID)),
+    );
+    expect(result.filter((row) => row.status === "fulfilled")).toHaveLength(1);
+    expect(result.filter((row) => row.status === "rejected")).toHaveLength(1);
+    const [current] = await database.client<{ version: number; setupID: string }[]>`
+      SELECT version::int AS version,setup_id AS "setupID" FROM factory.identity_configuration`;
+    expect(current?.version).toBe(1);
+    if (!current) throw new Error("Owned active identity missing");
+    expect((await control.activate(admin, current.setupID)).version).toBe(1);
+    const winner = current.setupID === first.commandID ? first : second;
+    expect((await control.save(admin, winner)).version).toBe(1);
+    expect(vault.size).toBe(2);
+    expect(await database.client`SELECT id FROM auth.session WHERE id=${sessionID}`).toHaveLength(
+      0,
+    );
+    await expect(control.save(admin, { ...first, commandID: crypto.randomUUID() })).rejects.toThrow(
+      "settings changed",
+    );
+    expect(await database.client`SELECT id FROM factory.identity_setup`).toHaveLength(2);
   } finally {
     await database.client.end();
     await fixture.dispose();

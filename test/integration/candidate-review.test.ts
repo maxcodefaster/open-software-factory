@@ -8,6 +8,7 @@ import { createReviewAdmission } from "../../apps/factory/src/agent/review-admis
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { runtimeBuildBrowserToken } from "../../packages/runtime-domain/src/identity";
@@ -387,6 +388,41 @@ async function observedCases(
 test("independent review freezes the exact candidate and the original Coding configuration", async () => {
   const f = await candidateReviewFixture();
   try {
+    const before = await f.database.client`SELECT state,epoch::text,turn_id,updated_at::text
+      FROM factory.change_writer WHERE change_id=${f.changeID}`;
+    const aborting = {
+      ...f.database,
+      client: new Proxy(f.database.client, {
+        get(client, key, receiver) {
+          if (key !== "begin") return Reflect.get(client, key, receiver);
+          return (work: (sql: DatabaseTransaction) => Promise<unknown>) =>
+            client.begin(async (sql) => {
+              await work(sql);
+              const [recorded] = await sql`SELECT review.turn_id,intent.session_id,intent.bootstrap,
+              intent.runtime_attempt_id
+              FROM factory.candidate_review review
+              JOIN factory.change_agent_turn_intent intent ON intent.turn_id=review.turn_id
+              WHERE review.id=${f.reviewID}`;
+              expect(recorded).toMatchObject({
+                session_id: `ses_factory_review_${f.reviewID.replaceAll("-", "")}`,
+                bootstrap: true,
+                runtime_attempt_id: null,
+              });
+              throw new Error("Owned review admission rollback");
+            });
+        },
+      }),
+    };
+    await expect(createReviewAdmission(aborting)(f.changeID, f.reviewID, f.userID)).rejects.toThrow(
+      "Owned review admission rollback",
+    );
+    expect(await f.turns.getByCommand(f.reviewID)).toBeNull();
+    expect((await f.review())?.turnID).toBeNull();
+    expect(
+      await f.database.client`SELECT state,epoch::text,turn_id,updated_at::text
+      FROM factory.change_writer WHERE change_id=${f.changeID}`,
+    ).toEqual(before);
+    expect(f.requests()).toBe(0);
     const admission = createReviewAdmission(f.database);
     const a = await admission(f.changeID, f.reviewID, f.userID);
     const b = await admission(f.changeID, f.reviewID, f.userID);

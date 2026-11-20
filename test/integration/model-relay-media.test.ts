@@ -42,6 +42,7 @@ test("the admitted model can receive retained browser screenshots beyond the old
   const finishUpload = Promise.withResolvers<void>();
   let pending: Promise<Response> | undefined;
   let calls = 0;
+  let revokeDuringDrain = false;
   const provider = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -70,10 +71,28 @@ test("the admitted model can receive retained browser screenshots beyond the old
       state='working',opencode_session_id=(SELECT session_id FROM factory.change_agent_turn_intent
         WHERE turn_id=${turn.id}) WHERE change_id=${owned.changeID}`;
     const secret = "owned-media-relay-secret";
-    const relay = createModelRelay(owned.database, secret, {
-      baseURL: `http://127.0.0.1:${provider.port}/v1`,
-      apiKey: "owned-media-provider-key",
-    });
+    const [beforeEpoch] = await owned.database.client<{ epoch: string }[]>`
+      SELECT model_request_epoch::text AS epoch FROM factory.change_agent_turn_intent WHERE turn_id=${turn.id}`;
+    if (!beforeEpoch) throw new Error("Owned relay epoch missing");
+    const relay = createModelRelay(
+      owned.database,
+      secret,
+      {
+        baseURL: `http://127.0.0.1:${provider.port}/v1`,
+        apiKey: "owned-media-provider-key",
+      },
+      async (turnID, attemptID, sessionID) => {
+        expect(turnID).toBe(turn.id);
+        expect(attemptID).toBe(owned.attemptID);
+        const [intent] = await owned.database.client`SELECT session_id
+          FROM factory.change_agent_turn_intent WHERE turn_id=${turn.id}`;
+        expect(sessionID).toBe(intent?.["session_id"]);
+        if (revokeDuringDrain)
+          await owned.database
+            .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true
+            WHERE change_id=${owned.changeID}`;
+      },
+    );
     const request = new Request("http://factory.invalid/internal/model", {
       method: "POST",
       headers: {
@@ -86,6 +105,30 @@ test("the admitted model can receive retained browser screenshots beyond the old
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("data: owned-browser-observation\n\n");
     expect(calls).toBe(1);
+    const epoch = async () => {
+      const [row] = await owned.database.client<{ epoch: string }[]>`
+        SELECT model_request_epoch::text AS epoch FROM factory.change_agent_turn_intent WHERE turn_id=${turn.id}`;
+      if (!row) throw new Error("Owned relay epoch missing");
+      return BigInt(row.epoch);
+    };
+    expect(await epoch()).toBe(BigInt(beforeEpoch.epoch) + 1n);
+    revokeDuringDrain = true;
+    const denied = await relay(
+      new Request("http://factory.invalid/internal/model", {
+        method: "POST",
+        headers: { authorization: `Bearer ${runtimeModelToken(secret, owned.attemptID, 1)}` },
+        body: JSON.stringify({ model: buildModelID, reasoning: { effort: "medium" }, input: [] }),
+      }),
+      owned.attemptID,
+      "responses",
+    );
+    expect(denied.status).toBe(403);
+    expect(calls).toBe(1);
+    expect(await epoch()).toBe(BigInt(beforeEpoch.epoch) + 1n);
+    revokeDuringDrain = false;
+    await owned.database
+      .client`UPDATE factory.change_agent_session SET state='working',stop_pending=false
+      WHERE change_id=${owned.changeID}`;
     let phase = 0;
     pending = relay(
       new Request("http://factory.invalid/internal/model", {
@@ -112,6 +155,7 @@ test("the admitted model can receive retained browser screenshots beyond the old
     finishUpload.resolve();
     expect((await pending).status).toBe(403);
     expect(calls).toBe(1);
+    expect(await epoch()).toBe(BigInt(beforeEpoch.epoch) + 1n);
   } finally {
     finishUpload.resolve();
     await pending?.then((response) => response.body?.cancel()).catch(() => {});

@@ -10,6 +10,7 @@ import { readResearch, searchResearch } from "../../apps/factory/src/project-age
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { appendTicketAuthoringIn } from "../../packages/ticket-authoring/src/authoring";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
@@ -168,6 +169,67 @@ test("weighted indexed research finds current specs, typos, references and relat
     expect(
       (await readResearch(db, owned.projectID, owned.userID, "epic", epic)).relationships[0]?.id,
     ).toBe(owned.ticketID);
+    for (const kind of ["requirement", "document"] as const) {
+      for (const [ordinal, summary] of [
+        [1, `Obsolete apricot ${kind} mandate`],
+        [2, `Current blueberry ${kind} mandate`],
+      ] as const) {
+        await appendTicketAuthoringIn(db.db, {
+          ticketId: dependent,
+          createdBy: owned.userID,
+          title: "Deliver export",
+          description: "",
+          canonicalContent: canonicalRequirementContent({
+            summary,
+            acceptanceCriteria: ["Preserve the saved authoring"],
+            nonGoals: [],
+          }),
+          ...(kind === "requirement"
+            ? { requirement: { id: crypto.randomUUID(), ordinal } }
+            : {
+                document: {
+                  id: crypto.randomUUID(),
+                  ordinal,
+                  requirementRevisionId: null,
+                  inputDigest: "c".repeat(64),
+                  authorKind: "human" as const,
+                },
+              }),
+        });
+      }
+      expect(
+        (await searchResearch(db, owned.projectID, owned.userID, "apricot", "ticket")).some(
+          (hit) => hit.id === dependent,
+        ),
+      ).toBe(false);
+      expect(
+        (await searchResearch(db, owned.projectID, owned.userID, "blueberry", "ticket")).filter(
+          (hit) => hit.id === dependent,
+        ),
+      ).toHaveLength(1);
+      const current = await readResearch(db, owned.projectID, owned.userID, "ticket", dependent);
+      expect(current.body).toContain(`Current blueberry ${kind} mandate`);
+      expect(current.body).not.toContain("apricot");
+    }
+    const childID = crypto.randomUUID();
+    await db.client`INSERT INTO factory.knowledge_page(id,project_id,parent_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
+      VALUES(${childID},${owned.projectID},${wikiID},'child-permissions','Child permissions','Retained child','Retained child',${"b".repeat(40)},${owned.userID})`;
+    expect(
+      (await readResearch(db, owned.projectID, owned.userID, "knowledge", wikiID)).relationships,
+    ).toContainEqual({
+      source: "knowledge",
+      id: childID,
+      label: "Child permissions",
+      relationship: "child-page",
+    });
+    expect(
+      (await readResearch(db, owned.projectID, owned.userID, "knowledge", childID)).relationships,
+    ).toContainEqual({
+      source: "knowledge",
+      id: wikiID,
+      label: "Permissions",
+      relationship: "parent-page",
+    });
     expect(await searchResearch(db, owned.projectID, owned.userID, "' | & ! <script> ;")).toEqual(
       [],
     );
@@ -627,6 +689,66 @@ test("Epic confirmation keeps an implemented origin and its admitted scope witho
     expect(
       await db.client`SELECT id FROM factory.change WHERE project_id=${owned.projectID}`,
     ).toHaveLength(1);
+  } finally {
+    await db.client.end();
+    await process.dispose();
+  }
+}, 60000);
+
+test("draft Epic confirmation remains personal and handles an empty reused-Ticket set", async () => {
+  const process = await factoryProcess();
+  const db = process.connect();
+  try {
+    const owned = await fixture(undefined, undefined, db);
+    const otherID = crypto.randomUUID();
+    await db.client`INSERT INTO auth."user"(id,name,email) VALUES(${otherID},'Other contributor',${`${otherID}@test.local`})`;
+    await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${owned.projectID},${otherID},'developer',${owned.userID})`;
+    const conversationID = crypto.randomUUID();
+    const entryID = crypto.randomUUID();
+    const proposal: EpicProposal = {
+      epic: { title: "Manual draft decision", description: "Retain explicit confirmation" },
+      members: ["new", "followup"].map((key) => ({
+        key,
+        existingTicketId: null,
+        expectedVersion: null,
+        title: `New saved intent ${key}`,
+        description: "No inference or approval",
+        requirement: {
+          summary: "Manual requirements",
+          acceptanceCriteria: ["Retain the author"],
+          nonGoals: [],
+        },
+        dependsOn: key === "followup" ? ["new"] : [],
+      })),
+    };
+    await db.client`INSERT INTO factory.ticket_conversation(id,project_id,created_by,mode)
+      VALUES(${conversationID},${owned.projectID},${owned.userID},'plan')`;
+    await db.client`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload)
+      VALUES(${entryID},${conversationID},1,'requirement','project-agent','plan','Review',${JSON.stringify({ epicProposal: proposal })}::jsonb)`;
+    const confirm = createEpicConfirmation(db);
+    const input = { commandId: crypto.randomUUID(), proposal };
+    await expect(confirm(owned.projectID, entryID, otherID, input)).rejects.toMatchObject({
+      code: "not-found",
+    });
+    const saved = await confirm(owned.projectID, entryID, owned.userID, input);
+    expect(saved).toEqual({
+      epicId: proposalIdentity(entryID, "epic"),
+      ticketIds: [proposalIdentity(entryID, "new"), proposalIdentity(entryID, "followup")],
+    });
+    expect(await confirm(owned.projectID, entryID, owned.userID, input)).toEqual(saved);
+    await expect(confirm(owned.projectID, entryID, otherID, input)).rejects.toMatchObject({
+      code: "conflict",
+    });
+    expect(
+      await db.client`SELECT id FROM factory.agent_turn WHERE conversation_id=${conversationID}`,
+    ).toHaveLength(0);
+    expect(
+      await db.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=ANY(${saved.ticketIds}::uuid[])`,
+    ).toHaveLength(0);
+    expect(
+      await db.client`SELECT id FROM factory.change WHERE ticket_id=ANY(${saved.ticketIds}::uuid[])`,
+    ).toHaveLength(0);
   } finally {
     await db.client.end();
     await process.dispose();

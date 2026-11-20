@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import type { APIRequestContext } from "@playwright/test";
 import { createRuntimeService } from "../../apps/factory/src/runtime/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { type createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { SystemContractError } from "../../packages/system-contract/src/system-contract";
 import {
   callFactoryFunction,
@@ -128,8 +129,15 @@ test("compiled Stop confirms an authorized prebuild without rejecting its settle
     createdAt: new Date("2026-10-28T00:00:00Z"),
     updatedAt: new Date("2026-10-28T00:01:00Z"),
   };
+  const client = {
+    unsafe(statement: string, parameters: unknown[]) {
+      expect(statement).toContain('select "workspace_id" from "factory"."runtime_attempt"');
+      expect(parameters).toEqual([attemptID]);
+      return { values: async () => [[null]] };
+    },
+  } as unknown as ReturnType<typeof createDatabase>["client"];
   const runtime = createRuntimeService({
-    database: { client: async () => [{ id: null }] },
+    database: { client, db: drizzleTransaction(client) },
     access: {
       async requireRuntime(userID: string, id: string, channel: string) {
         expect([userID, id, channel]).toEqual([actor, attemptID, "ide"]);

@@ -1,6 +1,8 @@
 import { createHmac } from "node:crypto";
+import { and, eq, isNull, ne, notInArray, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { workspaceFileOperation, workspaceFileTransfer } from "../../../../packages/db/src/schema";
 import {
   type ContainerFileMutation,
   containerFileMutation,
@@ -104,11 +106,26 @@ export function createWorkspaceContainerFiles(
     return JSON.parse(response) as unknown;
   }
   async function transfer(userID: string, id: string, active = true) {
-    const [row] = await database.client<
-      Transfer[]
-    >`SELECT id,workspace_id AS "workspaceID",runtime_attempt_id AS "attemptID",
-      actor_id AS "actorID",direction,input_digest AS digest,path,state,result,expires_at AS "expiresAt"
-      FROM factory.workspace_file_transfer WHERE id=${z.uuid().parse(id)} AND actor_id=${userID}`;
+    const [row] = await database.db
+      .select({
+        id: workspaceFileTransfer.id,
+        workspaceID: workspaceFileTransfer.workspaceId,
+        attemptID: workspaceFileTransfer.runtimeAttemptId,
+        actorID: workspaceFileTransfer.actorId,
+        direction: workspaceFileTransfer.direction,
+        digest: workspaceFileTransfer.inputDigest,
+        path: workspaceFileTransfer.path,
+        state: workspaceFileTransfer.state,
+        result: workspaceFileTransfer.result,
+        expiresAt: workspaceFileTransfer.expiresAt,
+      })
+      .from(workspaceFileTransfer)
+      .where(
+        and(
+          eq(workspaceFileTransfer.id, z.uuid().parse(id)),
+          eq(workspaceFileTransfer.actorId, userID),
+        ),
+      );
     if (!row) throw new CommandError("not-found", "File transfer not found");
     row.expiresAt = z.coerce.date().parse(row.expiresAt);
     await authorize(userID, row.workspaceID, row.direction === "upload");
@@ -159,10 +176,16 @@ export function createWorkspaceContainerFiles(
         "Native transfer identity differs from its retained intent",
       );
     const { content: _content, ...compact } = result;
-    await database.client`UPDATE factory.workspace_file_transfer SET result=${JSON.stringify(compact)}::text::jsonb,
-      state=CASE WHEN state IN ('committed','releasing','released') THEN state WHEN ${row.direction === "upload" && result.complete} THEN 'committed'
-        WHEN commit_attempted_at IS NOT NULL THEN state ELSE 'active' END,
-      updated_at=now() WHERE id=${row.id}`;
+    await database.db
+      .update(workspaceFileTransfer)
+      .set({
+        result: compact,
+        state: query`CASE WHEN ${workspaceFileTransfer.state} IN ('committed','releasing','released')
+          THEN ${workspaceFileTransfer.state} WHEN ${row.direction === "upload" && result.complete} THEN 'committed'
+          WHEN ${workspaceFileTransfer.commitAttemptedAt} IS NOT NULL THEN ${workspaceFileTransfer.state} ELSE 'active' END`,
+        updatedAt: query`now()`,
+      })
+      .where(eq(workspaceFileTransfer.id, row.id));
   }
   async function status(userID: string, id: string) {
     const row = await transfer(userID, id, false);
@@ -187,8 +210,15 @@ export function createWorkspaceContainerFiles(
         );
       } catch {
         await authorize(userID, row.workspaceID);
-        await database.client`UPDATE factory.workspace_file_transfer SET state='uncertain',updated_at=now()
-          WHERE id=${id} AND state NOT IN ('committed','releasing','released')`;
+        await database.db
+          .update(workspaceFileTransfer)
+          .set({ state: "uncertain", updatedAt: query`now()` })
+          .where(
+            and(
+              eq(workspaceFileTransfer.id, id),
+              notInArray(workspaceFileTransfer.state, ["committed", "releasing", "released"]),
+            ),
+          );
       }
     }
     return view(await transfer(userID, id, false));
@@ -197,10 +227,10 @@ export function createWorkspaceContainerFiles(
     const input = workspaceTransferInput.parse(value);
     await authorize(userID, input.workspaceID, input.direction === "upload");
     const fingerprint = digest(input);
-    const [existing] = await database.client<
-      { digest: string; actorID: string }[]
-    >`SELECT input_digest AS digest,actor_id AS "actorID"
-      FROM factory.workspace_file_transfer WHERE id=${input.requestID}`;
+    const [existing] = await database.db
+      .select({ digest: workspaceFileTransfer.inputDigest, actorID: workspaceFileTransfer.actorId })
+      .from(workspaceFileTransfer)
+      .where(eq(workspaceFileTransfer.id, input.requestID));
     if (existing) {
       if (existing.digest !== fingerprint || existing.actorID !== userID)
         throw new CommandError(
@@ -214,10 +244,20 @@ export function createWorkspaceContainerFiles(
       if (input.direction === "upload")
         await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
       else await workspaceAuthorityIn(sql, input.workspaceID, userID, true);
-      const [row] =
-        await sql`INSERT INTO factory.workspace_file_transfer(id,workspace_id,runtime_attempt_id,actor_id,direction,input_digest,path,state)
-        VALUES(${input.requestID},${input.workspaceID},${attemptID},${userID},${input.direction},${fingerprint},${input.path},'preparing')
-        ON CONFLICT(id) DO NOTHING RETURNING id`;
+      const [row] = await drizzleTransaction(sql)
+        .insert(workspaceFileTransfer)
+        .values({
+          id: input.requestID,
+          workspaceId: input.workspaceID,
+          runtimeAttemptId: attemptID,
+          actorId: userID,
+          direction: input.direction,
+          inputDigest: fingerprint,
+          path: input.path,
+          state: "preparing",
+        })
+        .onConflictDoNothing({ target: workspaceFileTransfer.id })
+        .returning({ id: workspaceFileTransfer.id });
       return Boolean(row);
     });
     if (!created) return begin(userID, input);
@@ -242,7 +282,12 @@ export function createWorkspaceContainerFiles(
         ),
       );
     } catch (cause) {
-      await database.client`UPDATE factory.workspace_file_transfer SET state='uncertain',updated_at=now() WHERE id=${row.id} AND state='preparing'`;
+      await database.db
+        .update(workspaceFileTransfer)
+        .set({ state: "uncertain", updatedAt: query`now()` })
+        .where(
+          and(eq(workspaceFileTransfer.id, row.id), eq(workspaceFileTransfer.state, "preparing")),
+        );
       throw cause;
     }
     return view(await transfer(userID, row.id));
@@ -342,10 +387,14 @@ export function createWorkspaceContainerFiles(
         const input = containerFileMutation.parse(value);
         await authorize(userID, input.workspaceID, true);
         const fingerprint = digest(input);
-        const [existing] = await database.client<
-          { digest: string; actorID: string; result: unknown }[]
-        >`SELECT input_digest AS digest,actor_id AS "actorID",result
-        FROM factory.workspace_file_operation WHERE id=${input.requestID}`;
+        const [existing] = await database.db
+          .select({
+            digest: workspaceFileOperation.inputDigest,
+            actorID: workspaceFileOperation.actorId,
+            result: workspaceFileOperation.result,
+          })
+          .from(workspaceFileOperation)
+          .where(eq(workspaceFileOperation.id, input.requestID));
         if (existing) {
           if (existing.digest !== fingerprint || existing.actorID !== userID)
             throw new CommandError(
@@ -355,9 +404,18 @@ export function createWorkspaceContainerFiles(
           return existing.result ?? { requestID: input.requestID, state: "uncertain" };
         }
         const attemptID = await ready(input.workspaceID, userID);
-        const [created] =
-          await database.client`INSERT INTO factory.workspace_file_operation(id,workspace_id,runtime_attempt_id,actor_id,action,input_digest)
-        VALUES(${input.requestID},${input.workspaceID},${attemptID},${userID},${input.action},${fingerprint}) ON CONFLICT(id) DO NOTHING RETURNING id`;
+        const [created] = await database.db
+          .insert(workspaceFileOperation)
+          .values({
+            id: input.requestID,
+            workspaceId: input.workspaceID,
+            runtimeAttemptId: attemptID,
+            actorId: userID,
+            action: input.action,
+            inputDigest: fingerprint,
+          })
+          .onConflictDoNothing({ target: workspaceFileOperation.id })
+          .returning({ id: workspaceFileOperation.id });
         if (!created)
           throw new CommandError(
             "conflict",
@@ -366,7 +424,10 @@ export function createWorkspaceContainerFiles(
         const result = nativeFile.parse(
           await call(userID, input.workspaceID, attemptID, `file-${input.action}`, input, true),
         );
-        await database.client`UPDATE factory.workspace_file_operation SET result=${JSON.stringify(result)}::text::jsonb,completed_at=now() WHERE id=${input.requestID}`;
+        await database.db
+          .update(workspaceFileOperation)
+          .set({ result, completedAt: query`now()` })
+          .where(eq(workspaceFileOperation.id, input.requestID));
         return result;
       }),
     upload: (userID: string, id: string, offset: number, content: Uint8Array) =>
@@ -415,7 +476,10 @@ export function createWorkspaceContainerFiles(
           const { content: _content, ...compact } = result;
           if (result.id !== id || result.path !== row.path)
             throw new CommandError("unavailable", "Native upload identity changed");
-          await sql`UPDATE factory.workspace_file_transfer SET result=${JSON.stringify(compact)}::text::jsonb,updated_at=now() WHERE id=${id}`;
+          await drizzleTransaction(sql)
+            .update(workspaceFileTransfer)
+            .set({ result: compact, updatedAt: query`now()` })
+            .where(eq(workspaceFileTransfer.id, id));
         });
         return view(await transfer(userID, id));
       }),
@@ -468,9 +532,17 @@ export function createWorkspaceContainerFiles(
         if (row.direction !== "upload") throw new CommandError("conflict", "Only uploads commit");
         if (row.state === "committed") return view(row);
         await readyTransfer(userID, row);
-        const [claimed] =
-          await database.client`UPDATE factory.workspace_file_transfer SET state='committing',commit_attempted_at=now(),updated_at=now()
-        WHERE id=${id} AND state='active' AND commit_attempted_at IS NULL RETURNING id`;
+        const [claimed] = await database.db
+          .update(workspaceFileTransfer)
+          .set({ state: "committing", commitAttemptedAt: query`now()`, updatedAt: query`now()` })
+          .where(
+            and(
+              eq(workspaceFileTransfer.id, id),
+              eq(workspaceFileTransfer.state, "active"),
+              isNull(workspaceFileTransfer.commitAttemptedAt),
+            ),
+          )
+          .returning({ id: workspaceFileTransfer.id });
         if (!claimed) return status(userID, id);
         try {
           await observe(
@@ -487,7 +559,12 @@ export function createWorkspaceContainerFiles(
             ),
           );
         } catch (cause) {
-          await database.client`UPDATE factory.workspace_file_transfer SET state='uncertain',updated_at=now() WHERE id=${id} AND state='committing'`;
+          await database.db
+            .update(workspaceFileTransfer)
+            .set({ state: "uncertain", updatedAt: query`now()` })
+            .where(
+              and(eq(workspaceFileTransfer.id, id), eq(workspaceFileTransfer.state, "committing")),
+            );
           throw cause;
         }
         return view(await transfer(userID, id));
@@ -496,7 +573,12 @@ export function createWorkspaceContainerFiles(
       track(async () => {
         const row = await transfer(userID, id, false);
         if (row.state === "released") return view(row);
-        await database.client`UPDATE factory.workspace_file_transfer SET state='releasing',updated_at=now() WHERE id=${id} AND state<>'released'`;
+        await database.db
+          .update(workspaceFileTransfer)
+          .set({ state: "releasing", updatedAt: query`now()` })
+          .where(
+            and(eq(workspaceFileTransfer.id, id), ne(workspaceFileTransfer.state, "released")),
+          );
         await call(
           userID,
           row.workspaceID,
@@ -505,7 +587,10 @@ export function createWorkspaceContainerFiles(
           { id },
           row.direction === "upload",
         );
-        await database.client`UPDATE factory.workspace_file_transfer SET state='released',updated_at=now() WHERE id=${id}`;
+        await database.db
+          .update(workspaceFileTransfer)
+          .set({ state: "released", updatedAt: query`now()` })
+          .where(eq(workspaceFileTransfer.id, id));
         return view(await transfer(userID, id, false));
       }),
     async close() {

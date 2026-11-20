@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createForgeAccessReconciliation } from "../../apps/factory/src/access/forge";
+import { forgeUsername } from "../../packages/forge/src/access";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -8,6 +9,7 @@ test("Change branch reconciliation persists exact text writers before confirming
   const owner = "factory";
   let expectedWriters: readonly string[] = [];
   let protections = 0;
+  let loseProtectionResponse = false;
   try {
     const forge = createForgeAccessReconciliation({
       database: owned.database,
@@ -31,6 +33,7 @@ test("Change branch reconciliation persists exact text writers before confirming
             confirmed: false,
           });
           protections++;
+          if (loseProtectionResponse) throw new Error("Owned protection acknowledgement lost");
         },
       },
     });
@@ -50,6 +53,16 @@ test("Change branch reconciliation persists exact text writers before confirming
       expect(intent).toEqual({ writers: [...expectedWriters], merger: owner, confirmed: true });
     }
     expect(protections).toBe(3);
+    loseProtectionResponse = true;
+    await expect(forge.protectChange(owned.changeID, expectedWriters)).rejects.toThrow(
+      "acknowledgement lost",
+    );
+    const [unconfirmed] = await owned.database.client<{ confirmed: boolean }[]>`
+      SELECT confirmed FROM factory.forge_branch_intent WHERE project_id=${owned.projectID} AND writers=${[...expectedWriters]}::text[]`;
+    expect(unconfirmed?.confirmed).toBe(false);
+    loseProtectionResponse = false;
+    await forge.protectChange(owned.changeID, expectedWriters);
+    expect(protections).toBe(5);
   } finally {
     await owned.dispose();
   }
@@ -146,10 +159,99 @@ test.each(["private", "public"] as const)(
         await database.client`SELECT project_id FROM factory.forge_grant_intent
         WHERE project_id=${other}`,
       ).toHaveLength(0);
+      for (const repositoryURL of [
+        `${publicOrigin}/factory/wrong-repository.git`,
+        `${publicOrigin}/other-owner/${repository}.git`,
+        `${publicOrigin}/factory/${repository}.git?token=owned-secret`,
+        `${publicOrigin}/factory/${repository}.git#other`,
+        `https://user:owned-secret@git.public.test/factory/${repository}.git`,
+      ]) {
+        await database.client`UPDATE factory.project SET repository_url=${repositoryURL} WHERE id=${owned.projectID}`;
+        await expect(access.reconcile(owned.userID)).rejects.toThrow("recorded forge identity");
+      }
+      expect(grants).toEqual([{ repository, enabled: true }]);
     } finally {
       await database.client.end({ timeout: 2 });
       await host.dispose();
     }
   },
   30_000,
+);
+
+test.each(["lost-grant", "authority-loss"] as const)(
+  "reconciliation retains intent and keeps the account suspended after %s, then observes the exact current permission",
+  async (failure) => {
+    const host = await factoryProcess();
+    const database = host.connect(1);
+    try {
+      const owned = await fixture(undefined, undefined, database);
+      const repository = `build-turn-${owned.projectID.replaceAll("-", "").slice(0, 12)}`;
+      await database.client`UPDATE factory.project SET repository_url=${`https://git.owned.test/factory/${repository}.git`} WHERE id=${owned.projectID}`;
+      await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
+        VALUES('Factory','https://factory.owned.test/oidc','https://git.owned.test/callback',7,'ready',${owned.userID})`;
+      let fail = true;
+      let accountCreated = false;
+      const enabled: boolean[] = [];
+      const access = createForgeAccessReconciliation({
+        database,
+        owner: "factory",
+        origin: "https://git.owned.test",
+        publicOrigin: "https://git.owned.test",
+        forge: {
+          readAccount: async () =>
+            accountCreated
+              ? {
+                  id: 71,
+                  login: forgeUsername(owned.userID),
+                  login_name: owned.userID,
+                  source_id: 7,
+                  active: false,
+                  prohibit_login: true,
+                  is_admin: false,
+                  restricted: true,
+                }
+              : undefined,
+          ensureAccount: async (input) => {
+            enabled.push(input.enabled);
+            accountCreated = true;
+            return 71;
+          },
+          removeAlternativeGrants: async () => {},
+          protectBranch: async () => {},
+          repositoryGrant: async (_owner, _repository, userID, desired) => {
+            const [intent] = await database.client<
+              { desired: boolean; confirmed: boolean | null }[]
+            >`
+              SELECT desired,confirmed FROM factory.forge_grant_intent WHERE project_id=${owned.projectID} AND user_id=${userID}`;
+            expect(intent).toEqual({ desired, confirmed: null });
+            if (fail) {
+              if (failure === "lost-grant") throw new Error("Owned grant acknowledgement lost");
+              await database.client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${owned.projectID} AND user_id=${userID}`;
+            }
+          },
+        },
+      });
+      await expect(access.reconcile(owned.userID)).rejects.toThrow(
+        failure === "lost-grant" ? "acknowledgement lost" : "permissions changed",
+      );
+      expect(enabled).toEqual([false]);
+      const [unsettled] = await database.client<{ state: string; source: number }[]>`
+        SELECT state,source_id::int AS source FROM factory.forge_account_intent WHERE user_id=${owned.userID}`;
+      expect(unsettled).toEqual({ state: "create-intended", source: 7 });
+      fail = false;
+      await access.reconcile(owned.userID);
+      const desired = failure === "lost-grant";
+      const [settled] = await database.client<{ state: string; observed: number }[]>`
+        SELECT state,forge_user_id::int AS observed FROM factory.forge_account_intent WHERE user_id=${owned.userID}`;
+      expect(settled).toEqual({ state: desired ? "ready" : "disabled", observed: 71 });
+      const [grant] = await database.client<{ desired: boolean; confirmed: boolean }[]>`
+        SELECT desired,confirmed FROM factory.forge_grant_intent WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+      expect(grant).toEqual({ desired, confirmed: desired });
+      expect(enabled).toEqual([false, false, desired]);
+    } finally {
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  60_000,
 );

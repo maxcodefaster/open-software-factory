@@ -1,8 +1,10 @@
+import { eq } from "drizzle-orm";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { developmentWorkspace, runtimeAttempt } from "../../../../packages/db/src/schema";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { workspaceAuthorityIn } from "../access/workspace";
 import type { createAccessController } from "../access/controller";
 import type { createProjectAppPreviews } from "../access/previews";
+import { workspaceAuthorityIn } from "../access/workspace";
 import {
   appPreviewsSchema,
   attemptsResponseSchema,
@@ -52,8 +54,10 @@ export function createRuntimeService(options: {
     async startTicket(userID: string, changeID: string) {
       const projectID = await options.access.requireChange(userID, changeID);
       await options.access.requireDevelopment(userID, projectID);
-      const [workspace] = await options.database.client<{ id: string }[]>`
-        SELECT id FROM factory.development_workspace WHERE change_id=${changeID}`;
+      const [workspace] = await options.database.db
+        .select({ id: developmentWorkspace.id })
+        .from(developmentWorkspace)
+        .where(eq(developmentWorkspace.changeId, changeID));
       if (!workspace)
         throw new CommandError(
           "conflict",
@@ -66,8 +70,10 @@ export function createRuntimeService(options: {
     },
     async stop(userID: string, attemptID: string) {
       await options.access.requireRuntime(userID, attemptID, "ide");
-      const [workspace] = await options.database.client<{ id: string | null }[]>`
-        SELECT workspace_id AS id FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      const [workspace] = await options.database.db
+        .select({ id: runtimeAttempt.workspaceId })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.id, attemptID));
       if (workspace?.id) {
         const workspaceID = workspace.id;
         await options.database.client.begin((sql) =>
@@ -83,9 +89,10 @@ export function createRuntimeService(options: {
     },
     async startFresh(userID: string, attemptID: string) {
       await options.access.requireRuntime(userID, attemptID, "ide");
-      const [workspace] = await options.database.client<
-        Array<{ id: string | null; projectID: string }>
-      >`SELECT workspace_id AS id,project_id AS "projectID" FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      const [workspace] = await options.database.db
+        .select({ id: runtimeAttempt.workspaceId, projectID: runtimeAttempt.projectId })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.id, attemptID));
       if (!workspace?.id) throw new CommandError("not-found", "Runtime Attempt not found");
       await options.access.requireDevelopment(userID, workspace.projectID);
       const workspaceID = workspace.id;

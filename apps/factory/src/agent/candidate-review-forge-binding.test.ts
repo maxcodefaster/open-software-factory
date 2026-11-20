@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { eq } from "drizzle-orm";
 import { drizzleTransaction } from "../../../../packages/db/src/client";
 import { agentTurn } from "../../../../packages/db/src/schema";
-import { eq } from "drizzle-orm";
+import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
   forgeBinding,
   forgeBindingDatabase,
@@ -60,7 +60,7 @@ test("review binds injected Forge readers before source calls, retaining exact r
     outcome_summary: null,
   };
   const fixture = forgeBindingDatabase(
-    (text, parameters) => {
+    (text) => {
       if (text.startsWith("SELECT * FROM factory.agent_turn")) return lease ? [turn] : [];
       if (text.startsWith("SELECT id FROM factory.agent_turn"))
         return lease ? [{ id: turnID }] : [];
@@ -93,10 +93,6 @@ test("review binds injected Forge readers before source calls, retaining exact r
         text.includes("FROM factory.review_scenario")
       )
         return [];
-      if (text.startsWith("UPDATE factory.candidate_review SET evidence")) {
-        evidence.push(...JSON.parse(String(parameters[0])));
-        return [];
-      }
       throw new Error(`Unexpected review query: ${text}`);
     },
     (text, parameters) => {
@@ -134,6 +130,12 @@ test("review binds injected Forge readers before source calls, retaining exact r
       if (text.includes('from "factory"."change"')) return [[changeID]];
       if (text.includes('from "factory"."change_writer"')) return [["agent", turnID]];
       if (text.includes('from "factory"."ticket_conversation"')) return [];
+      if (text.includes('from "factory"."review_scenario"')) return [];
+      if (text.startsWith('update "factory"."candidate_review" set "evidence"')) {
+        expect(parameters[1]).toBe(reviewID);
+        evidence.push(...JSON.parse(String(parameters[0])));
+        return [];
+      }
       throw new Error(`Unexpected review authority query: ${text}`);
     },
   );

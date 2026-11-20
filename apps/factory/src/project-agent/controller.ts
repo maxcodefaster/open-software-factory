@@ -1,4 +1,6 @@
 import { setTimeout as wait } from "node:timers/promises";
+import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import {
@@ -18,7 +20,25 @@ import {
 } from "../../../../packages/conversation-domain/src/conversation";
 import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { ProjectAgentProgress } from "../../../../packages/conversation-domain/src/turn-observation";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  agentTurnSkill,
+  change,
+  conversationEntry,
+  epic,
+  knowledgePage,
+  mcpObservation,
+  requirementApproval,
+  requirementRevision,
+  technicalDesignRevision,
+  ticket,
+  ticketConversation,
+} from "../../../../packages/db/src/schema";
 import { technicalPlanningBaseInput } from "../../../../packages/requirement-domain/src/technical-design";
 import {
   createAccessController,
@@ -218,14 +238,36 @@ export function createProjectAgentController(
       .map((value) => value.id);
     const ticketIDs = parsed.filter((value) => value.source === "ticket").map((value) => value.id);
     const epicIDs = parsed.filter((value) => value.source === "epic").map((value) => value.id);
-    const rows = await database.client<Array<{ source: string; id: string }>>`
-      SELECT 'knowledge'::text AS source, id FROM factory.knowledge_page
-      WHERE project_id = ${projectID} AND state='active' AND id = ANY(${knowledgeIDs}::uuid[])
-      UNION ALL
-      SELECT 'ticket'::text AS source, id FROM factory.ticket
-      WHERE project_id = ${projectID} AND trashed_at IS NULL AND state!='cancelled' AND converted_to_epic_id IS NULL AND id = ANY(${ticketIDs}::uuid[])
-      UNION ALL SELECT 'epic',id FROM factory.epic WHERE project_id=${projectID} AND id=ANY(${epicIDs}::uuid[])
-    `;
+    const rows = await database.db
+      .select({ source: sql<string>`'knowledge'::text`, id: knowledgePage.id })
+      .from(knowledgePage)
+      .where(
+        and(
+          eq(knowledgePage.projectId, projectID),
+          eq(knowledgePage.state, "active"),
+          inArray(knowledgePage.id, knowledgeIDs),
+        ),
+      )
+      .unionAll(
+        database.db
+          .select({ source: sql<string>`'ticket'::text`, id: ticket.id })
+          .from(ticket)
+          .where(
+            and(
+              eq(ticket.projectId, projectID),
+              isNull(ticket.trashedAt),
+              ne(ticket.state, "cancelled"),
+              isNull(ticket.convertedToEpicId),
+              inArray(ticket.id, ticketIDs),
+            ),
+          ),
+      )
+      .unionAll(
+        database.db
+          .select({ source: sql<string>`'epic'::text`, id: epic.id })
+          .from(epic)
+          .where(and(eq(epic.projectId, projectID), inArray(epic.id, epicIDs))),
+      );
     const allowed = new Set(
       rows.map((row) => `${row.source}:${row.id}`).filter((key) => projectSources.has(key)),
     );
@@ -394,10 +436,18 @@ export function createProjectAgentController(
         if (command.kind === "project-message") {
           let technicalBase: z.infer<typeof technicalPlanningBaseInput> | undefined;
           if (command.intent === "technical-planning") {
-            const [latest] = await transaction<{ id: string }[]>`
-              SELECT id FROM factory.technical_design_revision WHERE ticket_id=${command.ticketId} ORDER BY ordinal DESC LIMIT 1`;
-            const [scope] =
-              await transaction`SELECT id FROM factory.requirement_approval WHERE ticket_id=${command.ticketId}`;
+            if (!command.ticketId) throw new Error("Technical Planning Ticket required");
+            const db = drizzleTransaction(transaction);
+            const [latest] = await db
+              .select({ id: technicalDesignRevision.id })
+              .from(technicalDesignRevision)
+              .where(eq(technicalDesignRevision.ticketId, command.ticketId))
+              .orderBy(desc(technicalDesignRevision.ordinal))
+              .limit(1);
+            const [scope] = await db
+              .select({ id: requirementApproval.id })
+              .from(requirementApproval)
+              .where(eq(requirementApproval.ticketId, command.ticketId));
             if (!ticketContext?.revisionId || ticketContext.implementationAdmitted || scope)
               throw new CommandError(
                 "conflict",
@@ -436,29 +486,51 @@ export function createProjectAgentController(
           return;
         }
         if (command.kind !== "project-answer") throw new Error("Project command required");
-        const questions = await transaction<
-          Array<{
-            payload: { question?: unknown; visibility?: string };
-            answered: boolean;
-            superseded: boolean;
-          }>
-        >`
-        SELECT question.payload, EXISTS(
-          SELECT 1 FROM factory.conversation_entry answer
-          WHERE answer.in_reply_to_entry_id = question.id AND answer.kind = 'answer'
-        ) AS answered, EXISTS(SELECT 1 FROM factory.conversation_entry newer
-          WHERE newer.conversation_id=question.conversation_id AND newer.ordinal>question.ordinal
-            AND newer.payload->>'contextId' IS NOT DISTINCT FROM question.payload->>'contextId'
-            AND (newer.kind IN ('question','requirement') OR
-              (newer.kind='user-message' AND coalesce(newer.payload->>'intent','')!='project-research'))) AS superseded
-        FROM factory.conversation_entry question
-        WHERE question.id = ${command.questionEntryId} AND question.conversation_id = ${current.id}
-          AND question.kind = 'question'
-          AND question.payload->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}
-      `;
+        const db = drizzleTransaction(transaction);
+        const question = alias(conversationEntry, "question");
+        const answer = alias(conversationEntry, "answer");
+        const newer = alias(conversationEntry, "newer");
+        const questions = await db
+          .select({
+            payload: question.payload,
+            answered: exists(
+              db
+                .select({ id: answer.id })
+                .from(answer)
+                .where(and(eq(answer.inReplyToEntryId, question.id), eq(answer.kind, "answer"))),
+            ),
+            superseded: exists(
+              db
+                .select({ id: newer.id })
+                .from(newer)
+                .where(
+                  and(
+                    eq(newer.conversationId, question.conversationId),
+                    gt(newer.ordinal, question.ordinal),
+                    sql<boolean>`${newer.payload}->>'contextId' IS NOT DISTINCT FROM ${question.payload}->>'contextId'`,
+                    or(
+                      inArray(newer.kind, ["question", "requirement"]),
+                      and(
+                        eq(newer.kind, "user-message"),
+                        sql<boolean>`coalesce(${newer.payload}->>'intent','')!='project-research'`,
+                      ),
+                    ),
+                  ),
+                ),
+            ),
+          })
+          .from(question)
+          .where(
+            and(
+              eq(question.id, command.questionEntryId),
+              eq(question.conversationId, current.id),
+              eq(question.kind, "question"),
+              sql<boolean>`${question.payload}->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}`,
+            ),
+          );
         const found = questions[0];
         if (!found) throw new CommandError("conflict", "Interview question not found");
-        if (found.payload.visibility === "developer") {
+        if (found.payload["visibility"] === "developer") {
           const { projectDevelopmentAuthorityIn } = await import("../access/controller");
           await projectDevelopmentAuthorityIn(transaction, command.createdBy, command.projectId);
         }
@@ -470,7 +542,7 @@ export function createProjectAgentController(
             "The Interview direction changed. Answer the current question instead.",
           );
         const normalized = normalizeInterviewAnswer(
-          interviewQuestionInput.parse(found.payload.question),
+          interviewQuestionInput.parse(found.payload["question"]),
           command.answer,
         );
         await appendConversationEntry(transaction, current.id, {
@@ -483,7 +555,7 @@ export function createProjectAgentController(
             commandId: command.commandId,
             turnId: record.id,
             projectContext,
-            ...(found.payload.visibility === "developer" ? { visibility: "developer" } : {}),
+            ...(found.payload["visibility"] === "developer" ? { visibility: "developer" } : {}),
             ...(ticketContext ? { ticketContext } : {}),
           },
           citations: [],
@@ -794,8 +866,17 @@ export function createProjectAgentController(
                 abort.signal,
                 async (connectionId, tool, digest, result) => {
                   const current = await turns.validateExecution(owner.id, token, async (sql) => {
-                    await sql`INSERT INTO factory.mcp_observation(id,turn_id,connection_id,tool_name,tool_digest,result_digest,is_error)
-                  VALUES(${crypto.randomUUID()},${owner.id},${connectionId},${tool},${digest},${mcpDigest(result.content)},${result.isError})`;
+                    await drizzleTransaction(sql)
+                      .insert(mcpObservation)
+                      .values({
+                        id: crypto.randomUUID(),
+                        turnId: owner.id,
+                        connectionId,
+                        toolName: tool,
+                        toolDigest: digest,
+                        resultDigest: mcpDigest(result.content),
+                        isError: result.isError,
+                      });
                   });
                   if (!current)
                     throw new CommandError(
@@ -809,8 +890,10 @@ export function createProjectAgentController(
           skillsLoaded: async (revisionIDs) => {
             const owned = await turns.validateExecution(owner.id, token, async (sql) => {
               for (const revisionID of revisionIDs) {
-                await sql`INSERT INTO factory.agent_turn_skill(turn_id, revision_id)
-                  VALUES (${owner.id}, ${revisionID}) ON CONFLICT DO NOTHING`;
+                await drizzleTransaction(sql)
+                  .insert(agentTurnSkill)
+                  .values({ turnId: owner.id, revisionId: revisionID })
+                  .onConflictDoNothing();
               }
             });
             if (!owned)
@@ -1064,8 +1147,16 @@ export function createProjectAgentController(
     confirmEpic: createEpicConfirmation(database),
     async recover() {
       if (closed) return;
-      const pending = await database.client<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
-        WHERE change_id IS NULL AND state IN ('pending', 'dispatching', 'running') ORDER BY created_at`;
+      const pending = await database.db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .where(
+          and(
+            isNull(agentTurn.changeId),
+            inArray(agentTurn.state, ["pending", "dispatching", "running"]),
+          ),
+        )
+        .orderBy(asc(agentTurn.createdAt));
       for (const record of pending) {
         // respond records unavailable/failed/uncertain outcomes itself. A DB
         // failure leaves durable intent for the next startup, not a paid retry.
@@ -1193,12 +1284,16 @@ export function createProjectAgentController(
       userID: string,
     ) {
       if (nextMode !== "build") {
-        const id = await database.client.begin(async (sql) => {
-          const scope = await ensureConversationIn(sql, projectID, ticketID, userID);
-          const current = await lockConversation(sql, scope.id);
+        const id = await database.client.begin(async (transaction) => {
+          const scope = await ensureConversationIn(transaction, projectID, ticketID, userID);
+          const current = await lockConversation(transaction, scope.id);
           if (!current) throw new CommandError("not-found", "Conversation not found");
+          const db = drizzleTransaction(transaction);
           const [coding] = current.ticketId
-            ? await sql`SELECT id FROM factory.change WHERE ticket_id=${current.ticketId}`
+            ? await db
+                .select({ id: change.id })
+                .from(change)
+                .where(eq(change.ticketId, current.ticketId))
             : [];
           if (coding)
             throw new CommandError(
@@ -1206,8 +1301,15 @@ export function createProjectAgentController(
               "This Ticket keeps its Coding conversation. Use Ask about this Project for separate research.",
             );
           if (current.mode !== nextMode) {
-            await sql`UPDATE factory.ticket_conversation SET mode=${nextMode},version=version+1,updated_at=now() WHERE id=${current.id}`;
-            await appendConversationEntry(sql, current.id, {
+            await db
+              .update(ticketConversation)
+              .set({
+                mode: nextMode,
+                version: sql<number>`${ticketConversation.version}+1`,
+                updatedAt: sql<Date>`now()`,
+              })
+              .where(eq(ticketConversation.id, current.id));
+            await appendConversationEntry(transaction, current.id, {
               kind: "mode-change",
               actor: "system",
               mode: nextMode,
@@ -1224,12 +1326,16 @@ export function createProjectAgentController(
       }
       const current = await ensureConversation(projectID, ticketID, userID);
       const requirements = current.ticketId
-        ? await database.client<Array<{ latestId: string | null; approvedId: string | null }>>`
-            SELECT latest.id AS "latestId", approval.requirement_revision_id AS "approvedId"
-            FROM (SELECT id FROM factory.requirement_revision WHERE ticket_id = ${current.ticketId}
-              ORDER BY ordinal DESC LIMIT 1) latest
-            LEFT JOIN factory.requirement_approval approval ON approval.ticket_id = ${current.ticketId}
-          `
+        ? await database.db
+            .select({
+              latestId: requirementRevision.id,
+              approvedId: requirementApproval.requirementRevisionId,
+            })
+            .from(requirementRevision)
+            .leftJoin(requirementApproval, eq(requirementApproval.ticketId, current.ticketId))
+            .where(eq(requirementRevision.ticketId, current.ticketId))
+            .orderBy(desc(requirementRevision.ordinal))
+            .limit(1)
         : [];
       assertModeAuthority({
         nextMode,
@@ -1239,10 +1345,14 @@ export function createProjectAgentController(
       });
       if (nextMode === "build" && current.ticketId) await changes.start(current.ticketId, userID);
       if (current.mode !== nextMode) {
-        await database.client`
-          UPDATE factory.ticket_conversation SET mode = ${nextMode}, version = version + 1,
-            updated_at = now() WHERE id = ${current.id}
-        `;
+        await database.db
+          .update(ticketConversation)
+          .set({
+            mode: nextMode,
+            version: sql<number>`${ticketConversation.version}+1`,
+            updatedAt: sql<Date>`now()`,
+          })
+          .where(eq(ticketConversation.id, current.id));
         await appendEntry(current.id, {
           kind: "mode-change",
           actor: "system",

@@ -217,11 +217,12 @@ PostgreSQL routines and triggers under `packages/db/native/` into the single sea
 baseline. `bun run db:check` detects source drift. Operators install that checked-in baseline;
 they do not run a generator or adopt a historical database.
 
-Schema-backed Drizzle queries cover access, settings, Project creation, usage rates, library covers,
-MCP configuration, shared Conversations, Learning review/application, Releases and attachment/media
-storage. `drizzleTransaction` binds them to the existing Postgres.js transaction,
-including nested savepoints; it does not open a second connection. Other slices still contain
-direct SQL and need the same incremental conversion and concurrency checks. Zero reuses its
+Schema-backed Drizzle queries cover Project setup, Models, Ticket authoring, Coding admission,
+Delivery, Source and IDE access, Workspace sharing/commands/files, Monitoring, Knowledge, Learning,
+Releases and attachment/media storage. `drizzleTransaction` binds queries to the existing
+Postgres.js transaction, including nested savepoints, or an explicitly reserved connection.
+It does not open a second connection. Remaining direct queries include native locks,
+compound authority predicates and unfinished feature conversions. Zero reuses its
 database provider per connection pool, not a user's authorization context.
 Its eight planning tables are generated from an explicit Drizzle column allowlist with
 `bun run zero:generate`; `bun run zero:check` rejects drift. Authorization joins remain explicit.

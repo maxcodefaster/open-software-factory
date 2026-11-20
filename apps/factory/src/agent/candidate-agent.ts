@@ -1,8 +1,34 @@
-import { advanceCandidateCommit, earlierSubmissionUnchanged, noChangesToSubmit } from "./candidate";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  and,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  notInArray,
+  or,
+  sql as query,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  change,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  project,
+  runtimeAttempt,
+  substrateBinding,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
+import { advanceCandidateCommit, earlierSubmissionUnchanged, noChangesToSubmit } from "./candidate";
 import { createAgentCommitTransport } from "./commit-transport";
 import { bounded, readableError } from "./native-errors";
 import { createAgentTurnStore } from "./turn-store";
@@ -31,16 +57,32 @@ export function createAgentCandidates(
 
   async function recoverRuntimeCommits(attemptID: string) {
     if (isClosed()) return;
-    const operations = await database.client<Array<{ id: string }>>`
-      SELECT operation.id FROM factory.change_commit_operation operation
-      JOIN factory.runtime_attempt original ON original.id = operation.runtime_attempt_id
-      JOIN factory.change change ON change.id = operation.change_id
-      JOIN factory.runtime_attempt current ON current.id = change.runtime_attempt_id
-      WHERE operation.source = 'agent' AND operation.state NOT IN ('succeeded', 'failed')
-        AND (original.id = ${attemptID} OR current.id = ${attemptID} AND current.state = 'ready'
-          AND operation.state = 'commit-intended' AND original.state IN ('stopped', 'failed')
-          AND original.workspace_id IS NOT NULL AND current.workspace_id = original.workspace_id)
-      ORDER BY operation.created_at`;
+    const original = alias(runtimeAttempt, "original");
+    const current = alias(runtimeAttempt, "current");
+    const operations = await database.db
+      .select({ id: changeCommitOperation.id })
+      .from(changeCommitOperation)
+      .innerJoin(original, eq(original.id, changeCommitOperation.runtimeAttemptId))
+      .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
+      .innerJoin(current, eq(current.id, change.runtimeAttemptId))
+      .where(
+        and(
+          eq(changeCommitOperation.source, "agent"),
+          notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+          or(
+            eq(original.id, attemptID),
+            and(
+              eq(current.id, attemptID),
+              eq(current.state, "ready"),
+              eq(changeCommitOperation.state, "commit-intended"),
+              inArray(original.state, ["stopped", "failed"]),
+              isNotNull(original.workspaceId),
+              eq(current.workspaceId, original.workspaceId),
+            ),
+          ),
+        ),
+      )
+      .orderBy(changeCommitOperation.createdAt);
     for (const operation of operations) {
       const previous = committing.get(operation.id);
       if (previous) await previous;
@@ -51,35 +93,29 @@ export function createAgentCandidates(
 
   async function performCommit(operationID: string, recovering: boolean) {
     if (isClosed()) return;
-    const operations = await database.client<
-      Array<{
-        id: string;
-        changeID: string;
-        attemptID: string;
-        branchName: string;
-        expectedParentSHA: string;
-        mergeParentSHA: string | null;
-        commitSHA: string | null;
-        commitMessage: string;
-        state: string;
-        lastError: string | null;
-        repositoryURL: string;
-        nativeIntent: unknown;
-      }>
-    >`
-      SELECT operation.id, operation.change_id AS "changeID", operation.runtime_attempt_id AS "attemptID",
-        operation.branch_name AS "branchName", operation.expected_parent_sha AS "expectedParentSHA",
-        operation.merge_parent_sha AS "mergeParentSHA",
-        operation.commit_sha AS "commitSHA", operation.commit_message AS "commitMessage", operation.state, operation.last_error AS "lastError",
-        project.repository_url AS "repositoryURL",
-        binding.intent AS "nativeIntent"
-      FROM factory.change_commit_operation operation
-      JOIN factory.change change ON change.id=operation.change_id
-      JOIN factory.project project ON project.id=change.project_id
-      JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-      WHERE operation.id = ${operationID} AND operation.source = 'agent'
-    `;
+    const operations = await database.db
+      .select({
+        id: changeCommitOperation.id,
+        changeID: changeCommitOperation.changeId,
+        attemptID: query<string>`${changeCommitOperation.runtimeAttemptId}`,
+        branchName: changeCommitOperation.branchName,
+        expectedParentSHA: changeCommitOperation.expectedParentSha,
+        mergeParentSHA: changeCommitOperation.mergeParentSha,
+        commitSHA: changeCommitOperation.commitSha,
+        commitMessage: changeCommitOperation.commitMessage,
+        state: changeCommitOperation.state,
+        lastError: changeCommitOperation.lastError,
+        repositoryURL: project.repositoryUrl,
+        nativeIntent: substrateBinding.intent,
+      })
+      .from(changeCommitOperation)
+      .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
+      .innerJoin(project, eq(project.id, change.projectId))
+      .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeCommitOperation.runtimeAttemptId))
+      .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+      .where(
+        and(eq(changeCommitOperation.id, operationID), eq(changeCommitOperation.source, "agent")),
+      );
     const operation = operations[0];
     if (!operation || ["succeeded", "failed"].includes(operation.state)) return;
     try {
@@ -126,26 +162,64 @@ export function createAgentCandidates(
         async (prepared) => {
           const commitSHA = prepared.commitSHA;
           await turns.observeCommit(operation.id, async (transaction, current) => {
-            const recorded = await transaction<Array<{ id: string }>>`
-              UPDATE factory.change_commit_operation
-              SET state = 'succeeded', observed_remote_sha = ${commitSHA}, completed_at = now(),
-                updated_at = now(), last_error = NULL
-              WHERE id = ${operation.id} AND state IN ('committed', 'push-intended')
-              RETURNING id
-            `;
+            const db = drizzleTransaction(transaction);
+            const recorded = await db
+              .update(changeCommitOperation)
+              .set({
+                state: "succeeded",
+                observedRemoteSha: commitSHA,
+                completedAt: query`now()`,
+                updatedAt: query`now()`,
+                lastError: null,
+              })
+              .where(
+                and(
+                  eq(changeCommitOperation.id, operation.id),
+                  inArray(changeCommitOperation.state, ["committed", "push-intended"]),
+                ),
+              )
+              .returning({ id: changeCommitOperation.id });
             if (!recorded[0] || !current) return;
-            await transaction`
-              UPDATE factory.change_agent_session
-              SET state = 'committed', active_inbox_id = NULL, last_error = NULL, updated_at = now()
-              WHERE change_id = ${operation.changeID}
-                AND state = 'waiting' AND active_turn_id = ${operation.id}
-                AND runtime_attempt_id = ${operation.attemptID} AND NOT stop_pending
-                AND EXISTS(SELECT 1 FROM factory.change WHERE id = ${operation.changeID}
-                  AND runtime_attempt_id = ${operation.attemptID})
-                AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
-                  WHERE intent.turn_id = ${operation.id} AND intent.runtime_attempt_id = ${operation.attemptID}
-                    AND intent.session_id = factory.change_agent_session.opencode_session_id)
-            `;
+            await db
+              .update(changeAgentSession)
+              .set({
+                state: "committed",
+                activeInboxId: null,
+                lastError: null,
+                updatedAt: query`now()`,
+              })
+              .where(
+                and(
+                  eq(changeAgentSession.changeId, operation.changeID),
+                  eq(changeAgentSession.state, "waiting"),
+                  eq(changeAgentSession.activeTurnId, operation.id),
+                  eq(changeAgentSession.runtimeAttemptId, operation.attemptID),
+                  eq(changeAgentSession.stopPending, false),
+                  exists(
+                    db
+                      .select({ id: change.id })
+                      .from(change)
+                      .where(
+                        and(
+                          eq(change.id, operation.changeID),
+                          eq(change.runtimeAttemptId, operation.attemptID),
+                        ),
+                      ),
+                  ),
+                  exists(
+                    db
+                      .select({ id: changeAgentTurnIntent.turnId })
+                      .from(changeAgentTurnIntent)
+                      .where(
+                        and(
+                          eq(changeAgentTurnIntent.turnId, operation.id),
+                          eq(changeAgentTurnIntent.runtimeAttemptId, operation.attemptID),
+                          eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+                        ),
+                      ),
+                  ),
+                ),
+              );
           });
         },
       );
@@ -166,28 +240,75 @@ export function createAgentCandidates(
           "the exact prepared commit was not found; current files were not committed";
       if (emptyCheckout || absentPreparedCommit) {
         await turns.observeCommit(operation.id, async (transaction) => {
+          const db = drizzleTransaction(transaction);
           const [previousSubmission] = emptyCheckout
-            ? await transaction<Array<{ id: string }>>`
-                SELECT id FROM factory.change_commit_operation
-                WHERE change_id = ${operation.changeID} AND state = 'succeeded'
-                  AND sequence < (SELECT sequence FROM factory.change_commit_operation WHERE id = ${operation.id})
-                LIMIT 1`
+            ? await db
+                .select({ id: changeCommitOperation.id })
+                .from(changeCommitOperation)
+                .where(
+                  and(
+                    eq(changeCommitOperation.changeId, operation.changeID),
+                    eq(changeCommitOperation.state, "succeeded"),
+                    lt(
+                      changeCommitOperation.sequence,
+                      query`(${db
+                        .select({ sequence: changeCommitOperation.sequence })
+                        .from(changeCommitOperation)
+                        .where(eq(changeCommitOperation.id, operation.id))})`,
+                    ),
+                  ),
+                )
+                .limit(1)
             : [];
           const diagnostic = emptyCheckout
             ? noChangesToSubmit + (previousSubmission ? earlierSubmissionUnchanged : "")
             : "Prepared commit was not found. Files were left untouched; review the checkout before starting a new Build turn.";
-          const recorded = await transaction<Array<{ id: string }>>`
-            UPDATE factory.change_commit_operation SET state = 'failed',
-              last_error = ${diagnostic}, completed_at = now(), updated_at = now()
-            WHERE id = ${operation.id} AND state = 'commit-intended' AND commit_sha IS NULL RETURNING id`;
+          const recorded = await db
+            .update(changeCommitOperation)
+            .set({
+              state: "failed",
+              lastError: diagnostic,
+              completedAt: query`now()`,
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                eq(changeCommitOperation.id, operation.id),
+                eq(changeCommitOperation.state, "commit-intended"),
+                isNull(changeCommitOperation.commitSha),
+              ),
+            )
+            .returning({ id: changeCommitOperation.id });
           if (!recorded[0]) return;
-          await transaction`
-            UPDATE factory.change_agent_session SET state = ${absentPreparedCommit ? "failed" : "waiting"}::factory.change_agent_state,
-              last_error = ${diagnostic}, active_inbox_id = NULL, updated_at = now()
-            WHERE change_id = ${operation.changeID} AND state = 'waiting' AND active_turn_id = ${operation.id}
-              AND runtime_attempt_id = ${operation.attemptID} AND NOT stop_pending
-              AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent WHERE intent.turn_id = ${operation.id}
-                AND intent.runtime_attempt_id = ${operation.attemptID} AND intent.session_id = factory.change_agent_session.opencode_session_id)`;
+          await db
+            .update(changeAgentSession)
+            .set({
+              state: absentPreparedCommit ? "failed" : "waiting",
+              lastError: diagnostic,
+              activeInboxId: null,
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                eq(changeAgentSession.changeId, operation.changeID),
+                eq(changeAgentSession.state, "waiting"),
+                eq(changeAgentSession.activeTurnId, operation.id),
+                eq(changeAgentSession.runtimeAttemptId, operation.attemptID),
+                eq(changeAgentSession.stopPending, false),
+                exists(
+                  db
+                    .select({ id: changeAgentTurnIntent.turnId })
+                    .from(changeAgentTurnIntent)
+                    .where(
+                      and(
+                        eq(changeAgentTurnIntent.turnId, operation.id),
+                        eq(changeAgentTurnIntent.runtimeAttemptId, operation.attemptID),
+                        eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+                      ),
+                    ),
+                ),
+              ),
+            );
         });
         return;
       }
@@ -197,30 +318,63 @@ export function createAgentCandidates(
       const rejected = cause instanceof CommandError && !recovering;
       const detail = readableError(cause);
       await turns.observeCommit(operation.id, async (transaction) => {
-        const recorded = await transaction<Array<{ id: string; state: string }>>`
-          UPDATE factory.change_commit_operation
-          SET state = CASE WHEN ${rejected} AND last_error IS NULL THEN 'failed'::factory.change_commit_state ELSE state END,
-            last_error = CASE WHEN ${rejected} AND last_error IS NULL THEN ${bounded(detail, 4_000)}
-              ELSE ${bounded(`Commit outcome not confirmed. New Build waits for recovery. ${detail}`, 4_000)} END,
-            completed_at = CASE WHEN ${rejected} AND last_error IS NULL THEN now() ELSE NULL END,
-            updated_at = now()
-          WHERE id = ${operation.id} AND state NOT IN ('succeeded', 'failed')
-          RETURNING id, state
-        `;
+        const db = drizzleTransaction(transaction);
+        const recorded = await db
+          .update(changeCommitOperation)
+          .set({
+            state: query`CASE WHEN ${rejected} AND ${changeCommitOperation.lastError} IS NULL THEN 'failed'::factory.change_commit_state ELSE ${changeCommitOperation.state} END`,
+            lastError: query`CASE WHEN ${rejected} AND ${changeCommitOperation.lastError} IS NULL THEN ${bounded(detail, 4_000)}
+            ELSE ${bounded(`Commit outcome not confirmed. New Build waits for recovery. ${detail}`, 4_000)} END`,
+            completedAt: query`CASE WHEN ${rejected} AND ${changeCommitOperation.lastError} IS NULL THEN now() ELSE NULL END`,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(changeCommitOperation.id, operation.id),
+              notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+            ),
+          )
+          .returning({ id: changeCommitOperation.id, state: changeCommitOperation.state });
         if (!recorded[0]) return;
-        await transaction`
-          UPDATE factory.change_agent_session
-          SET state = CASE WHEN ${recorded[0].state === "failed"} THEN 'failed'::factory.change_agent_state ELSE state END,
-            last_error = (SELECT last_error FROM factory.change_commit_operation WHERE id = ${operation.id}), updated_at = now()
-          WHERE change_id = ${operation.changeID}
-            AND state = 'waiting' AND active_turn_id = ${operation.id}
-            AND runtime_attempt_id = ${operation.attemptID} AND NOT stop_pending
-            AND EXISTS(SELECT 1 FROM factory.change WHERE id = ${operation.changeID}
-              AND runtime_attempt_id = ${operation.attemptID})
-            AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
-              WHERE intent.turn_id = ${operation.id} AND intent.runtime_attempt_id = ${operation.attemptID}
-                AND intent.session_id = factory.change_agent_session.opencode_session_id)
-        `;
+        await db
+          .update(changeAgentSession)
+          .set({
+            state: query`CASE WHEN ${recorded[0].state === "failed"} THEN 'failed'::factory.change_agent_state ELSE ${changeAgentSession.state} END`,
+            lastError: query`(${db.select({ lastError: changeCommitOperation.lastError }).from(changeCommitOperation).where(eq(changeCommitOperation.id, operation.id))})`,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(changeAgentSession.changeId, operation.changeID),
+              eq(changeAgentSession.state, "waiting"),
+              eq(changeAgentSession.activeTurnId, operation.id),
+              eq(changeAgentSession.runtimeAttemptId, operation.attemptID),
+              eq(changeAgentSession.stopPending, false),
+              exists(
+                db
+                  .select({ id: change.id })
+                  .from(change)
+                  .where(
+                    and(
+                      eq(change.id, operation.changeID),
+                      eq(change.runtimeAttemptId, operation.attemptID),
+                    ),
+                  ),
+              ),
+              exists(
+                db
+                  .select({ id: changeAgentTurnIntent.turnId })
+                  .from(changeAgentTurnIntent)
+                  .where(
+                    and(
+                      eq(changeAgentTurnIntent.turnId, operation.id),
+                      eq(changeAgentTurnIntent.runtimeAttemptId, operation.attemptID),
+                      eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+                    ),
+                  ),
+              ),
+            ),
+          );
       });
     }
   }
@@ -297,8 +451,16 @@ export function createAgentCandidates(
     record: recordCommit,
     reconcile: reconcileCommit,
     recoverRuntime: recoverRuntimeCommits,
-    pending: () => database.client<Array<{ id: string }>>`
-      SELECT id FROM factory.change_commit_operation
-      WHERE source='agent' AND state NOT IN ('succeeded','failed') ORDER BY created_at`,
+    pending: () =>
+      database.db
+        .select({ id: changeCommitOperation.id })
+        .from(changeCommitOperation)
+        .where(
+          and(
+            eq(changeCommitOperation.source, "agent"),
+            notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+          ),
+        )
+        .orderBy(changeCommitOperation.createdAt),
   };
 }

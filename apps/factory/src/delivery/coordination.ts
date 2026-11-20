@@ -1,6 +1,35 @@
+import {
+  and,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notExists,
+  or,
+  sql as query,
+} from "drizzle-orm";
 import type { z } from "zod";
 import { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentSession,
+  changeCommitOperation,
+  changeWriter,
+  mergeOperation,
+  projectDeliveryPolicy,
+  projectDeliveryQueue,
+  reviewFeedback,
+  ticket,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 
@@ -9,8 +38,17 @@ export async function deliveryDelegationIn(
   projectID: string,
   policyID: string,
 ) {
-  const [policy] = await sql<{ userID: string }[]>`SELECT delegated_by AS "userID"
-    FROM factory.project_delivery_policy WHERE id=${policyID} AND project_id=${projectID} AND revoked_at IS NULL FOR SHARE`;
+  const [policy] = await drizzleTransaction(sql)
+    .select({ userID: projectDeliveryPolicy.delegatedBy })
+    .from(projectDeliveryPolicy)
+    .where(
+      and(
+        eq(projectDeliveryPolicy.id, policyID),
+        eq(projectDeliveryPolicy.projectId, projectID),
+        isNull(projectDeliveryPolicy.revokedAt),
+      ),
+    )
+    .for("share");
   if (!policy)
     throw new CommandError("forbidden", "Automatic Delivery delegation is no longer active.");
   await projectAuthorityIn(sql, policy.userID, projectID, true);
@@ -19,59 +57,149 @@ export async function deliveryDelegationIn(
 }
 
 export function createDeliveryCoordination(database: ReturnType<typeof createDatabase>) {
+  // Current-promotion selection stays in the native view. Both queue operations
+  // retain the same unsettled merge/promotion fence.
+  const unsettledPromotion = and(
+    ne(mergeOperation.state, "failed"),
+    or(
+      ne(mergeOperation.state, "succeeded"),
+      isNull(query`promotion.state`),
+      ne(query`promotion.state`, "succeeded"),
+    ),
+  );
   return {
     async claim(projectID: string, changeID: string) {
       return database.client.begin(async (sql) => {
-        await sql`INSERT INTO factory.project_delivery_queue(project_id) VALUES(${projectID}) ON CONFLICT DO NOTHING`;
-        const [slot] = await sql<{ changeID: string | null }[]>`SELECT change_id AS "changeID"
-          FROM factory.project_delivery_queue WHERE project_id=${projectID} FOR UPDATE`;
-        const [promotion] = await sql<{ changeID: string }[]>`SELECT merge.change_id AS "changeID"
-          FROM factory.merge_operation merge JOIN factory.change change ON change.id=merge.change_id
-          LEFT JOIN factory.current_promotion promotion ON promotion.change_id=change.id
-          WHERE change.project_id=${projectID} AND merge.state<>'failed'
-            AND (merge.state<>'succeeded' OR promotion.state IS NULL OR promotion.state<>'succeeded')
-          ORDER BY merge.id LIMIT 1`;
+        const db = drizzleTransaction(sql);
+        await db
+          .insert(projectDeliveryQueue)
+          .values({ projectId: projectID })
+          .onConflictDoNothing();
+        const [slot] = await db
+          .select({ changeID: projectDeliveryQueue.changeId })
+          .from(projectDeliveryQueue)
+          .where(eq(projectDeliveryQueue.projectId, projectID))
+          .for("update");
+        const [promotion] = await db
+          .select({ changeID: mergeOperation.changeId })
+          .from(mergeOperation)
+          .innerJoin(change, eq(change.id, mergeOperation.changeId))
+          .leftJoin(
+            query`factory.current_promotion promotion`,
+            eq(query`promotion.change_id`, change.id),
+          )
+          .where(and(eq(change.projectId, projectID), unsettledPromotion))
+          .orderBy(mergeOperation.id)
+          .limit(1);
         if (promotion && promotion.changeID !== changeID) return false;
         if (slot?.changeID && slot.changeID !== changeID) {
-          const [blocked] = await sql`SELECT change.id FROM factory.change change
-            JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-            LEFT JOIN factory.change_agent_session session ON session.change_id=change.id
-            LEFT JOIN factory.agent_turn turn ON turn.id=session.active_turn_id
-            LEFT JOIN factory.change_writer writer ON writer.change_id=change.id
-            WHERE change.id=${slot.changeID} AND (
-              change.state IN ('cancelled','cancelling','failed','delivered') OR ticket.trashed_at IS NOT NULL
-              OR change.delivery_waiting_sha=(SELECT commit_sha FROM factory.change_commit_operation
-                WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
-              OR session.stop_pending OR session.state IN ('failed','stopped','waiting')
-              OR (session.state IN ('starting','working') AND turn.authority->'review' IS NULL)
-              OR writer.state IN ('human','handoff') OR EXISTS(
-                SELECT 1 FROM factory.review_feedback WHERE change_id=change.id AND kind='thread' AND state<>'resolved'))`;
+          const [blocked] = await db
+            .select({ id: change.id })
+            .from(change)
+            .innerJoin(ticket, eq(ticket.id, change.ticketId))
+            .leftJoin(changeAgentSession, eq(changeAgentSession.changeId, change.id))
+            .leftJoin(agentTurn, eq(agentTurn.id, changeAgentSession.activeTurnId))
+            .leftJoin(changeWriter, eq(changeWriter.changeId, change.id))
+            .where(
+              and(
+                eq(change.id, slot.changeID),
+                or(
+                  inArray(change.state, ["cancelled", "cancelling", "failed", "delivered"]),
+                  isNotNull(ticket.trashedAt),
+                  eq(
+                    change.deliveryWaitingSha,
+                    db
+                      .select({ sha: changeCommitOperation.commitSha })
+                      .from(changeCommitOperation)
+                      .where(
+                        and(
+                          eq(changeCommitOperation.changeId, change.id),
+                          eq(changeCommitOperation.state, "succeeded"),
+                        ),
+                      )
+                      .orderBy(desc(changeCommitOperation.sequence))
+                      .limit(1),
+                  ),
+                  eq(changeAgentSession.stopPending, true),
+                  inArray(changeAgentSession.state, ["failed", "stopped", "waiting"]),
+                  and(
+                    inArray(changeAgentSession.state, ["starting", "working"]),
+                    query`${agentTurn.authority}->'review' IS NULL`,
+                  ),
+                  inArray(changeWriter.state, ["human", "handoff"]),
+                  exists(
+                    db
+                      .select({ id: reviewFeedback.id })
+                      .from(reviewFeedback)
+                      .where(
+                        and(
+                          eq(reviewFeedback.changeId, change.id),
+                          eq(reviewFeedback.kind, "thread"),
+                          ne(reviewFeedback.state, "resolved"),
+                        ),
+                      ),
+                  ),
+                ),
+              ),
+            );
           if (!blocked) return false;
         }
-        await sql`UPDATE factory.project_delivery_queue SET change_id=${changeID},updated_at=now()
-          WHERE project_id=${projectID} AND change_id IS DISTINCT FROM ${changeID}::uuid`;
+        await db
+          .update(projectDeliveryQueue)
+          .set({ changeId: changeID, updatedAt: query`now()` })
+          .where(
+            and(
+              eq(projectDeliveryQueue.projectId, projectID),
+              query`${projectDeliveryQueue.changeId} IS DISTINCT FROM ${changeID}::uuid`,
+            ),
+          );
         return true;
       });
     },
     async release(changeID: string) {
       await database.client.begin(async (sql) => {
-        const [slot] = await sql`SELECT project_id FROM factory.project_delivery_queue
-          WHERE change_id=${changeID} FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [slot] = await db
+          .select({ projectID: projectDeliveryQueue.projectId })
+          .from(projectDeliveryQueue)
+          .where(eq(projectDeliveryQueue.changeId, changeID))
+          .for("update");
         if (!slot) return;
         // A concurrent approval can persist its merge intent while this waits.
         // Check that intent in a fresh statement after acquiring the slot.
-        await sql`UPDATE factory.project_delivery_queue SET change_id=NULL,updated_at=now()
-          WHERE change_id=${changeID} AND NOT EXISTS(
-            SELECT 1 FROM factory.merge_operation merge LEFT JOIN factory.current_promotion promotion ON promotion.change_id=merge.change_id
-            WHERE merge.change_id=${changeID} AND merge.state<>'failed'
-              AND (merge.state<>'succeeded' OR promotion.state IS NULL OR promotion.state<>'succeeded'))`;
+        await db
+          .update(projectDeliveryQueue)
+          .set({ changeId: null, updatedAt: query`now()` })
+          .where(
+            and(
+              eq(projectDeliveryQueue.changeId, changeID),
+              notExists(
+                db
+                  .select({ id: mergeOperation.id })
+                  .from(mergeOperation)
+                  .leftJoin(
+                    query`factory.current_promotion promotion`,
+                    eq(query`promotion.change_id`, mergeOperation.changeId),
+                  )
+                  .where(and(eq(mergeOperation.changeId, changeID), unsettledPromotion)),
+              ),
+            ),
+          );
       });
     },
     async activePolicy(projectID: string) {
-      const [policy] = await database.client<
-        { id: string; userID: string }[]
-      >`SELECT id,delegated_by AS "userID"
-        FROM factory.project_delivery_policy WHERE project_id=${projectID} AND revoked_at IS NULL`;
+      const [policy] = await database.db
+        .select({
+          id: projectDeliveryPolicy.id,
+          userID: projectDeliveryPolicy.delegatedBy,
+        })
+        .from(projectDeliveryPolicy)
+        .where(
+          and(
+            eq(projectDeliveryPolicy.projectId, projectID),
+            isNull(projectDeliveryPolicy.revokedAt),
+          ),
+        );
       if (!policy) return null;
       try {
         await database.client.begin((sql) => deliveryDelegationIn(sql, projectID, policy.id));
@@ -92,10 +220,18 @@ export function createDeliveryCoordination(database: ReturnType<typeof createDat
         if (!(cause instanceof CommandError)) throw cause;
         canDelegate = false;
       }
-      const [policy] = await database.client<
-        { id: string; delegatedBy: string }[]
-      >`SELECT id,delegated_by AS "delegatedBy"
-        FROM factory.project_delivery_policy WHERE project_id=${projectID} AND revoked_at IS NULL`;
+      const [policy] = await database.db
+        .select({
+          id: projectDeliveryPolicy.id,
+          delegatedBy: projectDeliveryPolicy.delegatedBy,
+        })
+        .from(projectDeliveryPolicy)
+        .where(
+          and(
+            eq(projectDeliveryPolicy.projectId, projectID),
+            isNull(projectDeliveryPolicy.revokedAt),
+          ),
+        );
       const active = await this.activePolicy(projectID);
       return {
         policyId: policy?.id ?? null,
@@ -112,16 +248,33 @@ export function createDeliveryCoordination(database: ReturnType<typeof createDat
     ) {
       const input = deliveryDelegationInput.parse(raw);
       await database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`delivery-policy:${projectID}`}))`;
         await projectAuthorityIn(sql, userID, projectID, true);
         if (input.enabled) await projectDevelopmentAuthorityIn(sql, userID, projectID);
-        const [current] = await sql<{ id: string }[]>`SELECT id FROM factory.project_delivery_policy
-          WHERE project_id=${projectID} AND revoked_at IS NULL FOR UPDATE`;
+        const [current] = await db
+          .select({ id: projectDeliveryPolicy.id })
+          .from(projectDeliveryPolicy)
+          .where(
+            and(
+              eq(projectDeliveryPolicy.projectId, projectID),
+              isNull(projectDeliveryPolicy.revokedAt),
+            ),
+          )
+          .for("update");
         if (input.enabled && current?.id === input.commandId) return;
         if (!input.enabled && !current && input.expectedPolicyId) {
-          const [replay] = await sql`SELECT id FROM factory.project_delivery_policy
-            WHERE id=${input.expectedPolicyId} AND project_id=${projectID}
-              AND revoked_command_id=${input.commandId} AND revoked_by=${userID}`;
+          const [replay] = await db
+            .select({ id: projectDeliveryPolicy.id })
+            .from(projectDeliveryPolicy)
+            .where(
+              and(
+                eq(projectDeliveryPolicy.id, input.expectedPolicyId),
+                eq(projectDeliveryPolicy.projectId, projectID),
+                eq(projectDeliveryPolicy.revokedCommandId, input.commandId),
+                eq(projectDeliveryPolicy.revokedBy, userID),
+              ),
+            );
           if (replay) return;
         }
         if ((current?.id ?? null) !== input.expectedPolicyId)
@@ -130,10 +283,18 @@ export function createDeliveryCoordination(database: ReturnType<typeof createDat
             "Delivery delegation changed. Refresh before changing it.",
           );
         if (current)
-          await sql`UPDATE factory.project_delivery_policy SET revoked_at=now(),revoked_command_id=${input.commandId},revoked_by=${userID} WHERE id=${current.id}`;
+          await db
+            .update(projectDeliveryPolicy)
+            .set({
+              revokedAt: query`now()`,
+              revokedCommandId: input.commandId,
+              revokedBy: userID,
+            })
+            .where(eq(projectDeliveryPolicy.id, current.id));
         if (input.enabled)
-          await sql`INSERT INTO factory.project_delivery_policy(id,project_id,delegated_by)
-            VALUES(${input.commandId},${projectID},${userID})`;
+          await db
+            .insert(projectDeliveryPolicy)
+            .values({ id: input.commandId, projectId: projectID, delegatedBy: userID });
       });
       return this.settings(projectID, userID);
     },

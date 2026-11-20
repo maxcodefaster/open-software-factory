@@ -1,3 +1,4 @@
+import { and, eq, exists, sql as expression, isNotNull, isNull, lt, notExists } from "drizzle-orm";
 import { z } from "zod";
 import {
   estimateUsage,
@@ -6,7 +7,12 @@ import {
   usagePurpose,
   usageRate,
 } from "../../../../packages/conversation-domain/src/usage";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import { usageEntry, usageOperation, usageReplayCursor } from "../../../../packages/db/src/schema";
 import { lockUsageIn } from "./policy";
 
 const identity = z.string().min(1).max(400);
@@ -29,9 +35,25 @@ const entry = z.object({
   occurredAt: z.iso.datetime(),
 });
 export type UsageEntry = z.infer<typeof entry>;
-type Database = ReturnType<typeof createDatabase>;
+type Database = Pick<ReturnType<typeof createDatabase>, "db"> & {
+  client: ReturnType<typeof createDatabase>["client"] | DatabaseTransaction;
+};
 
 export function createUsageJournal(database: Database) {
+  async function advanceIn(
+    db: Pick<Database["db"], "insert">,
+    operationID: string,
+    sessionID: string,
+    sequence: number,
+  ) {
+    await db
+      .insert(usageReplayCursor)
+      .values({ operationId: operationID, sessionId: sessionID, sequence })
+      .onConflictDoUpdate({
+        target: [usageReplayCursor.operationId, usageReplayCursor.sessionId],
+        set: { sequence: expression`GREATEST(${usageReplayCursor.sequence},${sequence})` },
+      });
+  }
   async function begin(
     input: UsageOperation,
     baselines: Array<{ sessionID: string; sequence: number }> = [],
@@ -40,31 +62,47 @@ export function createUsageJournal(database: Database) {
     if (value.rate && (value.rate.provider !== value.provider || value.rate.model !== value.model))
       throw new Error("Usage rate must name the exact admitted model");
     await database.client.begin(async (sql) => {
-      const inserted =
-        await sql`INSERT INTO factory.usage_operation(id,project_id,user_id,purpose,engine,provider,model,rate)
-        VALUES(${value.id},${value.projectID},${value.userID},${value.purpose},${value.engine},${value.provider},${value.model},${value.rate ? JSON.stringify(value.rate) : null}::jsonb)
-        ON CONFLICT DO NOTHING RETURNING id`;
+      const db = drizzleTransaction(sql);
+      const inserted = await db
+        .insert(usageOperation)
+        .values({
+          id: value.id,
+          projectId: value.projectID,
+          userId: value.userID,
+          purpose: value.purpose,
+          engine: value.engine,
+          provider: value.provider,
+          model: value.model,
+          rate: value.rate,
+        })
+        .onConflictDoNothing()
+        .returning({ id: usageOperation.id });
       if (inserted.length)
         for (const baseline of baselines) {
           identity.parse(baseline.sessionID);
           z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).parse(baseline.sequence);
-          await sql`INSERT INTO factory.usage_replay_cursor(operation_id,session_id,sequence,start_sequence)
-          VALUES(${value.id},${baseline.sessionID},${baseline.sequence},${baseline.sequence})`;
+          await db.insert(usageReplayCursor).values({
+            operationId: value.id,
+            sessionId: baseline.sessionID,
+            sequence: baseline.sequence,
+            startSequence: baseline.sequence,
+          });
         }
-      const [row] = await sql<
-        Array<{
-          project_id: string | null;
-          user_id: string | null;
-          purpose: string;
-          engine: string;
-          provider: string;
-          model: string;
-        }>
-      >`SELECT project_id,user_id,purpose,engine,provider,model FROM factory.usage_operation WHERE id=${value.id}`;
+      const [row] = await db
+        .select({
+          projectId: usageOperation.projectId,
+          userId: usageOperation.userId,
+          purpose: usageOperation.purpose,
+          engine: usageOperation.engine,
+          provider: usageOperation.provider,
+          model: usageOperation.model,
+        })
+        .from(usageOperation)
+        .where(eq(usageOperation.id, value.id));
       if (
         !row ||
-        row.project_id !== value.projectID ||
-        row.user_id !== value.userID ||
+        row.projectId !== value.projectID ||
+        row.userId !== value.userID ||
         row.purpose !== value.purpose ||
         row.engine !== value.engine ||
         row.provider !== value.provider ||
@@ -86,74 +124,133 @@ export function createUsageJournal(database: Database) {
     }
     await database.client.begin(async (sql) => {
       await lockUsageIn(sql);
-      const [row] = await sql<
-        Array<{ rate: unknown }>
-      >`SELECT rate FROM factory.usage_operation WHERE id=${operationID} FOR UPDATE`;
+      const db = drizzleTransaction(sql);
+      const [row] = await db
+        .select({ rate: usageOperation.rate })
+        .from(usageOperation)
+        .where(eq(usageOperation.id, operationID))
+        .for("update");
       if (!row) throw new Error("Usage must be admitted before observation");
       const estimate = estimateUsage(value.counters, row.rate ? usageRate.parse(row.rate) : null);
-      await sql`INSERT INTO factory.usage_entry(operation_id,event_id,source,outcome,counters,nano_usd,known_nano_usd,occurred_at)
-        VALUES(${operationID},${value.eventID},${value.source},${value.outcome},${JSON.stringify(value.counters)}::jsonb,${estimate.nanoUSD},${estimate.knownNanoUSD},${value.occurredAt}) ON CONFLICT DO NOTHING`;
-      const [existing] = await sql<
-        Array<{ source: string; outcome: string; counters: unknown; occurred_at: Date }>
-      >`SELECT source,outcome,counters,occurred_at FROM factory.usage_entry WHERE operation_id=${operationID} AND event_id=${value.eventID}`;
+      await db
+        .insert(usageEntry)
+        .values({
+          operationId: operationID,
+          eventId: value.eventID,
+          source: value.source,
+          outcome: value.outcome,
+          counters: value.counters,
+          nanoUsd: estimate.nanoUSD === null ? null : BigInt(estimate.nanoUSD),
+          knownNanoUsd: BigInt(estimate.knownNanoUSD),
+          occurredAt: expression`${value.occurredAt}::timestamptz`,
+        })
+        .onConflictDoNothing();
+      const [existing] = await db
+        .select({
+          source: usageEntry.source,
+          outcome: usageEntry.outcome,
+          counters: usageEntry.counters,
+          occurredAt: usageEntry.occurredAt,
+        })
+        .from(usageEntry)
+        .where(and(eq(usageEntry.operationId, operationID), eq(usageEntry.eventId, value.eventID)));
       if (
         !existing ||
         existing.source !== value.source ||
         existing.outcome !== value.outcome ||
         JSON.stringify(usageCounters.parse(existing.counters)) !== JSON.stringify(value.counters) ||
-        new Date(existing.occurred_at).getTime() !== Date.parse(value.occurredAt)
+        existing.occurredAt.getTime() !== Date.parse(value.occurredAt)
       )
         throw new Error("Usage event replay changed observation");
-      if (cursor)
-        await sql`INSERT INTO factory.usage_replay_cursor(operation_id,session_id,sequence)
-        VALUES(${operationID},${cursor.sessionID},${cursor.sequence}) ON CONFLICT(operation_id,session_id)
-        DO UPDATE SET sequence=GREATEST(factory.usage_replay_cursor.sequence,EXCLUDED.sequence)`;
+      if (cursor) await advanceIn(db, operationID, cursor.sessionID, cursor.sequence);
     });
   }
   return {
     begin,
     record,
     async abandon(operationID: string) {
-      const [operation] = await database.client<
-        Array<{ created_at: Date }>
-      >`SELECT created_at FROM factory.usage_operation WHERE id=${operationID} AND settled_at IS NULL`;
+      const [operation] = await database.db
+        .select({ createdAt: usageOperation.createdAt })
+        .from(usageOperation)
+        .where(and(eq(usageOperation.id, operationID), isNull(usageOperation.settledAt)));
       if (!operation) return;
       await record(operationID, {
         eventID: "recovery:unobserved",
         source: "unobserved",
         outcome: "unknown",
         counters: unknownCounters(),
-        occurredAt: new Date(operation.created_at).toISOString(),
+        occurredAt: operation.createdAt.toISOString(),
       });
-      await database.client`UPDATE factory.usage_operation SET outcome='unknown',settled_at=now() WHERE id=${operationID} AND settled_at IS NULL`;
+      await database.db
+        .update(usageOperation)
+        .set({ outcome: "unknown", settledAt: expression`now()` })
+        .where(and(eq(usageOperation.id, operationID), isNull(usageOperation.settledAt)));
     },
     async advance(operationID: string, sessionID: string, sequence: number) {
       identity.parse(sessionID);
       z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).parse(sequence);
-      await database.client`INSERT INTO factory.usage_replay_cursor(operation_id,session_id,sequence)
-        VALUES(${operationID},${sessionID},${sequence}) ON CONFLICT(operation_id,session_id)
-        DO UPDATE SET sequence=GREATEST(factory.usage_replay_cursor.sequence,EXCLUDED.sequence)`;
+      await advanceIn(database.db, operationID, sessionID, sequence);
     },
     async settle(operationID: string, outcome: UsageEntry["outcome"]) {
-      await database.client`UPDATE factory.usage_operation SET outcome=${outcome},settled_at=now() WHERE id=${operationID} AND settled_at IS NULL`;
+      await database.db
+        .update(usageOperation)
+        .set({ outcome, settledAt: expression`now()` })
+        .where(and(eq(usageOperation.id, operationID), isNull(usageOperation.settledAt)));
     },
     async cursor(operationID: string, sessionID: string) {
-      const [row] = await database.client<
-        Array<{ sequence: string }>
-      >`SELECT sequence FROM factory.usage_replay_cursor WHERE operation_id=${operationID} AND session_id=${sessionID}`;
+      const [row] = await database.db
+        .select({ sequence: usageReplayCursor.sequence })
+        .from(usageReplayCursor)
+        .where(
+          and(
+            eq(usageReplayCursor.operationId, operationID),
+            eq(usageReplayCursor.sessionId, sessionID),
+          ),
+        );
       return row ? Number(row.sequence) : 0;
     },
     async prune(now = new Date()) {
       // PostgreSQL calendar subtraction avoids an approximate 365-day retention window.
       return database.client.begin(async (sql) => {
         await lockUsageIn(sql);
-        const removed = await sql`DELETE FROM factory.usage_operation WHERE settled_at IS NOT NULL
-        AND created_at < ${now.toISOString()}::timestamptz - interval '12 months'
-        AND NOT EXISTS(SELECT 1 FROM factory.usage_entry WHERE operation_id=factory.usage_operation.id
-          AND occurred_at >= ${now.toISOString()}::timestamptz - interval '12 months') RETURNING id`;
-        await sql`DELETE FROM factory.usage_entry entry USING factory.usage_operation operation
-          WHERE entry.operation_id=operation.id AND operation.settled_at IS NOT NULL
-          AND entry.occurred_at < ${now.toISOString()}::timestamptz - interval '12 months'`;
+        const db = drizzleTransaction(sql);
+        const cutoff = expression`${now.toISOString()}::timestamptz - interval '12 months'`;
+        const removed = await db
+          .delete(usageOperation)
+          .where(
+            and(
+              isNotNull(usageOperation.settledAt),
+              lt(usageOperation.createdAt, cutoff),
+              notExists(
+                db
+                  .select({ eventId: usageEntry.eventId })
+                  .from(usageEntry)
+                  .where(
+                    and(
+                      eq(usageEntry.operationId, usageOperation.id),
+                      expression`${usageEntry.occurredAt} >= ${cutoff}`,
+                    ),
+                  ),
+              ),
+            ),
+          )
+          .returning({ id: usageOperation.id });
+        await db.delete(usageEntry).where(
+          and(
+            lt(usageEntry.occurredAt, cutoff),
+            exists(
+              db
+                .select({ id: usageOperation.id })
+                .from(usageOperation)
+                .where(
+                  and(
+                    eq(usageOperation.id, usageEntry.operationId),
+                    isNotNull(usageOperation.settledAt),
+                  ),
+                ),
+            ),
+          ),
+        );
         return removed;
       });
     },
