@@ -197,7 +197,8 @@ Factory and the Starter use Solid 2 with TanStack Start RC11 and the fixed upstr
 request-scope module omitted from that release's exports. Installation applies it automatically;
 no upstream implementation is copied or changed. The old security backport is removed.
 The Starter bundles TanStack before Nitro packages the production server.
-TypeScript 6 remains required by the browser diagnostics and packaged language server;
+IDE diagnostics use project language tools, not a browser-only TypeScript compiler.
+TypeScript 6 remains required by compiler API-based test tooling and the packaged language server;
 TypeScript 7's CLI does not provide those JavaScript compiler or `tsserver` APIs.
 Runtime and data-service upgrades need their native and backup checks, not only a newer lockfile.
 

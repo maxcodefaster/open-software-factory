@@ -19,15 +19,17 @@
     "@theia/workspace": "1.77.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
-    "typescript": "6.0.3",
     "monaco-editor": "npm:@theia/monaco-editor-core@1.108.201",
     "y-monaco": "0.1.6",
     "y-protocols": "1.0.7",
     "yjs": "13.6.33",
     "vscode-jsonrpc": "8.2.1"
   },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  },
   "scripts": {
-    "build": "tsc && cp src/browser/factory-ide.css lib/browser/factory-ide.css"
+    "build": "rm -rf lib && tsc && cp src/browser/factory-ide.css lib/browser/factory-ide.css"
   },
   "theiaExtensions": [
     {

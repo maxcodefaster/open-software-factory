@@ -17,7 +17,6 @@ import { SearchInWorkspaceServer } from "@theia/search-in-workspace/lib/common/s
 import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
 import { FactoryActivityNavigation } from "./factory-activity-navigation";
 import { FactoryChromeContribution } from "./factory-chrome";
-import { FactoryDiagnosticsContribution } from "./factory-diagnostics";
 import { FactoryLanguageGrammars } from "./factory-language-grammars";
 import { FactoryLanguageTools } from "./factory-language-tools";
 import {
@@ -115,8 +114,6 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
   bind(FrontendApplicationContribution).toService(FactoryCollaboration);
   bind(FrontendApplicationContribution).toService(FactoryWriterContribution);
 
-  bind(FactoryDiagnosticsContribution).toSelf().inSingletonScope();
-  bind(FrontendApplicationContribution).toService(FactoryDiagnosticsContribution);
   bind(FactoryLanguageTools).toSelf().inSingletonScope();
   bind(FrontendApplicationContribution).toService(FactoryLanguageTools);
   // Resolving ResourceProvider builds EditorManager itself. Defer the language

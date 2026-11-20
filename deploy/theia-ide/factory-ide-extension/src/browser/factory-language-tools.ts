@@ -12,11 +12,7 @@ import * as monaco from "@theia/monaco-editor-core";
 import { ProtocolToMonacoConverter } from "@theia/monaco/lib/browser/protocol-to-monaco-converter";
 import type { MessageConnection } from "vscode-jsonrpc/browser";
 import { languageConnection, languageRequest } from "./factory-language-connection";
-import {
-  factoryLanguageState,
-  languagePreset,
-  type FactoryLanguage,
-} from "./factory-language-state";
+import { languagePreset, type FactoryLanguage } from "./factory-language";
 import {
   FactoryRuntimeContext,
   factoryRuntimeContext,
@@ -400,7 +396,6 @@ export class FactoryLanguageTools implements FrontendApplicationContribution, Re
           await connection.sendNotification("initialized", {});
           window.clearTimeout(deadline);
           peer.ready = true;
-          factoryLanguageState.set(workspaceID, language, true);
           for (const model of monaco.editor.getModels()) this.watch(model);
           this.renderStatus();
         })().catch(() =>
@@ -479,7 +474,6 @@ export class FactoryLanguageTools implements FrontendApplicationContribution, Re
     this.peers.delete(peer.language);
     peer.connection.dispose();
     peer.socket.close();
-    factoryLanguageState.set(peer.workspaceID, peer.language, false);
     for (const [model, disposable] of peer.buffers) {
       disposable.dispose();
       if (!model.isDisposed())

@@ -34,7 +34,7 @@ const { FactoryStatusBar } = await import(
 test("rich status hovers keep their commands and explicit accessibility names", async () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
   class ElementFixture {
-    textContent = "TypeScript syntax checks only";
+    textContent = "Project language tools";
   }
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: ElementFixture });
   const status = Object.create(FactoryStatusBar.prototype) as InstanceType<typeof FactoryStatusBar>;
@@ -55,7 +55,7 @@ test("rich status hovers keep their commands and explicit accessibility names", 
     expect(markdownInputs).toEqual(["**Settings**"]);
     const content = new ElementFixture() as unknown as HTMLElement;
     await status.setElement("language", { alignment: 0, text: "$(bracket)", tooltip: content });
-    expect(latestEntry().accessibilityInformation?.label).toBe("TypeScript syntax checks only");
+    expect(latestEntry().accessibilityInformation?.label).toBe("Project language tools");
     let calls = 0;
     await status.setElement("lazy", {
       alignment: 0,
