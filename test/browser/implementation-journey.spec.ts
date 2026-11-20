@@ -8,6 +8,7 @@ import {
   conversationViewSchema,
   deliveryViewSchema,
   developerIDEViewSchema,
+  runtimeAttemptSchema,
   sourceWorkspaceViewSchema,
   writerViewSchema,
 } from "../../apps/factory/src/api-contracts";
@@ -3353,13 +3354,18 @@ test.describe("touch review recovery", () => {
     independentReviewRetryJourney(page, "failed", true));
 });
 
-async function failedPromotionRetryJourney(page: Parameters<typeof signIn>[0], touch = false) {
+async function failedPromotionRetryJourney(
+  page: Parameters<typeof signIn>[0],
+  touch = false,
+  cleanupFailure = false,
+) {
   const changeID = crypto.randomUUID();
   const promotionID = crypto.randomUUID();
   const replacementID = crypto.randomUUID();
   const retryID = crypto.randomUUID();
   const gate = Promise.withResolvers<void>();
   const commands: Array<{ commandId: string; promotionId: string }> = [];
+  const cleanups: string[] = [];
   let retried = false;
   const value = () =>
     deliveryViewSchema.parse({
@@ -3378,6 +3384,19 @@ async function failedPromotionRetryJourney(page: Parameters<typeof signIn>[0], t
     });
   await mockFactoryFunctions(page, {
     runtime: {
+      stop: async (_actor, id) => {
+        expect(id).toBe(replacementID);
+        expect(commands).toHaveLength(0);
+        cleanups.push(id);
+        if (cleanupFailure && cleanups.length === 1)
+          throw new CommandError("unavailable", "Main Preview cleanup remains unconfirmed.");
+        return runtimeAttemptSchema.parse({
+          id: replacementID,
+          projectId: projectID,
+          runtimeKind: "staging",
+          state: "stopped",
+        });
+      },
       changes: async () =>
         changesResponseSchema.parse({
           changes: [
@@ -3444,7 +3463,8 @@ async function failedPromotionRetryJourney(page: Parameters<typeof signIn>[0], t
   ).toBe(0);
   await wakeFactoryReads(page);
   expect(commands).toEqual([]);
-  const evidence = ".factory/test-results/promotion-retry";
+  expect(cleanups).toEqual([]);
+  const evidence = `.factory/test-results/promotion-retry/${cleanupFailure ? "keyboard" : touch ? "touch" : "pointer"}`;
   await mkdir(evidence, { recursive: true });
   for (const width of touch ? [390] : [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
@@ -3453,10 +3473,27 @@ async function failedPromotionRetryJourney(page: Parameters<typeof signIn>[0], t
     );
     await page.screenshot({ path: `${evidence}/failed-${touch ? "touch" : width}.png` });
   }
-  if (touch) await retry.tap();
-  else await retry.click();
+  const activate = async () => {
+    if (cleanupFailure) {
+      await retry.focus();
+      await page.keyboard.press("Enter");
+    } else if (touch) await retry.tap();
+    else await retry.click();
+  };
+  await activate();
+  if (cleanupFailure) {
+    await expect(page.getByRole("alert")).toContainText(
+      "Main Preview cleanup remains unconfirmed.",
+    );
+    await expect(retry).toBeEnabled();
+    expect(commands).toEqual([]);
+    expect(cleanups).toEqual([replacementID]);
+    await page.screenshot({ path: `${evidence}/cleanup-unconfirmed-keyboard.png` });
+    await activate();
+  }
   await expect(retry).toBeDisabled();
   await expect.poll(() => commands.length).toBe(1);
+  expect(cleanups).toEqual(cleanupFailure ? [replacementID, replacementID] : [replacementID]);
   expect(commands[0]?.promotionId).toBe(promotionID);
   gate.resolve();
   await expect(retry).toHaveCount(0);
@@ -3469,6 +3506,11 @@ test("failed Promotion exposes one explicit Main Preview retry without another m
   page,
 }) => {
   await failedPromotionRetryJourney(page);
+});
+test("keyboard Promotion retry retains the failed target when cleanup is unconfirmed", async ({
+  page,
+}) => {
+  await failedPromotionRetryJourney(page, false, true);
 });
 test.describe("synthetic touch Promotion recovery", () => {
   test.use({ hasTouch: true, isMobile: true });

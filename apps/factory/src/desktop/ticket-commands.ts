@@ -18,6 +18,7 @@ import {
   retryStagingPromotion,
 } from "../server-functions/delivery";
 import { serverCall } from "../server-functions/result";
+import { stopRuntimeAttempt } from "../server-functions/runtime";
 import {
   createTicketFollowUp,
   getTicketDetail,
@@ -418,10 +419,9 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
   }
 
   async function retryPromotion(changeID: string) {
-    const promotionId =
-      dependencies.selectedChange()?.id === changeID
-        ? dependencies.delivery()?.promotionId
-        : undefined;
+    const target =
+      dependencies.selectedChange()?.id === changeID ? dependencies.delivery() : undefined;
+    const promotionId = target?.promotionId;
     if (!promotionId) return;
     const scope = dependencies.agentCommandScope("retry-promotion", changeID);
     await dependencies.mutate(async () => {
@@ -429,6 +429,17 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
         scope,
         JSON.stringify({ changeID, promotionId }),
       );
+      // Use the failed replacement's normal cleanup owner, never the Coding
+      // Workspace. The retry still requires the server's confirmed cleanup.
+      if (
+        target?.mergeState === "succeeded" &&
+        target?.promotionState === "failed" &&
+        target.replacementRuntimeAttemptId &&
+        ["failed", "stopped", "stop-intended", "stopping", "cleanup-failed"].includes(
+          target.replacementRuntimeState ?? "",
+        )
+      )
+        await serverCall(stopRuntimeAttempt({ data: [target.replacementRuntimeAttemptId] }));
       const value = await serverCall(
         retryStagingPromotion({ data: [changeID, { commandId, promotionId }] }),
       );
