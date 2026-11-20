@@ -7,26 +7,34 @@ import {
   matchesRestoreSourceContract,
   restoreContractDigest,
   reviewedRestoreContract,
+  reviewedRestoreContracts,
 } from "./restore-source-contract";
 
 const hash = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex");
 
 async function fixtureRevision() {
   const source = resolve(import.meta.dir, "../..");
-  try {
-    if ((await localGit(source, ["cat-file", "-t", reviewedRestoreContract.revision])) === "commit")
-      return reviewedRestoreContract.revision;
-  } catch {
-    // CI may have only the checked-out commit. This selects test data only,
-    // after the unchanged production matcher proves both pinned contracts.
+  for (const reviewed of reviewedRestoreContracts) {
+    try {
+      if ((await localGit(source, ["cat-file", "-t", reviewed.revision])) === "commit")
+        return { revision: reviewed.revision, reviewed };
+    } catch {
+      // The exact reviewed commit can be absent in a shallow checkout.
+    }
   }
   const current = await localGit(source, ["rev-parse", "--verify", "HEAD"]);
   if (!(await matchesRestoreSourceContract(source, current, current)))
-    throw Error("Restore tests need the reviewed baseline or a content-equivalent local commit");
-  return current;
+    throw Error("Restore tests need a reviewed baseline or a content-equivalent local commit");
+  const chart = await restoreContractDigest(source, current, "chart");
+  const application = await restoreContractDigest(source, current, "application");
+  const reviewed = reviewedRestoreContracts.find(
+    (entry) => entry.chart === chart && entry.application === application,
+  );
+  if (!reviewed) throw Error("The shallow fixture has no matching reviewed content pair");
+  return { revision: current, reviewed };
 }
 
-const baseline = await fixtureRevision();
+const { revision: baseline, reviewed: baselineContract } = await fixtureRevision();
 
 async function localGit(repository: string, args: string[], input?: string) {
   const child = Bun.spawn(
@@ -123,11 +131,11 @@ test("real local committed objects reproduce both static baseline SHA-256 contra
   try {
     for (const contract of ["chart", "application"] as const)
       expect(await restoreContractDigest(repo.root, baseline, contract)).toBe(
-        reviewedRestoreContract[contract],
+        baselineContract[contract],
       );
     expect(await repo.matches(baseline, baseline)).toBe(true);
     expect(await repo.matches()).toBe(true);
-    // Chart and application are checked against their respective contracts, not as one pair.
+    // Different source SHAs must still match the same reviewed content pair.
     expect(await repo.matches(baseline, repo.admitted)).toBe(true);
     expect(await repo.matches(repo.admitted, baseline)).toBe(true);
   } finally {
@@ -137,6 +145,20 @@ test("real local committed objects reproduce both static baseline SHA-256 contra
 
 test.each([
   "apps/factory/src/restore-contract-new-code.ts",
+  "apps/factory/src/agent/opencode-terminal.ts",
+  "apps/factory/src/agent/terminal-outcome.ts",
+  "apps/factory/src/models/relay.ts",
+  "packages/db/migrations/0001_baseline.sql",
+  "apps/factory/src/delivery/controller.ts",
+  "apps/factory/src/desktop/ticket-commands.ts",
+  "test/integration/terminal-checkpoint-restore.test.ts",
+  "test/integration/delivery-recovery.test.ts",
+  "test/fixtures/change-agent-turns.ts",
+  "apps/factory/src/desktop/ticket-commands.test.ts",
+  "test/fixtures/promotion-retry.ts",
+  "test/browser/implementation-journey.spec.ts",
+  "scripts/kubernetes/backup.test.ts",
+  "test/integration/backup-runner.native.test.ts",
   "packages/restore-contract-new-package.ts",
   "services/restore-contract-new-service.go",
   "deploy/opencode-server/config/AGENTS.md",
@@ -172,6 +194,7 @@ test.each([
   "deploy/helm/factory/templates/factory.yaml",
   "deploy/helm/factory/templates/preflight.yaml",
   "deploy/helm/factory/files/backup/forgejo.sh",
+  "deploy/helm/factory/files/backup/common.sh",
   "deploy/helm/factory/files/backup/foreign-keys.sql",
   "deploy/helm/factory/templates/new-test-only.yaml",
 ] as const)("real committed chart change in %s refuses", async (path) => {
@@ -184,6 +207,61 @@ test.each([
   } finally {
     await repo.close();
   }
+});
+
+test("additional content profiles retain the historical fingerprint", () => {
+  expect(reviewedRestoreContracts[0]).toBe(reviewedRestoreContract);
+  expect(reviewedRestoreContract).toEqual({
+    revision: "509a72684ef9961f22ad3cd857e0ac5c3062a4fa",
+    chart: "66ee75748e01f963fa94bb73dc470cd2149a29a5b2d2af42576a0c4f99abfc18",
+    application: "48f400353073eb34ba67cd50ba2e81a55adce3d87bacd996a93acd66533522a6",
+  });
+  expect(Object.isFrozen(reviewedRestoreContracts)).toBe(true);
+  expect(reviewedRestoreContracts.every(Object.isFrozen)).toBe(true);
+});
+
+test("every available reviewed source and the selected shallow fixture retain admission", async () => {
+  const source = resolve(import.meta.dir, "../..");
+  const revisions = new Set([baseline, ...reviewedRestoreContracts.map((entry) => entry.revision)]);
+  let observed = 0;
+  for (const revision of revisions) {
+    try {
+      await localGit(source, ["cat-file", "-e", `${revision}^{commit}`]);
+    } catch {
+      // Missing historical objects are not positive results; baseline must exist.
+      continue;
+    }
+    expect(await matchesRestoreSourceContract(source, revision, revision)).toBe(true);
+    observed++;
+  }
+  expect(observed).toBeGreaterThan(0);
+});
+
+test("chart and application digests cannot be borrowed from different reviewed pairs", async () => {
+  const source = resolve(import.meta.dir, "../..");
+  const available = new Map([[baseline, { ...baselineContract, revision: baseline }]]);
+  for (const reviewed of reviewedRestoreContracts) {
+    try {
+      await localGit(source, ["cat-file", "-e", `${reviewed.revision}^{commit}`]);
+      available.set(reviewed.revision, reviewed);
+    } catch {
+      // Missing historical objects do not count as a checked pair.
+    }
+  }
+  let observed = 0;
+  for (const chart of available.values()) {
+    for (const application of available.values()) {
+      const expected = reviewedRestoreContracts.some(
+        (reviewed) =>
+          reviewed.chart === chart.chart && reviewed.application === application.application,
+      );
+      expect(await matchesRestoreSourceContract(source, chart.revision, application.revision)).toBe(
+        expected,
+      );
+      observed++;
+    }
+  }
+  expect(observed).toBeGreaterThan(0);
 });
 
 test("committed deletions, executable modes, symlinks, submodules and excluded-path mode changes refuse", async () => {

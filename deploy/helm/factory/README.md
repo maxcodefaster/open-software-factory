@@ -739,19 +739,25 @@ where they carry configuration. The top-level `fixture.json` fields are:
 | `limits` | Positive per-container `memoryMiB`, `cpus`, `pids`, `tmpfsMiB`; integer `commandTimeoutSeconds`, `requiredDiskBytes` and independently observed `availableDiskBytes` |
 
 The historical exact chart/application pairs in `supportedSourceManifests` remain supported.
-Other pairs qualify only when read-only local Git object inspection proves that each revision's
-respective contract matches reviewed baseline `0a6800a0871bf9c8bc9f09f7c19e7160deacb0c1`.
-Chart and application revisions may differ. The tool preserves both original SHAs in the fixture,
-independent witnesses, plan, journal and receipt. Do not relabel backups with the baseline SHA.
-Content-profile admission always requires the original, nonempty, ordinary, independently witnessed
+Other pairs qualify only when read-only local Git object inspection proves that both
+respective digests match one static entry in `reviewedRestoreContracts`. Append newly reviewed
+content pairs instead of replacing historical fingerprints. Chart and application revisions may
+differ, but their digests must match the same reviewed pair. The tool preserves the original
+source SHAs in fixtures, witnesses, journals and receipts. Never relabel a backup with a profile SHA.
+Content-profile admission still requires the original, nonempty, ordinary, independently witnessed
 `ingress-tls/identity.json`, not an excluded credential or symlink.
 
-`scripts/kubernetes/restore-source-contract.ts` pins these SHA-256 digests:
+The current static reviewed pairs in `scripts/kubernetes/restore-source-contract.ts` are:
 
-| Contract | Baseline SHA-256 |
-| --- | --- |
-| Chart | `66ee75748e01f963fa94bb73dc470cd2149a29a5b2d2af42576a0c4f99abfc18` |
-| Application | `a3faa3161c75baf61f8b57d4f12e31dda938cf607871eadae84bf4d72abbf981` |
+| Reviewed source | Chart SHA-256 | Application SHA-256 |
+| --- | --- | --- |
+| `509a72684ef9961f22ad3cd857e0ac5c3062a4fa` | `66ee75748e01f963fa94bb73dc470cd2149a29a5b2d2af42576a0c4f99abfc18` | `48f400353073eb34ba67cd50ba2e81a55adce3d87bacd996a93acd66533522a6` |
+| `2eb86535dc91e14a49936d33a90e72518fc850d8` | `1dc021ba75f8e7236a627db10506cf009382ede01bd79de794e15c0f5f115556` | `7f6e775ad953ffad7a57fbb0de4e9217f7c8db314e55e5c2966b27b4543ac9f2` |
+
+Earlier documentation recorded baseline `0a6800a0871bf9c8bc9f09f7c19e7160deacb0c1` with
+chart digest `66ee75748e01f963fa94bb73dc470cd2149a29a5b2d2af42576a0c4f99abfc18` and
+application digest `a3faa3161c75baf61f8b57d4f12e31dda938cf607871eadae84bf4d72abbf981`.
+Those historical values are retained here for provenance, not added as an admission bypass.
 
 The chart contract covers every committed file under `deploy/helm/factory/` except the exact
 `README.md` path. This includes Helm preflight hooks, values and all backup scripts. There are no
@@ -782,7 +788,7 @@ For each contract, sort committed paths by UTF-8 byte order. Hash the UTF-8 pref
 `factory-restore-source-contract-v1`, NUL, contract name `chart` or `application`, NUL, then one
 compact JSON array `[gitMode, path, rawBlobSHA256]` plus LF for each selected file. Git modes are
 six-character strings. Blob SHA-256 values hash raw committed bytes, not working files or Git's
-SHA-1 IDs. The baseline has 29 chart files and 2,177 application files.
+SHA-1 IDs. The earlier documented baseline had 29 chart files and 2,177 application files.
 
 Only full lowercase SHA commit objects qualify. Branches, tags, abbreviated SHAs, revision
 expressions, missing commits/contract blobs, submodules, unreadable objects and contract mismatches refuse

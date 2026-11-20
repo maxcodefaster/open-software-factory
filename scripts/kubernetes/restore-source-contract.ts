@@ -13,6 +13,16 @@ export const reviewedRestoreContract = Object.freeze({
   application: "48f400353073eb34ba67cd50ba2e81a55adce3d87bacd996a93acd66533522a6",
 });
 
+// Append reviewed content pairs; never replace the historical fingerprint.
+export const reviewedRestoreContracts = Object.freeze([
+  reviewedRestoreContract,
+  Object.freeze({
+    revision: "2eb86535dc91e14a49936d33a90e72518fc850d8",
+    chart: "1dc021ba75f8e7236a627db10506cf009382ede01bd79de794e15c0f5f115556",
+    application: "7f6e775ad953ffad7a57fbb0de4e9217f7c8db314e55e5c2966b27b4543ac9f2",
+  }),
+]);
+
 // Exact paths only. No extension, directory, test-name or README glob can hide new code.
 // The Helm preflight templates and backup scripts are production files, not exclusions.
 const chartExclusions = new Set(["deploy/helm/factory/README.md"]);
@@ -161,11 +171,10 @@ export async function matchesRestoreSourceContract(
   if (!revisionPattern.test(chartRevision) || !revisionPattern.test(applicationRevision))
     return false;
   try {
-    return (
-      (await restoreContractDigest(repository, chartRevision, "chart")) ===
-        reviewedRestoreContract.chart &&
-      (await restoreContractDigest(repository, applicationRevision, "application")) ===
-        reviewedRestoreContract.application
+    const chart = await restoreContractDigest(repository, chartRevision, "chart");
+    const application = await restoreContractDigest(repository, applicationRevision, "application");
+    return reviewedRestoreContracts.some(
+      (reviewed) => reviewed.chart === chart && reviewed.application === application,
     );
   } catch {
     // Missing commits/blobs, unsupported entries, size/time bounds and Git failures all refuse.
