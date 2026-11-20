@@ -1,13 +1,70 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { is } from "drizzle-orm";
+import { eq, is } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
+import { drizzleTransaction } from "../../packages/db/src/client";
 import { baselineDigest, readMigration, shippedMigrations } from "../../packages/db/src/migrations";
 import * as schema from "../../packages/db/src/schema";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { verificationEnvironment } from "../../scripts/testing/test-prerequisites";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
+
+test("typed and native queries share commit, rollback and nested savepoints on the same connection", async () => {
+  const server = await ownedPostgresServer();
+  const client = postgres(server.identity.url, { max: 2 });
+  const id = crypto.randomUUID();
+  try {
+    await expect(
+      client.begin(async (transaction) => {
+        const db = drizzleTransaction(transaction);
+        await db.insert(schema.authUser).values({
+          id,
+          name: "Typed transaction",
+          email: `typed-${id}@baseline.test`,
+        });
+        expect([...(await transaction`SELECT name FROM auth."user" WHERE id=${id}`)]).toEqual([
+          { name: "Typed transaction" },
+        ]);
+        await expect(
+          db.transaction(async (nested) => {
+            await nested
+              .update(schema.authUser)
+              .set({ name: "Rolled-back savepoint" })
+              .where(eq(schema.authUser.id, id));
+            throw new Error("Owned savepoint rollback");
+          }),
+        ).rejects.toThrow("Owned savepoint rollback");
+        expect(await db.select({ name: schema.authUser.name }).from(schema.authUser)).toEqual([
+          { name: "Typed transaction" },
+        ]);
+        throw new Error("Owned outer rollback");
+      }),
+    ).rejects.toThrow("Owned outer rollback");
+    expect(await client`SELECT id FROM auth."user" WHERE id=${id}`).toHaveLength(0);
+    await client.begin(async (transaction) => {
+      const db = drizzleTransaction(transaction);
+      await db.insert(schema.authUser).values({
+        id,
+        name: "Committed transaction",
+        email: `typed-${id}@baseline.test`,
+      });
+      await transaction`UPDATE auth."user" SET name='Native update' WHERE id=${id}`;
+      expect(
+        await db
+          .select({ name: schema.authUser.name })
+          .from(schema.authUser)
+          .where(eq(schema.authUser.id, id)),
+      ).toEqual([{ name: "Native update" }]);
+    });
+    expect([...(await client`SELECT name FROM auth."user" WHERE id=${id}`)]).toEqual([
+      { name: "Native update" },
+    ]);
+  } finally {
+    await client.end({ timeout: 2 });
+    await server.dispose();
+  }
+});
 
 async function initialize(url: string) {
   const child = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {

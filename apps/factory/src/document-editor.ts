@@ -8,7 +8,7 @@ import { Markdown } from "@tiptap/markdown";
 import type { SelectionBookmark } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
-import { codeHighlighter } from "./code-highlighting";
+import { codeBlockHighlighter } from "./code-highlighting";
 import type { DocumentBlockState, DocumentEditor, DocumentFormat } from "./document-model";
 import { preserveDocumentSelection } from "./document-selection";
 import { documentSlash } from "./document-slash";
@@ -16,7 +16,7 @@ import { documentSlash } from "./document-slash";
 export function documentExtensions() {
   return [
     StarterKit.configure({ link: { openOnClick: false }, codeBlock: false }),
-    CodeBlockLowlight.configure({ lowlight: codeHighlighter, defaultLanguage: "plaintext" }),
+    CodeBlockLowlight.configure({ lowlight: codeBlockHighlighter, defaultLanguage: "plaintext" }),
     Markdown,
     Image.extend({
       addNodeView() {

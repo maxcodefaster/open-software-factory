@@ -9,7 +9,7 @@ import {
 } from "../../apps/factory/src/knowledge/generation-failure";
 import { WikiPublicationConflict } from "../../apps/factory/src/knowledge/publication";
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
-import type { createDatabase } from "../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -48,6 +48,8 @@ test.each(["version", "revision", "state"] as const)(
     let pageCount = 0;
     let state = "pending";
     let calls = 0;
+    let transactionDepth = 0;
+    const typedReads: Array<{ query: string; parameters: unknown[] }> = [];
     const environment = {
       FACTORY_FORGEJO_API_URL: "https://forge.invalid/api/v1/",
       FACTORY_FORGEJO_PUBLIC_URL: "https://forge.invalid",
@@ -68,25 +70,18 @@ test.each(["version", "revision", "state"] as const)(
     );
     Object.assign(process.env, environment);
     const fetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network admitted"));
-    // An in-memory transaction double, not a SQL connection or interpreter.
+    // Replace PostgreSQL I/O, retaining the actual Drizzle builders and result mapping.
     const sql = async (parts: TemplateStringsArray, ...values: unknown[]) => {
       const text = parts.join("?").replace(/\s+/g, " ").trim();
-      if (text.startsWith('SELECT id FROM auth."user"')) return [{ id: userID }];
-      if (text.includes("FROM factory.account_access"))
-        return [{ disabledAt: null, directoryDisabledAt: null }];
-      if (text.includes("FROM factory.project_membership")) return [{ manageProject: false }];
-      if (text.includes("FROM factory.administrator")) return [];
       if (text.startsWith("SELECT pg_advisory_xact_lock")) return [];
       if (
-        [
-          "factory.model_role_connection",
-          "factory.model_defaults",
-          "factory.project_model_settings",
-          "factory.personal_model_settings",
-          "factory.usage_operation",
-        ].some((table) => text.includes(`FROM ${table}`))
-      )
+        text ===
+        'SELECT connection_id AS "connectionID", connection_version::float8 AS version FROM factory.model_role_connection WHERE role=?'
+      ) {
+        expect(values).toEqual(["planning"]);
         return [];
+      }
+      if (text.includes("FROM factory.usage_operation")) return [];
       if (text.includes("FROM factory.project WHERE"))
         return [
           {
@@ -147,10 +142,73 @@ test.each(["version", "revision", "state"] as const)(
         );
       throw new Error(`Unhandled offline statement: ${text}`);
     };
+    const modelRoleRead = [
+      'select "factory"."model_role_connection"."role", "factory"."model_connection_version"."provider",',
+      '"factory"."model_role_connection"."model_id", "factory"."model_connection_version"."endpoint"',
+      'from "factory"."model_role_connection" inner join "factory"."model_connection_version"',
+      'on ("factory"."model_connection_version"."connection_id" = "factory"."model_role_connection"."connection_id"',
+      'and "factory"."model_connection_version"."version" = "factory"."model_role_connection"."connection_version")',
+    ].join(" ");
     const client = Object.assign(sql, {
-      begin: (work: (transaction: typeof sql) => unknown) => work(sql),
+      unsafe(query: string, parameters: unknown[]) {
+        typedReads.push({ query, parameters });
+        expect(transactionDepth).toBeGreaterThan(0);
+        let values: unknown[][];
+        switch (query) {
+          case 'select "id" from "auth"."user" where "auth"."user"."id" = $1 for share':
+            expect(parameters).toEqual([userID]);
+            values = [[userID]];
+            break;
+          case 'select "disabled_at", "directory_disabled_at" from "factory"."account_access" where "factory"."account_access"."user_id" = $1 for share':
+            expect(parameters).toEqual([userID]);
+            values = [[null, null]];
+            break;
+          case 'select "role", "manage_project" from "factory"."project_membership" where ("factory"."project_membership"."project_id" = $1 and "factory"."project_membership"."user_id" = $2) for share':
+            expect(parameters).toEqual([projectID, userID]);
+            values = [["developer", false]];
+            break;
+          case 'select "user_id" from "factory"."administrator" where "factory"."administrator"."user_id" = $1 for share':
+            expect(parameters).toEqual([userID]);
+            values = [];
+            break;
+          case 'select "id" from "factory"."project" where "factory"."project"."id" = $1':
+            expect(parameters).toEqual([projectID]);
+            values = [[projectID]];
+            break;
+          case modelRoleRead:
+            expect(parameters).toEqual([]);
+            values = [];
+            break;
+          case 'select "version", "planning_model_id", "build_model_id", "role_rules" from "factory"."model_defaults" where "factory"."model_defaults"."singleton" = $1':
+            expect(parameters).toEqual([true]);
+            values = [];
+            break;
+          case 'select "version", "planning", "build" from "factory"."project_model_settings" where "factory"."project_model_settings"."project_id" = $1':
+            expect(parameters).toEqual([projectID]);
+            values = [];
+            break;
+          case 'select "version", "planning_model_id", "build_model_id" from "factory"."personal_model_settings" where ("factory"."personal_model_settings"."project_id" = $1 and "factory"."personal_model_settings"."user_id" = $2)':
+            expect(parameters).toEqual([projectID, userID]);
+            values = [];
+            break;
+          default:
+            throw new Error(`Unhandled offline Drizzle statement: ${query}`);
+        }
+        return Object.assign(Promise.resolve(values), { values: async () => values });
+      },
+      async begin<T>(work: (transaction: typeof sql) => Promise<T>) {
+        transactionDepth++;
+        try {
+          return await work(sql);
+        } finally {
+          transactionDepth--;
+        }
+      },
     });
-    const database = { client } as unknown as ReturnType<typeof createDatabase>;
+    const database = {
+      client,
+      db: drizzleTransaction(client as unknown as ReturnType<typeof createDatabase>["client"]),
+    } as unknown as ReturnType<typeof createDatabase>;
     const wiki = createKnowledgeController(
       database,
       {
@@ -219,6 +277,18 @@ test.each(["version", "revision", "state"] as const)(
       await wiki.recover();
       await wiki.settle();
       expect(calls).toBe(2);
+      expect(typedReads.filter(({ query }) => query === modelRoleRead)).toHaveLength(1);
+      expect(
+        typedReads.filter(({ query }) => query.includes('from "factory"."model_defaults"')),
+      ).toHaveLength(1);
+      expect(
+        typedReads.filter(({ query }) => query.includes('from "factory"."project_model_settings"')),
+      ).toHaveLength(1);
+      expect(
+        typedReads.filter(({ query }) =>
+          query.includes('from "factory"."personal_model_settings"'),
+        ),
+      ).toHaveLength(1);
       expect(state).toBe("succeeded");
       expect(pageWrites).toBe(1);
       expect(row.generatedBody).toBe("Current generated overview.");

@@ -1,19 +1,143 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
+import {
+  createAccessController,
+  projectDevelopmentAuthorityIn,
+} from "../../apps/factory/src/access/controller";
 import {
   searchProjectKnowledge,
   searchProjectTickets,
 } from "../../apps/factory/src/project-agent/controller";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { drizzleTransaction } from "../../packages/db/src/client";
+import {
+  accountAccess,
+  administrator as administratorTable,
+  authUser,
+  project,
+  projectMembership,
+} from "../../packages/db/src/schema";
 import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
+
+test("project authority retains share locks through concurrent account, directory, member and administrator revocation", async () => {
+  const process = await factoryProcess();
+  const database = process.connect();
+  let revocation: Promise<void> | undefined;
+  try {
+    const userID = crypto.randomUUID();
+    const projectID = crypto.randomUUID();
+    const now = new Date();
+    await database.db.insert(authUser).values({
+      id: userID,
+      name: "Owned access authority",
+      email: `${userID}@factory.local`,
+    });
+    await database.db.insert(project).values({
+      id: projectID,
+      slug: `access-lock-${projectID}`,
+      name: "Owned access locks",
+      desktopBackgroundKey: "river-landscape",
+      repositoryUrl: "https://example.invalid/repo.git",
+      defaultBranch: "main",
+      devcontainerPath: ".devcontainer/devcontainer.json",
+      createdBy: userID,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const access = createAccessController(database);
+    for (const revoked of ["member", "administrator", "account", "directory"] as const) {
+      await database.db
+        .update(accountAccess)
+        .set({
+          disabledAt: null,
+          directoryDisabledAt: null,
+        })
+        .where(eq(accountAccess.userId, userID));
+      if (revoked === "administrator") {
+        await database.db.insert(administratorTable).values({ userId: userID });
+      } else {
+        await database.db
+          .insert(projectMembership)
+          .values({
+            projectId: projectID,
+            userId: userID,
+            role: "developer",
+            manageProject: false,
+            updatedBy: userID,
+          })
+          .onConflictDoNothing();
+      }
+      const started = Promise.withResolvers<number>();
+      let completed = false;
+      let revocationError: unknown;
+      await database.client.begin(async (transaction) => {
+        await projectDevelopmentAuthorityIn(transaction, userID, projectID);
+        const [owner] = await transaction<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+        if (!owner) throw new Error("Missing access transaction backend");
+        revocation = database.client
+          .begin(async (writer) => {
+            const [backend] = await writer<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+            if (!backend) throw new Error("Missing revocation transaction backend");
+            started.resolve(backend.pid);
+            const db = drizzleTransaction(writer);
+            if (revoked === "member") {
+              await db.delete(projectMembership).where(eq(projectMembership.userId, userID));
+            } else if (revoked === "administrator") {
+              await db.delete(administratorTable).where(eq(administratorTable.userId, userID));
+            } else {
+              await db
+                .update(accountAccess)
+                .set(revoked === "account" ? { disabledAt: now } : { directoryDisabledAt: now })
+                .where(eq(accountAccess.userId, userID));
+            }
+          })
+          .then(
+            () => {
+              completed = true;
+            },
+            (cause: unknown) => {
+              revocationError = cause;
+              started.reject(cause);
+            },
+          );
+        const writerPID = await started.promise;
+        await eventually(
+          async () => {
+            const [row] = await database.client<Array<{ blocked: boolean }>>`
+              SELECT ${owner.pid} = ANY(pg_blocking_pids(${writerPID})) AS blocked`;
+            return row?.blocked === true;
+          },
+          (blocked) => blocked,
+          `${revoked} revocation did not wait for the access transaction`,
+        );
+        expect(completed).toBe(false);
+        await projectDevelopmentAuthorityIn(transaction, userID, projectID);
+      });
+      await revocation;
+      if (revocationError) throw revocationError;
+      expect(completed).toBe(true);
+      const message =
+        revoked === "account" || revoked === "directory"
+          ? "Account access is disabled"
+          : "Project not found";
+      await expect(access.requireDevelopment(userID, projectID)).rejects.toThrow(message);
+      await expect(access.canDevelop(userID, projectID)).rejects.toThrow(message);
+    }
+  } finally {
+    await revocation;
+    await database.client.end();
+    await process.dispose();
+  }
+}, 60_000);
 
 test("managed developers sign in, see only member Projects and cannot manage global settings", async () => {
   const process = await factoryProcess();

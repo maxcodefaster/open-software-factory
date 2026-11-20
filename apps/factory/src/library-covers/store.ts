@@ -1,5 +1,7 @@
+import { eq, inArray } from "drizzle-orm";
+import { drizzleTransaction } from "../../../../packages/db/src/client";
+import { mcpLibraryCover, skillLibraryCover } from "../../../../packages/db/src/schema";
 import {
-  type LibraryCover,
   type LibraryCoverKey,
   libraryCoverState,
 } from "../../../../packages/conversation-domain/src/library-covers";
@@ -7,16 +9,18 @@ import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 type LibraryKind = "skill" | "mcp";
-const tables = { skill: "factory.skill_library_cover", mcp: "factory.mcp_library_cover" };
+const tables = { skill: skillLibraryCover, mcp: mcpLibraryCover };
 
 export async function libraryCoversIn(
   sql: AgentTurnTransaction,
   kind: LibraryKind,
   libraryIds: string[],
 ) {
-  const rows = await sql<Array<{ libraryId: string; key: string; version: number }>>`
-    SELECT library_id AS "libraryId", cover_key AS key, version::float8 AS version
-    FROM ${sql(tables[kind])} WHERE library_id = ANY(${libraryIds}::uuid[])`;
+  const table = tables[kind];
+  const rows = await drizzleTransaction(sql)
+    .select({ libraryId: table.libraryId, key: table.coverKey, version: table.version })
+    .from(table)
+    .where(inArray(table.libraryId, libraryIds));
   return new Map(rows.map((row) => [row.libraryId, libraryCoverState.parse(row)]));
 }
 
@@ -27,8 +31,11 @@ export async function initializeLibraryCoverIn(
   key: LibraryCoverKey,
   userId: string,
 ) {
-  await sql`INSERT INTO ${sql(tables[kind])}(library_id, cover_key, version, updated_by)
-    VALUES (${libraryId}, ${key}, 1, ${userId}) ON CONFLICT (library_id) DO NOTHING`;
+  const table = tables[kind];
+  await drizzleTransaction(sql)
+    .insert(table)
+    .values({ libraryId, coverKey: key, version: 1, updatedBy: userId })
+    .onConflictDoNothing({ target: table.libraryId });
 }
 
 // Callers authorize the owning library and hold its existing write lock.
@@ -39,9 +46,13 @@ export async function saveLibraryCoverIn(
   input: { libraryId: string; key: LibraryCoverKey; expectedVersion: number },
   userId: string,
 ) {
-  const [current] = await sql<Array<LibraryCover & { updatedBy: string }>>`
-    SELECT cover_key AS key, version::float8 AS version, updated_by AS "updatedBy"
-    FROM ${sql(tables[kind])} WHERE library_id = ${input.libraryId} FOR UPDATE`;
+  const table = tables[kind];
+  const db = drizzleTransaction(sql);
+  const [current] = await db
+    .select({ key: table.coverKey, version: table.version, updatedBy: table.updatedBy })
+    .from(table)
+    .where(eq(table.libraryId, input.libraryId))
+    .for("update");
   if ((current?.version ?? 0) !== input.expectedVersion) {
     if (
       current?.version === input.expectedVersion + 1 &&
@@ -52,9 +63,18 @@ export async function saveLibraryCoverIn(
     throw new CommandError("conflict", "This cover changed elsewhere. Reload before saving.");
   }
   if (current?.key === input.key) return { saved: true };
-  await sql`INSERT INTO ${sql(tables[kind])}(library_id, cover_key, version, updated_by)
-    VALUES (${input.libraryId}, ${input.key}, ${input.expectedVersion + 1}, ${userId})
-    ON CONFLICT (library_id) DO UPDATE SET cover_key = EXCLUDED.cover_key,
-      version = EXCLUDED.version, updated_by = EXCLUDED.updated_by`;
+  const values = {
+    libraryId: input.libraryId,
+    coverKey: input.key,
+    version: input.expectedVersion + 1,
+    updatedBy: userId,
+  };
+  await db
+    .insert(table)
+    .values(values)
+    .onConflictDoUpdate({
+      target: table.libraryId,
+      set: { coverKey: values.coverKey, version: values.version, updatedBy: values.updatedBy },
+    });
   return { saved: true };
 }

@@ -1,4 +1,6 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, sql as expression, isNull, ne } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { accountAccess, authUser, projectMembership } from "../../../../packages/db/src/schema";
 import type { ProjectRole } from "../../../../packages/project-domain/src/access";
 import { CommandError } from "../command-error";
 import { projectAuthorityIn, requireActiveAccountIn } from "./controller";
@@ -16,19 +18,31 @@ export function createMembershipCommands(database: Database) {
       await sql`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
       await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`project-membership:${input.projectID}`},0))`;
       await projectAuthorityIn(sql, input.actorID, input.projectID, true);
-      const [target] =
-        "email" in input.target
-          ? await sql<
-              Array<{ id: string }>
-            >`SELECT id FROM auth."user" WHERE email=${input.target.email.toLowerCase()} FOR SHARE`
-          : await sql<
-              Array<{ id: string }>
-            >`SELECT id FROM auth."user" WHERE id=${input.target.userID} FOR SHARE`;
+      const db = drizzleTransaction(sql);
+      const [target] = await db
+        .select({ id: authUser.id })
+        .from(authUser)
+        .where(
+          "email" in input.target
+            ? eq(authUser.email, input.target.email.toLowerCase())
+            : eq(authUser.id, input.target.userID),
+        )
+        .for("share");
       if (!target) throw new CommandError("not-found", "Account not found");
-      const [previous] = await sql<
-        Membership[]
-      >`SELECT user_id AS "userId",role,manage_project AS "manageProject"
-        FROM factory.project_membership WHERE project_id=${input.projectID} AND user_id=${target.id} FOR UPDATE`;
+      const membershipFields = {
+        userId: projectMembership.userId,
+        role: projectMembership.role,
+        manageProject: projectMembership.manageProject,
+      };
+      const targetMembership = and(
+        eq(projectMembership.projectId, input.projectID),
+        eq(projectMembership.userId, target.id),
+      );
+      const [previous] = await db
+        .select(membershipFields)
+        .from(projectMembership)
+        .where(targetMembership)
+        .for("update");
       const setting = "email" in input.target ? input.target : null;
       if (setting) {
         await requireActiveAccountIn(sql, target.id);
@@ -43,11 +57,20 @@ export function createMembershipCommands(database: Database) {
           );
       }
       if (previous?.manageProject && !setting?.manageProject) {
-        const [other] = await sql`SELECT member.user_id FROM factory.project_membership member
-          LEFT JOIN factory.account_access access ON access.user_id=member.user_id
-          WHERE member.project_id=${input.projectID} AND member.user_id<>${target.id}
-            AND member.manage_project AND access.disabled_at IS NULL
-            AND access.directory_disabled_at IS NULL LIMIT 1`;
+        const [other] = await db
+          .select({ userId: projectMembership.userId })
+          .from(projectMembership)
+          .leftJoin(accountAccess, eq(accountAccess.userId, projectMembership.userId))
+          .where(
+            and(
+              eq(projectMembership.projectId, input.projectID),
+              ne(projectMembership.userId, target.id),
+              eq(projectMembership.manageProject, true),
+              isNull(accountAccess.disabledAt),
+              isNull(accountAccess.directoryDisabledAt),
+            ),
+          )
+          .limit(1);
         if (!other)
           throw new CommandError(
             "conflict",
@@ -55,16 +78,28 @@ export function createMembershipCommands(database: Database) {
           );
       }
       if (!setting) {
-        await sql`DELETE FROM factory.project_membership WHERE project_id=${input.projectID} AND user_id=${target.id}`;
+        await db.delete(projectMembership).where(targetMembership);
         return null;
       }
-      const [saved] = await sql<
-        Membership[]
-      >`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
-        VALUES(${input.projectID},${target.id},${setting.role},${setting.manageProject},${input.actorID})
-        ON CONFLICT(project_id,user_id) DO UPDATE SET role=EXCLUDED.role,manage_project=EXCLUDED.manage_project,
-          updated_by=EXCLUDED.updated_by,updated_at=now()
-        RETURNING user_id AS "userId",role,manage_project AS "manageProject"`;
+      const [saved] = await db
+        .insert(projectMembership)
+        .values({
+          projectId: input.projectID,
+          userId: target.id,
+          role: setting.role,
+          manageProject: setting.manageProject,
+          updatedBy: input.actorID,
+        })
+        .onConflictDoUpdate({
+          target: [projectMembership.projectId, projectMembership.userId],
+          set: {
+            role: setting.role,
+            manageProject: setting.manageProject,
+            updatedBy: input.actorID,
+            updatedAt: expression`now()`,
+          },
+        })
+        .returning(membershipFields);
       if (!saved) throw new CommandError("conflict", "Project membership was not saved");
       return saved;
     });

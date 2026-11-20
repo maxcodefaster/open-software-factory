@@ -386,6 +386,209 @@ export const betterAuthSchema = {
 };
 
 export const factorySchema = pgSchema("factory");
+export const administrator = factorySchema.table("administrator", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => authUser.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const skillLibraryCover = factorySchema.table("skill_library_cover", {
+  libraryId: uuid("library_id").primaryKey(),
+  coverKey: text("cover_key").notNull(),
+  version: bigint("version", { mode: "number" }).notNull(),
+  updatedBy: uuid("updated_by")
+    .notNull()
+    .references(() => authUser.id),
+});
+
+export const mcpLibraryCover = factorySchema.table("mcp_library_cover", {
+  libraryId: uuid("library_id").primaryKey(),
+  coverKey: text("cover_key").notNull(),
+  version: bigint("version", { mode: "number" }).notNull(),
+  updatedBy: uuid("updated_by")
+    .notNull()
+    .references(() => authUser.id),
+});
+
+export const changeState = factorySchema.enum("change_state", [
+  "branch-pending",
+  "starting",
+  "active",
+  "cancelling",
+  "cancelled",
+  "failed",
+  "delivering",
+  "delivered",
+]);
+export const workspaceKind = factorySchema.enum("development_workspace_kind", [
+  "personal",
+  "ticket",
+]);
+export const runtimeAttemptState = factorySchema.enum("runtime_attempt_state", [
+  "create-intended",
+  "starting",
+  "ready",
+  "stop-intended",
+  "stopping",
+  "stopped",
+  "cleanup-failed",
+  "failed",
+  "pausing",
+  "paused",
+  "resuming",
+]);
+export const isolatedRuntimeKind = factorySchema.enum("isolated_runtime_kind", [
+  "staging",
+  "verification",
+  "prebuild",
+  "publication",
+]);
+
+export const change = factorySchema.table("change", {
+  id: uuid("id").primaryKey(),
+  projectId: uuid("project_id").notNull(),
+  ticketId: uuid("ticket_id").notNull(),
+  requirementApprovalId: uuid("requirement_approval_id").notNull(),
+  branchName: text("branch_name").notNull(),
+  baseSha: text("base_sha").notNull(),
+  state: changeState("state").notNull(),
+  version: bigint("version", { mode: "number" }).notNull().default(1),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  failure: text("failure"),
+  runtimeAttemptId: uuid("runtime_attempt_id"),
+  deliveryWaitingSha: text("delivery_waiting_sha"),
+  deliveryWaitingPolicyId: uuid("delivery_waiting_policy_id"),
+});
+
+export const developmentWorkspace = factorySchema.table("development_workspace", {
+  id: uuid("id").primaryKey(),
+  projectId: uuid("project_id").notNull(),
+  kind: workspaceKind("kind").notNull(),
+  ownerUserId: uuid("owner_user_id"),
+  ticketId: uuid("ticket_id"),
+  changeId: uuid("change_id"),
+  sourceBranch: text("source_branch").notNull(),
+  sourceRevision: text("source_revision").notNull(),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  substrate: boolean("substrate").notNull().default(true),
+  collaborationEnabled: boolean("collaboration_enabled").notNull().default(false),
+});
+
+export const runtimeAttempt = factorySchema.table("runtime_attempt", {
+  id: uuid("id").primaryKey(),
+  projectId: uuid("project_id").notNull(),
+  changeId: uuid("change_id"),
+  workspaceId: uuid("workspace_id"),
+  generation: bigint("generation", { mode: "number" }).notNull(),
+  revision: text("revision").notNull(),
+  state: runtimeAttemptState("state").notNull(),
+  parentConnectorTokenHash: text("parent_connector_token_hash").notNull(),
+  childConnectorTokenHash: text("child_connector_token_hash").notNull(),
+  createIntendedAt: timestamp("create_intended_at", { withTimezone: true }).notNull(),
+  createObservedAt: timestamp("create_observed_at", { withTimezone: true }),
+  stopIntendedAt: timestamp("stop_intended_at", { withTimezone: true }),
+  stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+  failure: text("failure"),
+  declaredApps: jsonb("declared_apps").notNull().default([]),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  isolatedKind: isolatedRuntimeKind("isolated_kind"),
+  verificationId: uuid("verification_id"),
+  readyAt: timestamp("ready_at", { withTimezone: true }),
+  appReadyAt: jsonb("app_ready_at").notNull().default({}),
+  resumeFailedAt: timestamp("resume_failed_at", { withTimezone: true }),
+  substrate: boolean("substrate").notNull().default(true),
+});
+
+export const substrateBinding = factorySchema.table("substrate_binding", {
+  runtimeAttemptId: uuid("runtime_attempt_id").primaryKey(),
+  atespace: text("atespace").notNull(),
+  actorName: text("actor_name").notNull(),
+  intent: jsonb("intent").notNull(),
+  actorUid: uuid("actor_uid"),
+  createAttemptedAt: timestamp("create_attempted_at", { withTimezone: true }),
+  createRejected: boolean("create_rejected").notNull().default(false),
+  deleteIntendedAt: timestamp("delete_intended_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  observation: jsonb("observation"),
+  checkpoint: jsonb("checkpoint"),
+});
+
+export const projectRepositoryIntent = factorySchema.table("project_repository_intent", {
+  commandId: uuid("command_id").primaryKey(),
+  setupId: uuid("setup_id").notNull(),
+  userId: uuid("user_id").notNull(),
+  projectId: uuid("project_id").notNull(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(),
+  kind: text("kind").$type<"starter" | "import">().notNull(),
+  sourceUrl: text("source_url").notNull(),
+  credentialKey: text("credential_key"),
+  fingerprint: text("fingerprint").notNull(),
+  state: text("state")
+    .$type<
+      | "credential-intended"
+      | "create-intended"
+      | "repository-ready"
+      | "committed"
+      | "uncertain"
+      | "failed"
+    >()
+    .notNull(),
+  defaultBranch: text("default_branch"),
+  failure: text("failure"),
+  credentialRemovedAt: timestamp("credential_removed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+});
+
+export const projectSetupReadiness = factorySchema.table(
+  "project_setup_readiness",
+  {
+    projectId: uuid("project_id").notNull(),
+    task: text("task").notNull(),
+    state: text("state")
+      .$type<"pending" | "running" | "ready" | "failed">()
+      .notNull()
+      .default("pending"),
+    commandId: uuid("command_id").notNull(),
+    operationId: uuid("operation_id"),
+    failure: text("failure"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (row) => [primaryKey({ columns: [row.projectId, row.task] })],
+);
+
+export const modelConnectionVersion = factorySchema.table(
+  "model_connection_version",
+  {
+    connectionId: uuid("connection_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    provider: text("provider").$type<"openai" | "anthropic" | "deepseek">().notNull(),
+    endpoint: text("endpoint").notNull(),
+    secretKey: text("secret_key").notNull(),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (row) => [primaryKey({ columns: [row.connectionId, row.version] })],
+);
+
+export const modelRoleConnection = factorySchema.table("model_role_connection", {
+  role: text("role").$type<"planning" | "build">().primaryKey(),
+  connectionId: uuid("connection_id").notNull(),
+  connectionVersion: bigint("connection_version", { mode: "number" }).notNull(),
+  modelId: text("model_id").notNull(),
+  updatedBy: uuid("updated_by").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const ticketState = factorySchema.enum("ticket_state", [
   "inbox",
   "backlog",

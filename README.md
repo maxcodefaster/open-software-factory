@@ -201,6 +201,19 @@ TypeScript 6 remains required by the browser diagnostics and packaged language s
 TypeScript 7's CLI does not provide those JavaScript compiler or `tsserver` APIs.
 Runtime and data-service upgrades need their native and backup checks, not only a newer lockfile.
 
+Data access uses schema-backed Drizzle queries in the converted access, settings, Project,
+usage-rate and library-cover slices. `drizzleTransaction` binds those queries to the existing
+Postgres.js transaction, including nested savepoints; it does not open a second connection.
+The native SQL baseline still owns PostgreSQL constraints, triggers and lifecycle invariants.
+Other slices still contain direct SQL and need the same incremental conversion and concurrency
+checks. Zero reuses its database provider per connection pool, not a user's authorization context.
+
+Mastra owns Planning orchestration. Explicit provider SDKs remain behind the model adapter because
+Mastra's compatible endpoint route does not preserve every native provider's protocol and reasoning
+semantics. Build probes use OpenCode's native Promise API; Factory no longer imports Effect directly.
+Effect remains an upstream OpenCode requirement. Tiptap packages upgrade together; qualified Marked
+and Highlight.js overrides keep the reader and editor on one implementation of each parser.
+
 `factory:reset` is restricted to an explicitly named disposable installation and matching
 confirmation. It refuses active runtime work or unconfirmed Coding Stop. Before removing its
 Compose data volumes, it checks that every recorded native scope, Developer IDE Namespace and

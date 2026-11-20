@@ -8,6 +8,17 @@ import { createAccessController } from "../access/controller";
 
 type Database = ReturnType<typeof createDatabase>;
 type Session = { user: { id: string } };
+const createProvider = (db: Database["db"]) => zeroDrizzle(zeroSchema, db);
+const providers = new WeakMap<Database["db"], ReturnType<typeof createProvider>>();
+
+export function zeroDatabase(database: Database) {
+  let provider = providers.get(database.db);
+  if (!provider) {
+    provider = createProvider(database.db);
+    providers.set(database.db, provider);
+  }
+  return provider;
+}
 
 export async function handleZeroQuery(
   request: Request,
@@ -35,10 +46,8 @@ export async function handleZeroMutate(
   session: Session | null,
 ) {
   if (!session) return Response.json({ error: "Authentication required" }, { status: 401 });
-  const zeroDatabase = zeroDrizzle(zeroSchema, database.db);
-  const result = await new PushProcessor(zeroDatabase, { userId: session.user.id }).process(
-    zeroServerMutators,
-    request,
-  );
+  const result = await new PushProcessor(zeroDatabase(database), {
+    userId: session.user.id,
+  }).process(zeroServerMutators, request);
   return Response.json(result);
 }

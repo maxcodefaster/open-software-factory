@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { architectureDiagramInput } from "../../../../packages/requirement-domain/src/technical-design";
-import { renderArchitectureDiagram, renderArchitectureDiagrams } from "./diagrams";
+import {
+  diagramRendererVersion,
+  renderArchitectureDiagram,
+  renderArchitectureDiagrams,
+} from "./diagrams";
 
 const diagram = (source: string) => ({
   title: "Ticket planning",
@@ -16,6 +20,17 @@ const design = (source: string) => ({
   risks: [],
   validation: [{ criterion: 1, check: "Run setup without private repository access." }],
   diagrams: [diagram(source)],
+});
+
+test("diagram renderer metadata matches both the declared pins and the installed engines", async () => {
+  const manifest = await Bun.file(new URL("../../../../package.json", import.meta.url)).json();
+  const plantuml = await Bun.file(
+    new URL("./package.json", import.meta.resolve("@plantuml/mcp-js/engine.js")),
+  ).json();
+  const viz = await Bun.file(new URL("../package.json", import.meta.resolve("@viz-js/viz"))).json();
+  expect(plantuml.version).toBe(manifest.dependencies["@plantuml/mcp-js"]);
+  expect(viz.version).toBe(manifest.dependencies["@viz-js/viz"]);
+  expect(diagramRendererVersion).toBe(`plantuml-mcp-js@${plantuml.version}/viz@${viz.version}`);
 });
 
 test("an invalid optional render retains the exact design instead of losing the planning response", async () => {

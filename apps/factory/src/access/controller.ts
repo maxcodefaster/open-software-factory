@@ -1,8 +1,17 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
-  type ProjectRole,
-  projectCapabilities,
-} from "../../../../packages/project-domain/src/access";
+  accountAccess,
+  administrator,
+  authUser,
+  change,
+  developmentWorkspace,
+  project,
+  projectMembership,
+  runtimeAttempt,
+  ticket,
+} from "../../../../packages/db/src/schema";
+import { projectCapabilities } from "../../../../packages/project-domain/src/access";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { workspaceAuthorityIn } from "./workspace";
@@ -10,11 +19,57 @@ import { workspaceAuthorityIn } from "./workspace";
 type Database = ReturnType<typeof createDatabase>;
 
 export async function requireActiveAccountIn(sql: AgentTurnTransaction, userID: string) {
-  const [user] = await sql`SELECT id FROM auth."user" WHERE id=${userID} FOR SHARE`;
-  const [access] = await sql<Array<{ disabledAt: Date | null; directoryDisabledAt: Date | null }>>`
-    SELECT disabled_at AS "disabledAt", directory_disabled_at AS "directoryDisabledAt" FROM factory.account_access WHERE user_id=${userID} FOR SHARE`;
+  const db = drizzleTransaction(sql);
+  const [user] = await db
+    .select({ id: authUser.id })
+    .from(authUser)
+    .where(eq(authUser.id, userID))
+    .for("share");
+  const [access] = await db
+    .select({
+      disabledAt: accountAccess.disabledAt,
+      directoryDisabledAt: accountAccess.directoryDisabledAt,
+    })
+    .from(accountAccess)
+    .where(eq(accountAccess.userId, userID))
+    .for("share");
   if (!user || !access || access.disabledAt || access.directoryDisabledAt)
     throw new CommandError("forbidden", "Account access is disabled");
+}
+
+async function administratorIn(sql: AgentTurnTransaction, userID: string) {
+  const [row] = await drizzleTransaction(sql)
+    .select({ userId: administrator.userId })
+    .from(administrator)
+    .where(eq(administrator.userId, userID))
+    .for("share");
+  return Boolean(row);
+}
+
+export async function requireSystemManagerIn(
+  sql: AgentTurnTransaction,
+  userID: string,
+  message = "System Manager access required",
+) {
+  await requireActiveAccountIn(sql, userID);
+  if (!(await administratorIn(sql, userID))) throw new CommandError("forbidden", message);
+}
+
+async function projectAccessIn(sql: AgentTurnTransaction, userID: string, projectID: string) {
+  await requireActiveAccountIn(sql, userID);
+  const db = drizzleTransaction(sql);
+  const [member] = await db
+    .select({ role: projectMembership.role, manageProject: projectMembership.manageProject })
+    .from(projectMembership)
+    .where(and(eq(projectMembership.projectId, projectID), eq(projectMembership.userId, userID)))
+    .for("share");
+  const systemManager = await administratorIn(sql, userID);
+  const [row] = await db.select({ id: project.id }).from(project).where(eq(project.id, projectID));
+  if (!row || (!member && !systemManager)) throw new CommandError("not-found", "Project not found");
+  return projectCapabilities(
+    systemManager ? "system-manager" : member?.role,
+    member?.manageProject,
+  );
 }
 
 export async function projectAuthorityIn(
@@ -23,18 +78,10 @@ export async function projectAuthorityIn(
   projectID: string,
   manage = false,
 ) {
-  await requireActiveAccountIn(sql, userID);
-  const [member] = await sql<Array<{ manageProject: boolean }>>`
-    SELECT manage_project AS "manageProject" FROM factory.project_membership WHERE project_id = ${projectID} AND user_id = ${userID} FOR SHARE
-  `;
-  const [administrator] =
-    await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userID} FOR SHARE`;
-  const [project] = await sql`SELECT id FROM factory.project WHERE id = ${projectID}`;
-  if (!project || (!member && !administrator))
-    throw new CommandError("not-found", "Project not found");
-  const managed = Boolean(administrator || member?.manageProject);
-  if (manage && !managed) throw new CommandError("forbidden", "Project Manager access required");
-  return managed;
+  const access = await projectAccessIn(sql, userID, projectID);
+  if (manage && !access.manage)
+    throw new CommandError("forbidden", "Project Manager access required");
+  return access.manage;
 }
 
 export async function projectDevelopmentAuthorityIn(
@@ -42,28 +89,19 @@ export async function projectDevelopmentAuthorityIn(
   userID: string,
   projectID: string,
 ) {
-  await projectAuthorityIn(sql, userID, projectID);
-  const [member] = await sql<
-    Array<{ role: ProjectRole }>
-  >`SELECT role FROM factory.project_membership
-    WHERE project_id = ${projectID} AND user_id = ${userID} FOR SHARE`;
-  const [administrator] =
-    await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userID} FOR SHARE`;
-  if (!projectCapabilities(administrator ? "system-manager" : member?.role).develop)
+  if (!(await projectAccessIn(sql, userID, projectID)).develop)
     throw new CommandError("forbidden", "Developer access required");
 }
 
 export function createAccessController(database: Database) {
-  const sql = database.client;
   async function isSystemManager(userID: string) {
-    await database.client.begin((transaction) => requireActiveAccountIn(transaction, userID));
-    const rows = await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userID}`;
-    return rows.length === 1;
+    return database.client.begin(async (transaction) => {
+      await requireActiveAccountIn(transaction, userID);
+      return administratorIn(transaction, userID);
+    });
   }
   async function requireSystemManager(userID: string) {
-    if (!(await isSystemManager(userID))) {
-      throw new CommandError("forbidden", "System Manager access required");
-    }
+    await database.client.begin((transaction) => requireSystemManagerIn(transaction, userID));
   }
   async function requireProject(userID: string, projectID: string, manage = false) {
     await database.client.begin((transaction) =>
@@ -74,27 +112,21 @@ export function createAccessController(database: Database) {
     await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, projectID));
   }
   async function canDevelop(userID: string, projectID: string) {
-    await requireProject(userID, projectID);
-    if (await isSystemManager(userID)) return true;
-    const [member] = await sql<Array<{ role: ProjectRole }>>`
-      SELECT role FROM factory.project_membership WHERE project_id=${projectID} AND user_id=${userID}
-    `;
-    return projectCapabilities(member?.role).develop;
+    return database.client.begin(
+      async (transaction) => (await projectAccessIn(transaction, userID, projectID)).develop,
+    );
   }
   async function requireRuntime(userID: string, attemptID: string, channel?: "app" | "ide") {
-    const rows = await sql<
-      Array<{
-        projectID: string;
-        kind: string | null;
-        ownerID: string | null;
-        workspaceID: string | null;
-      }>
-    >`
-      SELECT attempt.project_id AS "projectID", workspace.kind, workspace.owner_user_id AS "ownerID",workspace.id AS "workspaceID"
-      FROM factory.runtime_attempt attempt
-      LEFT JOIN factory.development_workspace workspace ON workspace.id = attempt.workspace_id
-      WHERE attempt.id = ${attemptID}
-    `;
+    const rows = await database.db
+      .select({
+        projectID: runtimeAttempt.projectId,
+        kind: developmentWorkspace.kind,
+        ownerID: developmentWorkspace.ownerUserId,
+        workspaceID: developmentWorkspace.id,
+      })
+      .from(runtimeAttempt)
+      .leftJoin(developmentWorkspace, eq(developmentWorkspace.id, runtimeAttempt.workspaceId))
+      .where(eq(runtimeAttempt.id, attemptID));
     const row = rows[0];
     if (!row) {
       throw new CommandError("not-found", "Runtime not found");
@@ -106,20 +138,22 @@ export function createAccessController(database: Database) {
       );
       return;
     }
-    await requireProject(userID, row.projectID);
     if (channel === "ide") await requireDevelopment(userID, row.projectID);
+    else await requireProject(userID, row.projectID);
   }
   async function requireTicket(userID: string, ticketID: string) {
-    const rows = await sql<Array<{ projectID: string }>>`
-      SELECT project_id AS "projectID" FROM factory.ticket WHERE id = ${ticketID}
-    `;
+    const rows = await database.db
+      .select({ projectID: ticket.projectId })
+      .from(ticket)
+      .where(eq(ticket.id, ticketID));
     if (!rows[0]) throw new CommandError("not-found", "Ticket not found");
     await requireProject(userID, rows[0].projectID);
   }
   async function requireChange(userID: string, changeID: string) {
-    const rows = await sql<Array<{ projectID: string }>>`
-      SELECT project_id AS "projectID" FROM factory.change WHERE id = ${changeID}
-    `;
+    const rows = await database.db
+      .select({ projectID: change.projectId })
+      .from(change)
+      .where(eq(change.id, changeID));
     if (!rows[0]) throw new CommandError("not-found", "Change not found");
     await requireProject(userID, rows[0].projectID);
     return rows[0].projectID;

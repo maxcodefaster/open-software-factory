@@ -3,9 +3,35 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { parse } from "jsonc-parser";
 import { verifyFrameworkVersion } from "./framework-image-proof";
 
 const fixedVersion = "1.169.45";
+
+test("document packages stay aligned and reader/editor share the qualified parser versions", async () => {
+  const manifest = await Bun.file("package.json").json();
+  const lock = parse(await Bun.file("bun.lock").text()) as {
+    packages: Record<string, [string, ...unknown[]]>;
+  };
+  const tiptapVersions = Object.entries(manifest.dependencies)
+    .filter(([name]) => name.startsWith("@tiptap/"))
+    .map(([, version]) => version);
+  expect(new Set(tiptapVersions).size).toBe(1);
+  for (const name of ["marked", "highlight.js"]) {
+    const versions = Object.values(lock.packages)
+      .map(([identity]) => identity)
+      .filter((identity) => identity.startsWith(`${name}@`));
+    expect(versions).toEqual([`${name}@${manifest.dependencies[name]}`]);
+  }
+  const root = createRequire(import.meta.url);
+  for (const [consumer, dependency] of [
+    ["@tiptap/markdown", "marked"],
+    ["lowlight", "highlight.js"],
+  ] as const) {
+    const scoped = createRequire(import.meta.resolve(consumer));
+    expect(scoped.resolve(dependency)).toBe(root.resolve(dependency));
+  }
+});
 
 test("Factory and the Starter use the fixed upstream transport with a metadata-only export repair", async () => {
   const [factory, starter, lock] = await Promise.all([

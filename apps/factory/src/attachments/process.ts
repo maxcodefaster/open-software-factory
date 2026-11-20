@@ -15,7 +15,10 @@ export async function processAttachment(
   let worker: Worker | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    worker = new Worker(new URL("./conversion-worker.ts", import.meta.url).href);
+    worker = new Worker(new URL("./conversion-worker.ts", import.meta.url).href, {
+      env: {},
+      preload: [],
+    });
     const running = worker;
     return await new Promise<ConvertedAttachment>((resolve, reject) => {
       timer = setTimeout(

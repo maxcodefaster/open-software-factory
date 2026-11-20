@@ -13,12 +13,6 @@ import { modelProbeFailure, reportedModelLimits } from "./probe";
 const output = z
   .object({ verified: z.literal(true), value: z.literal("factory-connection-ok") })
   .strict();
-const emptyLimits = () => ({
-  requests: null,
-  tokens: null,
-  remainingRequests: null,
-  remainingTokens: null,
-});
 
 // One explicitly authorized probe, at most two model steps. No retries or fallback.
 // It proves this request's access/capabilities, not sustained token-per-minute capacity.
@@ -35,7 +29,7 @@ export async function probeModel(input: {
     return probeBuildModel(input);
   }
   let toolCall = false;
-  let limits: ModelProbeResult["limits"] = emptyLimits();
+  let limits = reportedModelLimits(undefined);
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(15_000)]);
   const usage = createMastraUsage(input.usageSink, input.connection.provider ?? "openai", signal);
   try {

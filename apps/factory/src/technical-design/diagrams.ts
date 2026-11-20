@@ -4,7 +4,7 @@ import {
   type TechnicalDesignContent,
 } from "../../../../packages/requirement-domain/src/technical-design";
 
-export const diagramRendererVersion = "plantuml-mcp-js@0.2.3/viz@3.31.0";
+export const diagramRendererVersion = "plantuml-mcp-js@0.2.4/viz@3.31.0";
 let active = 0;
 const renderedDiagram = z.object({
   valid: z.boolean(),

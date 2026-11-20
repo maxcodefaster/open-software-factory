@@ -295,8 +295,12 @@ test("each live answer snapshot validates account access once through its durabl
   let accountReads = 0;
   let snapshotAccountReads = 0;
   let pending: Promise<unknown> | undefined;
-  owned.database.client.options.debug = (_connection, query) => {
-    if (query.includes('FROM auth."user"')) accountReads++;
+  owned.database.client.options.debug = (_connection, query, parameters) => {
+    if (query.includes('from "auth"."user"')) {
+      expect(query).toBe('select "id" from "auth"."user" where "auth"."user"."id" = $1 for share');
+      expect(parameters).toEqual([owned.userID]);
+      accountReads++;
+    }
   };
   try {
     owned.release();

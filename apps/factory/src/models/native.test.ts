@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import { Agent } from "@mastra/core/agent";
-import { nativeEndpoints, nativeModel, providerCatalogue, validateModelEndpoint } from "./native";
-import { modelProbeFailure, reportedModelLimits } from "./probe";
+import { fakeResponsesOutput } from "../../../../test/support/fake-openai-responses";
+import {
+  modelProviderOptions,
+  nativeEndpoints,
+  nativeModel,
+  providerCatalogue,
+  validateModelEndpoint,
+} from "./native";
+import { modelProbeFailure, probeModel, reportedModelLimits } from "./probe";
 
 test("native catalogue comes from pinned Mastra and contains only Factory-supported providers", async () => {
   const catalogue = await providerCatalogue();
@@ -21,6 +28,100 @@ test.each(["gpt-6-luna", "gpt-6.1-sol"])(
     expect(Reflect.get(model, "provider")).toBe("openai.responses");
   },
 );
+
+test("the qualified Sol snapshot shares Responses/privacy policy without guessing other IDs", async () => {
+  const modelID = "gpt-6.1-sol-2026-09-29";
+  const model = await nativeModel({ provider: "openai", apiKey: "unused" }, modelID);
+  if (typeof model !== "object" || model === null) throw new Error("Missing native SDK model");
+  expect(Reflect.get(model, "provider")).toBe("openai.responses");
+  expect(modelProviderOptions({ apiKey: "unused" }, modelID)).toEqual({
+    openai: { store: false },
+  });
+  expect(modelProviderOptions({ apiKey: "unused" }, "gpt-6-luna")).toEqual({
+    openai: { reasoningEffort: "low", store: false },
+  });
+  for (const id of [
+    "gpt-6.1-sol-2026-09-30",
+    "gpt-6-luna-2026-09-29",
+    "custom-sol-deployment",
+    "gpt-6.1-sol-latest",
+    "unknown-model",
+    "toString",
+  ])
+    expect(modelProviderOptions({ apiKey: "unused" }, id)).toBeUndefined();
+  expect(
+    modelProviderOptions({ provider: "anthropic", apiKey: "unused" }, modelID),
+  ).toBeUndefined();
+});
+
+test("Planning uses the exact qualified Sol snapshot on both stateless Responses steps", async () => {
+  let requests = 0;
+  const modelID = "gpt-6.1-sol-2026-09-29";
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      requests++;
+      expect(new URL(request.url).pathname).toBe("/v1/responses");
+      const body = await request.json();
+      expect(body.model).toBe(modelID);
+      expect(body.store).toBe(false);
+      if (requests === 2) expect(JSON.stringify(body.input)).toContain("factory-connection-ok");
+      const item =
+        requests === 1
+          ? {
+              type: "function_call" as const,
+              id: "owned-probe-item",
+              call_id: "owned-probe-call",
+              name: "probe",
+              arguments: "{}",
+            }
+          : {
+              type: "message" as const,
+              id: "owned-probe-answer",
+              role: "assistant" as const,
+              content: [
+                {
+                  type: "output_text" as const,
+                  annotations: [] as never[],
+                  text: JSON.stringify({ verified: true, value: "factory-connection-ok" }),
+                },
+              ],
+            };
+      if (body.stream) return fakeResponsesOutput(item);
+      return Response.json({
+        id: "resp_owned_probe",
+        created_at: 1,
+        status: "completed",
+        model: modelID,
+        output: [item],
+        error: null,
+        incomplete_details: null,
+        usage: { input_tokens: 3, output_tokens: 2 },
+      });
+    },
+  });
+  try {
+    const result = await probeModel({
+      connection: {
+        provider: "openai",
+        apiKey: "owned-key",
+        baseURL: `http://127.0.0.1:${server.port}/v1`,
+      },
+      modelId: modelID,
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(result).toMatchObject({
+      status: "ready",
+      modelId: modelID,
+      toolCall: true,
+      structuredOutput: true,
+    });
+    expect(requests).toBe(2);
+  } finally {
+    await server.stop(true);
+  }
+});
 
 test("conversation model choices omit known non-conversation OpenAI model families", async () => {
   const models = (await providerCatalogue()).find((entry) => entry.provider === "openai")?.models;

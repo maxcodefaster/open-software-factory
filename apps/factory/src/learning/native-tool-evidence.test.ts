@@ -186,14 +186,6 @@ function collection(
       policyOwners.push(values[1]);
       return options.disabled ? [{ scope_key: "owned-paused" }] : [];
     }
-    if (query.includes('FROM auth."user"')) return [{ id: userID }];
-    if (query.includes("FROM factory.account_access"))
-      return [{ disabledAt: null, directoryDisabledAt: null }];
-    if (query.includes("SELECT role FROM factory.project_membership"))
-      return [{ role: options.contributor ? "product-contributor" : "developer" }];
-    if (query.includes("FROM factory.project_membership")) return [{ manageProject: false }];
-    if (query.includes("FROM factory.administrator")) return [];
-    if (query.includes("FROM factory.project WHERE")) return [{ id: projectID }];
     if (query.includes("SELECT id FROM factory.learning_case"))
       return snapshots.map((snapshot) => ({ id: snapshot.id }));
     if (query.includes("FROM factory.session_archive archive"))
@@ -246,6 +238,36 @@ function collection(
     throw new Error(`Unexpected offline query: ${query}`);
   };
   const client = Object.assign(run, {
+    unsafe(query: string, values: unknown[]) {
+      queries.push(query);
+      expect(transaction.depth).toBeGreaterThan(0);
+      let rows: unknown[][];
+      switch (query) {
+        case 'select "id" from "auth"."user" where "auth"."user"."id" = $1 for share':
+          expect(values).toEqual([userID]);
+          rows = [[userID]];
+          break;
+        case 'select "disabled_at", "directory_disabled_at" from "factory"."account_access" where "factory"."account_access"."user_id" = $1 for share':
+          expect(values).toEqual([userID]);
+          rows = [[null, null]];
+          break;
+        case 'select "role", "manage_project" from "factory"."project_membership" where ("factory"."project_membership"."project_id" = $1 and "factory"."project_membership"."user_id" = $2) for share':
+          expect(values).toEqual([projectID, userID]);
+          rows = [[options.contributor ? "product-contributor" : "developer", false]];
+          break;
+        case 'select "user_id" from "factory"."administrator" where "factory"."administrator"."user_id" = $1 for share':
+          expect(values).toEqual([userID]);
+          rows = [];
+          break;
+        case 'select "id" from "factory"."project" where "factory"."project"."id" = $1':
+          expect(values).toEqual([projectID]);
+          rows = [[projectID]];
+          break;
+        default:
+          throw new Error(`Unexpected offline Drizzle query: ${query}`);
+      }
+      return Object.assign(Promise.resolve(rows), { values: async () => rows });
+    },
     begin: async <T>(work: (sql: typeof run) => Promise<T>) => {
       transaction.depth++;
       try {

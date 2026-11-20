@@ -1,4 +1,12 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, DrizzleQueryError, desc, eq, exists, notExists, or, sql } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  project,
+  projectMembership,
+  projectRepositoryIntent,
+  projectSetupReadiness,
+} from "../../../../packages/db/src/schema";
 import {
   createRegisterProjectInput,
   type RegisterProjectInput,
@@ -19,18 +27,20 @@ export type ProjectServiceDependencies = {
   forgeOwner: string;
 };
 
-type ProjectRow = {
-  id: string;
-  slug: string;
-  name: string;
-  desktopBackgroundKey: string;
-  repositoryUrl: string;
-  defaultBranch: string;
-  devcontainerPath: string;
-  createdAt: string | Date;
+const projectFields = {
+  id: project.id,
+  slug: project.slug,
+  name: project.name,
+  desktopBackgroundKey: project.desktopBackgroundKey,
+  repositoryUrl: project.repositoryUrl,
+  defaultBranch: project.defaultBranch,
+  devcontainerPath: project.devcontainerPath,
+  createdAt: project.createdAt,
 };
+type ProjectRow = Pick<typeof project.$inferSelect, keyof typeof projectFields>;
 
-function isUniqueViolation(cause: unknown): cause is { code: "23505" } {
+function isUniqueViolation(cause: unknown): boolean {
+  if (cause instanceof DrizzleQueryError) return isUniqueViolation(cause.cause);
   return Boolean(cause && typeof cause === "object" && "code" in cause && cause.code === "23505");
 }
 
@@ -44,29 +54,59 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
     });
   return {
     async recover() {
-      const projects = await dependencies.database.client<{ id: string; userID: string }[]>`
-        SELECT project.id,project.created_by AS "userID" FROM factory.project project
-        JOIN factory.project_setup_readiness configuration
-          ON configuration.project_id=project.id AND configuration.task='configuration'
-        WHERE configuration.state='pending' AND NOT EXISTS(
-          SELECT 1 FROM factory.project_repository_intent intent WHERE intent.project_id=project.id
-        )`;
+      const { db } = dependencies.database;
+      const projects = await db
+        .select({ id: project.id, userID: project.createdBy })
+        .from(project)
+        .innerJoin(
+          projectSetupReadiness,
+          and(
+            eq(projectSetupReadiness.projectId, project.id),
+            eq(projectSetupReadiness.task, "configuration"),
+          ),
+        )
+        .where(
+          and(
+            eq(projectSetupReadiness.state, "pending"),
+            notExists(
+              db
+                .select({ projectId: projectRepositoryIntent.projectId })
+                .from(projectRepositoryIntent)
+                .where(eq(projectRepositoryIntent.projectId, project.id)),
+            ),
+          ),
+        );
       for (const project of projects)
         await dependencies.onRegistered(project.id, project.userID, true);
     },
     async list(userID: string) {
       await dependencies.database.client.begin((sql) => requireActiveAccountIn(sql, userID));
-      const rows = await dependencies.database.client<ProjectRow[]>`
-        SELECT id, slug, name, repository_url AS "repositoryUrl",
-          desktop_background_key AS "desktopBackgroundKey",
-          default_branch AS "defaultBranch", devcontainer_path AS "devcontainerPath",
-          created_at AS "createdAt"
-        FROM factory.project
-        WHERE EXISTS(SELECT 1 FROM factory.administrator WHERE user_id = ${userID})
-          OR EXISTS(SELECT 1 FROM factory.project_membership
-            WHERE project_id = factory.project.id AND user_id = ${userID})
-        ORDER BY created_at DESC
-      `;
+      const { db } = dependencies.database;
+      const rows = await db
+        .select(projectFields)
+        .from(project)
+        .where(
+          or(
+            exists(
+              db
+                .select({ userId: administrator.userId })
+                .from(administrator)
+                .where(eq(administrator.userId, userID)),
+            ),
+            exists(
+              db
+                .select({ projectId: projectMembership.projectId })
+                .from(projectMembership)
+                .where(
+                  and(
+                    eq(projectMembership.projectId, project.id),
+                    eq(projectMembership.userId, userID),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .orderBy(desc(project.createdAt));
       return { projects: rows.map(dto) };
     },
     async register(userID: string, value: RegisterProjectInput) {
@@ -87,32 +127,46 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
       }
       try {
         const id = crypto.randomUUID();
-        const rows = await dependencies.database.client.begin(async (sql) => {
-          await sql`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
-          const created = await sql<ProjectRow[]>`
-        INSERT INTO factory.project(
-          id, slug, name, repository_url, default_branch, devcontainer_path, created_by
-        ) VALUES (
-          ${id}, ${input.slug}, ${input.name}, ${input.repositoryUrl}, ${input.defaultBranch},
-          ${input.devcontainerPath}, ${userID}
-        )
-        RETURNING id, slug, name, repository_url AS "repositoryUrl",
-          desktop_background_key AS "desktopBackgroundKey",
-          default_branch AS "defaultBranch", devcontainer_path AS "devcontainerPath",
-          created_at AS "createdAt"
-      `;
-          await sql`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
-          VALUES(${id},${userID},'developer',true,${userID})`;
-          await sql`INSERT INTO factory.project_setup_readiness(project_id,task,command_id)
-            VALUES(${id},'configuration',${crypto.randomUUID()})`;
+        const rows = await dependencies.database.client.begin(async (client) => {
+          await client`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
+          const db = drizzleTransaction(client);
+          const created = await db
+            .insert(project)
+            .values({
+              id,
+              slug: input.slug,
+              name: input.name,
+              repositoryUrl: input.repositoryUrl,
+              defaultBranch: input.defaultBranch,
+              devcontainerPath: input.devcontainerPath,
+              createdBy: userID,
+              // The database trigger assigns the shared background. Keep its
+              // choice and timestamp defaults rather than synthesizing them.
+              desktopBackgroundKey: sql`default`,
+              createdAt: sql`default`,
+              updatedAt: sql`default`,
+            })
+            .returning(projectFields);
+          await db.insert(projectMembership).values({
+            projectId: id,
+            userId: userID,
+            role: "developer",
+            manageProject: true,
+            updatedBy: userID,
+          });
+          await db.insert(projectSetupReadiness).values({
+            projectId: id,
+            task: "configuration",
+            commandId: crypto.randomUUID(),
+          });
           return created;
         });
-        const project = rows[0];
-        if (!project) throw new Error("Project insert returned no row");
+        const registered = rows[0];
+        if (!registered) throw new Error("Project insert returned no row");
         void dependencies
-          .onRegistered(project.id, userID, false)
+          .onRegistered(registered.id, userID, false)
           .catch(reportFailure("Registered Project preparation needs attention"));
-        return dto(project);
+        return dto(registered);
       } catch (cause) {
         if (isUniqueViolation(cause)) {
           throw new CommandError("conflict", "A Project with that slug already exists");

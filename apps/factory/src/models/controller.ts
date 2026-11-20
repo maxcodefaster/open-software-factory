@@ -1,3 +1,4 @@
+import { and, sql as drizzleSQL, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
 import {
@@ -17,7 +18,15 @@ import {
   type modelDefaultsInput,
   modelRulesInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  modelConnectionVersion,
+  modelDefaults,
+  modelRoleConnection,
+  personalModelSettings,
+  projectModelSettings,
+} from "../../../../packages/db/src/schema";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
@@ -25,9 +34,12 @@ import { providerCatalogue } from "./native";
 
 export async function codingReasoningIn(sql: AgentTurnTransaction) {
   await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
-  const [stored] = await sql<Array<{ reasoning: string | null }>>`
-    SELECT role_rules->'build'->>'reasoningEffort' AS reasoning
-    FROM factory.model_defaults WHERE singleton`;
+  const [stored] = await drizzleTransaction(sql)
+    .select({
+      reasoning: drizzleSQL<string | null>`${modelDefaults.roleRules}->'build'->>'reasoningEffort'`,
+    })
+    .from(modelDefaults)
+    .where(eq(modelDefaults.singleton, true));
   return codingReasoningInput.parse(stored?.reasoning ?? "medium");
 }
 
@@ -53,9 +65,6 @@ export function createModelSettingsController(
   environment = modelEnvironment(),
 ) {
   const { baseURL, apiKey } = environment;
-  type Defaults = Pick<ModelSettingsView, "version" | "planningModelId" | "buildModelId"> & {
-    rules: ModelSettingsView["rules"] | null;
-  };
   const emptyProject: ProjectModelSettings = {
     version: 0,
     planning: { modelId: null, models: null, allowOverride: null },
@@ -66,13 +75,24 @@ export function createModelSettingsController(
     else await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
   }
   async function get(
-    sql: AgentTurnTransaction | typeof database.client = database.client,
+    client: AgentTurnTransaction | typeof database.client = database.client,
   ): Promise<ModelSettingsView> {
-    const connections = await sql<
-      Array<{ role: ModelRole; provider: string; modelId: string; endpoint: string }>
-    >`
-      SELECT binding.role, version.provider, binding.model_id AS "modelId", version.endpoint FROM factory.model_role_connection binding
-      JOIN factory.model_connection_version version ON version.connection_id=binding.connection_id AND version.version=binding.connection_version`;
+    const db = client === database.client ? database.db : drizzleTransaction(client);
+    const connections = await db
+      .select({
+        role: modelRoleConnection.role,
+        provider: modelConnectionVersion.provider,
+        modelId: modelRoleConnection.modelId,
+        endpoint: modelConnectionVersion.endpoint,
+      })
+      .from(modelRoleConnection)
+      .innerJoin(
+        modelConnectionVersion,
+        and(
+          eq(modelConnectionVersion.connectionId, modelRoleConnection.connectionId),
+          eq(modelConnectionVersion.version, modelRoleConnection.connectionVersion),
+        ),
+      );
     const catalogue = await providerCatalogue();
     const models = [
       ...new Set([
@@ -94,10 +114,15 @@ export function createModelSettingsController(
           ]
         : environment.models;
     }
-    const [stored] = await sql<Defaults[]>`
-      SELECT version::float8 AS version, planning_model_id AS "planningModelId",
-        build_model_id AS "buildModelId", role_rules AS rules FROM factory.model_defaults WHERE singleton
-    `;
+    const [stored] = await db
+      .select({
+        version: modelDefaults.version,
+        planningModelId: modelDefaults.planningModelId,
+        buildModelId: modelDefaults.buildModelId,
+        rules: modelDefaults.roleRules,
+      })
+      .from(modelDefaults)
+      .where(eq(modelDefaults.singleton, true));
     const rules = modelRulesInput.parse(
       stored?.rules ?? {
         planning: { models: permitted("planning"), allowOverride: true },
@@ -143,14 +168,29 @@ export function createModelSettingsController(
   ): Promise<InheritedModelSettingsView> {
     const canManageProject = await projectAuthorityIn(sql, userID, projectID);
     const system = await get(sql);
-    const [projectRow] = await sql<ProjectModelSettings[]>`
-      SELECT version::float8 AS version, planning, build FROM factory.project_model_settings WHERE project_id = ${projectID}
-    `;
+    const db = drizzleTransaction(sql);
+    const [projectRow] = await db
+      .select({
+        version: projectModelSettings.version,
+        planning: projectModelSettings.planning,
+        build: projectModelSettings.build,
+      })
+      .from(projectModelSettings)
+      .where(eq(projectModelSettings.projectId, projectID));
     const project = projectRow ? projectModelInput.parse(projectRow) : emptyProject;
-    const [personalRow] = await sql<PersonalModelSettings[]>`
-      SELECT version::float8 AS version, planning_model_id AS "planningModelId", build_model_id AS "buildModelId"
-      FROM factory.personal_model_settings WHERE project_id = ${projectID} AND user_id = ${userID}
-    `;
+    const [personalRow] = await db
+      .select({
+        version: personalModelSettings.version,
+        planningModelId: personalModelSettings.planningModelId,
+        buildModelId: personalModelSettings.buildModelId,
+      })
+      .from(personalModelSettings)
+      .where(
+        and(
+          eq(personalModelSettings.projectId, projectID),
+          eq(personalModelSettings.userId, userID),
+        ),
+      );
     const personal = personalRow
       ? personalModelInput.parse(personalRow)
       : { version: 0, planningModelId: null, buildModelId: null };
@@ -206,6 +246,7 @@ export function createModelSettingsController(
       return database.client.begin(async (sql) => {
         await lock(sql, true);
         await projectAuthorityIn(sql, userID, projectID, true);
+        const db = drizzleTransaction(sql);
         const system = await get(sql);
         for (const role of modelRoles) {
           const rule = input[role];
@@ -232,17 +273,33 @@ export function createModelSettingsController(
         }
         const [changed] =
           input.version === 0
-            ? await sql`
-          INSERT INTO factory.project_model_settings(project_id, version, planning, build, updated_by)
-          VALUES (${projectID}, 1, ${JSON.stringify(input.planning)}::jsonb, ${JSON.stringify(input.build)}::jsonb, ${userID})
-          ON CONFLICT DO NOTHING
-          RETURNING version
-        `
-            : await sql`
-          UPDATE factory.project_model_settings SET version = version + 1,
-            planning = ${JSON.stringify(input.planning)}::jsonb, build = ${JSON.stringify(input.build)}::jsonb, updated_by = ${userID}, updated_at = now()
-          WHERE project_id = ${projectID} AND version = ${input.version} RETURNING version
-        `;
+            ? await db
+                .insert(projectModelSettings)
+                .values({
+                  projectId: projectID,
+                  version: 1,
+                  planning: input.planning,
+                  build: input.build,
+                  updatedBy: userID,
+                })
+                .onConflictDoNothing()
+                .returning({ version: projectModelSettings.version })
+            : await db
+                .update(projectModelSettings)
+                .set({
+                  version: drizzleSQL`${projectModelSettings.version} + 1`,
+                  planning: input.planning,
+                  build: input.build,
+                  updatedBy: userID,
+                  updatedAt: drizzleSQL`now()`,
+                })
+                .where(
+                  and(
+                    eq(projectModelSettings.projectId, projectID),
+                    eq(projectModelSettings.version, input.version),
+                  ),
+                )
+                .returning({ version: projectModelSettings.version });
         if (!changed) throw changedElsewhere();
         return inherited(sql, projectID, userID);
       });
@@ -251,6 +308,7 @@ export function createModelSettingsController(
       const input = personalModelInput.parse(value);
       return database.client.begin(async (sql) => {
         await lock(sql, true);
+        const db = drizzleTransaction(sql);
         const current = await inherited(sql, projectID, userID);
         for (const role of modelRoles) {
           const id = role === "planning" ? input.planningModelId : input.buildModelId;
@@ -265,16 +323,33 @@ export function createModelSettingsController(
         }
         const [changed] =
           input.version === 0
-            ? await sql`
-          INSERT INTO factory.personal_model_settings(project_id, user_id, version, planning_model_id, build_model_id)
-          VALUES (${projectID}, ${userID}, 1, ${input.planningModelId}, ${input.buildModelId})
-          ON CONFLICT DO NOTHING RETURNING version
-        `
-            : await sql`
-          UPDATE factory.personal_model_settings SET version = version + 1,
-            planning_model_id = ${input.planningModelId}, build_model_id = ${input.buildModelId}, updated_at = now()
-          WHERE project_id = ${projectID} AND user_id = ${userID} AND version = ${input.version} RETURNING version
-        `;
+            ? await db
+                .insert(personalModelSettings)
+                .values({
+                  projectId: projectID,
+                  userId: userID,
+                  version: 1,
+                  planningModelId: input.planningModelId,
+                  buildModelId: input.buildModelId,
+                })
+                .onConflictDoNothing()
+                .returning({ version: personalModelSettings.version })
+            : await db
+                .update(personalModelSettings)
+                .set({
+                  version: drizzleSQL`${personalModelSettings.version} + 1`,
+                  planningModelId: input.planningModelId,
+                  buildModelId: input.buildModelId,
+                  updatedAt: drizzleSQL`now()`,
+                })
+                .where(
+                  and(
+                    eq(personalModelSettings.projectId, projectID),
+                    eq(personalModelSettings.userId, userID),
+                    eq(personalModelSettings.version, input.version),
+                  ),
+                )
+                .returning({ version: personalModelSettings.version });
         if (!changed) throw changedElsewhere();
         return inherited(sql, projectID, userID);
       });
@@ -282,9 +357,13 @@ export function createModelSettingsController(
     async set(input: z.input<typeof modelDefaultsInput>, userID: string) {
       return database.client.begin(async (sql) => {
         await lock(sql, true);
-        const [administrator] =
-          await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userID} FOR SHARE`;
-        if (!administrator) throw new CommandError("forbidden", "System Manager access required");
+        const db = drizzleTransaction(sql);
+        const [manager] = await db
+          .select({ userId: administrator.userId })
+          .from(administrator)
+          .where(eq(administrator.userId, userID))
+          .for("share");
+        if (!manager) throw new CommandError("forbidden", "System Manager access required");
         const current = await get(sql);
         const models = current.models;
         if (!models.includes(input.planningModelId) || !models.includes(input.buildModelId))
@@ -303,18 +382,32 @@ export function createModelSettingsController(
         }
         const [changed] =
           input.version === 0
-            ? await sql<Array<{ version: number }>>`
-              INSERT INTO factory.model_defaults(singleton, version, planning_model_id, build_model_id, role_rules, updated_by)
-              VALUES (true, 1, ${input.planningModelId}, ${input.buildModelId}, ${JSON.stringify(rules)}::jsonb, ${userID})
-              ON CONFLICT DO NOTHING RETURNING version
-            `
-            : await sql<Array<{ version: number }>>`
-              UPDATE factory.model_defaults SET version = version + 1,
-                planning_model_id = ${input.planningModelId}, build_model_id = ${input.buildModelId},
-                role_rules = ${JSON.stringify(rules)}::jsonb,
-                updated_by = ${userID}, updated_at = now()
-              WHERE singleton AND version = ${input.version} RETURNING version
-            `;
+            ? await db
+                .insert(modelDefaults)
+                .values({
+                  singleton: true,
+                  version: 1,
+                  planningModelId: input.planningModelId,
+                  buildModelId: input.buildModelId,
+                  roleRules: rules,
+                  updatedBy: userID,
+                })
+                .onConflictDoNothing()
+                .returning({ version: modelDefaults.version })
+            : await db
+                .update(modelDefaults)
+                .set({
+                  version: drizzleSQL`${modelDefaults.version} + 1`,
+                  planningModelId: input.planningModelId,
+                  buildModelId: input.buildModelId,
+                  roleRules: rules,
+                  updatedBy: userID,
+                  updatedAt: drizzleSQL`now()`,
+                })
+                .where(
+                  and(eq(modelDefaults.singleton, true), eq(modelDefaults.version, input.version)),
+                )
+                .returning({ version: modelDefaults.version });
         if (!changed)
           throw new CommandError(
             "conflict",

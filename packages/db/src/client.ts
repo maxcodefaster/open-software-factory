@@ -1,6 +1,43 @@
-import { drizzle } from "drizzle-orm/postgres-js";
+import {
+  createTableRelationsHelpers,
+  extractTablesRelationalConfig,
+  type ExtractTablesWithRelations,
+} from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { drizzle, PostgresJsDatabase, PostgresJsSession } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
+
+type DatabaseConnection = postgres.Sql | postgres.TransactionSql;
+const databases = new WeakMap<DatabaseConnection, PostgresJsDatabase<typeof schema>>();
+const tables = extractTablesRelationalConfig<ExtractTablesWithRelations<typeof schema>>(
+  schema,
+  createTableRelationsHelpers,
+);
+const relationalSchema = {
+  fullSchema: schema,
+  schema: tables.tables,
+  tableNamesMap: tables.tableNamesMap,
+};
+const dialect = new PgDialect();
+
+/** Bind typed queries to the caller's existing connection, without opening another transaction. */
+export function drizzleTransaction(client: DatabaseConnection) {
+  const existing = databases.get(client);
+  if (existing) return existing;
+  // The public driver constructor configures pool serializers. Transactions have
+  // no pool options; Drizzle's native session binds their unsafe/begin methods.
+  const db =
+    "options" in client
+      ? drizzle(client, { schema })
+      : new PostgresJsDatabase<typeof schema>(
+          dialect,
+          new PostgresJsSession(client as unknown as postgres.Sql, dialect, relationalSchema),
+          relationalSchema,
+        );
+  databases.set(client, db);
+  return db;
+}
 
 export function databaseURL() {
   const { DATABASE_URL } = process.env;
@@ -15,7 +52,7 @@ export function createDatabase(max = 10) {
   const client = postgres(url, { max });
   return {
     client,
-    db: drizzle(client, { schema }),
+    db: drizzleTransaction(client),
     coordination: () => postgres(url, { max: 1, idle_timeout: 0 }),
   };
 }

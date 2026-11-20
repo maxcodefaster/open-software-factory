@@ -19,11 +19,14 @@ export default defineConfig(() => ({
       output: {
         codeSplitting: {
           groups: [
-            { name: "document-engine", test: /node_modules\/.*(?:@tiptap|prosemirror)/ },
+            // Reader/highlighter and Tiptap share these packages. Assign them
+            // before the editor group recursively captures its dependencies.
+            { name: "document-shared", test: /node_modules\/(?:marked|devlop)\// },
             {
               name: "document-highlighting",
-              test: /node_modules\/.*(?:highlight\.js|lowlight|hast-util|property-information|comma-separated-tokens|space-separated-tokens)/,
+              test: /node_modules\/(?:highlight\.js|lowlight|hast-util-[^/]+|property-information|comma-separated-tokens|space-separated-tokens)\//,
             },
+            { name: "document-engine", test: /node_modules\/(?:@tiptap\/|prosemirror-[^/]+\/)/ },
           ],
         },
       },

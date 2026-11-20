@@ -44,7 +44,33 @@ codeHighlighter.registerAlias({
   bash: ["sh", "shell"],
 });
 
+const maximumHighlightedCharacters = 80_000;
+
+function plainCode(text: string): ReturnType<typeof codeHighlighter.highlight> {
+  return {
+    type: "root",
+    children: [{ type: "text", value: text }],
+    data: { language: undefined, relevance: 0 },
+  };
+}
+
+// Tiptap also auto-detects unknown languages. Bound both grammar paths without
+// truncating the authored code or changing its saved language.
+export const codeBlockHighlighter = {
+  ...codeHighlighter,
+  highlight(...args: Parameters<typeof codeHighlighter.highlight>) {
+    return args[1].length > maximumHighlightedCharacters
+      ? plainCode(args[1])
+      : codeHighlighter.highlight(...args);
+  },
+  highlightAuto(...args: Parameters<typeof codeHighlighter.highlightAuto>) {
+    return args[0].length > maximumHighlightedCharacters
+      ? plainCode(args[0])
+      : codeHighlighter.highlightAuto(...args);
+  },
+};
+
 export function highlightedCode(text: string, language: string) {
-  if (text.length > 80_000 || !codeHighlighter.registered(language)) return;
+  if (text.length > maximumHighlightedCharacters || !codeHighlighter.registered(language)) return;
   return toHtml(codeHighlighter.highlight(language, text));
 }

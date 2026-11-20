@@ -1,9 +1,8 @@
-import { ai, LLMClient, ToolChoice, tool } from "@opencode/ai/effect";
+import { ai, ToolChoice, tool } from "@opencode/ai";
 import { model as anthropicModel } from "@opencode/ai/providers/anthropic";
 import { model as deepseekModel } from "@opencode/ai/providers/deepseek";
 import { model as openaiModel } from "@opencode/ai/providers/openai/responses";
-import { RequestExecutor } from "@opencode/ai/route";
-import { Effect, Layer, Schema } from "effect";
+import { z } from "zod";
 import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
 import {
   type CodingReasoning,
@@ -14,6 +13,11 @@ import { openCodeModelConfiguration } from "../../../../packages/runtime-kuberne
 import type { MastraUsageSink } from "../usage/mastra";
 import type { ResolvedModelConnection } from "./native";
 import { modelProbeFailure, reportedModelLimits } from "./probe";
+
+const probeOutput = z.object({
+  verified: z.literal(true),
+  value: z.literal("factory-connection-ok"),
+});
 
 // The exact native provider modules used by OpenCode 2, without starting compute
 // or copying the provider protocol. One inference, no retries and no fallback.
@@ -48,42 +52,32 @@ export async function probeBuildModel(input: {
     const probeTool = tool({
       name: "factory_connection_probe",
       description: "Confirm native model access by returning this exact structured value.",
-      input: Schema.Struct({
-        verified: Schema.Literal(true),
-        value: Schema.Literal("factory-connection-ok"),
-      }),
-      success: Schema.Unknown,
+      input: z.toJSONSchema(probeOutput),
     });
-    const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.fetchLayer));
+    const nativeFetch = globalThis.fetch;
     await input.usageSink?.begin();
     admitted = true;
-    const response = await Effect.runPromise(
-      ai
-        .generate(
-          ai.request({
-            model,
-            system:
-              "Call factory_connection_probe once with verified:true and value:factory-connection-ok. Do nothing else.",
-            prompt: "Check native Build transport.",
-            maxTokens: 4_096,
-            tools: [probeTool],
-            toolChoice: ToolChoice.named("factory_connection_probe"),
-          }),
-          {
-            http: (request, execute) =>
-              execute(request).pipe(
-                Effect.tap((response) =>
-                  Effect.sync(() => {
-                    limits = reportedModelLimits(response.headers);
-                  }),
-                ),
-              ),
+    const response = await ai.generate(
+      {
+        model,
+        system:
+          "Call factory_connection_probe once with verified:true and value:factory-connection-ok. Do nothing else.",
+        prompt: "Check native Build transport.",
+        maxTokens: 4_096,
+        tools: [probeTool],
+        toolChoice: ToolChoice.named("factory_connection_probe"),
+        // Official per-request fetch override keeps the native executor's status,
+        // transport and cancellation handling. Observe headers without reading,
+        // cloning or replacing the body, including on definite provider refusals.
+        fetch: Object.assign(
+          async (request: string | URL | Request, init?: RequestInit) => {
+            const response = await nativeFetch(request, init);
+            limits = reportedModelLimits(response.headers);
+            return response;
           },
-        )
-        .pipe(
-          Effect.catch((cause) => Effect.fail(cause.cause.http ?? cause)),
-          Effect.provide(layer),
+          { preconnect: nativeFetch.preconnect },
         ),
+      },
       { signal },
     );
     const calls = response.toolCalls.filter((call) => call.name === "factory_connection_probe");
@@ -106,7 +100,7 @@ export async function probeBuildModel(input: {
     });
     await input.usageSink?.settle("completed");
     toolCall = calls.length === 1;
-    const structuredOutput = toolCall && Schema.is(probeTool.input)(calls[0]?.input);
+    const structuredOutput = toolCall && probeOutput.safeParse(calls[0]?.input).success;
     return {
       status: structuredOutput ? "ready" : "unsupported",
       modelId: input.modelId,
@@ -126,10 +120,9 @@ export async function probeBuildModel(input: {
       });
       await input.usageSink?.settle(outcome);
     }
-    const native = cause && typeof cause === "object" && "cause" in cause ? cause.cause : cause;
-    const http = native && typeof native === "object" && "http" in native ? native.http : undefined;
     return {
-      status: modelProbeFailure(http ?? cause, signal),
+      // The Promise API preserves AIError.status and its native cause.
+      status: modelProbeFailure(cause, signal),
       modelId: input.modelId,
       toolCall,
       structuredOutput: false,

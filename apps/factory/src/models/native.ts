@@ -19,6 +19,14 @@ export const nativeEndpoints = {
   deepseek: "https://api.deepseek.com",
 } as const satisfies Record<ModelProvider, string>;
 
+// Exact reviewed IDs only. The Sol snapshot is already qualified by
+// openCodeModelMetadata; deployment aliases and other snapshots remain unknown.
+const openaiResponsesOptions = new Map<string, { store: false; reasoningEffort?: "low" }>([
+  ["gpt-6-luna", { reasoningEffort: "low", store: false }],
+  ["gpt-6.1-sol", { store: false }],
+  ["gpt-6.1-sol-2026-09-29", { store: false }],
+]);
+
 export async function providerCatalogue() {
   const { getProviderConfig } = await import("@mastra/core/llm");
   return modelProvider.options.map((provider) => {
@@ -87,9 +95,11 @@ export async function nativeModel(
   if (id.startsWith(`${provider}/`))
     throw new CommandError("conflict", "Select the provider model ID without a provider prefix");
   const baseURL = connection.baseURL;
-  const responses = provider === "openai" && (id === "gpt-6-luna" || id === "gpt-6.1-sol");
-  // Router URL overrides in pinned Mastra select chat-completions even for Anthropic.
-  // Use the native SDK for enterprise endpoints, never translate Messages to OpenAI.
+  const responses = modelProviderOptions(connection, id) !== undefined;
+  // Mastra's explicit Responses route works, but URL overrides otherwise select
+  // compatible Chat, not native Messages/DeepSeek/OpenAI Chat semantics.
+  // Keep native SDKs for enterprise endpoints; routing one Responses branch
+  // through Mastra would not remove the OpenAI dependency still needed for Chat.
   if (baseURL || responses) {
     const options = { apiKey: connection.apiKey, ...(baseURL ? { baseURL } : {}) };
     switch (provider) {
@@ -113,7 +123,6 @@ export async function nativeModel(
 
 export function modelProviderOptions(connection: ResolvedModelConnection, modelId: string) {
   if ((connection.provider ?? "openai") !== "openai") return undefined;
-  if (modelId === "gpt-6-luna") return { openai: { reasoningEffort: "low", store: false } };
-  if (modelId === "gpt-6.1-sol") return { openai: { store: false } };
-  return undefined;
+  const options = openaiResponsesOptions.get(modelId);
+  return options ? { openai: { ...options } } : undefined;
 }
