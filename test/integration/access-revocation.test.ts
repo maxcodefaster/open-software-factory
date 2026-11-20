@@ -1,26 +1,67 @@
 import { expect, test } from "bun:test";
-import { createAccessRevocation } from "../../apps/factory/src/access/revocation";
 import { createForgeIdentityRoutes } from "../../apps/factory/src/access/forge-routes";
+import { createAccessRevocation } from "../../apps/factory/src/access/revocation";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("native Forge connection confirms independently while failed account reconciliation stays durable", async () => {
   const fixture = await factoryProcess();
   const database = fixture.connect();
   const id = crypto.randomUUID();
+  const discoveryURL = "https://factory.test/api/auth/.well-known/openid-configuration";
+  const redirectURI = "https://forge.test/user/oauth2/Factory/callback";
+  let fresh = true;
+  let loseClientReply = true;
+  let clientCalls = 0;
   try {
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned connection manager',${`${id}@company.test`})`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${id})`;
-    await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,state,intended_by)
-      VALUES('Factory','https://factory.test/api/auth/.well-known/openid-configuration','https://forge.test/user/oauth2/Factory/callback','create-intended',${id})`;
     const route = createForgeIdentityRoutes({
       database,
-      identity: { requireFresh: async () => {}, ensureForgeClient: async () => "factory-forgejo" },
+      identity: {
+        requireFresh: async () => {
+          if (!fresh) throw new Error("Owned authentication is not fresh");
+        },
+        ensureForgeClient: async () => {
+          clientCalls++;
+          expect(
+            (
+              await database.client`SELECT discovery_url,redirect_uri,intended_by,state
+              FROM factory.forge_connection`
+            )[0],
+          ).toEqual({
+            discovery_url: discoveryURL,
+            redirect_uri: redirectURI,
+            intended_by: id,
+            state: "create-intended",
+          });
+          if (loseClientReply) {
+            loseClientReply = false;
+            throw new Error("Owned lost client reply");
+          }
+          return "factory-forgejo";
+        },
+      },
       forgeOrigin: "https://forge.test",
-      discoveryURL: "https://factory.test/api/auth/.well-known/openid-configuration",
+      discoveryURL,
       reconcile: async () => {
         throw new Error("Owned native account mismatch");
       },
     });
+    const clientRequest = (discovery = discoveryURL) =>
+      new Request("https://factory.test/api/admin/forge/client", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ discoveryURL: discovery, redirectURI }),
+      });
+    fresh = false;
+    await expect(route(clientRequest(), id)).rejects.toThrow("not fresh");
+    expect(await database.client`SELECT id FROM factory.forge_connection`).toHaveLength(0);
+    fresh = true;
+    expect((await route(clientRequest("https://other.test/discovery"), id))?.status).toBe(400);
+    expect(clientCalls).toBe(0);
+    await expect(route(clientRequest(), id)).rejects.toThrow("lost client reply");
+    expect((await route(clientRequest(), id))?.status).toBe(200);
+    expect(clientCalls).toBe(2);
     const request = (sourceID: number) =>
       new Request("https://factory.test/api/admin/forge/connection", {
         method: "POST",
@@ -37,6 +78,16 @@ test("native Forge connection confirms independently while failed account reconc
       )[0]?.["pending"],
     ).toBe(true);
     expect((await route(request(8), id))?.status).toBe(409);
+    const [before] = await database.client<
+      { version: string }[]
+    >`SELECT version FROM factory.access_revocation WHERE user_id=${id}`;
+    if (!before) throw new Error("Owned revocation version missing");
+    expect((await route(request(7), id))?.status).toBe(204);
+    expect(
+      (
+        await database.client`SELECT version FROM factory.access_revocation WHERE user_id=${id}`
+      )[0]?.["version"],
+    ).toBe(String(BigInt(before.version) + 1n));
   } finally {
     await database.client.end();
     await fixture.dispose();
@@ -129,6 +180,40 @@ test("native directory disablement commits recoverable revocation; response loss
     await fixture.dispose();
   }
 }, 60_000);
+
+test("revocation acknowledgement preserves bigint versions above the safe-integer limit and leaves a newer intent pending", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect();
+  const userID = crypto.randomUUID();
+  let calls = 0;
+  const observer = createAccessRevocation(database, async () => {
+    if (++calls === 1)
+      await database.client`UPDATE factory.access_revocation SET version=version+1 WHERE user_id=${userID}`;
+  });
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${userID},'Owned exact revocation',${`${userID}@company.test`})`;
+    await database.client`INSERT INTO factory.access_revocation(user_id,version)
+      VALUES(${userID},9007199254740993)`;
+    await observer.drain();
+    expect(
+      (
+        await database.client`SELECT version,processed_version FROM factory.access_revocation WHERE user_id=${userID}`
+      )[0],
+    ).toEqual({ version: "9007199254740994", processed_version: "0" });
+    await observer.drain();
+    expect(
+      (
+        await database.client`SELECT version,processed_version FROM factory.access_revocation WHERE user_id=${userID}`
+      )[0],
+    ).toEqual({ version: "9007199254740994", processed_version: "9007199254740994" });
+    expect(calls).toBe(2);
+  } finally {
+    await observer.close();
+    await database.client.end();
+    await fixture.dispose();
+  }
+}, 30_000);
 
 test("new Projects commit access reconciliation for existing System Managers and their initial Developer", async () => {
   const fixture = await factoryProcess();

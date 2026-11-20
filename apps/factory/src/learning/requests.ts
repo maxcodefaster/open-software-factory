@@ -1,5 +1,8 @@
+import { and, eq, gt, notExists, sql as typedSQL } from "drizzle-orm";
 import type { Sql, TransactionSql } from "postgres";
 import { learningReviewWindowMs } from "../../../../packages/conversation-domain/src/learning";
+import { drizzleTransaction } from "../../../../packages/db/src/client";
+import { learningCommand, learningReview } from "../../../../packages/db/src/schema";
 
 export type ReviewRequest = {
   id: string;
@@ -17,21 +20,48 @@ export function pendingReviewRequests(
   sql: Sql | TransactionSql,
   scope: { projectId: string; ownerId: string | null } | null = null,
 ) {
-  return sql<ReviewRequest[]>`
-    SELECT command.id,command.actor_id AS "actorId",(command.input->>'projectId')::uuid AS "projectId",
-      CASE WHEN command.input->>'scope'='personal' THEN command.actor_id END AS "ownerId",
-      (command.input->>'developerOnly')::boolean AS "developerOnly",(command.input->>'cases')::int AS cases,
-      command.created_at AS "requestedAt"
-    FROM factory.learning_command command
-    WHERE command.input->>'kind'='review-now'
-      AND command.created_at>now()-make_interval(secs=>${learningReviewWindowMs / 1000})
-      AND (${scope?.projectId ?? null}::uuid IS NULL OR (command.input->>'projectId')::uuid=${scope?.projectId ?? null}::uuid)
-      AND (${scope === null}::boolean OR (CASE WHEN command.input->>'scope'='personal' THEN command.actor_id END)
-        IS NOT DISTINCT FROM ${scope?.ownerId ?? null}::uuid)
-      AND NOT EXISTS(SELECT 1 FROM factory.learning_review review
-        WHERE review.kind='work' AND review.project_id=(command.input->>'projectId')::uuid
-          AND review.owner_id IS NOT DISTINCT FROM (CASE WHEN command.input->>'scope'='personal' THEN command.actor_id END)
-          AND review.developer_only=(command.input->>'developerOnly')::boolean
-          AND review.created_at>command.created_at)
-    ORDER BY command.created_at LIMIT 8`;
+  const db = drizzleTransaction(sql);
+  const projectId = typedSQL<string>`(${learningCommand.input}->>'projectId')::uuid`;
+  const ownerId = typedSQL<
+    string | null
+  >`case when ${learningCommand.input}->>'scope'='personal' then ${learningCommand.actorId} end`;
+  const developerOnly = typedSQL<boolean>`(${learningCommand.input}->>'developerOnly')::boolean`;
+  return db
+    .select({
+      id: learningCommand.id,
+      actorId: learningCommand.actorId,
+      projectId,
+      ownerId,
+      developerOnly,
+      cases: typedSQL<number>`(${learningCommand.input}->>'cases')::int`,
+      requestedAt: learningCommand.createdAt,
+    })
+    .from(learningCommand)
+    .where(
+      and(
+        eq(typedSQL<string>`${learningCommand.input}->>'kind'`, "review-now"),
+        gt(
+          learningCommand.createdAt,
+          typedSQL`now()-make_interval(secs=>${learningReviewWindowMs / 1000})`,
+        ),
+        scope ? eq(projectId, scope.projectId) : undefined,
+        scope ? typedSQL`${ownerId} is not distinct from ${scope.ownerId}::uuid` : undefined,
+        notExists(
+          db
+            .select({ id: learningReview.id })
+            .from(learningReview)
+            .where(
+              and(
+                eq(learningReview.kind, "work"),
+                eq(learningReview.projectId, projectId),
+                typedSQL`${learningReview.ownerId} is not distinct from ${ownerId}`,
+                eq(learningReview.developerOnly, developerOnly),
+                gt(learningReview.createdAt, learningCommand.createdAt),
+              ),
+            ),
+        ),
+      ),
+    )
+    .orderBy(learningCommand.createdAt)
+    .limit(8);
 }

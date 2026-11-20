@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { createAccountRevocation } from "../../apps/factory/src/access/account-revocation";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createDeveloperIDERuntime } from "../../apps/factory/src/workspace/developer-ide-runtime";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -174,6 +176,26 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
       runtime.route(`${prefix}/${owned.attemptID}/terminals/terminal-a`, request("DELETE"), auth),
     ).rejects.toThrow("not connected");
     expect(closed).toHaveLength(1);
+    const replacement = crypto.randomUUID();
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${replacement},${owned.projectID},${owned.changeID},${source.id},2,${"a".repeat(40)},
+          'create-intended',${"d".repeat(64)},${"e".repeat(64)},now(),${owned.userID})`;
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+        VALUES(${replacement},${`fa-${replacement.replaceAll("-", "")}`},
+          ${`runtime-${replacement.replaceAll("-", "")}`},'{}')`;
+      await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacement}`;
+    });
+    // A newer generation is not this Ticket's selected Attempt until its owner links it.
+    expect(await (await runtime.route(prefix, request(), auth))?.json()).toMatchObject({
+      attemptID: owned.attemptID,
+      state: "stopped",
+    });
+    await expect(
+      runtime.socketData(terminal.replace(owned.attemptID, replacement), auth),
+    ).rejects.toThrow("not connected");
+    expect(starts).toBe(1);
     await database.client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
     await expect(runtime.route(prefix, request(), auth)).rejects.toThrow(
       "Developer access required",
@@ -209,15 +231,63 @@ test("paused App projections retain declared channels without waking execution o
         WHERE id=${owned.attemptID}`;
       })(),
     ).rejects.toThrow("immutable");
+    const { turn } = await createAgentTurnStore(database).admit(
+      {
+        kind: "change-start",
+        commandId: crypto.randomUUID(),
+        projectId: owned.projectID,
+        ticketId: owned.ticketID,
+        changeId: owned.changeID,
+        conversationId: null,
+        createdBy: owned.userID,
+      },
+      { mode: "build", modelId: "owned-no-inference", requirementRevisionId: owned.revisionID },
+    );
+    await database.client`UPDATE factory.change_writer SET state='human',user_id=${owned.userID}
+      WHERE change_id=${owned.changeID}`;
+    const stoppedRuntime: string[] = [];
+    const stoppedAgent: string[] = [];
+    let loseForgeReply = false;
+    const revoke = createAccountRevocation({
+      database,
+      sweepRuntime: async () => {},
+      reconcileEditor: async () => {},
+      reconcileSources: async () => {},
+      stopRuntime: async (id) => {
+        stoppedRuntime.push(id);
+      },
+      stopAgent: async (id) => {
+        stoppedAgent.push(id);
+      },
+      reconcileForge: async () => {
+        if (loseForgeReply) throw new Error("Owned lost Forge reconciliation reply");
+      },
+    });
+    await revoke(owned.userID, false);
+    expect(stoppedRuntime).toEqual([]);
+    expect(stoppedAgent).toEqual([]);
     await database.client`UPDATE factory.project_membership SET role='product-contributor'
       WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
     expect(await previews(owned.projectID, owned.userID)).toHaveLength(2);
+    await revoke(owned.userID, false);
+    expect(stoppedRuntime).toEqual([owned.attemptID]);
+    expect(stoppedAgent).toEqual([]);
     expect(
       await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${owned.projectID}`,
-    ).toHaveLength(0);
+    ).toHaveLength(1);
     const [attempt] = await database.client<Array<{ state: string }>>`
       SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
     expect(attempt?.state).toBe("paused");
+    await database.client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${owned.userID}`;
+    loseForgeReply = true;
+    await expect(revoke(owned.userID, true)).rejects.toThrow("lost Forge reconciliation");
+    expect(stoppedRuntime).toEqual([owned.attemptID, owned.attemptID]);
+    expect(stoppedAgent).toEqual([owned.changeID]);
+    expect(
+      (await database.client`SELECT state FROM factory.agent_turn WHERE id=${turn.id}`)[0]?.[
+        "state"
+      ],
+    ).toBe("pending");
   } finally {
     await database.client.end({ timeout: 2 });
     await process.dispose();

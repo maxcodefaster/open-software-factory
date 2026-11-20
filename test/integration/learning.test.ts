@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { retainLearningArtifactsIn } from "../../apps/factory/src/learning/artifacts";
+import { learningEnabledIn } from "../../apps/factory/src/learning/authority";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
+import { pendingReviewRequests } from "../../apps/factory/src/learning/requests";
 import { createLearningService } from "../../apps/factory/src/learning/service";
 import { collectLearningCases } from "../../apps/factory/src/learning/sources";
 import { createLearningWorker } from "../../apps/factory/src/learning/worker";
@@ -574,15 +576,39 @@ test("source collection retains real personal scope and never treats an unsuppor
     await database.client`INSERT INTO factory.agent_turn(id,command_id,project_id,conversation_id,created_by,input,input_digest,authority,state,outcome_summary)
       VALUES(${turn},${command},${owned.projectID},${conversation},${owned.userID},${JSON.stringify(input)}::jsonb,${"a".repeat(64)},
       ${JSON.stringify({ mode: "investigate", conversationVersion: 1, modelId: "owned" })}::jsonb,'completed','Private observation')`;
+    const artifacts = [
+      { reference: "knowledge:empty:v1", body: " \n ", truncated: false },
+      {
+        reference: "knowledge:owned:v1",
+        body: "Actual source read. MAX_RETRIES = 3.",
+        truncated: false,
+      },
+      { reference: "knowledge:bounded:v1", body: "x".repeat(2_100), truncated: false },
+      { reference: "r".repeat(410), body: "Retained excerpt.", truncated: true },
+      { reference: "knowledge:ignored:v1", body: "Outside the artifact count.", truncated: false },
+    ];
+    await expect(
+      database.client.begin(async (sql) => {
+        await retainLearningArtifactsIn(sql, { id: turn, command: input }, artifacts);
+        throw new Error("Owned retention rollback");
+      }),
+    ).rejects.toThrow("Owned retention rollback");
+    expect(
+      await database.client`SELECT ordinal FROM factory.learning_source_artifact WHERE turn_id=${turn}`,
+    ).toHaveLength(0);
     await database.client.begin((sql) =>
-      retainLearningArtifactsIn(sql, { id: turn, command: input }, [
-        {
-          reference: "knowledge:owned:v1",
-          body: "Actual source read. MAX_RETRIES = 3.",
-          truncated: false,
-        },
-        { reference: "knowledge:bounded:v1", body: "x".repeat(2_100), truncated: false },
-      ]),
+      retainLearningArtifactsIn(sql, { id: turn, command: input }, artifacts),
+    );
+    expect([
+      ...(await database.client`SELECT ordinal,reference,body,truncated FROM factory.learning_source_artifact
+          WHERE turn_id=${turn} ORDER BY ordinal`),
+    ]).toEqual(
+      artifacts.slice(1, 4).map((artifact, ordinal) => ({
+        ordinal,
+        reference: artifact.reference.slice(0, 400),
+        body: artifact.body.slice(0, 2_000),
+        truncated: artifact.truncated || artifact.body.length > 2_000,
+      })),
     );
     const policy = createLearningService(database);
     await policy.set(owned.userID, {
@@ -592,6 +618,23 @@ test("source collection retains real personal scope and never treats an unsuppor
       expectedVersion: 0,
       enabled: false,
     });
+    await database.client.begin(async (sql) => {
+      expect(await learningEnabledIn(sql, owned.projectID, owned.userID)).toBe(false);
+      expect(await learningEnabledIn(sql, owned.projectID, null)).toBe(true);
+      expect(await learningEnabledIn(sql, owned.projectID, crypto.randomUUID())).toBe(true);
+    });
+    await expect(
+      database.client.begin(async (sql) => {
+        await sql`INSERT INTO factory.learning_policy(scope_key,project_id,owner_id,enabled,version,updated_by)
+          VALUES(${`${owned.projectID}:project`},${owned.projectID},NULL,false,1,${owned.userID})`;
+        expect(await learningEnabledIn(sql, owned.projectID, null)).toBe(false);
+        expect(await learningEnabledIn(sql, owned.projectID, crypto.randomUUID())).toBe(false);
+        throw new Error("Owned policy rollback");
+      }),
+    ).rejects.toThrow("Owned policy rollback");
+    await database.client.begin(async (sql) => {
+      expect(await learningEnabledIn(sql, owned.projectID, null)).toBe(true);
+    });
     // Pausing fences new retention even if called from an already admitted Turn.
     await database.client.begin((sql) =>
       retainLearningArtifactsIn(sql, { id: turn, command: input }, [
@@ -600,7 +643,7 @@ test("source collection retains real personal scope and never treats an unsuppor
     );
     expect(
       await database.client`SELECT ordinal FROM factory.learning_source_artifact WHERE turn_id=${turn}`,
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     await policy.set(owned.userID, {
       commandId: crypto.randomUUID(),
       projectId: owned.projectID,
@@ -902,6 +945,97 @@ const reviewNow = (projectId: string, cases: number, developerOnly = false) => (
   developerOnly,
   cases,
 });
+
+test("pending Review now requests preserve exact visibility, strict timestamps and the eight-request bound", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const other = await fixture(undefined, undefined, database);
+    await database.client.begin(async (sql) => {
+      async function request(
+        projectId: string,
+        ownerId: string | null,
+        developerOnly: boolean,
+        age: number,
+        kind = "review-now",
+      ) {
+        const id = crypto.randomUUID();
+        const input = {
+          ...reviewNow(projectId, 2, developerOnly),
+          commandId: id,
+          kind,
+          scope: ownerId ? "personal" : "project",
+        };
+        const [saved] = await sql<{ requestedAt: Date }[]>`
+          INSERT INTO factory.learning_command(id,actor_id,input,result,created_at)
+          VALUES(${id},${ownerId ?? owned.userID},${JSON.stringify(input)}::jsonb,'{}'::jsonb,
+            now()-make_interval(secs=>${age})) RETURNING created_at AS "requestedAt"`;
+        return {
+          id,
+          actorId: ownerId ?? owned.userID,
+          projectId,
+          ownerId,
+          developerOnly,
+          cases: 2,
+          requestedAt: new Date(fixtureValue(saved, "saved request").requestedAt),
+        };
+      }
+      const shared = await request(owned.projectID, null, false, 60);
+      const developer = await request(owned.projectID, null, true, 59);
+      const personal = await request(owned.projectID, owned.userID, false, 58);
+      const otherPersonal = await request(owned.projectID, other.userID, false, 57);
+      const otherProject = await request(other.projectID, null, false, 56);
+      await request(owned.projectID, null, false, 3_600);
+      await request(owned.projectID, null, false, 3_601);
+      await request(owned.projectID, null, false, 55, "set-policy");
+      expect(await pendingReviewRequests(sql)).toEqual([
+        shared,
+        developer,
+        personal,
+        otherPersonal,
+        otherProject,
+      ]);
+      expect(
+        await pendingReviewRequests(sql, { projectId: owned.projectID, ownerId: null }),
+      ).toEqual([shared, developer]);
+      expect(
+        await pendingReviewRequests(sql, { projectId: owned.projectID, ownerId: owned.userID }),
+      ).toEqual([personal]);
+      async function review(
+        scope: typeof shared,
+        kind: "work" | "calibration",
+        equalToRequest = false,
+      ) {
+        await sql`INSERT INTO factory.learning_review(id,project_id,owner_id,developer_only,reviewer_id,kind,
+          rubric,model_id,judge_key,state,input,input_digest,owner_token,owner_expires_at,created_at)
+          VALUES(${crypto.randomUUID()},${scope.projectId},${scope.ownerId},${scope.developerOnly},${owned.userID},
+            ${kind},'work-review/v1','owned','owned-request-selector','uncertain','[]'::jsonb,
+            ${"a".repeat(64)},${crypto.randomUUID()},now(),
+            CASE WHEN ${equalToRequest} THEN
+              (SELECT created_at FROM factory.learning_command WHERE id=${scope.id})
+              ELSE now()-interval '1 second' END)`;
+      }
+      await review(shared, "calibration");
+      await review(shared, "work", true);
+      await review(developer, "work");
+      await review(otherPersonal, "work");
+      await review(otherProject, "work");
+      expect(await pendingReviewRequests(sql)).toEqual([shared, personal]);
+      await review(shared, "work");
+      expect(await pendingReviewRequests(sql)).toEqual([personal]);
+      const fresh = [];
+      for (let index = 0; index < 10; index++)
+        fresh.push(await request(owned.projectID, null, false, 0.9 - index / 100));
+      expect(
+        await pendingReviewRequests(sql, { projectId: owned.projectID, ownerId: null }),
+      ).toEqual(fresh.slice(0, 8));
+    });
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
 
 test.each(["allowlisted", "unknown", "proposal-link"] as const)(
   "a %s semantic rejection persists a safe reason without proposals, trials or paid retry",

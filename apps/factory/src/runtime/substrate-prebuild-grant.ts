@@ -1,4 +1,6 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { runtimeAttempt } from "../../../../packages/db/src/schema";
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { requireSetupReady } from "../setup/execution-gate";
@@ -64,11 +66,18 @@ export async function substratePrebuildGrantIn(
 }
 
 export async function substratePrebuildPrincipalIn(sql: DatabaseTransaction, attemptID: string) {
-  const [attempt] = await sql<
-    { userID: string }[]
-  >`SELECT created_by AS "userID" FROM factory.runtime_attempt
-    WHERE id=${attemptID} AND isolated_kind='prebuild' AND workspace_id IS NULL
-      AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
+  const [attempt] = await drizzleTransaction(sql)
+    .select({ userID: runtimeAttempt.createdBy })
+    .from(runtimeAttempt)
+    .where(
+      and(
+        eq(runtimeAttempt.id, attemptID),
+        eq(runtimeAttempt.isolatedKind, "prebuild"),
+        isNull(runtimeAttempt.workspaceId),
+        inArray(runtimeAttempt.state, ["starting", "ready"]),
+        isNull(runtimeAttempt.stopIntendedAt),
+      ),
+    );
   if (!attempt)
     throw new CommandError("forbidden", "Current native prebuild principal is unavailable");
   return attempt.userID;

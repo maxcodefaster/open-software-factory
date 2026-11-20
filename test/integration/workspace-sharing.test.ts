@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { workspaceWriteAuthorityIn } from "../../apps/factory/src/access/change-writer";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { workspaceAuthorityIn } from "../../apps/factory/src/access/workspace";
+import { createWorkspaceService } from "../../apps/factory/src/workspace/service";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
@@ -37,6 +38,20 @@ async function fixture() {
       permission,
       expectedVersion,
     });
+  const noPreparation = async () => {
+    throw Error("Listing Workspaces must not prepare Source or compute");
+  };
+  const service = createWorkspaceService({
+    database,
+    sources: {
+      get: noPreparation,
+      ensure: noPreparation,
+      ensurePersonal: noPreparation,
+      ensureChange: noPreparation,
+    },
+    editors: { get: noPreparation, ensure: noPreparation, stop: noPreparation },
+    revokeEditor: noPreparation,
+  });
   return {
     native,
     database,
@@ -51,6 +66,7 @@ async function fixture() {
     read,
     write,
     grant,
+    available: (userID: string) => service.available(userID, project),
     async dispose() {
       await native.dispose();
     },
@@ -61,6 +77,16 @@ test("personal source is private until shared and grants never elevate Project a
   const f = await fixture();
   try {
     expect((await f.read(f.owner)).permission).toBe("collaborate");
+    expect(await f.available(f.owner)).toEqual([
+      {
+        workspaceID: f.workspace,
+        ownerID: f.owner,
+        name: "Native fixture",
+        kind: "personal",
+        collaborative: false,
+      },
+    ]);
+    expect(await f.available(f.editor)).toEqual([]);
     await expect(f.read(f.editor)).rejects.toThrow("Workspace not found");
     await expect(f.grant(f.contributor, "collaborate")).rejects.toThrow(
       "Developer access required",
@@ -69,6 +95,7 @@ test("personal source is private until shared and grants never elevate Project a
       (await f.sharing.view(f.owner, f.workspace)).members.map((m) => m.userID).sort(),
     ).toEqual([f.editor, f.viewer].sort());
     await f.grant(f.viewer, "observe");
+    expect((await f.available(f.viewer)).map((row) => row.workspaceID)).toEqual([f.workspace]);
     expect((await f.read(f.viewer)).permission).toBe("observe");
     await expect(f.write(f.viewer)).rejects.toThrow("observation only");
     await f.grant(f.editor, "collaborate");
@@ -77,6 +104,9 @@ test("personal source is private until shared and grants never elevate Project a
     await f.database
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.project} AND user_id=${f.editor}`;
     await expect(f.write(f.editor)).rejects.toThrow("Developer access required");
+    await expect(f.available(f.editor)).rejects.toThrow("Developer access required");
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+    expect(await f.database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
   } finally {
     await f.dispose();
   }
@@ -117,6 +147,7 @@ test("a kick revokes only the member's access and preserves shared runtime ident
       .client`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`;
     const result = await f.grant(f.editor, null, 1);
     expect(result.permission).toBeNull();
+    expect(await f.available(f.editor)).toEqual([]);
     expect(f.revoked.at(-1)).toEqual({ workspaceID: f.workspace, userID: f.editor });
     await expect(f.read(f.editor)).rejects.toThrow("Workspace not found");
     await expect(access.requireRuntime(f.editor, attemptID, "app")).rejects.toThrow(

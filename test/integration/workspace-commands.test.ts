@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceCommands } from "../../apps/factory/src/workspace/commands";
+import { createWorkspaceComputeAccess } from "../../apps/factory/src/workspace/compute-access";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { eventually } from "../fixtures/factory-process";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
@@ -303,6 +304,44 @@ test("unknown suspended startup refuses demand promptly without admitting a comm
     ]).toEqual([]);
   } finally {
     await commands.close();
+    await f.dispose();
+  }
+}, 30000);
+
+test("compute demand refuses stopped, failed and foreign handles without dispatch", async () => {
+  const f = await commandFixture();
+  let preparations = 0;
+  const demand = createWorkspaceComputeAccess(
+    f.database,
+    { ready: () => true },
+    {
+      ...f.runtime,
+      start: async () => {
+        preparations++;
+        throw Error("Refused compute must not start");
+      },
+      startPersisted: async () => {
+        preparations++;
+        throw Error("Refused compute must not start");
+      },
+    },
+    () => false,
+  );
+  try {
+    await expect(demand(f.workspaceID, f.owner, true, crypto.randomUUID())).rejects.toThrow(
+      "different Runtime Attempt",
+    );
+    for (const state of ["stopped", "failed"]) {
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${f.attemptID}`;
+      await expect(demand(f.workspaceID, f.owner)).rejects.toThrow(
+        "Start this Workspace explicitly",
+      );
+    }
+    expect(preparations).toBe(0);
+    expect(f.starts()).toBe(0);
+    expect(await f.database.client`SELECT id FROM factory.workspace_command`).toHaveLength(0);
+  } finally {
     await f.dispose();
   }
 }, 30000);

@@ -1,4 +1,6 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, sql as expression, gt, ne, or } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { authSession, runtimeAttempt } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { createAccessController } from "./controller";
 
@@ -24,9 +26,21 @@ export function createRuntimeAccess(
   }
   async function valid(grant: Grant) {
     if (grant.expires <= Date.now()) return false;
-    const sessions = await database.client`SELECT id FROM auth.session
-      WHERE id = ${grant.sessionID} AND user_id = ${grant.userID} AND expires_at > now()
-        AND login_method<>'identity-test' AND (login_method<>'sso' OR authenticated_at>now()-interval '24 hours')`;
+    const sessions = await drizzleTransaction(database.client)
+      .select({ id: authSession.id })
+      .from(authSession)
+      .where(
+        and(
+          eq(authSession.id, grant.sessionID),
+          eq(authSession.userId, grant.userID),
+          gt(authSession.expiresAt, expression`now()`),
+          ne(authSession.loginMethod, "identity-test"),
+          or(
+            ne(authSession.loginMethod, "sso"),
+            gt(authSession.authenticatedAt, expression`now()-interval '24 hours'`),
+          ),
+        ),
+      );
     if (!sessions.length) return false;
     try {
       await access.requireRuntime(grant.userID, grant.attemptID, grant.channel);
@@ -151,16 +165,20 @@ export function createRuntimeAccess(
       }
     },
     async revokeMember(projectID: string, userID: string) {
-      const attempts = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
+      const attempts = await drizzleTransaction(database.client)
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.projectId, projectID));
       const ids = new Set(attempts.map((attempt) => attempt.id));
       for (const [token, grant] of grants) {
         if (grant.userID === userID && ids.has(grant.attemptID)) revoke(token);
       }
     },
     async revokeWorkspaceMember(workspaceID: string, userID: string) {
-      const attempts = await database.client<{ id: string }[]>`
-        SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspaceID}`;
+      const attempts = await drizzleTransaction(database.client)
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.workspaceId, workspaceID));
       const ids = new Set(attempts.map((attempt) => attempt.id));
       for (const [token, grant] of grants)
         if (grant.userID === userID && ids.has(grant.attemptID)) revoke(token);

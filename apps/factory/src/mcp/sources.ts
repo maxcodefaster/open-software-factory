@@ -1,7 +1,8 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { mcpObservation } from "../../../../packages/db/src/schema";
 import type { createBuildBrowserController } from "../agent/browser-controller";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { createAttachmentTools } from "../attachments/tools";
@@ -128,8 +129,17 @@ export function createMCPSourceEndpoint(
             turnId,
             authorized.ownerToken,
             async (sql) => {
-              await sql`INSERT INTO factory.mcp_observation(id,turn_id,connection_id,tool_name,tool_digest,result_digest,is_error)
-            VALUES(${crypto.randomUUID()},${turnId},${connectionId},${tool},${digest},${mcpDigest(result.content)},${result.isError})`;
+              await drizzleTransaction(sql)
+                .insert(mcpObservation)
+                .values({
+                  id: crypto.randomUUID(),
+                  turnId,
+                  connectionId,
+                  toolName: tool,
+                  toolDigest: digest,
+                  resultDigest: mcpDigest(result.content),
+                  isError: result.isError,
+                });
             },
           );
           if (!current)

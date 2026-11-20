@@ -1,5 +1,7 @@
+import { eq, sql as query } from "drizzle-orm";
 import { verificationDiagnosisInput } from "../../../../packages/conversation-domain/src/verification";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { executionPolicyCommand, verification } from "../../../../packages/db/src/schema";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { submittedCandidate } from "../agent/candidate-state";
@@ -16,14 +18,19 @@ export async function retryVerificationBootstrap(
   runtimeAttemptID: string,
 ) {
   return database.client.begin(async (sql) => {
+    const db = drizzleTransaction(sql);
     const writer = await lockChangeWriterIn(sql, changeID);
     await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
     const scope = `checks-bootstrap-retry:${changeID}`;
     const input = { changeID, verificationID, runtimeAttemptID };
-    const [replay] = await sql<
-      { scope: string; actor: string; input: typeof input }[]
-    >`SELECT scope,actor_id AS actor,input FROM factory.execution_policy_command
-      WHERE command_id=${commandID}`;
+    const [replay] = await db
+      .select({
+        scope: executionPolicyCommand.scope,
+        actor: executionPolicyCommand.actorId,
+        input: query<typeof input>`${executionPolicyCommand.input}`,
+      })
+      .from(executionPolicyCommand)
+      .where(eq(executionPolicyCommand.commandId, commandID));
     if (replay) {
       if (
         replay.scope !== scope ||
@@ -82,20 +89,34 @@ export async function retryVerificationBootstrap(
       );
     // Keep the failed outcome and its exact Runtime identity with the explicit
     // decision before releasing the Verification's pending bootstrap reference.
-    await sql`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-      VALUES(${commandID},${scope},${userID},${JSON.stringify(input)}::jsonb,
-        ${JSON.stringify({
-          verificationID,
-          runtimeAttemptID,
-          actionRunID: candidate.actionRunID,
-          state: "failed",
-          summary: candidate.summary,
-          diagnosis: diagnosis.data,
-          completedAt: candidate.completedAt,
-        })}::jsonb)`;
-    await sql`UPDATE factory.verification SET state='pending',runtime_attempt_id=NULL,
-      runner_uuid=NULL,runner_token=NULL,summary=NULL,diagnosis=NULL,completed_at=NULL,updated_at=now()
-      WHERE id=${verificationID}`;
+    await db.insert(executionPolicyCommand).values({
+      commandId: commandID,
+      scope,
+      actorId: userID,
+      input,
+      result: {
+        verificationID,
+        runtimeAttemptID,
+        actionRunID: candidate.actionRunID,
+        state: "failed",
+        summary: candidate.summary,
+        diagnosis: diagnosis.data,
+        completedAt: candidate.completedAt,
+      },
+    });
+    await db
+      .update(verification)
+      .set({
+        state: "pending",
+        runtimeAttemptId: null,
+        runnerUuid: null,
+        runnerToken: null,
+        summary: null,
+        diagnosis: null,
+        completedAt: null,
+        updatedAt: query`now()`,
+      })
+      .where(eq(verification.id, verificationID));
     return true;
   });
 }

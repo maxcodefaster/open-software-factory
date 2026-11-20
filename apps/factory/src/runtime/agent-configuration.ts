@@ -1,4 +1,6 @@
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { agentTurn, modelConnectionVersion } from "../../../../packages/db/src/schema";
 import {
   runtimeBuildBrowserToken,
   runtimeModelToken,
@@ -21,19 +23,25 @@ export async function agentConfiguration(
     throw new Error(
       "Configure FACTORY_BROWSER_TOOLS_IMAGE with the pinned Build browser image before starting implementation",
     );
-  const [admitted] = await database.client<
-    Array<{
-      modelID: string;
-      provider: "openai" | "anthropic" | "deepseek" | null;
-      reasoningEffort: "medium" | "high" | "xhigh" | "max" | null;
-    }>
-  >`
-    SELECT turn.authority->>'modelId' AS "modelID", version.provider,
-      turn.authority->>'codingReasoning' AS "reasoningEffort"
-    FROM factory.agent_turn turn LEFT JOIN factory.model_connection_version version
-      ON version.connection_id::text=turn.authority->'modelConnection'->>'connectionID'
-      AND version.version::text=turn.authority->'modelConnection'->>'version'
-    WHERE turn.change_id=${changeID} ORDER BY turn.created_at, turn.id LIMIT 1`;
+  const [admitted] = await database.db
+    .select({
+      modelID: sql<string | null>`${agentTurn.authority}->>'modelId'`,
+      provider: modelConnectionVersion.provider,
+      reasoningEffort: sql<
+        "medium" | "high" | "xhigh" | "max" | null
+      >`${agentTurn.authority}->>'codingReasoning'`,
+    })
+    .from(agentTurn)
+    .leftJoin(
+      modelConnectionVersion,
+      and(
+        sql`${modelConnectionVersion.connectionId}::text=${agentTurn.authority}->'modelConnection'->>'connectionID'`,
+        sql`${modelConnectionVersion.version}::text=${agentTurn.authority}->'modelConnection'->>'version'`,
+      ),
+    )
+    .where(eq(agentTurn.changeId, changeID))
+    .orderBy(asc(agentTurn.createdAt), asc(agentTurn.id))
+    .limit(1);
   const modelID = admitted?.modelID ?? agentModelID;
   return {
     modelBaseURL: substrateFactoryURL(`/internal/model/${attemptID}/v1`, binding),

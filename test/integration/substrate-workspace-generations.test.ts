@@ -3,7 +3,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { substrateWorkspaceGrantIn } from "../../apps/factory/src/runtime/substrate-grant";
+import {
+  substrateWorkspaceGrantIn,
+  substrateWorkspaceRevisionIn,
+} from "../../apps/factory/src/runtime/substrate-grant";
 import {
   createSubstrateWorkspaces,
   type SubstrateWorkspaceConfiguration,
@@ -267,6 +270,9 @@ async function proveGenerations(kind: "personal" | "ticket") {
       ? workspaces.start(userID, f.changeID)
       : workspaces.start(userID, undefined, f.workspaceID);
   try {
+    expect(
+      await f.database.client.begin((sql) => substrateWorkspaceRevisionIn(sql, f.workspaceID)),
+    ).toBe(base);
     const firstID = await start();
     expect(firstID).toBe(f.attemptID);
     const first = await workspaces.forAttempt(firstID);
@@ -283,6 +289,9 @@ async function proveGenerations(kind: "personal" | "ticket") {
     if (kind === "ticket") {
       await recordSubmission(submitted, 1);
       await recordSubmission("e".repeat(40), 2, "failed");
+      expect(
+        await f.database.client.begin((sql) => substrateWorkspaceRevisionIn(sql, f.workspaceID)),
+      ).toBe(submitted);
     }
     const original = await f.database
       .client`SELECT row_to_json(b) AS binding FROM factory.substrate_binding b WHERE runtime_attempt_id=${firstID}`;
@@ -405,7 +414,9 @@ async function proveGenerations(kind: "personal" | "ticket") {
     const lease = await source.lease(f.workspaceID);
     await expect(
       source.attach(f.workspaceID, crypto.randomUUID(), f.database.client),
-    ).rejects.toThrow("current original Actor binding");
+    ).rejects.toMatchObject({
+      cause: { message: expect.stringContaining("current original Actor binding") },
+    });
     expect(await source.lease(f.workspaceID)).toEqual(lease);
     await expect(
       Promise.resolve(f.database.client`

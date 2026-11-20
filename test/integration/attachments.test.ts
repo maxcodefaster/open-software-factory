@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import {
+  type AgentTurnRecord,
+  createAgentTurnStore,
+} from "../../apps/factory/src/agent/turn-store";
 import {
   type AttachmentObjects,
   attachmentDigest,
@@ -10,6 +13,7 @@ import { createAttachmentRoutes } from "../../apps/factory/src/attachments/route
 import {
   attachmentContextIn,
   createAttachmentStore,
+  freezeAttachmentContextIn,
 } from "../../apps/factory/src/attachments/store";
 import { createAttachmentTools } from "../../apps/factory/src/attachments/tools";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
@@ -517,6 +521,109 @@ test("feedback files and their human meaning reach only the selected correction 
     await f.dispose();
   }
 });
+
+test.each(["agent", "integration"] as const)(
+  "Review context keeps the exact %s producer and PostgreSQL microsecond fallback ordering",
+  async (source) => {
+    const f = await candidateReviewFixture();
+    const store = createAttachmentStore(f.database, memoryObjects().objects, async (bytes) => ({
+      text: new TextDecoder().decode(bytes),
+      previews: [],
+    }));
+    const ids = [
+      "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
+    ];
+    try {
+      if (f.initial.authority.mode !== "build") throw Error("Owned Build authority missing");
+      const files = [];
+      for (const name of ["earlier", "later", "after-commit"]) {
+        const bytes = new TextEncoder().encode(name);
+        const file = {
+          id: crypto.randomUUID(),
+          projectId: f.projectID,
+          name: `${name}.txt`,
+          mediaType: "text/plain" as const,
+          bytes: bytes.length,
+          sha256: attachmentDigest(bytes),
+        };
+        await store.begin(f.userID, file);
+        await store.upload(f.userID, file.id, bytes);
+        files.push(file);
+      }
+      const review = {
+        reviewId: f.reviewID,
+        verificationId: f.verificationID,
+        commitSha: f.commit,
+        baseSha: "a".repeat(40),
+      };
+      for (const [index, microseconds] of [101, 201, 301, 249].entries()) {
+        const id = fixtureValue(ids[index], "Owned lineage Turn");
+        const file = fixtureValue(files[index === 3 ? 2 : index], "Owned lineage attachment");
+        const authority = { ...f.initial.authority, ...(index === 3 ? { review } : {}) };
+        await f.database.client`INSERT INTO factory.agent_turn(
+          id,command_id,project_id,ticket_id,change_id,created_by,input,input_digest,authority,state,created_at)
+          VALUES(${id},${crypto.randomUUID()},${f.projectID},${f.ticketID},${f.changeID},${f.userID},
+            ${JSON.stringify({ kind: index === 3 ? "change-review" : "change-prompt" })}::jsonb,
+            ${"a".repeat(64)},${JSON.stringify(authority)}::jsonb,'stopped',
+            ${`2100-01-01T00:00:00.000${microseconds}Z`}::timestamptz)`;
+        await f.database.client`INSERT INTO factory.attachment_turn_context(turn_id,content)
+          VALUES(${id},${JSON.stringify({ sources: [{ label: `Implementation reference ${index}`, content: attachmentMarkdown(file) }] })})`;
+      }
+      const producerID =
+        source === "agent" ? fixtureValue(ids[0], "Exact producer") : crypto.randomUUID();
+      for (const [sequence, id, commit] of [
+        [2, producerID, f.commit],
+        [3, crypto.randomUUID(), "e".repeat(40)],
+      ] as const)
+        await f.database.client`INSERT INTO factory.change_commit_operation(
+          id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
+          observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at,source)
+          SELECT ${id},id,runtime_attempt_id,${sequence},branch_name,base_sha,${commit},${commit},
+            'Owned exact context',${crypto.randomUUID()},'succeeded',created_by,
+            ${sequence === 2 ? "2100-01-01T00:00:00.000250Z" : "2100-01-01T00:00:00.000350Z"}::timestamptz,${source}
+          FROM factory.change WHERE id=${f.changeID}`;
+      const record: AgentTurnRecord = {
+        ...f.initial,
+        id: crypto.randomUUID(),
+        commandId: crypto.randomUUID(),
+        command: {
+          kind: "change-review",
+          commandId: crypto.randomUUID(),
+          reviewId: f.reviewID,
+          changeId: f.changeID,
+          ticketId: f.ticketID,
+          projectId: f.projectID,
+          conversationId: null,
+          createdBy: f.userID,
+        },
+        authority: { ...f.initial.authority, review },
+      };
+      await f.database.client`INSERT INTO factory.agent_turn(
+        id,command_id,project_id,ticket_id,change_id,created_by,input,input_digest,authority)
+        VALUES(${record.id},${record.commandId},${f.projectID},${f.ticketID},${f.changeID},${f.userID},
+          ${JSON.stringify(record.command)}::jsonb,${"b".repeat(64)},${JSON.stringify(record.authority)}::jsonb)`;
+      const turnsBefore = await f.database.client`SELECT id FROM factory.agent_turn ORDER BY id`;
+      await f.database.client.begin((sql) => freezeAttachmentContextIn(sql, record));
+      const frozen = await f.database.client.begin((sql) => attachmentContextIn(sql, record.id));
+      const selected = fixtureValue(files[source === "agent" ? 0 : 1], "Selected lineage file");
+      expect(frozen).toContain(selected.id);
+      for (const file of files) if (file.id !== selected.id) expect(frozen).not.toContain(file.id);
+      expect([
+        ...(await f.database.client<{ id: string }[]>`
+        SELECT attachment_id AS id FROM factory.attachment_reference WHERE reference_id=${record.id}`),
+      ]).toEqual([{ id: selected.id }]);
+      expect(await f.database.client`SELECT id FROM factory.agent_turn ORDER BY id`).toEqual(
+        turnsBefore,
+      );
+    } finally {
+      await f.dispose();
+    }
+  },
+  30000,
+);
 
 test("cumulative storage does not block concurrent uploads and cleanup retains drafts and uncertain bytes", async () => {
   const f = await fixture();

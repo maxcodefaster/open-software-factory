@@ -131,14 +131,10 @@ function collection(
   const policyOwners: unknown[] = [];
   const availability = { saved };
   const transaction = { depth: 0 };
-  const run = async (parts: TemplateStringsArray, ...values: unknown[]) => {
+  const run = async (parts: TemplateStringsArray) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     queries.push(query);
     if (query.includes("SELECT pg_advisory_xact_lock_shared")) return [];
-    if (query.includes("SELECT scope_key FROM factory.learning_policy")) {
-      policyOwners.push(values[1]);
-      return options.disabled ? [{ scope_key: "owned-paused" }] : [];
-    }
     throw new Error(`Unexpected offline query: ${query}`);
   };
   const client = Object.assign(run, {
@@ -163,6 +159,12 @@ function collection(
                   false,
                 ],
               ];
+      } else if (from("learning_policy")) {
+        expect(transaction.depth).toBeGreaterThan(0);
+        const personal = query.includes('"owner_id" = $2');
+        expect(values).toEqual(personal ? [projectID, userID, false, 1] : [projectID, false, 1]);
+        policyOwners.push(personal ? values[1] : null);
+        rows = options.disabled ? [["owned-paused"]] : [];
       } else if (from("session_archive")) {
         expect(transaction.depth).toBeGreaterThan(0);
         expect(values).toEqual(["completed", turnID, projectID, "saved"]);

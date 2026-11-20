@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { createSubstratePrebuild } from "../../apps/factory/src/runtime/substrate-prebuild";
-import { substratePrebuildSourceIn } from "../../apps/factory/src/runtime/substrate-prebuild-grant";
+import {
+  substratePrebuildPrincipalIn,
+  substratePrebuildSourceIn,
+} from "../../apps/factory/src/runtime/substrate-prebuild-grant";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import {
   runtimeConnectorTokens,
@@ -290,6 +293,9 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
       change_id: null,
       isolated_kind: "prebuild",
     });
+    expect(
+      await f.database.client.begin((sql) => substratePrebuildPrincipalIn(sql, attemptID)),
+    ).toBe(f.userID);
     expect(await source()).toBe("https://example.invalid/fixture.git");
     await f.database
       .client`UPDATE factory.project SET repository_url='https://example.invalid/other.git' WHERE id=${f.projectID}`;
@@ -569,6 +575,9 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
         .client`SELECT * FROM factory.substrate_prebuild WHERE runtime_attempt_id=${predecessorID}`),
     ]).toEqual(predecessor);
     expect((await runtime.get(predecessorID))?.state).toBe("stopped");
+    await expect(
+      f.database.client.begin((sql) => substratePrebuildPrincipalIn(sql, predecessorID)),
+    ).rejects.toThrow("prebuild principal is unavailable");
     expect((await runtime.stop(attemptID))?.state).toBe("stopped");
   } finally {
     f.hub.revoke(attemptID);

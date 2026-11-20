@@ -1,13 +1,16 @@
 import {
   and,
   asc,
+  desc,
   eq,
   exists,
   sql as expression,
   gt,
   inArray,
   isNull,
+  like,
   lt,
+  lte,
   ne,
   not,
   or,
@@ -25,12 +28,18 @@ import {
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
+  agentTurn,
   attachment,
   attachmentDraft,
   attachmentReference,
   attachmentStorage,
   attachmentTurnContext,
+  changeCommitOperation,
+  conversationEntry,
+  requirementRevision,
   ticket,
+  ticketConversation,
+  ticketDocumentRevision,
 } from "../../../../packages/db/src/schema";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnRecord } from "../agent/turn-store";
@@ -127,22 +136,61 @@ export async function assertMessageAttachmentsIn(
 }
 
 export async function freezeAttachmentContextIn(sql: DatabaseTransaction, record: AgentTurnRecord) {
+  const db = drizzleTransaction(sql);
   const sources: { label: string; content: string }[] = [];
   const { command, authority } = record;
   const review = authority.mode === "build" ? authority.review : undefined;
   if (review && "changeId" in command) {
-    const inherited = await sql<{ content: string }[]>`WITH producer AS (
-      SELECT id,completed_at FROM factory.change_commit_operation
-      WHERE change_id=${command.changeId} AND commit_sha=${review.commitSha} AND state='succeeded'
-      ORDER BY sequence DESC LIMIT 1
-    ) SELECT context.content FROM factory.attachment_turn_context context
-      WHERE context.turn_id=COALESCE(
-        (SELECT id FROM factory.agent_turn WHERE id=(SELECT id FROM producer)
-          AND change_id=${command.changeId} AND NOT (authority ? 'review')),
-        (SELECT turn.id FROM factory.agent_turn turn,producer
-          WHERE turn.change_id=${command.changeId} AND NOT (turn.authority ? 'review')
-            AND turn.created_at<=producer.completed_at ORDER BY turn.created_at DESC,turn.id DESC LIMIT 1))
-      ORDER BY context.source`;
+    const producer = db.$with("producer").as(
+      db
+        .select({ id: changeCommitOperation.id, completedAt: changeCommitOperation.completedAt })
+        .from(changeCommitOperation)
+        .where(
+          and(
+            eq(changeCommitOperation.changeId, command.changeId),
+            eq(changeCommitOperation.commitSha, review.commitSha),
+            eq(changeCommitOperation.state, "succeeded"),
+          ),
+        )
+        .orderBy(desc(changeCommitOperation.sequence))
+        .limit(1),
+    );
+    const exactTurn = db
+      .select({ id: agentTurn.id })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.id, db.select({ id: producer.id }).from(producer)),
+          eq(agentTurn.changeId, command.changeId),
+          not(expression`${agentTurn.authority} ? 'review'`),
+        ),
+      );
+    const precedingTurn = db
+      .select({ id: agentTurn.id })
+      .from(agentTurn)
+      .crossJoin(producer)
+      .where(
+        and(
+          eq(agentTurn.changeId, command.changeId),
+          not(expression`${agentTurn.authority} ? 'review'`),
+          lte(agentTurn.createdAt, producer.completedAt),
+        ),
+      )
+      .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+      .limit(1);
+    // Keep producer selection and its fallback in one PostgreSQL snapshot.
+    // Timestamp comparison stays in SQL, including sub-millisecond lineage.
+    const inherited = await db
+      .with(producer)
+      .select({ content: attachmentTurnContext.content })
+      .from(attachmentTurnContext)
+      .where(
+        eq(
+          attachmentTurnContext.turnId,
+          expression<string>`COALESCE((${exactTurn}),(${precedingTurn}))`,
+        ),
+      )
+      .orderBy(asc(attachmentTurnContext.source));
     sources.push(
       ...inherited.map((item) => ({
         label: "Exact admitted implementation attachment context",
@@ -150,13 +198,24 @@ export async function freezeAttachmentContextIn(sql: DatabaseTransaction, record
       })),
     );
   } else if ("changeId" in command) {
-    const inherited = await sql<{ source: string; content: string }[]>`
-      SELECT source,content FROM factory.attachment_turn_context WHERE turn_id=(
-        SELECT id FROM factory.agent_turn WHERE change_id=${command.changeId}
-          AND id<>${record.id} AND NOT (authority ? 'review')
-          AND input->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}
-          ORDER BY created_at DESC,id DESC LIMIT 1)
-      ORDER BY source`;
+    const previousTurn = db
+      .select({ id: agentTurn.id })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.changeId, command.changeId),
+          ne(agentTurn.id, record.id),
+          not(expression`${agentTurn.authority} ? 'review'`),
+          expression`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}`,
+        ),
+      )
+      .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+      .limit(1);
+    const inherited = await db
+      .select({ source: attachmentTurnContext.source, content: attachmentTurnContext.content })
+      .from(attachmentTurnContext)
+      .where(eq(attachmentTurnContext.turnId, previousTurn))
+      .orderBy(asc(attachmentTurnContext.source));
     for (const item of inherited) {
       if (item.source === "admission") {
         const frozen = JSON.parse(item.content) as { sources: typeof sources };
@@ -177,23 +236,43 @@ export async function freezeAttachmentContextIn(sql: DatabaseTransaction, record
         : "";
   if (currentText) sources.push({ label: "Current human request", content: currentText });
   if (command.ticketId && !review) {
-    const [ticket] = await sql<{ description: string; canonical: string }[]>`
-      SELECT description,COALESCE(
-        (SELECT canonical_content FROM factory.requirement_revision WHERE id=${"requirementRevisionId" in authority ? authority.requirementRevisionId : null}),
-        (SELECT canonical_content FROM factory.ticket_document_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1),'') AS canonical
-      FROM factory.ticket WHERE id=${command.ticketId} AND project_id=${command.projectId}`;
-    if (ticket)
+    const requirementID =
+      "requirementRevisionId" in authority ? authority.requirementRevisionId : null;
+    const pinnedRequirement = db
+      .select({ content: requirementRevision.canonicalContent })
+      .from(requirementRevision)
+      .where(requirementID ? eq(requirementRevision.id, requirementID) : expression`false`);
+    const latestDocument = db
+      .select({ content: ticketDocumentRevision.canonicalContent })
+      .from(ticketDocumentRevision)
+      .where(eq(ticketDocumentRevision.ticketId, ticket.id))
+      .orderBy(desc(ticketDocumentRevision.ordinal))
+      .limit(1);
+    const [selectedTicket] = await db
+      .select({
+        description: ticket.description,
+        canonical: expression<string>`COALESCE((${pinnedRequirement}),(${latestDocument}),'')`,
+      })
+      .from(ticket)
+      .where(and(eq(ticket.id, command.ticketId), eq(ticket.projectId, command.projectId)));
+    if (selectedTicket)
       sources.push({
         label: "Selected Ticket",
-        content: `${ticket.description}\n${ticket.canonical}`,
+        content: `${selectedTicket.description}\n${selectedTicket.canonical}`,
       });
-    const messages = await sql<
-      { body: string }[]
-    >`SELECT entry.body FROM factory.conversation_entry entry
-      JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-      WHERE conversation.ticket_id=${command.ticketId} AND entry.actor='user'
-        AND entry.payload->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}
-        AND entry.body LIKE '%/api/attachments/%' ORDER BY entry.ordinal,entry.id`;
+    const messages = await db
+      .select({ body: conversationEntry.body })
+      .from(conversationEntry)
+      .innerJoin(ticketConversation, eq(ticketConversation.id, conversationEntry.conversationId))
+      .where(
+        and(
+          eq(ticketConversation.ticketId, command.ticketId),
+          eq(conversationEntry.actor, "user"),
+          expression`${conversationEntry.payload}->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}`,
+          like(conversationEntry.body, "%/api/attachments/%"),
+        ),
+      )
+      .orderBy(asc(conversationEntry.ordinal), asc(conversationEntry.id));
     sources.push(
       ...messages.map((message) => ({
         label: "Human Ticket chat, preserve its meaning",
@@ -201,9 +280,18 @@ export async function freezeAttachmentContextIn(sql: DatabaseTransaction, record
       })),
     );
   } else if (!review && "conversationId" in command && command.conversationId) {
-    const messages = await sql<{ body: string }[]>`SELECT body FROM factory.conversation_entry
-      WHERE conversation_id=${command.conversationId} AND actor='user' AND body LIKE '%/api/attachments/%'
-        AND payload->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null} ORDER BY ordinal,id`;
+    const messages = await db
+      .select({ body: conversationEntry.body })
+      .from(conversationEntry)
+      .where(
+        and(
+          eq(conversationEntry.conversationId, command.conversationId),
+          eq(conversationEntry.actor, "user"),
+          like(conversationEntry.body, "%/api/attachments/%"),
+          expression`${conversationEntry.payload}->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}`,
+        ),
+      )
+      .orderBy(asc(conversationEntry.ordinal), asc(conversationEntry.id));
     sources.push(
       ...messages.map((message) => ({
         label: "Human conversation context",
@@ -222,7 +310,6 @@ export async function freezeAttachmentContextIn(sql: DatabaseTransaction, record
   const ids = [...new Set([...selected.values()].flatMap((source) => source.ids))];
   if (!ids.length) return;
   const files = [];
-  const db = drizzleTransaction(sql);
   const sharedInput =
     Boolean(command.ticketId) &&
     ["change-prompt", "project-message", "project-answer"].includes(command.kind);

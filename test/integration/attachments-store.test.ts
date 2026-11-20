@@ -20,7 +20,10 @@ import { memoryPrivateObjects } from "../fixtures/private-objects";
 
 let server: Awaited<ReturnType<typeof ownedPostgresServer>>;
 beforeAll(async () => {
-  server = await ownedPostgresServer();
+  const inherited = process.env["FACTORY_TEST_POSTGRES"];
+  server = inherited
+    ? { identity: JSON.parse(inherited), dispose: async () => {} }
+    : await ownedPostgresServer();
 }, 60_000);
 afterAll(async () => {
   await server?.dispose();
@@ -410,7 +413,9 @@ test("attachment context pins authored sources to the exact turn and feedback so
   const sql = f.database.client;
   try {
     const first = await f.upload("First reference"),
-      later = await f.upload("Later reference");
+      later = await f.upload("Later reference"),
+      isolated = await f.upload("Another private context"),
+      assistant = await f.upload("Assistant reference");
     const conversationID = crypto.randomUUID(),
       contextID = crypto.randomUUID();
     await sql`INSERT INTO factory.ticket_conversation(id,project_id,created_by) VALUES(${conversationID},${f.projectID},${f.userID})`;
@@ -457,11 +462,40 @@ test("attachment context pins authored sources to the exact turn and feedback so
     const before = await sql.begin((transaction) => attachmentContextIn(transaction, record.id));
     await sql`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,created_by)
       VALUES(${crypto.randomUUID()},${conversationID},1,'user-message','user','investigate',${attachmentMarkdown(later.file)},${JSON.stringify({ contextId: contextID })}::jsonb,${f.userID})`;
+    for (const [ordinal, actor, file, context] of [
+      [2, "user", isolated.file, crypto.randomUUID()],
+      [3, "project-agent", assistant.file, contextID],
+      [4, "user", isolated.file, null],
+    ] as const)
+      await sql`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,created_by)
+        VALUES(${crypto.randomUUID()},${conversationID},${ordinal},'user-message',${actor},'investigate',
+          ${attachmentMarkdown(file)},${JSON.stringify({ contextId: context })}::jsonb,${f.userID})`;
     expect(await sql.begin((transaction) => attachmentContextIn(transaction, record.id))).toBe(
       before,
     );
     expect(before).toContain(first.file.id);
     expect(before).not.toContain(later.file.id);
+    if (record.command.kind !== "project-message")
+      throw Error("Owned conversation request missing");
+    const next: AgentTurnRecord = {
+      ...record,
+      id: crypto.randomUUID(),
+      commandId: crypto.randomUUID(),
+      command: { ...record.command, text: "Read the selected private context." },
+    };
+    await sql`UPDATE factory.agent_turn SET state='stopped' WHERE id=${record.id}`;
+    await sql`INSERT INTO factory.agent_turn(id,command_id,project_id,conversation_id,created_by,input,input_digest,authority)
+      VALUES(${next.id},${next.commandId},${f.projectID},${conversationID},${f.userID},${JSON.stringify(next.command)}::jsonb,${"b".repeat(64)},${JSON.stringify(next.authority)}::jsonb)`;
+    await sql.begin((transaction) => freezeAttachmentContextIn(transaction, next));
+    const selected = await sql.begin((transaction) => attachmentContextIn(transaction, next.id));
+    expect(selected).toContain(later.file.id);
+    expect(selected).not.toContain(first.file.id);
+    expect(selected).not.toContain(isolated.file.id);
+    expect(selected).not.toContain(assistant.file.id);
+    expect(await sql`SELECT id FROM factory.agent_turn`).toHaveLength(2);
+    expect(
+      await sql`SELECT attachment_id FROM factory.attachment_reference WHERE reference_id=${next.id} AND shared`,
+    ).toHaveLength(0);
     await expect(f.store.metadata(f.otherID, first.file.id)).rejects.toMatchObject({ status: 404 });
     await expect(f.store.metadata(f.otherID, later.file.id)).rejects.toMatchObject({ status: 404 });
     await sql.begin(async (transaction) => {
@@ -510,6 +544,17 @@ test("Build context reads the approved requirement revision rather than the late
     const latest = attachmentMarkdown(newer.file);
     await sql`INSERT INTO factory.ticket_document_revision(id,ticket_id,ordinal,title,description,canonical_content,content_digest,input_digest,created_by)
       VALUES(${crypto.randomUUID()},${f.ticketID},1,'Unapproved edit','',${latest},${attachmentDigest(new TextEncoder().encode(latest))},${"b".repeat(64)},${f.userID})`;
+    const conversationID = crypto.randomUUID();
+    await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,created_by)
+      VALUES(${conversationID},${f.projectID},${f.ticketID},${f.userID})`;
+    for (const [ordinal, actor, file, payload] of [
+      [1, "user", approved.file, {}],
+      [2, "user", newer.file, { contextId: crypto.randomUUID() }],
+      [3, "project-agent", newer.file, {}],
+    ] as const)
+      await sql`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,created_by)
+        VALUES(${crypto.randomUUID()},${conversationID},${ordinal},'user-message',${actor},'build',
+          ${attachmentMarkdown(file)},${JSON.stringify(payload)}::jsonb,${f.userID})`;
     const record: AgentTurnRecord = {
       id: crypto.randomUUID(),
       commandId: crypto.randomUUID(),
@@ -525,7 +570,7 @@ test("Build context reads the approved requirement revision rather than the late
         ticketId: f.ticketID,
         conversationId: null,
         changeId: changeID,
-        text: attachmentMarkdown(approved.file),
+        text: "Inspect the pinned requirement and the selected human Ticket chat.",
       },
       authority: {
         mode: "build",
@@ -541,6 +586,7 @@ test("Build context reads the approved requirement revision rather than the late
     await sql.begin((transaction) => freezeAttachmentContextIn(transaction, record));
     const frozen = await sql.begin((transaction) => attachmentContextIn(transaction, record.id));
     expect(frozen).toContain(approved.file.id);
+    expect(frozen).toContain("Human Ticket chat, preserve its meaning");
     expect(frozen).not.toContain(newer.file.id);
     // Stop the undispatched fixture turn through its native transition guard.
     await sql`UPDATE factory.agent_turn SET state='stopped' WHERE id=${record.id}`;

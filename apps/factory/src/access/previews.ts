@@ -1,5 +1,19 @@
+import { and, desc, eq, exists, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  authUser,
+  change,
+  developmentWorkspace,
+  project,
+  projectMembership,
+  projectSetupReadiness,
+  runtimeAttempt,
+  stagingPreview,
+  ticket,
+  workspaceShare,
+} from "../../../../packages/db/src/schema";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { parseSystemContract } from "../../../../packages/system-contract/src/system-contract";
 import { factoryForgeSource } from "../knowledge/forge-source";
@@ -58,51 +72,113 @@ export function createProjectAppPreviews(
   }
   return async (projectID: string, userID: string) => {
     await access.requireProject(userID, projectID);
-    const [staging] = await database.client<
-      {
-        repositoryURL: string;
-        defaultBranch: string;
-        revision: string | null;
-        attemptID: string | null;
-        state: string | null;
-      }[]
-    >`
-      SELECT project.repository_url AS "repositoryURL",project.default_branch AS "defaultBranch",
-        preview.revision,attempt.id AS "attemptID",attempt.state
-      FROM factory.project project
-      LEFT JOIN factory.staging_preview preview ON preview.project_id=project.id
-      LEFT JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id
-      WHERE project.id=${projectID} AND (preview.runtime_attempt_id IS NOT NULL OR EXISTS(
-        SELECT 1 FROM factory.project_setup_readiness readiness
-        WHERE readiness.project_id=project.id AND readiness.task='configuration' AND readiness.state='ready'
-      ))`;
-    const attempts = await database.client<
-      {
-        id: string;
-        owner: string | null;
-        title: string | null;
-        apps: unknown;
-        state: string;
-        revision: string;
-        repositoryURL: string;
-      }[]
-    >`
-      SELECT attempt.id,person.name AS owner,ticket.title,attempt.declared_apps AS apps,
-        attempt.state,attempt.revision,project.repository_url AS "repositoryURL"
-      FROM factory.runtime_attempt attempt
-      JOIN factory.project project ON project.id=attempt.project_id
-      JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
-      LEFT JOIN auth."user" person ON person.id=workspace.owner_user_id
-      LEFT JOIN factory.change change ON change.id=workspace.change_id
-      LEFT JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-      WHERE attempt.project_id=${projectID} AND attempt.state IN ('create-intended','ready','pausing','paused','resuming','starting')
-        AND (workspace.kind='personal' OR change.runtime_attempt_id=attempt.id AND ticket.trashed_at IS NULL)
-        AND (workspace.kind<>'personal' OR (
-          (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID}) OR EXISTS(
-            SELECT 1 FROM factory.project_membership WHERE project_id=${projectID} AND user_id=${userID} AND role='developer'))
-          AND (workspace.owner_user_id=${userID} OR EXISTS(SELECT 1 FROM factory.workspace_share
-            WHERE workspace_id=workspace.id AND user_id=${userID} AND revoked_at IS NULL))))
-      ORDER BY attempt.created_at DESC LIMIT 100`;
+    const db = drizzleTransaction(database.client);
+    const [staging] = await db
+      .select({
+        repositoryURL: project.repositoryUrl,
+        defaultBranch: project.defaultBranch,
+        revision: stagingPreview.revision,
+        attemptID: runtimeAttempt.id,
+        state: runtimeAttempt.state,
+      })
+      .from(project)
+      .leftJoin(stagingPreview, eq(stagingPreview.projectId, project.id))
+      .leftJoin(runtimeAttempt, eq(runtimeAttempt.id, stagingPreview.runtimeAttemptId))
+      .where(
+        and(
+          eq(project.id, projectID),
+          or(
+            isNotNull(stagingPreview.runtimeAttemptId),
+            exists(
+              db
+                .select({ projectID: projectSetupReadiness.projectId })
+                .from(projectSetupReadiness)
+                .where(
+                  and(
+                    eq(projectSetupReadiness.projectId, project.id),
+                    eq(projectSetupReadiness.task, "configuration"),
+                    eq(projectSetupReadiness.state, "ready"),
+                  ),
+                ),
+            ),
+          ),
+        ),
+      );
+    const attempts = await db
+      .select({
+        id: runtimeAttempt.id,
+        owner: authUser.name,
+        title: ticket.title,
+        apps: runtimeAttempt.declaredApps,
+        state: runtimeAttempt.state,
+        revision: runtimeAttempt.revision,
+        repositoryURL: project.repositoryUrl,
+      })
+      .from(runtimeAttempt)
+      .innerJoin(project, eq(project.id, runtimeAttempt.projectId))
+      .innerJoin(developmentWorkspace, eq(developmentWorkspace.id, runtimeAttempt.workspaceId))
+      .leftJoin(authUser, eq(authUser.id, developmentWorkspace.ownerUserId))
+      .leftJoin(change, eq(change.id, developmentWorkspace.changeId))
+      .leftJoin(ticket, eq(ticket.id, change.ticketId))
+      .where(
+        and(
+          eq(runtimeAttempt.projectId, projectID),
+          inArray(runtimeAttempt.state, [
+            "create-intended",
+            "ready",
+            "pausing",
+            "paused",
+            "resuming",
+            "starting",
+          ]),
+          or(
+            eq(developmentWorkspace.kind, "personal"),
+            and(eq(change.runtimeAttemptId, runtimeAttempt.id), isNull(ticket.trashedAt)),
+          ),
+          or(
+            ne(developmentWorkspace.kind, "personal"),
+            and(
+              or(
+                exists(
+                  db
+                    .select({ userID: administrator.userId })
+                    .from(administrator)
+                    .where(eq(administrator.userId, userID)),
+                ),
+                exists(
+                  db
+                    .select({ userID: projectMembership.userId })
+                    .from(projectMembership)
+                    .where(
+                      and(
+                        eq(projectMembership.projectId, projectID),
+                        eq(projectMembership.userId, userID),
+                        eq(projectMembership.role, "developer"),
+                      ),
+                    ),
+                ),
+              ),
+              or(
+                eq(developmentWorkspace.ownerUserId, userID),
+                exists(
+                  db
+                    .select({ userID: workspaceShare.userId })
+                    .from(workspaceShare)
+                    .where(
+                      and(
+                        eq(workspaceShare.workspaceId, developmentWorkspace.id),
+                        eq(workspaceShare.userId, userID),
+                        isNull(workspaceShare.revokedAt),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      )
+      .orderBy(desc(runtimeAttempt.createdAt))
+      .limit(100);
     const development: {
       attemptID: string;
       projectID: string;

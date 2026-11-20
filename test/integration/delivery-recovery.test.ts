@@ -2,12 +2,31 @@ import { expect, test } from "bun:test";
 import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
+import { retryPromotion } from "../../apps/factory/src/delivery/promotion-retry";
 import { retryVerificationBootstrap } from "../../apps/factory/src/delivery/verification-retry";
+import type { createDatabase, DatabaseTransaction } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
+
+function rollbackRetryDatabase(database: ReturnType<typeof createDatabase>) {
+  return {
+    ...database,
+    client: new Proxy(database.client, {
+      get(target, property, receiver) {
+        if (property === "begin")
+          return (callback: (sql: DatabaseTransaction) => Promise<unknown>) =>
+            target.begin(async (sql) => {
+              await callback(sql);
+              throw new Error("Owned retry transaction rollback");
+            });
+        return Reflect.get(target, property, receiver);
+      },
+    }),
+  };
+}
 
 async function deliveryFixture() {
   const process = await factoryProcess();
@@ -236,14 +255,95 @@ test("failed Verification compute is visible while human editing fences reconcil
         summary: "no space left on device",
         jobs: [],
       })}::jsonb WHERE id=${verificationID}`;
+    const commandID = crypto.randomUUID();
+    const [beforeRetry] = await f.database
+      .client`SELECT * FROM factory.verification WHERE id=${verificationID}`;
+    if (!beforeRetry) throw new Error("Missing exact failed Verification");
+    await expect(
+      retryVerificationBootstrap(
+        rollbackRetryDatabase(f.database),
+        f.owned.changeID,
+        f.owned.userID,
+        commandID,
+        verificationID,
+        attemptID,
+      ),
+    ).rejects.toThrow("Owned retry transaction rollback");
+    expect(
+      (await f.database.client`SELECT * FROM factory.verification WHERE id=${verificationID}`)[0],
+    ).toEqual(beforeRetry);
+    expect(
+      await f.database
+        .client`SELECT command_id FROM factory.execution_policy_command WHERE command_id=${commandID}`,
+    ).toHaveLength(0);
     await retryVerificationBootstrap(
       f.database,
       f.owned.changeID,
       f.owned.userID,
-      crypto.randomUUID(),
+      commandID,
       verificationID,
       attemptID,
     );
+    const [reset] = await f.database
+      .client`SELECT * FROM factory.verification WHERE id=${verificationID}`;
+    expect(reset).toMatchObject({
+      state: "pending",
+      runtime_attempt_id: null,
+      runner_uuid: null,
+      runner_token: null,
+      summary: null,
+      diagnosis: null,
+      completed_at: null,
+    });
+    for (const field of [
+      "id",
+      "change_id",
+      "commit_sha",
+      "action_run_id",
+      "action_run_url",
+      "workflow_id",
+      "pull_request_number",
+      "runner_name",
+      "runner_id",
+      "runner_job_handle",
+      "repair_prompted_at",
+      "created_by",
+      "created_at",
+    ])
+      expect(reset?.[field]).toEqual(beforeRetry[field]);
+    const [receipt] = await f.database
+      .client`SELECT actor_id,input,result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
+    expect(receipt).toMatchObject({
+      actor_id: f.owned.userID,
+      input: { changeID: f.owned.changeID, verificationID, runtimeAttemptID: attemptID },
+      result: {
+        verificationID,
+        runtimeAttemptID: attemptID,
+        actionRunID: "1",
+        state: "failed",
+        diagnosis: beforeRetry["diagnosis"],
+      },
+    });
+    expect(
+      await retryVerificationBootstrap(
+        f.database,
+        f.owned.changeID,
+        f.owned.userID,
+        commandID,
+        verificationID,
+        attemptID,
+      ),
+    ).toBe(false);
+    await expect(
+      retryVerificationBootstrap(
+        f.database,
+        f.owned.changeID,
+        f.owned.userID,
+        commandID,
+        verificationID,
+        crypto.randomUUID(),
+      ),
+    ).rejects.toThrow("Checks retry changed target");
     await f.database.client`UPDATE factory.verification SET runner_uuid=${crypto.randomUUID()},
       runner_token='owned-retry-token' WHERE id=${verificationID}`;
     const replacementID = await f.native.startVerification(verificationID, f.owned.userID);
@@ -810,6 +910,13 @@ test("failed Promotion retry preserves its original attempt and admits one new e
             commit_sha: f.sha,
             previous_runtime_attempt_id: previous,
           });
+          const [receipt] = await f.database
+            .client`SELECT actor_id,input,result FROM factory.execution_policy_command WHERE command_id=${id}`;
+          expect(receipt).toMatchObject({
+            actor_id: f.owned.userID,
+            input: { changeID: f.owned.changeID, promotionID: promotion },
+            result: { promotionID: id },
+          });
           starts.push(id);
           expect(await f.native.startStaging(userID, id)).toBe(replacement);
           return null;
@@ -856,6 +963,27 @@ test("failed Promotion retry preserves its original attempt and admits one new e
     ).rejects.toThrow("default branch");
     expect(starts).toEqual([]);
     f.setBase(f.sha);
+    await expect(
+      retryPromotion(
+        rollbackRetryDatabase(f.database),
+        f.owned.changeID,
+        f.owned.userID,
+        command,
+        promotion,
+        async () => f.sha,
+      ),
+    ).rejects.toThrow("Owned retry transaction rollback");
+    expect(
+      await f.database
+        .client`SELECT command_id FROM factory.execution_policy_command WHERE command_id=${command}`,
+    ).toHaveLength(0);
+    expect(
+      await f.database.client`SELECT id FROM factory.promotion_operation WHERE id=${command}`,
+    ).toHaveLength(0);
+    expect(
+      (await f.database.client`SELECT * FROM factory.promotion_operation WHERE id=${promotion}`)[0],
+    ).toEqual(original);
+    expect(starts).toEqual([]);
     await Promise.all([
       controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
       controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),

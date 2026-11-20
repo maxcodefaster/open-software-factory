@@ -1,4 +1,6 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, asc, eq, sql as expression, lt, notInArray } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { accessRevocation, accountAccess } from "../../../../packages/db/src/schema";
 import { reportFailure } from "../failure-log";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -25,20 +27,41 @@ export function createAccessRevocation(
       const attempted: string[] = [];
       do {
         wakeAgain = false;
-        const rows = await database.client<Revocation[]>`
-          SELECT intent.user_id AS "userID",intent.version::text AS version,
-            (access.disabled_at IS NOT NULL OR access.directory_disabled_at IS NOT NULL) AS disabled
-          FROM factory.access_revocation intent JOIN factory.account_access access ON access.user_id=intent.user_id
-          WHERE processed_version<version AND NOT intent.user_id=ANY(${attempted}::uuid[])
-          ORDER BY intent.updated_at,intent.user_id LIMIT 64`;
+        const db = drizzleTransaction(database.client);
+        const rows: Revocation[] = await db
+          .select({
+            userID: accessRevocation.userId,
+            // Keep the native bigint exact across the external acknowledgement boundary.
+            version: expression<string>`${accessRevocation.version}::text`,
+            disabled: expression<boolean>`${accountAccess.disabledAt} IS NOT NULL OR ${accountAccess.directoryDisabledAt} IS NOT NULL`,
+          })
+          .from(accessRevocation)
+          .innerJoin(accountAccess, eq(accountAccess.userId, accessRevocation.userId))
+          .where(
+            and(
+              lt(accessRevocation.processedVersion, accessRevocation.version),
+              attempted.length ? notInArray(accessRevocation.userId, attempted) : undefined,
+            ),
+          )
+          .orderBy(asc(accessRevocation.updatedAt), asc(accessRevocation.userId))
+          .limit(64);
         for (const row of rows) {
           if (closed) return;
           attempted.push(row.userID);
           try {
             await revoke(row.userID, row.disabled);
             // Recheck the version after external work. A newer revocation stays pending.
-            await database.client`UPDATE factory.access_revocation SET processed_version=${row.version}
-              WHERE user_id=${row.userID} AND version=${row.version} AND processed_version<${row.version}`;
+            const version = expression`${row.version}::bigint`;
+            await db
+              .update(accessRevocation)
+              .set({ processedVersion: version })
+              .where(
+                and(
+                  eq(accessRevocation.userId, row.userID),
+                  eq(accessRevocation.version, version),
+                  lt(accessRevocation.processedVersion, version),
+                ),
+              );
           } catch (cause) {
             failures.push(cause);
           }

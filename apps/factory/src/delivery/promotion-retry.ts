@@ -1,4 +1,6 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { eq, sql as query } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { executionPolicyCommand, promotionOperation } from "../../../../packages/db/src/schema";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 
@@ -13,6 +15,7 @@ export async function retryPromotion(
   defaultHead: (repositoryURL: string) => Promise<string>,
 ) {
   return database.client.begin(async (sql) => {
+    const db = drizzleTransaction(sql);
     const [change] = await sql<
       { projectID: string; state: string; repositoryURL: string }[]
     >`SELECT change.project_id AS "projectID",change.state,project.repository_url AS "repositoryURL"
@@ -23,10 +26,14 @@ export async function retryPromotion(
     await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
     const scope = `promotion-retry:${changeID}`;
     const input = { changeID, promotionID };
-    const [replay] = await sql<
-      { scope: string; actor: string; input: typeof input }[]
-    >`SELECT scope,actor_id AS actor,input FROM factory.execution_policy_command
-      WHERE command_id=${commandID}`;
+    const [replay] = await db
+      .select({
+        scope: executionPolicyCommand.scope,
+        actor: executionPolicyCommand.actorId,
+        input: query<typeof input>`${executionPolicyCommand.input}`,
+      })
+      .from(executionPolicyCommand)
+      .where(eq(executionPolicyCommand.commandId, commandID));
     if (replay) {
       if (
         replay.scope !== scope ||
@@ -88,13 +95,23 @@ export async function retryPromotion(
       );
     if ((await defaultHead(change.repositoryURL)) !== previous.commitSHA)
       throw new CommandError("conflict", "The default branch changed after this merge.");
-    await sql`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-      VALUES(${commandID},${scope},${userID},${JSON.stringify(input)}::jsonb,
-        ${JSON.stringify({ promotionID: commandID })}::jsonb)`;
-    await sql`INSERT INTO factory.promotion_operation(
-      id,change_id,project_id,commit_sha,previous_runtime_attempt_id,ordinal,supersedes_id,retry_command_id)
-      VALUES(${commandID},${changeID},${change.projectID},${previous.commitSHA},
-        ${previous.previousAttemptID},${previous.ordinal + 1},${previous.id},${commandID})`;
+    await db.insert(executionPolicyCommand).values({
+      commandId: commandID,
+      scope,
+      actorId: userID,
+      input,
+      result: { promotionID: commandID },
+    });
+    await db.insert(promotionOperation).values({
+      id: commandID,
+      changeId: changeID,
+      projectId: change.projectID,
+      commitSha: previous.commitSHA,
+      previousRuntimeAttemptId: previous.previousAttemptID,
+      ordinal: previous.ordinal + 1,
+      supersedesId: previous.id,
+      retryCommandId: commandID,
+    });
     return true;
   });
 }

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
+import { createMCPSourceEndpoint, mcpSourceAlias } from "../../apps/factory/src/mcp/sources";
+import { mcpDigest } from "../../apps/factory/src/mcp/controller";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { seedMonitoringDelegation } from "../fixtures/monitoring";
 import { fixtureValue } from "../fixtures/value";
@@ -149,6 +151,62 @@ test.each([true, false])(
       const owner = await turns.claimPending(first.turn.id);
       if (!owner?.ownerToken) throw new Error("Owned first turn lease missing");
       await turns.beginDispatch(first.turn.id, owner.ownerToken);
+      if (initiallyEnabled) {
+        const token = owner.ownerToken;
+        const facade = createMCPSourceEndpoint(f.database, connections, {
+          authorizeRuntime: async (attemptID, turnID, authorization) =>
+            attemptID === f.attemptID &&
+            turnID === owner.id &&
+            authorization === "Bearer owned-source-capability" &&
+            (await turns.validateExecution(owner.id, token))
+              ? {
+                  ownerToken: token,
+                  session: {
+                    id: crypto.randomUUID(),
+                    ordinal: 1,
+                    turnID: owner.id,
+                    changeID: f.changeID,
+                    attemptID: f.attemptID,
+                    generation: 1,
+                    agentSessionID: f.sessionID,
+                    ownerID: f.userID,
+                    state: "intended",
+                  },
+                }
+              : null,
+        });
+        const response = await facade(
+          new Request("https://factory.example/internal/source-proof", {
+            method: "POST",
+            headers: {
+              authorization: "Bearer owned-source-capability",
+              "content-type": "application/json",
+              accept: "application/json, text/event-stream",
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "tools/call",
+              params: { name: mcpSourceAlias(id, "read"), arguments: {} },
+            }),
+          }),
+          f.attemptID,
+          owner.id,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain("Owned read");
+        const observations = await f.database.client`
+          SELECT * FROM factory.mcp_observation WHERE turn_id=${owner.id}`;
+        expect(observations).toHaveLength(1);
+        expect(observations[0]).toMatchObject({
+          connection_id: id,
+          tool_name: "read",
+          tool_digest: original[0]?.tools[0]?.digest,
+          result_digest: mcpDigest("Owned read"),
+          is_error: false,
+        });
+        expect(JSON.stringify(observations)).not.toContain("Owned read");
+      }
       await turns.settle(
         first.turn.id,
         owner.ownerToken,

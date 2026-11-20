@@ -1,16 +1,188 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { sql as expression } from "drizzle-orm";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { readTurnObservation } from "../../apps/factory/src/agent/turn-observation";
+import { createModelConnections } from "../../apps/factory/src/models/connections";
+import type { StoredModelConnection } from "../../apps/factory/src/models/secrets";
 import { createDatabase, type DatabaseTransaction } from "../../packages/db/src/client";
+import { agentTurn, agentTurnSkill, skillRevision } from "../../packages/db/src/schema";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
+
+test("retained turn projections keep exact context, pinned provider and Skill order without private inputs or inference", async () => {
+  const owned = await fixture();
+  const conversationID = crypto.randomUUID(),
+    contextID = crypto.randomUUID();
+  const connectionID = crypto.randomUUID();
+  const otherConnectionID = crypto.randomUUID();
+  const skills = [crypto.randomUUID(), crypto.randomUUID()] as const;
+  const originalID = crypto.randomUUID(),
+    currentID = crypto.randomUUID(),
+    researchID = crypto.randomUUID();
+  const ownerToken = crypto.randomUUID();
+  const authority = {
+    mode: "build" as const,
+    modelId: buildModelID,
+    requirementRevisionId: owned.revisionID,
+    codingReasoning: "medium" as const,
+    modelConnection: { connectionID, version: 1 },
+    skillRevisionIds: [...skills].reverse(),
+    requiredSkillRevisionIds: [],
+  };
+  try {
+    await owned.database.client`INSERT INTO factory.ticket_conversation
+      (id,project_id,ticket_id,mode,created_by)
+      VALUES(${conversationID},${owned.projectID},${owned.ticketID},'build',${owned.userID})`;
+    const [manager] = await owned.database.client<{ id: string }[]>`
+      SELECT user_id AS id FROM factory.administrator LIMIT 1`;
+    if (!manager) throw new Error("Owned model manager missing");
+    const secrets = new Map<string, StoredModelConnection>();
+    const models = createModelConnections(
+      owned.database,
+      {
+        configured: true,
+        read: async (key) => secrets.get(key),
+        create: async (key, value) => {
+          secrets.set(key, value);
+        },
+      },
+      "owned-projection-signing-key",
+      [],
+      async () => {
+        throw new Error("Projection setup must not start inference");
+      },
+    );
+    for (const [id, provider] of [
+      [connectionID, "openai"],
+      [otherConnectionID, "anthropic"],
+    ] as const)
+      await models.save(manager.id, {
+        commandID: crypto.randomUUID(),
+        connectionID: id,
+        version: 0,
+        provider,
+        endpoint: null,
+        apiKey: `private-model-${provider}`,
+      });
+    await owned.database.db.insert(skillRevision).values(
+      skills.map((id, index) => ({
+        id,
+        skillKey: `owned-projection-${index}`,
+        revision: index + 1,
+        content: { name: `Public Skill ${index}`, instructions: "private-skill-body" },
+        contentDigest: "a".repeat(64),
+        createdBy: owned.userID,
+      })),
+    );
+    await owned.database.db.insert(agentTurn).values(
+      [
+        {
+          id: originalID,
+          contextId: undefined,
+          changeId: owned.changeID,
+          kind: "change-prompt",
+          authority,
+        },
+        {
+          id: currentID,
+          contextId: contextID,
+          changeId: owned.changeID,
+          kind: "change-prompt",
+          authority: {
+            ...authority,
+            modelConnection: { connectionID: otherConnectionID, version: 1 },
+            skillRevisionIds: [],
+          },
+        },
+        {
+          id: researchID,
+          contextId: undefined,
+          changeId: null,
+          kind: "project-message",
+          authority: { mode: "investigate", modelId: "owned-research", conversationVersion: 1 },
+        },
+      ].map(({ id, contextId, changeId, kind, authority }) => {
+        const commandId = crypto.randomUUID();
+        return {
+          id,
+          commandId,
+          projectId: owned.projectID,
+          ticketId: owned.ticketID,
+          conversationId: conversationID,
+          changeId,
+          createdBy: owned.userID,
+          state: id === originalID ? ("running" as const) : ("completed" as const),
+          ownerToken: id === originalID ? ownerToken : null,
+          ownerExpiresAt:
+            id === originalID ? expression`clock_timestamp()+interval '1 minute'` : null,
+          input: {
+            kind,
+            commandId,
+            text: "private-command-body",
+            ...(contextId ? { contextId } : {}),
+          },
+          inputDigest: "b".repeat(64),
+          authority,
+          outcomeSummary: "Public retained summary",
+        };
+      }),
+    );
+    await owned.database.db
+      .insert(agentTurnSkill)
+      .values({ turnId: originalID, revisionId: skills[0] });
+    // Seed recorded history through the existing live-load and settlement guards.
+    // This checks its read projection, not actual native Skill execution.
+    expect(
+      await createAgentTurnStore(owned.database).settle(
+        originalID,
+        ownerToken,
+        "completed",
+        "Public retained summary",
+      ),
+    ).toBe(true);
+    const original = await readTurnObservation(owned.database, { changeID: owned.changeID });
+    expect(original).toMatchObject({ id: originalID, codingReasoning: "medium" });
+    expect(original?.skills.map(({ id, loaded }) => ({ id, loaded }))).toEqual([
+      { id: skills[1], loaded: false },
+      { id: skills[0], loaded: true },
+    ]);
+    await owned.database.client`INSERT INTO factory.conversation_context
+      (id,conversation_id,command_id,kind,mode,ordinal,title,created_by,change_id)
+      VALUES(${contextID},${conversationID},${crypto.randomUUID()},'coding','build',1,'Current',${owned.userID},${owned.changeID})`;
+    await owned.database
+      .client`UPDATE factory.ticket_conversation SET active_coding_context_id=${contextID}
+      WHERE id=${conversationID}`;
+    const current = await readTurnObservation(owned.database, { changeID: owned.changeID });
+    expect(current).toMatchObject({ id: currentID, skills: [] });
+    expect(current).not.toHaveProperty("codingReasoning");
+    expect(
+      (await readTurnObservation(owned.database, { changeID: owned.changeID, turnID: originalID }))
+        ?.id,
+    ).toBe(originalID);
+    expect((await readTurnObservation(owned.database, { conversationID }))?.id).toBe(researchID);
+    expect(
+      await readTurnObservation(owned.database, { conversationID, contextID }),
+    ).toBeUndefined();
+    expect(
+      await readTurnObservation(owned.database, {
+        changeID: crypto.randomUUID(),
+        turnID: originalID,
+      }),
+    ).toBeUndefined();
+    expect(JSON.stringify([original, current])).not.toContain("private-");
+    expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+}, 30_000);
 
 test("Build admission rolls back its typed dispatch intent and writer claim on the caller's transaction", async () => {
   const owned = await fixture();

@@ -1,5 +1,12 @@
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  change,
+  developmentWorkspace,
+  runtimeAttempt,
+  ticket,
+} from "../../../../packages/db/src/schema";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import type { createRuntimeAccess } from "../access/runtime";
@@ -40,17 +47,19 @@ export function createDeveloperIDERuntime(
     { editorToken: string; attemptID: string; token: string }
   >();
   async function workspace(workspaceID: string, userID: string): Promise<Workspace> {
-    const [row] = await database.client<
-      Array<Omit<Workspace, "permission"> & { ownerID: string | null }>
-    >`
-      SELECT workspace.project_id AS "projectID", workspace.change_id AS "changeID",
-        workspace.kind, workspace.owner_user_id AS "ownerID",
-        workspace.kind = 'personal' OR (change.state IN ('starting','active','failed')
-          AND ticket.trashed_at IS NULL) AS available
-      FROM factory.development_workspace workspace
-      LEFT JOIN factory.change change ON change.id=workspace.change_id
-      LEFT JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-      WHERE workspace.id=${workspaceID}`;
+    const [row] = await database.db
+      .select({
+        projectID: developmentWorkspace.projectId,
+        changeID: developmentWorkspace.changeId,
+        kind: developmentWorkspace.kind,
+        ownerID: developmentWorkspace.ownerUserId,
+        available: sql<boolean>`${developmentWorkspace.kind}='personal' OR (${change.state} IN ('starting','active','failed')
+          AND ${ticket.trashedAt} IS NULL)`,
+      })
+      .from(developmentWorkspace)
+      .leftJoin(change, eq(change.id, developmentWorkspace.changeId))
+      .leftJoin(ticket, eq(ticket.id, change.ticketId))
+      .where(eq(developmentWorkspace.id, workspaceID));
     if (!row) throw new CommandError("not-found", "Workspace not found");
     const access = await database.client.begin((sql) =>
       workspaceAuthorityIn(sql, workspaceID, userID),
@@ -67,16 +76,34 @@ export function createDeveloperIDERuntime(
         state: "unavailable",
         failure: "This implementation is no longer active. Source files remain available.",
       };
-    const [attempt] = await database.client<
-      Array<{ attemptID: string; state: string; failure: string | null; restoreFailed: boolean }>
-    >`
-      SELECT id AS "attemptID",state,failure,
-        (state IN ('resuming','cleanup-failed') AND resume_failed_at IS NOT NULL) AS "restoreFailed"
-      FROM factory.runtime_attempt
-      WHERE workspace_id=${workspaceID} AND project_id=${source.projectID}
-        AND ((${source.changeID}::uuid IS NULL AND change_id IS NULL)
-          OR (change_id=${source.changeID} AND id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${source.changeID})))
-      ORDER BY generation DESC LIMIT 1`;
+    const [attempt] = await database.db
+      .select({
+        attemptID: runtimeAttempt.id,
+        state: runtimeAttempt.state,
+        failure: runtimeAttempt.failure,
+        restoreFailed: sql<boolean>`${runtimeAttempt.state} IN ('resuming','cleanup-failed') AND ${runtimeAttempt.resumeFailedAt} IS NOT NULL`,
+      })
+      .from(runtimeAttempt)
+      .where(
+        and(
+          eq(runtimeAttempt.workspaceId, workspaceID),
+          eq(runtimeAttempt.projectId, source.projectID),
+          source.changeID === null
+            ? isNull(runtimeAttempt.changeId)
+            : and(
+                eq(runtimeAttempt.changeId, source.changeID),
+                eq(
+                  runtimeAttempt.id,
+                  database.db
+                    .select({ attemptID: change.runtimeAttemptId })
+                    .from(change)
+                    .where(eq(change.id, source.changeID)),
+                ),
+              ),
+        ),
+      )
+      .orderBy(desc(runtimeAttempt.generation))
+      .limit(1);
     return {
       workspaceID,
       kind: source.kind,

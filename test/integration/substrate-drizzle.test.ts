@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { agentConfiguration } from "../../apps/factory/src/runtime/agent-configuration";
 import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
 import {
@@ -6,6 +7,78 @@ import {
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
+
+test("runtime model projection keeps the first admission's version and reasoning, never personal settings", async () => {
+  const f = await substrateFixture("a".repeat(40), "ticket");
+  const connectionID = crypto.randomUUID();
+  const configuration = () =>
+    agentConfiguration(
+      f.database,
+      f.changeID,
+      "owned-model-projection",
+      f.attemptID,
+      1,
+      `registry.invalid/browser@sha256:${"d".repeat(64)}`,
+      f.config,
+    );
+  try {
+    await f.database
+      .client`INSERT INTO factory.personal_model_settings(project_id,user_id,version,build_model_id)
+      VALUES(${f.projectID},${f.userID},1,'private-model-not-for-background')`;
+    const fallback = await configuration();
+    expect(fallback.modelID).not.toBe("private-model-not-for-background");
+    expect(fallback.provider).toBe("openai");
+    expect(fallback).not.toHaveProperty("reasoningEffort");
+    await f.database.client.begin(async (sql) => {
+      for (const version of [1, 2]) {
+        const commandID = crypto.randomUUID();
+        const provider = version === 2 ? "anthropic" : "deepseek";
+        const secretKey = `owned-model-${connectionID}-${version}`;
+        await sql`INSERT INTO factory.model_connection_write(command_id,connection_id,base_version,
+          provider,endpoint,fingerprint,secret_key,created_by)
+          VALUES(${commandID},${connectionID},${version - 1},${provider},'https://example.invalid/v1',
+            ${"b".repeat(64)},${secretKey},${f.userID})`;
+        await sql`INSERT INTO factory.model_connection_version(connection_id,version,provider,endpoint,secret_key,created_by)
+          VALUES(${connectionID},${version},${provider},'https://example.invalid/v1',${secretKey},${f.userID})`;
+        await sql`UPDATE factory.model_connection_write SET state='committed',committed_at=now()
+          WHERE command_id=${commandID}`;
+      }
+      const [approval] = await sql<{ revisionID: string }[]>`
+        SELECT requirement_revision_id AS "revisionID" FROM factory.requirement_approval
+        WHERE ticket_id=${f.ticketID}`;
+      if (!approval) throw Error("Owned requirement approval is missing");
+      // Equal transaction clocks exercise the stable ID tie-breaker as well.
+      for (const [id, modelID, version, reasoning] of [
+        ["22222222-2222-4222-8222-222222222222", "later-model", 1, "high"],
+        ["11111111-1111-4111-8111-111111111111", "admitted-model", 2, "max"],
+      ] as const) {
+        await sql`INSERT INTO factory.agent_turn(id,command_id,project_id,ticket_id,change_id,created_by,input,input_digest,authority,state)
+          VALUES(${id},${crypto.randomUUID()},${f.projectID},${f.ticketID},${f.changeID},${f.userID},
+            '{"kind":"change-start"}',${"a".repeat(64)},
+            ${JSON.stringify({
+              mode: "build",
+              requirementRevisionId: approval.revisionID,
+              modelId: modelID,
+              modelConnection: { connectionID, version },
+              codingReasoning: reasoning,
+            })}::jsonb,'completed')`;
+      }
+    });
+    const admitted = await configuration();
+    expect(admitted).toMatchObject({
+      modelID: "admitted-model",
+      modelIDs: ["admitted-model"],
+      provider: "anthropic",
+      reasoningEffort: "max",
+      modelBaseURL: `https://factory.test/internal/model/${f.attemptID}/v1`,
+    });
+    expect(await configuration()).toEqual(admitted);
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+    expect(await f.database.client`SELECT id FROM factory.agent_turn`).toHaveLength(2);
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
 
 test("native Drizzle admission commits typed JSON and database-clock intent before Create dispatch", async () => {
   const f = await substrateFixture();

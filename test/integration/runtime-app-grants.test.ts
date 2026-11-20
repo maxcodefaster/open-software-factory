@@ -21,6 +21,23 @@ test("App grants bind the exact declared App and expire obsolete path cookies on
       mode: "embedded" as const,
       appChannel: "app-forms",
     };
+    await expect(access.issue({ ...grant, userID: crypto.randomUUID() })).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    for (const method of ["identity-test", "sso", "password"] as const) {
+      await owned.database.client`UPDATE auth.session SET login_method=${method},
+        authenticated_at=now()-interval '25 hours',
+        expires_at=CASE WHEN ${method === "password"} THEN now()-interval '1 second' ELSE now()+interval '1 hour' END
+        WHERE id=${sessionID}`;
+      await expect(access.issue(grant)).rejects.toMatchObject({ code: "forbidden" });
+    }
+    await owned.database.client`UPDATE auth.session SET login_method='sso',
+      authenticated_at=now(),expires_at=now()+interval '1 hour' WHERE id=${sessionID}`;
+    const ssoGrant = await access.issue(grant);
+    access.revoke(ssoGrant);
+    // Password sessions keep their normal expiry policy, not the SSO freshness window.
+    await owned.database.client`UPDATE auth.session SET login_method='password',
+      authenticated_at=now()-interval '25 hours' WHERE id=${sessionID}`;
     const token = await access.issue(grant);
     const origin = appRuntimeOrigin("https://factory.example", owned.attemptID, "app-forms");
     const destination = new URL(

@@ -21,6 +21,7 @@ import {
 } from "../../../../packages/db/src/client";
 import {
   agentTurn,
+  attachmentStorage,
   buildBrowserSession,
   candidateReview,
   change,
@@ -71,8 +72,10 @@ export function createReviewMedia(
   objects: PrivateObjects = createPrivateObjects(),
 ) {
   async function key(id: string) {
-    const [storage] = await database.client<{ id: string }[]>`
-      SELECT id FROM factory.attachment_storage WHERE singleton`;
+    const [storage] = await database.db
+      .select({ id: attachmentStorage.id })
+      .from(attachmentStorage)
+      .where(eq(attachmentStorage.singleton, true));
     if (!storage) throw new Error("Installation storage identity is unavailable");
     return `factory-review/${storage.id}/${z.uuid().parse(id).toLowerCase()}`;
   }

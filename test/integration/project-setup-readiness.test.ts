@@ -3,10 +3,63 @@ import { createEnvironmentController } from "../../apps/factory/src/environments
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createSetupReadiness } from "../../apps/factory/src/setup/readiness";
+import { createSetupService } from "../../apps/factory/src/setup/service";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { callFactoryFunction } from "../fixtures/server-functions";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 import { fixtureValue } from "../fixtures/value";
+
+test("setup service retries read the retained repository kind only within authorized Project scope", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const userID = crypto.randomUUID(),
+    outsider = crypto.randomUUID();
+  const requested: boolean[] = [];
+  const unused = async () => {
+    throw new Error("This service projection must not start work");
+  };
+  type Options = Parameters<typeof createSetupService>[0];
+  const service = createSetupService({
+    database,
+    drafts: {} as Options["drafts"],
+    inspection: {} as Options["inspection"],
+    readiness: {
+      retry: async (_projectID, _userID, _task, starter) => {
+        requested.push(starter);
+      },
+      status: async () => [],
+      start: unused,
+      recover: unused,
+      observeWikiRetry: unused,
+      close: async () => {},
+    },
+  });
+  try {
+    for (const id of [userID, outsider])
+      await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned setup reader',${`${id}@setup.test`})`;
+    for (const kind of ["starter", "import"] as const) {
+      const projectID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.project
+        (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${projectID},${`kind-${projectID}`},'Owned kind','https://example.invalid/owned','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+        VALUES(${projectID},${userID},'developer',true,${userID})`;
+      await database.client`INSERT INTO factory.project_repository_intent
+        (command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
+        VALUES(${crypto.randomUUID()},${crypto.randomUUID()},${userID},${projectID},'Owned kind',
+          ${`kind-${projectID}`},${kind},'https://example.invalid/owned',${"a".repeat(64)},'committed')`;
+      expect(await service.retryTask(userID, projectID, "hook")).toEqual([]);
+      await expect(service.retryTask(outsider, projectID, "hook")).rejects.toThrow(
+        "Project not found",
+      );
+    }
+    expect(requested).toEqual([true, false]);
+    expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
+  } finally {
+    await database.client.end();
+    await host.dispose();
+  }
+}, 30_000);
 
 test("setup coordination leaves a one-connection pool available and joins admitted work before shutdown", async () => {
   const host = await factoryProcess();

@@ -1,4 +1,6 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { conversationEntry, ticket } from "../../../../packages/db/src/schema";
 import { z } from "zod";
 import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
 import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
@@ -58,20 +60,34 @@ export async function persistProjectOutput(
     });
     return;
   }
-  const [input] = await transaction<Array<{ payload: Record<string, unknown> }>>`
-    SELECT payload FROM factory.conversation_entry
-    WHERE conversation_id=${current.id} AND payload->>'commandId'=${command.commandId}
-    ORDER BY ordinal DESC LIMIT 1`;
+  const db = drizzleTransaction(transaction);
+  const [input] = await db
+    .select({ payload: conversationEntry.payload })
+    .from(conversationEntry)
+    .where(
+      and(
+        eq(conversationEntry.conversationId, current.id),
+        eq(sql<string>`${conversationEntry.payload}->>'commandId'`, command.commandId),
+      ),
+    )
+    .orderBy(desc(conversationEntry.ordinal))
+    .limit(1);
   let proposedTicket = output.kind === "requirement" ? output.ticket : null;
   if (proposedTicket && current.ticketId) {
     const base = z
       .object({ id: z.uuid(), version: z.number().int().positive() })
       .safeParse(input?.payload["ticketContext"]);
     if (base.success && base.data.id === current.ticketId) {
-      const [request] = await transaction<{ description: string }[]>`
-        SELECT description FROM factory.ticket
-        WHERE id=${current.ticketId} AND project_id=${command.projectId}
-          AND version=${base.data.version}`;
+      const [request] = await db
+        .select({ description: ticket.description })
+        .from(ticket)
+        .where(
+          and(
+            eq(ticket.id, current.ticketId),
+            eq(ticket.projectId, command.projectId),
+            eq(ticket.version, base.data.version),
+          ),
+        );
       // The summary and criteria are advisory. Keep authored Request details,
       // including diagnostics/attachments the model may omit, for confirmation
       // and the technical continuation. Read the full exact base, not its

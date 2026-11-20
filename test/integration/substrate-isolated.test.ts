@@ -6,6 +6,7 @@ import { createDeliveryPromotion } from "../../apps/factory/src/delivery/promoti
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { removeRuntimeRepository } from "../../apps/factory/src/runtime/git-http";
 import {
+  substrateIsolatedPrincipalIn,
   substrateIsolatedSourceIn,
   substrateStagingOwner,
 } from "../../apps/factory/src/runtime/substrate-isolated-grant";
@@ -259,6 +260,12 @@ test("native initial Staging retains original creates, serves only its bootstrap
       changeId: null,
     });
     expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
+    expect(
+      await f.database.client.begin((sql) => substrateIsolatedPrincipalIn(sql, attemptID)),
+    ).toBe(f.userID);
+    await expect(
+      f.database.client.begin((sql) => substrateIsolatedPrincipalIn(sql, f.attemptID)),
+    ).rejects.toThrow("isolated execution principal is unavailable");
     expect(owned.creates.get("Actor")).toBe(1);
     expect(owned.creates.get("Atespace")).toBe(1);
     expect(owned.counts().resumes).toBe(1);
@@ -299,6 +306,9 @@ test("native initial Staging retains original creates, serves only its bootstrap
     ).rejects.toThrow("immutable");
     const stopped = await runtime.stop(attemptID);
     expect(stopped?.state).toBe("stopped");
+    await expect(
+      f.database.client.begin((sql) => substrateIsolatedPrincipalIn(sql, attemptID)),
+    ).rejects.toThrow("isolated execution principal is unavailable");
     expect(owned.counts().deletes).toBe(1);
     const successorID = runtimeIdentity(substrateStagingOwner(f.projectID), 2).attemptID;
     expect((await owned.controller().ensureStaging(f.projectID, f.userID))?.id).toBe(successorID);
@@ -364,6 +374,9 @@ test("native publication binds one exact Forgejo job, publishes through admitted
       workspaceId: null,
       changeId: null,
     });
+    expect(
+      await f.database.client.begin((sql) => substrateIsolatedPrincipalIn(sql, attemptID)),
+    ).toBe(f.userID);
     expect(owned.creates.get("Actor")).toBe(1);
     expect(owned.counts().resumes).toBe(1);
     const template = owned.objects(attemptID).get("ActorTemplate");

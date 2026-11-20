@@ -45,6 +45,9 @@ test("media completion uses the caller's savepoint and keeps completed content a
     });
     expect(await media.bytes(id)).toEqual(data);
     expect(objects.blobs.size).toBe(1);
+    const [storage] = await f.database.client<{ id: string }[]>`
+      SELECT id FROM factory.attachment_storage WHERE singleton`;
+    expect([...objects.blobs.keys()]).toEqual([`factory-review/${storage?.id}/${id}`]);
   } finally {
     await f.dispose();
   }

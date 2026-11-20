@@ -3,7 +3,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { substrateVerificationSourceIn } from "../../apps/factory/src/runtime/substrate-verification-grant";
+import {
+  substrateVerificationPrincipalIn,
+  substrateVerificationSourceIn,
+} from "../../apps/factory/src/runtime/substrate-verification-grant";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import {
@@ -332,6 +335,12 @@ test("native Verification continues initial capacity rejection on its exact-job 
     });
     expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
     expect(started?.native?.portable).toBe(false);
+    expect(
+      await f.database.client.begin((sql) => substrateVerificationPrincipalIn(sql, attemptID)),
+    ).toBe(f.userID);
+    await expect(
+      f.database.client.begin((sql) => substrateVerificationPrincipalIn(sql, f.attemptID)),
+    ).rejects.toThrow("Verification principal is unavailable");
     expect(resumes).toBe(1);
     expect(await codingState()).toEqual(retainedCoding);
     let retainedOwnerCalls = 0;
@@ -433,6 +442,9 @@ test("native Verification continues initial capacity rejection on its exact-job 
       .client`SELECT * FROM factory.substrate_verification WHERE runtime_attempt_id=${attemptID}`;
     if (!originalProvision) throw new Error("Original native provisioning history is missing");
     expect((await runtime.stop(attemptID))?.state).toBe("stopped");
+    await expect(
+      f.database.client.begin((sql) => substrateVerificationPrincipalIn(sql, attemptID)),
+    ).rejects.toThrow("Verification principal is unavailable");
     await expect(readSource()).rejects.toThrow("Verification Source grant required");
     expect(deletes).toBe(1);
     // Controlled receipt of the existing authenticated retry owner. Its human

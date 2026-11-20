@@ -1,4 +1,12 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, inArray, isNotNull, notExists } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  agentTurn,
+  change,
+  changeWriter,
+  projectMembership,
+} from "../../../../packages/db/src/schema";
 
 export function createAccountRevocation(options: {
   database: ReturnType<typeof createDatabase>;
@@ -15,19 +23,65 @@ export function createAccountRevocation(options: {
     // authority invalidates newly opened editing access on those retries.
     await options.reconcileEditor(userID);
     await options.reconcileSources(userID);
-    const humanWork = await options.database.client<{ attemptID: string }[]>`
-      SELECT change.runtime_attempt_id AS "attemptID" FROM factory.change_writer writer
-      JOIN factory.change change ON change.id=writer.change_id
-      WHERE writer.user_id=${userID} AND change.runtime_attempt_id IS NOT NULL
-        AND (${disabled} OR NOT EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID})
-          AND NOT EXISTS(SELECT 1 FROM factory.project_membership WHERE project_id=change.project_id AND user_id=${userID} AND role='developer'))`;
-    for (const work of humanWork) await options.stopRuntime(work.attemptID);
-    const changes = await options.database.client<Array<{ id: string }>>`
-      SELECT DISTINCT turn.change_id AS id FROM factory.agent_turn turn
-      JOIN factory.change change ON change.id=turn.change_id
-      WHERE turn.created_by=${userID} AND turn.state IN ('pending','dispatching','running','uncertain')
-        AND (${disabled} OR NOT EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID})
-          AND NOT EXISTS(SELECT 1 FROM factory.project_membership WHERE project_id=change.project_id AND user_id=${userID}))`;
+    const db = drizzleTransaction(options.database.client);
+    const administratorAccess = db
+      .select({ userID: administrator.userId })
+      .from(administrator)
+      .where(eq(administrator.userId, userID));
+    const humanWork = await db
+      .select({ attemptID: change.runtimeAttemptId })
+      .from(changeWriter)
+      .innerJoin(change, eq(change.id, changeWriter.changeId))
+      .where(
+        and(
+          eq(changeWriter.userId, userID),
+          isNotNull(change.runtimeAttemptId),
+          disabled
+            ? undefined
+            : and(
+                notExists(administratorAccess),
+                notExists(
+                  db
+                    .select({ userID: projectMembership.userId })
+                    .from(projectMembership)
+                    .where(
+                      and(
+                        eq(projectMembership.projectId, change.projectId),
+                        eq(projectMembership.userId, userID),
+                        eq(projectMembership.role, "developer"),
+                      ),
+                    ),
+                ),
+              ),
+        ),
+      );
+    for (const work of humanWork) if (work.attemptID) await options.stopRuntime(work.attemptID);
+    const changes = await db
+      .selectDistinct({ id: change.id })
+      .from(agentTurn)
+      .innerJoin(change, eq(change.id, agentTurn.changeId))
+      .where(
+        and(
+          eq(agentTurn.createdBy, userID),
+          inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+          disabled
+            ? undefined
+            : and(
+                notExists(administratorAccess),
+                notExists(
+                  db
+                    .select({ userID: projectMembership.userId })
+                    .from(projectMembership)
+                    .where(
+                      and(
+                        eq(projectMembership.projectId, change.projectId),
+                        eq(projectMembership.userId, userID),
+                      ),
+                    ),
+                ),
+              ),
+        ),
+      );
     for (const change of changes) await options.stopAgent(change.id);
     await options.reconcileForge(userID);
   };

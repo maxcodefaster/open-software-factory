@@ -1,5 +1,7 @@
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { projectRepositoryIntent } from "../../../../packages/db/src/schema";
 import type {
   ProjectSetupView,
   projectSetupCreate,
@@ -76,9 +78,12 @@ export function createSetupService(options: {
     },
     async retryTask(userID: string, projectID: string, task: SetupTask) {
       await access.requireProject(userID, projectID);
-      const [intent] = await options.database
-        .client`SELECT kind FROM factory.project_repository_intent WHERE project_id=${projectID}`;
-      await options.readiness.retry(projectID, userID, task, intent?.["kind"] === "starter");
+      const [intent] = await options.database.db
+        .select({ kind: projectRepositoryIntent.kind })
+        .from(projectRepositoryIntent)
+        .where(eq(projectRepositoryIntent.projectId, projectID))
+        .limit(1);
+      await options.readiness.retry(projectID, userID, task, intent?.kind === "starter");
       return setupReadiness.parse(await options.readiness.status(projectID, userID));
     },
   };

@@ -1,4 +1,6 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, eq, isNull, or } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { learningPolicy } from "../../../../packages/db/src/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 
@@ -25,7 +27,19 @@ export async function learningEnabledIn(
   await sql`SELECT pg_advisory_xact_lock_shared(hashtext(${`learning-policy:${projectId}:project`}))`;
   if (ownerId)
     await sql`SELECT pg_advisory_xact_lock_shared(hashtext(${`learning-policy:${projectId}:${ownerId}`}))`;
-  const [disabled] = await sql`SELECT scope_key FROM factory.learning_policy
-    WHERE project_id=${projectId} AND (owner_id IS NULL OR owner_id=${ownerId}) AND NOT enabled`;
+  const [disabled] = await drizzleTransaction(sql)
+    .select({ scopeKey: learningPolicy.scopeKey })
+    .from(learningPolicy)
+    .where(
+      and(
+        eq(learningPolicy.projectId, projectId),
+        or(
+          isNull(learningPolicy.ownerId),
+          ownerId === null ? undefined : eq(learningPolicy.ownerId, ownerId),
+        ),
+        eq(learningPolicy.enabled, false),
+      ),
+    )
+    .limit(1);
   return !disabled;
 }

@@ -3,7 +3,10 @@ import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
-import { admittedTicketContext } from "../../apps/factory/src/project-agent/ticket-context";
+import {
+  admittedProjectContext,
+  admittedTicketContext,
+} from "../../apps/factory/src/project-agent/ticket-context";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -60,6 +63,19 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
     };
     await db.client.begin(async (sql) => {
       const ticketContext = await admittedTicketContext(sql, owned.projectID, ticketID);
+      expect(ticketContext).toMatchObject({
+        documentId: null,
+        revisionId: null,
+        requirement: null,
+        implementationAdmitted: false,
+      });
+      expect(await admittedProjectContext(sql, owned.projectID, ticketID)).toMatchObject({
+        project: { id: owned.projectID, defaultBranch: "main" },
+        relationships: [],
+      });
+      await expect(admittedTicketContext(sql, crypto.randomUUID(), ticketID)).rejects.toThrow(
+        "Selected Ticket context unavailable",
+      );
       await appendConversationEntry(sql, conversationID, {
         kind: "user-message",
         actor: "user",
@@ -138,6 +154,16 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
       description: "Human refinement",
     };
     await documents.save(ticketID, owned.userID, refinement);
+    const retained = await db.client.begin((sql) =>
+      admittedTicketContext(sql, owned.projectID, ticketID),
+    );
+    expect(retained).toMatchObject({
+      documentId: refinement.commandId,
+      revisionId: input.commandId,
+      version: 3,
+    });
+    expect(retained?.requirement).toContain("A specific outcome");
+    expect(retained?.description).toBe("Human refinement");
     const [refined] = await db.client<Array<{ documents: number; requirements: number }>>`
       SELECT (SELECT count(*)::int FROM factory.ticket_document_revision WHERE ticket_id=${ticketID}) AS documents,
         (SELECT count(*)::int FROM factory.requirement_revision WHERE ticket_id=${ticketID}) AS requirements`;

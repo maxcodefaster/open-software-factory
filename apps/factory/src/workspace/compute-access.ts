@@ -1,4 +1,6 @@
+import { desc, eq } from "drizzle-orm";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { runtimeAttempt, runtimeComputeWait } from "../../../../packages/db/src/schema";
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
@@ -22,12 +24,17 @@ export function createWorkspaceComputeAccess(
         return { projectID: access.projectID, changeID: access.changeID };
       });
     const access = await authorize();
-    const [attempt] = await database.client<
-      { id: string; state: string; computeWait: string | null }[]
-    >`SELECT attempt.id,attempt.state,waiting.reason AS "computeWait"
-      FROM factory.runtime_attempt attempt LEFT JOIN factory.runtime_compute_wait waiting
-        ON waiting.attempt_id=attempt.id
-      WHERE attempt.workspace_id=${workspaceID} ORDER BY attempt.generation DESC LIMIT 1`;
+    const [attempt] = await database.db
+      .select({
+        id: runtimeAttempt.id,
+        state: runtimeAttempt.state,
+        computeWait: runtimeComputeWait.reason,
+      })
+      .from(runtimeAttempt)
+      .leftJoin(runtimeComputeWait, eq(runtimeComputeWait.attemptId, runtimeAttempt.id))
+      .where(eq(runtimeAttempt.workspaceId, workspaceID))
+      .orderBy(desc(runtimeAttempt.generation))
+      .limit(1);
     if (expectedAttemptID && attempt?.id !== expectedAttemptID)
       throw new CommandError(
         "conflict",
@@ -77,8 +84,12 @@ export function createWorkspaceComputeAccess(
         );
       await Bun.sleep(100);
     }
-    const [current] = await database.client<{ id: string }[]>`SELECT id FROM factory.runtime_attempt
-      WHERE workspace_id=${workspaceID} ORDER BY generation DESC LIMIT 1`;
+    const [current] = await database.db
+      .select({ id: runtimeAttempt.id })
+      .from(runtimeAttempt)
+      .where(eq(runtimeAttempt.workspaceId, workspaceID))
+      .orderBy(desc(runtimeAttempt.generation))
+      .limit(1);
     if (current?.id !== attempt.id)
       throw new CommandError("conflict", "Workspace compute changed during preparation");
     await authorize();

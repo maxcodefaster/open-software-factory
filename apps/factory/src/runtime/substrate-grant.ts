@@ -1,4 +1,28 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  sql as expression,
+} from "drizzle-orm";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  change,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  developmentWorkspace,
+  runtimeAttempt,
+  substrateBinding,
+  substrateSource,
+} from "../../../../packages/db/src/schema";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import { createAgentTurnStore } from "../agent/turn-store";
@@ -12,13 +36,29 @@ export async function substrateUnsettledBootstrapIn(
   workspaceID: string,
   attemptID: string,
 ) {
-  const [row] = await sql<
-    { state: string }[]
-  >`SELECT a.state::text AS state FROM factory.runtime_attempt a
-    JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.project_id=a.project_id
-    WHERE a.id=${attemptID} AND w.id=${workspaceID} AND w.kind='personal'
-      AND a.change_id IS NULL AND w.change_id IS NULL AND a.ready_at IS NULL AND a.failure IS NOT NULL
-      AND a.state IN ('failed','pausing','paused') AND a.stop_intended_at IS NULL`;
+  const [row] = await drizzleTransaction(sql)
+    .select({ state: runtimeAttempt.state })
+    .from(runtimeAttempt)
+    .innerJoin(
+      developmentWorkspace,
+      and(
+        eq(developmentWorkspace.id, runtimeAttempt.workspaceId),
+        eq(developmentWorkspace.projectId, runtimeAttempt.projectId),
+      ),
+    )
+    .where(
+      and(
+        eq(runtimeAttempt.id, attemptID),
+        eq(developmentWorkspace.id, workspaceID),
+        eq(developmentWorkspace.kind, "personal"),
+        isNull(runtimeAttempt.changeId),
+        isNull(developmentWorkspace.changeId),
+        isNull(runtimeAttempt.readyAt),
+        isNotNull(runtimeAttempt.failure),
+        inArray(runtimeAttempt.state, ["failed", "pausing", "paused"]),
+        isNull(runtimeAttempt.stopIntendedAt),
+      ),
+    );
   return row;
 }
 
@@ -28,18 +68,49 @@ export async function substrateBootstrapRetentionIn(
   workspaceID: string,
   attemptID: string,
 ) {
-  const [row] = await sql<
-    { state: string }[]
-  >`SELECT a.state::text AS state FROM factory.runtime_attempt a
-    JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.project_id=a.project_id
-    JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-    JOIN factory.substrate_source s ON s.workspace_id=w.id AND s.actor_uid=b.actor_uid
-    WHERE a.id=${attemptID} AND w.id=${workspaceID} AND w.kind='personal'
-      AND a.change_id IS NULL AND w.change_id IS NULL AND a.ready_at IS NULL
-      AND a.state IN ('starting','failed','pausing','paused') AND a.stop_intended_at IS NULL
-      AND s.owner='actor' AND s.writable AND s.writer_epoch=1 AND s.generation=0
-      AND s.checkpoint_id IS NULL AND s.checkpoint IS NULL
-      AND NOT EXISTS(SELECT 1 FROM factory.change_agent_turn_intent i WHERE i.runtime_attempt_id=a.id)`;
+  const db = drizzleTransaction(sql);
+  const [row] = await db
+    .select({ state: runtimeAttempt.state })
+    .from(runtimeAttempt)
+    .innerJoin(
+      developmentWorkspace,
+      and(
+        eq(developmentWorkspace.id, runtimeAttempt.workspaceId),
+        eq(developmentWorkspace.projectId, runtimeAttempt.projectId),
+      ),
+    )
+    .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+    .innerJoin(
+      substrateSource,
+      and(
+        eq(substrateSource.workspaceId, developmentWorkspace.id),
+        eq(substrateSource.actorUid, substrateBinding.actorUid),
+      ),
+    )
+    .where(
+      and(
+        eq(runtimeAttempt.id, attemptID),
+        eq(developmentWorkspace.id, workspaceID),
+        eq(developmentWorkspace.kind, "personal"),
+        isNull(runtimeAttempt.changeId),
+        isNull(developmentWorkspace.changeId),
+        isNull(runtimeAttempt.readyAt),
+        inArray(runtimeAttempt.state, ["starting", "failed", "pausing", "paused"]),
+        isNull(runtimeAttempt.stopIntendedAt),
+        eq(substrateSource.owner, "actor"),
+        eq(substrateSource.writable, true),
+        eq(substrateSource.writerEpoch, 1),
+        eq(substrateSource.generation, 0),
+        isNull(substrateSource.checkpointId),
+        isNull(substrateSource.checkpoint),
+        notExists(
+          db
+            .select({ attemptID: changeAgentTurnIntent.runtimeAttemptId })
+            .from(changeAgentTurnIntent)
+            .where(eq(changeAgentTurnIntent.runtimeAttemptId, runtimeAttempt.id)),
+        ),
+      ),
+    );
   return row;
 }
 
@@ -135,15 +206,16 @@ export async function substrateWorkspaceGrantIn(
   userID: string,
   newExecution = false,
 ) {
-  const [workspace] = await sql<
-    {
-      projectID: string;
-      kind: string;
-      ownerID: string | null;
-      changeID: string | null;
-    }[]
-  >`SELECT project_id AS "projectID",kind,owner_user_id AS "ownerID",change_id AS "changeID"
-    FROM factory.development_workspace WHERE id=${workspaceID}`;
+  const db = drizzleTransaction(sql);
+  const [workspace] = await db
+    .select({
+      projectID: developmentWorkspace.projectId,
+      kind: developmentWorkspace.kind,
+      ownerID: developmentWorkspace.ownerUserId,
+      changeID: developmentWorkspace.changeId,
+    })
+    .from(developmentWorkspace)
+    .where(eq(developmentWorkspace.id, workspaceID));
   if (!workspace) throw new CommandError("forbidden", "Current native Workspace grant required");
   if (workspace.kind === "personal") {
     await workspaceWriteAuthorityIn(sql, workspaceID, userID);
@@ -153,8 +225,15 @@ export async function substrateWorkspaceGrantIn(
   const writer = await lockChangeWriterIn(sql, workspace.changeID);
   if (!writer.available) throw new CommandError("conflict", "Ticket execution is no longer active");
   if (newExecution) {
-    const [pendingStop] = await sql`SELECT change_id FROM factory.change_agent_session
-      WHERE change_id=${workspace.changeID} AND stop_pending`;
+    const [pendingStop] = await db
+      .select({ changeID: changeAgentSession.changeId })
+      .from(changeAgentSession)
+      .where(
+        and(
+          eq(changeAgentSession.changeId, workspace.changeID),
+          eq(changeAgentSession.stopPending, true),
+        ),
+      );
     if (pendingStop)
       throw new CommandError(
         "conflict",
@@ -225,13 +304,25 @@ export async function substrateWorkspaceGrantIn(
 // Call after the Workspace grant has locked its Change. The retained Source
 // basis never changes, but a new Ticket execution starts at its latest submission.
 export async function substrateWorkspaceRevisionIn(sql: DatabaseTransaction, workspaceID: string) {
-  const [workspace] = await sql<{ revision: string }[]>`
-    SELECT COALESCE(
-      (SELECT commit_sha FROM factory.change_commit_operation
-        WHERE change_id=w.change_id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
-      c.base_sha,w.source_revision) AS revision
-    FROM factory.development_workspace w LEFT JOIN factory.change c ON c.id=w.change_id
-    WHERE w.id=${workspaceID}`;
+  const db = drizzleTransaction(sql);
+  const submitted = db
+    .select({ revision: changeCommitOperation.commitSha })
+    .from(changeCommitOperation)
+    .where(
+      and(
+        eq(changeCommitOperation.changeId, developmentWorkspace.changeId),
+        eq(changeCommitOperation.state, "succeeded"),
+      ),
+    )
+    .orderBy(desc(changeCommitOperation.sequence))
+    .limit(1);
+  const [workspace] = await db
+    .select({
+      revision: expression<string>`COALESCE((${submitted}),${change.baseSha},${developmentWorkspace.sourceRevision})`,
+    })
+    .from(developmentWorkspace)
+    .leftJoin(change, eq(change.id, developmentWorkspace.changeId))
+    .where(eq(developmentWorkspace.id, workspaceID));
   if (!workspace) throw new CommandError("not-found", "Native Workspace not found");
   return workspace.revision;
 }

@@ -1,4 +1,6 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { runtimeAttempt } from "../../../../packages/db/src/schema";
 import { runtimeIdentity } from "../../../../packages/runtime-domain/src/identity";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
@@ -130,10 +132,19 @@ export async function substrateIsolatedGrantIn(
 }
 
 export async function substrateIsolatedPrincipalIn(sql: DatabaseTransaction, attemptID: string) {
-  const [attempt] = await sql<{ userID: string }[]>`
-    SELECT created_by AS "userID" FROM factory.runtime_attempt WHERE id=${attemptID}
-      AND isolated_kind IN ('staging','publication') AND workspace_id IS NULL AND change_id IS NULL
-      AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
+  const [attempt] = await drizzleTransaction(sql)
+    .select({ userID: runtimeAttempt.createdBy })
+    .from(runtimeAttempt)
+    .where(
+      and(
+        eq(runtimeAttempt.id, attemptID),
+        inArray(runtimeAttempt.isolatedKind, ["staging", "publication"]),
+        isNull(runtimeAttempt.workspaceId),
+        isNull(runtimeAttempt.changeId),
+        inArray(runtimeAttempt.state, ["starting", "ready"]),
+        isNull(runtimeAttempt.stopIntendedAt),
+      ),
+    );
   if (!attempt)
     throw new CommandError(
       "forbidden",

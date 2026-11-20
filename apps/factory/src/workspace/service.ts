@@ -1,3 +1,10 @@
+import { and, asc, eq, exists, isNull, or, sql } from "drizzle-orm";
+import {
+  authUser,
+  developmentWorkspace,
+  ticket,
+  workspaceShare,
+} from "../../../../packages/db/src/schema";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import type { createWorkspaceSourceController } from "./source-controller";
 import type { createWorkspaceSharing } from "./sharing";
@@ -35,22 +42,39 @@ export function createWorkspaceService(options: {
       const database = options.database;
       if (!database) throw new CommandError("unavailable", "Workspace listing is unavailable");
       await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, projectID));
-      return database.client<
-        {
-          workspaceID: string;
-          ownerID: string | null;
-          name: string;
-          kind: string;
-          collaborative: boolean;
-        }[]
-      >`
-        SELECT workspace.id AS "workspaceID",workspace.owner_user_id AS "ownerID",COALESCE(person.name,ticket.title,'Ticket') AS name,
-          workspace.kind,workspace.collaboration_enabled AS collaborative
-        FROM factory.development_workspace workspace LEFT JOIN auth."user" person ON person.id=workspace.owner_user_id
-        LEFT JOIN factory.ticket ticket ON ticket.id=workspace.ticket_id
-        WHERE workspace.project_id=${projectID} AND (workspace.kind='ticket' OR workspace.owner_user_id=${userID} OR EXISTS(
-          SELECT 1 FROM factory.workspace_share WHERE workspace_id=workspace.id AND user_id=${userID} AND revoked_at IS NULL))
-        ORDER BY workspace.created_at,workspace.id`;
+      return database.db
+        .select({
+          workspaceID: developmentWorkspace.id,
+          ownerID: developmentWorkspace.ownerUserId,
+          name: sql<string>`COALESCE(${authUser.name},${ticket.title},'Ticket')`,
+          kind: developmentWorkspace.kind,
+          collaborative: developmentWorkspace.collaborationEnabled,
+        })
+        .from(developmentWorkspace)
+        .leftJoin(authUser, eq(authUser.id, developmentWorkspace.ownerUserId))
+        .leftJoin(ticket, eq(ticket.id, developmentWorkspace.ticketId))
+        .where(
+          and(
+            eq(developmentWorkspace.projectId, projectID),
+            or(
+              eq(developmentWorkspace.kind, "ticket"),
+              eq(developmentWorkspace.ownerUserId, userID),
+              exists(
+                database.db
+                  .select({ workspaceID: workspaceShare.workspaceId })
+                  .from(workspaceShare)
+                  .where(
+                    and(
+                      eq(workspaceShare.workspaceId, developmentWorkspace.id),
+                      eq(workspaceShare.userId, userID),
+                      isNull(workspaceShare.revokedAt),
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        )
+        .orderBy(asc(developmentWorkspace.createdAt), asc(developmentWorkspace.id));
     },
     async collaboration(userID: string, workspaceID: string) {
       if (!options.database || !options.collaboration)

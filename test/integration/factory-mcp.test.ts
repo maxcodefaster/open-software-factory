@@ -123,6 +123,25 @@ test("actual MCP discovery and calls create one retained Ticket with atomic, ide
       releases: [],
       humanConfirmationRequired: true,
     });
+    for (const [version, state] of [
+      ["1.2.3", "published"],
+      ["9.0.0", "failed"],
+    ] as const)
+      await f.database.client`INSERT INTO factory.project_release
+        (id,project_id,command_id,version,commit_sha,notes,state,published_at,created_by)
+        VALUES(${crypto.randomUUID()},${f.projectID},${crypto.randomUUID()},${version},${"a".repeat(40)},
+          'Owned retained release',${state},${state === "published" ? "2026-11-19T12:00:00Z" : null}::timestamptz,${f.userID})`;
+    const history = JSON.parse((await releases.run({})).content);
+    expect(history).toMatchObject({
+      lastPublishedVersion: "1.2.3",
+      suggestions: { patch: "1.2.4", minor: "1.3.0", major: "2.0.0" },
+      humanConfirmationRequired: true,
+    });
+    expect(history.releases).toHaveLength(2);
+    expect(
+      history.releases.find((release: { version: string }) => release.version === "1.2.3")
+        .publishedAt,
+    ).toBe("2026-11-19 12:00:00+00");
     expect((await releases.run({ projectId: crypto.randomUUID() })).isError).toBe(true);
     const create = toolOf(mcp, "createTicket");
     const input = {

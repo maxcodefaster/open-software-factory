@@ -124,6 +124,11 @@ test.each(["ready", "paused", "unavailable"] as const)(
       });
       await expect(previews(project, stranger)).rejects.toThrow("Project not found");
       expect(calls).toEqual([]);
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+        VALUES(${project},${stranger},'developer',${owner})`;
+      await database.client`INSERT INTO factory.administrator(user_id) VALUES(${stranger})`;
+      expect(await previews(project, stranger)).toEqual([]);
+      expect(calls).toEqual([]);
       const first = await previews(project, owner);
       expect(first.map((app) => [app.channel, app.label])).toEqual(
         state === "unavailable"
@@ -153,6 +158,28 @@ test.each(["ready", "paused", "unavailable"] as const)(
           ]),
         );
         expect(calls).toHaveLength(2);
+      }
+      if (state !== "unavailable") {
+        const sharing = createWorkspaceSharing(database, () => {});
+        const decide = (permission: "observe" | null, expectedVersion: number) =>
+          sharing.decide(owner, {
+            commandID: crypto.randomUUID(),
+            workspaceID: workspace,
+            userID: stranger,
+            permission,
+            expectedVersion,
+          });
+        await decide("observe", 0);
+        expect(await previews(project, stranger)).toEqual(first);
+        await database.client`DELETE FROM factory.administrator WHERE user_id=${stranger}`;
+        await database.client`UPDATE factory.project_membership SET role='product-contributor'
+          WHERE project_id=${project} AND user_id=${stranger}`;
+        expect(await previews(project, stranger)).toEqual([]);
+        await database.client`UPDATE factory.project_membership SET role='developer'
+          WHERE project_id=${project} AND user_id=${stranger}`;
+        await decide(null, 1);
+        expect(await previews(project, stranger)).toEqual([]);
+        expect(calls).toHaveLength(1);
       }
       expect(
         await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${project}`,

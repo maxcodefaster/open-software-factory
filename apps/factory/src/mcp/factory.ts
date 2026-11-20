@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { and, desc, eq, gt, inArray, sql as expression } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { agentTurn, conversationEntry, projectRelease } from "../../../../packages/db/src/schema";
 import { versionSuggestions } from "../../../../packages/project-domain/src/release";
 import { createPlanningTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
 import { type AgentTurnRecord, createAgentTurnStore } from "../agent/turn-store";
@@ -48,23 +50,29 @@ export function createFactoryTicketCommand(database: ReturnType<typeof createDat
     let outcome: { id: string; projectId: string; title: string; state: string } | undefined;
     const allowed = await turns.validateExecution(turnID, ownerToken, async (sql) => {
       signal.throwIfAborted();
-      const [previous] = await sql<
-        {
-          payload: {
+      const db = drizzleTransaction(sql);
+      const [previous] = await db
+        .select({
+          payload: expression<{
             factoryAction: { digest: string; result: NonNullable<typeof outcome> };
-          };
-        }[]
-      >`
-        SELECT payload FROM factory.conversation_entry WHERE conversation_id=${conversationID}
-          AND payload->'factoryAction'->>'turnId'=${turnID}
-          AND payload->'factoryAction'->>'key'=${input.key} LIMIT 1`;
+          }>`${conversationEntry.payload}`,
+        })
+        .from(conversationEntry)
+        .where(
+          and(
+            eq(conversationEntry.conversationId, conversationID),
+            eq(expression<string>`${conversationEntry.payload}#>>'{factoryAction,turnId}'`, turnID),
+            eq(expression<string>`${conversationEntry.payload}#>>'{factoryAction,key}'`, input.key),
+          ),
+        )
+        .limit(1);
       if (previous) {
         if (previous.payload.factoryAction.digest !== digest)
           throw new CommandError("conflict", "This action key already created a different Ticket.");
         outcome = previous.payload.factoryAction.result;
         return;
       }
-      outcome = await createPlanningTicketIn(drizzleTransaction(sql), turn.command.createdBy, {
+      outcome = await createPlanningTicketIn(db, turn.command.createdBy, {
         id: ticketID(turnID, input.key),
         projectId: turn.command.projectId,
         title: input.title,
@@ -92,9 +100,17 @@ export function createFactoryTicketCommand(database: ReturnType<typeof createDat
         ...(turn.command.contextId ? { contextId: turn.command.contextId } : {}),
       });
       signal.throwIfAborted();
-      const [live] = await sql`SELECT id FROM factory.agent_turn WHERE id=${turnID}
-        AND owner_token=${ownerToken} AND owner_expires_at>clock_timestamp()
-        AND state IN ('dispatching','running')`;
+      const [live] = await db
+        .select({ id: agentTurn.id })
+        .from(agentTurn)
+        .where(
+          and(
+            eq(agentTurn.id, turnID),
+            eq(agentTurn.ownerToken, ownerToken),
+            gt(agentTurn.ownerExpiresAt, expression`clock_timestamp()`),
+            inArray(agentTurn.state, ["dispatching", "running"]),
+          ),
+        );
       if (!live)
         throw new CommandError("forbidden", "Factory action ownership expired before commit.");
     });
@@ -149,14 +165,28 @@ export async function connectFactoryMCP(input: {
     },
     async () => {
       await input.authorize();
-      const releases = await input.database.client<
-        { version: string; commitSHA: string; state: string; publishedAt: string | null }[]
-      >`SELECT version,commit_sha AS "commitSHA",state,published_at::text AS "publishedAt"
-        FROM factory.project_release WHERE project_id=${input.turn.command.projectId}
-        ORDER BY created_at DESC LIMIT 10`;
-      const [last] = await input.database.client<{ version: string }[]>`
-        SELECT version FROM factory.project_release WHERE project_id=${input.turn.command.projectId} AND state='published'
-        ORDER BY published_at DESC,id DESC LIMIT 1`;
+      const releases = await input.database.db
+        .select({
+          version: projectRelease.version,
+          commitSHA: projectRelease.commitSha,
+          state: projectRelease.state,
+          publishedAt: expression<string | null>`${projectRelease.publishedAt}::text`,
+        })
+        .from(projectRelease)
+        .where(eq(projectRelease.projectId, input.turn.command.projectId))
+        .orderBy(desc(projectRelease.createdAt))
+        .limit(10);
+      const [last] = await input.database.db
+        .select({ version: projectRelease.version })
+        .from(projectRelease)
+        .where(
+          and(
+            eq(projectRelease.projectId, input.turn.command.projectId),
+            eq(projectRelease.state, "published"),
+          ),
+        )
+        .orderBy(desc(projectRelease.publishedAt), desc(projectRelease.id))
+        .limit(1);
       return result({
         projectId: input.turn.command.projectId,
         lastPublishedVersion: last?.version ?? null,

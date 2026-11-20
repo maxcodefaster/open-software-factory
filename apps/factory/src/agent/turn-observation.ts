@@ -1,6 +1,15 @@
+import { and, desc, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import { turnObservationInput } from "../../../../packages/conversation-domain/src/turn-observation";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  agentTurnSkill,
+  change,
+  modelConnectionVersion,
+  skillRevision,
+  ticketConversation,
+} from "../../../../packages/db/src/schema";
 
 type Database = ReturnType<typeof createDatabase>;
 type Target =
@@ -9,54 +18,75 @@ type Target =
 
 // Internal read only. Callers authorize the containing Project/Change/conversation.
 export async function readTurnObservation(database: Database, target: Target) {
-  const rows = await database.client<
-    Array<{
-      id: string;
-      commandId: string;
-      state: string;
-      summary: string | null;
-      authority: unknown;
-      provider: string | null;
-    }>
-  >`
-    SELECT turn.id, turn.command_id AS "commandId", turn.state, turn.outcome_summary AS summary, turn.authority,
-      connection.provider
-    FROM factory.agent_turn turn LEFT JOIN factory.model_connection_version connection
-      ON connection.connection_id::text=turn.authority->'modelConnection'->>'connectionID'
-      AND connection.version::text=turn.authority->'modelConnection'->>'version'
-    WHERE (${"changeID" in target ? target.changeID : null}::uuid IS NOT NULL
-      AND turn.change_id = ${"changeID" in target ? target.changeID : null}
-      AND (${"turnID" in target ? (target.turnID ?? null) : null}::uuid IS NULL
-        OR turn.id = ${"turnID" in target ? (target.turnID ?? null) : null})
-      AND (${"turnID" in target ? (target.turnID ?? null) : null}::uuid IS NOT NULL
-        OR turn.input->>'contextId' IS NOT DISTINCT FROM
-          (SELECT conversation.active_coding_context_id::text FROM factory.ticket_conversation conversation
-            JOIN factory.change change ON change.ticket_id=conversation.ticket_id
-            WHERE change.id=${"changeID" in target ? target.changeID : null})))
-      OR (${"conversationID" in target ? target.conversationID : null}::uuid IS NOT NULL
-        AND turn.conversation_id = ${"conversationID" in target ? target.conversationID : null}
-        AND turn.input->>'contextId' IS NOT DISTINCT FROM ${"contextID" in target ? (target.contextID ?? null) : null}
-        AND turn.change_id IS NULL)
-    ORDER BY turn.created_at DESC, turn.id DESC LIMIT 1`;
-  const row = rows[0];
+  const db = database.db;
+  const contextID = sql<string | null>`${agentTurn.input}->>'contextId'`;
+  const scope =
+    "changeID" in target
+      ? and(
+          eq(agentTurn.changeId, target.changeID),
+          target.turnID != null
+            ? eq(agentTurn.id, target.turnID)
+            : sql`${contextID} IS NOT DISTINCT FROM (${db
+                .select({
+                  id: sql<string | null>`${ticketConversation.activeCodingContextId}::text`,
+                })
+                .from(ticketConversation)
+                .innerJoin(change, eq(change.ticketId, ticketConversation.ticketId))
+                .where(eq(change.id, target.changeID))})`,
+        )
+      : and(
+          eq(agentTurn.conversationId, target.conversationID),
+          sql`${contextID} IS NOT DISTINCT FROM ${target.contextID ?? null}`,
+          isNull(agentTurn.changeId),
+        );
+  const [row] = await db
+    .select({
+      id: agentTurn.id,
+      commandId: agentTurn.commandId,
+      state: agentTurn.state,
+      summary: agentTurn.outcomeSummary,
+      authority: agentTurn.authority,
+      provider: modelConnectionVersion.provider,
+    })
+    .from(agentTurn)
+    .leftJoin(
+      modelConnectionVersion,
+      and(
+        eq(
+          sql`${modelConnectionVersion.connectionId}::text`,
+          sql`${agentTurn.authority}#>>'{modelConnection,connectionID}'`,
+        ),
+        eq(
+          sql`${modelConnectionVersion.version}::text`,
+          sql`${agentTurn.authority}#>>'{modelConnection,version}'`,
+        ),
+      ),
+    )
+    .where(scope)
+    .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+    .limit(1);
   if (!row) return undefined;
   const authority = agentTurnAuthorityInput.parse(row.authority);
-  const skills = await database.client<
-    Array<{
-      id: string;
-      name: string;
-      revision: number;
-      digest: string;
-      loaded: boolean;
-    }>
-  >`
-    SELECT revision.id, revision.content->>'name' AS name, revision.revision::float8 AS revision,
-      revision.content_digest AS digest,
-      EXISTS(SELECT 1 FROM factory.agent_turn_skill loaded
-        WHERE loaded.turn_id = ${row.id} AND loaded.revision_id = revision.id) AS loaded
-    FROM factory.skill_revision revision
-    WHERE revision.id = ANY(${authority.skillRevisionIds}::uuid[])
-    ORDER BY array_position(${authority.skillRevisionIds}::uuid[], revision.id)`;
+  const skills = await db
+    .select({
+      id: skillRevision.id,
+      name: sql<string>`${skillRevision.content}->>'name'`,
+      revision: skillRevision.revision,
+      digest: skillRevision.contentDigest,
+      loaded: exists(
+        db
+          .select({ id: agentTurnSkill.revisionId })
+          .from(agentTurnSkill)
+          .where(
+            and(eq(agentTurnSkill.turnId, row.id), eq(agentTurnSkill.revisionId, skillRevision.id)),
+          ),
+      ),
+    })
+    .from(skillRevision)
+    .where(inArray(skillRevision.id, authority.skillRevisionIds))
+    .orderBy(
+      sql`array_position(${sql.param(authority.skillRevisionIds)}::uuid[],${skillRevision.id})`,
+    );
   return turnObservationInput.parse({
     id: row.id,
     commandId: row.commandId,

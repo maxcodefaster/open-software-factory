@@ -1,4 +1,14 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, desc, eq, exists, isNull, or, sql as expression } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  change,
+  epic,
+  project as projectModel,
+  requirementRevision,
+  ticket,
+  ticketDependency,
+  ticketDocumentRevision,
+} from "../../../../packages/db/src/schema";
 import { z } from "zod";
 
 const ticketContext = z
@@ -21,19 +31,46 @@ export async function admittedTicketContext(
   ticketID: string | null,
 ) {
   if (!ticketID) return undefined;
-  const rows = await sql<Array<z.infer<typeof ticketContext>>>`
-    SELECT ticket.id, ticket.version::integer AS version,
-      (SELECT id FROM factory.ticket_document_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1) AS "documentId",
-      left(ticket.title,200) AS title, left(ticket.description,10000) AS description,
-      revision.id AS "revisionId", left(COALESCE(document.canonical_content,revision.canonical_content),12000) AS requirement,
-      EXISTS(SELECT 1 FROM factory.change WHERE ticket_id=ticket.id) AS "implementationAdmitted",
-      (length(ticket.description)>10000 OR COALESCE(length(COALESCE(document.canonical_content,revision.canonical_content))>12000,false)) AS truncated
-    FROM factory.ticket ticket
-    LEFT JOIN LATERAL (SELECT canonical_content FROM factory.ticket_document_revision
-      WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1) document ON true
-    LEFT JOIN LATERAL (SELECT id,canonical_content FROM factory.requirement_revision
-      WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1) revision ON true
-    WHERE ticket.id=${ticketID} AND ticket.project_id=${projectID}`;
+  const db = drizzleTransaction(sql);
+  const document = db
+    .select({
+      id: ticketDocumentRevision.id,
+      content: ticketDocumentRevision.canonicalContent,
+    })
+    .from(ticketDocumentRevision)
+    .where(eq(ticketDocumentRevision.ticketId, ticket.id))
+    .orderBy(desc(ticketDocumentRevision.ordinal))
+    .limit(1)
+    .as("document");
+  const revision = db
+    .select({
+      id: requirementRevision.id,
+      content: requirementRevision.canonicalContent,
+    })
+    .from(requirementRevision)
+    .where(eq(requirementRevision.ticketId, ticket.id))
+    .orderBy(desc(requirementRevision.ordinal))
+    .limit(1)
+    .as("revision");
+  const content = expression`COALESCE(${document.content},${revision.content})`;
+  const rows = await db
+    .select({
+      id: ticket.id,
+      version: expression<number>`${ticket.version}::integer`,
+      documentId: document.id,
+      title: expression<string>`left(${ticket.title},200)`,
+      description: expression<string>`left(${ticket.description},10000)`,
+      revisionId: revision.id,
+      requirement: expression<string | null>`left(${content},12000)`,
+      implementationAdmitted: exists(
+        db.select({ id: change.id }).from(change).where(eq(change.ticketId, ticket.id)),
+      ),
+      truncated: expression<boolean>`length(${ticket.description})>10000 OR COALESCE(length(${content})>12000,false)`,
+    })
+    .from(ticket)
+    .leftJoinLateral(document, expression`true`)
+    .leftJoinLateral(revision, expression`true`)
+    .where(and(eq(ticket.id, ticketID), eq(ticket.projectId, projectID)));
   if (!rows[0]) throw new Error("Selected Ticket context unavailable");
   return ticketContext.parse(rows[0]);
 }
@@ -43,15 +80,56 @@ export async function admittedProjectContext(
   projectID: string,
   ticketID: string | null,
 ) {
-  const [project] =
-    await sql`SELECT id,name,default_branch AS "defaultBranch" FROM factory.project WHERE id=${projectID}`;
+  const db = drizzleTransaction(sql);
+  const [project] = await db
+    .select({
+      id: projectModel.id,
+      name: projectModel.name,
+      defaultBranch: projectModel.defaultBranch,
+    })
+    .from(projectModel)
+    .where(eq(projectModel.id, projectID));
   const relationships = ticketID
-    ? await sql`
-    SELECT 'epic'::text AS source,e.id,e.title,e.version::integer AS version,'parent-epic'::text AS relationship FROM factory.epic e
-      JOIN factory.ticket t ON t.epic_id=e.id WHERE t.id=${ticketID} AND t.project_id=${projectID}
-    UNION ALL SELECT 'ticket',t.id,t.title,t.version::integer,CASE WHEN edge.ticket_id=${ticketID} THEN 'prerequisite' ELSE 'dependent' END FROM factory.ticket_dependency edge
-      JOIN factory.ticket t ON t.id=CASE WHEN edge.ticket_id=${ticketID} THEN edge.prerequisite_id ELSE edge.ticket_id END
-      WHERE edge.project_id=${projectID} AND (edge.ticket_id=${ticketID} OR edge.prerequisite_id=${ticketID}) AND t.trashed_at IS NULL LIMIT 40`
+    ? await db
+        .select({
+          source: expression<string>`'epic'::text`,
+          id: epic.id,
+          title: epic.title,
+          version: expression<number>`${epic.version}::integer`,
+          relationship: expression<string>`'parent-epic'::text`,
+        })
+        .from(epic)
+        .innerJoin(ticket, eq(ticket.epicId, epic.id))
+        .where(and(eq(ticket.id, ticketID), eq(ticket.projectId, projectID)))
+        .unionAll(
+          db
+            .select({
+              source: expression<string>`'ticket'::text`,
+              id: ticket.id,
+              title: ticket.title,
+              version: expression<number>`${ticket.version}::integer`,
+              relationship: expression<string>`CASE WHEN ${ticketDependency.ticketId}=${ticketID} THEN 'prerequisite' ELSE 'dependent' END`,
+            })
+            .from(ticketDependency)
+            .innerJoin(
+              ticket,
+              eq(
+                ticket.id,
+                expression<string>`CASE WHEN ${ticketDependency.ticketId}=${ticketID} THEN ${ticketDependency.prerequisiteId} ELSE ${ticketDependency.ticketId} END`,
+              ),
+            )
+            .where(
+              and(
+                eq(ticketDependency.projectId, projectID),
+                or(
+                  eq(ticketDependency.ticketId, ticketID),
+                  eq(ticketDependency.prerequisiteId, ticketID),
+                ),
+                isNull(ticket.trashedAt),
+              ),
+            ),
+        )
+        .limit(40)
     : [];
   return { project, relationships };
 }
