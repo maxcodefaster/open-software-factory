@@ -9,6 +9,7 @@ import postgres from "postgres";
 import * as schema from "./schema";
 
 type DatabaseConnection = postgres.Sql | postgres.TransactionSql;
+export type DatabaseTransaction = postgres.TransactionSql;
 const databases = new WeakMap<DatabaseConnection, PostgresJsDatabase<typeof schema>>();
 const tables = extractTablesRelationalConfig<ExtractTablesWithRelations<typeof schema>>(
   schema,

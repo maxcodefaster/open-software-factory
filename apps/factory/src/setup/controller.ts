@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { projectMembership } from "../../../../packages/db/src/schema";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { ForgeAmbiguousWriteError } from "../../../../packages/forge/src/forge";
 import {
@@ -11,6 +12,7 @@ import {
 } from "../../../../packages/project-domain/src/setup";
 import { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
+import { createProjectIn } from "../projects/creation";
 import type { ImportSecrets } from "./secrets";
 import { starterFiles } from "./starter";
 
@@ -128,10 +130,22 @@ export function createProjectSetupController(options: {
         `${encodeURIComponent(options.forgeOwner)}/${encodeURIComponent(row.slug)}`,
         `${options.forgeOrigin}/`,
       ).toString();
-      await transaction`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${row.projectID},${row.slug},${row.name},${url},${branch},'.devcontainer/devcontainer.json',${row.userID})`;
-      await transaction`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
-        VALUES(${row.projectID},${row.userID},'developer',true,${row.userID})`;
+      await createProjectIn(transaction, {
+        id: row.projectID,
+        slug: row.slug,
+        name: row.name,
+        repositoryUrl: url,
+        defaultBranch: branch,
+        devcontainerPath: ".devcontainer/devcontainer.json",
+        createdBy: row.userID,
+      });
+      await drizzleTransaction(transaction).insert(projectMembership).values({
+        projectId: row.projectID,
+        userId: row.userID,
+        role: "developer",
+        manageProject: true,
+        updatedBy: row.userID,
+      });
       await transaction`UPDATE factory.project_repository_intent SET state='committed',default_branch=${branch},failure=NULL,completed_at=now() WHERE command_id=${row.commandID}`;
       await transaction`UPDATE factory.project_setup_draft SET state='created',project_id=${row.projectID},failure=NULL,updated_at=now()
         WHERE id=${row.setupID} AND user_id=${row.userID} AND command_id=${row.commandID}`;

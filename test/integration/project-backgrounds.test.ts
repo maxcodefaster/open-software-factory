@@ -214,8 +214,8 @@ test("new Projects receive catalogue backgrounds without changing identities or 
       expect(desktopBackgroundKeys.some((key) => key === row?.key)).toBe(true);
       backgrounds.push(fixtureValue(row, "row").key);
     }
-    // Neither creator can see the other's Project. Their independent least-used
-    // catalogues can legitimately select the same painting.
+    // Direct database fixtures use a valid fixed default. Product registration
+    // exercises the shared allocation policy in the first test above.
     expect(backgrounds).toHaveLength(2);
     expect(before.map((row) => row.project.id).sort()).toEqual([projectId, otherProjectId].sort());
     expect(before.map((row) => row.project.created_by).sort()).toEqual(

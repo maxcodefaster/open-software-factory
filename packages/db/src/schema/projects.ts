@@ -64,7 +64,7 @@ export const project = factorySchema.table(
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    desktopBackgroundKey: text("desktop_background_key").notNull(),
+    desktopBackgroundKey: text("desktop_background_key").default("river-landscape").notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     foreignKey({

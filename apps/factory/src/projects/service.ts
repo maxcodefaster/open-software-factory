@@ -1,4 +1,4 @@
-import { and, DrizzleQueryError, desc, eq, exists, notExists, or, sql } from "drizzle-orm";
+import { and, DrizzleQueryError, desc, eq, exists, notExists, or } from "drizzle-orm";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
   administrator,
@@ -16,6 +16,7 @@ import { projectSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { factoryForgeSource } from "../knowledge/forge-source";
+import { createProjectIn, projectFields } from "./creation";
 
 type Database = ReturnType<typeof createDatabase>;
 
@@ -27,16 +28,6 @@ export type ProjectServiceDependencies = {
   forgeOwner: string;
 };
 
-const projectFields = {
-  id: project.id,
-  slug: project.slug,
-  name: project.name,
-  desktopBackgroundKey: project.desktopBackgroundKey,
-  repositoryUrl: project.repositoryUrl,
-  defaultBranch: project.defaultBranch,
-  devcontainerPath: project.devcontainerPath,
-  createdAt: project.createdAt,
-};
 type ProjectRow = Pick<typeof project.$inferSelect, keyof typeof projectFields>;
 
 function isUniqueViolation(cause: unknown): boolean {
@@ -130,23 +121,11 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
         const rows = await dependencies.database.client.begin(async (client) => {
           await client`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
           const db = drizzleTransaction(client);
-          const created = await db
-            .insert(project)
-            .values({
-              id,
-              slug: input.slug,
-              name: input.name,
-              repositoryUrl: input.repositoryUrl,
-              defaultBranch: input.defaultBranch,
-              devcontainerPath: input.devcontainerPath,
-              createdBy: userID,
-              // The database trigger assigns the shared background. Keep its
-              // choice and timestamp defaults rather than synthesizing them.
-              desktopBackgroundKey: sql`default`,
-              createdAt: sql`default`,
-              updatedAt: sql`default`,
-            })
-            .returning(projectFields);
+          const created = await createProjectIn(client, {
+            id,
+            ...input,
+            createdBy: userID,
+          });
           await db.insert(projectMembership).values({
             projectId: id,
             userId: userID,

@@ -216,6 +216,8 @@ database provider per connection pool, not a user's authorization context.
 Its eight planning tables are generated from an explicit Drizzle column allowlist with
 `bun run zero:generate`; `bun run zero:check` rejects drift. Authorization joins remain explicit.
 The generator is development-only, and the browser imports only its checked-in output.
+Project registration and repository setup share `projects/creation.ts`. It selects the shared
+background under a transaction lock; PostgreSQL no longer owns that product selection policy.
 
 Mastra owns Planning orchestration. Explicit provider SDKs remain behind the model adapter because
 Mastra's compatible endpoint route does not preserve every native provider's protocol and reasoning

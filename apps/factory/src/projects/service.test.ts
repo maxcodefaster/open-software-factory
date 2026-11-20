@@ -44,9 +44,17 @@ function fixture(projectRows: unknown[][] = [projectRow], failure?: Error) {
           if (query.includes('from "auth"."user"')) rows = [[userID]];
           else if (query.includes('from "factory"."account_access"')) rows = [[null, null]];
           else if (query.includes('from "factory"."project"'))
-            rows = query.includes('"project_setup_readiness"')
-              ? [[projectID, userID]]
-              : projectRows;
+            rows = query.includes("count(")
+              ? [
+                  ["river-landscape", 1],
+                  ["the-harvesters", 1],
+                  ["mountainous-landscape", 1],
+                  ["gulf-of-marseille", 1],
+                  ["scene-on-the-ice", 1],
+                ]
+              : query.includes('"project_setup_readiness"')
+                ? [[projectID, userID]]
+                : projectRows;
           else if (query.includes('from "factory"."administrator"')) rows = [[userID]];
           else if (query.startsWith('insert into "factory"."project"')) {
             if (failure) throw failure;
@@ -109,7 +117,7 @@ test("project registration uses one locked transaction and preserves database de
   expect(f.queries[lock]?.transaction).toBe(transaction);
   expect(f.queries.indexOf(firstWrite)).toBeGreaterThan(lock);
   expect(writes[0]?.query).toContain("default");
-  expect(writes[0]?.parameters).not.toContain("moonlit-landscape");
+  expect(writes[0]?.parameters).toContain("moonlit-landscape");
   expect(writes[0]?.parameters).not.toContain(createdAt);
   const membership = writes[1];
   const insert = membership?.query.match(/\(([^)]+)\) values \(([^)]+)\)/);
@@ -151,6 +159,7 @@ test("project registration never reports success without a returned row", async 
   const f = fixture([]);
   await expect(f.service.register(userID, input)).rejects.toThrow("Project insert returned no row");
   expect(f.callbacks).toHaveLength(0);
+  expect(f.transactions.at(-1)).toMatch(/^rollback:/);
 });
 
 test("project list keeps membership visibility and timestamp output on standalone reads", async () => {

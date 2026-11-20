@@ -8,8 +8,6 @@ CREATE TRIGGER knowledge_hierarchy_guard BEFORE INSERT OR UPDATE OF id, project_
 
 CREATE TRIGGER knowledge_revision_immutable BEFORE DELETE OR UPDATE ON factory.knowledge_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
-CREATE TRIGGER project_background_assignment BEFORE INSERT ON factory.project FOR EACH ROW EXECUTE FUNCTION factory.assign_project_background();
-
 CREATE TRIGGER project_repository_intent_guard BEFORE UPDATE ON factory.project_repository_intent FOR EACH ROW EXECUTE FUNCTION factory.guard_project_repository_intent();
 
 CREATE TRIGGER requirement_approval_immutable BEFORE DELETE OR UPDATE ON factory.requirement_approval FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();

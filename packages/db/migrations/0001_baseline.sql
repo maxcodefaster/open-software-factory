@@ -219,31 +219,6 @@ END $$;
 -- Native 13-planning-functions.sql.
 -- Planning routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.assign_project_background() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.desktop_background_key IS NULL THEN
-    -- Both registration paths and concurrent creates share one allocation boundary.
-    PERFORM pg_advisory_xact_lock(hashtextextended('factory-project-background-allocation',0));
-    SELECT catalogue.key INTO NEW.desktop_background_key
-    FROM unnest(ARRAY[
-      'river-landscape','the-harvesters','mountainous-landscape',
-      'gulf-of-marseille','scene-on-the-ice','moonlit-landscape'
-    ]) AS catalogue(key)
-    LEFT JOIN factory.project project ON project.desktop_background_key=catalogue.key
-      AND (
-        EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=NEW.created_by)
-        OR EXISTS(SELECT 1 FROM factory.project_membership
-          WHERE project_id=project.id AND user_id=NEW.created_by)
-      )
-    GROUP BY catalogue.key
-    ORDER BY count(project.id), random()
-    LIMIT 1;
-  END IF;
-  RETURN NEW;
-END $$;
-
 CREATE FUNCTION factory.guard_epic_hierarchy() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -3595,7 +3570,7 @@ CREATE TABLE "factory"."project" (
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"desktop_background_key" text NOT NULL,
+	"desktop_background_key" text DEFAULT 'river-landscape' NOT NULL,
 	CONSTRAINT "project_slug_key" UNIQUE("slug"),
 	CONSTRAINT "project_default_branch_check" CHECK ((length(default_branch) >= 1) AND (length(default_branch) <= 200)),
 	CONSTRAINT "project_desktop_background_key_check" CHECK (desktop_background_key = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text, 'gulf-of-marseille'::text, 'scene-on-the-ice'::text, 'moonlit-landscape'::text])),
@@ -5604,8 +5579,6 @@ CREATE TRIGGER knowledge_hierarchy_guard BEFORE INSERT OR UPDATE OF id, project_
 
 CREATE TRIGGER knowledge_revision_immutable BEFORE DELETE OR UPDATE ON factory.knowledge_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
-CREATE TRIGGER project_background_assignment BEFORE INSERT ON factory.project FOR EACH ROW EXECUTE FUNCTION factory.assign_project_background();
-
 CREATE TRIGGER project_repository_intent_guard BEFORE UPDATE ON factory.project_repository_intent FOR EACH ROW EXECUTE FUNCTION factory.guard_project_repository_intent();
 
 CREATE TRIGGER requirement_approval_immutable BEFORE DELETE OR UPDATE ON factory.requirement_approval FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
@@ -5969,5 +5942,5 @@ INSERT INTO factory.installation_maintenance(singleton) VALUES(true);
 INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid());
 
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'14dc3053f0fe002dd24c503c1091239fe2f3a5f26f4a2059d9c126310b40cbf1');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'d2d8dbcc5f9cb796859b34b4dd901ed5308ed89d96fce27e87b8033a62856181');
 COMMIT;
