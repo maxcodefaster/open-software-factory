@@ -1,6 +1,6 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { mcpDigest } from "../../apps/factory/src/mcp/controller";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
@@ -11,7 +11,7 @@ import { factoryProcess } from "./factory-process";
 // Exact synthetic authorization state for the existing native Build/reviewer
 // fixture. Transport/authentication itself uses monitoringFixture below.
 export async function seedMonitoringDelegation(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   context: {
     userID: string;
     projectID: string;

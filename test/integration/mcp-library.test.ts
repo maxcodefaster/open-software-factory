@@ -3,10 +3,262 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
+import { createMCPLibrary, mcpDigest } from "../../apps/factory/src/mcp/controller";
 import type { MCPSecret } from "../../apps/factory/src/mcp/secrets";
 import type { MCPAssignment } from "../../packages/conversation-domain/src/mcp-library";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
+
+test("MCP admission reads native writes and rolls back typed assignments in the caller's PostgreSQL transaction", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect(2);
+  const library = createMCPLibrary(database);
+  const userId = crypto.randomUUID();
+  const projectId = crypto.randomUUID();
+  const conversationId = crypto.randomUUID();
+  const libraryId = crypto.randomUUID();
+  const revisionId = crypto.randomUUID();
+  const credentialEpoch = crypto.randomUUID();
+  const policyVersion = 5_000_000_000;
+  const content = {
+    name: "Owned transaction source",
+    description: "Read within the caller's transaction",
+    endpoint: "https://source.example/mcp",
+    provider: "custom",
+    authentication: "none",
+    roles: ["planning"],
+  };
+  const tools: MCPAssignment["tools"] = [
+    {
+      name: "read",
+      description: "Owned transaction read",
+      inputSchema: { type: "object", properties: {} },
+      digest: "a".repeat(64),
+      readOnlyHint: true,
+    },
+  ];
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${userId},'Owned transaction manager',${`${userId}@transaction.test`},true)`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userId})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectId},${`transaction-${projectId}`},'Owned transaction Project',
+        'https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${userId})`;
+    await database.client`INSERT INTO factory.ticket_conversation(id,project_id,created_by)
+      VALUES(${conversationId},${projectId},${userId})`;
+    const { turn } = await createAgentTurnStore(database).admit(
+      {
+        kind: "project-message",
+        commandId: crypto.randomUUID(),
+        projectId,
+        ticketId: null,
+        conversationId,
+        createdBy: userId,
+        text: "Owned transaction-only admission",
+      },
+      { mode: "investigate", conversationVersion: 1, modelId: "owned-no-inference" },
+    );
+    const rollback = new Error("Owned MCP transaction rollback");
+    async function admission(rollbackAfterWrite: boolean) {
+      await database.client.begin(async (sql) => {
+        await sql`SET LOCAL statement_timeout='5s'`;
+        await sql`INSERT INTO factory.mcp_library(id,scope,owner_id)
+          VALUES(${libraryId},'personal',${userId})`;
+        await sql`INSERT INTO factory.mcp_revision(id,library_id,revision,content,digest,created_by)
+          VALUES(${revisionId},${libraryId},1,${JSON.stringify(content)}::jsonb,${mcpDigest(content)},${userId})`;
+        await sql`INSERT INTO factory.mcp_connection(id,revision_id,state,version,credential_epoch,tools,allowed_tools,authorized_by)
+          VALUES(${libraryId},${revisionId},'ready',${policyVersion},${credentialEpoch},
+            ${JSON.stringify(tools)}::jsonb,${JSON.stringify(tools.map(({ name, digest }) => ({ name, digest })))}::jsonb,${userId})`;
+        await sql`INSERT INTO factory.mcp_choice(library_id,scope,context_id,user_id,role,state,revision_id,version)
+          VALUES(${libraryId},'personal',${projectId},${userId},'planning','enable',${revisionId},1)`;
+        expect(await library.connectionIn(sql, libraryId)).toMatchObject({
+          version: policyVersion,
+          credentialEpoch,
+          tools,
+        });
+        expect(await library.revisionIn(sql, revisionId)).toMatchObject({
+          libraryId,
+          revision: 1,
+          content,
+        });
+        await library.admitIn(sql, turn.id, projectId, userId, "planning");
+        await library.admitIn(sql, turn.id, projectId, userId, "planning");
+        expect([
+          ...(await sql`SELECT connection_id,policy_version::float8 AS policy_version,tools FROM factory.agent_turn_mcp WHERE turn_id=${turn.id}`),
+        ]).toEqual([{ connection_id: libraryId, policy_version: policyVersion, tools }]);
+        expect(await library.assignments(turn.id)).toEqual([]);
+        if (rollbackAfterWrite) throw rollback;
+      });
+    }
+    await expect(admission(true)).rejects.toBe(rollback);
+    expect(await library.assignments(turn.id)).toEqual([]);
+    expect((await library.view(userId, projectId)).entries).toEqual([]);
+    await admission(false);
+    expect(await library.assignments(turn.id)).toEqual([
+      {
+        connectionId: libraryId,
+        credentialEpoch,
+        revisionId,
+        policyVersion,
+        tools,
+        required: false,
+      },
+    ]);
+  } finally {
+    await database.client.end();
+    await fixture.dispose();
+  }
+});
+
+test("MCP saves fence replay digests and concurrent revisions without leaving partial rows", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect();
+  const library = createMCPLibrary(database);
+  const userId = crypto.randomUUID();
+  const input = {
+    libraryId: crypto.randomUUID(),
+    revisionId: crypto.randomUUID(),
+    expectedRevision: 0,
+    scope: "personal",
+    content: {
+      name: "Owned revision source",
+      description: "Fence the exact revision",
+      endpoint: "https://source.example/mcp",
+      provider: "custom",
+      authentication: "none",
+      roles: ["planning"],
+    },
+  };
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${userId},'Owned revision author',${`${userId}@revision.test`},true)`;
+    await library.save(input, userId);
+    await library.save(input, userId);
+    await expect(
+      library.save({ ...input, content: { ...input.content, name: "Changed replay" } }, userId),
+    ).rejects.toThrow("identity was reused");
+    const foreignLibraryId = crypto.randomUUID();
+    await expect(library.save({ ...input, libraryId: foreignLibraryId }, userId)).rejects.toThrow(
+      "identity was reused",
+    );
+    expect([
+      ...(await database.client`SELECT id FROM factory.mcp_library WHERE id=${foreignLibraryId}`),
+    ]).toEqual([]);
+    expect([
+      ...(await database.client`SELECT library_id FROM factory.mcp_library_cover WHERE library_id=${foreignLibraryId}`),
+    ]).toEqual([]);
+    const candidates = ["First", "Second"].map((name) => ({
+      ...input,
+      revisionId: crypto.randomUUID(),
+      expectedRevision: 1,
+      content: { ...input.content, name },
+    }));
+    const results = await Promise.allSettled(
+      candidates.map((value) => library.save(value, userId)),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const entry = fixtureValue((await library.view(userId)).entries[0], "owned revision entry");
+    expect(entry.revisions.map((revision) => revision.revision)).toEqual([2, 1]);
+    expect(entry.revisions[1]).toMatchObject({
+      id: input.revisionId,
+      digest: mcpDigest(input.content),
+    });
+    for (const revision of entry.revisions)
+      expect(revision.digest).toBe(mcpDigest(revision.content));
+  } finally {
+    await database.client.end();
+    await fixture.dispose();
+  }
+});
+
+test("MCP credential recovery supersedes lost writes after base-key, epoch, disconnect or authority changes", async () => {
+  const fixture = await factoryProcess();
+  const database = fixture.connect();
+  const stored = new Map<string, MCPSecret>();
+  let requests = 0;
+  const connections = createMCPConnections(
+    database,
+    {
+      configured: true,
+      read: async (key) => stored.get(key),
+      create: async (key, value) => {
+        stored.set(key, value);
+        throw new Error("Lost owned write acknowledgement");
+      },
+    },
+    "owned-recovery-key",
+    "https://factory.example",
+    async () => {
+      requests++;
+      throw new Error("Unsettled credentials must not dispatch");
+    },
+  );
+  try {
+    for (const change of ["base-key", "epoch", "disconnect", "authority"]) {
+      const userId = crypto.randomUUID();
+      const libraryId = crypto.randomUUID();
+      const revisionId = crypto.randomUUID();
+      const commandId = crypto.randomUUID();
+      await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+        VALUES(${userId},'Owned recovery author',${`${userId}@recovery.test`},true)`;
+      await connections.library.save(
+        {
+          libraryId,
+          revisionId,
+          expectedRevision: 0,
+          scope: "personal",
+          content: {
+            name: `Owned ${change} source`,
+            description: "Reject a stale credential write",
+            endpoint: "https://source.example/mcp",
+            provider: "custom",
+            authentication: "bearer",
+            roles: ["planning"],
+          },
+        },
+        userId,
+      );
+      await expect(
+        connections.connect(libraryId, userId, {
+          commandId,
+          revisionId,
+          expectedVersion: 0,
+          token: "Owned unacknowledged token",
+        }),
+      ).rejects.toThrow("Could not connect");
+      const [pending] = await database.client<
+        Array<{ id: string; epoch: string; state: string }>
+      >`SELECT id,credential_epoch AS epoch,state FROM factory.mcp_secret_write WHERE connection_id=${libraryId}`;
+      if (!pending) throw new Error("Owned credential write intent missing");
+      expect(pending).toMatchObject({ epoch: commandId, state: "intended" });
+      if (change === "base-key")
+        await database.client`UPDATE factory.mcp_connection SET secret_key='owned-replacement'
+          WHERE id=${libraryId}`;
+      else if (change === "epoch")
+        await database.client`UPDATE factory.mcp_connection SET credential_epoch=${crypto.randomUUID()}
+          WHERE id=${libraryId}`;
+      else if (change === "disconnect") await connections.library.disconnect(libraryId, userId);
+      else
+        await database.client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${userId}`;
+      const [before] =
+        await database.client`SELECT secret_key,credential_epoch,state FROM factory.mcp_connection WHERE id=${libraryId}`;
+      if (!before) throw new Error("Owned recovery connection missing");
+      await connections.recover();
+      const [settled] =
+        await database.client`SELECT state FROM factory.mcp_secret_write WHERE id=${pending.id}`;
+      expect(settled?.["state"]).toBe("superseded");
+      expect([
+        ...(await database.client`SELECT secret_key,credential_epoch,state FROM factory.mcp_connection WHERE id=${libraryId}`),
+      ]).toEqual([before]);
+    }
+    expect(requests).toBe(0);
+    expect(stored.size).toBe(4);
+  } finally {
+    await database.client.end();
+    await fixture.dispose();
+  }
+});
 
 test("MCP library keeps private definitions private, grants exact read tools and fences changed or revoked access", async () => {
   const fixture = await factoryProcess();

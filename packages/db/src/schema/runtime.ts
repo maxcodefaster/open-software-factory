@@ -47,7 +47,6 @@ export const runtimeAttempt = factorySchema.table(
     readyAt: timestamp("ready_at", { withTimezone: true }),
     appReadyAt: jsonb("app_ready_at").default({}).notNull(),
     resumeFailedAt: timestamp("resume_failed_at", { withTimezone: true }),
-    substrate: boolean("substrate").default(true).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     index("runtime_attempt_active_isolated_idx")
@@ -126,7 +125,6 @@ export const runtimeAttempt = factorySchema.table(
     ),
     check("runtime_attempt_declared_apps_check", sql`jsonb_typeof(declared_apps) = 'array'::text`),
     check("runtime_attempt_generation_check", sql`generation > 0`),
-    check("runtime_attempt_native_only", sql`(substrate)`),
     check(
       "runtime_attempt_native_owner",
       sql`((workspace_id IS NOT NULL) AND (isolated_kind IS NULL) AND (verification_id IS NULL)) OR ((workspace_id IS NULL) AND (change_id IS NULL) AND (isolated_kind = 'verification'::isolated_runtime_kind) AND (verification_id IS NOT NULL)) OR ((workspace_id IS NULL) AND (change_id IS NULL) AND (isolated_kind = ANY (ARRAY['prebuild'::isolated_runtime_kind, 'staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind])) AND (verification_id IS NULL))`,

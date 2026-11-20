@@ -1,10 +1,10 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { sampleLearningCase } from "../../../../packages/conversation-domain/src/learning";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { learningEnabledIn } from "./authority";
 
 export type LearningSourceArtifact = { reference: string; body: string; truncated: boolean };
 export async function retainLearningArtifactsIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   turn: { id: string; command: { projectId: string; createdBy: string; ticketId?: string | null } },
   artifacts: LearningSourceArtifact[],
 ) {

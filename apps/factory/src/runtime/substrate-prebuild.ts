@@ -126,7 +126,7 @@ export function createSubstratePrebuild(
         { preparationID: string }[]
       >`SELECT provision.preparation_id AS "preparationID"
         FROM factory.substrate_prebuild provision JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id
-        WHERE attempt.id=${attemptID} AND attempt.substrate AND attempt.project_id=${config.projectID}
+        WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
           AND attempt.isolated_kind='prebuild' AND attempt.workspace_id IS NULL`;
       return row ? execution(row.preparationID, await saved(row.preparationID)) : undefined;
     },
@@ -135,7 +135,7 @@ export function createSubstratePrebuild(
         { id: string; state: string; preparationID: string }[]
       >`SELECT attempt.id,attempt.state,provision.preparation_id AS "preparationID" FROM factory.runtime_attempt attempt
         JOIN factory.substrate_prebuild provision ON provision.runtime_attempt_id=attempt.id
-        WHERE attempt.substrate AND attempt.project_id=${config.projectID}
+        WHERE attempt.project_id=${config.projectID}
           AND attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed')`;
       for (const row of rows) {
         const runtime = await this.forAttempt(row.id);

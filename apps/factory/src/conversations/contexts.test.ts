@@ -4,6 +4,7 @@ import {
   activateCodingContextIn,
   archiveContextIn,
   contextCommandIn,
+  contextsIn,
   contextTranscriptIn,
   insertContextIn,
 } from "./contexts";
@@ -54,45 +55,50 @@ test("research, original Coding and fresh Coding use the same locked ordinal/ide
     },
   ];
   let current = contexts[0];
-  const fixture = conversationDatabase(({ text, parameters }) => {
-    if (text.startsWith("SELECT")) {
-      expect(text).toEndWith("FOR UPDATE");
-      expect(parameters).toEqual([conversationID]);
-      return [{ id: conversationID }];
-    }
-    if (!current) throw new Error("Missing test context");
-    const coding = current.kind === "coding" ? current : undefined;
-    expect(text).toContain("COALESCE(MAX(ordinal),0)+1");
-    expect(parameters).toEqual([
-      current.id,
-      conversationID,
-      current.commandID,
-      current.kind,
-      conversationID,
-      current.title,
-      userID,
-      current.mode,
-      coding?.changeID ?? null,
-      coding?.nativeSessionID ?? null,
-      coding?.previousContextID ?? null,
-      coding?.original ?? false,
-      coding?.archive ? JSON.stringify(coding.archive.session) : null,
-      coding?.archive ? JSON.stringify(coding.archive.transcript) : "[]",
-    ]);
-    return [];
-  });
+  const fixture = conversationDatabase(
+    () => {
+      throw new Error("Context persistence must use typed queries");
+    },
+    ({ text, parameters }) => {
+      if (text.startsWith("select")) {
+        expect(text).toEndWith("for update");
+        expect(parameters).toEqual([conversationID]);
+        return [[conversationID]];
+      }
+      if (!current) throw new Error("Missing test context");
+      const coding = current.kind === "coding" ? current : undefined;
+      expect(text).toContain('COALESCE(MAX("ordinal"),0)+1');
+      expect(parameters).toEqual([
+        current.id,
+        conversationID,
+        current.commandID,
+        current.kind,
+        current.mode,
+        conversationID,
+        current.title,
+        userID,
+        coding?.changeID ?? null,
+        coding?.nativeSessionID ?? null,
+        coding?.previousContextID ?? null,
+        coding?.original ?? false,
+        coding?.archive ? JSON.stringify(coding.archive.session) : null,
+        coding?.archive ? JSON.stringify(coding.archive.transcript) : "[]",
+      ]);
+      return [];
+    },
+  );
   const before = JSON.stringify(contexts);
   await fixture.database.client.begin(async (sql) => {
     for (current of contexts) await insertContextIn(sql, current);
   });
   expect(JSON.stringify(contexts)).toBe(before);
   expect(fixture.statements.map(({ text }) => text.split(" ")[0])).toEqual([
-    "SELECT",
-    "INSERT",
-    "SELECT",
-    "INSERT",
-    "SELECT",
-    "INSERT",
+    "select",
+    "insert",
+    "select",
+    "insert",
+    "select",
+    "insert",
   ]);
   expect(fixture.statements.every(({ transaction }) => transaction === 1)).toBe(true);
 });
@@ -112,11 +118,25 @@ test("shared context receipts return exact IDs and reject cross-kind, user, Conv
     let observed: Omit<typeof receipt, "previousID"> & { previousID: string | null } = {
       ...receipt,
     };
-    const fixture = conversationDatabase(({ text, parameters }) => {
-      expect(text).toStartWith("SELECT");
-      expect(parameters).toEqual([commandID]);
-      return [observed];
-    });
+    const fixture = conversationDatabase(
+      () => {
+        throw new Error("Command receipts must use typed queries");
+      },
+      ({ text, parameters }) => {
+        expect(text).toStartWith("select");
+        expect(parameters).toEqual([commandID]);
+        return [
+          [
+            observed.id,
+            observed.conversationID,
+            observed.userID,
+            observed.kind,
+            observed.changeID,
+            observed.previousID,
+          ],
+        ];
+      },
+    );
     const command: Parameters<typeof contextCommandIn>[1] =
       kind === "research"
         ? { conversationID, commandID, createdBy: userID, kind }
@@ -140,7 +160,7 @@ test("shared context receipts return exact IDs and reject cross-kind, user, Conv
         fixture.database.client.begin((sql) => contextCommandIn(sql, command)),
       ).rejects.toThrow("different input");
     }
-    expect(fixture.statements.every(({ text }) => text.startsWith("SELECT"))).toBe(true);
+    expect(fixture.statements.every(({ text }) => text.startsWith("select"))).toBe(true);
   }
 });
 
@@ -152,24 +172,31 @@ test("archive and active pointer writes retain exact payloads without touching h
   };
   const archive = { session: { active_turn_id: transcript.turn.id }, transcript };
   const before = JSON.stringify(archive);
-  const fixture = conversationDatabase(({ text, parameters }) => {
-    if (text.startsWith("UPDATE factory.conversation_context")) {
-      expect(text).toContain("WHERE id=? AND conversation_id=?");
-      expect(parameters).toEqual([
-        JSON.stringify(archive.session),
-        JSON.stringify(transcript),
-        contextID,
-        conversationID,
-      ]);
-    } else {
-      expect(text).toStartWith("UPDATE factory.ticket_conversation SET active_coding_context_id");
-      expect(parameters).toEqual([contextID, conversationID]);
-    }
-    expect(text).not.toMatch(
-      /version|epoch|factory\.conversation_entry|factory\.change_agent_session/,
-    );
-    return [{ id: contextID }];
-  });
+  const fixture = conversationDatabase(
+    () => {
+      throw new Error("Archive writes must use typed queries");
+    },
+    ({ text, parameters }) => {
+      if (text.startsWith('update "factory"."conversation_context"')) {
+        expect(text).toContain('"conversation_context"."id" = $3');
+        expect(text).toContain('"conversation_context"."conversation_id" = $4');
+        expect(parameters).toEqual([
+          JSON.stringify(archive.session),
+          JSON.stringify(transcript),
+          contextID,
+          conversationID,
+        ]);
+      } else {
+        expect(text).toStartWith('update "factory"."ticket_conversation"');
+        expect(text).toContain('"active_coding_context_id" = $1');
+        expect(parameters).toEqual([contextID, conversationID]);
+      }
+      expect(text).not.toMatch(
+        /version|epoch|factory\.conversation_entry|factory\.change_agent_session/,
+      );
+      return [[contextID]];
+    },
+  );
   await fixture.database.client.begin(async (sql) => {
     await archiveContextIn(sql, conversationID, contextID, archive);
     await activateCodingContextIn(sql, conversationID, contextID);
@@ -179,7 +206,12 @@ test("archive and active pointer writes retain exact payloads without touching h
 });
 
 test("a missing or cross-Conversation archive target cannot be treated as saved", async () => {
-  const fixture = conversationDatabase(() => []);
+  const fixture = conversationDatabase(
+    () => {
+      throw new Error("Archive must use typed queries");
+    },
+    () => [],
+  );
   await expect(
     fixture.database.client.begin((sql) =>
       archiveContextIn(sql, conversationID, crypto.randomUUID(), { session: {}, transcript: {} }),
@@ -190,29 +222,42 @@ test("a missing or cross-Conversation archive target cannot be treated as saved"
 test("transcript reads stay scoped to the requested context or the retained original", async () => {
   const contextID = crypto.randomUUID();
   const transcript = { messages: [{ id: "original-message", text: "Retained authored text" }] };
-  const fixture = conversationDatabase(({ text, parameters }) => {
-    expect(text).toContain("WHERE conversation_id=?");
-    expect(text).toContain("?::uuid IS NULL AND original");
-    expect(parameters).toEqual([conversationID, parameters[1], parameters[1]]);
-    return [{ transcript }];
-  });
+  const fixture = conversationDatabase(
+    () => {
+      throw new Error("Transcript must use typed queries");
+    },
+    ({ text, parameters }) => {
+      expect(text).toContain('"conversation_context"."conversation_id" = $1');
+      expect(text).toContain(
+        parameters[1] === true
+          ? '"conversation_context"."original" = $2'
+          : '"conversation_context"."id" = $2',
+      );
+      return [[JSON.stringify(transcript)]];
+    },
+  );
   expect(await contextTranscriptIn(fixture.database.client, conversationID, contextID)).toEqual({
     transcript,
   });
-  expect(fixture.statements.at(-1)?.parameters).toEqual([conversationID, contextID, contextID]);
+  expect(fixture.statements.at(-1)?.parameters).toEqual([conversationID, contextID, 1]);
   expect(await contextTranscriptIn(fixture.database.client, conversationID)).toEqual({
     transcript,
   });
-  expect(fixture.statements.at(-1)?.parameters).toEqual([conversationID, null, null]);
+  expect(fixture.statements.at(-1)?.parameters).toEqual([conversationID, true, 1]);
 });
 
 test("context inserts await the Conversation lock and preserve explicit archive nulls rather than defaults", async () => {
-  const lock = Promise.withResolvers<unknown[]>();
-  const fixture = conversationDatabase(({ text, parameters }) => {
-    if (text.startsWith("SELECT")) return lock.promise;
-    expect(parameters.slice(-2)).toEqual(["null", "null"]);
-    return [];
-  });
+  const lock = Promise.withResolvers<unknown[][]>();
+  const fixture = conversationDatabase(
+    () => {
+      throw new Error("Context inserts must use typed queries");
+    },
+    ({ text }) => {
+      if (text.startsWith("select")) return lock.promise;
+      expect(text).toContain("'null'::jsonb, 'null'::jsonb");
+      return [];
+    },
+  );
   const pending = fixture.database.client.begin((sql) =>
     insertContextIn(sql, {
       id: crypto.randomUUID(),
@@ -228,9 +273,38 @@ test("context inserts await the Conversation lock and preserve explicit archive 
       archive: { session: null, transcript: null },
     }),
   );
+  await Bun.sleep(0);
   expect(fixture.statements).toHaveLength(1);
-  expect(fixture.statements[0]?.text).toEndWith("FOR UPDATE");
-  lock.resolve([{ id: conversationID }]);
+  expect(fixture.statements[0]?.text).toEndWith("for update");
+  lock.resolve([[conversationID]]);
   await pending;
   expect(fixture.statements).toHaveLength(2);
+});
+
+test("context titles use typed correlated history searches and timestamps stay API strings", async () => {
+  const id = crypto.randomUUID();
+  const fixture = conversationDatabase(
+    () => {
+      throw new Error("Context list must use typed queries");
+    },
+    ({ text, parameters }) => {
+      expect(text).toContain("COALESCE(");
+      expect(text).toContain("regexp_replace");
+      expect(text).toContain("IS NOT DISTINCT FROM");
+      expect(text).toContain('"agent_turn"."input"->>\'contextId\'');
+      expect(text).toEndWith('order by "factory"."conversation_context"."ordinal" desc');
+      expect(parameters.at(-1)).toBe(conversationID);
+      return [[id, "research", "Authored question", 3, false, "2026-11-20T12:34:56+01:00"]];
+    },
+  );
+  expect(await fixture.database.client.begin((sql) => contextsIn(sql, conversationID))).toEqual([
+    {
+      id,
+      kind: "research",
+      title: "Authored question",
+      ordinal: 3,
+      original: false,
+      createdAt: "2026-11-20T11:34:56.000Z",
+    },
+  ]);
 });

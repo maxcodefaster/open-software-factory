@@ -1,11 +1,11 @@
 import { advanceCandidateCommit, earlierSubmissionUnchanged, noChangesToSubmit } from "./candidate";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import { createAgentCommitTransport } from "./commit-transport";
 import { bounded, readableError } from "./native-errors";
-import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
+import { createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 
@@ -226,7 +226,7 @@ export function createAgentCandidates(
   }
 
   async function recordCommit(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     active: { changeID: string; runtimeAttemptID: string; ticketTitle: string },
     userID: string,
     turnID: string,

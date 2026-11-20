@@ -1,4 +1,4 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
@@ -11,7 +11,6 @@ import {
   interruptOpenCodeSession,
 } from "./opencode-client";
 import { createStopTransport } from "./stop-transport";
-import type { AgentTurnTransaction } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type StopTarget = { stopID: string | null; turnID: string | null };
@@ -35,7 +34,7 @@ export type RetainedStopTarget = {
 // confirmation of this different Session, nor proof that compute is stopped.
 // Keep this proof pure so controlled maintenance can use the same transaction.
 export async function confirmUndispatchedReviewStopsIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   target?: { changeID: string; stopID: string },
 ) {
   const candidates = await sql<{ changeID: string; stopID: string; workspaceID: string }[]>`
@@ -97,7 +96,7 @@ export async function confirmUndispatchedReviewStopsIn(
 // Read-only cleanup authority for the original Attempt, not permission to stop
 // or dispatch the newly commissioned writer's unassigned input.
 export async function requirePendingWriterHandoffIn(
-  sql: Database["client"] | AgentTurnTransaction,
+  sql: Database["client"] | DatabaseTransaction,
   attemptID: string,
   handoff: PendingWriterHandoff,
 ): Promise<void> {
@@ -105,7 +104,7 @@ export async function requirePendingWriterHandoffIn(
     SELECT attempt.id FROM factory.runtime_attempt attempt
     JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
       AND workspace.project_id=attempt.project_id AND workspace.change_id=attempt.change_id
-      AND workspace.kind='ticket' AND workspace.substrate
+      AND workspace.kind='ticket'
     JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
       AND change.project_id=attempt.project_id
     JOIN factory.ticket ticket ON ticket.id=change.ticket_id AND ticket.id=workspace.ticket_id
@@ -116,7 +115,7 @@ export async function requirePendingWriterHandoffIn(
     JOIN factory.agent_turn turn ON turn.id=writer.turn_id AND turn.change_id=change.id
       AND turn.project_id=change.project_id AND turn.ticket_id=ticket.id
     JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id AND intent.change_id=change.id
-    WHERE attempt.id=${attemptID} AND attempt.substrate
+    WHERE attempt.id=${attemptID}
       AND change.state IN ('starting','active','failed') AND change.cancel_requested_at IS NULL
       AND ticket.trashed_at IS NULL
       AND writer.state='agent-preparing' AND writer.turn_id=${handoff.turnID}
@@ -144,7 +143,7 @@ export async function requirePendingWriterHandoffIn(
 // cancellation. A fresh bootstrap whose native confirmation was fenced cannot
 // have submitted input; every confirmed/reused Session needs actual settlement.
 export async function requireStoppedAgentInputsIn(
-  sql: Database["client"] | AgentTurnTransaction,
+  sql: Database["client"] | DatabaseTransaction,
   attemptID: string,
   handoff?: PendingWriterHandoff,
 ) {
@@ -186,7 +185,7 @@ export function createChangeAgentStop(
     changeID: string,
     target: StopTarget,
     origin?: StopOrigin,
-    sql: Database["client"] | AgentTurnTransaction = database.client,
+    sql: Database["client"] | DatabaseTransaction = database.client,
   ) {
     if (!target.turnID) return;
     const summary =
@@ -531,7 +530,7 @@ export function createChangeAgentStop(
         if (!changes[0]) return false;
         if (pausedBootstrap) {
           const [paused] = await sql`SELECT id FROM factory.runtime_attempt
-            WHERE id=${current.attemptID} AND change_id=${changeID} AND state='paused' AND substrate`;
+            WHERE id=${current.attemptID} AND change_id=${changeID} AND state='paused'`;
           if (!paused) return false;
         }
         if (retainedSettled) {

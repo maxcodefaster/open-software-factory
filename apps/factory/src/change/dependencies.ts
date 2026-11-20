@@ -1,10 +1,10 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 // Call after acquiring the dependent Ticket lock and checking Project access.
 export async function requireDeliveredPrerequisites(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   ticketID: string,
 ) {

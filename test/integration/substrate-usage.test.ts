@@ -106,7 +106,7 @@ test("native allowance uses immutable resource intent and unknown failures do no
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {
@@ -175,7 +175,7 @@ test("the actual Substrate adapter registers an in-flight Resume for Factory shu
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {

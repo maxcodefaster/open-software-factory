@@ -1,7 +1,7 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { ensureConversationIn } from "../../apps/factory/src/conversations/store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -124,7 +124,7 @@ function afterPublication(owned: Owned, after: () => Promise<void>) {
     client: new Proxy(owned.database.client, {
       get(target, property, receiver) {
         if (property === "begin") {
-          return async (callback: (sql: AgentTurnTransaction) => Promise<unknown>) => {
+          return async (callback: (sql: DatabaseTransaction) => Promise<unknown>) => {
             const result = await target.begin(callback);
             if (++transactions === 1) await after();
             return result;

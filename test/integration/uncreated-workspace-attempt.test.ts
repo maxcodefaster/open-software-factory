@@ -16,7 +16,7 @@ test("controller fixtures retain a deterministic uncreated native binding and im
     });
     expect(attemptID).toBe(runtimeIdentity(f.workspaceID, 1).attemptID);
     const [saved] = await f.database.client`
-      SELECT attempt.state,attempt.substrate,binding.atespace,binding.actor_uid,
+      SELECT attempt.state,binding.atespace,binding.actor_uid,
         binding.create_attempted_at,environment.version::float8 AS version
       FROM factory.runtime_attempt attempt
       JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
@@ -24,7 +24,6 @@ test("controller fixtures retain a deterministic uncreated native binding and im
       WHERE attempt.id=${attemptID}`;
     expect(saved).toMatchObject({
       state: "ready",
-      substrate: true,
       atespace: `fa-${attemptID.replaceAll("-", "")}`,
       actor_uid: null,
       create_attempted_at: null,

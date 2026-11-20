@@ -20,9 +20,8 @@ import {
   skillRevisionInput,
   systemSkillSettingsInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { createSkillLibraryController } from "./library-controller";
 
@@ -32,18 +31,18 @@ function digest(content: SkillContent) {
 
 export function createSkillController(database: ReturnType<typeof createDatabase>) {
   const library = createSkillLibraryController(database);
-  async function lock(sql: AgentTurnTransaction, write = false) {
+  async function lock(sql: DatabaseTransaction, write = false) {
     if (write) await sql`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`;
     else await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-skills'))`;
   }
 
-  async function manager(sql: AgentTurnTransaction, userID: string) {
+  async function manager(sql: DatabaseTransaction, userID: string) {
     const [allowed] =
       await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userID} FOR SHARE`;
     if (!allowed) throw new CommandError("forbidden", "System Manager access required");
   }
 
-  async function catalogue(sql: AgentTurnTransaction) {
+  async function catalogue(sql: DatabaseTransaction) {
     const rows = await sql<
       Array<{ id: string; revision: number; content: unknown; digest: string; published: boolean }>
     >`
@@ -57,7 +56,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
     return rows.map((row) => skillRevisionInput.parse(row));
   }
 
-  async function system(sql: AgentTurnTransaction): Promise<SystemSkillSettings> {
+  async function system(sql: DatabaseTransaction): Promise<SystemSkillSettings> {
     const [row] = await sql<Array<{ version: number; planning: unknown; build: unknown }>>`
       SELECT version::float8 AS version, planning, build FROM factory.system_skill_settings WHERE singleton
     `;
@@ -71,7 +70,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
   }
 
   async function inherited(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     projectID: string,
     userID: string,
   ): Promise<InheritedSkillSettings> {
@@ -165,7 +164,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
       });
     },
     library,
-    async getLibraryIn(sql: AgentTurnTransaction, userID: string, projectID?: string) {
+    async getLibraryIn(sql: DatabaseTransaction, userID: string, projectID?: string) {
       await lock(sql, true);
       return library.viewIn(
         sql,
@@ -188,7 +187,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
       return database.client.begin((sql) => this.getLibraryIn(sql, userID, projectID));
     },
     async chooseLibraryIn(
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       value: unknown,
       userID: string,
       projectID?: string,
@@ -302,7 +301,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
     },
     async resolveAssignment(
       role: SkillRole,
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       context: { projectID: string; userID: string; personal?: boolean },
     ) {
       await lock(sql, true);
@@ -333,7 +332,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
     },
     async resolve(
       role: SkillRole,
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       context: { projectID: string; userID: string },
     ) {
       return (await this.resolveAssignment(role, sql, context)).revisionIds;
@@ -406,7 +405,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
         return inherited(sql, projectID, userID);
       });
     },
-    async load(ids: string[], transaction?: AgentTurnTransaction): Promise<SkillRevision[]> {
+    async load(ids: string[], transaction?: DatabaseTransaction): Promise<SkillRevision[]> {
       if (!ids.length) return [];
       const sql = transaction ?? database.client;
       const rows = await sql<

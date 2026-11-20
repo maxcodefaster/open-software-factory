@@ -952,9 +952,9 @@ SELECT json_build_object(
  'requirements',COALESCE((SELECT json_agg(v ORDER BY ordinal DESC) FROM (SELECT id,ordinal,canonical_content AS "canonicalContent",content_digest AS "contentDigest" FROM factory.requirement_revision WHERE ticket_id=${t}) v),'[]'::json),
  'scope',COALESCE((SELECT requirement_revision_id FROM factory.requirement_approval WHERE ticket_id=${t}),
    (SELECT id FROM factory.requirement_revision WHERE ticket_id=${t} ORDER BY ordinal DESC LIMIT 1)),
- 'source',(SELECT json_build_object('eligible',s.owner='service' AND s.writable AND s.service_base IS NOT NULL AND s.checkpoint IS NOT NULL AND w.substrate AND w.project_id=${p}
+ 'source',(SELECT json_build_object('eligible',s.owner='service' AND s.writable AND s.service_base IS NOT NULL AND s.checkpoint IS NOT NULL AND w.project_id=${p}
    AND EXISTS(SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-     WHERE a.workspace_id=s.workspace_id AND a.substrate AND a.state='stopped' AND b.actor_uid=s.actor_uid AND b.deleted_at IS NOT NULL),
+     WHERE a.workspace_id=s.workspace_id AND a.state='stopped' AND b.actor_uid=s.actor_uid AND b.deleted_at IS NOT NULL),
    'sha256',encode(factory.digest(convert_to(to_jsonb(s)::text,'UTF8'),'sha256'),'hex'))
    FROM factory.substrate_source s JOIN factory.development_workspace w ON w.id=s.workspace_id WHERE s.workspace_id=${s}),
  'account',(SELECT row_to_json(v) FROM (SELECT id,email FROM auth."user" WHERE id='${f.account.id}'::uuid) v),

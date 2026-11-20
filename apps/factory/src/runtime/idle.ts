@@ -55,7 +55,7 @@ export function createIdleCompute(
     const candidates = await database.client<
       Array<{ id: string; projectID: string; workspaceID: string; changeID: string | null }>
     >`SELECT id,project_id AS "projectID",workspace_id AS "workspaceID",change_id AS "changeID" FROM factory.runtime_attempt
-      WHERE workspace_id IS NOT NULL AND substrate AND state='ready'
+      WHERE workspace_id IS NOT NULL AND state='ready'
         AND (${after}::uuid IS NULL OR id>${after}::uuid) ORDER BY id LIMIT 64`;
     // Advance even when every candidate is busy. Activity remains ephemeral.
     after = candidates.length === 64 ? (candidates.at(-1)?.id ?? null) : null;

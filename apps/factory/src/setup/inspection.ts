@@ -1,4 +1,4 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
   type SetupInspectionOutput,
@@ -8,7 +8,6 @@ import {
   setupInspectionView,
 } from "../../../../packages/project-domain/src/setup";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { readableCodePath } from "../knowledge/code-read";
 import { factoryForgeSource } from "../knowledge/forge-source";
@@ -63,7 +62,7 @@ export function createSetupInspection(input: {
   model(
     projectID: string,
     userID: string,
-    transaction: AgentTurnTransaction,
+    transaction: DatabaseTransaction,
   ): Promise<{ modelID: string; connectionID: string | null; connectionVersion: number | null }>;
   connection(reference: {
     connectionID: string | null;

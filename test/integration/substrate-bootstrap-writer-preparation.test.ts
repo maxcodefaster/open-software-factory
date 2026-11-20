@@ -127,7 +127,7 @@ test.each([
         }
         if (method === "CreateActor") {
           creates++;
-          actor = f.actor();
+          actor = await f.createdActor();
           return structuredClone(actor);
         }
         if (method === "ResumeActor" && actor) {

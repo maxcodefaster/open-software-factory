@@ -131,8 +131,8 @@ BEGIN
   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native names and bindings cannot be reused'; END IF;
   IF TG_OP='INSERT' THEN
     IF NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.id=NEW.runtime_attempt_id
-      AND a.substrate AND a.state='create-intended' AND a.stop_intended_at IS NULL
-      AND (EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=a.workspace_id AND w.substrate)
+ AND a.state='create-intended' AND a.stop_intended_at IS NULL
+      AND (EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=a.workspace_id)
         OR EXISTS(SELECT 1 FROM factory.substrate_verification p WHERE p.verification_id=a.verification_id
           AND p.runtime_attempt_id=a.id AND p.generation=a.generation AND a.isolated_kind='verification'
           AND a.workspace_id IS NULL AND a.change_id IS NULL AND p.atespace IS NOT NULL
@@ -238,7 +238,7 @@ BEGIN
   IF TG_OP='INSERT' THEN
     IF NEW.owner<>'actor' OR NEW.writer_epoch<>1 OR NOT NEW.writable OR NEW.generation<>0
       OR NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-        WHERE a.workspace_id=NEW.workspace_id AND a.substrate AND b.actor_uid=NEW.actor_uid
+        WHERE a.workspace_id=NEW.workspace_id AND b.actor_uid=NEW.actor_uid
           AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt n WHERE n.workspace_id=a.workspace_id AND n.generation>a.generation))
       THEN RAISE EXCEPTION 'Source requires its current original Actor binding'; END IF;
@@ -259,7 +259,7 @@ BEGIN
         JOIN factory.substrate_workspace provision ON provision.workspace_id=current.workspace_id AND provision.generation=current.generation
         WHERE predecessor.workspace_id=NEW.workspace_id AND predecessor.state='stopped'
           AND old_binding.actor_uid=OLD.actor_uid AND old_binding.deleted_at IS NOT NULL
-          AND current.substrate AND current.state='create-intended' AND current.stop_intended_at IS NULL
+ AND current.state='create-intended' AND current.stop_intended_at IS NULL
           AND new_binding.actor_uid=NEW.actor_uid AND NOT new_binding.create_rejected
           AND new_binding.create_attempted_at IS NOT NULL
           AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
@@ -345,11 +345,11 @@ BEGIN
           SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
           JOIN factory.substrate_source s ON s.workspace_id=a.workspace_id AND s.actor_uid=b.actor_uid
           WHERE a.workspace_id=NEW.workspace_id AND a.generation=previous_generation
-            AND a.substrate AND a.state='stopped' AND b.deleted_at IS NOT NULL
+ AND a.state='stopped' AND b.deleted_at IS NOT NULL
             AND s.owner='service' AND s.writable AND s.checkpoint IS NOT NULL)))
       THEN RAISE EXCEPTION 'Native Workspace successor requires exact cleanup and independent Source'; END IF;
     IF NOT EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id
-      AND w.substrate
+
       AND (w.kind='personal' OR EXISTS (
         SELECT 1 FROM factory.change c JOIN factory.ticket t ON t.id=c.ticket_id
         JOIN factory.branch_create_operation b ON b.change_id=c.id
@@ -374,24 +374,12 @@ BEGIN
   RETURN NEW;
 END $$;
 
-CREATE FUNCTION factory.protect_workspace_runtime_binding() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.substrate IS DISTINCT FROM OLD.substrate THEN
-    RAISE EXCEPTION 'Workspace runtime identity is immutable';
-  END IF;
-  RETURN NEW;
-END $$;
-
 CREATE FUNCTION factory.require_substrate_binding() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF TG_OP='UPDATE' AND NEW.substrate IS DISTINCT FROM OLD.substrate
-    THEN RAISE EXCEPTION 'Runtime engine identity is immutable'; END IF;
-  IF NEW.substrate AND NOT EXISTS(SELECT 1 FROM factory.substrate_binding b WHERE b.runtime_attempt_id=NEW.id AND (
-    EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id AND w.substrate
+  IF NOT EXISTS(SELECT 1 FROM factory.substrate_binding b WHERE b.runtime_attempt_id=NEW.id AND (
+    EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id
       AND w.project_id=NEW.project_id AND w.change_id IS NOT DISTINCT FROM NEW.change_id)
     OR EXISTS(SELECT 1 FROM factory.substrate_verification p JOIN factory.verification v ON v.id=p.verification_id
       JOIN factory.change c ON c.id=v.change_id
@@ -430,7 +418,7 @@ BEGIN
         JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
         JOIN factory.agent_turn turn ON turn.id=intent.turn_id
         JOIN factory.substrate_source source ON source.workspace_id=workspace.id
-        WHERE attempt.id=NEW.runtime_attempt_id AND attempt.substrate AND workspace.substrate
+        WHERE attempt.id=NEW.runtime_attempt_id
           AND attempt.workspace_id=NEW.workspace_id AND attempt.change_id=NEW.change_id
           AND attempt.stop_intended_at IS NULL AND workspace.kind='ticket'
           AND binding.actor_uid=NEW.actor_uid AND binding.checkpoint=NEW.checkpoint
@@ -486,7 +474,7 @@ BEGIN
   IF TG_OP='INSERT' AND NOT EXISTS(
     SELECT 1 FROM factory.runtime_attempt attempt
     JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-    WHERE attempt.id=NEW.runtime_attempt_id AND attempt.substrate AND binding.actor_uid=NEW.actor_uid
+    WHERE attempt.id=NEW.runtime_attempt_id AND binding.actor_uid=NEW.actor_uid
       AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
       AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
       AND binding.observation#>>'{metadata,version}'=NEW.native_version

@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { workspaceWriteAuthorityIn, lockChangeWriterIn } from "../access/change-writer";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 import type { createWorkspaceSourceController } from "./source-controller";
@@ -76,7 +75,7 @@ export function createWorkspaceCollaboration(
   const pending = new Set<Promise<unknown>>();
   let closed = false;
   const authorizeIn = async (
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     workspaceID: string,
     userID: string,
     write = false,
@@ -201,7 +200,7 @@ export function createWorkspaceCollaboration(
     workspaceID: string,
     path: string,
     value: Awaited<ReturnType<typeof load>>,
-    sql: AgentTurnTransaction | typeof database.client = database.client,
+    sql: DatabaseTransaction | typeof database.client = database.client,
   ) {
     const state = Buffer.from(Y.encodeStateAsUpdate(value.doc));
     if (state.length > 8 << 20 || Buffer.byteLength(value.doc.getText("text").toString()) > 2 << 20)

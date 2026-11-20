@@ -1,9 +1,9 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 export async function substrateVerificationAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   verificationID: string,
   userID: string,
@@ -42,7 +42,7 @@ export async function substrateVerificationAuthorityIn(
 }
 
 export async function substrateVerificationGrantIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   verificationID: string,
   attemptID: string,
@@ -64,7 +64,7 @@ export async function substrateVerificationGrantIn(
       AND provision.intent->>'jobHandle'=${scope.jobHandle}
       AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
       AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
-      AND (attempt.id IS NULL OR (attempt.substrate AND attempt.project_id=${projectID}
+      AND (attempt.id IS NULL OR (attempt.project_id=${projectID}
         AND attempt.verification_id=${verificationID} AND attempt.workspace_id IS NULL
         AND attempt.isolated_kind='verification' AND attempt.revision=${scope.revision}
         AND attempt.created_by=${userID} AND attempt.stop_intended_at IS NULL
@@ -75,11 +75,11 @@ export async function substrateVerificationGrantIn(
 }
 
 export async function substrateVerificationPrincipalIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   attemptID: string,
 ) {
   const [attempt] = await sql<{ userID: string }[]>`SELECT created_by AS "userID"
-    FROM factory.runtime_attempt WHERE id=${attemptID} AND substrate AND isolated_kind='verification'
+    FROM factory.runtime_attempt WHERE id=${attemptID} AND isolated_kind='verification'
       AND workspace_id IS NULL AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
   if (!attempt)
     throw new CommandError("forbidden", "Current native Verification principal is unavailable");
@@ -89,7 +89,7 @@ export async function substrateVerificationPrincipalIn(
 // The isolated bootstrap has no personal Workspace or canonical Source grant.
 // Resolve its repository only through the same exact-job authority that admitted
 // this immutable Verification generation; reading never commissions execution.
-export async function substrateVerificationSourceIn(sql: AgentTurnTransaction, attemptID: string) {
+export async function substrateVerificationSourceIn(sql: DatabaseTransaction, attemptID: string) {
   const [scope] = await sql<
     { projectID: string; verificationID: string; userID: string; repository: string }[]
   >`SELECT a.project_id AS "projectID",a.verification_id AS "verificationID",a.created_by AS "userID",project.repository_url AS repository
@@ -97,7 +97,7 @@ export async function substrateVerificationSourceIn(sql: AgentTurnTransaction, a
     JOIN factory.substrate_verification provision ON provision.runtime_attempt_id=a.id
       AND provision.verification_id=a.verification_id AND provision.generation=a.generation
     JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=a.id
-    WHERE a.id=${attemptID} AND a.substrate AND a.isolated_kind='verification' AND a.workspace_id IS NULL
+    WHERE a.id=${attemptID} AND a.isolated_kind='verification' AND a.workspace_id IS NULL
       AND a.state IN ('create-intended','starting') AND a.ready_at IS NULL AND a.stop_intended_at IS NULL
       AND provision.intent->>'repository'=project.repository_url
       AND provision.intent->>'revision'=a.revision

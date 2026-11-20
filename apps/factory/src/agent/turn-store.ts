@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type postgres from "postgres";
 import type { z } from "zod";
 import {
   type AgentTurnCommand,
@@ -9,7 +8,7 @@ import {
   agentTurnCommandInput,
   assertAgentTurnAuthority,
 } from "../../../../packages/conversation-domain/src/agent-turn";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import { freezeAttachmentContextIn } from "../attachments/store";
@@ -45,7 +44,6 @@ function turn(row: TurnRow) {
   };
 }
 export type AgentTurnRecord = ReturnType<typeof turn>;
-export type AgentTurnTransaction = postgres.TransactionSql;
 
 function fingerprint(command: AgentTurnCommand) {
   // Zod's fixed object schemas normalize key order, trim text and fill answer defaults.
@@ -62,7 +60,7 @@ function leaseDuration(milliseconds: number) {
 
 async function currentAuthorityIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   record: AgentTurnRecord,
   renewingPreparation = false,
 ) {
@@ -158,7 +156,7 @@ async function currentAuthorityIn(
             JOIN factory.change change ON change.id=writer.change_id
               AND change.runtime_attempt_id=session.runtime_attempt_id
             JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
-              AND attempt.change_id=change.id AND attempt.substrate
+              AND attempt.change_id=change.id
             JOIN factory.change_agent_turn_intent intent ON intent.turn_id=writer.turn_id
               AND intent.change_id=change.id AND intent.runtime_attempt_id IS NULL
             WHERE writer.change_id=change.id AND writer.turn_id=${record.id}
@@ -182,10 +180,10 @@ async function currentAuthorityIn(
 
 export function createAgentTurnStore(database: Database) {
   async function validateExecutionIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     id: string,
     ownerToken: string,
-    forward?: (sql: AgentTurnTransaction) => Promise<void>,
+    forward?: (sql: DatabaseTransaction) => Promise<void>,
   ) {
     const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
       AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
@@ -201,7 +199,7 @@ export function createAgentTurnStore(database: Database) {
   }
   async function observeCommit(
     id: string,
-    persist: (sql: AgentTurnTransaction, current: boolean) => Promise<void>,
+    persist: (sql: DatabaseTransaction, current: boolean) => Promise<void>,
   ) {
     return database.client.begin(async (sql) => {
       const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
@@ -214,10 +212,10 @@ export function createAgentTurnStore(database: Database) {
   }
 
   async function admitIn(
-    transaction: AgentTurnTransaction,
+    transaction: DatabaseTransaction,
     rawCommand: AgentTurnCommand,
     rawAuthority: z.input<typeof agentTurnAuthorityInput>,
-    persistInput?: (transaction: AgentTurnTransaction, record: AgentTurnRecord) => Promise<void>,
+    persistInput?: (transaction: DatabaseTransaction, record: AgentTurnRecord) => Promise<void>,
   ) {
     const command = agentTurnCommandInput.parse(rawCommand);
     const authority = agentTurnAuthorityInput.parse(rawAuthority);
@@ -321,7 +319,7 @@ export function createAgentTurnStore(database: Database) {
 
   return {
     admitIn,
-    async resumePendingIn(sql: AgentTurnTransaction, id: string) {
+    async resumePendingIn(sql: DatabaseTransaction, id: string) {
       const [row] = await sql<
         TurnRow[]
       >`SELECT * FROM factory.agent_turn WHERE id=${id} AND state='pending' FOR UPDATE`;
@@ -339,14 +337,14 @@ export function createAgentTurnStore(database: Database) {
     async admit(
       command: AgentTurnCommand,
       authority: z.input<typeof agentTurnAuthorityInput>,
-      persistInput?: (transaction: AgentTurnTransaction, record: AgentTurnRecord) => Promise<void>,
+      persistInput?: (transaction: DatabaseTransaction, record: AgentTurnRecord) => Promise<void>,
     ) {
       return database.client.begin((transaction) =>
         admitIn(transaction, command, authority, persistInput),
       );
     },
 
-    async getByCommand(commandID: string, transaction?: AgentTurnTransaction) {
+    async getByCommand(commandID: string, transaction?: DatabaseTransaction) {
       const sql = transaction ?? database.client;
       const rows = await sql<TurnRow[]>`
         SELECT * FROM factory.agent_turn WHERE command_id = ${commandID}
@@ -435,7 +433,7 @@ export function createAgentTurnStore(database: Database) {
     async validateExecution(
       id: string,
       ownerToken: string,
-      forward?: (sql: AgentTurnTransaction) => Promise<void>,
+      forward?: (sql: DatabaseTransaction) => Promise<void>,
     ) {
       return database.client.begin((sql) => validateExecutionIn(sql, id, ownerToken, forward));
     },
@@ -454,7 +452,7 @@ export function createAgentTurnStore(database: Database) {
       return rows[0] ? turn(rows[0]) : null;
     },
 
-    async validateCommit(id: string, forward: (sql: AgentTurnTransaction) => Promise<void>) {
+    async validateCommit(id: string, forward: (sql: DatabaseTransaction) => Promise<void>) {
       return observeCommit(id, async (sql, current) => {
         if (current) await forward(sql);
       });
@@ -547,7 +545,7 @@ export function createAgentTurnStore(database: Database) {
     async markRunning(
       id: string,
       ownerToken: string,
-      persistOutcome: (sql: AgentTurnTransaction) => Promise<void>,
+      persistOutcome: (sql: DatabaseTransaction) => Promise<void>,
     ) {
       return database.client.begin(async (sql) => {
         const admitted = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
@@ -577,7 +575,7 @@ export function createAgentTurnStore(database: Database) {
       ownerToken: string,
       state: "completed" | "failed" | "uncertain",
       summary: string,
-      persistOutcome?: (transaction: AgentTurnTransaction) => Promise<void>,
+      persistOutcome?: (transaction: DatabaseTransaction) => Promise<void>,
     ) {
       if (summary.length > 2_000) throw new Error("Agent outcome summary is too large");
       if (persistOutcome && state !== "completed") {

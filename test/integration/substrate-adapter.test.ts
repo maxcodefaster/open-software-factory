@@ -28,7 +28,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {
@@ -145,10 +145,9 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
     if (method === "CreateActor") {
       creates++;
       const [saved] = await f.database
-        .client`SELECT a.substrate,b.create_attempted_at FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${f.attemptID}`;
-      expect(saved?.["substrate"]).toBe(true);
+        .client`SELECT b.create_attempted_at FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${f.attemptID}`;
       expect(saved?.["create_attempted_at"]).not.toBeNull();
-      actor = f.actor();
+      actor = await f.createdActor();
       throw new SubstrateRPCError("Unavailable", "lost Create reply");
     }
     if (method === "ResumeActor") {
@@ -390,7 +389,7 @@ test("native observation rejects stale version and recreated UID; AlreadyExists 
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {

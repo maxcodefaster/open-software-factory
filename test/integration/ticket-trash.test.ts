@@ -24,13 +24,12 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
             id: string;
             branch: string;
             revision: string;
-            native: boolean;
             atespace: string;
             actor: string;
             intent: unknown;
           }>
         >`SELECT workspace.id,workspace.source_branch AS branch,workspace.source_revision AS revision,
-        workspace.substrate AS native,binding.atespace,binding.actor_name AS actor,binding.intent
+        binding.atespace,binding.actor_name AS actor,binding.intent
         FROM factory.development_workspace workspace
         JOIN factory.runtime_attempt attempt ON attempt.workspace_id=workspace.id AND attempt.id=${owned.attemptID}
         JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
@@ -151,7 +150,8 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
       turnCount: 1,
     });
     expect(await readSource()).toEqual(originalWorkspace);
-    expect(originalWorkspace.native).toBe(true);
+    expect(originalWorkspace.atespace).toBe(`fa-${owned.attemptID.replaceAll("-", "")}`);
+    expect(originalWorkspace.actor).toBe(`runtime-${owned.attemptID.replaceAll("-", "")}`);
     expect(jobs.calls).toHaveLength(afterStop);
     expect(jobs.calls.filter((call) => call.method === "CreateActor")).toHaveLength(1);
     expect(jobs.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);

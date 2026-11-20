@@ -1,4 +1,4 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   createDeveloperIDEClient,
   type DeveloperIDEClient,
@@ -11,12 +11,11 @@ import {
   developerIDEIdentity,
 } from "../../../../packages/workspace-domain/src/developer-ide";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 
 type Database = ReturnType<typeof createDatabase>;
-type IDEQuery = Database["client"] | AgentTurnTransaction;
+type IDEQuery = Database["client"] | DatabaseTransaction;
 interface IDERow {
   userID: string;
   resourceID: string;

@@ -7,14 +7,14 @@ import {
   buildBrowserCallInput,
   buildBrowserResultInput,
 } from "../../../../packages/conversation-domain/src/browser-tools";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { createReviewMedia, maximumRecordingBytes } from "../review/media";
 import { substrateFactoryURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
-import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
+import { createAgentTurnStore } from "./turn-store";
 
 type BrowserSession = {
   id: string;
@@ -153,7 +153,7 @@ export function createBuildBrowserController(
   }
 
   async function currentIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     session: BrowserSession,
     ownerToken: string,
     purpose: "active" | "reopen" | "facade" = "active",
@@ -699,7 +699,6 @@ export function createBuildBrowserController(
           await media.complete(proof, manifest.durationMs, sql, manifest.note);
           await currentIn(sql, session, ownerToken);
         });
-        await media.sweep();
       } catch {
         await recordingFailure(recording.id);
       }

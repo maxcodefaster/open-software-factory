@@ -1,10 +1,8 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
-import {
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "../../apps/factory/src/agent/turn-store";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
@@ -107,7 +105,7 @@ async function dispatchFixture(bootstrap: boolean, starting = false, failure?: E
       client: new Proxy(owned.database.client, {
         get(target, key, receiver) {
           if (key !== "begin") return Reflect.get(target, key, receiver);
-          return (work: (sql: AgentTurnTransaction) => Promise<unknown>) => {
+          return (work: (sql: DatabaseTransaction) => Promise<unknown>) => {
             let dispatch = false;
             // Observe beginDispatch's pending-row lock without replacing the
             // Turn store, executing substitute SQL, or changing its result.

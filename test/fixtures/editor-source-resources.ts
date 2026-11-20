@@ -27,13 +27,13 @@ export async function requireOwnedProjectSourceRetention(
     SELECT 'runtime' AS kind FROM factory.runtime_attempt attempt
       LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
       WHERE attempt.project_id=${projectID}
-        AND (NOT attempt.substrate OR attempt.state<>'stopped' OR binding.deleted_at IS NULL)
+        AND (attempt.state<>'stopped' OR binding.deleted_at IS NULL)
     UNION ALL
     SELECT 'source' AS kind FROM factory.substrate_source source
       JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
       LEFT JOIN factory.substrate_binding binding ON binding.actor_uid=source.actor_uid
       WHERE workspace.project_id=${projectID}
-        AND (NOT workspace.substrate OR source.owner<>'service' OR NOT source.writable
+        AND (source.owner<>'service' OR NOT source.writable
           OR source.generation<1 OR source.checkpoint IS NULL OR source.service_base IS NULL
           OR source.checkpoint->>'actorUID' IS DISTINCT FROM source.actor_uid::text
           OR binding.deleted_at IS NULL)

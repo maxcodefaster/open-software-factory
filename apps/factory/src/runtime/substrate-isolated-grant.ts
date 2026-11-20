@@ -1,6 +1,6 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { runtimeIdentity } from "../../../../packages/runtime-domain/src/identity";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 export type SubstrateIsolatedOwner = {
@@ -25,7 +25,7 @@ export function substrateStagingOwner(projectID: string) {
 // The existing Preview, human-approved promotion and bound publication job own
 // authority. Native provisioning records do not create another product decision.
 export async function substrateIsolatedAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   owner: SubstrateIsolatedOwner,
   userID: string,
@@ -92,7 +92,7 @@ export async function substrateIsolatedAuthorityIn(
     FROM factory.staging_preview preview JOIN factory.project project ON project.id=preview.project_id
     WHERE preview.project_id=${projectID} AND (preview.runtime_attempt_id IS NULL OR preview.runtime_attempt_id=${attemptID}
       OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=predecessor.id
-        WHERE predecessor.id=preview.runtime_attempt_id AND predecessor.substrate
+        WHERE predecessor.id=preview.runtime_attempt_id
           AND predecessor.state='stopped' AND binding.deleted_at IS NOT NULL))
     FOR UPDATE OF preview`;
   if (!scope)
@@ -101,7 +101,7 @@ export async function substrateIsolatedAuthorityIn(
 }
 
 export async function substrateIsolatedGrantIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   owner: SubstrateIsolatedOwner,
   attemptID: string,
@@ -119,7 +119,7 @@ export async function substrateIsolatedGrantIn(
       AND (provision.intent->>'jobHandle') IS NOT DISTINCT FROM ${scope.jobHandle}
       AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
       AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
-      AND (attempt.id IS NULL OR (attempt.substrate AND attempt.project_id=${projectID}
+      AND (attempt.id IS NULL OR (attempt.project_id=${projectID}
         AND attempt.isolated_kind::text=${owner.isolatedKind} AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
         AND attempt.verification_id IS NULL AND attempt.generation=provision.generation
         AND attempt.revision=${scope.revision} AND attempt.created_by=${userID} AND attempt.stop_intended_at IS NULL
@@ -129,9 +129,9 @@ export async function substrateIsolatedGrantIn(
   return { projectID, changeID: null, revision: scope.revision };
 }
 
-export async function substrateIsolatedPrincipalIn(sql: AgentTurnTransaction, attemptID: string) {
+export async function substrateIsolatedPrincipalIn(sql: DatabaseTransaction, attemptID: string) {
   const [attempt] = await sql<{ userID: string }[]>`
-    SELECT created_by AS "userID" FROM factory.runtime_attempt WHERE id=${attemptID} AND substrate
+    SELECT created_by AS "userID" FROM factory.runtime_attempt WHERE id=${attemptID}
       AND isolated_kind IN ('staging','publication') AND workspace_id IS NULL AND change_id IS NULL
       AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
   if (!attempt)
@@ -142,7 +142,7 @@ export async function substrateIsolatedPrincipalIn(sql: AgentTurnTransaction, at
   return attempt.userID;
 }
 
-export async function substrateIsolatedSourceIn(sql: AgentTurnTransaction, attemptID: string) {
+export async function substrateIsolatedSourceIn(sql: DatabaseTransaction, attemptID: string) {
   const [scope] = await sql<
     {
       projectID: string;
@@ -160,7 +160,7 @@ export async function substrateIsolatedSourceIn(sql: AgentTurnTransaction, attem
       AND provision.project_id=attempt.project_id AND provision.generation=attempt.generation
       AND provision.kind=attempt.isolated_kind::text
     JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-    WHERE attempt.id=${attemptID} AND attempt.substrate AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
+    WHERE attempt.id=${attemptID} AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
       AND attempt.isolated_kind IN ('staging','publication') AND attempt.state IN ('create-intended','starting')
       AND attempt.ready_at IS NULL AND attempt.stop_intended_at IS NULL
       AND provision.intent->>'repository'=project.repository_url AND provision.intent->>'revision'=attempt.revision

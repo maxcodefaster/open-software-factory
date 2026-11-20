@@ -1,12 +1,11 @@
 import type { z } from "zod";
 import { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 export async function deliveryDelegationIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   policyID: string,
 ) {

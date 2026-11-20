@@ -24,8 +24,6 @@ CREATE TRIGGER substrate_worker_capacity_identity BEFORE INSERT OR DELETE OR UPD
 
 CREATE TRIGGER substrate_workspace_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_workspace FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_workspace();
 
-CREATE TRIGGER workspace_runtime_identity BEFORE UPDATE ON factory.development_workspace FOR EACH ROW EXECUTE FUNCTION factory.protect_workspace_runtime_binding();
-
 CREATE TRIGGER substrate_input_stop_identity BEFORE INSERT OR UPDATE OR DELETE
 ON factory.substrate_input_stop FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_input_stop();
 

@@ -1,8 +1,7 @@
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 
-type SQL = ReturnType<typeof createDatabase>["client"] | AgentTurnTransaction;
+type SQL = ReturnType<typeof createDatabase>["client"] | DatabaseTransaction;
 export const nativeInputStopAssignment = z.strictObject({
   stopID: z.uuid(),
   attemptID: z.uuid(),
@@ -59,7 +58,7 @@ export async function nativeInputStopIn(sql: SQL, attemptID: string, stopID?: st
     JOIN factory.change_agent_session session ON session.change_id=change.id
     JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
     JOIN factory.agent_turn turn ON turn.id=intent.turn_id
-    WHERE attempt.id=${attemptID} AND attempt.substrate
+    WHERE attempt.id=${attemptID}
       AND (${stopID ?? null}::uuid IS NULL OR operation.stop_id=${stopID ?? null})
       AND attempt.workspace_id=operation.workspace_id AND attempt.change_id=change.id
       AND attempt.stop_intended_at IS NULL AND binding.actor_uid=operation.actor_uid

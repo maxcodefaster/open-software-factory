@@ -18,7 +18,7 @@ import {
 } from "../../../../packages/conversation-domain/src/conversation";
 import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { ProjectAgentProgress } from "../../../../packages/conversation-domain/src/turn-observation";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { technicalPlanningBaseInput } from "../../../../packages/requirement-domain/src/technical-design";
 import {
   createAccessController,
@@ -26,11 +26,7 @@ import {
   projectDevelopmentAuthorityIn,
 } from "../access/controller";
 import { readTurnObservation } from "../agent/turn-observation";
-import {
-  type AgentTurnRecord,
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "../agent/turn-store";
+import { type AgentTurnRecord, createAgentTurnStore } from "../agent/turn-store";
 import { createUsageObservations } from "../agent/usage-observations";
 import { attachmentContextIn, readableAttachmentIn } from "../attachments/store";
 import { createAttachmentTools } from "../attachments/tools";
@@ -317,8 +313,8 @@ export function createProjectAgentController(
     | Omit<Extract<AgentTurnCommand, { kind: "project-message" }>, "conversationId">
     | Omit<Extract<AgentTurnCommand, { kind: "project-answer" }>, "conversationId">;
 
-  async function admitProject(request: ProjectRequest, transaction?: AgentTurnTransaction) {
-    const admit = async (transaction: AgentTurnTransaction) => {
+  async function admitProject(request: ProjectRequest, transaction?: DatabaseTransaction) {
+    const admit = async (transaction: DatabaseTransaction) => {
       await transaction`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${request.commandId}`}))`;
       // A proposal can bind a draft to a Ticket. Resolve replay before looking for a new draft.
       const previous = await turns.getByCommand(request.commandId, transaction);
@@ -1040,7 +1036,7 @@ export function createProjectAgentController(
       return closing;
     },
     async admitTechnicalIn(
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       input: {
         commandID: string;
         projectID: string;

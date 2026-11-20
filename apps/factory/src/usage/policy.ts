@@ -7,9 +7,8 @@ import {
   executionPolicyCommand,
   tighterExecutionPolicy,
 } from "../../../../packages/conversation-domain/src/execution-policy";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { computeAllocationIn } from "./compute";
 
@@ -29,7 +28,7 @@ function fingerprint(value: unknown) {
     .digest("hex");
 }
 
-type SQL = AgentTurnTransaction | ReturnType<typeof createDatabase>["client"];
+type SQL = DatabaseTransaction | ReturnType<typeof createDatabase>["client"];
 export const usageAdmissionLock = "factory-usage-admission";
 export async function lockUsageIn(sql: SQL) {
   await sql`SELECT pg_advisory_xact_lock(hashtext(${usageAdmissionLock}))`;
@@ -95,7 +94,7 @@ export async function codingBudgetIn(sql: SQL, projectID: string | null, continu
 }
 export function createUsagePolicy(database: ReturnType<typeof createDatabase>) {
   async function authorize(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     actorID: string,
     projectID: string | null,
     manage: boolean,

@@ -1,6 +1,6 @@
 import { changeIdentity } from "../../../../packages/change-domain/src/change";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   createForgejoClient,
   ForgeAmbiguousWriteError,
@@ -12,7 +12,6 @@ import {
   type RequirementContent,
 } from "../../../../packages/requirement-domain/src/requirement";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import type { RuntimeAttemptView } from "../runtime/types";
@@ -31,7 +30,7 @@ type ImplementationAdmission = {
   technicalDesignRevisionID?: string;
   codingReasoning?: CodingReasoning;
   expectedBaseSHA?: string;
-  admitBuild(sql: AgentTurnTransaction, changeID: string): Promise<unknown>;
+  admitBuild(sql: DatabaseTransaction, changeID: string): Promise<unknown>;
 };
 
 export function createChangeController(

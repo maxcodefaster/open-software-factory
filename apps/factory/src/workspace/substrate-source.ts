@@ -3,9 +3,8 @@ import { lstat, mkdir, mkdtemp, open, readFile, rename, rmdir, stat } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
 import { substrateRuntimePrincipalIn, substrateWorkspaceGrantIn } from "../runtime/substrate-grant";
@@ -13,7 +12,7 @@ import { nativeInputStopIn } from "../runtime/substrate-input-stop";
 import { createPrivateObjects, objectDigest, type PrivateObjects } from "../storage/objects";
 
 type Database = ReturnType<typeof createDatabase>;
-type SQL = Database["client"] | AgentTurnTransaction;
+type SQL = Database["client"] | DatabaseTransaction;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const sourceBundle = z
   .strictObject({
@@ -266,7 +265,7 @@ export function createSubstrateSources(
       LEFT JOIN factory.change_writer c ON c.change_id=w.change_id
       LEFT JOIN factory.change change ON change.id=w.change_id
       LEFT JOIN factory.ticket ticket ON ticket.id=w.ticket_id
-      WHERE w.id=${row.workspaceID} AND w.substrate`;
+      WHERE w.id=${row.workspaceID}`;
     if (!workspace || (workspace.kind !== "personal" && !workspace.epoch))
       throw new CommandError("unavailable", "Current Source writing authority is unavailable");
     return {
@@ -697,7 +696,7 @@ export function createSubstrateSources(
           actorUID: string;
           generation: number;
         }[]
-      >`SELECT a.workspace_id AS "workspaceID",a.project_id AS "projectID",a.created_by AS "userID",a.parent_connector_token_hash AS token,b.actor_uid::text AS "actorUID",a.generation::float8 AS generation FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.substrate AND w.project_id=a.project_id AND w.change_id IS NOT DISTINCT FROM a.change_id WHERE a.id=${attemptID} AND a.substrate AND a.state='starting' AND a.stop_intended_at IS NULL AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt n WHERE n.workspace_id=a.workspace_id AND n.generation>a.generation)`;
+      >`SELECT a.workspace_id AS "workspaceID",a.project_id AS "projectID",a.created_by AS "userID",a.parent_connector_token_hash AS token,b.actor_uid::text AS "actorUID",a.generation::float8 AS generation FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.project_id=a.project_id AND w.change_id IS NOT DISTINCT FROM a.change_id WHERE a.id=${attemptID} AND a.state='starting' AND a.stop_intended_at IS NULL AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt n WHERE n.workspace_id=a.workspace_id AND n.generation>a.generation)`;
       const auth = request.headers.get("authorization")?.replace(/^Bearer /, "");
       if (
         !attempt ||

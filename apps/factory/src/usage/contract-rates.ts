@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { usageRate } from "../../../../packages/conversation-domain/src/usage";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
 import { executionPolicyCommand, usageRateOverride } from "../../../../packages/db/src/schema";
 import { requireSystemManagerIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { lockUsageIn } from "./policy";
 import { usageCatalogue } from "./rates";
@@ -27,7 +30,7 @@ export function createContractRates(database: ReturnType<typeof createDatabase>)
     );
   }
   return {
-    async get(provider: string, model: string, transaction?: AgentTurnTransaction) {
+    async get(provider: string, model: string, transaction?: DatabaseTransaction) {
       const db = transaction ? drizzleTransaction(transaction) : database.db;
       const [row] = await db
         .select({ rate: usageRateOverride.rate })

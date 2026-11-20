@@ -1,4 +1,4 @@
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./controller";
 
@@ -14,7 +14,7 @@ export type WorkspaceAuthority = {
 
 /** Project membership is always the upper bound, including for an explicitly shared Workspace. */
 export async function workspaceAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   workspaceID: string,
   userID: string,
   write = false,

@@ -1,9 +1,9 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 export async function learningAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   actorId: string,
   scope: {
     projectId: string;
@@ -18,7 +18,7 @@ export async function learningAuthorityIn(
   if (scope.developerOnly) await projectDevelopmentAuthorityIn(sql, actorId, scope.projectId);
 }
 export async function learningEnabledIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectId: string,
   ownerId: string | null,
 ) {

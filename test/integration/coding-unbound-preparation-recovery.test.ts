@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
-import {
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "../../apps/factory/src/agent/turn-store";
-import { createDatabase } from "../../packages/db/src/client";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import {
@@ -585,7 +582,7 @@ test("local cancellation rechecks the intent and Session in a fresh statement af
   owned.database.client = new Proxy(original, {
     get(target, property, receiver) {
       if (property === "begin")
-        return (callback: (sql: AgentTurnTransaction) => unknown) =>
+        return (callback: (sql: DatabaseTransaction) => unknown) =>
           original.begin((sql) =>
             Reflect.apply(callback, undefined, [
               new Proxy(sql, {

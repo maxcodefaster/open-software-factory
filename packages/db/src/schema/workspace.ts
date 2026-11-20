@@ -115,7 +115,6 @@ export const developmentWorkspace = factorySchema.table(
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    substrate: boolean("substrate").default(true).notNull(),
     collaborationEnabled: boolean("collaboration_enabled").default(false).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
@@ -171,7 +170,6 @@ export const developmentWorkspace = factorySchema.table(
       "development_workspace_check",
       sql`((kind = 'personal'::development_workspace_kind) AND (owner_user_id IS NOT NULL) AND (ticket_id IS NULL) AND (change_id IS NULL)) OR ((kind = 'ticket'::development_workspace_kind) AND (owner_user_id IS NULL) AND (ticket_id IS NOT NULL) AND (change_id IS NOT NULL))`,
     ),
-    check("development_workspace_native_only", sql`(substrate)`),
     check(
       "development_workspace_source_branch_check",
       sql`(length(source_branch) >= 1) AND (length(source_branch) <= 200)`,

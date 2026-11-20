@@ -1,7 +1,33 @@
 import { createHash } from "node:crypto";
+import {
+  and,
+  eq,
+  exists,
+  sql as expression,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  notExists,
+  or,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  buildBrowserSession,
+  candidateReview,
+  change,
+  reviewFeedback,
+  reviewMedia,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { reviewChangeIn } from "./controller";
@@ -53,8 +79,10 @@ export function createReviewMedia(
   async function stage(id: string, data: Uint8Array) {
     const sha = createHash("sha256").update(data).digest("hex");
     const proof = { id, sha, bytes: data.byteLength };
-    const [intent] = await database.client<{ state: string; sha: string | null; kind: string }[]>`
-        SELECT state,sha256 AS sha,kind FROM factory.review_media WHERE id=${id}`;
+    const [intent] = await database.db
+      .select({ state: reviewMedia.state, sha: reviewMedia.sha256, kind: reviewMedia.kind })
+      .from(reviewMedia)
+      .where(eq(reviewMedia.id, id));
     if (intent?.sha && intent.sha !== sha)
       throw new CommandError("conflict", "Media identity changed its original content");
     if (intent?.state === "complete" && intent.sha === sha) return proof;
@@ -62,10 +90,17 @@ export function createReviewMedia(
       throw new CommandError("conflict", "Media publication is no longer current");
     if (data.byteLength < 1 || data.byteLength > maximumRecordingBytes)
       throw new CommandError("conflict", "Media publication exceeds its size bound");
-    const [claimed] = await database.client`UPDATE factory.review_media
-      SET sha256=${sha},byte_length=${data.byteLength}
-      WHERE id=${id} AND state IN ('intended','recording') AND (sha256 IS NULL OR sha256=${sha})
-      RETURNING id`;
+    const [claimed] = await database.db
+      .update(reviewMedia)
+      .set({ sha256: sha, byteLength: data.byteLength })
+      .where(
+        and(
+          eq(reviewMedia.id, id),
+          inArray(reviewMedia.state, ["intended", "recording"]),
+          or(isNull(reviewMedia.sha256), eq(reviewMedia.sha256, sha)),
+        ),
+      )
+      .returning({ id: reviewMedia.id });
     if (!claimed)
       throw new CommandError("conflict", "Media publication changed its original content");
     await objects.put(await key(id), data, intent.kind === "still" ? "image/jpeg" : "video/webm");
@@ -74,18 +109,31 @@ export function createReviewMedia(
   async function complete(
     proof: Awaited<ReturnType<typeof stage>>,
     durationMs: number | undefined,
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     note?: "Unchanged frames shortened.",
   ) {
-    const [intent] = await sql<{ state: string; sha: string | null }[]>`
-      SELECT state,sha256 AS sha FROM factory.review_media WHERE id=${proof.id} FOR UPDATE`;
+    const db = drizzleTransaction(sql);
+    const [intent] = await db
+      .select({ state: reviewMedia.state, sha: reviewMedia.sha256 })
+      .from(reviewMedia)
+      .where(eq(reviewMedia.id, proof.id))
+      .for("update");
     if (intent?.sha && intent.sha !== proof.sha)
       throw new CommandError("conflict", "Media identity changed its original content");
     if (intent?.state === "complete" && intent.sha === proof.sha) return;
     if (!intent || !["intended", "recording"].includes(intent.state))
       throw new CommandError("conflict", "Media publication is no longer current");
-    await sql`UPDATE factory.review_media SET state='complete',sha256=${proof.sha},
-      byte_length=${proof.bytes},duration_ms=${durationMs ?? null},reason=${note ?? null},completed_at=now() WHERE id=${proof.id}`;
+    await db
+      .update(reviewMedia)
+      .set({
+        state: "complete",
+        sha256: proof.sha,
+        byteLength: proof.bytes,
+        durationMs: durationMs ?? null,
+        reason: note ?? null,
+        completedAt: expression`now()`,
+      })
+      .where(eq(reviewMedia.id, proof.id));
   }
   async function publish(id: string, data: Uint8Array, durationMs?: number) {
     const proof = await stage(id, data);
@@ -119,18 +167,18 @@ export function createReviewMedia(
       await database.client.begin(async (sql) => {
         await reviewChangeIn(sql, changeID, userID, true);
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`review-media:${id}`}))`;
-        const [previous] = await sql<
-          {
-            changeID: string;
-            author: string;
-            kind: string;
-            context: Record<string, unknown>;
-            sha: string | null;
-            state: string;
-          }[]
-        >`
-          SELECT change_id AS "changeID",created_by AS author,kind,source_context AS context,sha256 AS sha,state
-          FROM factory.review_media WHERE id=${id}`;
+        const db = drizzleTransaction(sql);
+        const [previous] = await db
+          .select({
+            changeID: reviewMedia.changeId,
+            author: reviewMedia.createdBy,
+            kind: reviewMedia.kind,
+            context: expression<Record<string, unknown>>`${reviewMedia.sourceContext}`,
+            sha: reviewMedia.sha256,
+            state: reviewMedia.state,
+          })
+          .from(reviewMedia)
+          .where(eq(reviewMedia.id, id));
         if (previous) {
           if (
             previous.changeID !== changeID ||
@@ -148,20 +196,27 @@ export function createReviewMedia(
         let commitSHA: string | undefined;
         let attemptID: string | null = null;
         if (input.source === "recording") {
-          const [recording] = await sql<
-            {
-              commitSHA: string;
-              attemptID: string | null;
-              duration: number;
-              session: string | null;
-              evidence: unknown[];
-            }[]
-          >`
-            SELECT media.commit_sha AS "commitSHA",media.runtime_attempt_id AS "attemptID",media.duration_ms AS duration,
-              media.browser_session_id AS session,review.evidence
-            FROM factory.review_media media JOIN factory.candidate_review review ON review.id=media.review_id
-            WHERE media.id=${input.recordingId} AND media.change_id=${changeID}
-              AND media.kind='recording' AND media.state IN ('complete','deleted') AND media.sha256 IS NOT NULL FOR SHARE OF media`;
+          const media = alias(reviewMedia, "media");
+          const [recording] = await db
+            .select({
+              commitSHA: media.commitSha,
+              attemptID: media.runtimeAttemptId,
+              duration: expression<number>`${media.durationMs}`,
+              session: media.browserSessionId,
+              evidence: expression<unknown[]>`${candidateReview.evidence}`,
+            })
+            .from(media)
+            .innerJoin(candidateReview, eq(candidateReview.id, media.reviewId))
+            .where(
+              and(
+                eq(media.id, input.recordingId),
+                eq(media.changeId, changeID),
+                eq(media.kind, "recording"),
+                inArray(media.state, ["complete", "deleted"]),
+                isNotNull(media.sha256),
+              ),
+            )
+            .for("share", { of: media });
           commitSHA = recording?.commitSHA;
           attemptID = recording?.attemptID ?? null;
           if (recording && input.timestampMs > recording.duration + 100)
@@ -188,9 +243,12 @@ export function createReviewMedia(
           if (observed)
             page = `Last observed page: ${String(observed["app"])}${String(observed["page"])}`;
         } else {
-          const [attempt] = await sql<{ commitSHA: string }[]>`
-            SELECT revision AS "commitSHA" FROM factory.runtime_attempt
-            WHERE id=${input.attemptId} AND change_id=${changeID}`;
+          const [attempt] = await db
+            .select({ commitSHA: runtimeAttempt.revision })
+            .from(runtimeAttempt)
+            .where(
+              and(eq(runtimeAttempt.id, input.attemptId), eq(runtimeAttempt.changeId, changeID)),
+            );
           commitSHA = attempt?.commitSHA;
           attemptID = input.attemptId;
         }
@@ -206,8 +264,18 @@ export function createReviewMedia(
               }
             : {}),
         };
-        await sql`INSERT INTO factory.review_media(id,change_id,created_by,kind,commit_sha,runtime_attempt_id,source_context,sha256,byte_length,state)
-          VALUES(${id},${changeID},${userID},'still',${commitSHA},${attemptID},${JSON.stringify(sourceContext)}::jsonb,${sha},${data.byteLength},'intended')`;
+        await db.insert(reviewMedia).values({
+          id,
+          changeId: changeID,
+          createdBy: userID,
+          kind: "still",
+          commitSha: commitSHA,
+          runtimeAttemptId: attemptID,
+          sourceContext,
+          sha256: sha,
+          byteLength: data.byteLength,
+          state: "intended",
+        });
       });
       const proof = await stage(id, data);
       await database.client.begin(async (sql) => {
@@ -219,9 +287,16 @@ export function createReviewMedia(
     async read(changeID: string, userID: string, id: string, range: string | null) {
       const media = await database.client.begin(async (sql) => {
         await reviewChangeIn(sql, changeID, userID);
-        const [media] = await sql<{ kind: string; bytes: number }[]>`
-          SELECT kind,byte_length AS bytes FROM factory.review_media
-          WHERE id=${z.uuid().parse(id)} AND change_id=${changeID} AND state='complete'`;
+        const [media] = await drizzleTransaction(sql)
+          .select({ kind: reviewMedia.kind, bytes: expression<number>`${reviewMedia.byteLength}` })
+          .from(reviewMedia)
+          .where(
+            and(
+              eq(reviewMedia.id, z.uuid().parse(id)),
+              eq(reviewMedia.changeId, changeID),
+              eq(reviewMedia.state, "complete"),
+            ),
+          );
         return media;
       });
       if (!media) return new Response(null, { status: 404 });
@@ -270,8 +345,16 @@ export function createReviewMedia(
       try {
         await database.client.begin(async (sql) => {
           await reviewChangeIn(sql, changeID, userID);
-          const [current] = await sql`SELECT id FROM factory.review_media
-            WHERE id=${id} AND change_id=${changeID} AND state='complete'`;
+          const [current] = await drizzleTransaction(sql)
+            .select({ id: reviewMedia.id })
+            .from(reviewMedia)
+            .where(
+              and(
+                eq(reviewMedia.id, id),
+                eq(reviewMedia.changeId, changeID),
+                eq(reviewMedia.state, "complete"),
+              ),
+            );
           if (!current)
             throw new CommandError("unavailable", "Review media is no longer available.");
         });
@@ -282,9 +365,13 @@ export function createReviewMedia(
       return new Response(response.body, { status: requested ? 206 : 200, headers });
     },
     async bytes(id: string) {
-      const [media] = await database.client<{ sha: string; bytes: number }[]>`
-        SELECT sha256 AS sha,byte_length AS bytes FROM factory.review_media
-        WHERE id=${z.uuid().parse(id)} AND state='complete'`;
+      const [media] = await database.db
+        .select({
+          sha: reviewMedia.sha256,
+          bytes: reviewMedia.byteLength,
+        })
+        .from(reviewMedia)
+        .where(and(eq(reviewMedia.id, z.uuid().parse(id)), eq(reviewMedia.state, "complete")));
       if (!media) throw new CommandError("unavailable", "Review media is unavailable.");
       const data = await objects.read(await key(id));
       if (
@@ -297,39 +384,117 @@ export function createReviewMedia(
     async sweep() {
       // Mark first, delete the exact object second. A crash repeats deletion, never resurrects
       // expired media or removes annotation stills.
-      await database.client`UPDATE factory.review_media media SET state='deleted',deleted_at=now()
-        WHERE kind='recording' AND state='complete' AND (
-          EXISTS(SELECT 1 FROM factory.review_media newer WHERE newer.change_id=media.change_id
-            AND newer.kind='recording' AND newer.state='complete'
-            AND (newer.created_at,newer.id)>(media.created_at,media.id))
-          OR EXISTS(SELECT 1 FROM factory.change change WHERE change.id=media.change_id
-            AND change.state IN ('delivered','cancelled')
-            AND COALESCE(change.cancelled_at,change.cancel_requested_at)<now()-interval '30 days'))`;
-      const unattached = await database.client<
-        { id: string; changeID: string }[]
-      >`SELECT id,change_id AS "changeID"
-        FROM factory.review_media media
-        WHERE kind='still' AND created_at<now()-interval '1 day' AND state IN ('intended','complete')
-          AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE media_id=media.id)`;
+      const db = database.db;
+      const newer = alias(reviewMedia, "newer");
+      await db
+        .update(reviewMedia)
+        .set({ state: "deleted", deletedAt: expression`now()` })
+        .where(
+          and(
+            eq(reviewMedia.kind, "recording"),
+            eq(reviewMedia.state, "complete"),
+            or(
+              exists(
+                db
+                  .select({ id: newer.id })
+                  .from(newer)
+                  .where(
+                    and(
+                      eq(newer.changeId, reviewMedia.changeId),
+                      eq(newer.kind, "recording"),
+                      eq(newer.state, "complete"),
+                      expression`(${newer.createdAt},${newer.id})>(${reviewMedia.createdAt},${reviewMedia.id})`,
+                    ),
+                  ),
+              ),
+              exists(
+                db
+                  .select({ id: change.id })
+                  .from(change)
+                  .where(
+                    and(
+                      eq(change.id, reviewMedia.changeId),
+                      inArray(change.state, ["delivered", "cancelled"]),
+                      expression`COALESCE(${change.cancelledAt},${change.cancelRequestedAt})<now()-interval '30 days'`,
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        );
+      const unattached = await db
+        .select({ id: reviewMedia.id, changeID: reviewMedia.changeId })
+        .from(reviewMedia)
+        .where(
+          and(
+            eq(reviewMedia.kind, "still"),
+            lt(reviewMedia.createdAt, expression`now()-interval '1 day'`),
+            inArray(reviewMedia.state, ["intended", "complete"]),
+            notExists(
+              db
+                .select({ id: reviewFeedback.id })
+                .from(reviewFeedback)
+                .where(eq(reviewFeedback.mediaId, reviewMedia.id)),
+            ),
+          ),
+        );
       for (const item of unattached)
         await database.client.begin(async (sql) => {
           // The same Change lock serializes attaching a frame and expiring an
           // unused upload. Recheck after the lock wait, not in its old snapshot.
-          await sql`SELECT id FROM factory.change WHERE id=${item.changeID} FOR UPDATE`;
-          await sql`UPDATE factory.review_media media SET state='deleted',deleted_at=now()
-          WHERE id=${item.id} AND state IN ('intended','complete')
-            AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE media_id=media.id)`;
+          const db = drizzleTransaction(sql);
+          await db
+            .select({ id: change.id })
+            .from(change)
+            .where(eq(change.id, item.changeID))
+            .for("update");
+          await db
+            .update(reviewMedia)
+            .set({ state: "deleted", deletedAt: expression`now()` })
+            .where(
+              and(
+                eq(reviewMedia.id, item.id),
+                inArray(reviewMedia.state, ["intended", "complete"]),
+                notExists(
+                  db
+                    .select({ id: reviewFeedback.id })
+                    .from(reviewFeedback)
+                    .where(eq(reviewFeedback.mediaId, reviewMedia.id)),
+                ),
+              ),
+            );
         });
       // Interrupted publications are recovered as unavailable, never replayed.
-      await database.client`UPDATE factory.review_media media SET state='unavailable',
-        reason='Recording interrupted. Review results are separate.'
-        WHERE kind='recording' AND state IN ('intended','recording')
-          AND NOT EXISTS(SELECT 1 FROM factory.build_browser_session browser JOIN factory.agent_turn turn ON turn.id=browser.turn_id
-            WHERE browser.id=media.browser_session_id AND browser.state IN ('intended','active')
-              AND turn.state IN ('dispatching','running') AND turn.owner_expires_at>now())`;
-      const deleted = await database.client<
-        { id: string }[]
-      >`SELECT id FROM factory.review_media WHERE state IN ('deleted','unavailable')`;
+      await db
+        .update(reviewMedia)
+        .set({
+          state: "unavailable",
+          reason: "Recording interrupted. Review results are separate.",
+        })
+        .where(
+          and(
+            eq(reviewMedia.kind, "recording"),
+            inArray(reviewMedia.state, ["intended", "recording"]),
+            notExists(
+              db
+                .select({ id: buildBrowserSession.id })
+                .from(buildBrowserSession)
+                .innerJoin(agentTurn, eq(agentTurn.id, buildBrowserSession.turnId))
+                .where(
+                  and(
+                    eq(buildBrowserSession.id, reviewMedia.browserSessionId),
+                    inArray(buildBrowserSession.state, ["intended", "active"]),
+                    inArray(agentTurn.state, ["dispatching", "running"]),
+                    gt(agentTurn.ownerExpiresAt, expression`now()`),
+                  ),
+                ),
+            ),
+          ),
+        );
+      const deleted = await db
+        .select({ id: reviewMedia.id })
+        .from(reviewMedia)
+        .where(inArray(reviewMedia.state, ["deleted", "unavailable"]));
       for (const item of deleted) await objects.remove(await key(item.id));
     },
   };

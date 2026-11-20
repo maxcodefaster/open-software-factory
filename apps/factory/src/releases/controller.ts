@@ -1,8 +1,30 @@
 import { timingSafeEqual } from "node:crypto";
+import {
+  and,
+  DrizzleQueryError,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  sql as query,
+} from "drizzle-orm";
 import type { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  projectRelease,
+  project as projectTable,
+  releaseAccess,
+  releaseAttempt,
+  runtimeAttempt,
+  stagingPreview,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
 import type { createForgejoReleases } from "../../../../packages/forge/src/releases";
+import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import {
   externalAccessInput,
   publishRelease,
@@ -26,6 +48,10 @@ import { publicationWorkflow, validatePublicationWorkflow } from "./workflow";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"];
+function isUniqueViolation(cause: unknown): boolean {
+  if (cause instanceof DrizzleQueryError) return isUniqueViolation(cause.cause);
+  return Boolean(cause && typeof cause === "object" && "code" in cause && cause.code === "23505");
+}
 type ReleaseRow = {
   id: string;
   projectID: string;
@@ -65,32 +91,18 @@ export function createReleaseController(options: {
   const { database, forge, publication, secrets, runtime } = options;
   const access = createAccessController(database);
   function repository(url: string): ForgeRepository {
-    const parsed = new URL(url);
-    const parts = parsed.pathname
-      .replace(/\.git$/, "")
-      .split("/")
-      .filter(Boolean);
-    const [owner, name] = parts;
-    const allowed = [new URL(options.apiURL).origin, new URL(options.publicURL).origin];
-    if (
-      !allowed.includes(parsed.origin) ||
-      parsed.username ||
-      parsed.password ||
-      parsed.search ||
-      parsed.hash ||
-      parts.length !== 2 ||
-      owner !== options.owner ||
-      !name
-    )
-      throw new CommandError(
-        "conflict",
-        "Project does not identify the configured Forgejo repository",
-      );
-    return { owner, name };
+    return boundForgeRepositoryFromURL(
+      url,
+      options,
+      () =>
+        new CommandError("conflict", "Project does not identify the configured Forgejo repository"),
+    );
   }
   async function project(projectID: string) {
-    const [row] = await database.client<{ repositoryURL: string; branch: string }[]>`
-      SELECT repository_url AS "repositoryURL", default_branch AS branch FROM factory.project WHERE id=${projectID}`;
+    const [row] = await database.db
+      .select({ repositoryURL: projectTable.repositoryUrl, branch: projectTable.defaultBranch })
+      .from(projectTable)
+      .where(eq(projectTable.id, projectID));
     if (!row) throw new CommandError("not-found", "Project not found");
     return { ...row, repository: repository(row.repositoryURL) };
   }
@@ -114,12 +126,25 @@ export function createReleaseController(options: {
     return contract;
   }
   async function candidate(projectID: string) {
-    const [row] = await database.client<{ sha: string }[]>`
-      SELECT staging.revision AS sha FROM factory.staging_preview staging
-      JOIN factory.runtime_attempt runtime ON runtime.id=staging.runtime_attempt_id AND runtime.state='ready'
-      WHERE staging.project_id=${projectID} AND EXISTS(
-        SELECT 1 FROM factory.current_promotion promotion WHERE promotion.project_id=${projectID}
-        AND promotion.commit_sha=staging.revision AND promotion.state='succeeded')`;
+    const [row] = await database.db
+      .select({ sha: stagingPreview.revision })
+      .from(stagingPreview)
+      .innerJoin(
+        runtimeAttempt,
+        and(
+          eq(runtimeAttempt.id, stagingPreview.runtimeAttemptId),
+          eq(runtimeAttempt.state, "ready"),
+        ),
+      )
+      .where(
+        and(
+          eq(stagingPreview.projectId, projectID),
+          // The native invoker-security view owns latest-promotion selection.
+          query<boolean>`EXISTS(
+            SELECT 1 FROM factory.current_promotion promotion WHERE promotion.project_id=${projectID}
+            AND promotion.commit_sha=${stagingPreview.revision} AND promotion.state='succeeded')`,
+        ),
+      );
     return row?.sha ?? null;
   }
   async function lock<T>(key: string, execute: (sql: SQL) => Promise<T>): Promise<T> {
@@ -141,37 +166,66 @@ export function createReleaseController(options: {
       await projectDevelopmentAuthorityIn(tx, userID, projectID);
     });
   }
-  async function record(id: string) {
-    const [row] = await database.client<ReleaseRow[]>`
-      SELECT release.id,release.project_id AS "projectID",release.version,release.commit_sha AS "commitSHA",
-        release.notes,release.state,release.contract,release.artifacts,release.created_by AS "createdBy",release.ended_at IS NOT NULL AS ended,
-        attempt.id AS "attemptID",attempt.state AS "attemptState",attempt.run_id::float8 AS "runID",
-        attempt.dispatch_intended_at IS NOT NULL AS "dispatchIntended",
-        attempt.runner_id::float8 AS "runnerID",attempt.runner_uuid AS "runnerUUID",
-        attempt.runner_token AS "runnerToken",attempt.job_handle AS "jobHandle",attempt.runtime_attempt_id AS "runtimeAttemptID"
-      FROM factory.project_release release JOIN LATERAL(
-        SELECT * FROM factory.release_attempt WHERE release_id=release.id ORDER BY ordinal DESC LIMIT 1
-      ) attempt ON true WHERE release.id=${id}`;
+  async function record(id: string): Promise<ReleaseRow | undefined> {
+    const attempt = database.db
+      .select()
+      .from(releaseAttempt)
+      .where(eq(releaseAttempt.releaseId, projectRelease.id))
+      .orderBy(desc(releaseAttempt.ordinal))
+      .limit(1)
+      .as("attempt");
+    const [row] = await database.db
+      .select({
+        id: projectRelease.id,
+        projectID: projectRelease.projectId,
+        version: projectRelease.version,
+        commitSHA: projectRelease.commitSha,
+        notes: projectRelease.notes,
+        state: projectRelease.state,
+        contract: query<ReleaseRow["contract"]>`${projectRelease.contract}`,
+        artifacts: query<ReleaseArtifact[]>`${projectRelease.artifacts}`,
+        createdBy: projectRelease.createdBy,
+        ended: query<boolean>`${projectRelease.endedAt} IS NOT NULL`,
+        attemptID: attempt.id,
+        attemptState: attempt.state,
+        runID: attempt.runId,
+        dispatchIntended: query<boolean>`${attempt.dispatchIntendedAt} IS NOT NULL`,
+        runnerID: attempt.runnerId,
+        runnerUUID: attempt.runnerUuid,
+        runnerToken: attempt.runnerToken,
+        jobHandle: attempt.jobHandle,
+        runtimeAttemptID: attempt.runtimeAttemptId,
+      })
+      .from(projectRelease)
+      .innerJoinLateral(attempt, query`true`)
+      .where(eq(projectRelease.id, id));
     return row;
   }
   async function state(row: ReleaseRow, next: string, failure: string | null = null) {
     await database.client.begin(async (sql) => {
-      await sql`UPDATE factory.release_attempt SET state=${next} WHERE id=${row.attemptID}`;
-      await sql`UPDATE factory.project_release SET state=${next},failure=${failure}
-        WHERE id=${row.id} AND state <> 'published'`;
+      const db = drizzleTransaction(sql);
+      await db
+        .update(releaseAttempt)
+        .set({ state: next })
+        .where(eq(releaseAttempt.id, row.attemptID));
+      await db
+        .update(projectRelease)
+        .set({ state: next, failure })
+        .where(and(eq(projectRelease.id, row.id), ne(projectRelease.state, "published")));
     });
     row.state = next;
     row.attemptState = next;
   }
   async function provisionGrant(id: string) {
-    const [grant] = await database.client<
-      {
-        projectID: string;
-        username: string;
-        secretKey: string;
-        scope: "git" | "packages" | "publish";
-      }[]
-    >`SELECT project_id AS "projectID",username,secret_key AS "secretKey",scope FROM factory.release_access WHERE id=${id}`;
+    const [grant] = await database.db
+      .select({
+        projectID: releaseAccess.projectId,
+        username: releaseAccess.username,
+        secretKey: releaseAccess.secretKey,
+        scope: releaseAccess.scope,
+      })
+      .from(releaseAccess)
+      .where(eq(releaseAccess.id, id));
     if (!grant || !secrets.configured)
       throw new CommandError("unavailable", "Release credential store is unavailable");
     let credential = await secrets.read(grant.secretKey);
@@ -211,35 +265,66 @@ export function createReleaseController(options: {
     replacesID?: string,
   ) {
     const username = `fr-${id.replaceAll("-", "")}`;
-    await sql`INSERT INTO factory.release_access(id,project_id,command_id,name,scope,state,username,secret_key,created_by,release_id,replaces_id)
-      VALUES(${id},${projectID},${id},${name},${scope},'pending',${username},${`release-access/${projectID}/${id}`},${userID},${releaseID ?? null},${replacesID ?? null})`;
+    await drizzleTransaction(sql)
+      .insert(releaseAccess)
+      .values({
+        id,
+        projectId: projectID,
+        commandId: id,
+        name,
+        scope,
+        state: "pending",
+        username,
+        secretKey: `release-access/${projectID}/${id}`,
+        createdBy: userID,
+        releaseId: releaseID ?? null,
+        replacesId: replacesID ?? null,
+      });
   }
   async function revoke(id: string) {
-    const [grant] = await database.client<{ projectID: string; username: string; state: string }[]>`
-      SELECT project_id AS "projectID",username,state FROM factory.release_access WHERE id=${id}`;
+    const [grant] = await database.db
+      .select({
+        projectID: releaseAccess.projectId,
+        username: releaseAccess.username,
+        state: releaseAccess.state,
+      })
+      .from(releaseAccess)
+      .where(eq(releaseAccess.id, id));
     if (!grant || grant.state === "revoked") return;
-    await database.client`UPDATE factory.release_access SET state='revoking' WHERE id=${id}`;
+    await database.db
+      .update(releaseAccess)
+      .set({ state: "revoking" })
+      .where(eq(releaseAccess.id, id));
     const context = await project(grant.projectID);
     await publication.revokeMachine(
       context.repository,
       releasePackageOwner(grant.projectID),
       grant.username,
     );
-    await database.client`UPDATE factory.release_access SET state='revoked',revoked_at=now() WHERE id=${id}`;
+    await database.db
+      .update(releaseAccess)
+      .set({ state: "revoked", revokedAt: query`now()` })
+      .where(eq(releaseAccess.id, id));
   }
   async function cleanup(row: ReleaseRow) {
-    const grants = await database.client<{ id: string }[]>`
-      SELECT id FROM factory.release_access WHERE release_id=${row.id} AND state <> 'revoked'`;
+    const grants = await database.db
+      .select({ id: releaseAccess.id })
+      .from(releaseAccess)
+      .where(and(eq(releaseAccess.releaseId, row.id), ne(releaseAccess.state, "revoked")));
     for (const grant of grants) await revoke(grant.id);
     if (row.runtimeAttemptID) await runtime.stop(row.runtimeAttemptID);
     if (row.runnerID) {
       const context = await project(row.projectID);
       await forge.deleteRunner(context.repository, row.runnerID);
     }
-    await database.client`UPDATE factory.release_attempt SET cleaned_at=now(),runner_token=NULL WHERE id=${row.attemptID}`;
+    await database.db
+      .update(releaseAttempt)
+      .set({ cleanedAt: query`now()`, runnerToken: null })
+      .where(eq(releaseAttempt.id, row.attemptID));
   }
   async function reconcileOne(id: string) {
     return lock(id, async (sql) => {
+      const db = drizzleTransaction(sql);
       const row = await record(id);
       if (!row) return;
       if (row.ended || ["published", "failed"].includes(row.state)) {
@@ -279,7 +364,15 @@ export function createReleaseController(options: {
           if (!row.runID) {
             await publication.protectReleaseTags(context.repository);
             await state(row, "dispatching");
-            await sql`UPDATE factory.release_attempt SET dispatch_intended_at=now() WHERE id=${row.attemptID} AND dispatch_intended_at IS NULL`;
+            await db
+              .update(releaseAttempt)
+              .set({ dispatchIntendedAt: query`now()` })
+              .where(
+                and(
+                  eq(releaseAttempt.id, row.attemptID),
+                  isNull(releaseAttempt.dispatchIntendedAt),
+                ),
+              );
             const admitted = await sql.begin(async (tx) => {
               await projectDevelopmentAuthorityIn(tx, row.createdBy, row.projectID);
               return publication.dispatch(
@@ -294,7 +387,10 @@ export function createReleaseController(options: {
               throw new Error("Publication run must contain exactly one job");
             row.runID = admitted.id;
           }
-          await sql`UPDATE factory.release_attempt SET run_id=${row.runID} WHERE id=${row.attemptID}`;
+          await db
+            .update(releaseAttempt)
+            .set({ runId: row.runID })
+            .where(eq(releaseAttempt.id, row.attemptID));
           const observed = await publication.run(context.repository, row.runID);
           if (
             !observed ||
@@ -309,7 +405,10 @@ export function createReleaseController(options: {
               releasePackageOwner(row.projectID)
           )
             throw new Error("Publication run identity differs from its admitted commit and inputs");
-          await sql`UPDATE factory.project_release SET run_id=${observed.id},run_url=${observed.html_url} WHERE id=${row.id}`;
+          await db
+            .update(projectRelease)
+            .set({ runId: observed.id, runUrl: observed.html_url })
+            .where(eq(projectRelease.id, row.id));
           if (["failure", "cancelled", "skipped"].includes(observed.status)) {
             await state(
               row,
@@ -321,9 +420,10 @@ export function createReleaseController(options: {
           }
           if (observed.status !== "success") {
             if (row.runtimeAttemptID) {
-              const [attempt] = await sql<
-                { state: string }[]
-              >`SELECT state FROM factory.runtime_attempt WHERE id=${row.runtimeAttemptID}`;
+              const [attempt] = await db
+                .select({ state: runtimeAttempt.state })
+                .from(runtimeAttempt)
+                .where(eq(runtimeAttempt.id, row.runtimeAttemptID));
               if (attempt && ["failed", "stopped", "cleanup-failed"].includes(attempt.state)) {
                 await state(
                   row,
@@ -347,7 +447,10 @@ export function createReleaseController(options: {
               if (jobs.length !== 1 || !job)
                 throw new Error("Publication job identity is missing or ambiguous");
               row.jobHandle = job.handle;
-              await sql`UPDATE factory.release_attempt SET job_handle=${row.jobHandle} WHERE id=${row.attemptID}`;
+              await db
+                .update(releaseAttempt)
+                .set({ jobHandle: row.jobHandle })
+                .where(eq(releaseAttempt.id, row.attemptID));
             }
             if (!row.runnerUUID) {
               const runner = await forge.registerEphemeralRunner(
@@ -357,15 +460,26 @@ export function createReleaseController(options: {
               row.runnerID = runner.id;
               row.runnerUUID = runner.uuid;
               row.runnerToken = runner.token;
-              await sql`UPDATE factory.release_attempt SET runner_id=${runner.id},runner_uuid=${runner.uuid},runner_token=${runner.token} WHERE id=${row.attemptID}`;
+              await db
+                .update(releaseAttempt)
+                .set({ runnerId: runner.id, runnerUuid: runner.uuid, runnerToken: runner.token })
+                .where(eq(releaseAttempt.id, row.attemptID));
             }
             await state(row, "running");
             await runtime.startPublication(row.attemptID, row.createdBy);
             return;
           }
           await state(row, "checking");
-          const [grant] = await sql<{ id: string; username: string }[]>`
-            SELECT id,username FROM factory.release_access WHERE release_id=${row.id} AND scope='publish' AND state='active'`;
+          const [grant] = await db
+            .select({ id: releaseAccess.id, username: releaseAccess.username })
+            .from(releaseAccess)
+            .where(
+              and(
+                eq(releaseAccess.releaseId, row.id),
+                eq(releaseAccess.scope, "publish"),
+                eq(releaseAccess.state, "active"),
+              ),
+            );
           if (!grant) throw new Error("Publication credential receipt is missing");
           const credential = await secrets.read(`release-publish/${row.projectID}/${grant.id}`);
           if (!credential?.token) throw new Error("Publication credential receipt is unavailable");
@@ -405,7 +519,7 @@ export function createReleaseController(options: {
               "Published artifact references changed after their identities were recorded",
             );
           if (!row.artifacts.length)
-            await sql`UPDATE factory.project_release SET artifacts=${JSON.stringify(artifacts)}::text::jsonb WHERE id=${row.id}`;
+            await db.update(projectRelease).set({ artifacts }).where(eq(projectRelease.id, row.id));
           row.artifacts = artifacts;
         }
         await state(row, "publishing");
@@ -426,8 +540,15 @@ export function createReleaseController(options: {
           );
         });
         await sql.begin(async (tx) => {
-          await tx`UPDATE factory.release_attempt SET state='published' WHERE id=${row.attemptID}`;
-          await tx`UPDATE factory.project_release SET state='published',release_url=${url},published_at=now(),failure=NULL WHERE id=${row.id} AND state='publishing'`;
+          const db = drizzleTransaction(tx);
+          await db
+            .update(releaseAttempt)
+            .set({ state: "published" })
+            .where(eq(releaseAttempt.id, row.attemptID));
+          await db
+            .update(projectRelease)
+            .set({ state: "published", releaseUrl: url, publishedAt: query`now()`, failure: null })
+            .where(and(eq(projectRelease.id, row.id), eq(projectRelease.state, "publishing")));
         });
         row.state = "published";
         await cleanup(row);
@@ -487,16 +608,43 @@ export function createReleaseController(options: {
               : "Release configuration is invalid. Check .factory/release.json and the single-job release workflow.";
         }
       }
-      const releases = await database.client`
-        SELECT id,version,commit_sha AS "commitSHA",state,notes,created_at::text AS "createdAt",
-          published_at::text AS "publishedAt",ended_at::text AS "endedAt",run_url AS "runURL",release_url AS "releaseURL",failure,artifacts
-        FROM factory.project_release WHERE project_id=${projectID} ORDER BY created_at DESC LIMIT 100`;
-      const grants = await database.client`
-        SELECT id,name,scope,state,created_at::text AS "createdAt",username
-        FROM factory.release_access WHERE project_id=${projectID} AND scope <> 'publish' ORDER BY created_at DESC`;
-      const [lastPublished] = await database.client<{ version: string }[]>`
-        SELECT version FROM factory.project_release WHERE project_id=${projectID} AND state='published'
-        ORDER BY published_at DESC,id DESC LIMIT 1`;
+      const releases = await database.db
+        .select({
+          id: projectRelease.id,
+          version: projectRelease.version,
+          commitSHA: projectRelease.commitSha,
+          state: projectRelease.state,
+          notes: projectRelease.notes,
+          createdAt: query<string>`${projectRelease.createdAt}::text`,
+          publishedAt: query<string | null>`${projectRelease.publishedAt}::text`,
+          endedAt: query<string | null>`${projectRelease.endedAt}::text`,
+          runURL: projectRelease.runUrl,
+          releaseURL: projectRelease.releaseUrl,
+          failure: projectRelease.failure,
+          artifacts: projectRelease.artifacts,
+        })
+        .from(projectRelease)
+        .where(eq(projectRelease.projectId, projectID))
+        .orderBy(desc(projectRelease.createdAt))
+        .limit(100);
+      const grants = await database.db
+        .select({
+          id: releaseAccess.id,
+          name: releaseAccess.name,
+          scope: releaseAccess.scope,
+          state: releaseAccess.state,
+          createdAt: query<string>`${releaseAccess.createdAt}::text`,
+          username: releaseAccess.username,
+        })
+        .from(releaseAccess)
+        .where(and(eq(releaseAccess.projectId, projectID), ne(releaseAccess.scope, "publish")))
+        .orderBy(desc(releaseAccess.createdAt));
+      const [lastPublished] = await database.db
+        .select({ version: projectRelease.version })
+        .from(projectRelease)
+        .where(and(eq(projectRelease.projectId, projectID), eq(projectRelease.state, "published")))
+        .orderBy(desc(projectRelease.publishedAt), desc(projectRelease.id))
+        .limit(1);
       const lastVersion = lastPublished?.version;
       return releaseSettingsView.parse({
         canPublish,
@@ -518,18 +666,17 @@ export function createReleaseController(options: {
       const command = publishRelease.parse(input);
       return lock(projectID, async (sql) => {
         await authorize(sql, userID, projectID);
-        const [previous] = await sql<
-          {
-            id: string;
-            commitSHA: string;
-            version: string;
-            notes: string;
-            createdBy: string;
-            projectID: string;
-          }[]
-        >`
-          SELECT id,commit_sha AS "commitSHA",version,notes,created_by AS "createdBy",project_id AS "projectID"
-          FROM factory.project_release WHERE command_id=${command.commandID}`;
+        const [previous] = await drizzleTransaction(sql)
+          .select({
+            id: projectRelease.id,
+            commitSHA: projectRelease.commitSha,
+            version: projectRelease.version,
+            notes: projectRelease.notes,
+            createdBy: projectRelease.createdBy,
+            projectID: projectRelease.projectId,
+          })
+          .from(projectRelease)
+          .where(eq(projectRelease.commandId, command.commandID));
         if (previous) {
           if (
             previous.projectID !== projectID ||
@@ -558,13 +705,24 @@ export function createReleaseController(options: {
         try {
           await sql.begin(async (tx) => {
             await projectDevelopmentAuthorityIn(tx, userID, projectID);
-            await tx`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,workflow,contract,notes,created_by)
-              VALUES(${id},${projectID},${command.commandID},${command.version},${command.commitSHA},
-              ${contract ? publicationWorkflow : null},${contract ? JSON.stringify(contract) : null}::text::jsonb,${command.notes},${userID})`;
-            await tx`INSERT INTO factory.release_attempt(id,release_id,command_id,ordinal) VALUES(${id},${id},${command.commandID},1)`;
+            const db = drizzleTransaction(tx);
+            await db.insert(projectRelease).values({
+              id,
+              projectId: projectID,
+              commandId: command.commandID,
+              version: command.version,
+              commitSha: command.commitSHA,
+              workflow: contract ? publicationWorkflow : null,
+              contract,
+              notes: command.notes,
+              createdBy: userID,
+            });
+            await db
+              .insert(releaseAttempt)
+              .values({ id, releaseId: id, commandId: command.commandID, ordinal: 1 });
           });
         } catch (cause) {
-          if ((cause as { code?: string }).code === "23505")
+          if (isUniqueViolation(cause))
             throw new CommandError(
               "conflict",
               "This version exists or another publication still needs attention",
@@ -590,9 +748,14 @@ export function createReleaseController(options: {
           throw new CommandError("not-found", "Release not found");
         if (row.state === "published")
           throw new CommandError("conflict", "A published release cannot be withdrawn");
-        await sql`UPDATE factory.project_release SET ended_at=COALESCE(ended_at,now()),
-          failure='Publication ended by a human. Previously published content has not been rolled back; an unconfirmed outcome remains unconfirmed.'
-          WHERE id=${id} AND state <> 'published'`;
+        await drizzleTransaction(sql)
+          .update(projectRelease)
+          .set({
+            endedAt: query`COALESCE(${projectRelease.endedAt},now())`,
+            failure:
+              "Publication ended by a human. Previously published content has not been rolled back; an unconfirmed outcome remains unconfirmed.",
+          })
+          .where(and(eq(projectRelease.id, id), ne(projectRelease.state, "published")));
         await cleanup(row);
       });
     },
@@ -607,18 +770,17 @@ export function createReleaseController(options: {
         await authorize(sql, userID, projectID, true);
         if (!secrets.configured || !publication.configuredAccess)
           throw new CommandError("unavailable", "Machine access is unavailable");
-        const [existing] = await sql<
-          {
-            projectID: string;
-            createdBy: string;
-            name: string;
-            scope: string;
-            username: string;
-            replacesID: string | null;
-          }[]
-        >`
-          SELECT project_id AS "projectID",created_by AS "createdBy",name,scope,username,replaces_id AS "replacesID"
-          FROM factory.release_access WHERE command_id=${command.commandID}`;
+        const [existing] = await drizzleTransaction(sql)
+          .select({
+            projectID: releaseAccess.projectId,
+            createdBy: releaseAccess.createdBy,
+            name: releaseAccess.name,
+            scope: releaseAccess.scope,
+            username: releaseAccess.username,
+            replacesID: releaseAccess.replacesId,
+          })
+          .from(releaseAccess)
+          .where(eq(releaseAccess.commandId, command.commandID));
         if (existing) {
           if (
             existing.projectID !== projectID ||
@@ -652,12 +814,18 @@ export function createReleaseController(options: {
               command.scope,
               command.commandID,
             );
-            await tx`UPDATE factory.release_access SET state='active',token_id=${token.id} WHERE id=${command.commandID}`;
+            await drizzleTransaction(tx)
+              .update(releaseAccess)
+              .set({ state: "active", tokenId: token.id })
+              .where(eq(releaseAccess.id, command.commandID));
             if (replacesID) await revoke(replacesID);
             return { id: command.commandID, username: credential.username, token: token.sha1 };
           });
         } catch (cause) {
-          await sql`UPDATE factory.release_access SET state='revoking' WHERE id=${command.commandID}`;
+          await drizzleTransaction(sql)
+            .update(releaseAccess)
+            .set({ state: "revoking" })
+            .where(eq(releaseAccess.id, command.commandID));
           await revoke(command.commandID).catch(() => {});
           throw cause;
         }
@@ -666,16 +834,35 @@ export function createReleaseController(options: {
     async rotateAccess(userID: string, projectID: string, id: string, commandID: string) {
       await access.requireProject(userID, projectID, true);
       await access.requireDevelopment(userID, projectID);
-      const [previous] = await database.client<{ name: string; scope: "git" | "packages" }[]>`
-        SELECT name,scope FROM factory.release_access WHERE id=${id} AND project_id=${projectID} AND scope <> 'publish'`;
+      const [previous] = await database.db
+        .select({
+          name: releaseAccess.name,
+          scope: query<"git" | "packages">`${releaseAccess.scope}`,
+        })
+        .from(releaseAccess)
+        .where(
+          and(
+            eq(releaseAccess.id, id),
+            eq(releaseAccess.projectId, projectID),
+            ne(releaseAccess.scope, "publish"),
+          ),
+        );
       if (!previous) throw new CommandError("not-found", "Machine access not found");
       return this.createAccess(userID, projectID, { commandID, ...previous }, id);
     },
     async revokeAccess(userID: string, projectID: string, id: string) {
       return lock(projectID, async (sql) => {
         await authorize(sql, userID, projectID, true);
-        const [grant] =
-          await sql`SELECT id FROM factory.release_access WHERE id=${id} AND project_id=${projectID} AND scope <> 'publish'`;
+        const [grant] = await drizzleTransaction(sql)
+          .select({ id: releaseAccess.id })
+          .from(releaseAccess)
+          .where(
+            and(
+              eq(releaseAccess.id, id),
+              eq(releaseAccess.projectId, projectID),
+              ne(releaseAccess.scope, "publish"),
+            ),
+          );
         if (!grant) throw new CommandError("not-found", "Machine access not found");
         await revoke(id);
       });
@@ -691,11 +878,14 @@ export function createReleaseController(options: {
         !timingSafeEqual(suppliedBytes, expectedBytes)
       )
         return new Response(null, { status: 403 });
-      const [link] = await database.client<{ releaseID: string }[]>`
-        SELECT release_id AS "releaseID" FROM factory.release_attempt WHERE id=${attemptID}`;
+      const [link] = await database.db
+        .select({ releaseID: releaseAttempt.releaseId })
+        .from(releaseAttempt)
+        .where(eq(releaseAttempt.id, attemptID));
       if (!link) return new Response(null, { status: 403 });
       // The same cross-process lock fences both credential issuance and End attempt.
       return lock(link.releaseID, async (sql) => {
+        const db = drizzleTransaction(sql);
         const row = await record(link.releaseID);
         if (
           !row ||
@@ -711,8 +901,17 @@ export function createReleaseController(options: {
           return new Response(null, { status: 409 });
         const contract = row.contract;
         await authorize(sql, row.createdBy, row.projectID);
-        const [runtime] =
-          await sql`SELECT id FROM factory.runtime_attempt WHERE id=${row.runtimeAttemptID} AND state IN ('starting','ready') AND stop_intended_at IS NULL AND isolated_kind='publication'`;
+        const [runtime] = await db
+          .select({ id: runtimeAttempt.id })
+          .from(runtimeAttempt)
+          .where(
+            and(
+              eq(runtimeAttempt.id, row.runtimeAttemptID),
+              inArray(runtimeAttempt.state, ["starting", "ready"]),
+              isNull(runtimeAttempt.stopIntendedAt),
+              eq(runtimeAttempt.isolatedKind, "publication"),
+            ),
+          );
         const context = await project(row.projectID);
         const actual = await publication.run(context.repository, row.runID);
         if (
@@ -730,9 +929,16 @@ export function createReleaseController(options: {
           !(await publication.attestTask(context.repository, row.jobHandle, actual))
         )
           return new Response(null, { status: 403 });
-        let [grant] = await sql<
-          { id: string }[]
-        >`SELECT id FROM factory.release_access WHERE release_id=${row.id} AND scope='publish' AND state IN ('pending','active')`;
+        let [grant] = await db
+          .select({ id: releaseAccess.id })
+          .from(releaseAccess)
+          .where(
+            and(
+              eq(releaseAccess.releaseId, row.id),
+              eq(releaseAccess.scope, "publish"),
+              inArray(releaseAccess.state, ["pending", "active"]),
+            ),
+          );
         if (!grant) {
           grant = { id: crypto.randomUUID() };
           await grantIntent(
@@ -786,10 +992,16 @@ export function createReleaseController(options: {
             token: token.sha1,
           };
           await secrets.create(`release-publish/${row.projectID}/${grant.id}`, credential);
-          await sql`UPDATE factory.release_access SET token_id=${token.id} WHERE id=${grant.id}`;
+          await db
+            .update(releaseAccess)
+            .set({ tokenId: token.id })
+            .where(eq(releaseAccess.id, grant.id));
         }
         // Recover a lost DB acknowledgement after the immutable secret was sealed.
-        await sql`UPDATE factory.release_access SET state='active' WHERE id=${grant.id}`;
+        await db
+          .update(releaseAccess)
+          .set({ state: "active" })
+          .where(eq(releaseAccess.id, grant.id));
         return Response.json(
           {
             username: credential.username,
@@ -801,18 +1013,51 @@ export function createReleaseController(options: {
       });
     },
     async recover() {
-      const rows = await database.client<{ id: string }[]>`
-        SELECT id FROM factory.project_release WHERE state NOT IN ('published','failed') AND ended_at IS NULL
-        OR EXISTS(SELECT 1 FROM factory.release_attempt attempt WHERE attempt.release_id=project_release.id AND attempt.cleaned_at IS NULL)`;
+      const db = database.db;
+      const rows = await db
+        .select({ id: projectRelease.id })
+        .from(projectRelease)
+        .where(
+          or(
+            and(
+              notInArray(projectRelease.state, ["published", "failed"]),
+              isNull(projectRelease.endedAt),
+            ),
+            exists(
+              db
+                .select({ id: releaseAttempt.id })
+                .from(releaseAttempt)
+                .where(
+                  and(
+                    eq(releaseAttempt.releaseId, projectRelease.id),
+                    isNull(releaseAttempt.cleanedAt),
+                  ),
+                ),
+            ),
+          ),
+        );
       for (const row of rows)
         await reconcileOne(row.id).catch(reportFailure("Release reconciliation"));
-      const grants = await database.client<
-        { id: string; projectID: string }[]
-      >`SELECT id,project_id AS "projectID" FROM factory.release_access WHERE state IN ('pending','revoking','uncertain') AND scope <> 'publish'`;
+      const grants = await db
+        .select({ id: releaseAccess.id, projectID: releaseAccess.projectId })
+        .from(releaseAccess)
+        .where(
+          and(
+            inArray(releaseAccess.state, ["pending", "revoking", "uncertain"]),
+            ne(releaseAccess.scope, "publish"),
+          ),
+        );
       for (const grant of grants)
         await lock(grant.projectID, async (sql) => {
-          const [current] =
-            await sql`SELECT id FROM factory.release_access WHERE id=${grant.id} AND state IN ('pending','revoking','uncertain')`;
+          const [current] = await drizzleTransaction(sql)
+            .select({ id: releaseAccess.id })
+            .from(releaseAccess)
+            .where(
+              and(
+                eq(releaseAccess.id, grant.id),
+                inArray(releaseAccess.state, ["pending", "revoking", "uncertain"]),
+              ),
+            );
           if (current) await revoke(grant.id);
         }).catch(reportFailure("Release access revocation"));
     },

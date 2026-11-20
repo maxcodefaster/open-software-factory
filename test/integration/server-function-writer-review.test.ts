@@ -1,8 +1,8 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createWriterService } from "../../apps/factory/src/access/writer-service";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { writerViewSchema } from "../../apps/factory/src/api-contracts";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { CommandError } from "../../apps/factory/src/command-error";
@@ -115,7 +115,7 @@ test("compiled Writer and Review commands preserve actors, epochs, immutable bat
       },
       async dispatch(id, userID, input, admit) {
         record("send", [id, userID, input]);
-        const turnId = await admit({} as AgentTurnTransaction, "Frozen correction", commandID);
+        const turnId = await admit({} as DatabaseTransaction, "Frozen correction", commandID);
         reviewAdmitted.resolve();
         await reviewRelease.promise;
         return { turnId };

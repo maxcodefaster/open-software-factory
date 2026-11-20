@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   type EnvironmentBundle,
   type EnvironmentManifest,
@@ -12,7 +12,6 @@ import {
   replaceEnvironment,
 } from "../../../../packages/project-domain/src/environment";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { type EnvironmentSecrets, emptyEnvironment, type StoredEnvironment } from "./openbao";
 
@@ -41,14 +40,14 @@ export function createEnvironmentController(
       "Environment settings changed or a save is pending. Reload or retry the pending save.",
     );
   async function lock(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     projectID: string,
     environment: ProjectEnvironment,
   ) {
     await sql`SELECT pg_advisory_xact_lock(hashtext(${`project-environment:${projectID}:${environment}`}))`;
   }
   async function current(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     projectID: string,
     environment: ProjectEnvironment,
   ): Promise<SettingsRow> {
@@ -57,7 +56,7 @@ export function createEnvironmentController(
       WHERE project_id=${projectID} AND environment=${environment}`;
     return row ?? { version: 0, manifest: { variables: [], registries: [] }, secretKey: null };
   }
-  async function writeRow(sql: AgentTurnTransaction, commandID: string) {
+  async function writeRow(sql: DatabaseTransaction, commandID: string) {
     const [row] = await sql<WriteRow[]>`SELECT command_id AS "commandID", project_id AS "projectID",
       environment, base_version::float8 AS "baseVersion", fingerprint, manifest,
       secret_key AS "secretKey", state, created_by AS "createdBy"

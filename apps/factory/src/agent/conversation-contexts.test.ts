@@ -47,23 +47,8 @@ function codingContextFixture() {
         return [{ projectID, available: state.writer.available }];
       if (text.startsWith("SELECT state,epoch")) return [state.writer];
       if (text.startsWith("SELECT ticket_id")) return [{ ticketID }];
-      if (text.startsWith("SELECT id FROM factory.ticket")) return [{ id: ticketID }];
-      if (text.includes("pg_advisory_xact_lock")) return [];
-      if (text.startsWith('SELECT id,project_id AS "projectId"'))
-        return [
-          {
-            id: conversationID,
-            projectId: projectID,
-            ticketId: ticketID,
-            mode: "build",
-            version: 11,
-            activeCodingContextId: state.contextID,
-          },
-        ];
       if (text.startsWith("SELECT conversation.id"))
         return [{ id: conversationID, contextID: state.contextID }];
-      if (text.includes("FROM factory.conversation_context WHERE command_id"))
-        return [...contextRows.values()].filter((row) => row.commandID === parameters[0]);
       if (text.startsWith("SELECT to_jsonb(session)")) {
         expect(text).toContain("state IN ('committed','stopped') AND NOT stop_pending");
         expect(text).toContain("factory.agent_turn");
@@ -89,21 +74,53 @@ function codingContextFixture() {
             ]
           : [];
       }
-      if (text.startsWith("SELECT id FROM factory.ticket_conversation")) {
-        expect(parameters).toEqual([conversationID]);
-        expect(text).toEndWith("FOR UPDATE");
-        return [{ id: conversationID }];
+      if (text.startsWith("UPDATE factory.change_agent_session")) {
+        expect(parameters).toEqual([
+          state.contextID ? `ses_factory_${state.contextID.replaceAll("-", "")}` : null,
+          parameters[0],
+          changeID,
+        ]);
+        expect(text).toContain("native_session_confirmed_at=NULL");
+        expect(text).toContain("implementation_session_confirmed_at=NULL");
+        expect(text).toContain("active_turn_id=NULL,active_inbox_id=NULL");
+        state.nativeID = String(parameters[0]);
+        state.latestTurnID = null;
+        state.resets++;
+        return [];
       }
-      if (text.startsWith("INSERT INTO factory.conversation_context")) {
+      throw new Error(`Unexpected Coding context query: ${text}`);
+    },
+    ({ text, parameters }) => {
+      if (text.includes('from "factory"."ticket"')) return [[ticketID]];
+      if (text.includes("pg_advisory_xact_lock")) return [];
+      if (text.includes('from "factory"."ticket_conversation"')) {
+        if (text.endsWith("for update")) {
+          expect(parameters).toEqual([conversationID]);
+          return [[conversationID]];
+        }
+        return [[conversationID, projectID, ticketID, "build", "11", state.contextID]];
+      }
+      if (text.startsWith("select") && text.includes('from "factory"."conversation_context"'))
+        return [...contextRows.values()]
+          .filter((row) => row.commandID === parameters[0])
+          .map((row) => [
+            row.id,
+            row.conversationID,
+            row.userID,
+            row.kind,
+            row.changeID,
+            row.previousID,
+          ]);
+      if (text.startsWith('insert into "factory"."conversation_context"')) {
         const [
           id,
           parent,
           commandID,
           kind,
+          mode,
           ordinalParent,
           _title,
           creator,
-          mode,
           change,
           nativeID,
           previousID,
@@ -133,38 +150,21 @@ function codingContextFixture() {
         });
         return [];
       }
-      if (text.startsWith("UPDATE factory.conversation_context")) {
+      if (text.startsWith('update "factory"."conversation_context"')) {
         if (state.failArchive) throw new Error("Owned archive write unavailable");
         expect(parameters[3]).toBe(conversationID);
         const context = contextRows.get(String(parameters[2]));
         if (!context) throw new Error("Missing owned context");
         context.session = JSON.parse(String(parameters[0]));
         context.transcript = JSON.parse(String(parameters[1]));
-        return [{ id: context.id }];
+        return [[context.id]];
       }
-      if (text.startsWith("UPDATE factory.ticket_conversation")) {
+      if (text.startsWith('update "factory"."ticket_conversation"')) {
         expect(parameters[1]).toBe(conversationID);
         expect(text).not.toMatch(/version|epoch/);
         state.contextID = String(parameters[0]);
         return [];
       }
-      if (text.startsWith("UPDATE factory.change_agent_session")) {
-        expect(parameters).toEqual([
-          state.contextID ? `ses_factory_${state.contextID.replaceAll("-", "")}` : null,
-          parameters[0],
-          changeID,
-        ]);
-        expect(text).toContain("native_session_confirmed_at=NULL");
-        expect(text).toContain("implementation_session_confirmed_at=NULL");
-        expect(text).toContain("active_turn_id=NULL,active_inbox_id=NULL");
-        state.nativeID = String(parameters[0]);
-        state.latestTurnID = null;
-        state.resets++;
-        return [];
-      }
-      throw new Error(`Unexpected Coding context query: ${text}`);
-    },
-    ({ text }) => {
       if (text.includes('"auth"."user"')) return [[userID]];
       if (text.includes('"factory"."account_access"')) return [[null, null]];
       if (text.includes('"factory"."project_membership"'))
@@ -221,12 +221,12 @@ test("Coding archives and rotates through the shared owner while keeping exact s
   expect(await rotate(changeID, userID, commandID, null, snapshot)).toBe(first);
   expect(contextRows.size).toBe(3);
   expect(state.resets).toBe(2);
-  const writes = fixture.statements.filter(({ text }) => /^(INSERT|UPDATE)/.test(text));
+  const writes = fixture.statements.filter(({ text }) => /^(INSERT|UPDATE)/i.test(text));
   expect(writes.filter(({ transaction }) => transaction === 3)).toHaveLength(0);
   for (const transaction of [1, 2]) {
     const current = writes.filter((statement) => statement.transaction === transaction);
     expect(current.at(-1)?.text).toStartWith("UPDATE factory.change_agent_session");
-    expect(current.at(-2)?.text).toStartWith("UPDATE factory.ticket_conversation");
+    expect(current.at(-2)?.text).toStartWith('update "factory"."ticket_conversation"');
   }
 });
 
@@ -285,7 +285,7 @@ test("Coding admission, stale transcript, replay mismatch and archive failures n
     expect(state.writer.epoch).toBe("9");
     const lastTransaction = fixture.transactions();
     const writes = fixture.statements.filter(
-      ({ text, transaction }) => transaction === lastTransaction && /^(INSERT|UPDATE)/.test(text),
+      ({ text, transaction }) => transaction === lastTransaction && /^(INSERT|UPDATE)/i.test(text),
     );
     expect(writes).toHaveLength(failure === "archive" ? 1 : 0);
   }

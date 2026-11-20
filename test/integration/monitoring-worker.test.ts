@@ -1,11 +1,9 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { lockChangeWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
-import {
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "../../apps/factory/src/agent/turn-store";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import { createMonitoringWorker } from "../../apps/factory/src/monitoring/worker";
@@ -219,7 +217,7 @@ test.each([
         approvedAt: null,
       });
       const retained = async (
-        sql: AgentTurnTransaction | typeof f.database.client = f.database.client,
+        sql: DatabaseTransaction | typeof f.database.client = f.database.client,
       ) => ({
         turns:
           await sql`SELECT id,state FROM factory.agent_turn WHERE change_id=${f.changeID} ORDER BY created_at,id`,
@@ -229,7 +227,7 @@ test.each([
       let before = await retained();
       let continuationTurnID: string | undefined;
       const retryID = crypto.randomUUID();
-      const admit = async (sql: AgentTurnTransaction) => {
+      const admit = async (sql: DatabaseTransaction) => {
         await lockChangeWriterIn(sql, f.changeID);
         if (continuation.endsWith("correction")) {
           const accepted = await createChangeAdmission(f.database, buildModelID).admitIn(

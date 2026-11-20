@@ -7,9 +7,8 @@ import {
   monitoringSave,
   monitoringView,
 } from "../../../../packages/conversation-domain/src/monitoring";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import {
   inputAssignmentsIn,
@@ -38,7 +37,7 @@ export function createMonitoringController(
     return `${origin}/hooks/inputs/${id}/${key(id, commandId)}`;
   }
   async function replayIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     userId: string,
     projectId: string,
     hookId: string,
@@ -66,7 +65,7 @@ export function createMonitoringController(
     return Boolean(old);
   }
   async function recordIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     userId: string,
     projectId: string,
     hookId: string,
@@ -77,7 +76,7 @@ export function createMonitoringController(
     await sql`INSERT INTO factory.monitoring_command(id,project_id,hook_id,actor_id,action,input_digest)
       VALUES(${commandId},${projectId},${hookId},${userId},${action},${monitoringDigest(input)})`;
   }
-  const authorityIn = (sql: AgentTurnTransaction, incidentId: string) =>
+  const authorityIn = (sql: DatabaseTransaction, incidentId: string) =>
     monitoringAuthorityIn(database, sql, incidentId);
   return {
     authorityIn,

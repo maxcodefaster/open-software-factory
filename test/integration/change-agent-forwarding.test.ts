@@ -1,13 +1,11 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentTransport } from "../../apps/factory/src/agent/change-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createStopTransport } from "../../apps/factory/src/agent/stop-transport";
-import {
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "../../apps/factory/src/agent/turn-store";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
@@ -235,7 +233,7 @@ test.each(["before", "after"] as const)(
       client: new Proxy(scope.database.client, {
         get(target, property, receiver) {
           if (property !== "begin") return Reflect.get(target, property, receiver);
-          return (callback: (sql: AgentTurnTransaction) => Promise<unknown>) =>
+          return (callback: (sql: DatabaseTransaction) => Promise<unknown>) =>
             target.begin((sql) =>
               callback(
                 new Proxy(sql, {

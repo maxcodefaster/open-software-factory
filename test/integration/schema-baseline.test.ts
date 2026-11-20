@@ -215,6 +215,11 @@ test("fresh concurrent initialization and repeated startup preserve the native s
         .sort(),
     );
     expect(await sql`SELECT singleton FROM factory.installation_maintenance`).toHaveLength(1);
+    expect(
+      await sql`SELECT table_name FROM information_schema.columns
+      WHERE table_schema='factory' AND table_name IN ('runtime_attempt','development_workspace')
+      AND column_name='substrate'`,
+    ).toHaveLength(0);
     expect(await sql`SELECT id FROM factory.attachment_storage`).toHaveLength(1);
     for (const table of [
       "factorybox_worker",

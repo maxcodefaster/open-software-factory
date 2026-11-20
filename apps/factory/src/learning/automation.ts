@@ -21,8 +21,7 @@ import {
 } from "../../../../packages/conversation-domain/src/learning-comparison";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { knownModelRejection } from "../models/execution-policy";
 import type { ResolvedModelConnection } from "../models/native";
@@ -61,7 +60,7 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 export function createLearningAutomation(
   database: Database,
   dependencies: {
-    modelIn(sql: AgentTurnTransaction, scope: Scope, actorId: string): Promise<Model>;
+    modelIn(sql: DatabaseTransaction, scope: Scope, actorId: string): Promise<Model>;
     connect(model: Model): Promise<ResolvedModelConnection>;
     review?: typeof reviewWork;
     replay?: typeof replayPlanning;
@@ -84,7 +83,7 @@ export function createLearningAutomation(
     return { ...edit.target, revisionId, version };
   }
 
-  async function grantIn(sql: AgentTurnTransaction, row: Candidate) {
+  async function grantIn(sql: DatabaseTransaction, row: Candidate) {
     await learningAuthorityIn(sql, row.actorId, row);
     if (!(await learningEnabledIn(sql, row.projectId, row.ownerId)))
       throw new CommandError("forbidden", "Learning is paused");
@@ -94,7 +93,7 @@ export function createLearningAutomation(
     if (!policy) throw new CommandError("forbidden", "Automatic Skill permission changed");
   }
   async function loadedIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     row: Candidate,
     edit: LearningEdit,
     choiceVersion?: number,
@@ -291,7 +290,7 @@ export function createLearningAutomation(
   async function execute(admitted: NonNullable<Awaited<ReturnType<typeof admit>>>) {
     const controller = new AbortController();
     running.add(controller);
-    const authorizeIn = async (sql: AgentTurnTransaction) => {
+    const authorizeIn = async (sql: DatabaseTransaction) => {
       controller.signal.throwIfAborted();
       await grantIn(sql, admitted);
       await loadedIn(sql, admitted, admitted.plan.edit, admitted.plan.activationVersion);

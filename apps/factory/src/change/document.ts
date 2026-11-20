@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
@@ -14,7 +18,6 @@ import {
   insertInitialTicketIn,
 } from "../../../../packages/ticket-authoring/src/authoring";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 const proposedDocument = z.object({
@@ -31,7 +34,7 @@ const proposedDocument = z.object({
 export function createTicketDocumentController(
   database: ReturnType<typeof createDatabase>,
   continuePlanning?: (
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     input: {
       commandID: string;
       projectID: string;

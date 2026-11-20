@@ -1,10 +1,10 @@
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./controller";
 import { writerActivity } from "./writer-activity";
 import { workspaceAuthorityIn } from "./workspace";
 
-export async function lockChangeWriterIn(sql: AgentTurnTransaction, changeID: string) {
+export async function lockChangeWriterIn(sql: DatabaseTransaction, changeID: string) {
   // Admission already orders Change before membership. Source and handoff use
   // the same order, including when a save waits for an admitted Agent turn.
   const [change] = await sql<{ projectID: string; available: boolean }[]>`
@@ -34,7 +34,7 @@ export async function lockChangeWriterIn(sql: AgentTurnTransaction, changeID: st
 }
 
 export async function claimAgentWriterIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   changeID: string,
   turnID: string,
   commissionerID: string,
@@ -122,7 +122,7 @@ export async function claimAgentWriterIn(
 }
 
 export async function workspaceWriteAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   workspaceID: string,
   userID: string,
 ) {
@@ -154,7 +154,7 @@ export async function workspaceWriteAuthorityIn(
 }
 
 export async function runtimeWriteAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   attemptID: string,
   userID: string,
 ) {

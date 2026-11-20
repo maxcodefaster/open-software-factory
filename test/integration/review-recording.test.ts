@@ -8,9 +8,14 @@ import { observe } from "../fixtures/pinned-opencode";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { fixtureValue } from "../fixtures/value";
 
-test("native review settlement publishes every recording chunk before closing its browser", async () => {
+test("native review settlement publishes every recording chunk before closing its browser without a global media sweep", async () => {
   const f = await candidateReviewFixture();
   const media = createReviewMedia(f.database, memoryPrivateObjects());
+  let sweeps = 0;
+  media.sweep = async () => {
+    sweeps++;
+    throw new Error("Unrelated installation cleanup failed");
+  };
   const browser = createBuildBrowserController(f.database, f.hub, "owned-finish-secret", media);
   const controller = createAgentController(
     f.database,
@@ -113,6 +118,7 @@ test("native review settlement publishes every recording chunk before closing it
     expect(operations.at(-1)).toBe("browser-close");
     expect(f.requests()).toBe(1);
     expect(f.commitCalls).toEqual([]);
+    expect(sweeps).toBe(0);
     const view = await createVisualReviewController(f.database).get(f.changeID, f.userID);
     expect(view.recording).toMatchObject({
       id: grant.sessionID,
@@ -195,82 +201,118 @@ test.each(["abort", "stop"] as const)(
   },
 );
 
-test("object storage I/O does not hold the turn lease lock and Stop fences a staged recording", async () => {
-  const f = await candidateReviewFixture();
-  const objects = memoryPrivateObjects();
-  const media = createReviewMedia(f.database, objects);
-  const staged = Promise.withResolvers<void>(),
-    release = Promise.withResolvers<void>();
-  const originalStage = media.stage;
-  media.stage = async (...args) => {
-    const proof = await originalStage(...args);
-    staged.resolve();
-    await release.promise;
-    return proof;
-  };
-  let finishing: Promise<void> | undefined;
-  try {
-    const turn = await f.activeReview();
-    const data = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4]);
-    f.hub.parentOperation = async (_attempt, operation, authorize) => {
-      await authorize?.(() => {});
-      const scope = JSON.parse(String(operation["data"]));
-      if (operation.action === "browser-call")
-        return {
-          data: JSON.stringify({
-            content: [{ type: "text", text: "Observed App" }],
-            structuredContent: {
-              sessionId: scope.sessionId,
-              turnId: turn.id,
-              runtimeAttemptId: f.attemptID,
-              generation: 1,
-              app: "app",
-              headCommit: f.commit,
-              workingTreeModified: false,
-              observedAt: new Date().toISOString(),
-            },
-          }),
-        };
-      if (operation.action === "browser-recording-start")
-        return { data: JSON.stringify({ startedAt: new Date().toISOString() }) };
-      if (operation.action === "browser-recording-finish")
-        return { data: JSON.stringify({ bytes: data.length, durationMs: 1000 }) };
-      if (operation.action === "browser-recording-chunk")
-        return { data: JSON.stringify({ offset: 0, data: data.toString("base64") }) };
-      return {};
+test.each(["stop", "abort", "expired-owner"] as const)(
+  "object storage I/O does not hold the turn lease lock and %s fences a staged recording",
+  async (ending) => {
+    const f = await candidateReviewFixture();
+    const objects = memoryPrivateObjects();
+    const media = createReviewMedia(f.database, objects);
+    const cancellation = new AbortController();
+    const staged = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    const originalStage = media.stage;
+    media.stage = async (...args) => {
+      const proof = await originalStage(...args);
+      staged.resolve();
+      await release.promise;
+      return proof;
     };
-    const browser = createBuildBrowserController(f.database, f.hub, "owned-stage-secret", media);
-    const grant = await browser.prepare(turn.id, turn.ownerToken);
-    const authority = await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`);
-    if (!authority) throw new Error("Missing browser");
-    await browser.call(
-      authority.session,
-      turn.ownerToken,
-      { name: "browser_open", arguments: { app: "app" } },
-      1,
-    );
-    finishing = browser.finishTurnRecording(turn.id, turn.ownerToken);
-    await Promise.race([
-      staged.promise,
-      finishing.then(() => {
-        throw new Error("Recording did not reach staged publication");
-      }),
-    ]);
-    expect(await f.turns.renew(turn.id, turn.ownerToken)).toBe(true);
-    await browser.closeTurn(turn.id);
-    release.resolve();
-    await finishing;
-    expect((await media.read(f.changeID, f.userID, grant.sessionID, null)).status).toBe(404);
-    await media.sweep();
-    expect([...objects.blobs.keys()].some((key) => key.endsWith(`/${grant.sessionID}`))).toBe(
-      false,
-    );
-  } finally {
-    release.resolve();
-    await finishing?.catch(() => {});
-    await f.dispose();
-  }
-});
+    let finishing: Promise<void> | undefined;
+    try {
+      const turn = await f.activeReview();
+      const data = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4]);
+      f.hub.parentOperation = async (_attempt, operation, authorize) => {
+        await authorize?.(() => {});
+        const scope = JSON.parse(String(operation["data"]));
+        if (operation.action === "browser-call")
+          return {
+            data: JSON.stringify({
+              content: [{ type: "text", text: "Observed App" }],
+              structuredContent: {
+                sessionId: scope.sessionId,
+                turnId: turn.id,
+                runtimeAttemptId: f.attemptID,
+                generation: 1,
+                app: "app",
+                headCommit: f.commit,
+                workingTreeModified: false,
+                observedAt: new Date().toISOString(),
+              },
+            }),
+          };
+        if (operation.action === "browser-recording-start")
+          return { data: JSON.stringify({ startedAt: new Date().toISOString() }) };
+        if (operation.action === "browser-recording-finish")
+          return { data: JSON.stringify({ bytes: data.length, durationMs: 1000 }) };
+        if (operation.action === "browser-recording-chunk")
+          return { data: JSON.stringify({ offset: 0, data: data.toString("base64") }) };
+        return {};
+      };
+      const browser = createBuildBrowserController(f.database, f.hub, "owned-stage-secret", media);
+      const grant = await browser.prepare(turn.id, turn.ownerToken);
+      const authority = await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`);
+      if (!authority) throw new Error("Missing browser");
+      await browser.call(
+        authority.session,
+        turn.ownerToken,
+        { name: "browser_open", arguments: { app: "app" } },
+        1,
+      );
+      finishing = browser.finishTurnRecording(turn.id, turn.ownerToken, cancellation.signal);
+      await Promise.race([
+        staged.promise,
+        finishing.then(() => {
+          throw new Error("Recording did not reach staged publication");
+        }),
+      ]);
+      expect(await f.turns.renew(turn.id, turn.ownerToken)).toBe(true);
+      await media.sweep();
+      const [active] = await f.database.client<{ state: string }[]>`
+      SELECT state FROM factory.review_media WHERE id=${grant.sessionID}`;
+      expect(active?.state).toBe("recording");
+      if (ending === "stop") await browser.closeTurn(turn.id);
+      else if (ending === "abort") cancellation.abort();
+      else
+        await f.database.client`UPDATE factory.agent_turn
+        SET owner_expires_at=now()-interval '1 second' WHERE id=${turn.id}`;
+      release.resolve();
+      await finishing;
+      expect((await media.read(f.changeID, f.userID, grant.sessionID, null)).status).toBe(404);
+      const [recording] = await f.database.client<{ state: string; reason: string | null }[]>`
+      SELECT state,reason FROM factory.review_media WHERE id=${grant.sessionID}`;
+      const interruptionReason =
+        ending === "stop"
+          ? "Recording interrupted. No App actions were repeated."
+          : "QA recording unavailable. App observations and review results are separate.";
+      expect(recording).toEqual({
+        state: ending === "expired-owner" ? "recording" : "unavailable",
+        reason: ending === "expired-owner" ? null : interruptionReason,
+      });
+      expect([...objects.blobs.keys()].some((key) => key.endsWith(`/${grant.sessionID}`))).toBe(
+        true,
+      );
+      await media.sweep();
+      await media.sweep();
+      const [expired] = await f.database.client<{ state: string; reason: string }[]>`
+      SELECT state,reason FROM factory.review_media WHERE id=${grant.sessionID}`;
+      expect(expired).toEqual({
+        state: "unavailable",
+        reason:
+          ending === "expired-owner"
+            ? "Recording interrupted. Review results are separate."
+            : interruptionReason,
+      });
+      expect([...objects.blobs.keys()].some((key) => key.endsWith(`/${grant.sessionID}`))).toBe(
+        false,
+      );
+    } finally {
+      cancellation.abort();
+      release.resolve();
+      await finishing?.catch(() => {});
+      await f.dispose();
+    }
+  },
+);
 
 test("encoder failure is distinct from successful App observations and never replays the browser action", async () => {
   const f = await candidateReviewFixture();

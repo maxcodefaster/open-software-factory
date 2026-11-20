@@ -1,18 +1,18 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { z } from "zod";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 
 // These are internal calls under the caller's validated Turn/Change transaction.
 // The ordinary human handoff has neither mode and always needs its real fence.
 export type SourceRoleFence =
   | {
       mode: "initial-bootstrap";
-      sql: AgentTurnTransaction;
+      sql: DatabaseTransaction;
       turnID: string;
       ownerToken: string;
     }
   | {
       mode: "dispatch";
-      sql: AgentTurnTransaction;
+      sql: DatabaseTransaction;
       turnID: string;
       ownerToken: string;
       attemptID: string;
@@ -71,7 +71,7 @@ export function templateInitialSourceRole(
 }
 
 export async function initialSourceRoleIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   workspaceID: string,
   attemptID: string,
   epoch: string,
@@ -94,7 +94,7 @@ export async function initialSourceRoleIn(
     FROM factory.runtime_attempt a
     JOIN factory.development_workspace workspace ON workspace.id=a.workspace_id
       AND workspace.project_id=a.project_id AND workspace.change_id=a.change_id
-      AND workspace.kind='ticket' AND workspace.substrate
+      AND workspace.kind='ticket'
     JOIN factory.change change ON change.id=a.change_id AND change.runtime_attempt_id=a.id
       AND change.project_id=a.project_id AND change.state='starting'
     JOIN factory.change_writer writer ON writer.change_id=change.id
@@ -126,7 +126,7 @@ export async function initialSourceRoleIn(
       AND source.actor_uid=binding.actor_uid AND source.owner='actor' AND source.writable
       AND source.writer_epoch=1 AND source.generation=0 AND source.checkpoint_id IS NULL
       AND source.checkpoint IS NULL AND source.service_base IS NULL
-    WHERE workspace.id=${workspaceID} AND a.id=${attemptID} AND a.substrate
+    WHERE workspace.id=${workspaceID} AND a.id=${attemptID}
       AND a.generation=1 AND a.state='starting' AND a.ready_at IS NULL
       AND a.failure IS NULL AND a.stop_intended_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer

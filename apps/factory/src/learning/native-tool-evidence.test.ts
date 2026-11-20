@@ -134,137 +134,160 @@ function collection(
   const run = async (parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     queries.push(query);
-    if (query.includes("FROM factory.usage_operation operation"))
-      return snapshots.length || values[0] !== null
-        ? []
-        : [
-            {
-              id: `turn:${turnID}`,
-              projectId: projectID,
-              userId: userID,
-              purpose: "coding",
-              outcome: "completed",
-              settledAt: options.settledAt ?? new Date(Date.now() - 10 * 60_000),
-              cursorAt: "2026-11-19 10:00:00.123456+00",
-              wiki: false,
-            },
-          ];
-    if (query.includes("FROM factory.agent_turn WHERE"))
-      return [
-        {
-          id: turnID,
-          input: {
-            kind: "change-prompt",
-            text: options.largeEvidence
-              ? "Task.".repeat(1_600)
-              : "Continue the approved implementation.",
-          },
-          authority: { mode: "build", modelId: "owned" },
-          state: options.state ?? "completed",
-          nativeCoding: !options.nonNative,
-          ticketId: "55555555-5555-4555-8555-555555555555",
-          conversationId: null,
-          createdBy: userID,
-          summary: options.largeEvidence ? "Outcome.".repeat(500) : "Saved implementation outcome.",
-          createdAt: new Date("2026-11-19T09:00:00Z"),
-          updatedAt: new Date("2026-11-19T10:00:00Z"),
-        },
-      ];
-    if (query.includes("FROM factory.agent_turn_skill loaded"))
-      return options.personal || options.personalOutsideExcerpt
-        ? [
-            {
-              id: "66666666-6666-4666-8666-666666666666",
-              scope: options.personal ? "personal" : "project",
-              personalLoaded: true,
-              content: {},
-            },
-          ]
-        : [];
     if (query.includes("SELECT pg_advisory_xact_lock_shared")) return [];
     if (query.includes("SELECT scope_key FROM factory.learning_policy")) {
       policyOwners.push(values[1]);
       return options.disabled ? [{ scope_key: "owned-paused" }] : [];
     }
-    if (query.includes("SELECT id FROM factory.learning_case"))
-      return snapshots.map((snapshot) => ({ id: snapshot.id }));
-    if (query.includes("FROM factory.session_archive archive"))
-      return availability.saved ? [availability.saved] : [];
-    if (query.includes("FROM factory.change_commit_operation WHERE id"))
-      return options.submitted
-        ? [
-            {
-              id: turnID,
-              sha: "a".repeat(40),
-              parent: "b".repeat(40),
-              state: "succeeded",
-              changeId: "77777777-7777-4777-8777-777777777777",
-            },
-          ]
-        : [];
-    if (query.includes("FROM factory.verification"))
-      return [
-        {
-          id: "88888888-8888-4888-8888-888888888888",
-          state: "succeeded",
-          completedAt: options.verificationPending ? null : new Date(),
-          summary: null,
-          diagnosis: null,
-        },
-      ];
-    if (query.includes("FROM factory.learning_source_artifact"))
-      return options.largeEvidence
-        ? Array.from({ length: 3 }, (_, ordinal) => ({
-            ordinal,
-            reference: `code:owned-${ordinal}`,
-            body: "source".repeat(500),
-            truncated: false,
-          }))
-        : [];
-    if (query.includes("INSERT INTO factory.learning_case")) {
-      snapshots.push(JSON.parse(String(values[8])));
-      return [];
-    }
-    if (
-      [
-        "FROM factory.learning_source_artifact",
-        "FROM factory.technical_design_revision",
-        "FROM factory.change_commit_operation",
-        "FROM factory.review_feedback_command",
-        "FROM factory.candidate_review",
-      ].some((table) => query.includes(table))
-    )
-      return [];
     throw new Error(`Unexpected offline query: ${query}`);
   };
   const client = Object.assign(run, {
     unsafe(query: string, values: unknown[]) {
       queries.push(query);
-      expect(transaction.depth).toBeGreaterThan(0);
+      const from = (table: string) => query.includes(`from "factory"."${table}"`);
       let rows: unknown[][];
-      switch (query) {
-        case 'select "id" from "auth"."user" where "auth"."user"."id" = $1 for share':
-          expect(values).toEqual([userID]);
-          rows = [[userID]];
-          break;
-        case 'select "disabled_at", "directory_disabled_at" from "factory"."account_access" where "factory"."account_access"."user_id" = $1 for share':
-          expect(values).toEqual([userID]);
-          rows = [[null, null]];
-          break;
-        case 'select "role", "manage_project" from "factory"."project_membership" where ("factory"."project_membership"."project_id" = $1 and "factory"."project_membership"."user_id" = $2) for share':
-          expect(values).toEqual([projectID, userID]);
-          rows = [[options.contributor ? "product-contributor" : "developer", false]];
-          break;
-        case 'select "user_id" from "factory"."administrator" where "factory"."administrator"."user_id" = $1 for share':
-          expect(values).toEqual([userID]);
-          rows = [];
-          break;
-        case 'select "id" from "factory"."project" where "factory"."project"."id" = $1':
-          expect(values).toEqual([projectID]);
-          rows = [[projectID]];
-          break;
-        default:
-          throw new Error(`Unexpected offline Drizzle query: ${query}`);
+      if (query.includes("union all")) {
+        expect(transaction.depth).toBe(0);
+        rows =
+          snapshots.length || query.includes("::timestamptz")
+            ? []
+            : [
+                [
+                  `turn:${turnID}`,
+                  projectID,
+                  userID,
+                  "coding",
+                  "completed",
+                  options.settledAt ?? new Date(Date.now() - 10 * 60_000),
+                  "2026-11-19 10:00:00.123456+00",
+                  false,
+                ],
+              ];
+      } else if (from("session_archive")) {
+        expect(transaction.depth).toBeGreaterThan(0);
+        expect(values).toEqual(["completed", turnID, projectID, "saved"]);
+        const saved = availability.saved;
+        rows = saved
+          ? [
+              [
+                saved.turnID,
+                saved.runtimeAttemptID,
+                saved.sessionID,
+                saved.promptID,
+                saved.throughMessageID,
+                saved.source,
+                saved.key,
+                saved.sha256,
+                saved.producerVersion,
+              ],
+            ]
+          : [];
+      } else if (from("agent_turn")) {
+        rows = [
+          [
+            turnID,
+            {
+              kind: "change-prompt",
+              text: options.largeEvidence
+                ? "Task.".repeat(1_600)
+                : "Continue the approved implementation.",
+            },
+            { mode: "build", modelId: "owned" },
+            "55555555-5555-4555-8555-555555555555",
+            null,
+            userID,
+            options.largeEvidence ? "Outcome.".repeat(500) : "Saved implementation outcome.",
+            options.state ?? "completed",
+            new Date("2026-11-19T09:00:00Z"),
+            new Date("2026-11-19T10:00:00Z"),
+            !options.nonNative,
+          ],
+        ];
+      } else if (from("agent_turn_skill")) {
+        rows =
+          options.personal || options.personalOutsideExcerpt
+            ? [
+                [
+                  "66666666-6666-4666-8666-666666666666",
+                  1,
+                  "a".repeat(64),
+                  options.personal ? "personal" : "project",
+                  null,
+                  true,
+                  {},
+                ],
+              ]
+            : [];
+      } else if (
+        from("candidate_review") ||
+        from("review_feedback_command") ||
+        from("technical_design_revision")
+      ) {
+        rows = [];
+      } else if (from("change_commit_operation")) {
+        rows = options.submitted
+          ? [
+              [
+                turnID,
+                "a".repeat(40),
+                "b".repeat(40),
+                "succeeded",
+                "77777777-7777-4777-8777-777777777777",
+              ],
+            ]
+          : [];
+      } else if (from("verification")) {
+        rows = [
+          [
+            "88888888-8888-4888-8888-888888888888",
+            "succeeded",
+            null,
+            null,
+            options.verificationPending ? null : new Date(),
+          ],
+        ];
+      } else if (from("learning_source_artifact")) {
+        rows = options.largeEvidence
+          ? Array.from({ length: 3 }, (_, ordinal) => [
+              ordinal,
+              `code:owned-${ordinal}`,
+              "source".repeat(500),
+              true,
+            ])
+          : [];
+      } else if (from("learning_case")) {
+        expect(transaction.depth).toBeGreaterThan(0);
+        rows = snapshots.map((snapshot) => [snapshot.id]);
+      } else if (query.startsWith('insert into "factory"."learning_case"')) {
+        expect(transaction.depth).toBeGreaterThan(0);
+        snapshots.push(JSON.parse(String(values[8])));
+        rows = [];
+      } else {
+        expect(transaction.depth).toBeGreaterThan(0);
+        switch (query) {
+          case 'select "id" from "auth"."user" where "auth"."user"."id" = $1 for share':
+            expect(values).toEqual([userID]);
+            rows = [[userID]];
+            break;
+          case 'select "disabled_at", "directory_disabled_at" from "factory"."account_access" where "factory"."account_access"."user_id" = $1 for share':
+            expect(values).toEqual([userID]);
+            rows = [[null, null]];
+            break;
+          case 'select "role", "manage_project" from "factory"."project_membership" where ("factory"."project_membership"."project_id" = $1 and "factory"."project_membership"."user_id" = $2) for share':
+            expect(values).toEqual([projectID, userID]);
+            rows = [[options.contributor ? "product-contributor" : "developer", false]];
+            break;
+          case 'select "user_id" from "factory"."administrator" where "factory"."administrator"."user_id" = $1 for share':
+            expect(values).toEqual([userID]);
+            rows = [];
+            break;
+          case 'select "id" from "factory"."project" where "factory"."project"."id" = $1':
+            expect(values).toEqual([projectID]);
+            rows = [[projectID]];
+            break;
+          default:
+            throw new Error(`Unexpected offline Drizzle query: ${query}`);
+        }
       }
       return Object.assign(Promise.resolve(rows), { values: async () => rows });
     },
@@ -346,12 +369,16 @@ test("selected completed Coding work retains safe checkpoint-bound tool counts a
   expect(source.snapshots[0]?.ownerId).toBeNull();
   expect(source.snapshots[0]?.developerOnly).toBe(true);
   expect(owned.read).toHaveBeenCalledTimes(2);
-  const query = source.queries.find((query) => query.includes("FROM factory.session_archive"));
-  expect(query).toContain("archive.state='saved'");
-  expect(query).toContain("intent.session_id=archive.session_id");
-  expect(query).toContain("intent.prompt_id=archive.prompt_id");
+  const query = source.queries.find((query) => query.includes('from "factory"."session_archive"'));
+  expect(query).toContain('"session_archive"."state" = $4');
   expect(query).toContain(
-    "attempt.change_id=turn.change_id AND attempt.project_id=turn.project_id",
+    '"change_agent_turn_intent"."session_id" = "factory"."session_archive"."session_id"',
+  );
+  expect(query).toContain(
+    '"change_agent_turn_intent"."prompt_id" = "factory"."session_archive"."prompt_id"',
+  );
+  expect(query).toContain(
+    '"runtime_attempt"."change_id" = "factory"."agent_turn"."change_id" and "factory"."runtime_attempt"."project_id" = "factory"."agent_turn"."project_id"',
   );
   await collectLearningCases(source.database, null, owned.objects);
   expect(source.snapshots).toHaveLength(1);
@@ -366,7 +393,7 @@ test.each(["disabled", "contributor"] as const)(
     await collectLearningCases(source.database, null, owned.objects);
     expect(source.snapshots).toEqual([]);
     expect(owned.read).not.toHaveBeenCalled();
-    expect(source.queries.some((query) => query.includes("FROM factory.session_archive"))).toBe(
+    expect(source.queries.some((query) => query.includes('from "factory"."session_archive"'))).toBe(
       false,
     );
     if (gate === "disabled") expect(source.policyOwners).toEqual([userID]);
@@ -684,14 +711,20 @@ test("a full deferred page advances at PostgreSQL precision, then an exhausted p
     cursorAt,
     wiki: false,
   }));
-  const run = async (parts: TemplateStringsArray, ...values: unknown[]) => {
-    const query = parts.join("?");
-    if (query.includes("FROM factory.usage_operation operation"))
-      return values[0] === null ? operations : [];
-    if (query.includes("FROM factory.agent_turn WHERE")) return [];
-    throw new Error("Unexpected query while deferring an unsettled turn");
+  const client = {
+    unsafe(query: string, values: unknown[]) {
+      let rows: unknown[][];
+      if (query.includes("union all")) {
+        rows = query.includes("::timestamptz")
+          ? []
+          : operations.map((operation) => Object.values(operation));
+        if (query.includes("::timestamptz")) expect(values).toContain(cursorAt);
+      } else if (query.includes('from "factory"."agent_turn"')) rows = [];
+      else throw new Error("Unexpected query while deferring an unsettled turn");
+      return { values: async () => rows };
+    },
   };
-  const database = { client: run } as unknown as ReturnType<typeof createDatabase>;
+  const database = { client } as unknown as ReturnType<typeof createDatabase>;
   const owned = await archive();
   const cursor = await collectLearningCases(database, null, owned.objects);
   const last = operations.at(-1);

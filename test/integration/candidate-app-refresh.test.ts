@@ -2,12 +2,11 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
-import { createDatabase } from "../../packages/db/src/client";
+import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { eventually } from "../fixtures/factory-process";
@@ -115,7 +114,7 @@ async function appReview(apps: boolean | "missing" | "partial" | "multiple" = tr
       client: new Proxy(database.client, {
         get(target, key, receiver) {
           if (key !== "begin") return Reflect.get(target, key, receiver);
-          return (work: (sql: AgentTurnTransaction) => Promise<unknown>) =>
+          return (work: (sql: DatabaseTransaction) => Promise<unknown>) =>
             begin((sql) =>
               work(
                 new Proxy(sql, {

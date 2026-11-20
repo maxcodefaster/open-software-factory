@@ -1,12 +1,12 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 // One versioned write boundary for the editor, restoration and an explicitly
 // accepted learning edit. The surrounding command owns its atomic receipt.
 export async function editKnowledgeIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   pageID: string,
   input: typeof knowledgeEditInput._output,
   userID: string,

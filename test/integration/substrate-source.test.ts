@@ -168,7 +168,7 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {

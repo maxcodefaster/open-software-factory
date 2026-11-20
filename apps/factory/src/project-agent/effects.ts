@@ -1,13 +1,14 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { z } from "zod";
 import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
 import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
-import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
+import type { AgentTurnRecord } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { saveTechnicalDesignIn } from "../technical-design/store";
 import { appendConversationEntry, lockConversation } from "../conversations/store";
 
 export async function persistProjectOutput(
-  transaction: AgentTurnTransaction,
+  transaction: DatabaseTransaction,
   turn: AgentTurnRecord,
   output: ProjectAgentOutput,
   developerOnly = false,

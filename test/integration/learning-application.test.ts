@@ -1,18 +1,18 @@
 import { expect, test } from "bun:test";
+import { editKnowledgeIn } from "../../apps/factory/src/knowledge/edit";
+import { calibrationCases } from "../../apps/factory/src/learning/calibration";
+import { createWorkReviewOutput } from "../../apps/factory/src/learning/judge-output";
 import { createLearningService } from "../../apps/factory/src/learning/service";
 import { learningEditDigest } from "../../apps/factory/src/learning/targets";
-import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { editKnowledgeIn } from "../../apps/factory/src/knowledge/edit";
-import type { LearningCase, LearningEdit } from "../../packages/conversation-domain/src/learning";
-import { retainedEditProposal } from "../fixtures/learning-edit";
-import { fixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
-import type { createDatabase } from "../../packages/db/src/client";
 import { createLearningWorker } from "../../apps/factory/src/learning/worker";
-import { calibrationCases } from "../../apps/factory/src/learning/calibration";
+import { createSkillController } from "../../apps/factory/src/skills/controller";
+import type { LearningCase, LearningEdit } from "../../packages/conversation-domain/src/learning";
+import type { createDatabase } from "../../packages/db/src/client";
+import { fixture } from "../fixtures/change-agent-turns";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { calibratedResult } from "../fixtures/learning";
+import { retainedEditProposal } from "../fixtures/learning-edit";
 import { fixtureValue } from "../fixtures/value";
-import { createWorkReviewOutput } from "../../apps/factory/src/learning/judge-output";
 
 const before = "Ask for a hostname before looking at repository sources.";
 const after = "Inspect repository sources before asking for a hostname.";
@@ -113,22 +113,25 @@ test("Monitoring refuses a result whose development permission was revoked durin
     });
     let changed = false;
     const client = new Proxy(database.client, {
-      apply(target, self, args) {
-        const result = Reflect.apply(target, self, args);
-        if (
-          Array.isArray(args[0]) &&
-          args[0].join("?").includes("FROM factory.learning_application application")
-        )
-          return (async () => {
-            const rows = await result;
-            if (!changed) {
-              changed = true;
-              await database.client`UPDATE factory.project_membership SET role='product-contributor'
+      get(target, property, receiver) {
+        if (property !== "unsafe") return Reflect.get(target, property, receiver);
+        return (...args: Parameters<typeof target.unsafe>) => {
+          const result = target.unsafe(...args);
+          if (!args[0].includes('from "factory"."learning_application"')) return result;
+          // Drizzle consumes row arrays through Postgres.js values(), not the tagged-call path.
+          const values = result.values.bind(result);
+          result.values = () =>
+            (async () => {
+              const rows = await values();
+              if (!changed) {
+                changed = true;
+                await database.client`UPDATE factory.project_membership SET role='product-contributor'
             WHERE project_id=${value.projectID} AND user_id=${value.userID}`;
-            }
-            return rows;
-          })();
-        return result;
+              }
+              return rows;
+            })() as ReturnType<typeof result.values>;
+          return result;
+        };
       },
     });
     await expect(
@@ -418,6 +421,113 @@ test("work review retains a reverted proposal's exact edit separately from a dif
     else process.env["FACTORY_MODEL_BASE_URL"] = previous.url;
     if (previous.key === undefined) delete process.env["FACTORY_MODEL_API_KEY"];
     else process.env["FACTORY_MODEL_API_KEY"] = previous.key;
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+test("concurrent Learning policy saves retain one version and exact immutable command input", async () => {
+  const host = await factoryProcess(),
+    database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.project_membership SET manage_project=true
+      WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    const service = createLearningService(database);
+    const commands = [false, true].map((enabled) => ({
+      commandId: crypto.randomUUID(),
+      projectId: owned.projectID,
+      scope: "project",
+      expectedVersion: 0,
+      enabled,
+      automaticSkills: !enabled,
+    }));
+    const results = await Promise.allSettled(
+      commands.map((command) => service.set(owned.userID, command)),
+    );
+    const winningIndex = results.findIndex((result) => result.status === "fulfilled");
+    const winner = fixtureValue(commands[winningIndex], "winning policy command");
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(await service.set(owned.userID, winner)).toEqual({ version: 1 });
+    await expect(
+      service.set(owned.userID, { ...winner, enabled: !winner.enabled }),
+    ).rejects.toThrow("identity was reused");
+    const [policy] = await database.client<
+      { enabled: boolean; automatic: boolean; version: number }[]
+    >`
+      SELECT enabled,automatic_skills AS automatic,version FROM factory.learning_policy
+      WHERE scope_key=${`${owned.projectID}:project`}`;
+    expect(policy).toEqual({
+      enabled: winner.enabled,
+      automatic: winner.automaticSkills,
+      version: 1,
+    });
+    const saved = await database.client<{ input: unknown; result: unknown }[]>`
+      SELECT input,result FROM factory.learning_command WHERE id=ANY(${commands.map((command) => command.commandId)}::uuid[])`;
+    expect([...saved]).toEqual([{ input: winner, result: { version: 1 } }]);
+    expect(
+      await database.client`SELECT id FROM factory.usage_operation WHERE purpose='learning'`,
+    ).toHaveLength(0);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+test("contended Drizzle decisions replay one exact command without duplicating the applied revision", async () => {
+  const host = await factoryProcess(),
+    database = host.connect();
+  const entered = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  let locker: Promise<unknown> | undefined;
+  let decisions: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  try {
+    const value = await skillExample(database);
+    locker = database.client.begin(async (sql) => {
+      await sql`SELECT id FROM factory.learning_proposal WHERE id=${value.proposal.id} FOR UPDATE`;
+      entered.resolve();
+      await release.promise;
+    });
+    void locker.catch(entered.reject);
+    await entered.promise;
+    decisions = Promise.allSettled([
+      value.service.decide(value.userID, value.apply),
+      value.service.decide(value.userID, value.apply),
+    ]);
+    await eventually(
+      async () => {
+        const [waiting] = await database.client<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname=current_database() AND wait_event_type='Lock'
+            AND query LIKE ${'%for update of "proposal"%'}`;
+        return waiting?.count ?? 0;
+      },
+      (count) => count === 2,
+      "Both Learning decisions did not contend on the proposal row",
+      3_000,
+    );
+    release.resolve();
+    await locker;
+    const results = await decisions;
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    expect(results[1]).toEqual(results[0]);
+    expect(
+      await database.client`SELECT id FROM factory.learning_command WHERE id=${value.apply.commandId}`,
+    ).toHaveLength(1);
+    expect(
+      await database.client`SELECT id FROM factory.learning_application WHERE proposal_id=${value.proposal.id}`,
+    ).toHaveLength(1);
+    expect(
+      await database.client`SELECT revision_id FROM factory.skill_library_revision WHERE library_id=${value.libraryId}`,
+    ).toHaveLength(2);
+    const [original] = await database.client<{ content: unknown }[]>`
+      SELECT content FROM factory.learning_proposal WHERE id=${value.proposal.id}`;
+    expect(original?.content).toEqual(value.proposal.content);
+  } finally {
+    release.resolve();
+    await locker;
+    await decisions;
     await database.client.end({ timeout: 2 });
     await host.dispose();
   }

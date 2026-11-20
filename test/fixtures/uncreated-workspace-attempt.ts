@@ -42,7 +42,7 @@ export async function recordUncreatedWorkspaceAttempt(
       { database: string; projectID: string; changeID: string | null; revision: string }[]
     >`SELECT current_database() AS database,project_id AS "projectID",
       change_id AS "changeID",source_revision AS revision
-      FROM factory.development_workspace WHERE id=${input.workspaceID} AND substrate`;
+      FROM factory.development_workspace WHERE id=${input.workspaceID}`;
     if (!scope || !/^owned_[a-f0-9]{32}$/.test(scope.database))
       throw Error("Uncreated native fixture admission requires an owned database and Workspace");
     await sql`INSERT INTO factory.runtime_attempt(

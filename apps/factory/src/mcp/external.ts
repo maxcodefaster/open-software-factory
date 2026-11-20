@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   workspaceCommandInput,
   workspaceCommandRead,
@@ -19,7 +19,6 @@ import type { createIdentityConfiguration } from "../access/identity-configurati
 import type { createRuntimeAccess } from "../access/runtime";
 import { workspaceAuthorityIn } from "../access/workspace";
 import type { createChangeWriterController } from "../access/writer-controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { json } from "../http";
 import type { createProjectService } from "../projects/service";
@@ -92,7 +91,7 @@ export function createExternalFactoryMCP(services: Services) {
     return attempt;
   }
   async function claimLifecycle(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     userID: string,
     input: z.infer<typeof lifecycleInput>,
     action: "start" | "pause" | "stop",

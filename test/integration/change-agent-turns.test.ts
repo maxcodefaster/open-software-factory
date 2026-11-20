@@ -5,11 +5,8 @@ import { createChangeWriterController } from "../../apps/factory/src/access/writ
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
-import {
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "../../apps/factory/src/agent/turn-store";
-import { createDatabase } from "../../packages/db/src/client";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -228,7 +225,7 @@ test("a reserved native Session is not presented as resumable before acknowledge
 }, 30_000);
 
 async function newerRequirements(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   owned: Awaited<ReturnType<typeof fixture>>,
 ) {
   const canonical = canonicalRequirementContent({
@@ -702,7 +699,7 @@ test("owned fixture joins held work and cleans up even when Stop persistence thr
   let begins = 0;
   let ended = false;
   Object.defineProperty(owned.database.client, "begin", {
-    value: (callback: (sql: AgentTurnTransaction) => Promise<unknown>) => {
+    value: (callback: (sql: DatabaseTransaction) => Promise<unknown>) => {
       if (++begins === 1) return Promise.reject(new Error("Owned Stop persistence failure"));
       return begin(callback);
     },

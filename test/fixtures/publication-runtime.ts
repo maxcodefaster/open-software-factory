@@ -239,7 +239,6 @@ console.log("Owned exact-source package published");
     expect(published?.runtimeAttemptID).toBe(runtimeAttemptID);
     const [bound] = await database.client<
       {
-        native: boolean;
         revision: string;
         ownerID: string;
         kind: string;
@@ -248,7 +247,7 @@ console.log("Owned exact-source package published");
         actorName: string;
         observation: unknown;
       }[]
-    >`SELECT attempt.substrate AS native,attempt.revision,isolated.owner_id AS "ownerID",
+    >`SELECT attempt.revision,isolated.owner_id AS "ownerID",
       isolated.kind,binding.actor_uid AS "actorUID",binding.atespace,
       binding.actor_name AS "actorName",binding.observation
       FROM factory.runtime_attempt attempt
@@ -260,7 +259,6 @@ console.log("Owned exact-source package published");
     const observed = nativeActor.parse(bound.observation);
     const actorUID = z.uuid().parse(bound.actorUID);
     expect(bound).toMatchObject({
-      native: true,
       revision: head.headSha,
       ownerID: releaseID,
       kind: "publication",

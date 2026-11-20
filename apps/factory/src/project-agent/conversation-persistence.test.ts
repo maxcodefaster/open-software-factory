@@ -14,28 +14,29 @@ test("research delegates locked command receipts and context inserts without cha
     let member = true;
     let engineCalls = 0;
     const fixture = conversationDatabase(
+      ({ text }) => {
+        throw new Error(`Unexpected raw research persistence query: ${text}`);
+      },
       ({ text, parameters }) => {
-        if (text.startsWith("SELECT id FROM factory.ticket")) return [{ id: ticketID }];
+        if (text.includes('from "factory"."ticket"')) return [[ticketID]];
         if (text.includes("pg_advisory_xact_lock")) return [];
-        if (text.includes("FROM factory.ticket_conversation")) {
+        if (text.includes('from "factory"."ticket_conversation"')) {
+          if (text.endsWith("for update")) return [[conversationID]];
           return [
-            {
-              id: conversationID,
-              projectId: projectID,
-              ticketId: ticketID ?? null,
-              mode: ticketMode ?? "investigate",
-              version: 11,
-            },
+            [conversationID, projectID, ticketID ?? null, ticketMode ?? "investigate", "11", null],
           ];
         }
-        if (text.includes("FROM factory.conversation_context WHERE command_id"))
-          return receipt ? [receipt] : [];
-        if (text.startsWith("INSERT INTO factory.conversation_context")) {
+        if (text.startsWith("select") && text.includes('from "factory"."conversation_context"'))
+          return receipt
+            ? [[receipt.id, receipt.conversationID, receipt.userID, receipt.kind, null, null]]
+            : [];
+        if (text.startsWith('insert into "factory"."conversation_context"')) {
           expect(parameters.slice(1, 4)).toEqual([conversationID, commandID, "research"]);
+          expect(parameters[4]).toBe(ticketMode === "build" ? "investigate" : "plan");
           expect(parameters.slice(5)).toEqual([
+            conversationID,
             "New conversation",
             userID,
-            ticketMode === "build" ? "investigate" : "plan",
             null,
             null,
             null,
@@ -47,9 +48,6 @@ test("research delegates locked command receipts and context inserts without cha
           receipt = { id: insertedID, conversationID, userID, kind: "research" };
           return [];
         }
-        throw new Error(`Unexpected research persistence query: ${text}`);
-      },
-      ({ text }) => {
         if (text.includes('"auth"."user"')) return [[userID]];
         if (text.includes('"factory"."account_access"')) return [[null, null]];
         if (text.includes('"factory"."project_membership"'))
@@ -72,7 +70,7 @@ test("research delegates locked command receipts and context inserts without cha
       expect(get).toHaveBeenLastCalledWith(projectID, ticketID, userID, insertedID);
       const count = fixture.statements.length;
       await controller.newConversation(projectID, ticketID, userID, commandID);
-      expect(fixture.statements.slice(count).some(({ text }) => text.startsWith("INSERT"))).toBe(
+      expect(fixture.statements.slice(count).some(({ text }) => text.startsWith("insert"))).toBe(
         false,
       );
       if (!receipt) throw new Error("Missing research receipt");
@@ -85,11 +83,11 @@ test("research delegates locked command receipts and context inserts without cha
         controller.newConversation(projectID, ticketID, userID, crypto.randomUUID()),
       ).rejects.toMatchObject({ code: "not-found" });
       expect(engineCalls).toBe(0);
-      expect(fixture.statements.some(({ text }) => text.startsWith("UPDATE"))).toBe(false);
-      const inserts = fixture.statements.filter(({ text }) => text.startsWith("INSERT"));
+      expect(fixture.statements.some(({ text }) => text.startsWith("update"))).toBe(false);
+      const inserts = fixture.statements.filter(({ text }) => text.startsWith("insert"));
       expect(inserts).toHaveLength(1);
-      const insertIndex = fixture.statements.findIndex(({ text }) => text.startsWith("INSERT"));
-      expect(fixture.statements[insertIndex - 1]?.text).toEndWith("FOR UPDATE");
+      const insertIndex = fixture.statements.findIndex(({ text }) => text.startsWith("insert"));
+      expect(fixture.statements[insertIndex - 1]?.text).toEndWith("for update");
     } finally {
       get.mockRestore();
       await controller.shutdown();

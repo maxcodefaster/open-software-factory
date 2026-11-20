@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   runtimeConnectorTokens,
   runtimeIdentity,
@@ -24,7 +24,6 @@ import upstream from "../../../../upstream.json";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
 import { agentConfiguration } from "./agent-configuration";
@@ -178,7 +177,7 @@ export function createSubstrateWorkspaces(
   async function saved(
     workspaceID: string,
     generation: number,
-    sql: typeof database.client | AgentTurnTransaction = database.client,
+    sql: typeof database.client | DatabaseTransaction = database.client,
   ) {
     const [row] = await sql<
       Provision[]
@@ -222,12 +221,12 @@ export function createSubstrateWorkspaces(
     matchesProject: (id: string) => id === config.projectID,
     async forAttempt(
       attemptID: string,
-      sql: typeof database.client | AgentTurnTransaction = database.client,
+      sql: typeof database.client | DatabaseTransaction = database.client,
     ) {
       const [attempt] = await sql<
         { workspaceID: string; generation: string }[]
       >`SELECT a.workspace_id AS "workspaceID",a.generation::text AS generation
-        FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.id=${attemptID} AND a.project_id=${config.projectID} AND a.substrate`;
+        FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation WHERE a.id=${attemptID} AND a.project_id=${config.projectID}`;
       if (!attempt) return undefined;
       return execution(
         attempt.workspaceID,
@@ -238,7 +237,7 @@ export function createSubstrateWorkspaces(
       const attempts = await database.client<
         { id: string }[]
       >`SELECT a.id FROM factory.runtime_attempt a JOIN factory.substrate_workspace p ON p.workspace_id=a.workspace_id AND p.generation=a.generation
-        WHERE a.project_id=${config.projectID} AND a.substrate ORDER BY a.created_at,a.id`;
+        WHERE a.project_id=${config.projectID} ORDER BY a.created_at,a.id`;
       for (const attempt of attempts) {
         try {
           await (await this.forAttempt(attempt.id))?.recover();
@@ -253,7 +252,7 @@ export function createSubstrateWorkspaces(
       userID: string,
       changeID?: string,
       selectedWorkspaceID?: string,
-      recordStart?: (sql: AgentTurnTransaction, workspaceID: string) => Promise<void>,
+      recordStart?: (sql: DatabaseTransaction, workspaceID: string) => Promise<void>,
     ) {
       if (changeID && !sources)
         throw new CommandError(
@@ -352,16 +351,12 @@ export function createSubstrateWorkspaces(
           await capacity?.requireReady(substrateResourceReservation(config));
         const [workspace] = await sql<
           {
-            substrate: boolean;
             owner: string | null;
             changeID: string | null;
             branch: string;
           }[]
-        >`SELECT substrate,owner_user_id AS owner,change_id AS "changeID",source_branch AS branch FROM factory.development_workspace WHERE id=${workspaceID}`;
-        if (
-          workspace &&
-          (!workspace.substrate || (changeID ? workspace.changeID !== changeID : !workspace.owner))
-        )
+        >`SELECT owner_user_id AS owner,change_id AS "changeID",source_branch AS branch FROM factory.development_workspace WHERE id=${workspaceID}`;
+        if (workspace && (changeID ? workspace.changeID !== changeID : !workspace.owner))
           throw new CommandError("conflict", "Retained Workspace is never converted or adopted");
         if (prior && config.deployment === "fresh-workspaces") {
           const retained = await substrateBootstrapRetentionIn(sql, workspaceID, attemptID);

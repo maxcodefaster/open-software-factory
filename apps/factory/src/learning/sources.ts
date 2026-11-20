@@ -1,20 +1,68 @@
 import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  like,
+  lte,
+  notExists,
+  notInArray,
+  notLike,
+  or,
+  sql as typedSQL,
+} from "drizzle-orm";
+import {
   type LearningCase,
   type LearningTarget,
   learningCase,
   sampleLearningCase,
 } from "../../../../packages/conversation-domain/src/learning";
 import { verificationReviewReasons } from "../../../../packages/conversation-domain/src/verification";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  agentTurnSkill,
+  candidateReview,
+  changeAgentTurnIntent,
+  changeCommitOperation,
+  conversationEntry,
+  knowledgeGeneration,
+  knowledgePage,
+  knowledgeRevision,
+  learningPolicy,
+  learningSourceArtifact,
+  monitoringHook,
+  monitoringIncident,
+  monitoringPolicy,
+  projectSetupInspection,
+  requirementRevision,
+  reviewFeedback,
+  reviewFeedbackCommand,
+  reviewFeedbackMessage,
+  runtimeAttempt,
+  learningCase as savedCase,
+  sessionArchive,
+  skillLibrary,
+  skillLibraryRevision,
+  skillRevision,
+  technicalDesignRevision,
+  usageOperation,
+  verification,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
-import {
-  nativeToolEvidenceMaximumBytes,
-  readNativeToolEvidence,
-  type SavedNativeToolArchive,
-} from "./native-tool-evidence";
+import { nativeToolEvidenceMaximumBytes, readNativeToolEvidence } from "./native-tool-evidence";
 
 type Database = ReturnType<typeof createDatabase>;
 type Operation = {
@@ -40,38 +88,118 @@ export async function collectLearningCases(
   // A Wiki generation makes dozens of model calls but is one piece of work with one
   // retained outcome. Review it once, after it settles. Its calls settle first, so a
   // cursor over them would pass the generation before it could be reviewed.
-  const operations = await database.client<(Operation & { wiki: boolean })[]>`
-    SELECT * FROM (
-      (SELECT operation.id,operation.project_id AS "projectId",operation.user_id AS "userId",
-        operation.purpose,operation.outcome,operation.settled_at AS "settledAt",
-        operation.settled_at::text AS "cursorAt",false AS wiki
-      FROM factory.usage_operation operation
-      WHERE operation.settled_at IS NOT NULL AND operation.project_id IS NOT NULL
-        AND operation.user_id IS NOT NULL AND operation.purpose NOT IN ('probe','learning')
-        AND operation.id NOT LIKE 'wiki:%'
-        AND NOT EXISTS(SELECT 1 FROM factory.learning_policy policy
-          WHERE policy.project_id=operation.project_id AND policy.owner_id IS NULL AND NOT policy.enabled)
-        AND (${cursor?.at ?? null}::timestamptz IS NULL OR (operation.settled_at,operation.id) >
-          (${cursor?.at ?? null}::timestamptz,${cursor?.id ?? ""}))
-        AND NOT EXISTS(SELECT 1 FROM factory.learning_case saved WHERE saved.id=operation.id)
-      ORDER BY operation.settled_at,operation.id LIMIT 100)
-      UNION ALL
-      (SELECT 'wiki:'||generation.id::text AS id,generation.project_id AS "projectId",generation.created_by AS "userId",
-        'wiki' AS purpose,'completed' AS outcome,generation.completed_at AS "settledAt",
-        generation.completed_at::text AS "cursorAt",true AS wiki
-      FROM factory.knowledge_generation generation
-      WHERE generation.completed_at>now()-interval '3 days'
-        AND NOT EXISTS(SELECT 1 FROM factory.learning_policy policy
-          WHERE policy.project_id=generation.project_id AND policy.owner_id IS NULL AND NOT policy.enabled)
-        AND NOT EXISTS(SELECT 1 FROM factory.learning_case saved
-          WHERE saved.id='wiki:'||generation.id::text OR saved.id LIKE 'wiki:'||generation.id::text||':%')
-        AND EXISTS(SELECT 1 FROM factory.usage_operation call
-          WHERE call.purpose='wiki' AND call.project_id=generation.project_id AND call.settled_at IS NOT NULL
-            AND call.id LIKE 'wiki:'||generation.id::text||':%')
-      ORDER BY generation.completed_at,generation.id LIMIT 20)
-    ) due ORDER BY due."settledAt",due.id`;
+  const db = drizzleTransaction(database.client);
+  const wikiID = typedSQL<string>`'wiki:'||${knowledgeGeneration.id}::text`;
+  const due = db
+    .select({
+      id: usageOperation.id,
+      projectId: usageOperation.projectId,
+      userId: usageOperation.userId,
+      purpose: usageOperation.purpose,
+      outcome: usageOperation.outcome,
+      settledAt: usageOperation.settledAt,
+      cursorAt: typedSQL<string>`${usageOperation.settledAt}::text`.as("cursorAt"),
+      wiki: typedSQL<boolean>`false`.as("wiki"),
+    })
+    .from(usageOperation)
+    .where(
+      and(
+        isNotNull(usageOperation.settledAt),
+        isNotNull(usageOperation.projectId),
+        isNotNull(usageOperation.userId),
+        notInArray(usageOperation.purpose, ["probe", "learning"]),
+        notLike(usageOperation.id, "wiki:%"),
+        notExists(
+          db
+            .select({ key: learningPolicy.scopeKey })
+            .from(learningPolicy)
+            .where(
+              and(
+                eq(learningPolicy.projectId, usageOperation.projectId),
+                isNull(learningPolicy.ownerId),
+                eq(learningPolicy.enabled, false),
+              ),
+            ),
+        ),
+        cursor
+          ? typedSQL`(${usageOperation.settledAt},${usageOperation.id}) >
+      (${cursor.at}::timestamptz,${cursor.id})`
+          : undefined,
+        notExists(
+          db
+            .select({ id: savedCase.id })
+            .from(savedCase)
+            .where(eq(savedCase.id, usageOperation.id)),
+        ),
+      ),
+    )
+    .orderBy(asc(usageOperation.settledAt), asc(usageOperation.id))
+    .limit(100)
+    .unionAll(
+      db
+        .select({
+          id: wikiID.as("id"),
+          projectId: knowledgeGeneration.projectId,
+          userId: knowledgeGeneration.createdBy,
+          purpose: typedSQL<"wiki">`'wiki'`.as("purpose"),
+          outcome: typedSQL<Operation["outcome"]>`'completed'`.as("outcome"),
+          settledAt: knowledgeGeneration.completedAt,
+          cursorAt: typedSQL<string>`${knowledgeGeneration.completedAt}::text`.as("cursorAt"),
+          wiki: typedSQL<boolean>`true`.as("wiki"),
+        })
+        .from(knowledgeGeneration)
+        .where(
+          and(
+            gt(knowledgeGeneration.completedAt, typedSQL`now()-interval '3 days'`),
+            notExists(
+              db
+                .select({ key: learningPolicy.scopeKey })
+                .from(learningPolicy)
+                .where(
+                  and(
+                    eq(learningPolicy.projectId, knowledgeGeneration.projectId),
+                    isNull(learningPolicy.ownerId),
+                    eq(learningPolicy.enabled, false),
+                  ),
+                ),
+            ),
+            notExists(
+              db
+                .select({ id: savedCase.id })
+                .from(savedCase)
+                .where(or(eq(savedCase.id, wikiID), like(savedCase.id, typedSQL`${wikiID}||':%'`))),
+            ),
+            exists(
+              db
+                .select({ id: usageOperation.id })
+                .from(usageOperation)
+                .where(
+                  and(
+                    eq(usageOperation.purpose, "wiki"),
+                    eq(usageOperation.projectId, knowledgeGeneration.projectId),
+                    isNotNull(usageOperation.settledAt),
+                    like(usageOperation.id, typedSQL`${wikiID}||':%'`),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .orderBy(asc(knowledgeGeneration.completedAt), asc(knowledgeGeneration.id))
+        .limit(20),
+    )
+    .as("due");
+  const operations = await db.select().from(due).orderBy(asc(due.settledAt), asc(due.id));
   for (const operation of operations) {
-    const source = await learningSnapshot(database, operation);
+    if (!operation.projectId || !operation.userId || !operation.settledAt || !operation.outcome)
+      continue;
+    const reviewerId = operation.userId;
+    const source = await learningSnapshot(database, {
+      ...operation,
+      projectId: operation.projectId,
+      userId: operation.userId,
+      settledAt: operation.settledAt,
+      outcome: operation.outcome,
+    });
     if (!source) continue; // An indexed operation can precede product settlement.
     const { snapshot, nativeTurnID } = source;
     const selected =
@@ -84,10 +212,10 @@ export async function collectLearningCases(
       snapshot.evidence = [];
       snapshot.targets = [];
     }
-    async function authorizedIn(sql: AgentTurnTransaction) {
+    async function authorizedIn(sql: DatabaseTransaction) {
       if (!(await learningEnabledIn(sql, snapshot.projectId, snapshot.ownerId))) return false;
       try {
-        await learningAuthorityIn(sql, operation.userId, {
+        await learningAuthorityIn(sql, reviewerId, {
           ...snapshot,
           managerOnly: snapshot.activity === "setup",
         });
@@ -100,25 +228,59 @@ export async function collectLearningCases(
     let nativeEvidence: LearningCase["evidence"][number] | undefined;
     if (selected && nativeTurnID) {
       const admitted = await database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         if (!(await authorizedIn(sql))) return null;
-        const [existing] = await sql`SELECT id FROM factory.learning_case WHERE id=${snapshot.id}`;
+        const [existing] = await db
+          .select({ id: savedCase.id })
+          .from(savedCase)
+          .where(eq(savedCase.id, snapshot.id));
         if (existing) return null;
-        const [saved] = await sql<SavedNativeToolArchive[]>`
-          SELECT archive.turn_id AS "turnID",archive.runtime_attempt_id AS "runtimeAttemptID",
-            archive.session_id AS "sessionID",archive.prompt_id AS "promptID",
-            archive.through_message_id AS "throughMessageID",archive.source_refs AS source,
-            archive.manifest_key AS key,archive.manifest_sha256 AS sha256,
-            archive.producer_version AS "producerVersion"
-          FROM factory.session_archive archive
-          JOIN factory.agent_turn turn ON turn.id=archive.turn_id AND turn.state='completed'
-            AND turn.authority->>'mode'='build'
-          JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-            AND intent.runtime_attempt_id=archive.runtime_attempt_id
-            AND intent.session_id=archive.session_id AND intent.prompt_id=archive.prompt_id
-            AND intent.change_id=turn.change_id
-          JOIN factory.runtime_attempt attempt ON attempt.id=archive.runtime_attempt_id
-            AND attempt.change_id=turn.change_id AND attempt.project_id=turn.project_id
-          WHERE turn.id=${nativeTurnID} AND turn.project_id=${snapshot.projectId} AND archive.state='saved'`;
+        const [saved] = await db
+          .select({
+            turnID: sessionArchive.turnId,
+            runtimeAttemptID: sessionArchive.runtimeAttemptId,
+            sessionID: sessionArchive.sessionId,
+            promptID: sessionArchive.promptId,
+            throughMessageID: sessionArchive.throughMessageId,
+            source: typedSQL<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
+            key: sessionArchive.manifestKey,
+            sha256: sessionArchive.manifestSha256,
+            producerVersion: sessionArchive.producerVersion,
+          })
+          .from(sessionArchive)
+          .innerJoin(
+            agentTurn,
+            and(
+              eq(agentTurn.id, sessionArchive.turnId),
+              eq(agentTurn.state, "completed"),
+              typedSQL`${agentTurn.authority}->>'mode'='build'`,
+            ),
+          )
+          .innerJoin(
+            changeAgentTurnIntent,
+            and(
+              eq(changeAgentTurnIntent.turnId, agentTurn.id),
+              eq(changeAgentTurnIntent.runtimeAttemptId, sessionArchive.runtimeAttemptId),
+              eq(changeAgentTurnIntent.sessionId, sessionArchive.sessionId),
+              eq(changeAgentTurnIntent.promptId, sessionArchive.promptId),
+              eq(changeAgentTurnIntent.changeId, agentTurn.changeId),
+            ),
+          )
+          .innerJoin(
+            runtimeAttempt,
+            and(
+              eq(runtimeAttempt.id, sessionArchive.runtimeAttemptId),
+              eq(runtimeAttempt.changeId, agentTurn.changeId),
+              eq(runtimeAttempt.projectId, agentTurn.projectId),
+            ),
+          )
+          .where(
+            and(
+              eq(agentTurn.id, nativeTurnID),
+              eq(agentTurn.projectId, snapshot.projectId),
+              eq(sessionArchive.state, "saved"),
+            ),
+          );
         // Usage settles before the asynchronous archive and even before Git
         // submission. The existing Verification wait helps once a SHA exists,
         // but cannot cover that earlier race. Do not freeze an empty trace at
@@ -129,17 +291,44 @@ export async function collectLearningCases(
       });
       if (!admitted) continue;
       // Private object I/O must not hold policy/account locks or a SQL connection.
-      nativeEvidence = await readNativeToolEvidence(nativeTurnID, admitted.saved, objects);
+      const saved = admitted.saved;
+      // The saved-state schema check requires these nullable columns to be present.
+      nativeEvidence = await readNativeToolEvidence(
+        nativeTurnID,
+        saved &&
+          saved.throughMessageID !== null &&
+          saved.key !== null &&
+          saved.sha256 !== null &&
+          saved.producerVersion !== null
+          ? {
+              ...saved,
+              throughMessageID: saved.throughMessageID,
+              key: saved.key,
+              sha256: saved.sha256,
+              producerVersion: saved.producerVersion,
+            }
+          : undefined,
+        objects,
+      );
     }
     await database.client.begin(async (sql) => {
       if (!(await authorizedIn(sql))) return;
       if (nativeEvidence) snapshot.evidence.push(nativeEvidence);
-      await sql`
-      INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
-      VALUES(${snapshot.id},${snapshot.projectId},${snapshot.ownerId},${operation.userId},
-        ${snapshot.developerOnly},${snapshot.activity},${snapshot.outcome},${snapshot.settledAt},
-        ${JSON.stringify(snapshot)}::jsonb,${selected})
-      ON CONFLICT DO NOTHING`;
+      await drizzleTransaction(sql)
+        .insert(savedCase)
+        .values({
+          id: snapshot.id,
+          projectId: snapshot.projectId,
+          ownerId: snapshot.ownerId,
+          reviewerId,
+          developerOnly: snapshot.developerOnly,
+          activity: snapshot.activity,
+          outcome: snapshot.outcome,
+          settledAt: new Date(snapshot.settledAt),
+          snapshot,
+          selected,
+        })
+        .onConflictDoNothing();
     });
   }
   const last = operations.findLast((operation) => !operation.wiki);
@@ -153,6 +342,7 @@ export async function collectLearningCases(
 }
 
 async function learningSnapshot(database: Database, operation: Operation) {
+  const db = drizzleTransaction(database.client);
   const evidence: LearningCase["evidence"] = [];
   const targets: LearningCase["targets"] = [];
   const reviewReasons: string[] = [];
@@ -187,25 +377,33 @@ async function learningSnapshot(database: Database, operation: Operation) {
   let settledAt = operation.settledAt;
   const sourceID = operation.id.split(":")[1] ?? "";
   if (operation.id.startsWith("turn:") && uuid.test(sourceID)) {
-    const [turn] = await database.client<
-      {
-        id: string;
-        input: Record<string, unknown>;
-        authority: Record<string, unknown>;
-        ticketId: string | null;
-        conversationId: string | null;
-        createdBy: string;
-        summary: string | null;
-        state: string;
-        nativeCoding: boolean;
-        createdAt: Date;
-        updatedAt: Date;
-      }[]
-    >`SELECT id,input,authority,ticket_id AS "ticketId",conversation_id AS "conversationId",
-      created_by AS "createdBy",outcome_summary AS summary,state,created_at AS "createdAt",updated_at AS "updatedAt",
-      EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent WHERE intent.turn_id=agent_turn.id) AS "nativeCoding"
-      FROM factory.agent_turn WHERE id=${sourceID} AND project_id=${operation.projectId}
-      AND state IN ('completed','failed','stopped','uncertain')`;
+    const [turn] = await db
+      .select({
+        id: agentTurn.id,
+        input: typedSQL<Record<string, unknown>>`${agentTurn.input}`,
+        authority: typedSQL<Record<string, unknown>>`${agentTurn.authority}`,
+        ticketId: agentTurn.ticketId,
+        conversationId: agentTurn.conversationId,
+        createdBy: agentTurn.createdBy,
+        summary: agentTurn.outcomeSummary,
+        state: agentTurn.state,
+        createdAt: agentTurn.createdAt,
+        updatedAt: agentTurn.updatedAt,
+        nativeCoding: exists(
+          db
+            .select({ id: changeAgentTurnIntent.turnId })
+            .from(changeAgentTurnIntent)
+            .where(eq(changeAgentTurnIntent.turnId, agentTurn.id)),
+        ),
+      })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.id, sourceID),
+          eq(agentTurn.projectId, operation.projectId),
+          inArray(agentTurn.state, ["completed", "failed", "stopped", "uncertain"]),
+        ),
+      );
     if (!turn) return null;
     ownerId = turn.ticketId ? null : turn.createdBy;
     activity =
@@ -239,24 +437,52 @@ async function learningSnapshot(database: Database, operation: Operation) {
       1_000,
     );
     add(`turn:${turn.id}:summary`, "outcome", turn.summary);
-    const artifacts = await database.client<
-      { ordinal: number; reference: string; body: string; truncated: boolean }[]
-    >`SELECT ordinal,reference,body,truncated FROM factory.learning_source_artifact WHERE turn_id=${turn.id} ORDER BY ordinal`;
+    const artifacts = await db
+      .select({
+        ordinal: learningSourceArtifact.ordinal,
+        reference: learningSourceArtifact.reference,
+        body: learningSourceArtifact.body,
+        truncated: learningSourceArtifact.truncated,
+      })
+      .from(learningSourceArtifact)
+      .where(eq(learningSourceArtifact.turnId, turn.id))
+      .orderBy(asc(learningSourceArtifact.ordinal));
     const questionId = turn.input["questionEntryId"];
     if (turn.conversationId && typeof questionId === "string" && uuid.test(questionId)) {
-      const [question] = await database.client<{ body: string; payload: unknown }[]>`
-        SELECT body,payload FROM factory.conversation_entry WHERE id=${questionId} AND conversation_id=${turn.conversationId}`;
+      const [question] = await db
+        .select({ body: conversationEntry.body, payload: conversationEntry.payload })
+        .from(conversationEntry)
+        .where(
+          and(
+            eq(conversationEntry.id, questionId),
+            eq(conversationEntry.conversationId, turn.conversationId),
+          ),
+        );
       if (question) add(`question:${questionId}`, "task", question, 3_000);
     }
     if (turn.conversationId) {
-      const entries = await database.client<
-        { id: string; body: string; payload: Record<string, unknown>; citations: unknown }[]
-      >`
-        SELECT id,body,payload,citations FROM factory.conversation_entry
-        WHERE conversation_id=${turn.conversationId} AND actor IN ('project-agent','change-agent')
-          AND created_at>=${turn.createdAt} AND created_at<=${turn.updatedAt}
-          AND coalesce(payload->>'contextId','')=${String(turn.input["contextId"] ?? "")}
-        ORDER BY ordinal LIMIT 3`;
+      const entries = await db
+        .select({
+          id: conversationEntry.id,
+          body: conversationEntry.body,
+          payload: conversationEntry.payload,
+          citations: conversationEntry.citations,
+        })
+        .from(conversationEntry)
+        .where(
+          and(
+            eq(conversationEntry.conversationId, turn.conversationId),
+            inArray(conversationEntry.actor, ["project-agent", "change-agent"]),
+            gte(conversationEntry.createdAt, turn.createdAt),
+            lte(conversationEntry.createdAt, turn.updatedAt),
+            eq(
+              typedSQL<string>`coalesce(${conversationEntry.payload}->>'contextId','')`,
+              String(turn.input["contextId"] ?? ""),
+            ),
+          ),
+        )
+        .orderBy(asc(conversationEntry.ordinal))
+        .limit(3);
       for (const entry of entries) {
         if (
           entry.payload["visibility"] === "developer" ||
@@ -276,33 +502,47 @@ async function learningSnapshot(database: Database, operation: Operation) {
         );
       }
     }
-    const designs = await database.client<
-      { id: string; content: string; commit: string; citations: unknown }[]
-    >`
-      SELECT id,canonical_content AS content,source_commit AS commit,citations FROM factory.technical_design_revision
-      WHERE turn_id=${turn.id} ORDER BY ordinal LIMIT 1`;
+    const designs = await db
+      .select({
+        id: technicalDesignRevision.id,
+        content: technicalDesignRevision.canonicalContent,
+        commit: technicalDesignRevision.sourceCommit,
+        citations: technicalDesignRevision.citations,
+      })
+      .from(technicalDesignRevision)
+      .where(eq(technicalDesignRevision.turnId, turn.id))
+      .orderBy(asc(technicalDesignRevision.ordinal))
+      .limit(1);
     for (const design of designs) {
       developerOnly = true;
       add(`technical-design:${design.id}`, "artifact", design, 6_000);
     }
     if (turn.authority["mode"] === "build") {
-      const [commit] = await database.client<
-        { id: string; sha: string | null; parent: string; state: string; changeId: string }[]
-      >`
-        SELECT id,commit_sha AS sha,expected_parent_sha AS parent,state,change_id AS "changeId"
-        FROM factory.change_commit_operation WHERE id=${turn.id}`;
+      const [commit] = await db
+        .select({
+          id: changeCommitOperation.id,
+          sha: changeCommitOperation.commitSha,
+          parent: changeCommitOperation.expectedParentSha,
+          state: changeCommitOperation.state,
+          changeId: changeCommitOperation.changeId,
+        })
+        .from(changeCommitOperation)
+        .where(eq(changeCommitOperation.id, turn.id));
       if (commit?.sha) {
-        const checks = await database.client<
-          {
-            id: string;
-            state: string;
-            summary: string | null;
-            diagnosis: unknown;
-            completedAt: Date | null;
-          }[]
-        >`
-          SELECT id,state,summary,diagnosis,completed_at AS "completedAt" FROM factory.verification
-          WHERE change_id=${commit.changeId} AND commit_sha=${commit.sha} ORDER BY created_at DESC LIMIT 1`;
+        const checks = await db
+          .select({
+            id: verification.id,
+            state: verification.state,
+            summary: verification.summary,
+            diagnosis: verification.diagnosis,
+            completedAt: verification.completedAt,
+          })
+          .from(verification)
+          .where(
+            and(eq(verification.changeId, commit.changeId), eq(verification.commitSha, commit.sha)),
+          )
+          .orderBy(desc(verification.createdAt))
+          .limit(1);
         if (
           operation.outcome === "completed" &&
           !checks[0]?.completedAt &&
@@ -328,53 +568,80 @@ async function learningSnapshot(database: Database, operation: Operation) {
       }
       const requirementId = turn.authority["requirementRevisionId"];
       if (typeof requirementId === "string" && uuid.test(requirementId)) {
-        const [requirement] = await database.client<{ content: string }[]>`
-          SELECT canonical_content AS content FROM factory.requirement_revision WHERE id=${requirementId}`;
+        const [requirement] = await db
+          .select({ content: requirementRevision.canonicalContent })
+          .from(requirementRevision)
+          .where(eq(requirementRevision.id, requirementId));
         if (requirement) add(`requirements:${requirementId}`, "task", requirement.content, 3_000);
       }
-      const feedback = await database.client<{ id: string; body: string; commit: string }[]>`
-        SELECT message.id,message.body,feedback.commit_sha AS commit FROM factory.review_feedback_command command
-        JOIN factory.review_feedback feedback ON feedback.id=command.feedback_id
-        JOIN factory.review_feedback_message message ON message.feedback_id=feedback.id
-        WHERE command.turn_id=${turn.id} ORDER BY message.created_at LIMIT 3`;
+      const feedback = await db
+        .select({
+          id: reviewFeedbackMessage.id,
+          body: reviewFeedbackMessage.body,
+          commit: reviewFeedback.commitSha,
+        })
+        .from(reviewFeedbackCommand)
+        .innerJoin(reviewFeedback, eq(reviewFeedback.id, reviewFeedbackCommand.feedbackId))
+        .innerJoin(reviewFeedbackMessage, eq(reviewFeedbackMessage.feedbackId, reviewFeedback.id))
+        .where(eq(reviewFeedbackCommand.turnId, turn.id))
+        .orderBy(asc(reviewFeedbackMessage.createdAt))
+        .limit(3);
       for (const item of feedback) add(`feedback:${item.id}`, "feedback", item, 2_000);
     }
-    const reviews = await database.client<
-      {
-        id: string;
-        result: unknown;
-        evidence: unknown;
-        commit: string;
-        base: string;
-        state: string;
-      }[]
-    >`
-      SELECT review.id,review.result,review.evidence,review.commit_sha AS commit,review.base_sha AS base,review.state FROM factory.candidate_review review
-      WHERE (review.turn_id=${turn.id} OR EXISTS(
-        SELECT 1 FROM factory.change_commit_operation commit WHERE commit.id=${turn.id} AND commit.change_id=review.change_id AND commit.commit_sha=review.commit_sha))
-      AND review.completed_at IS NOT NULL ORDER BY review.ordinal LIMIT 2`;
+    const reviews = await db
+      .select({
+        id: candidateReview.id,
+        result: candidateReview.result,
+        evidence: candidateReview.evidence,
+        commit: candidateReview.commitSha,
+        base: candidateReview.baseSha,
+        state: candidateReview.state,
+      })
+      .from(candidateReview)
+      .where(
+        and(
+          or(
+            eq(candidateReview.turnId, turn.id),
+            exists(
+              db
+                .select({ id: changeCommitOperation.id })
+                .from(changeCommitOperation)
+                .where(
+                  and(
+                    eq(changeCommitOperation.id, turn.id),
+                    eq(changeCommitOperation.changeId, candidateReview.changeId),
+                    eq(changeCommitOperation.commitSha, candidateReview.commitSha),
+                  ),
+                ),
+            ),
+          ),
+          isNotNull(candidateReview.completedAt),
+        ),
+      )
+      .orderBy(asc(candidateReview.ordinal))
+      .limit(2);
     for (const review of reviews) add(`candidate-review:${review.id}`, "artifact", review, 6_000);
-    const skills = await database.client<
-      {
-        id: string;
-        digest: string;
-        scope: string | null;
-        personalLoaded: boolean;
-        libraryId: string | null;
-        version: number;
-        content: unknown;
-      }[]
-    >`
-      SELECT revision.id,revision.revision::int AS version,revision.content_digest AS digest,library.scope,library.id AS "libraryId",
-        bool_or(library.scope='personal') OVER () AS "personalLoaded",
-        jsonb_build_object('key',revision.content->'key','name',revision.content->'name',
-          'description',revision.content->'description','roles',revision.content->'roles',
-          'instructions',revision.content->'instructions',
-          'omitted','Bundled references and executable resources are not copied into this review.') AS content
-      FROM factory.agent_turn_skill loaded JOIN factory.skill_revision revision ON revision.id=loaded.revision_id
-      LEFT JOIN factory.skill_library_revision link ON link.revision_id=revision.id
-      LEFT JOIN factory.skill_library library ON library.id=link.library_id WHERE loaded.turn_id=${turn.id}
-      ORDER BY revision.id LIMIT 6`;
+    const skills = await db
+      .select({
+        id: skillRevision.id,
+        version: skillRevision.revision,
+        digest: skillRevision.contentDigest,
+        scope: skillLibrary.scope,
+        libraryId: skillLibrary.id,
+        personalLoaded: typedSQL<boolean>`bool_or(${skillLibrary.scope}='personal') OVER ()`,
+        content: typedSQL<Record<string, unknown>>`jsonb_build_object(
+        'key',${skillRevision.content}->'key','name',${skillRevision.content}->'name',
+        'description',${skillRevision.content}->'description','roles',${skillRevision.content}->'roles',
+        'instructions',${skillRevision.content}->'instructions',
+        'omitted','Bundled references and executable resources are not copied into this review.')`,
+      })
+      .from(agentTurnSkill)
+      .innerJoin(skillRevision, eq(skillRevision.id, agentTurnSkill.revisionId))
+      .leftJoin(skillLibraryRevision, eq(skillLibraryRevision.revisionId, skillRevision.id))
+      .leftJoin(skillLibrary, eq(skillLibrary.id, skillLibraryRevision.libraryId))
+      .where(eq(agentTurnSkill.turnId, turn.id))
+      .orderBy(asc(skillRevision.id))
+      .limit(6);
     for (const skill of skills) {
       if (skill.scope === "personal" || skill.personalLoaded) ownerId = turn.createdBy;
       add(`skill:${skill.id}`, "configuration", skill, 2_000);
@@ -406,30 +673,33 @@ async function learningSnapshot(database: Database, operation: Operation) {
     // Native tools are added only after the final scope/authority checks.
     // A summary or missing archive never stands in for an observed tool trace.
   } else if (operation.id.startsWith("monitoring:") && uuid.test(sourceID)) {
-    const [incident] = await database.client<
-      {
-        state: string;
-        title: string;
-        instructions: string | null;
-        payloadDigest: string;
-        diagnosis: unknown;
-        reason: string | null;
-        assignment: unknown;
-        policyId: string;
-        hookId: string;
-        version: number;
-        current: boolean;
-      }[]
-    >`
-      SELECT incident.state,incident.title,policy.instructions,incident.payload_digest AS "payloadDigest",
-        incident.diagnosis,incident.reason,
-        jsonb_build_object('revisionIds',incident.skill_assignment->'revisionIds',
-          'requiredRevisionIds',incident.skill_assignment->'requiredRevisionIds',
-          'codeAccess',incident.skill_assignment->'codeAccess') AS assignment,incident.policy_id AS "policyId",
-        hook.id AS "hookId",hook.version::int AS version,(hook.policy_id=policy.id) AS current
-      FROM factory.monitoring_incident incident JOIN factory.monitoring_policy policy ON policy.id=incident.policy_id
-      JOIN factory.monitoring_hook hook ON hook.id=policy.hook_id
-      WHERE incident.id=${sourceID} AND incident.project_id=${operation.projectId} AND incident.settled_at IS NOT NULL`;
+    const [incident] = await db
+      .select({
+        state: monitoringIncident.state,
+        title: monitoringIncident.title,
+        instructions: monitoringPolicy.instructions,
+        payloadDigest: monitoringIncident.payloadDigest,
+        diagnosis: monitoringIncident.diagnosis,
+        reason: monitoringIncident.reason,
+        assignment: typedSQL<Record<string, unknown>>`jsonb_build_object(
+        'revisionIds',${monitoringIncident.skillAssignment}->'revisionIds',
+        'requiredRevisionIds',${monitoringIncident.skillAssignment}->'requiredRevisionIds',
+        'codeAccess',${monitoringIncident.skillAssignment}->'codeAccess')`,
+        policyId: monitoringIncident.policyId,
+        hookId: monitoringHook.id,
+        version: monitoringHook.version,
+        current: eq(monitoringHook.policyId, monitoringPolicy.id),
+      })
+      .from(monitoringIncident)
+      .innerJoin(monitoringPolicy, eq(monitoringPolicy.id, monitoringIncident.policyId))
+      .innerJoin(monitoringHook, eq(monitoringHook.id, monitoringPolicy.hookId))
+      .where(
+        and(
+          eq(monitoringIncident.id, sourceID),
+          eq(monitoringIncident.projectId, operation.projectId),
+          isNotNull(monitoringIncident.settledAt),
+        ),
+      );
     if (!incident) return null;
     ownerId = null;
     const assignment = incident.assignment as Record<string, unknown> | null;
@@ -471,20 +741,24 @@ async function learningSnapshot(database: Database, operation: Operation) {
         incident.instructions,
       );
   } else if (operation.id.startsWith("wiki:") && uuid.test(sourceID)) {
-    const [generation] = await database.client<
-      {
-        state: string;
-        commit: string;
-        failure: string | null;
-        pages: number | null;
-        conflicts: number | null;
-        completedAt: Date;
-      }[]
-    >`
-      SELECT state,source_commit_sha AS commit,failure,page_count AS pages,conflict_count AS conflicts,
-        completed_at AS "completedAt"
-      FROM factory.knowledge_generation WHERE id=${sourceID} AND project_id=${operation.projectId} AND completed_at IS NOT NULL`;
-    if (!generation) return null;
+    const [generation] = await db
+      .select({
+        state: knowledgeGeneration.state,
+        commit: knowledgeGeneration.sourceCommitSha,
+        failure: knowledgeGeneration.failure,
+        pages: knowledgeGeneration.pageCount,
+        conflicts: knowledgeGeneration.conflictCount,
+        completedAt: knowledgeGeneration.completedAt,
+      })
+      .from(knowledgeGeneration)
+      .where(
+        and(
+          eq(knowledgeGeneration.id, sourceID),
+          eq(knowledgeGeneration.projectId, operation.projectId),
+          isNotNull(knowledgeGeneration.completedAt),
+        ),
+      );
+    if (!generation?.completedAt) return null;
     // One model call's status says nothing about the generation this case reviews.
     outcome = generation.state === "succeeded" ? "completed" : "failed";
     const { completedAt, ...retained } = generation;
@@ -492,21 +766,27 @@ async function learningSnapshot(database: Database, operation: Operation) {
     ownerId = null;
     developerOnly = true;
     add(`wiki:${sourceID}:outcome`, "outcome", retained);
-    const revisions = await database.client<
-      {
-        id: string;
-        title: string;
-        body: string;
-        commit: string;
-        pageId: string | null;
-        version: number | null;
-      }[]
-    >`
-      SELECT revision.id,revision.title,revision.body,revision.source_commit_sha AS commit,
-        page.id AS "pageId",page.version::int AS version
-      FROM factory.knowledge_revision revision LEFT JOIN factory.knowledge_page page
-        ON page.id=revision.page_id AND page.current_revision_id=revision.id AND page.state='active'
-      WHERE revision.generation_id=${sourceID} ORDER BY revision.id LIMIT 3`;
+    const revisions = await db
+      .select({
+        id: knowledgeRevision.id,
+        title: knowledgeRevision.title,
+        body: knowledgeRevision.body,
+        commit: knowledgeRevision.sourceCommitSha,
+        pageId: knowledgePage.id,
+        version: knowledgePage.version,
+      })
+      .from(knowledgeRevision)
+      .leftJoin(
+        knowledgePage,
+        and(
+          eq(knowledgePage.id, knowledgeRevision.pageId),
+          eq(knowledgePage.currentRevisionId, knowledgeRevision.id),
+          eq(knowledgePage.state, "active"),
+        ),
+      )
+      .where(eq(knowledgeRevision.generationId, sourceID))
+      .orderBy(asc(knowledgeRevision.id))
+      .limit(3);
     for (const revision of revisions) {
       add(`knowledge:${revision.id}`, "artifact", revision, 5_000);
       if (revision.pageId && revision.version)
@@ -523,11 +803,21 @@ async function learningSnapshot(database: Database, operation: Operation) {
         );
     }
   } else if (operation.id.startsWith("setup:") && uuid.test(sourceID)) {
-    const [inspection] = await database.client<
-      { state: string; source: string; output: unknown; failure: string | null }[]
-    >`
-      SELECT state,source_commit AS source,output,failure FROM factory.project_setup_inspection
-      WHERE id=${sourceID} AND project_id=${operation.projectId} AND state NOT IN ('inspecting','confirming')`;
+    const [inspection] = await db
+      .select({
+        state: projectSetupInspection.state,
+        source: projectSetupInspection.sourceCommit,
+        output: projectSetupInspection.output,
+        failure: projectSetupInspection.failure,
+      })
+      .from(projectSetupInspection)
+      .where(
+        and(
+          eq(projectSetupInspection.id, sourceID),
+          eq(projectSetupInspection.projectId, operation.projectId),
+          notInArray(projectSetupInspection.state, ["inspecting", "confirming"]),
+        ),
+      );
     if (!inspection) return null;
     // Setup drafts/inspection answers are not a shared Project conversation.
     developerOnly = false;

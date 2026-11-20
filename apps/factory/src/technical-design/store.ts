@@ -1,3 +1,4 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { createHash } from "node:crypto";
 import type { z } from "zod";
 import type { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
@@ -9,12 +10,11 @@ import {
   validateTechnicalDesignCoverage,
 } from "../../../../packages/requirement-domain/src/technical-design";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { diagramRendererVersion } from "./diagrams";
 
 export async function technicalPlanningOutstandingIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   ticketID: string,
   requirementRevisionID: string | null,
 ) {
@@ -34,7 +34,7 @@ export async function technicalPlanningOutstandingIn(
 }
 
 export async function saveTechnicalDesignIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   input: {
     id: string;
     ticketID: string;

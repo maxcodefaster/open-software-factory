@@ -220,7 +220,7 @@ BEGIN
         SELECT 1 FROM factory.staging_preview preview WHERE preview.project_id=NEW.project_id
           AND preview.revision=NEW.intent->>'revision' AND (preview.runtime_attempt_id IS NULL
             OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=predecessor.id
-              WHERE predecessor.id=preview.runtime_attempt_id AND predecessor.substrate
+              WHERE predecessor.id=preview.runtime_attempt_id
                 AND predecessor.state='stopped' AND binding.deleted_at IS NOT NULL)))
         OR (NEW.generation>1 AND NOT EXISTS(
           SELECT 1 FROM factory.substrate_isolated previous JOIN factory.runtime_attempt predecessor ON predecessor.id=previous.runtime_attempt_id

@@ -1,6 +1,5 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { confirmUndispatchedReviewStopsIn } from "../agent/stop";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { createUsageJournal } from "../usage/journal";
 
@@ -23,7 +22,7 @@ export async function installationInMaintenance(database: Database) {
 export async function beginInstallationMaintenance(
   database: Database,
   observePausedStop?: (
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     target: RetainedMaintenanceStop,
   ) => Promise<boolean>,
 ) {
@@ -57,7 +56,7 @@ export async function beginInstallationMaintenance(
         FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
         WHERE session.state='stopped' AND session.stop_pending AND session.stop_id IS NOT NULL
-          AND attempt.substrate AND attempt.state='paused' AND attempt.workspace_id IS NOT NULL
+ AND attempt.state='paused' AND attempt.workspace_id IS NOT NULL
         ORDER BY attempt.workspace_id,session.change_id`;
       for (const target of paused) {
         // Native lifecycle owns this same lock. Never wait for it while holding

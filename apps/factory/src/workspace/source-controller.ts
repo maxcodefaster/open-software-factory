@@ -1,4 +1,4 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import type { WorkspaceSourceState } from "../../../../packages/workspace-domain/src/source";
 import {
   personalWorkspaceIdentity,
@@ -7,7 +7,6 @@ import {
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { workspaceAuthorityIn } from "../access/workspace";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
 import { boundedSourceBody } from "./source-body";
@@ -15,7 +14,7 @@ import { initialSourceRoleIn, type SourceRoleFence } from "./source-role-fence";
 import type { createSubstrateSources } from "./substrate-source";
 
 type Database = ReturnType<typeof createDatabase>;
-type SourceSQL = Database["client"] | AgentTurnTransaction;
+type SourceSQL = Database["client"] | DatabaseTransaction;
 export interface SourceWorkspaceView {
   readonly workspaceID: string;
   readonly label: string;
@@ -32,7 +31,7 @@ export function createWorkspaceSourceController(
   hub: Pick<RuntimeHub, "sourceConnected" | "parentConnected">,
   sources: ReturnType<typeof createSubstrateSources>,
   options?: {
-    supportsInitialRole(attemptID: string, sql: AgentTurnTransaction): Promise<boolean>;
+    supportsInitialRole(attemptID: string, sql: DatabaseTransaction): Promise<boolean>;
   },
 ) {
   const streams = new Map<
@@ -62,12 +61,12 @@ export function createWorkspaceSourceController(
       s.owner AS "sourceOwner",s.writable AS "sourceWritable",s.writer_epoch::text AS "sourceEpoch"
       FROM factory.development_workspace w JOIN factory.project p ON p.id=w.project_id
       LEFT JOIN factory.ticket t ON t.id=w.ticket_id
-      LEFT JOIN factory.runtime_attempt a ON a.workspace_id=w.id AND a.substrate
+      LEFT JOIN factory.runtime_attempt a ON a.workspace_id=w.id
         AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
           WHERE newer.workspace_id=w.id AND newer.generation>a.generation)
       LEFT JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
       LEFT JOIN factory.substrate_source s ON s.workspace_id=w.id
-      WHERE w.id=${workspaceID} AND w.substrate`;
+      WHERE w.id=${workspaceID}`;
     return current ?? null;
   }
   async function view(
@@ -93,7 +92,7 @@ export function createWorkspaceSourceController(
         : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
     };
   }
-  const authority = (workspaceID: string, userID: string, sql: AgentTurnTransaction) =>
+  const authority = (workspaceID: string, userID: string, sql: DatabaseTransaction) =>
     workspaceAuthorityIn(sql, workspaceID, userID);
   function revokeWorkspace(workspaceID: string) {
     for (const [controller, stream] of streams)
@@ -110,7 +109,6 @@ export function createWorkspaceSourceController(
     return result;
   }
   return {
-    substrate: sources,
     nativeRestore: (request: Request, attemptID: string) =>
       sources.restoreEndpoint(request, attemptID),
     ensure,
@@ -152,9 +150,9 @@ export function createWorkspaceSourceController(
       writable: boolean,
       commission?: SourceRoleFence,
     ) {
-      const fence = async (sql: AgentTurnTransaction) => {
+      const fence = async (sql: DatabaseTransaction) => {
         const [workspace] = await sql<{ id: string }[]>`
-          SELECT id FROM factory.development_workspace WHERE change_id=${changeID} AND substrate`;
+          SELECT id FROM factory.development_workspace WHERE change_id=${changeID}`;
         if (!workspace) {
           if (commission?.mode === "dispatch")
             throw new CommandError("unavailable", "Current Source Workspace is unavailable");
@@ -190,7 +188,7 @@ export function createWorkspaceSourceController(
             JOIN factory.substrate_source source ON source.workspace_id=a.workspace_id
               AND source.actor_uid=binding.actor_uid AND source.owner='actor' AND source.writable
             WHERE a.id=${commission.attemptID} AND a.workspace_id=${workspace.id}
-              AND a.state='ready' AND a.stop_intended_at IS NULL AND a.substrate
+              AND a.state='ready' AND a.stop_intended_at IS NULL
               AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
                 WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
           if (writable || !binding || current?.attemptID !== commission.attemptID || !current.ready)

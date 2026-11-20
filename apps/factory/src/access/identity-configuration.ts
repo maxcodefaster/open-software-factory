@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { z } from "zod";
 import type { IdentityPolicy } from "../../../../packages/auth/src/policy";
 import { createFactoryAuth } from "../../../../packages/auth/src/server";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   type IdentityConfiguration,
   identityConfiguration,
@@ -10,7 +10,6 @@ import {
   identityConfigurationWrite,
   identityMetadata,
 } from "../../../../packages/identity-domain/src/configuration";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { createOpenBaoKV } from "../secrets/openbao";
 import { requireActiveAccountIn } from "./controller";
@@ -77,7 +76,7 @@ export function createIdentityConfiguration(
   let activeVersion = 0;
   let recoveringActive = false;
   const candidates = new Map<string, ReturnType<typeof createFactoryAuth>>();
-  async function manager(sql: AgentTurnTransaction, userID: string) {
+  async function manager(sql: DatabaseTransaction, userID: string) {
     await requireActiveAccountIn(sql, userID);
     const [row] =
       await sql`SELECT user_id FROM factory.administrator WHERE user_id=${userID} FOR SHARE`;

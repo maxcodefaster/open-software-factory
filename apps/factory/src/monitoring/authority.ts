@@ -5,9 +5,8 @@ import {
   defaultAutofixInstructions,
   type inputDelegation,
 } from "../../../../packages/conversation-domain/src/monitoring";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { createMCPLibrary } from "../mcp/controller";
 import { monitoringDigest } from "./payload";
@@ -24,7 +23,7 @@ export type MonitoringAuthority = {
   delegation: z.infer<typeof inputDelegation>;
 };
 export async function manageMonitoringIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   userId: string,
   projectId: string,
   delegation: MonitoringAuthority["delegation"] = "application-fix-and-delivery",
@@ -35,7 +34,7 @@ export async function manageMonitoringIn(
 }
 export async function monitoringAssignmentIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   connectionId: string,
   projectId: string,
   userId: string,
@@ -73,7 +72,7 @@ export async function monitoringAssignmentIn(
 
 export async function inputAssignmentsIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   ids: string[],
   projectId: string,
   userId: string,
@@ -113,7 +112,7 @@ export function retainedInputAssignments(value: {
 
 export async function validateInputAssignmentsIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   assignments: MCPAssignment[],
   projectId: string,
   userId: string,
@@ -139,7 +138,7 @@ export async function validateInputAssignmentsIn(
 
 export async function inputTicketAssignmentsIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   ticketId: string,
   projectId: string,
   userId: string,
@@ -159,7 +158,7 @@ export async function inputTicketAssignmentsIn(
 
 export async function monitoringAuthorityIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   incidentId: string,
 ): Promise<MonitoringAuthority> {
   const [incident] = await sql<
@@ -195,7 +194,7 @@ export async function monitoringAuthorityIn(
 
 export async function monitoringChangeAuthorityIn(
   database: Database,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   changeId: string,
   incidentId: string,
 ) {

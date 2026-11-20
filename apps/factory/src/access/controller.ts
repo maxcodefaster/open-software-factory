@@ -1,5 +1,9 @@
 import { and, eq } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
 import {
   accountAccess,
   administrator,
@@ -12,13 +16,12 @@ import {
   ticket,
 } from "../../../../packages/db/src/schema";
 import { projectCapabilities } from "../../../../packages/project-domain/src/access";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { workspaceAuthorityIn } from "./workspace";
 
 type Database = ReturnType<typeof createDatabase>;
 
-export async function requireActiveAccountIn(sql: AgentTurnTransaction, userID: string) {
+export async function requireActiveAccountIn(sql: DatabaseTransaction, userID: string) {
   const db = drizzleTransaction(sql);
   const [user] = await db
     .select({ id: authUser.id })
@@ -37,7 +40,7 @@ export async function requireActiveAccountIn(sql: AgentTurnTransaction, userID: 
     throw new CommandError("forbidden", "Account access is disabled");
 }
 
-async function administratorIn(sql: AgentTurnTransaction, userID: string) {
+async function administratorIn(sql: DatabaseTransaction, userID: string) {
   const [row] = await drizzleTransaction(sql)
     .select({ userId: administrator.userId })
     .from(administrator)
@@ -47,7 +50,7 @@ async function administratorIn(sql: AgentTurnTransaction, userID: string) {
 }
 
 export async function requireSystemManagerIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   userID: string,
   message = "System Manager access required",
 ) {
@@ -55,7 +58,7 @@ export async function requireSystemManagerIn(
   if (!(await administratorIn(sql, userID))) throw new CommandError("forbidden", message);
 }
 
-async function projectAccessIn(sql: AgentTurnTransaction, userID: string, projectID: string) {
+async function projectAccessIn(sql: DatabaseTransaction, userID: string, projectID: string) {
   await requireActiveAccountIn(sql, userID);
   const db = drizzleTransaction(sql);
   const [member] = await db
@@ -73,7 +76,7 @@ async function projectAccessIn(sql: AgentTurnTransaction, userID: string, projec
 }
 
 export async function projectAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   userID: string,
   projectID: string,
   manage = false,
@@ -85,7 +88,7 @@ export async function projectAuthorityIn(
 }
 
 export async function projectDevelopmentAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   userID: string,
   projectID: string,
 ) {

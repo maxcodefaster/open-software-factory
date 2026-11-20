@@ -14,7 +14,7 @@ import {
   skillContentInput,
   skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 
 type RetainedSettings = Pick<InheritedSkillSettings, "system" | "project" | "personal">;
 
@@ -23,7 +23,6 @@ import {
   libraryCoverInput,
 } from "../../../../packages/conversation-domain/src/library-covers";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import {
   initializeLibraryCoverIn,
@@ -45,7 +44,7 @@ type Library = {
 };
 
 export function createSkillLibraryController(database: ReturnType<typeof createDatabase>) {
-  async function capabilities(sql: AgentTurnTransaction, userId: string, projectId?: string) {
+  async function capabilities(sql: DatabaseTransaction, userId: string, projectId?: string) {
     await requireActiveAccountIn(sql, userId);
     const [admin] =
       await sql`SELECT user_id FROM factory.administrator WHERE user_id = ${userId} FOR SHARE`;
@@ -55,7 +54,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     };
   }
   async function authority(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     userId: string,
     scope: Library["scope"],
     projectId?: string,
@@ -66,16 +65,16 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     if (scope === "project" && (!projectId || !access.canManageProject))
       throw new CommandError("forbidden", "Project manager access required");
   }
-  async function lock(sql: AgentTurnTransaction) {
+  async function lock(sql: DatabaseTransaction) {
     await sql`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`;
   }
-  async function libraries(sql: AgentTurnTransaction) {
+  async function libraries(sql: DatabaseTransaction) {
     return sql<
       Library[]
     >`SELECT id, storage_key AS "storageKey", scope, owner_id AS "ownerId", project_id AS "projectId" FROM factory.skill_library ORDER BY scope, storage_key`;
   }
   async function writeRevision(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     library: Library,
     revisionId: string,
     expected: number,
@@ -109,7 +108,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     await sql`INSERT INTO factory.skill_publication(revision_id, published, updated_by) VALUES (${revisionId}, true, ${userId})`;
     await sql`INSERT INTO factory.skill_library_revision(library_id, revision_id, copied_from) VALUES (${library.id}, ${revisionId}, ${copiedFrom ?? null})`;
   }
-  async function seed(sql: AgentTurnTransaction, userId: string) {
+  async function seed(sql: DatabaseTransaction, userId: string) {
     const [administrator] = await sql<
       Array<{ id: string }>
     >`SELECT user_id AS id FROM factory.administrator ORDER BY user_id LIMIT 1`;
@@ -141,7 +140,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     }
   }
   async function viewIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     userId: string,
     projectId?: string,
     legacy?: RetainedSettings,
@@ -272,7 +271,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       return repository ? previewRepositorySkill(value) : previewSkillImport(value);
     },
     async viewIn(
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       userId: string,
       projectId?: string,
       legacy?: RetainedSettings,
@@ -282,7 +281,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       await seed(sql, userId);
       return viewIn(sql, userId, projectId, legacy);
     },
-    async saveIn(sql: AgentTurnTransaction, value: unknown, userId: string) {
+    async saveIn(sql: DatabaseTransaction, value: unknown, userId: string) {
       const input = skillLibrarySaveInput.parse(value);
       await lock(sql);
       await authority(sql, userId, input.scope, input.projectId);
@@ -338,10 +337,10 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       });
     },
     async chooseIn(
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       value: unknown,
       userId: string,
-      legacy?: (sql: AgentTurnTransaction) => Promise<RetainedSettings>,
+      legacy?: (sql: DatabaseTransaction) => Promise<RetainedSettings>,
     ) {
       const input = skillChoiceInput.parse(value);
       await lock(sql);
@@ -387,7 +386,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
     async choose(
       value: unknown,
       userId: string,
-      legacy?: (sql: AgentTurnTransaction) => Promise<RetainedSettings>,
+      legacy?: (sql: DatabaseTransaction) => Promise<RetainedSettings>,
     ) {
       return database.client.begin((sql) => this.chooseIn(sql, value, userId, legacy));
     },

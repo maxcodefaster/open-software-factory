@@ -1,7 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   hashConnectorToken,
   runtimeConnectorTokens,
@@ -25,7 +25,6 @@ import {
   type RetainedStopTarget,
   requireStoppedAgentInputsIn,
 } from "../agent/stop";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { admitComputeIn } from "../usage/compute";
 import { templateInitialSourceRole } from "../workspace/source-role-fence";
@@ -412,7 +411,7 @@ export function createSubstrateExecution(
     )
       throw new Error("Native Connector egress differs from its pinned restricted policy");
   }
-  async function binding(sql: Database["client"] | AgentTurnTransaction = database.client) {
+  async function binding(sql: Database["client"] | DatabaseTransaction = database.client) {
     const [row] = await sql<
       Binding[]
     >`SELECT intent,atespace,actor_name AS "actorName",actor_uid::text AS "actorUID",
@@ -481,7 +480,7 @@ export function createSubstrateExecution(
     }
   }
   async function remember(
-    sql: Database["client"] | AgentTurnTransaction,
+    sql: Database["client"] | DatabaseTransaction,
     saved: Binding,
     value: unknown,
   ) {
@@ -511,7 +510,7 @@ export function createSubstrateExecution(
       uid,
     );
   }
-  async function observe(sql: Database["client"] | AgentTurnTransaction, saved: Binding) {
+  async function observe(sql: Database["client"] | DatabaseTransaction, saved: Binding) {
     if (saved.createRejected)
       throw new Error("Native Create was rejected; an existing Actor is never adopted");
     await profile();
@@ -614,7 +613,7 @@ export function createSubstrateExecution(
       throw new CommandError("conflict", substrateBootstrapContinuationBlocked);
   }
   async function requireInitialVerificationResumeIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     saved: Binding,
     actor: NativeActor,
     operation: ActorRPC,
@@ -666,7 +665,7 @@ export function createSubstrateExecution(
       );
   }
   async function requireCapacityWorkspaceResumeIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     saved: Binding,
     actor: NativeActor,
     operation: ActorRPC,
@@ -1083,12 +1082,12 @@ export function createSubstrateExecution(
     // The maintenance caller holds the installation fence and this Workspace's
     // transaction lock. This permits retaining a paused input across an upgrade,
     // not confirming Stop or dispatching any cleanup, lifecycle or inference.
-    async pausedStopRetainedIn(sql: AgentTurnTransaction, stopID: string) {
+    async pausedStopRetainedIn(sql: DatabaseTransaction, stopID: string) {
       const [retained] = await sql`
         SELECT attempt.id FROM factory.runtime_attempt attempt
         JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
           AND workspace.project_id=attempt.project_id AND workspace.change_id=attempt.change_id
-          AND workspace.kind='ticket' AND workspace.substrate
+          AND workspace.kind='ticket'
         JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
         JOIN factory.change_agent_session session ON session.change_id=change.id
           AND session.runtime_attempt_id=attempt.id
@@ -1097,7 +1096,7 @@ export function createSubstrateExecution(
           AND intent.session_id=session.opencode_session_id AND intent.prompt_id IS NOT NULL
         JOIN factory.agent_turn turn ON turn.id=intent.turn_id AND turn.change_id=change.id
         JOIN factory.substrate_source source ON source.workspace_id=workspace.id
-        WHERE attempt.id=${attemptID} AND attempt.substrate AND attempt.state='paused'
+        WHERE attempt.id=${attemptID} AND attempt.state='paused'
           AND attempt.stop_intended_at IS NULL
           AND EXISTS(SELECT 1 FROM factory.installation_maintenance WHERE singleton AND enabled)
           AND session.state='stopped' AND session.stop_pending AND session.stop_id=${stopID}
@@ -1126,7 +1125,7 @@ export function createSubstrateExecution(
           AND (checkpoint->>'writerEpoch')::bigint<writer_epoch`;
       return Boolean(source && (await inputStopVersion()));
     },
-    async supportsInitialSourceRole(sql: AgentTurnTransaction) {
+    async supportsInitialSourceRole(sql: DatabaseTransaction) {
       return trackNativeOperation(
         (async () => {
           if (!workspaceID || config.generation !== 1 || config.deployment !== "fresh-workspaces")

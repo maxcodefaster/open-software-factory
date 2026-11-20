@@ -21,7 +21,7 @@ test("native Pause retains a bounded control-free failure without discarding Sou
     }
     if (method === "CreateActor") {
       creates++;
-      actor = f.actor();
+      actor = await f.createdActor();
       return structuredClone(actor);
     }
     if (method === "ResumeActor" && actor) {

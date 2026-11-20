@@ -1,8 +1,8 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { searchExpression } from "../knowledge/search-expression";
-import type { AgentTurnTransaction } from "./turn-store";
 
 export async function buildKnowledgeContext(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   query: string,
 ) {

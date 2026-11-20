@@ -1,10 +1,10 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { requireSetupReady } from "../setup/execution-gate";
 
 export async function substratePrebuildAuthorityIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   preparationID: string,
   attemptID: string,
@@ -37,7 +37,7 @@ export async function substratePrebuildAuthorityIn(
 }
 
 export async function substratePrebuildGrantIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   preparationID: string,
   attemptID: string,
@@ -54,7 +54,7 @@ export async function substratePrebuildGrantIn(
       AND provision.intent#>>'{environment,version}'=${String(scope.version)}
       AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
       AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
-      AND (attempt.id IS NULL OR (attempt.substrate AND attempt.project_id=${projectID}
+      AND (attempt.id IS NULL OR (attempt.project_id=${projectID}
         AND attempt.isolated_kind='prebuild' AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
         AND attempt.revision=${scope.revision} AND attempt.created_by=${userID} AND attempt.stop_intended_at IS NULL
         AND attempt.state IN ('create-intended','starting','ready')))`;
@@ -63,18 +63,18 @@ export async function substratePrebuildGrantIn(
   return { projectID, changeID: null, revision: scope.revision };
 }
 
-export async function substratePrebuildPrincipalIn(sql: AgentTurnTransaction, attemptID: string) {
+export async function substratePrebuildPrincipalIn(sql: DatabaseTransaction, attemptID: string) {
   const [attempt] = await sql<
     { userID: string }[]
   >`SELECT created_by AS "userID" FROM factory.runtime_attempt
-    WHERE id=${attemptID} AND substrate AND isolated_kind='prebuild' AND workspace_id IS NULL
+    WHERE id=${attemptID} AND isolated_kind='prebuild' AND workspace_id IS NULL
       AND state IN ('starting','ready') AND stop_intended_at IS NULL`;
   if (!attempt)
     throw new CommandError("forbidden", "Current native prebuild principal is unavailable");
   return attempt.userID;
 }
 
-export async function substratePrebuildSourceIn(sql: AgentTurnTransaction, attemptID: string) {
+export async function substratePrebuildSourceIn(sql: DatabaseTransaction, attemptID: string) {
   const [scope] = await sql<
     { projectID: string; preparationID: string; userID: string; repository: string }[]
   >`
@@ -83,7 +83,7 @@ export async function substratePrebuildSourceIn(sql: AgentTurnTransaction, attem
     JOIN factory.project project ON project.id=attempt.project_id
     JOIN factory.substrate_prebuild provision ON provision.runtime_attempt_id=attempt.id AND provision.generation=attempt.generation
     JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-    WHERE attempt.id=${attemptID} AND attempt.substrate AND attempt.isolated_kind='prebuild'
+    WHERE attempt.id=${attemptID} AND attempt.isolated_kind='prebuild'
       AND attempt.workspace_id IS NULL AND attempt.state IN ('create-intended','starting')
       AND attempt.ready_at IS NULL AND attempt.stop_intended_at IS NULL
       AND provision.intent->>'repository'=project.repository_url AND provision.intent->>'revision'=attempt.revision

@@ -1,7 +1,7 @@
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import {
   beginInstallationMaintenance,
   finishInstallationMaintenance,
@@ -181,14 +181,7 @@ test.each([
       }
       if (method === "CreateActor") {
         creates++;
-        // Use the fixture server's clock for native creation and dispatch
-        // facts, not the relative wall-clock offset between the Mac and VM.
-        const [clock] = await f.database.client<
-          { now: string }[]
-        >`SELECT clock_timestamp()::text AS now`;
-        if (!clock) throw Error("Controlled native creation clock missing");
-        actor = f.actor();
-        actor.metadata.createTime = new Date(clock.now).toISOString();
+        actor = await f.createdActor();
         return structuredClone(actor);
       }
       if (method === "ResumeActor" && actor) {
@@ -376,7 +369,7 @@ test.each([
           const observation =
             scenario === "maintenance-no-observer"
               ? undefined
-              : async (sql: AgentTurnTransaction, target: { stopID: string }) => {
+              : async (sql: DatabaseTransaction, target: { stopID: string }) => {
                   const retained = await execution.pausedStopRetainedIn(sql, target.stopID);
                   if (scenario === "maintenance-new-stop")
                     await sql`UPDATE factory.change_agent_session SET stop_id=${crypto.randomUUID()}

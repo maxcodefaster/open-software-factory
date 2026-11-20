@@ -4,7 +4,7 @@ import {
   candidateReviewResultInput,
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
@@ -51,11 +51,7 @@ import { createChangeAgentStop, type PendingWriterHandoff, type RetainedStopTarg
 import { captureTerminalOutcome, validateTerminalMessages } from "./terminal-outcome";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
-import {
-  type AgentTurnRecord,
-  type AgentTurnTransaction,
-  createAgentTurnStore,
-} from "./turn-store";
+import { type AgentTurnRecord, createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -224,7 +220,7 @@ export function createAgentController(
 
   async function row(
     changeID: string,
-    sql: Database["client"] | AgentTurnTransaction = database.client,
+    sql: Database["client"] | DatabaseTransaction = database.client,
   ) {
     const rows = await sql<AgentRow[]>`
       SELECT change.id AS "changeID", change.project_id AS "projectID",
@@ -1316,8 +1312,8 @@ export function createAgentController(
         SELECT session.change_id AS "changeID" FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
         WHERE session.stop_pending AND (attempt.state IN ('failed','cleanup-failed','stopped')
-          OR (${Boolean(settleRetainedStop)} AND attempt.substrate AND attempt.state IN ('paused','starting','pausing'))
-          OR (${Boolean(runtime.get)} AND attempt.substrate AND attempt.state='paused'
+          OR (${Boolean(settleRetainedStop)} AND attempt.state IN ('paused','starting','pausing'))
+          OR (${Boolean(runtime.get)} AND attempt.state='paused'
             AND session.native_session_confirmed_at IS NULL
             AND session.implementation_session_confirmed_at IS NULL
             AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
@@ -1349,7 +1345,7 @@ export function createAgentController(
             JOIN factory.runtime_attempt previous ON previous.id=writer.fence_attempt_id
             WHERE writer.change_id=turn.change_id AND writer.turn_id=turn.id
               AND writer.state='agent-preparing' AND writer.fence_required
-              AND (previous.state='stopped' OR (previous.substrate AND previous.state='paused'))
+              AND (previous.state='stopped' OR (previous.state='paused'))
           )))
           AND (turn.owner_token IS NULL OR turn.owner_expires_at<=clock_timestamp())
           AND NOT EXISTS(SELECT 1 FROM factory.coding_pause WHERE turn_id=turn.id AND resumed_by_turn_id IS NULL)
@@ -1467,7 +1463,7 @@ export function createAgentController(
     },
 
     admitStartIn(
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       changeID: string,
       userID: string,
       commandId: string,
@@ -1509,7 +1505,7 @@ export function createAgentController(
     },
 
     async admitPromptIn(
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       changeID: string,
       userID: string,
       text: string,

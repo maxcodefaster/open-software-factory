@@ -2,10 +2,9 @@ import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
-import type { createDatabase } from "../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
@@ -27,11 +26,11 @@ export async function fixture(
   externalDatabase?: ReturnType<typeof createDatabase>,
   connector?: string | { runtime: "deferred-native" },
   approvalSetup?: (
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     context: { userID: string; projectID: string; ticketID: string },
   ) => Promise<{ incidentID: string; policyID: string }>,
   environmentSetup?: (
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     context: { userID: string; projectID: string },
   ) => Promise<void>,
 ) {

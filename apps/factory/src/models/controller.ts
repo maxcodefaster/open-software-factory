@@ -18,7 +18,11 @@ import {
   type modelDefaultsInput,
   modelRulesInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
 import {
   administrator,
   modelConnectionVersion,
@@ -28,11 +32,10 @@ import {
   projectModelSettings,
 } from "../../../../packages/db/src/schema";
 import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { providerCatalogue } from "./native";
 
-export async function codingReasoningIn(sql: AgentTurnTransaction) {
+export async function codingReasoningIn(sql: DatabaseTransaction) {
   await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
   const [stored] = await drizzleTransaction(sql)
     .select({
@@ -70,12 +73,12 @@ export function createModelSettingsController(
     planning: { modelId: null, models: null, allowOverride: null },
     build: { modelId: null, models: null, allowOverride: null },
   };
-  async function lock(sql: AgentTurnTransaction, write = false) {
+  async function lock(sql: DatabaseTransaction, write = false) {
     if (write) await sql`SELECT pg_advisory_xact_lock(hashtext('factory-model-settings'))`;
     else await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
   }
   async function get(
-    client: AgentTurnTransaction | typeof database.client = database.client,
+    client: DatabaseTransaction | typeof database.client = database.client,
   ): Promise<ModelSettingsView> {
     const db = client === database.client ? database.db : drizzleTransaction(client);
     const connections = await db
@@ -162,7 +165,7 @@ export function createModelSettingsController(
     };
   }
   async function inherited(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     projectID: string,
     userID: string,
     personalSelection = true,
@@ -231,7 +234,7 @@ export function createModelSettingsController(
     },
     async resolve(
       role: ModelRole,
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
       context: { projectID: string; userID: string; personal?: boolean },
     ) {
       await lock(sql);

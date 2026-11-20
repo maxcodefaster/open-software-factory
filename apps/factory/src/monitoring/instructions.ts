@@ -1,7 +1,6 @@
 import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import { inputInstructions } from "../../../../packages/conversation-domain/src/monitoring";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import {
   manageMonitoringIn,
@@ -13,7 +12,7 @@ import {
 // Hook or reinterpret an admitted event as a request under different guidance.
 export async function editInputInstructionsIn(
   database: ReturnType<typeof createDatabase>,
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   input: {
     hookId: string;
     policyId: string;

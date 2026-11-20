@@ -7,11 +7,11 @@ export type ConversationStatement = {
   transaction: number | null;
 };
 
-// Replace database I/O only. The owner queries and Drizzle's authorization
+// Replace database I/O only. The owner queries and Drizzle's
 // builders/result mapping still run; unexpected statements fail each test.
 export function conversationDatabase(
   raw: (statement: ConversationStatement) => unknown[] | Promise<unknown[]>,
-  typed: (statement: ConversationStatement) => unknown[][] = ({ text }) => {
+  typed: (statement: ConversationStatement) => unknown[][] | Promise<unknown[][]> = ({ text }) => {
     throw new Error(`Unexpected typed Conversation query: ${text}`);
   },
 ) {
@@ -33,7 +33,7 @@ export function conversationDatabase(
           const statement = { text, parameters, transaction };
           statements.push(statement);
           const rows = typed(statement);
-          return { values: async () => rows };
+          return Object.assign(Promise.resolve(rows), { values: async () => rows });
         },
       },
     );

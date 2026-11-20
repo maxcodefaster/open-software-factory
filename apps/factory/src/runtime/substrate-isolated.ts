@@ -159,7 +159,7 @@ export function createSubstrateIsolated(
       previous && purpose.isolatedKind === "staging" && !purpose.promotionID
         ? await sql`SELECT attempt.id FROM factory.runtime_attempt attempt
             JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-            WHERE attempt.id=${previous.attemptID} AND attempt.substrate AND attempt.state='stopped'
+            WHERE attempt.id=${previous.attemptID} AND attempt.state='stopped'
               AND binding.deleted_at IS NOT NULL`
         : [];
     const prior = retired ? undefined : previous;
@@ -416,7 +416,7 @@ export function createSubstrateIsolated(
       const [row] = await database.client`
         SELECT provision.runtime_attempt_id FROM factory.substrate_isolated provision
         JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id
-        WHERE attempt.id=${attemptID} AND attempt.substrate AND attempt.project_id=${config.projectID}
+        WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
           AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL AND attempt.isolated_kind::text=provision.kind`;
       return row ? execution(await saved(attemptID)) : undefined;
     },
@@ -492,7 +492,7 @@ export function createSubstrateIsolated(
       const rows = await database.client<{ id: string; state: string }[]>`
         SELECT attempt.id,attempt.state FROM factory.runtime_attempt attempt
         JOIN factory.substrate_isolated provision ON provision.runtime_attempt_id=attempt.id
-        WHERE attempt.project_id=${config.projectID} AND attempt.substrate
+        WHERE attempt.project_id=${config.projectID}
           AND attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed')`;
       for (const row of rows) {
         const runtime = await this.forAttempt(row.id);

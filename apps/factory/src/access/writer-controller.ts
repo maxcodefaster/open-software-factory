@@ -1,7 +1,7 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { forgeUsername } from "../../../../packages/forge/src/access";
 import type { PendingWriterHandoff } from "../agent/stop";
-import { type AgentTurnTransaction, createAgentTurnStore } from "../agent/turn-store";
+import { createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import type { RuntimeAttemptView } from "../runtime/types";
 import type { SourceRoleFence } from "../workspace/source-role-fence";
@@ -341,7 +341,7 @@ export function createChangeWriterController(options: {
         WHERE writer.change_id=${changeID} AND writer.state='handoff' AND writer.handoff_kind='takeover'
           AND writer.requested_by=${userID} AND writer.request_id IS NOT NULL
           AND (writer.fence_attempt_id IS NULL OR attempt.state='stopped'
-            OR (attempt.substrate AND attempt.state='paused'))`;
+            OR attempt.state='paused')`;
       // Continue only the same person's recorded request. A native paused row
       // merely schedules observation; takeover still rechecks the exact durable
       // native result, permissions, Agent Stop, Source and branch fences.
@@ -367,7 +367,7 @@ export function createChangeWriterController(options: {
         if (writer.state === "agent") return true;
         // An old interactive shell can retain child jobs, Docker execs and services.
         // Confirm full compute teardown rather than pretending shell-PID kill fences it.
-        const prepare = async (sql: AgentTurnTransaction) => {
+        const prepare = async (sql: DatabaseTransaction) => {
           const current = await lockChangeWriterIn(sql, changeID);
           if (
             current.state !== "agent-preparing" ||

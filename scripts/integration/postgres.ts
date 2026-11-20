@@ -162,10 +162,10 @@ try {
     await expectRejected(
       transaction,
       async (savepoint) => {
-        await savepoint`UPDATE factory.runtime_attempt SET substrate=false WHERE id=${firstAttempt}`;
+        await savepoint`UPDATE factory.runtime_attempt SET generation=generation+1 WHERE id=${firstAttempt}`;
       },
-      (cause) => cause.code === "23514" || cause.message.includes("engine identity is immutable"),
-      "PostgreSQL allowed a non-native execution owner",
+      (cause) => cause.message.includes("Runtime Attempt identity"),
+      "PostgreSQL allowed an existing Runtime Attempt to change its native identity",
     );
     await transaction`
       UPDATE factory.runtime_attempt SET state = 'cleanup-failed' WHERE id = ${firstAttempt}

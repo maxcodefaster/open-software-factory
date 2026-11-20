@@ -69,13 +69,18 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
   let lostDelete = true;
   let admissionChecks = 0;
   let admissionBlocked = true;
-  const metadata = (name: string, space?: string) => ({
-    name,
-    uid: crypto.randomUUID(),
-    version: "1",
-    createTime: new Date().toISOString(),
-    ...(space ? { atespace: space } : {}),
-  });
+  const metadata = async (name: string, space?: string) => {
+    const [clock] = await f.database.client<{ at: string }[]>`
+      SELECT clock_timestamp()::text AS at`;
+    if (!clock) throw new Error("Owned native creation clock is unavailable");
+    return {
+      name,
+      uid: crypto.randomUUID(),
+      version: "1",
+      createTime: new Date(clock.at).toISOString(),
+      ...(space ? { atespace: space } : {}),
+    };
+  };
   const call: SubstrateCall = async (method, request) => {
     const body = request as Record<string, unknown>;
     if (method.startsWith("Get")) {
@@ -102,17 +107,23 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
       expect(fact?.dispatched).toBe(true);
       creates.set(kind, (creates.get(kind) ?? 0) + 1);
       let value: Record<string, unknown>;
-      if (kind === "Atespace") value = { metadata: metadata(atespace) };
+      if (kind === "Atespace") value = { metadata: await metadata(atespace) };
       else if (kind === "AtespaceAccessPolicy")
-        value = { ...(body["accessPolicy"] as object), metadata: metadata("default") };
+        value = { ...(body["accessPolicy"] as object), metadata: await metadata("default") };
       else if (kind === "ActorTemplate")
-        value = { ...(body["actorTemplate"] as object), metadata: metadata("runtime", atespace) };
+        value = {
+          ...(body["actorTemplate"] as object),
+          metadata: await metadata("runtime", atespace),
+        };
       else if (kind === "ActorEgressPolicy")
-        value = { ...(body["egressPolicy"] as object), metadata: metadata("default", atespace) };
+        value = {
+          ...(body["egressPolicy"] as object),
+          metadata: await metadata("default", atespace),
+        };
       else if (kind === "Actor") {
         actor = nativeActor.parse({
           ...(body["actor"] as object),
-          metadata: metadata(`runtime-${attemptID.replaceAll("-", "")}`, atespace),
+          metadata: await metadata(`runtime-${attemptID.replaceAll("-", "")}`, atespace),
           status: { state: "ACTOR_STATE_SUSPENDED" },
         });
         value = actor;
@@ -247,8 +258,7 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
     expect(admissionChecks).toBe(2);
     for (const kind of ["Atespace", "AtespaceAccessPolicy", "ActorTemplate", "Actor"])
       expect(creates.get(kind)).toBe(1);
-    const [attempt] = await f.database
-      .client`SELECT id,state,workspace_id,change_id,isolated_kind,substrate
+    const [attempt] = await f.database.client`SELECT id,state,workspace_id,change_id,isolated_kind
       FROM factory.runtime_attempt WHERE id=${attemptID}`;
     expect(attempt).toEqual({
       id: attemptID,
@@ -256,7 +266,6 @@ async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
       workspace_id: null,
       change_id: null,
       isolated_kind: "prebuild",
-      substrate: true,
     });
     expect(await source()).toBe("https://example.invalid/fixture.git");
     await f.database

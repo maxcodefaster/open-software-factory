@@ -6,19 +6,18 @@ import {
   correctionReviewInstructions,
   findingCheckInstructions,
 } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { claimAgentWriterIn, lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import { freezeFeedbackAttachmentsIn } from "../attachments/store";
 import { CommandError } from "../command-error";
 import { createAgentTurnStore } from "./turn-store";
-import type { AgentTurnTransaction } from "./turn-store";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 
 export function createReviewAdmission(
   database: ReturnType<typeof createDatabase>,
   workspaceReview?: (
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     context: { projectID: string; userID: string },
   ) => Promise<{ modelId: string; modelConnection?: ModelConnectionReference }>,
 ) {

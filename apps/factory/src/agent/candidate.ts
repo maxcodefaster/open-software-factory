@@ -1,10 +1,9 @@
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
-import type { AgentTurnTransaction } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type CandidateCommit = {
@@ -56,7 +55,7 @@ export async function advanceCandidateCommit<T extends CandidateCommit>(
 }
 
 export async function recordWorkspaceCandidateIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   intent: {
     id: string;
     changeID: string;

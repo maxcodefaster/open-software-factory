@@ -1,10 +1,9 @@
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import type { NativeActor } from "../../../../packages/runtime-kubernetes/src/substrate-control";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
-type SQL = ReturnType<typeof createDatabase>["client"] | AgentTurnTransaction;
+type SQL = ReturnType<typeof createDatabase>["client"] | DatabaseTransaction;
 export type ActorRPC = {
   action: "resume" | "suspend";
   originKey: string;

@@ -19,7 +19,7 @@ BEGIN
           SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
           JOIN factory.verification v ON v.id=NEW.verification_id
           JOIN factory.execution_policy_command decision ON decision.scope='checks-bootstrap-retry:'||v.change_id::text
-          WHERE a.id=predecessor.runtime_attempt_id AND a.verification_id=v.id AND a.substrate
+          WHERE a.id=predecessor.runtime_attempt_id AND a.verification_id=v.id
             AND a.state='stopped' AND b.deleted_at IS NOT NULL
             AND decision.input->>'verificationID'=v.id::text
             AND decision.input->>'runtimeAttemptID'=a.id::text

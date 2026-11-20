@@ -12,8 +12,6 @@ const rowSchema = z.object({
   projectID: z.uuid(),
   workspaceID: z.uuid(),
   generation: z.string().regex(/^[1-9][0-9]*$/),
-  native: z.literal(true),
-  workspaceNative: z.literal(true),
   state: z.literal("ready"),
   intendedAt: clock,
   attemptedAt: clock,
@@ -85,7 +83,7 @@ export async function readNativeWorkspaceObservation(
   const [row] = await database.client`
     SELECT attempt.id AS "attemptID",attempt.project_id AS "projectID",
       attempt.workspace_id AS "workspaceID",attempt.generation::text AS generation,
-      attempt.substrate AS native,workspace.substrate AS "workspaceNative",attempt.state,
+      attempt.state,
       attempt.create_intended_at::text AS "intendedAt",binding.create_attempted_at::text AS "attemptedAt",
       binding.actor_uid AS "actorUID",binding.atespace,binding.actor_name AS "actorName",
       binding.intent->>'projectID' AS "intentProjectID",

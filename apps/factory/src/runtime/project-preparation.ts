@@ -154,10 +154,9 @@ export function createProjectPreparation(input: {
             imageRepository: string | null;
             jobEnvironment: string | null;
             publicBuild: boolean;
-            substrate: boolean;
             userID: string;
           }>
-        >`SELECT attempt.project_id AS "projectID",attempt.substrate,attempt.created_by AS "userID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,factory.image_build_is_public(intent.secret_key) AS "publicBuild",preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",
+        >`SELECT attempt.project_id AS "projectID",attempt.created_by AS "userID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,factory.image_build_is_public(intent.secret_key) AS "publicBuild",preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",
           native.intent->>'imageRepository' AS "imageRepository"
           FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id AND attempt.isolated_kind='prebuild'
           LEFT JOIN factory.substrate_prebuild native ON native.runtime_attempt_id=attempt.id AND native.preparation_id=preparation.id
@@ -207,18 +206,16 @@ export function createProjectPreparation(input: {
             headers: { "cache-control": "no-store" },
           });
         if (job?.state !== "running") return denied();
-        if (attempt.substrate) {
-          try {
-            await substratePrebuildGrantIn(
-              transaction,
-              attempt.projectID,
-              attempt.jobID,
-              attemptID,
-              attempt.userID,
-            );
-          } catch {
-            return denied();
-          }
+        try {
+          await substratePrebuildGrantIn(
+            transaction,
+            attempt.projectID,
+            attempt.jobID,
+            attemptID,
+            attempt.userID,
+          );
+        } catch {
+          return denied();
         }
         await transaction`UPDATE factory.project_image_preparation SET state='succeeded',identity=${upload.identity},image=${upload.image},failure=NULL,updated_at=now() WHERE id=${attempt.jobID} AND state='running'`;
         return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });

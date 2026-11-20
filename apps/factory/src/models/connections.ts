@@ -13,8 +13,7 @@ import {
 } from "../../../../packages/conversation-domain/src/model-connection";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { unknownCounters } from "../../../../packages/conversation-domain/src/usage";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
@@ -57,22 +56,22 @@ export function createModelConnections(
       "conflict",
       "Model connection changed or a save is pending. Reload or retry the same save.",
     );
-  async function manager(sql: AgentTurnTransaction, userID: string) {
+  async function manager(sql: DatabaseTransaction, userID: string) {
     const [row] =
       await sql`SELECT user_id FROM factory.administrator WHERE user_id=${userID} FOR SHARE`;
     if (!row) throw new CommandError("forbidden", "System Manager access required");
   }
-  async function lock(sql: AgentTurnTransaction, id: string) {
+  async function lock(sql: DatabaseTransaction, id: string) {
     await sql`SELECT pg_advisory_xact_lock(hashtext(${`model-connection:${id}`}))`;
   }
-  async function current(sql: AgentTurnTransaction, id: string) {
+  async function current(sql: DatabaseTransaction, id: string) {
     const [row] = await sql<
       Version[]
     >`SELECT version::float8 AS version, provider, endpoint, secret_key AS "secretKey"
       FROM factory.model_connection_version WHERE connection_id=${id} ORDER BY version DESC LIMIT 1`;
     return row;
   }
-  async function intent(sql: AgentTurnTransaction, commandID: string) {
+  async function intent(sql: DatabaseTransaction, commandID: string) {
     const [row] = await sql<
       Intent[]
     >`SELECT command_id AS "commandID", connection_id AS "connectionID",
@@ -291,7 +290,7 @@ export function createModelConnections(
     },
     async reference(
       role: "planning" | "build",
-      sql: AgentTurnTransaction,
+      sql: DatabaseTransaction,
     ): Promise<ModelConnectionReference | undefined> {
       const [row] = await sql<
         Array<ModelConnectionReference>

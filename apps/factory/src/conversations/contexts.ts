@@ -1,60 +1,109 @@
-import type postgres from "postgres";
+import { and, asc, desc, eq, isNotNull, sql } from "drizzle-orm";
 import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  conversationContext,
+  conversationEntry,
+  ticketConversation,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 
 export async function contextIn(
-  sql: postgres.TransactionSql,
+  transaction: DatabaseTransaction,
   conversationID: string,
   contextID: string,
 ) {
-  const [context] = await sql<
-    {
-      id: string;
-      kind: "research" | "coding";
-      original: boolean;
-      nativeSessionID: string | null;
-      mode: "investigate" | "plan" | "build";
-    }[]
-  >`SELECT id,kind,original,native_session_id AS "nativeSessionID",mode
-    FROM factory.conversation_context WHERE id=${contextID} AND conversation_id=${conversationID}`;
+  const [context] = await drizzleTransaction(transaction)
+    .select({
+      id: conversationContext.id,
+      kind: conversationContext.kind,
+      original: conversationContext.original,
+      nativeSessionID: conversationContext.nativeSessionId,
+      mode: conversationContext.mode,
+    })
+    .from(conversationContext)
+    .where(
+      and(
+        eq(conversationContext.id, contextID),
+        eq(conversationContext.conversationId, conversationID),
+      ),
+    );
   if (!context) throw new CommandError("not-found", "Conversation not found.");
-  return context;
+  return { ...context, kind: context.kind as "research" | "coding" };
 }
 
-export async function contextsIn(sql: postgres.TransactionSql, conversationID: string) {
-  return sql<
-    {
-      id: string;
-      kind: "research" | "coding";
-      title: string;
-      ordinal: number;
-      original: boolean;
-      createdAt: string;
-    }[]
-  >`
-    SELECT context.id,context.kind,COALESCE(
-      (SELECT left(regexp_replace(entry.body,'[[:space:]]+',' ','g'),80)
-        FROM factory.conversation_entry entry WHERE entry.conversation_id=context.conversation_id
-          AND entry.actor='user' AND entry.kind='user-message' AND entry.payload->>'contextId'
-            IS NOT DISTINCT FROM CASE WHEN context.original THEN NULL ELSE context.id::text END
-        ORDER BY entry.ordinal LIMIT 1),
-      (SELECT left(regexp_replace(turn.input->>'text','[[:space:]]+',' ','g'),80)
-        FROM factory.agent_turn turn WHERE turn.input->>'contextId'=context.id::text
-          AND turn.created_by IS NOT NULL AND turn.input->>'text' IS NOT NULL ORDER BY turn.created_at,turn.id LIMIT 1),
-      context.title) AS title,context.ordinal,context.original,context.created_at AS "createdAt"
-    FROM factory.conversation_context context WHERE context.conversation_id=${conversationID} ORDER BY context.ordinal DESC`;
+export async function contextsIn(transaction: DatabaseTransaction, conversationID: string) {
+  const db = drizzleTransaction(transaction);
+  const entryTitle = db
+    .select({
+      title: sql<string>`left(regexp_replace(${conversationEntry.body},'[[:space:]]+',' ','g'),80)`,
+    })
+    .from(conversationEntry)
+    .where(
+      and(
+        eq(conversationEntry.conversationId, conversationContext.conversationId),
+        eq(conversationEntry.actor, "user"),
+        eq(conversationEntry.kind, "user-message"),
+        sql<boolean>`${conversationEntry.payload}->>'contextId' IS NOT DISTINCT FROM
+          CASE WHEN ${conversationContext.original} THEN NULL ELSE ${conversationContext.id}::text END`,
+      ),
+    )
+    .orderBy(asc(conversationEntry.ordinal))
+    .limit(1);
+  const turnTitle = db
+    .select({
+      title: sql<string>`left(regexp_replace(${agentTurn.input}->>'text','[[:space:]]+',' ','g'),80)`,
+    })
+    .from(agentTurn)
+    .where(
+      and(
+        sql<boolean>`${agentTurn.input}->>'contextId'=${conversationContext.id}::text`,
+        isNotNull(agentTurn.createdBy),
+        sql<boolean>`${agentTurn.input}->>'text' IS NOT NULL`,
+      ),
+    )
+    .orderBy(asc(agentTurn.createdAt), asc(agentTurn.id))
+    .limit(1);
+  const rows = await db
+    .select({
+      id: conversationContext.id,
+      kind: conversationContext.kind,
+      title: sql<string>`COALESCE((${entryTitle}), (${turnTitle}), ${conversationContext.title})`,
+      ordinal: conversationContext.ordinal,
+      original: conversationContext.original,
+      createdAt: conversationContext.createdAt,
+    })
+    .from(conversationContext)
+    .where(eq(conversationContext.conversationId, conversationID))
+    .orderBy(desc(conversationContext.ordinal));
+  return rows.map((row) => ({
+    ...row,
+    kind: row.kind as "research" | "coding",
+    createdAt: row.createdAt.toISOString(),
+  }));
 }
 
 export async function contextTranscriptIn(
-  sql: postgres.Sql | postgres.TransactionSql,
+  connection: ReturnType<typeof createDatabase>["client"] | DatabaseTransaction,
   conversationID: string,
   contextID?: string,
 ) {
-  const [archive] = await sql<{ transcript: Record<string, unknown> }[]>`
-    SELECT transcript
-    FROM factory.conversation_context WHERE conversation_id=${conversationID} AND
-    (id=${contextID ?? null} OR (${contextID ?? null}::uuid IS NULL AND original)) LIMIT 1`;
-  return archive;
+  const [archive] = await drizzleTransaction(connection)
+    .select({ transcript: conversationContext.transcript })
+    .from(conversationContext)
+    .where(
+      and(
+        eq(conversationContext.conversationId, conversationID),
+        contextID ? eq(conversationContext.id, contextID) : eq(conversationContext.original, true),
+      ),
+    )
+    .limit(1);
+  return archive as { transcript: Record<string, unknown> } | undefined;
 }
 
 type ContextCommand = {
@@ -64,20 +113,18 @@ type ContextCommand = {
 } & ({ kind: "research" } | { kind: "coding"; changeID: string; previousContextID: string | null });
 
 /** Observe a command receipt before an engine admits a new context. Never replay its effects. */
-export async function contextCommandIn(sql: postgres.TransactionSql, command: ContextCommand) {
-  const [previous] = await sql<
-    {
-      id: string;
-      conversationID: string;
-      userID: string;
-      kind: "research" | "coding";
-      changeID: string | null;
-      previousID: string | null;
-    }[]
-  >`
-    SELECT id,conversation_id AS "conversationID",created_by AS "userID",kind,
-      change_id AS "changeID",previous_context_id AS "previousID"
-    FROM factory.conversation_context WHERE command_id=${command.commandID}`;
+export async function contextCommandIn(transaction: DatabaseTransaction, command: ContextCommand) {
+  const [previous] = await drizzleTransaction(transaction)
+    .select({
+      id: conversationContext.id,
+      conversationID: conversationContext.conversationId,
+      userID: conversationContext.createdBy,
+      kind: conversationContext.kind,
+      changeID: conversationContext.changeId,
+      previousID: conversationContext.previousContextId,
+    })
+    .from(conversationContext)
+    .where(eq(conversationContext.commandId, command.commandID));
   if (!previous) return undefined;
   if (
     previous.conversationID !== command.conversationID ||
@@ -110,40 +157,73 @@ type ContextInsert = {
 );
 
 /** All context kinds allocate history ordinals under the same Conversation row lock. */
-export async function insertContextIn(sql: postgres.TransactionSql, context: ContextInsert) {
-  await sql`SELECT id FROM factory.ticket_conversation WHERE id=${context.conversationID} FOR UPDATE`;
+export async function insertContextIn(transaction: DatabaseTransaction, context: ContextInsert) {
+  const db = drizzleTransaction(transaction);
+  await db
+    .select({ id: ticketConversation.id })
+    .from(ticketConversation)
+    .where(eq(ticketConversation.id, context.conversationID))
+    .for("update");
   const coding = context.kind === "coding" ? context : undefined;
-  await sql`INSERT INTO factory.conversation_context(
-    id,conversation_id,command_id,kind,ordinal,title,created_by,mode,
-    change_id,native_session_id,previous_context_id,original,archived_session,transcript)
-    VALUES(${context.id},${context.conversationID},${context.commandID},${context.kind},
-      (SELECT COALESCE(MAX(ordinal),0)+1 FROM factory.conversation_context WHERE conversation_id=${context.conversationID}),
-      ${context.title},${context.createdBy},${context.mode},${coding?.changeID ?? null},
-      ${coding?.nativeSessionID ?? null},${coding?.previousContextID ?? null},${coding?.original ?? false},
-      ${coding?.archive ? JSON.stringify(coding.archive.session) : null}::jsonb,
-      ${coding?.archive ? JSON.stringify(coding.archive.transcript) : "[]"}::jsonb)`;
+  const ordinal = db
+    .select({ next: sql<number>`COALESCE(MAX(${conversationContext.ordinal}),0)+1` })
+    .from(conversationContext)
+    .where(eq(conversationContext.conversationId, context.conversationID));
+  await db.insert(conversationContext).values({
+    id: context.id,
+    conversationId: context.conversationID,
+    commandId: context.commandID,
+    kind: context.kind,
+    mode: context.mode,
+    ordinal: sql<number>`(${ordinal})`,
+    title: context.title,
+    createdBy: context.createdBy,
+    changeId: coding?.changeID ?? null,
+    nativeSessionId: coding?.nativeSessionID ?? null,
+    previousContextId: coding?.previousContextID ?? null,
+    original: coding?.original ?? false,
+    // JSON null is a retained archive value, distinct from SQL NULL and the default transcript.
+    archivedSession:
+      coding?.archive?.session === null
+        ? sql<unknown>`'null'::jsonb`
+        : (coding?.archive?.session ?? null),
+    transcript:
+      coding?.archive?.transcript === null
+        ? sql<unknown>`'null'::jsonb`
+        : (coding?.archive?.transcript ?? []),
+  });
 }
 
 export async function archiveContextIn(
-  sql: postgres.TransactionSql,
+  transaction: DatabaseTransaction,
   conversationID: string,
   contextID: string,
   archive: { session: unknown; transcript: unknown },
 ) {
-  const [saved] = await sql<
-    { id: string }[]
-  >`UPDATE factory.conversation_context SET archived_session=${JSON.stringify(archive.session)}::jsonb,
-    transcript=${JSON.stringify(archive.transcript)}::jsonb
-    WHERE id=${contextID} AND conversation_id=${conversationID} RETURNING id`;
+  const [saved] = await drizzleTransaction(transaction)
+    .update(conversationContext)
+    .set({
+      archivedSession: archive.session === null ? sql<unknown>`'null'::jsonb` : archive.session,
+      transcript: archive.transcript === null ? sql<unknown>`'null'::jsonb` : archive.transcript,
+    })
+    .where(
+      and(
+        eq(conversationContext.id, contextID),
+        eq(conversationContext.conversationId, conversationID),
+      ),
+    )
+    .returning({ id: conversationContext.id });
   if (!saved) throw new CommandError("conflict", "Conversation context changed.");
 }
 
 export async function activateCodingContextIn(
-  sql: postgres.TransactionSql,
+  transaction: DatabaseTransaction,
   conversationID: string,
   contextID: string,
 ) {
   // Context rotation does not change the Conversation version or its writer epoch.
-  await sql`UPDATE factory.ticket_conversation SET active_coding_context_id=${contextID},updated_at=now()
-    WHERE id=${conversationID}`;
+  await drizzleTransaction(transaction)
+    .update(ticketConversation)
+    .set({ activeCodingContextId: contextID, updatedAt: sql<Date>`now()` })
+    .where(eq(ticketConversation.id, conversationID));
 }

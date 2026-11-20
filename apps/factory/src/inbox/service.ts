@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import {
   type AttentionCapability,
   type AttentionMember,
@@ -7,7 +7,6 @@ import {
   receivesAttention,
 } from "../../../../packages/ticket-domain/src/attention";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError, plainFailureMessage } from "../command-error";
 import {
   type AttentionPerson,
@@ -55,7 +54,7 @@ const plainPreview = (source: Source): Source => ({
   preview: plainFailureMessage(source.preview),
 });
 
-async function peopleIn(sql: AgentTurnTransaction, projectID: string): Promise<AttentionPerson[]> {
+async function peopleIn(sql: DatabaseTransaction, projectID: string): Promise<AttentionPerson[]> {
   return sql<AttentionPerson[]>`
     SELECT person.id,person.name,
       (membership.role='developer' OR admin.user_id IS NOT NULL) AS develop,
@@ -69,7 +68,7 @@ async function peopleIn(sql: AgentTurnTransaction, projectID: string): Promise<A
     ORDER BY lower(person.name),person.id`;
 }
 
-async function ticketsIn(sql: AgentTurnTransaction, userID: string, projects: string[]) {
+async function ticketsIn(sql: DatabaseTransaction, userID: string, projects: string[]) {
   return sql<Ticket[]>`
     SELECT ticket.id,ticket.project_id AS "projectId",ticket.title,ticket.state,
       responsibility.user_id AS "responsibleId",
@@ -93,7 +92,7 @@ async function ticketsIn(sql: AgentTurnTransaction, userID: string, projects: st
 // The Inbox projects retained source records. It cannot approve, retry, dispatch,
 // or invent work. Resolved/superseded source state removes an obligation for all
 // recipients, independently of their personal read receipts.
-async function listIn(sql: AgentTurnTransaction, userID: string): Promise<InboxView> {
+async function listIn(sql: DatabaseTransaction, userID: string): Promise<InboxView> {
   await requireActiveAccountIn(sql, userID);
   const [administrator] =
     await sql`SELECT user_id FROM factory.administrator WHERE user_id=${userID} FOR SHARE`;
@@ -449,7 +448,7 @@ async function listIn(sql: AgentTurnTransaction, userID: string): Promise<InboxV
 
 export function createInboxService(database: ReturnType<typeof createDatabase>) {
   async function attentionIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     userID: string,
     ticketID: string,
     write = false,

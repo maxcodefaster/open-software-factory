@@ -1,18 +1,17 @@
 import { eq, inArray } from "drizzle-orm";
-import { drizzleTransaction } from "../../../../packages/db/src/client";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
 import { mcpLibraryCover, skillLibraryCover } from "../../../../packages/db/src/schema";
 import {
   type LibraryCoverKey,
   libraryCoverState,
 } from "../../../../packages/conversation-domain/src/library-covers";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 type LibraryKind = "skill" | "mcp";
 const tables = { skill: skillLibraryCover, mcp: mcpLibraryCover };
 
 export async function libraryCoversIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   kind: LibraryKind,
   libraryIds: string[],
 ) {
@@ -25,7 +24,7 @@ export async function libraryCoversIn(
 }
 
 export async function initializeLibraryCoverIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   kind: LibraryKind,
   libraryId: string,
   key: LibraryCoverKey,
@@ -41,7 +40,7 @@ export async function initializeLibraryCoverIn(
 // Callers authorize the owning library and hold its existing write lock.
 // Cover changes deliberately never touch content revisions, choices or connections.
 export async function saveLibraryCoverIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   kind: LibraryKind,
   input: { libraryId: string; key: LibraryCoverKey; expectedVersion: number },
   userId: string,

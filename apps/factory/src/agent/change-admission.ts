@@ -11,7 +11,7 @@ import { buildBrowserInstructions } from "../../../../packages/conversation-doma
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { claimAgentWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { attachmentContextIn } from "../attachments/store";
@@ -32,7 +32,7 @@ import { codingBudgetIn } from "../usage/policy";
 import { buildGoalInstructions } from "./build-completion";
 import { buildKnowledgeContext } from "./knowledge-context";
 import { readTerminalOutcome, type TerminalInput, type TerminalOutcome } from "./terminal-outcome";
-import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
+import { createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 export type ChangeAgentInput =
@@ -74,14 +74,14 @@ export function createChangeAdmission(
   defaultModel:
     | string
     | ((
-        sql: AgentTurnTransaction,
+        sql: DatabaseTransaction,
         context: { projectID: string; userID: string; personal?: boolean },
       ) => Promise<string>),
-  resolveConnection?: (sql: AgentTurnTransaction) => Promise<ModelConnectionReference | undefined>,
+  resolveConnection?: (sql: DatabaseTransaction) => Promise<ModelConnectionReference | undefined>,
 ) {
   const turns = createAgentTurnStore(database);
   const skills = createSkillController(database);
-  async function context(sql: AgentTurnTransaction, changeID: string, userID: string) {
+  async function context(sql: DatabaseTransaction, changeID: string, userID: string) {
     // Acquire locks before reading the approved revision. A joined statement
     // retains its pre-wait snapshot even after a concurrent writer commits.
     const locked = await sql<Array<{ id: string }>>`
@@ -143,7 +143,7 @@ export function createChangeAdmission(
     };
   }
   async function admitIn(
-    sql: AgentTurnTransaction,
+    sql: DatabaseTransaction,
     changeID: string,
     userID: string,
     input: ChangeAgentInput,

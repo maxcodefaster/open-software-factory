@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { SourceCitation } from "../../../conversation-domain/src/conversation";
 import {
   bigint,
   boolean,
@@ -31,10 +32,7 @@ export const conversationEntry = factorySchema.table(
     mode: conversationMode("mode").notNull(),
     body: text("body").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().default({}).notNull(),
-    citations: jsonb("citations")
-      .$type<Array<{ source: "knowledge" | "ticket"; id: string; label: string }>>()
-      .default([])
-      .notNull(),
+    citations: jsonb("citations").$type<SourceCitation[]>().default([]).notNull(),
     inReplyToEntryId: uuid("in_reply_to_entry_id"),
     requirementRevisionId: uuid("requirement_revision_id"),
     createdBy: uuid("created_by"),

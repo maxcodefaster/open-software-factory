@@ -267,15 +267,11 @@ export async function createFactoryApplication() {
     createVerificationTools(database),
   );
   const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
-  const workspaceSources = createWorkspaceSourceController(
-    database,
-    runtimeHub,
-    createSubstrateSources(database, runtimeHub),
-    {
-      supportsInitialRole: (attemptID, sql) =>
-        runtimeController.supportsInitialSourceRole(attemptID, sql),
-    },
-  );
+  const nativeSources = createSubstrateSources(database, runtimeHub);
+  const workspaceSources = createWorkspaceSourceController(database, runtimeHub, nativeSources, {
+    supportsInitialRole: (attemptID, sql) =>
+      runtimeController.supportsInitialSourceRole(attemptID, sql),
+  });
   const workspaceCollaboration = createWorkspaceCollaboration(database, workspaceSources);
   const workspaceSharing = createWorkspaceSharing(database, async (workspaceID, userID) => {
     workspaceCollaboration.revoke(workspaceID, userID);
@@ -296,7 +292,7 @@ export async function createFactoryApplication() {
         throw new CommandError("unavailable", "Coding Stop is not ready; compute was retained");
       await agentController.stop(changeID, handoff);
     },
-    ...(workspaceSources.substrate ? { sources: workspaceSources.substrate } : {}),
+    sources: nativeSources,
     ...(nativeCapacity ? { capacity: nativeCapacity } : {}),
   });
   const workspaceCommands = createWorkspaceCommands(

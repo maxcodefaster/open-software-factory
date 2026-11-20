@@ -171,6 +171,12 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     });
     await expect(connections.callback(other, params)).rejects.toThrow("another session");
     expect(exchanges).toBe(0);
+    await database.client`UPDATE factory.mcp_oauth_flow SET expires_at=now()-interval '1 second'
+      WHERE id=${command.commandId}`;
+    await expect(connections.callback(manager, params)).rejects.toThrow("expired");
+    expect(exchanges).toBe(0);
+    await database.client`UPDATE factory.mcp_oauth_flow SET expires_at=now()+interval '10 minutes'
+      WHERE id=${command.commandId}`;
     expect(await connections.callback(manager, params)).toEqual({ connected: true });
     expect(exchanges).toBe(1);
     await expect(connections.callback(manager, params)).rejects.toThrow();
@@ -244,6 +250,21 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     expect(
       (await database.client.begin((sql) => connections.library.connectionIn(sql, id))).state,
     ).toBe("reconnect");
+    const [pending] = await database.client<
+      Array<{ id: string; key: string }>
+    >`SELECT id,secret_key AS key FROM factory.mcp_secret_write WHERE connection_id=${id} AND state='intended'`;
+    if (!pending) throw new Error("Owned renewal intent missing");
+    const retained = fixtureValue(secret.get(pending.key), "owned pending renewal material");
+    secret.set(pending.key, {
+      ...retained,
+      material: { ...retained.material, verifier: "Owned mismatched material" },
+    });
+    await expect(connections.recover()).rejects.toThrow("durable write intent");
+    expect(refreshes).toBe(2);
+    const [unsettled] =
+      await database.client`SELECT state FROM factory.mcp_secret_write WHERE id=${pending.id}`;
+    expect(unsettled?.["state"]).toBe("intended");
+    secret.set(pending.key, retained);
     await connections.recover();
     expect(
       (await database.client.begin((sql) => connections.library.connectionIn(sql, id))).state,

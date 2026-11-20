@@ -1,5 +1,5 @@
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { z } from "zod";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 
 const ticketContext = z
   .object({
@@ -16,7 +16,7 @@ const ticketContext = z
   .strict();
 
 export async function admittedTicketContext(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   ticketID: string | null,
 ) {
@@ -39,7 +39,7 @@ export async function admittedTicketContext(
 }
 
 export async function admittedProjectContext(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   projectID: string,
   ticketID: string | null,
 ) {

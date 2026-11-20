@@ -11,12 +11,12 @@ import {
   checkedReviewResult,
   reviewNeedsBrowser,
 } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { CommandError } from "../command-error";
 import { createReviewExecutionReader } from "./review-execution";
-import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
+import { createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type ReviewScope = {
@@ -109,7 +109,7 @@ export function createCandidateReviewController(
   }
   // Exact immutable source only. No checkout file service, shell, test execution,
   // writes, ambient credentials or Project-chosen MCP tools are exposed here.
-  async function scopeIn(sql: AgentTurnTransaction, turnID: string) {
+  async function scopeIn(sql: DatabaseTransaction, turnID: string) {
     const [scope] = await sql<ReviewScope[]>`
       SELECT review.id,review.change_id AS "changeID",review.commit_sha AS "commitSHA",
         review.base_sha AS "baseSHA",project.repository_url AS "repositoryURL",review.result,review.evidence,
@@ -143,7 +143,7 @@ export function createCandidateReviewController(
   async function authorized<T>(
     turnID: string,
     ownerToken: string,
-    use: (sql: AgentTurnTransaction, scope: ReviewScope) => Promise<T>,
+    use: (sql: DatabaseTransaction, scope: ReviewScope) => Promise<T>,
   ) {
     let result: T | undefined;
     const allowed = await turns.validateExecution(turnID, ownerToken, async (sql) => {

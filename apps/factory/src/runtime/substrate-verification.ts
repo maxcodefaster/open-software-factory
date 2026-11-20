@@ -130,7 +130,7 @@ export function createSubstrateVerification(
     async forAttempt(attemptID: string) {
       const [row] = await database.client<{ verificationID: string }[]>`
         SELECT provision.verification_id AS "verificationID" FROM factory.substrate_verification provision
-        JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id AND attempt.substrate
+        JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id
         WHERE attempt.id=${attemptID} AND attempt.project_id=${config.projectID}
           AND attempt.verification_id=provision.verification_id AND attempt.isolated_kind='verification'
           AND attempt.workspace_id IS NULL`;
@@ -143,7 +143,7 @@ export function createSubstrateVerification(
         { id: string }[]
       >`SELECT attempt.id FROM factory.runtime_attempt attempt
         JOIN factory.substrate_verification provision ON provision.runtime_attempt_id=attempt.id
-        WHERE attempt.substrate AND attempt.project_id=${config.projectID} AND attempt.state IN ('starting','ready')
+        WHERE attempt.project_id=${config.projectID} AND attempt.state IN ('starting','ready')
           AND attempt.stop_intended_at IS NULL`;
       for (const row of rows) await (await this.forAttempt(row.id))?.recover();
     },
@@ -167,7 +167,7 @@ export function createSubstrateVerification(
               JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
               WHERE verification.id=${verificationID} AND verification.runtime_attempt_id IS NULL
                 AND verification.state='pending' AND attempt.verification_id=verification.id
-                AND attempt.substrate AND attempt.state='stopped' AND binding.deleted_at IS NOT NULL
+ AND attempt.state='stopped' AND binding.deleted_at IS NOT NULL
                 AND EXISTS(SELECT 1 FROM factory.execution_policy_command decision
                   WHERE decision.scope='checks-bootstrap-retry:'||verification.change_id::text
                     AND decision.input->>'verificationID'=verification.id::text

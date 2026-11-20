@@ -127,13 +127,16 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
       if (kind === "AtespaceAccessPolicy") spec = request["accessPolicy"];
       if (kind === "ActorEgressPolicy") spec = request["egressPolicy"];
       if (!spec) throw new Error(`Missing ${kind}`);
+      const [clock] = await f.database.client<{ at: string }[]>`
+        SELECT clock_timestamp()::text AS at`;
+      if (!clock) throw new Error("Owned native creation clock is unavailable");
       const value = {
         ...spec,
         metadata: {
           ...(spec["metadata"] as object),
           uid: crypto.randomUUID(),
           version: "1",
-          createTime: new Date().toISOString(),
+          createTime: new Date(clock.at).toISOString(),
         },
       };
       if (kind === "Actor") Object.assign(value, { status: { state: "ACTOR_STATE_SUSPENDED" } });
@@ -412,13 +415,16 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
               : `${kind[0]?.toLowerCase()}${kind.slice(1)}`
         ];
       if (!spec) throw new Error("Owned native intent missing");
+      const [clock] = await f.database.client<{ at: string }[]>`
+        SELECT clock_timestamp()::text AS at`;
+      if (!clock) throw new Error("Owned native creation clock is unavailable");
       const value = {
         ...spec,
         metadata: {
           ...(spec["metadata"] as object),
           uid: crypto.randomUUID(),
           version: "1",
-          createTime: new Date().toISOString(),
+          createTime: new Date(clock.at).toISOString(),
         },
       };
       if (kind === "Actor") Object.assign(value, { status: { state: "ACTOR_STATE_SUSPENDED" } });
@@ -516,12 +522,11 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
       f.database.client.begin((sql) => substrateWorkspaceSourceIn(f.database, sql, f.attemptID));
     expect(await readTicketSource()).toBe(`file://${repo}`);
     const [binding] = await f.database
-      .client`SELECT w.kind,w.owner_user_id,a.change_id,w.substrate FROM factory.development_workspace w JOIN factory.runtime_attempt a ON a.workspace_id=w.id WHERE a.id=${f.attemptID}`;
+      .client`SELECT w.kind,w.owner_user_id,a.change_id FROM factory.development_workspace w JOIN factory.runtime_attempt a ON a.workspace_id=w.id WHERE a.id=${f.attemptID}`;
     expect(binding).toMatchObject({
       kind: "ticket",
       owner_user_id: null,
       change_id: f.changeID,
-      substrate: true,
     });
     expect([
       ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
@@ -1010,7 +1015,7 @@ test("product Stop without independent Source refuses deletion rather than repor
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {

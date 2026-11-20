@@ -217,8 +217,9 @@ PostgreSQL routines and triggers under `packages/db/native/` into the single sea
 baseline. `bun run db:check` detects source drift. Operators install that checked-in baseline;
 they do not run a generator or adopt a historical database.
 
-Schema-backed Drizzle queries cover the converted access, settings, Project, usage-rate and
-library-cover slices. `drizzleTransaction` binds them to the existing Postgres.js transaction,
+Schema-backed Drizzle queries cover access, settings, Project creation, usage rates, library covers,
+MCP configuration, shared Conversations, Learning review/application, Releases and attachment/media
+storage. `drizzleTransaction` binds them to the existing Postgres.js transaction,
 including nested savepoints; it does not open a second connection. Other slices still contain
 direct SQL and need the same incremental conversion and concurrency checks. Zero reuses its
 database provider per connection pool, not a user's authorization context.
@@ -227,6 +228,8 @@ Its eight planning tables are generated from an explicit Drizzle column allowlis
 The generator is development-only, and the browser imports only its checked-in output.
 Project registration and repository setup share `projects/creation.ts`. It selects the shared
 background under a transaction lock; PostgreSQL no longer owns that product selection policy.
+Runtime Attempts and Workspaces have no runtime-selector flag. Every Attempt requires its
+persisted matching native binding, including at the deferred transaction boundary.
 
 Mastra owns Planning orchestration. Explicit provider SDKs remain behind the model adapter because
 Mastra's compatible endpoint route does not preserve every native provider's protocol and reasoning

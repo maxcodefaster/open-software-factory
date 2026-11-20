@@ -81,15 +81,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
       }
       if (method === "CreateActor") {
         effects.push(method);
-        actor = f.actor();
-        const [created] = await f.database.client<{ at: string }[]>`
-          SELECT (create_attempted_at + interval '1 millisecond')::text AS at
-          FROM factory.substrate_binding
-          WHERE runtime_attempt_id=${f.attemptID} AND create_attempted_at IS NOT NULL`;
-        if (!created) throw Error("Owned native Create intent is missing");
-        // Keep simulated native creation after its dispatch on the fixture DB's
-        // clock, rather than depending on host/container wall-clock alignment.
-        actor.metadata.createTime = new Date(created.at).toISOString();
+        actor = await f.createdActor();
         return structuredClone(actor);
       }
       if (method === "ResumeActor" && actor) {
@@ -509,7 +501,7 @@ test("failed personal bootstrap reconnect admits its retained Source Parent only
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {
@@ -563,7 +555,7 @@ test("a previously ready personal Workspace with its original frozen pause recov
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = f.actor();
+      actor = await f.createdActor();
       return actor;
     }
     if (method === "ResumeActor" && actor) {
@@ -663,7 +655,7 @@ test.each(["starting", "failed"])(
         return structuredClone(actor);
       }
       if (method === "CreateActor") {
-        actor = f.actor();
+        actor = await f.createdActor();
         return actor;
       }
       if (method === "ResumeActor" && actor) {
@@ -829,7 +821,7 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
         return structuredClone(actor);
       }
       if (method === "CreateActor") {
-        actor = f.actor();
+        actor = await f.createdActor();
         return actor;
       }
       if (method === "ResumeActor" && actor) {

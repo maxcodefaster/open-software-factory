@@ -59,7 +59,7 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
     }
     if (method === "CreateActor") {
       creates++;
-      actor = f.actor();
+      actor = await f.createdActor();
       return structuredClone(actor);
     }
     if (method === "ResumeActor" && actor) {

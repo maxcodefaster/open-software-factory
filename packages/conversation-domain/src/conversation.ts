@@ -31,6 +31,7 @@ export const sourceCitationInput = z
   .refine((value) => value.source !== "code" || (!!value.commitSha && !!value.path), {
     message: "Code citations require an exact commit and path",
   });
+export type SourceCitation = z.infer<typeof sourceCitationInput>;
 
 const questionOptionInput = z
   .object({

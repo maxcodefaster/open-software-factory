@@ -10,15 +10,15 @@ import {
   pendingReviewThreads,
   visualReviewSchema,
 } from "../../../../packages/conversation-domain/src/visual-review";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import { type AgentTurnTransaction, createAgentTurnStore } from "../agent/turn-store";
+import { createAgentTurnStore } from "../agent/turn-store";
 import { assertMessageAttachmentsIn, freezeFeedbackAttachmentsIn } from "../attachments/store";
 import { CommandError } from "../command-error";
 
 type Database = ReturnType<typeof createDatabase>;
 
-async function feedbackIn(sql: AgentTurnTransaction, changeID: string) {
+async function feedbackIn(sql: DatabaseTransaction, changeID: string) {
   const rows = await sql`
     SELECT feedback.id,feedback.kind,feedback.state,feedback.version,
       feedback.author_id AS "authorId",author.name AS author,feedback.commit_sha AS "commitSha",
@@ -49,7 +49,7 @@ async function feedbackIn(sql: AgentTurnTransaction, changeID: string) {
 }
 
 export async function reviewChangeIn(
-  sql: AgentTurnTransaction,
+  sql: DatabaseTransaction,
   changeID: string,
   userID: string,
   write = false,
@@ -75,7 +75,7 @@ export function createVisualReviewController(
     changeID: string,
     userID: string,
     input: T,
-    work: (sql: AgentTurnTransaction) => Promise<{ feedbackId?: string; turnId?: string }>,
+    work: (sql: DatabaseTransaction) => Promise<{ feedbackId?: string; turnId?: string }>,
   ) {
     return database.client.begin(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`visual-review:${input.commandId}`}))`;
@@ -342,7 +342,7 @@ export function createVisualReviewController(
       changeID: string,
       userID: string,
       raw: unknown,
-      admit: (sql: AgentTurnTransaction, text: string, commandID: string) => Promise<string>,
+      admit: (sql: DatabaseTransaction, text: string, commandID: string) => Promise<string>,
     ) {
       const input = feedbackDispatchInput.parse(raw);
       if (new Set(input.feedback.map((item) => item.id)).size !== input.feedback.length)

@@ -1,6 +1,5 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn } from "../access/change-writer";
-import type { AgentTurnTransaction } from "./turn-store";
 
 // Candidate publication has no dependency on the native commit transport or its SDK.
 export async function publishWorkspaceCandidate(
@@ -38,7 +37,7 @@ export async function publishWorkspaceCandidate(
 // Correlated predicate for Delivery's change/session/writer aliases.
 // Human submission is a fenced receipt, not completion of historical Coding.
 export function submittedCandidate(
-  sql: ReturnType<typeof createDatabase>["client"] | AgentTurnTransaction,
+  sql: ReturnType<typeof createDatabase>["client"] | DatabaseTransaction,
 ) {
   return sql`(
     writer.state IN ('agent','unassigned') AND NOT writer.fence_required

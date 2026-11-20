@@ -1,4 +1,23 @@
 import { isDeepStrictEqual } from "node:util";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  exists,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  not,
+  notInArray,
+  or,
+  sql as typedSQL,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import {
   learningCase,
@@ -13,14 +32,32 @@ import {
   maxCalibrationGrades,
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  administrator,
+  learningCase as caseRecord,
+  learningApplication,
+  learningCommand,
+  learningPolicy,
+  learningReview,
+  learningTrial,
+  learningTrialStep,
+  projectMembership,
+  learningProposal as proposalRecord,
+  ticketConversation,
+  usageEntry,
+  usageOperation,
+} from "../../../../packages/db/src/schema";
 import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../../../packages/requirement-domain/src/requirement";
 import { insertInitialTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { pendingReviewRequests } from "./requests";
@@ -44,98 +81,243 @@ export function createLearningService(database: Database) {
       ownUsage: personal || !manager,
     };
   }
-  async function replay(sql: AgentTurnTransaction, id: string, actorId: string, input: unknown) {
-    await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning-command:${id}`}))`;
-    const [existing] = await sql<{ actorId: string; input: unknown; result: unknown }[]>`
-      SELECT actor_id AS "actorId",input,result FROM factory.learning_command WHERE id=${id}`;
+  async function replay(sql: DatabaseTransaction, id: string, actorId: string, input: unknown) {
+    const db = drizzleTransaction(sql);
+    await db.execute(typedSQL`SELECT pg_advisory_xact_lock(hashtext(${`learning-command:${id}`}))`);
+    const [existing] = await db
+      .select({
+        actorId: learningCommand.actorId,
+        input: learningCommand.input,
+        result: learningCommand.result,
+      })
+      .from(learningCommand)
+      .where(eq(learningCommand.id, id));
     if (existing && (existing.actorId !== actorId || !isDeepStrictEqual(existing.input, input)))
       throw new CommandError("conflict", "Learning command identity was reused");
     return existing;
   }
   return {
     async get(userId: string, projectId: string | null, personal = false) {
+      const db = drizzleTransaction(database.client);
       const permitted = await rights(userId, projectId, personal);
       const ownerId = personal ? userId : null;
+      const reviewVisible = and(
+        projectId ? eq(learningReview.projectId, projectId) : undefined,
+        ownerId ? eq(learningReview.ownerId, ownerId) : isNull(learningReview.ownerId),
+        permitted.developer ? undefined : eq(learningReview.developerOnly, false),
+        permitted.manager
+          ? undefined
+          : typedSQL`NOT(${learningReview.input} @> '[{"activity":"setup"}]'::jsonb)`,
+      );
+      const caseVisible = and(
+        projectId ? eq(caseRecord.projectId, projectId) : undefined,
+        ownerId ? eq(caseRecord.ownerId, ownerId) : isNull(caseRecord.ownerId),
+        permitted.developer ? undefined : eq(caseRecord.developerOnly, false),
+        permitted.manager ? undefined : ne(caseRecord.activity, "setup"),
+        typedSQL`NOT(${caseRecord.activity}='wiki' AND ${caseRecord.id} ~ ${legacyWikiCallPattern})`,
+      );
+      const reviewFields = {
+        id: learningReview.id,
+        kind: learningReview.kind,
+        state: learningReview.state,
+        modelId: learningReview.modelId,
+        rubric: learningReview.rubric,
+        calibrated: learningReview.calibrated,
+        reason: learningReview.reason,
+        createdAt: learningReview.createdAt,
+        completedAt: learningReview.completedAt,
+        result: learningReview.result,
+        cases: learningReview.input,
+      };
       const policies = projectId
-        ? await database.client<
-            {
-              ownerId: string | null;
-              enabled: boolean;
-              automaticSkills: boolean;
-              version: number;
-            }[]
-          >`
-        SELECT owner_id AS "ownerId",enabled,automatic_skills AS "automaticSkills",version FROM factory.learning_policy WHERE project_id=${projectId}
-          AND (owner_id IS NULL OR owner_id=${ownerId})`
+        ? await db
+            .select({
+              ownerId: learningPolicy.ownerId,
+              enabled: learningPolicy.enabled,
+              automaticSkills: learningPolicy.automaticSkills,
+              version: learningPolicy.version,
+            })
+            .from(learningPolicy)
+            .where(
+              and(
+                eq(learningPolicy.projectId, projectId),
+                or(
+                  isNull(learningPolicy.ownerId),
+                  ownerId ? eq(learningPolicy.ownerId, ownerId) : undefined,
+                ),
+              ),
+            )
         : [];
       const policy = policies.find((item) => item.ownerId === ownerId);
       const parentEnabled = policies.find((item) => item.ownerId === null)?.enabled ?? true;
-      const days = await database.client`
-        WITH dates AS (
-          SELECT generate_series((now() AT TIME ZONE 'UTC')::date-27,(now() AT TIME ZONE 'UTC')::date,interval '1 day')::date AS day
-        ), operations AS (
-          SELECT (settled_at AT TIME ZONE 'UTC')::date AS day,count(*)::int AS operations,
-            count(*) FILTER(WHERE outcome='completed')::int AS completed,
-            count(*) FILTER(WHERE outcome IN ('failed','interrupted'))::int AS failed,
-            count(*) FILTER(WHERE outcome='unknown')::int AS unknown,
-            bool_or(NOT EXISTS(SELECT 1 FROM factory.usage_entry entry WHERE entry.operation_id=factory.usage_operation.id)) AS missing_usage,
-            percentile_cont(0.5) WITHIN GROUP(ORDER BY extract(epoch FROM settled_at-created_at))::float8 AS elapsed
-          FROM factory.usage_operation
-          WHERE settled_at >= ((now() AT TIME ZONE 'UTC')::date-27) AT TIME ZONE 'UTC'
-            AND (${projectId}::uuid IS NULL OR project_id=${projectId})
-            AND (NOT ${permitted.ownUsage} OR user_id=${userId})
-            AND purpose NOT IN ('probe','learning') GROUP BY 1
-        ), costs AS (
-          SELECT (entry.occurred_at AT TIME ZONE 'UTC')::date AS day,
-            sum(entry.known_nano_usd)::text AS cost,bool_or(entry.nano_usd IS NULL) AS incomplete
-          FROM factory.usage_entry entry JOIN factory.usage_operation operation ON operation.id=entry.operation_id
-          WHERE entry.occurred_at>=((now() AT TIME ZONE 'UTC')::date-27) AT TIME ZONE 'UTC'
-            AND (${projectId}::uuid IS NULL OR operation.project_id=${projectId})
-            AND (NOT ${permitted.ownUsage} OR operation.user_id=${userId}) AND operation.purpose<>'probe' GROUP BY 1
-        ), covered AS (
-          SELECT (source.settled_at AT TIME ZONE 'UTC')::date AS day,count(*)::int AS observed,
-            count(*) FILTER(WHERE source.selected)::int AS selected,
-            count(result.value)::int AS reviewed,
-            count(*) FILTER(WHERE result.value->>'fulfillment'='supported')::int AS supported,
-            count(*) FILTER(WHERE result.value->>'fulfillment'='problem')::int AS problems,
-            count(*) FILTER(WHERE result.value->>'rework'='avoidable')::int AS avoidable,
-            count(*) FILTER(WHERE result.value->>'rework' IN ('avoidable','necessary'))::int AS rework_known
-          FROM factory.learning_case source
-          LEFT JOIN factory.learning_review review ON review.id=source.batch_id AND review.state='completed' AND review.kind='work'
-          LEFT JOIN LATERAL jsonb_array_elements(review.result->'cases') result(value) ON result.value->>'caseId'=source.id
-          WHERE source.settled_at>=((now() AT TIME ZONE 'UTC')::date-27) AT TIME ZONE 'UTC'
-            AND (${projectId}::uuid IS NULL OR source.project_id=${projectId})
-            AND source.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-            AND (NOT source.developer_only OR ${permitted.developer})
-            AND (source.activity<>'setup' OR ${permitted.manager})
-            AND NOT(source.activity='wiki' AND source.id ~ ${legacyWikiCallPattern})
-          GROUP BY 1
-        )
-        SELECT dates.day::text AS date,coalesce(operations.operations,0) AS operations,
-          coalesce(operations.completed,0) AS completed,coalesce(operations.failed,0) AS failed,
-          coalesce(operations.unknown,0) AS unknown,coalesce(costs.cost,'0') AS "knownNanoUSD",
-          (coalesce(costs.incomplete,false) OR coalesce(operations.missing_usage,false)) AS incomplete,operations.elapsed AS "elapsedSeconds",
-          coalesce(covered.observed,0) AS observed,coalesce(covered.selected,0) AS selected,
-          coalesce(covered.reviewed,0) AS reviewed,coalesce(covered.supported,0) AS supported,
-          coalesce(covered.problems,0) AS problems,coalesce(covered.avoidable,0) AS avoidable,
-          coalesce(covered.rework_known,0) AS "reworkKnown"
-        FROM dates LEFT JOIN operations USING(day) LEFT JOIN costs USING(day) LEFT JOIN covered USING(day) ORDER BY dates.day`;
+      // Native expressions retain UTC bucketing, filtered aggregates and JSON verdict expansion.
+      const start = typedSQL`((now() AT TIME ZONE 'UTC')::date-27) AT TIME ZONE 'UTC'`;
+      const operationDay = typedSQL<string>`(${usageOperation.settledAt} AT TIME ZONE 'UTC')::date`;
+      const costDay = typedSQL<string>`(${usageEntry.occurredAt} AT TIME ZONE 'UTC')::date`;
+      const caseDay = typedSQL<string>`(${caseRecord.settledAt} AT TIME ZONE 'UTC')::date`;
+      const dates = db.$with("dates").as(
+        db
+          .select({
+            day: typedSQL<string>`date_series.day::date`.as("day"),
+          })
+          .from(typedSQL`generate_series(
+          (now() AT TIME ZONE 'UTC')::date-27,(now() AT TIME ZONE 'UTC')::date,interval '1 day') date_series(day)`),
+      );
+      const missingUsage = not(
+        exists(
+          db
+            .select({ id: usageEntry.eventId })
+            .from(usageEntry)
+            .where(eq(usageEntry.operationId, usageOperation.id)),
+        ),
+      );
+      const operations = db.$with("operations").as(
+        db
+          .select({
+            day: operationDay.as("day"),
+            operations: typedSQL<number>`count(*)::int`.as("operations"),
+            completed:
+              typedSQL<number>`count(*) FILTER(WHERE ${usageOperation.outcome}='completed')::int`.as(
+                "completed",
+              ),
+            failed:
+              typedSQL<number>`count(*) FILTER(WHERE ${usageOperation.outcome} IN ('failed','interrupted'))::int`.as(
+                "failed",
+              ),
+            unknown:
+              typedSQL<number>`count(*) FILTER(WHERE ${usageOperation.outcome}='unknown')::int`.as(
+                "unknown",
+              ),
+            missingUsage: typedSQL<boolean>`bool_or(${missingUsage})`.as("missing_usage"),
+            elapsed: typedSQL<number | null>`percentile_cont(0.5) WITHIN GROUP(
+          ORDER BY extract(epoch FROM ${usageOperation.settledAt}-${usageOperation.createdAt}))::float8`.as(
+              "elapsed",
+            ),
+          })
+          .from(usageOperation)
+          .where(
+            and(
+              gte(usageOperation.settledAt, start),
+              projectId ? eq(usageOperation.projectId, projectId) : undefined,
+              permitted.ownUsage ? eq(usageOperation.userId, userId) : undefined,
+              notInArray(usageOperation.purpose, ["probe", "learning"]),
+            ),
+          )
+          .groupBy(operationDay),
+      );
+      const costs = db.$with("costs").as(
+        db
+          .select({
+            day: costDay.as("day"),
+            cost: typedSQL<string>`sum(${usageEntry.knownNanoUsd})::text`.as("cost"),
+            incomplete: typedSQL<boolean>`bool_or(${usageEntry.nanoUsd} IS NULL)`.as("incomplete"),
+          })
+          .from(usageEntry)
+          .innerJoin(usageOperation, eq(usageOperation.id, usageEntry.operationId))
+          .where(
+            and(
+              gte(usageEntry.occurredAt, start),
+              projectId ? eq(usageOperation.projectId, projectId) : undefined,
+              permitted.ownUsage ? eq(usageOperation.userId, userId) : undefined,
+              ne(usageOperation.purpose, "probe"),
+            ),
+          )
+          .groupBy(costDay),
+      );
+      const covered = db.$with("covered").as(
+        db
+          .select({
+            day: caseDay.as("day"),
+            observed: typedSQL<number>`count(*)::int`.as("observed"),
+            selected: typedSQL<number>`count(*) FILTER(WHERE ${caseRecord.selected})::int`.as(
+              "selected",
+            ),
+            reviewed: typedSQL<number>`count(verdict.value)::int`.as("reviewed"),
+            supported:
+              typedSQL<number>`count(*) FILTER(WHERE verdict.value->>'fulfillment'='supported')::int`.as(
+                "supported",
+              ),
+            problems:
+              typedSQL<number>`count(*) FILTER(WHERE verdict.value->>'fulfillment'='problem')::int`.as(
+                "problems",
+              ),
+            avoidable:
+              typedSQL<number>`count(*) FILTER(WHERE verdict.value->>'rework'='avoidable')::int`.as(
+                "avoidable",
+              ),
+            reworkKnown:
+              typedSQL<number>`count(*) FILTER(WHERE verdict.value->>'rework' IN ('avoidable','necessary'))::int`.as(
+                "rework_known",
+              ),
+          })
+          .from(caseRecord)
+          .leftJoin(
+            learningReview,
+            and(
+              eq(learningReview.id, caseRecord.batchId),
+              eq(learningReview.state, "completed"),
+              eq(learningReview.kind, "work"),
+            ),
+          )
+          .leftJoin(
+            typedSQL`LATERAL jsonb_array_elements(${learningReview.result}->'cases') verdict(value)`,
+            typedSQL`verdict.value->>'caseId'=${caseRecord.id}`,
+          )
+          .where(and(gte(caseRecord.settledAt, start), caseVisible))
+          .groupBy(caseDay),
+      );
+      const days = await db
+        .with(dates, operations, costs, covered)
+        .select({
+          date: typedSQL<string>`${dates}.${dates.day}::text`,
+          operations: typedSQL<number>`coalesce(${operations}.${operations.operations},0)`,
+          completed: typedSQL<number>`coalesce(${operations}.${operations.completed},0)`,
+          failed: typedSQL<number>`coalesce(${operations}.${operations.failed},0)`,
+          unknown: typedSQL<number>`coalesce(${operations}.${operations.unknown},0)`,
+          knownNanoUSD: typedSQL<string>`coalesce(${costs}.${costs.cost},'0')`,
+          incomplete: typedSQL<boolean>`coalesce(${costs}.${costs.incomplete},false) OR coalesce(${operations}.${operations.missingUsage},false)`,
+          elapsedSeconds: operations.elapsed,
+          observed: typedSQL<number>`coalesce(${covered}.${covered.observed},0)`,
+          selected: typedSQL<number>`coalesce(${covered}.${covered.selected},0)`,
+          reviewed: typedSQL<number>`coalesce(${covered}.${covered.reviewed},0)`,
+          supported: typedSQL<number>`coalesce(${covered}.${covered.supported},0)`,
+          problems: typedSQL<number>`coalesce(${covered}.${covered.problems},0)`,
+          avoidable: typedSQL<number>`coalesce(${covered}.${covered.avoidable},0)`,
+          reworkKnown: typedSQL<number>`coalesce(${covered}.${covered.reworkKnown},0)`,
+        })
+        .from(dates)
+        .leftJoin(operations, typedSQL`${operations}.${operations.day} = ${dates}.${dates.day}`)
+        .leftJoin(costs, typedSQL`${costs}.${costs.day} = ${dates}.${dates.day}`)
+        .leftJoin(covered, typedSQL`${covered}.${covered.day} = ${dates}.${dates.day}`)
+        .orderBy(asc(typedSQL`${dates}.${dates.day}`));
       // Cases batch within one visibility group, so report the group closest to starting.
       const [waiting] = projectId
-        ? await database.client<{ count: number; since: Date; developerOnly: boolean }[]>`
-        SELECT count(*)::int AS count,min(settled_at) AS since,developer_only AS "developerOnly" FROM factory.learning_case
-        WHERE project_id=${projectId} AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-          AND selected AND batch_id IS NULL
-          AND (NOT developer_only OR ${permitted.developer})
-          AND (activity<>'setup' OR ${permitted.manager})
-          AND NOT(activity='wiki' AND id ~ ${legacyWikiCallPattern})
-        GROUP BY developer_only ORDER BY count(*) DESC,min(settled_at) LIMIT 1`
+        ? await db
+            .select({
+              count: count(),
+              since: typedSQL`min(${caseRecord.settledAt})`.mapWith(caseRecord.settledAt),
+              developerOnly: caseRecord.developerOnly,
+            })
+            .from(caseRecord)
+            .where(and(caseVisible, eq(caseRecord.selected, true), isNull(caseRecord.batchId)))
+            .groupBy(caseRecord.developerOnly)
+            .orderBy(desc(count()), typedSQL`min(${caseRecord.settledAt})`)
+            .limit(1)
         : [];
       const [running] = projectId
-        ? await database.client<{ id: string }[]>`
-        SELECT id FROM factory.learning_review WHERE project_id=${projectId}
-          AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid AND state='running' AND kind='work'
-          AND (NOT developer_only OR ${permitted.developer}) LIMIT 1`
+        ? await db
+            .select({ id: learningReview.id })
+            .from(learningReview)
+            .where(
+              and(
+                eq(learningReview.projectId, projectId),
+                ownerId ? eq(learningReview.ownerId, ownerId) : isNull(learningReview.ownerId),
+                eq(learningReview.state, "running"),
+                eq(learningReview.kind, "work"),
+                permitted.developer ? undefined : eq(learningReview.developerOnly, false),
+              ),
+            )
+            .limit(1)
         : [];
       const [requested] = projectId
         ? (await pendingReviewRequests(database.client, { projectId, ownerId })).filter(
@@ -145,16 +327,30 @@ export function createLearningService(database: Database) {
       // Calibration is shared by every Project that uses the same judge, so describe the latest
       // judge without exposing its cases. A model change starts a new judge with its own record.
       const [latestCalibration] = projectId
-        ? await database.client<
-            { judgeKey: string; state: string; calibrated: boolean | null; modelId: string }[]
-          >`
-        SELECT judge_key AS "judgeKey",state,calibrated,model_id AS "modelId" FROM factory.learning_review
-        WHERE kind='calibration' ORDER BY created_at DESC LIMIT 1`
+        ? await db
+            .select({
+              judgeKey: learningReview.judgeKey,
+              state: learningReview.state,
+              calibrated: learningReview.calibrated,
+              modelId: learningReview.modelId,
+            })
+            .from(learningReview)
+            .where(eq(learningReview.kind, "calibration"))
+            .orderBy(desc(learningReview.createdAt))
+            .limit(1)
         : [];
       const [wrongGrades] = latestCalibration
-        ? await database.client<{ count: number }[]>`
-        SELECT count(*)::int AS count FROM factory.learning_review
-        WHERE kind='calibration' AND judge_key=${latestCalibration.judgeKey} AND state='completed' AND NOT calibrated`
+        ? await db
+            .select({ count: count() })
+            .from(learningReview)
+            .where(
+              and(
+                eq(learningReview.kind, "calibration"),
+                eq(learningReview.judgeKey, latestCalibration.judgeKey),
+                eq(learningReview.state, "completed"),
+                eq(learningReview.calibrated, false),
+              ),
+            )
         : [];
       const calibration = !latestCalibration
         ? { state: "none" as const, attempts: 0, modelId: null }
@@ -173,24 +369,28 @@ export function createLearningService(database: Database) {
             modelId: latestCalibration.modelId,
           };
       let reviews: Array<Record<string, unknown>> = projectId
-        ? await database.client`
-        SELECT id,kind,state,model_id AS "modelId",rubric,calibrated,reason,
-          created_at AS "createdAt",completed_at AS "completedAt",result,input AS cases
-        FROM factory.learning_review WHERE project_id=${projectId}
-          AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-          AND (NOT developer_only OR ${permitted.developer})
-          AND (${permitted.manager} OR NOT(input @> '[{"activity":"setup"}]'::jsonb))
-        ORDER BY created_at DESC LIMIT 12`
+        ? await db
+            .select(reviewFields)
+            .from(learningReview)
+            .where(reviewVisible)
+            .orderBy(desc(learningReview.createdAt))
+            .limit(12)
         : [];
       const proposals = projectId
-        ? await database.client`
-        SELECT proposal.id,proposal.review_id AS "reviewId",proposal.content,proposal.state,
-          proposal.ticket_id AS "ticketId",(review.owner_id IS NOT NULL) AS private
-        FROM factory.learning_proposal proposal JOIN factory.learning_review review ON review.id=proposal.review_id
-        WHERE review.project_id=${projectId} AND review.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-          AND (NOT review.developer_only OR ${permitted.developer})
-          AND (${permitted.manager} OR NOT(review.input @> '[{"activity":"setup"}]'::jsonb))
-        ORDER BY review.created_at DESC,proposal.ordinal LIMIT 24`
+        ? await db
+            .select({
+              id: proposalRecord.id,
+              reviewId: proposalRecord.reviewId,
+              content: proposalRecord.content,
+              state: proposalRecord.state,
+              ticketId: proposalRecord.ticketId,
+              private: isNotNull(learningReview.ownerId),
+            })
+            .from(proposalRecord)
+            .innerJoin(learningReview, eq(learningReview.id, proposalRecord.reviewId))
+            .where(reviewVisible)
+            .orderBy(desc(learningReview.createdAt), asc(proposalRecord.ordinal))
+            .limit(24)
         : [];
       // Pending proposals can outlive the recent-history window. Always return
       // their exact supporting reviews, under the same visibility predicate.
@@ -198,50 +398,93 @@ export function createLearningService(database: Database) {
         (id) => !reviews.some((review) => review["id"] === id),
       );
       if (projectId && missing.length) {
-        const sources = await database.client`
-          SELECT id,kind,state,model_id AS "modelId",rubric,calibrated,reason,
-            created_at AS "createdAt",completed_at AS "completedAt",result,input AS cases
-          FROM factory.learning_review WHERE id=ANY(${missing}::uuid[]) AND project_id=${projectId}
-            AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-            AND (NOT developer_only OR ${permitted.developer})
-            AND (${permitted.manager} OR NOT(input @> '[{"activity":"setup"}]'::jsonb))
-          ORDER BY created_at DESC`;
+        const sources = await db
+          .select(reviewFields)
+          .from(learningReview)
+          .where(and(inArray(learningReview.id, missing), reviewVisible))
+          .orderBy(desc(learningReview.createdAt));
         reviews = [...reviews, ...sources];
       }
+      const later = alias(learningReview, "later");
+      const recent = db
+        .select({
+          id: caseRecord.id,
+          snapshot: caseRecord.snapshot,
+          settledAt: caseRecord.settledAt,
+          reviewId: typedSQL<string | null>`${later.id}`.as("review_id"),
+          verdict: typedSQL<unknown>`verdict.value`.as("verdict"),
+          sampled: typedSQL<number>`count(*) OVER()`.as("sampled"),
+          reviewed: typedSQL<number>`count(verdict.value) OVER()`.as("reviewed"),
+          problems:
+            typedSQL<number>`count(*) FILTER(WHERE verdict.value->>'fulfillment'='problem') OVER()`.as(
+              "problems",
+            ),
+        })
+        .from(caseRecord)
+        .leftJoin(
+          later,
+          and(
+            eq(later.id, caseRecord.batchId),
+            eq(later.state, "completed"),
+            eq(later.kind, "work"),
+          ),
+        )
+        .leftJoin(
+          typedSQL`LATERAL jsonb_array_elements(${later.result}->'cases') verdict(value)`,
+          typedSQL`verdict.value->>'caseId'=${caseRecord.id}`,
+        )
+        .where(
+          and(
+            eq(caseRecord.projectId, learningReview.projectId),
+            typedSQL`${caseRecord.ownerId} IS NOT DISTINCT FROM ${learningReview.ownerId}`,
+            eq(caseRecord.developerOnly, learningReview.developerOnly),
+            eq(caseRecord.selected, true),
+            typedSQL`${caseRecord.snapshot}->'targets' @> jsonb_build_array(jsonb_build_object(
+            'target',jsonb_build_object('kind',${learningApplication.target}->>'kind',
+              'id',${learningApplication.target}->>'id','revisionId',${learningApplication.appliedRevisionId}::text)))`,
+            permitted.manager ? undefined : ne(caseRecord.activity, "setup"),
+          ),
+        )
+        .orderBy(desc(caseRecord.settledAt), asc(caseRecord.id))
+        .limit(3)
+        .as("recent");
+      const subsequent = db
+        .select({
+          sampled: typedSQL<number>`max(${recent.sampled})::int`.as("sampled"),
+          reviewed: typedSQL<number>`max(${recent.reviewed})::int`.as("reviewed"),
+          problems: typedSQL<number>`max(${recent.problems})::int`.as("problems"),
+          cases: typedSQL<unknown[]>`jsonb_agg(jsonb_build_object(
+          'source',${recent.snapshot},'reviewId',${recent.reviewId},'verdict',${recent.verdict})
+          ORDER BY ${recent.settledAt} DESC,${recent.id})`.as("cases"),
+        })
+        .from(recent)
+        .as("subsequent");
       const applications = projectId
-        ? await database.client`
-        SELECT application.id,application.proposal_id AS "proposalId",application.target,
-          proposal.content->>'title' AS title,proposal.content->'edit' AS edit,
-          application.applied_revision_id AS "appliedRevisionId",application.applied_version AS "appliedVersion",
-          application.state,application.created_at AS "createdAt",application.reverted_at AS "revertedAt",
-          (application.comparison_id IS NOT NULL) AS automatic,(application.reverted_comparison_id IS NOT NULL) AS "automaticRecovery",
-          jsonb_build_object('sampled',coalesce(subsequent.sampled,0),'reviewed',coalesce(subsequent.reviewed,0),
-            'problems',coalesce(subsequent.problems,0),'cases',coalesce(subsequent.cases,'[]'::jsonb)) AS subsequent
-        FROM factory.learning_application application
-        JOIN factory.learning_proposal proposal ON proposal.id=application.proposal_id
-        JOIN factory.learning_review review ON review.id=proposal.review_id
-        LEFT JOIN LATERAL (
-          SELECT max(recent.sampled)::int AS sampled,max(recent.reviewed)::int AS reviewed,max(recent.problems)::int AS problems,
-            jsonb_agg(jsonb_build_object('source',recent.snapshot,'reviewId',recent.review_id,'verdict',recent.verdict)
-              ORDER BY recent.settled_at DESC,recent.id) AS cases FROM (
-          SELECT source.id,source.snapshot,source.settled_at,later.id AS review_id,verdict.value AS verdict,
-            count(*) OVER() AS sampled,count(verdict.value) OVER() AS reviewed,
-            count(*) FILTER(WHERE verdict.value->>'fulfillment'='problem') OVER() AS problems
-          FROM factory.learning_case source
-          LEFT JOIN factory.learning_review later ON later.id=source.batch_id AND later.state='completed' AND later.kind='work'
-          LEFT JOIN LATERAL jsonb_array_elements(later.result->'cases') verdict(value) ON verdict.value->>'caseId'=source.id
-          WHERE source.project_id=review.project_id AND source.owner_id IS NOT DISTINCT FROM review.owner_id
-            AND source.developer_only=review.developer_only AND source.selected
-            AND source.snapshot->'targets' @> jsonb_build_array(jsonb_build_object('target',jsonb_build_object(
-              'kind',application.target->>'kind','id',application.target->>'id','revisionId',application.applied_revision_id::text)))
-            AND (${permitted.manager} OR source.activity<>'setup')
-          ORDER BY source.settled_at DESC,source.id LIMIT 3
-          ) recent
-        ) subsequent ON true
-        WHERE review.project_id=${projectId} AND review.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-          AND (NOT review.developer_only OR ${permitted.developer})
-          AND (${permitted.manager} OR NOT(review.input @> '[{"activity":"setup"}]'::jsonb))
-        ORDER BY application.created_at DESC LIMIT 24`
+        ? await db
+            .select({
+              id: learningApplication.id,
+              proposalId: learningApplication.proposalId,
+              target: learningApplication.target,
+              title: typedSQL<string>`${proposalRecord.content}->>'title'`,
+              edit: typedSQL<unknown>`${proposalRecord.content}->'edit'`,
+              appliedRevisionId: learningApplication.appliedRevisionId,
+              appliedVersion: learningApplication.appliedVersion,
+              state: learningApplication.state,
+              createdAt: learningApplication.createdAt,
+              revertedAt: learningApplication.revertedAt,
+              automatic: isNotNull(learningApplication.comparisonId),
+              automaticRecovery: isNotNull(learningApplication.revertedComparisonId),
+              subsequent: typedSQL<unknown>`jsonb_build_object(
+            'sampled',coalesce(${subsequent.sampled},0),'reviewed',coalesce(${subsequent.reviewed},0),
+            'problems',coalesce(${subsequent.problems},0),'cases',coalesce(${subsequent.cases},'[]'::jsonb))`,
+            })
+            .from(learningApplication)
+            .innerJoin(proposalRecord, eq(proposalRecord.id, learningApplication.proposalId))
+            .innerJoin(learningReview, eq(learningReview.id, proposalRecord.reviewId))
+            .leftJoinLateral(subsequent, typedSQL`true`)
+            .where(reviewVisible)
+            .orderBy(desc(learningApplication.createdAt))
+            .limit(24)
         : [];
       const proposalViews: Array<Record<string, unknown>> = await Promise.all(
         proposals.map(async (row) => {
@@ -306,19 +549,44 @@ export function createLearningService(database: Database) {
       );
       const comparisons: Array<Record<string, unknown>> = projectId
         ? [
-            ...(await database.client`
-        SELECT trial.id,trial.proposal_id AS "proposalId",trial.phase,proposal.content->>'title' AS title,
-          trial.state,trial.reason,trial.model_id AS "modelId",trial.rubric,trial.created_at AS "createdAt",trial.result,
-          (trial.input->>'candidateFirst')::boolean AS "candidateFirst",trial.input->'cases' AS evidence,
-          trial.input->'baselineTarget' AS "baselineTarget",trial.input->>'before' AS before,trial.input->>'after' AS after,
-          coalesce((SELECT jsonb_agg(step.result ORDER BY step.stage) FROM factory.learning_trial_step step
-            WHERE step.trial_id=trial.id AND step.stage<2 AND step.state='completed'),'[]'::jsonb) AS responses
-        FROM factory.learning_trial trial JOIN factory.learning_proposal proposal ON proposal.id=trial.proposal_id
-        JOIN factory.learning_review review ON review.id=proposal.review_id
-        WHERE review.project_id=${projectId} AND review.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-          AND (NOT review.developer_only OR ${permitted.developer})
-          AND (${permitted.manager} OR NOT(review.input @> '[{"activity":"setup"}]'::jsonb))
-        ORDER BY trial.created_at DESC LIMIT 24`),
+            ...(await db
+              .select({
+                id: learningTrial.id,
+                proposalId: learningTrial.proposalId,
+                phase: learningTrial.phase,
+                title: typedSQL<string>`${proposalRecord.content}->>'title'`,
+                state: learningTrial.state,
+                reason: learningTrial.reason,
+                modelId: learningTrial.modelId,
+                rubric: learningTrial.rubric,
+                createdAt: learningTrial.createdAt,
+                result: learningTrial.result,
+                candidateFirst: typedSQL<boolean>`(${learningTrial.input}->>'candidateFirst')::boolean`,
+                evidence: typedSQL<unknown>`${learningTrial.input}->'cases'`,
+                baselineTarget: typedSQL<unknown>`${learningTrial.input}->'baselineTarget'`,
+                before: typedSQL<string>`${learningTrial.input}->>'before'`,
+                after: typedSQL<string>`${learningTrial.input}->>'after'`,
+                responses: typedSQL<unknown[]>`coalesce((${db
+                  .select({
+                    responses: typedSQL<
+                      unknown[]
+                    >`jsonb_agg(${learningTrialStep.result} ORDER BY ${learningTrialStep.stage})`,
+                  })
+                  .from(learningTrialStep)
+                  .where(
+                    and(
+                      eq(learningTrialStep.trialId, learningTrial.id),
+                      lt(learningTrialStep.stage, 2),
+                      eq(learningTrialStep.state, "completed"),
+                    ),
+                  )}),'[]'::jsonb)`,
+              })
+              .from(learningTrial)
+              .innerJoin(proposalRecord, eq(proposalRecord.id, learningTrial.proposalId))
+              .innerJoin(learningReview, eq(learningReview.id, proposalRecord.reviewId))
+              .where(reviewVisible)
+              .orderBy(desc(learningTrial.createdAt))
+              .limit(24)),
           ].map((row) => ({
             ...row,
             createdAt: new Date(row["createdAt"] as Date).toISOString(),
@@ -375,30 +643,54 @@ export function createLearningService(database: Database) {
     async set(userId: string, raw: unknown) {
       const input = learningPolicyCommand.parse(raw);
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         await projectAuthorityIn(sql, userId, input.projectId, input.scope === "project");
         const existing = await replay(sql, input.commandId, userId, input);
         if (existing) return existing.result;
         const ownerId = input.scope === "personal" ? userId : null;
         const key = `${input.projectId}:${ownerId ?? "project"}`;
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning-policy:${key}`}))`;
-        const [current] = await sql<
-          { version: number }[]
-        >`SELECT version FROM factory.learning_policy WHERE scope_key=${key}`;
+        await db.execute(
+          typedSQL`SELECT pg_advisory_xact_lock(hashtext(${`learning-policy:${key}`}))`,
+        );
+        const [current] = await db
+          .select({ version: learningPolicy.version })
+          .from(learningPolicy)
+          .where(eq(learningPolicy.scopeKey, key));
         if ((current?.version ?? 0) !== input.expectedVersion)
           throw new CommandError("conflict", "Learning settings changed. Reload before saving.");
-        await sql`INSERT INTO factory.learning_policy(scope_key,project_id,owner_id,enabled,automatic_skills,version,updated_by)
-          VALUES(${key},${input.projectId},${ownerId},${input.enabled},${input.automaticSkills},${input.expectedVersion + 1},${userId})
-          ON CONFLICT(scope_key) DO UPDATE SET enabled=EXCLUDED.enabled,automatic_skills=EXCLUDED.automatic_skills,
-            version=EXCLUDED.version,updated_by=EXCLUDED.updated_by,updated_at=now()`;
+        const values = {
+          scopeKey: key,
+          projectId: input.projectId,
+          ownerId,
+          enabled: input.enabled,
+          automaticSkills: input.automaticSkills,
+          version: input.expectedVersion + 1,
+          updatedBy: userId,
+        };
+        await db
+          .insert(learningPolicy)
+          .values(values)
+          .onConflictDoUpdate({
+            target: learningPolicy.scopeKey,
+            set: {
+              enabled: values.enabled,
+              automaticSkills: values.automaticSkills,
+              version: values.version,
+              updatedBy: userId,
+              updatedAt: typedSQL`now()`,
+            },
+          });
         const result = { version: input.expectedVersion + 1 };
-        await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
-          VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+        await db
+          .insert(learningCommand)
+          .values({ id: input.commandId, actorId: userId, input, result });
         return result;
       });
     },
     async reviewNow(userId: string, raw: unknown) {
       const input = learningReviewNowCommand.parse(raw);
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         const ownerId = input.scope === "personal" ? userId : null;
         const group = { projectId: input.projectId, ownerId, developerOnly: input.developerOnly };
         // Spending Planning-model calls on shared work needs the same current Project manager
@@ -409,12 +701,22 @@ export function createLearningService(database: Database) {
         });
         const existing = await replay(sql, input.commandId, userId, input);
         if (existing) return existing.result;
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning:${input.projectId}:${ownerId ?? "project"}:${input.developerOnly}`}))`;
+        await db.execute(
+          typedSQL`SELECT pg_advisory_xact_lock(hashtext(${`learning:${input.projectId}:${ownerId ?? "project"}:${input.developerOnly}`}))`,
+        );
         if (!(await learningEnabledIn(sql, input.projectId, ownerId)))
           throw new CommandError("forbidden", "Learning is paused. Resume it to review now.");
-        const [busy] =
-          await sql`SELECT id FROM factory.learning_review WHERE project_id=${input.projectId}
-          AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid AND developer_only=${input.developerOnly} AND state='running'`;
+        const [busy] = await db
+          .select({ id: learningReview.id })
+          .from(learningReview)
+          .where(
+            and(
+              eq(learningReview.projectId, input.projectId),
+              ownerId ? eq(learningReview.ownerId, ownerId) : isNull(learningReview.ownerId),
+              eq(learningReview.developerOnly, input.developerOnly),
+              eq(learningReview.state, "running"),
+            ),
+          );
         if (busy) throw new CommandError("conflict", "A review of this work is already running.");
         if (
           (await pendingReviewRequests(sql, { projectId: input.projectId, ownerId })).some(
@@ -422,44 +724,75 @@ export function createLearningService(database: Database) {
           )
         )
           throw new CommandError("conflict", "A review of this work is already requested.");
-        const [eligible] = await sql<{ count: number }[]>`
-          SELECT count(*)::int AS count FROM (
-            SELECT 1 FROM factory.learning_case source
-            WHERE source.project_id=${input.projectId} AND source.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
-              AND source.developer_only=${input.developerOnly} AND source.selected AND source.batch_id IS NULL
-              AND NOT(source.activity='wiki' AND source.id ~ ${legacyWikiCallPattern})
-              AND (source.activity<>'setup' OR EXISTS(SELECT 1 FROM factory.project_membership membership
-                WHERE membership.project_id=source.project_id AND membership.user_id=source.reviewer_id AND membership.manage_project)
-                OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=source.reviewer_id))
-            LIMIT ${input.cases}) limited`;
+        const limited = db
+          .select({ id: caseRecord.id })
+          .from(caseRecord)
+          .where(
+            and(
+              eq(caseRecord.projectId, input.projectId),
+              ownerId ? eq(caseRecord.ownerId, ownerId) : isNull(caseRecord.ownerId),
+              eq(caseRecord.developerOnly, input.developerOnly),
+              eq(caseRecord.selected, true),
+              isNull(caseRecord.batchId),
+              typedSQL`NOT(${caseRecord.activity}='wiki' AND ${caseRecord.id} ~ ${legacyWikiCallPattern})`,
+              or(
+                ne(caseRecord.activity, "setup"),
+                exists(
+                  db
+                    .select({ userId: projectMembership.userId })
+                    .from(projectMembership)
+                    .where(
+                      and(
+                        eq(projectMembership.projectId, caseRecord.projectId),
+                        eq(projectMembership.userId, caseRecord.reviewerId),
+                        eq(projectMembership.manageProject, true),
+                      ),
+                    ),
+                ),
+                exists(
+                  db
+                    .select({ userId: administrator.userId })
+                    .from(administrator)
+                    .where(eq(administrator.userId, caseRecord.reviewerId)),
+                ),
+              ),
+            ),
+          )
+          .limit(input.cases)
+          .as("limited");
+        const [eligible] = await db.select({ count: count() }).from(limited);
         if (!eligible?.count)
           throw new CommandError("conflict", "No selected case is waiting for a review.");
         const result = { cases: Math.min(eligible.count, input.cases) };
-        await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
-          VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+        await db
+          .insert(learningCommand)
+          .values({ id: input.commandId, actorId: userId, input, result });
         return result;
       });
     },
     async decide(userId: string, raw: unknown) {
       const input = learningDecisionCommand.parse(raw);
       return database.client.begin(async (sql) => {
-        const [proposal] = await sql<
-          {
-            content: unknown;
-            state: string;
-            projectId: string;
-            ownerId: string | null;
-            developerOnly: boolean;
-            managerOnly: boolean;
-            cases: unknown;
-          }[]
-        >`SELECT proposal.content,proposal.state,review.project_id AS "projectId",review.owner_id AS "ownerId",
-          review.developer_only AS "developerOnly",review.input AS cases,(review.input @> '[{"activity":"setup"}]'::jsonb) AS "managerOnly" FROM factory.learning_proposal proposal
-          JOIN factory.learning_review review ON review.id=proposal.review_id WHERE proposal.id=${input.proposalId} FOR UPDATE OF proposal`;
+        const db = drizzleTransaction(sql);
+        const lockedProposal = alias(proposalRecord, "proposal");
+        const [proposal] = await db
+          .select({
+            content: lockedProposal.content,
+            state: lockedProposal.state,
+            projectId: learningReview.projectId,
+            ownerId: learningReview.ownerId,
+            developerOnly: learningReview.developerOnly,
+            cases: learningReview.input,
+            managerOnly: typedSQL<boolean>`${learningReview.input} @> '[{"activity":"setup"}]'::jsonb`,
+          })
+          .from(lockedProposal)
+          .innerJoin(learningReview, eq(learningReview.id, lockedProposal.reviewId))
+          .where(eq(lockedProposal.id, input.proposalId))
+          .for("update", { of: lockedProposal });
         if (!proposal) throw new CommandError("not-found", "Improvement not found");
         const content = learningProposal.parse(proposal.content);
         if (input.decision === "apply" && content.edit?.target.kind === "skill")
-          await sql`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`;
+          await db.execute(typedSQL`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`);
         await learningAuthorityIn(sql, userId, proposal);
         if (!proposal.ownerId && input.decision !== "apply")
           await projectAuthorityIn(sql, userId, proposal.projectId, true);
@@ -512,12 +845,29 @@ export function createLearningService(database: Database) {
             },
             cases,
           );
-          const [reverted] = await sql`
-            SELECT application.id FROM factory.learning_application application
-            JOIN factory.learning_proposal previous ON previous.id=application.proposal_id
-            WHERE application.state='reverted' AND application.target->>'kind'=${content.edit.target.kind}
-              AND application.target->>'id'=${content.edit.target.id} AND application.target->>'field'=${content.edit.target.field}
-              AND previous.content->'edit'->>'after'=${content.edit.after} LIMIT 1`;
+          const [reverted] = await db
+            .select({ id: learningApplication.id })
+            .from(learningApplication)
+            .innerJoin(proposalRecord, eq(proposalRecord.id, learningApplication.proposalId))
+            .where(
+              and(
+                eq(learningApplication.state, "reverted"),
+                eq(
+                  typedSQL<string>`${learningApplication.target}->>'kind'`,
+                  content.edit.target.kind,
+                ),
+                eq(typedSQL<string>`${learningApplication.target}->>'id'`, content.edit.target.id),
+                eq(
+                  typedSQL<string>`${learningApplication.target}->>'field'`,
+                  content.edit.target.field,
+                ),
+                eq(
+                  typedSQL<string>`${proposalRecord.content}->'edit'->>'after'`,
+                  content.edit.after,
+                ),
+              ),
+            )
+            .limit(1);
           if (reverted)
             throw new CommandError(
               "conflict",
@@ -531,14 +881,29 @@ export function createLearningService(database: Database) {
             projectId: proposal.projectId,
             revisionId,
           });
-          await sql`INSERT INTO factory.learning_application(id,proposal_id,target,edit_digest,activation,applied_revision_id,applied_version,applied_by)
-            VALUES(${id},${input.proposalId},${JSON.stringify(content.edit.target)}::jsonb,${input.editDigest},
-              ${JSON.stringify(saved.activation)}::jsonb,${saved.revisionId},${saved.version},${userId})`;
-          await sql`UPDATE factory.learning_proposal SET state='applied',decision_id=${input.commandId},decided_by=${userId},decided_at=now()
-            WHERE id=${input.proposalId}`;
+          await db.insert(learningApplication).values({
+            id,
+            proposalId: input.proposalId,
+            target: content.edit.target,
+            editDigest: input.editDigest,
+            activation: saved.activation,
+            appliedRevisionId: saved.revisionId,
+            appliedVersion: saved.version,
+            appliedBy: userId,
+          });
+          await db
+            .update(proposalRecord)
+            .set({
+              state: "applied",
+              decisionId: input.commandId,
+              decidedBy: userId,
+              decidedAt: typedSQL`now()`,
+            })
+            .where(eq(proposalRecord.id, input.proposalId));
           const result = { applicationId: id, revisionId: saved.revisionId };
-          await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
-            VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+          await db
+            .insert(learningCommand)
+            .values({ id: input.commandId, actorId: userId, input, result });
           return result;
         }
         let ticketId: string | null = null;
@@ -575,50 +940,68 @@ export function createLearningService(database: Database) {
               },
             },
           });
-          await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
-            VALUES(${crypto.randomUUID()},${proposal.projectId},${ticketId},'plan',${userId})`;
+          await db.insert(ticketConversation).values({
+            id: crypto.randomUUID(),
+            projectId: proposal.projectId,
+            ticketId,
+            mode: "plan",
+            createdBy: userId,
+          });
         }
-        await sql`UPDATE factory.learning_proposal SET state=${ticketId ? "ticket-created" : "dismissed"},
-          decision_id=${input.commandId},decided_by=${userId},decided_at=now(),ticket_id=${ticketId} WHERE id=${input.proposalId}`;
+        await db
+          .update(proposalRecord)
+          .set({
+            state: ticketId ? "ticket-created" : "dismissed",
+            decisionId: input.commandId,
+            decidedBy: userId,
+            decidedAt: typedSQL`now()`,
+            ticketId,
+          })
+          .where(eq(proposalRecord.id, input.proposalId));
         const result = { ticketId };
-        await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
-          VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+        await db
+          .insert(learningCommand)
+          .values({ id: input.commandId, actorId: userId, input, result });
         return result;
       });
     },
     async rollback(userId: string, raw: unknown) {
       const input = learningRollbackCommand.parse(raw);
       return database.client.begin(async (sql) => {
-        const [identity] = await sql<{ proposalId: string }[]>`
-          SELECT proposal_id AS "proposalId" FROM factory.learning_application WHERE id=${input.applicationId}`;
+        const db = drizzleTransaction(sql);
+        const lockedProposal = alias(proposalRecord, "proposal");
+        const [identity] = await db
+          .select({ proposalId: learningApplication.proposalId })
+          .from(learningApplication)
+          .where(eq(learningApplication.id, input.applicationId));
         if (!identity) throw new CommandError("not-found", "Applied improvement not found");
-        const [source] = await sql<
-          {
-            projectId: string;
-            ownerId: string | null;
-            developerOnly: boolean;
-            managerOnly: boolean;
-          }[]
-        >`
-          SELECT review.project_id AS "projectId",review.owner_id AS "ownerId",review.developer_only AS "developerOnly",
-            (review.input @> '[{"activity":"setup"}]'::jsonb) AS "managerOnly"
-          FROM factory.learning_proposal proposal JOIN factory.learning_review review ON review.id=proposal.review_id
-          WHERE proposal.id=${identity.proposalId} FOR UPDATE OF proposal`;
-        const [application] = await sql<
-          {
-            target: unknown;
-            state: string;
-            revisionId: string;
-            version: number;
-            activation: unknown;
-          }[]
-        >`SELECT target,state,applied_revision_id AS "revisionId",applied_version AS version,activation
-          FROM factory.learning_application WHERE id=${input.applicationId} FOR UPDATE`;
+        const [source] = await db
+          .select({
+            projectId: learningReview.projectId,
+            ownerId: learningReview.ownerId,
+            developerOnly: learningReview.developerOnly,
+            managerOnly: typedSQL<boolean>`${learningReview.input} @> '[{"activity":"setup"}]'::jsonb`,
+          })
+          .from(lockedProposal)
+          .innerJoin(learningReview, eq(learningReview.id, lockedProposal.reviewId))
+          .where(eq(lockedProposal.id, identity.proposalId))
+          .for("update", { of: lockedProposal });
+        const [application] = await db
+          .select({
+            target: learningApplication.target,
+            state: learningApplication.state,
+            revisionId: learningApplication.appliedRevisionId,
+            version: learningApplication.appliedVersion,
+            activation: learningApplication.activation,
+          })
+          .from(learningApplication)
+          .where(eq(learningApplication.id, input.applicationId))
+          .for("update");
         if (!source || !application)
           throw new CommandError("not-found", "Applied improvement not found");
         const target = learningTarget.parse(application.target);
         if (target.kind === "skill")
-          await sql`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`;
+          await db.execute(typedSQL`SELECT pg_advisory_xact_lock(hashtext('factory-skills'))`);
         await learningAuthorityIn(sql, userId, source);
         await targets.authorize(sql, target, userId, source.projectId);
         const old = await replay(sql, input.commandId, userId, input);
@@ -634,11 +1017,20 @@ export function createLearningService(database: Database) {
           projectId: source.projectId,
           revisionId: crypto.randomUUID(),
         });
-        await sql`UPDATE factory.learning_application SET state='reverted',reverted_revision_id=${saved.revisionId},
-          reverted_version=${saved.version},reverted_by=${userId},reverted_at=now() WHERE id=${input.applicationId}`;
+        await db
+          .update(learningApplication)
+          .set({
+            state: "reverted",
+            revertedRevisionId: saved.revisionId,
+            revertedVersion: saved.version,
+            revertedBy: userId,
+            revertedAt: typedSQL`now()`,
+          })
+          .where(eq(learningApplication.id, input.applicationId));
         const result = { revisionId: saved.revisionId, version: saved.version };
-        await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
-          VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+        await db
+          .insert(learningCommand)
+          .values({ id: input.commandId, actorId: userId, input, result });
         return result;
       });
     },
