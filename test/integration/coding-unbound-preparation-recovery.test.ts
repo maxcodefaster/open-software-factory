@@ -595,6 +595,14 @@ test("local cancellation rechecks the intent and Session in a fresh statement af
                   statements.push((args[0] as TemplateStringsArray).join(""));
                   return Reflect.apply(query, context, args);
                 },
+                get(query, property, receiver) {
+                  if (property === "unsafe")
+                    return (text: string, ...args: unknown[]) => {
+                      statements.push(text);
+                      return Reflect.apply(query.unsafe, query, [text, ...args]);
+                    };
+                  return Reflect.get(query, property, receiver);
+                },
               }),
             ]);
           return typeof optionsOrCallback === "string"
@@ -607,15 +615,17 @@ test("local cancellation rechecks the intent and Session in a fresh statement af
   try {
     await controller.stop(owned.changeID);
     const locked = statements.findIndex((sql) => sql.includes("FOR UPDATE OF turn SKIP LOCKED"));
-    const canceled = statements.findIndex((sql) => sql.includes("UPDATE factory.agent_turn"));
+    const canceled = statements.findIndex((sql) =>
+      sql.toLowerCase().includes('update "factory"."agent_turn"'),
+    );
     const rechecked = statements.findIndex(
       (sql, index) =>
         index > locked &&
-        sql.includes("FROM factory.change_agent_session") &&
-        sql.includes("factory.change_agent_turn_intent") &&
-        sql.includes("intent.runtime_attempt_id IS NULL") &&
-        sql.includes("session.state='stopped'") &&
-        sql.includes("NOT session.stop_pending"),
+        sql.includes('from "factory"."change_agent_session"') &&
+        sql.includes('"factory"."change_agent_turn_intent"') &&
+        sql.includes('"change_agent_turn_intent"."runtime_attempt_id" is null') &&
+        sql.includes('"change_agent_session"."state" =') &&
+        sql.includes('"change_agent_session"."stop_pending" ='),
     );
     // SKIP LOCKED alone does not refresh its statement snapshot if binding
     // commits just before the tuple lock. This separate statement is required.
