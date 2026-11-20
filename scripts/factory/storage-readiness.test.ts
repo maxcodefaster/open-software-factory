@@ -458,26 +458,44 @@ test("a successful probe cannot announce readiness while its volume still exists
 test("a verified probe resumes its exact cleanup after a delayed reclaimer without creating a second probe", () =>
   fixture(async (directory, cluster) => {
     cluster.keepVolume = true;
-    await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
-      "volume cleanup is not confirmed",
-    );
-    const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
-    // The provisioner settles its original deletion after Factory's observation timed out.
-    cluster.resources.delete(cluster.key("PersistentVolume", previous.volume.name));
-    cluster.keepVolume = false;
-    cluster.beforeCreate = async () => {
-      throw new Error("A second storage probe must not replace the completed write/read check");
+    let now = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    cluster.run = async (args, input) => {
+      const result = await cluster.invoke(args, input);
+      // Expire only the original volume's cleanup observation. Host I/O must
+      // not consume the simulated successful write/read window first.
+      if (
+        cluster.keepVolume &&
+        args.includes("PersistentVolume") &&
+        !cluster.resources.has(cluster.key("PersistentVolumeClaim", "runtime-data"))
+      )
+        now += 101;
+      return result;
     };
-    const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
-    expect(result.checkID).toBe(previous.id);
-    expect(cluster.podCreates).toBe(1);
-    expect(cluster.resources.size).toBe(0);
-    const diagnostic = JSON.parse(await readFile(result.diagnosticFile, "utf8"));
-    expect(diagnostic).toMatchObject({
-      checkID: previous.id,
-      verified: true,
-      cleanupConfirmed: true,
-    });
+    try {
+      await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
+        "volume cleanup is not confirmed",
+      );
+      const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
+      // The provisioner settles its original deletion after Factory's observation timed out.
+      cluster.resources.delete(cluster.key("PersistentVolume", previous.volume.name));
+      cluster.keepVolume = false;
+      cluster.beforeCreate = async () => {
+        throw new Error("A second storage probe must not replace the completed write/read check");
+      };
+      const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
+      expect(result.checkID).toBe(previous.id);
+      expect(cluster.podCreates).toBe(1);
+      expect(cluster.resources.size).toBe(0);
+      const diagnostic = JSON.parse(await readFile(result.diagnosticFile, "utf8"));
+      expect(diagnostic).toMatchObject({
+        checkID: previous.id,
+        verified: true,
+        cleanupConfirmed: true,
+      });
+    } finally {
+      clock.mockRestore();
+    }
   }));
 
 test.each(["image", "storage-class"])("resumed cleanup cannot qualify a changed %s", (changed) =>
