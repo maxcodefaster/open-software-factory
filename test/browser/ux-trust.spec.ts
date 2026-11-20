@@ -1179,7 +1179,9 @@ test.beforeEach(async ({ page }) => {
   await insertChangedTicket("Delivered implementation", "delivered");
 });
 
-test.afterEach(async () => {
+test.afterEach(async ({ context }) => {
+  // Stop this fixture's UI polling before deleting its Project and Change rows.
+  await context.close();
   for (const id of additionalProjectIDs) await deleteFactoryProject(id);
   additionalProjectIDs = [];
   if (projectID) await deleteFactoryProject(projectID);

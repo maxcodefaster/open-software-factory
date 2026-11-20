@@ -159,6 +159,8 @@ async function learningSnapshot(database: Database, operation: Operation) {
   let remaining = 20_000;
   let evidenceLimit = 24;
   let nativeTurnID: string | null = null;
+  // Gather before allocating: SQL/source order must not spend the budget of
+  // later approved scope, observed outcomes or editable guidance.
   function add(
     id: string,
     kind: LearningCase["evidence"][number]["kind"],
@@ -167,23 +169,16 @@ async function learningSnapshot(database: Database, operation: Operation) {
   ) {
     if (value === null || value === undefined) return;
     const body = typeof value === "string" ? value : JSON.stringify(value);
-    if (!body?.trim() || remaining <= 0 || evidence.length >= evidenceLimit) return;
-    let excerpt = body.slice(0, Math.min(limit, remaining));
-    while (Buffer.byteLength(excerpt) > remaining)
-      excerpt = excerpt.slice(0, Math.floor(excerpt.length * 0.75));
+    if (!body?.trim()) return;
+    const excerpt = body.slice(0, limit);
     if (!excerpt.trim()) return;
     evidence.push({ id, kind, body: excerpt, truncated: body.length > excerpt.length });
-    remaining -= Buffer.byteLength(excerpt);
   }
   function editable(target: LearningTarget, evidenceId: string, value: unknown) {
-    if (typeof value !== "string" || !value.trim() || remaining < 512 || targets.length >= 8)
-      return;
-    let excerpt = value.slice(0, Math.min(4_000, remaining - 256));
-    while (Buffer.byteLength(excerpt) > remaining - 256)
-      excerpt = excerpt.slice(0, Math.floor(excerpt.length * 0.75));
+    if (typeof value !== "string" || !value.trim() || targets.length >= 8) return;
+    const excerpt = value.slice(0, 4_000);
     if (!excerpt.trim()) return;
     targets.push({ target, evidenceId, text: excerpt, truncated: excerpt.length < value.length });
-    remaining -= Buffer.byteLength(excerpt) + 256;
   }
   let ownerId: string | null = operation.userId;
   let developerOnly = false;
@@ -247,13 +242,6 @@ async function learningSnapshot(database: Database, operation: Operation) {
     const artifacts = await database.client<
       { ordinal: number; reference: string; body: string; truncated: boolean }[]
     >`SELECT ordinal,reference,body,truncated FROM factory.learning_source_artifact WHERE turn_id=${turn.id} ORDER BY ordinal`;
-    for (const artifact of artifacts) {
-      if (artifact.reference.startsWith("code:")) developerOnly = true;
-      const id = `turn:${turn.id}:source:${artifact.ordinal}`;
-      add(id, "artifact", `${artifact.reference}\n${artifact.body}`, 2_500);
-      const saved = evidence.find((item) => item.id === id);
-      if (saved) saved.truncated ||= artifact.truncated;
-    }
     const questionId = turn.input["questionEntryId"];
     if (turn.conversationId && typeof questionId === "string" && uuid.test(questionId)) {
       const [question] = await database.client<{ body: string; payload: unknown }[]>`
@@ -323,7 +311,7 @@ async function learningSnapshot(database: Database, operation: Operation) {
           return null;
         add(`commit:${commit.id}`, "artifact", commit, 1_000);
         for (const check of checks)
-          add(`verification:${check.id}`, "artifact", { ...check, commit: commit.sha }, 12_000);
+          add(`verification:${check.id}`, "artifact", { commit: commit.sha, ...check }, 12_000);
         const diagnosis = checks[0]?.diagnosis;
         reviewReasons.push(
           ...(checks[0] && checks[0].state !== "succeeded"
@@ -405,6 +393,15 @@ async function learningSnapshot(database: Database, operation: Operation) {
             content[field],
           );
       }
+    }
+    // Raw source excerpts are supplementary, not a reason to drop the task,
+    // exact Verification or loaded guidance when the item ceiling is reached.
+    for (const artifact of artifacts) {
+      if (artifact.reference.startsWith("code:")) developerOnly = true;
+      const id = `turn:${turn.id}:source:${artifact.ordinal}`;
+      add(id, "artifact", `${artifact.reference}\n${artifact.body}`, 2_500);
+      const saved = evidence.find((item) => item.id === id);
+      if (saved) saved.truncated ||= artifact.truncated;
     }
     // Native tools are added only after the final scope/authority checks.
     // A summary or missing archive never stands in for an observed tool trace.
@@ -544,6 +541,37 @@ async function learningSnapshot(database: Database, operation: Operation) {
       "No supported retained work-evidence adapter is available.",
     );
   }
+  evidence.splice(evidenceLimit);
+  const caseTargets = targets.filter((target) =>
+    evidence.some((item) => item.id === target.evidenceId),
+  );
+  remaining -= caseTargets.length * 256;
+  let passages = evidence.length + caseTargets.length;
+  let unallocatedBytes =
+    evidence.reduce((sum, item) => sum + Buffer.byteLength(item.body), 0) +
+    caseTargets.reduce((sum, target) => sum + Buffer.byteLength(target.text), 0);
+  function allocate(value: string) {
+    const bytes = Buffer.byteLength(value);
+    const budget = unallocatedBytes <= remaining ? bytes : Math.floor(remaining / passages);
+    unallocatedBytes -= bytes;
+    passages--;
+    let excerpt = value.slice(0, budget);
+    while (Buffer.byteLength(excerpt) > budget)
+      excerpt = excerpt.slice(0, Math.floor(excerpt.length * 0.75));
+    remaining -= Buffer.byteLength(excerpt);
+    return excerpt;
+  }
+  for (const item of evidence) {
+    const excerpt = allocate(item.body);
+    item.truncated ||= excerpt.length < item.body.length;
+    item.body = excerpt;
+  }
+  for (const target of caseTargets) {
+    const excerpt = allocate(target.text);
+    target.truncated ||= excerpt.length < target.text.length;
+    target.text = excerpt;
+  }
+  const retainedEvidence = evidence.filter((item) => item.body.trim());
   const snapshot = learningCase.parse({
     id: operation.id,
     projectId: operation.projectId,
@@ -552,8 +580,11 @@ async function learningSnapshot(database: Database, operation: Operation) {
     activity,
     outcome,
     settledAt: new Date(settledAt).toISOString(),
-    evidence,
-    targets,
+    evidence: retainedEvidence,
+    targets: caseTargets.filter(
+      (target) =>
+        target.text.trim() && retainedEvidence.some((item) => item.id === target.evidenceId),
+    ),
     ...(reviewReasons.length ? { reviewReasons } : {}),
   });
   return { snapshot, nativeTurnID };

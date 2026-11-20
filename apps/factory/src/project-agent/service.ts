@@ -34,12 +34,13 @@ export function createConversationService(options: {
     });
   }
   function required(value: Awaited<ReturnType<typeof controller.get>>) {
-    if (!value)
+    const result = dto(value);
+    if (!result)
       throw new CommandError(
         "unavailable",
         "Conversation response is unconfirmed. Refresh its saved history before retrying.",
       );
-    return conversationViewSchema.parse(dto(value));
+    return result;
   }
   return {
     async get(userID: string, projectID: string, input: z.output<typeof conversationReadInput>) {

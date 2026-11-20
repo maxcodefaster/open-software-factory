@@ -60,6 +60,7 @@ test.each(["Build", "Staging"] as const)(
       let mutationCalls = 0;
       let activeReads = 0;
       let installedSkills: string[] = [];
+      let permissions: unknown[] | undefined;
       const instructions = new Map<string, unknown>();
       const mcpServers = new Set<string>();
       async function connect(role: "parent" | "child") {
@@ -182,13 +183,21 @@ test.each(["Build", "Staging"] as const)(
             } else if (path.endsWith("/agent")) {
               status = 204;
             } else if (path === "/api/model") data = [{ providerID: "factory", id: buildModelID }];
-            else if (path.endsWith(`/${owned.sessionID}`))
-              data = {
-                id: owned.sessionID,
-                location: { directory: "/workspace/project" },
-                model: { providerID: "factory", id: buildModelID },
-              };
-            else if (path.endsWith("/active")) {
+            else if (path === `/api/session/${owned.sessionID}`) {
+              if (frame.method === "PATCH") {
+                const body = JSON.parse(Buffer.from(frame.data, "base64").toString()) as {
+                  permissions?: unknown[];
+                };
+                if (body.permissions) permissions = structuredClone(body.permissions);
+                status = 204;
+              } else
+                data = {
+                  id: owned.sessionID,
+                  ...(permissions ? { permissions: structuredClone(permissions) } : {}),
+                  location: { directory: "/workspace/project" },
+                  model: { providerID: "factory", id: buildModelID },
+                };
+            } else if (path.endsWith("/active")) {
               activeReads += 1;
               data = promptID ? { [owned.sessionID]: { type: "running" } } : {};
             } else if (path.endsWith("/prompt")) {
@@ -239,8 +248,10 @@ test.each(["Build", "Staging"] as const)(
         });
       }
       const state = async () => {
-        const [row] = await database.client<{ state: string; failure: string | null }[]>`
-          SELECT state, failure FROM factory.runtime_attempt WHERE id = ${attempt.id}`;
+        const [row] = await database.client<
+          { state: string; failure: string | null; updatedAt: string }[]
+        >`
+          SELECT state, failure, updated_at::text AS "updatedAt" FROM factory.runtime_attempt WHERE id = ${attempt.id}`;
         return row;
       };
       const identity = async () => [
@@ -266,9 +277,16 @@ test.each(["Build", "Staging"] as const)(
         ),
       ).toBe(true);
       const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
+      const beforeConnection = await state();
       let parent = await connect("parent");
       let child = await connect("child");
-      await eventually(state, (row) => row?.state === "ready", "Initial readiness missing");
+      // Prior work retained a ready row. Wait for this process to observe the
+      // current hello, not that stale row while native recovery still owns Source.
+      await eventually(
+        state,
+        (row) => row?.state === "ready" && row.updatedAt !== beforeConnection?.updatedAt,
+        "Current Connector readiness was not observed",
+      );
       const parentHeaders = await peer.connectorHeaders(attemptID, "parent");
       for (const invalid of [
         { "x-factory-runtime-actor-uid": crypto.randomUUID() },
@@ -307,6 +325,21 @@ test.each(["Build", "Staging"] as const)(
           30_000,
         );
         expect(promptCalls).toBe(1);
+        const [writer] = await database.client<{ epoch: number }[]>`
+          SELECT epoch::float8 AS epoch FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+        if (!writer) throw Error("Owned reconnect Source writer is missing");
+        const fence = {
+          attemptID,
+          workspaceID: owned.workspaceID,
+          writerEpoch: writer.epoch,
+          writable: false,
+        };
+        expect(peer.sourceFences).toEqual([fence, fence]);
+        expect(permissions).toContainEqual({
+          action: "question",
+          resource: "*",
+          effect: "deny",
+        });
       }
       const turn = target === "Build" ? await owned.turn(commandID) : undefined;
       const beforeMutations = mutationCalls;

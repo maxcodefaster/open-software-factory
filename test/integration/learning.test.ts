@@ -24,6 +24,7 @@ test("Input learning uses published outcomes and saved instructions, never raw w
     await database.client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
     const hook = crypto.randomUUID(),
       policy = crypto.randomUUID();
+    const explanation = `Missing Project context. ${"Published observation. ".repeat(320)}`;
     let incident = crypto.randomUUID();
     while (!sampleLearningCase(`monitoring:${incident}`, "completed"))
       incident = crypto.randomUUID();
@@ -36,7 +37,7 @@ test("Input learning uses published outcomes and saved instructions, never raw w
         title,context,state,reason,diagnosis,skill_assignment,settled_at)
         VALUES(${incident},${hook},${owned.projectID},${policy},1,${"b".repeat(64)},${"c".repeat(64)},
         'Owned request without Project context','RAW-WEBHOOK-CREDENTIAL-DO-NOT-SHARE','insufficient-context','Missing Project context.',
-        ${JSON.stringify({ outcome: "insufficient-context", explanation: "Missing Project context.", title: "Owned request", requirements: null, code: [] })}::jsonb,
+        ${JSON.stringify({ outcome: "insufficient-context", explanation, title: "Owned request", requirements: null, code: [] })}::jsonb,
         ${JSON.stringify({ revisionIds: [], requiredRevisionIds: [], codeAccess: false, projectContext: { private: "PRIVATE-ADMISSION-CONTEXT-DO-NOT-SHARE" } })}::jsonb,now())`;
       await sql`INSERT INTO factory.usage_operation(id,project_id,user_id,purpose,engine,provider,model,settled_at,outcome)
         VALUES(${`monitoring:${incident}`},${owned.projectID},${owned.userID},'research','mastra','owned','owned',now(),'completed')`;
@@ -51,6 +52,11 @@ test("Input learning uses published outcomes and saved instructions, never raw w
     expect(packet).toContain("Missing Project context");
     expect(packet).not.toContain("RAW-WEBHOOK-CREDENTIAL");
     expect(packet).not.toContain("PRIVATE-ADMISSION-CONTEXT");
+    const outcome = saved?.snapshot.evidence.find(
+      (item) => item.id === `input:${incident}:outcome`,
+    );
+    expect(outcome?.body).toContain(explanation);
+    expect(outcome?.truncated).toBe(false);
   } finally {
     await database.client.end({ timeout: 2 });
     await host.dispose();
@@ -241,6 +247,155 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
     const restricted = await createLearningService(database).get(owned.userID, owned.projectID);
     expect(restricted.days.reduce((count, day) => count + day.observed, 0)).toBe(0);
     expect(JSON.stringify(restricted)).not.toContain(content.instructions);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+test("long source excerpts cannot starve approved scope, Verification or editable guidance in a bounded Learning case", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const turn = "00000000-0000-4000-8000-000000000002",
+      command = crypto.randomUUID(),
+      verification = crypto.randomUUID(),
+      commit = "b".repeat(40);
+    const input = {
+      kind: "change-prompt",
+      commandId: command,
+      projectId: owned.projectID,
+      ticketId: owned.ticketID,
+      changeId: owned.changeID,
+      conversationId: null,
+      createdBy: owned.userID,
+      text: `Correct only the approved behavior. ${"Context. ".repeat(1_500)}`.slice(0, 12_000),
+    };
+    const skills = Array.from({ length: 6 }, (_, index) => ({
+      id: `00000000-0000-4000-8001-${String(index).padStart(12, "0")}`,
+      library: crypto.randomUUID(),
+      content: {
+        key: `owned-guidance-${index}`,
+        name: `Owned guidance ${index}`,
+        description: `Explain observed failures. ${"Description. ".repeat(30)}`,
+        roles: ["build"],
+        instructions: `Check the exact approved criterion before editing. ${"Guidance. ".repeat(500)}`,
+        references: [{ path: "private.txt", content: "PRIVATE-BUNDLED-REFERENCE" }],
+      },
+    }));
+    await database.client`INSERT INTO factory.agent_turn(id,command_id,project_id,ticket_id,change_id,created_by,
+      input,input_digest,authority,state,owner_token,owner_expires_at,outcome_summary,created_at,updated_at)
+      VALUES(${turn},${command},${owned.projectID},${owned.ticketID},${owned.changeID},${owned.userID},
+        ${JSON.stringify(input)}::jsonb,${"a".repeat(64)},
+        ${JSON.stringify({ mode: "build", requirementRevisionId: owned.revisionID, modelId: "owned", skillRevisionIds: skills.map((skill) => skill.id) })}::jsonb,
+        'running',${crypto.randomUUID()},now()+interval '1 minute',
+        ${"An implementation claim is not Verification. ".repeat(45).slice(0, 2_000)},now()-interval '11 minutes',now()-interval '10 minutes')`;
+    await database.client`INSERT INTO factory.change_agent_turn_intent(
+      turn_id,change_id,session_id,prompt_id,prompt_text,bootstrap,session_title,runtime_attempt_id)
+      VALUES(${turn},${owned.changeID},'ses_owned_budget','msg_owned_budget','Owned retained intent',false,'Owned budget',${owned.attemptID})`;
+    for (const [index, skill] of skills.entries()) {
+      await database.client`INSERT INTO factory.skill_library(id,storage_key,scope,owner_id,project_id)
+        VALUES(${skill.library},${`owned-guidance-${index}`},${index === 5 ? "personal" : "project"},
+          ${index === 5 ? owned.userID : null},${index === 5 ? null : owned.projectID})`;
+      await database.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by)
+        VALUES(${skill.id},${`owned-guidance-${index}`},1,${JSON.stringify(skill.content)}::jsonb,${"a".repeat(64)},${owned.userID})`;
+      await database.client`INSERT INTO factory.skill_library_revision(library_id,revision_id)
+        VALUES(${skill.library},${skill.id})`;
+      await database.client`INSERT INTO factory.agent_turn_skill(turn_id,revision_id) VALUES(${turn},${skill.id})`;
+    }
+    await database.client.begin((sql) =>
+      retainLearningArtifactsIn(sql, { id: turn, command: input }, [
+        { reference: "code:first:src/a.ts", body: "ログ".repeat(1_500), truncated: false },
+        { reference: "code:second:src/b.ts", body: "ログ".repeat(1_500), truncated: false },
+        { reference: "code:third:src/c.ts", body: "ログ".repeat(1_500), truncated: false },
+      ]),
+    );
+    await database.client`UPDATE factory.agent_turn SET state='completed',owner_token=NULL,owner_expires_at=NULL
+      WHERE id=${turn}`;
+    const branch = `factory/change-${owned.projectID.replaceAll("-", "").slice(0, 12)}`;
+    await database.client`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,
+      expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
+      VALUES(${turn},${owned.changeID},${owned.attemptID},1,${branch},${"a".repeat(40)},${commit},${commit},
+        'Owned exact candidate',${`owned:${turn}`},'succeeded',${owned.userID},now())`;
+    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
+      summary,diagnosis,created_by,completed_at)
+      VALUES(${verification},${owned.changeID},${commit},1,1,'owned-budget-runner','failed',
+        'The exact candidate failed its approved check.',
+        ${JSON.stringify({
+          kind: "check-failed",
+          summary: "The approved check failed.",
+          jobs: [
+            {
+              id: 1,
+              attempt: 1,
+              name: "Approved check",
+              output: "Expected the approved behavior. ".repeat(60),
+            },
+          ],
+        })}::jsonb,${owned.userID},now())`;
+    await database.client`INSERT INTO factory.usage_operation(id,project_id,user_id,purpose,engine,provider,model,created_at,settled_at,outcome)
+      VALUES(${`turn:${turn}`},${owned.projectID},${owned.userID},'coding','opencode','owned','owned',
+        now()-interval '11 minutes',now()-interval '10 minutes','completed')`;
+    await collectLearningCases(database);
+    const [saved] = await database.client<{ snapshot: LearningCase; selected: boolean }[]>`
+      SELECT snapshot,selected FROM factory.learning_case WHERE id=${`turn:${turn}`}`;
+    expect(saved?.selected).toBe(true);
+    const snapshot = learningCase.parse(saved?.snapshot);
+    expect(snapshot.ownerId).toBe(owned.userID);
+    expect(snapshot.developerOnly).toBe(true);
+    expect(snapshot.reviewReasons).toEqual(["verification-not-successful"]);
+    expect(
+      snapshot.evidence.find((item) => item.id === `requirements:${owned.revisionID}`)?.body,
+    ).toContain("A bounded local check passes");
+    const checks = snapshot.evidence.find((item) => item.id === `verification:${verification}`);
+    expect(checks?.body).toContain(commit);
+    expect(checks?.body).toContain("The exact candidate failed its approved check.");
+    expect(snapshot.evidence.some((item) => item.id === `commit:${turn}`)).toBe(true);
+    for (const skill of skills)
+      expect(snapshot.evidence.some((item) => item.id === `skill:${skill.id}`)).toBe(true);
+    expect(snapshot.targets).toHaveLength(8);
+    expect(
+      snapshot.targets.some(
+        (item) =>
+          item.target.kind === "skill" &&
+          item.target.field === "instructions" &&
+          item.text.startsWith("Check the exact approved criterion before editing."),
+      ),
+    ).toBe(true);
+    for (const target of snapshot.targets)
+      expect(snapshot.evidence.some((item) => item.id === target.evidenceId)).toBe(true);
+    expect(snapshot.evidence.some((item) => item.id.endsWith(":source:0") && item.truncated)).toBe(
+      true,
+    );
+    const native = fixtureValue(
+      snapshot.evidence.find((item) => item.id === `turn:${turn}:native-tools`),
+      "reserved native evidence",
+    );
+    expect(JSON.parse(native.body)).toMatchObject({
+      status: "unknown",
+      reason: "no-saved-checkpoint",
+    });
+    const bytes =
+      snapshot.evidence
+        .filter((item) => item !== native)
+        .reduce((sum, item) => sum + Buffer.byteLength(item.body), 0) +
+      snapshot.targets.reduce((sum, item) => sum + Buffer.byteLength(item.text) + 256, 0);
+    expect(bytes).toBeLessThanOrEqual(16_000);
+    expect(Buffer.byteLength(native.body)).toBeLessThanOrEqual(4_000);
+    expect(bytes + Buffer.byteLength(native.body)).toBeLessThanOrEqual(20_000);
+    expect(snapshot.evidence.length).toBeLessThanOrEqual(24);
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE-BUNDLED-REFERENCE");
+    expect(
+      (await createLearningService(database).get(owned.userID, owned.projectID)).days.reduce(
+        (sum, day) => sum + day.observed,
+        0,
+      ),
+    ).toBe(0);
+    await collectLearningCases(database);
+    const [again] = await database.client<{ snapshot: LearningCase }[]>`
+      SELECT snapshot FROM factory.learning_case WHERE id=${`turn:${turn}`}`;
+    expect(again?.snapshot).toEqual(snapshot);
   } finally {
     await database.client.end({ timeout: 2 });
     await host.dispose();

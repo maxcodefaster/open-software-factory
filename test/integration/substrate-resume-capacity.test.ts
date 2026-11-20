@@ -32,7 +32,7 @@ async function capacityFixture() {
     }
     if (method === "CreateActor") {
       creates++;
-      actor = f.actor();
+      actor = await f.createdActor();
       return structuredClone(actor);
     }
     if (method === "ResumeActor" && actor) {
@@ -107,6 +107,34 @@ async function capacityFixture() {
   };
 }
 
+test.skipIf(!process.env["FACTORY_TEST_POSTGRES"])(
+  "controller fixtures reuse inherited PostgreSQL without sharing databases or daemon ownership",
+  async () => {
+    const first = await substrateFixture();
+    try {
+      const second = await substrateFixture();
+      try {
+        expect(second.config.database).not.toBe(first.config.database);
+        const [shared] = await first.database.client<{ name: string }[]>`
+          SELECT datname AS name FROM pg_database WHERE datname=${second.config.database}`;
+        expect(shared?.name).toBe(second.config.database);
+        expect([
+          ...(await first.database
+            .client`SELECT id FROM factory.project WHERE id=${second.projectID}`),
+        ]).toEqual([]);
+      } finally {
+        await second.dispose();
+      }
+      expect([
+        ...(await first.database
+          .client`SELECT id FROM factory.project WHERE id=${first.projectID}`),
+      ]).toEqual([{ id: first.projectID }]);
+    } finally {
+      await first.dispose();
+    }
+  },
+);
+
 test("a capacity-rejected checkpoint Resume can continue without replacing its Actor or dispatch facts", async () => {
   const f = await capacityFixture();
   try {
@@ -138,6 +166,7 @@ test("a capacity-rejected checkpoint Resume can continue without replacing its A
 test.each([
   "unknown-reply",
   "uid",
+  "create-time",
   "version",
   "assigned",
   "snapshot-uri",
@@ -172,6 +201,9 @@ test.each([
       switch (fault) {
         case "uid":
           actor.metadata.uid = crypto.randomUUID();
+          break;
+        case "create-time":
+          actor.metadata.createTime = "2000-01-01T00:00:00.000Z";
           break;
         case "version":
           actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
@@ -221,7 +253,10 @@ test.each([
           SET reason='accounting-incomplete' WHERE attempt_id=${f.attemptID}`;
           break;
       }
-      await expect(f.runtime.resumeForApp(f.attemptID, f.userID)).rejects.toThrow();
+      const continuation = expect(f.runtime.resumeForApp(f.attemptID, f.userID)).rejects;
+      if (fault === "create-time")
+        await continuation.toThrow("Native Actor differs from its immutable create binding");
+      else await continuation.toThrow();
       expect(f.resumes()).toBe(2);
       expect(f.creates()).toBe(1);
       expect(await f.facts()).toEqual(original);

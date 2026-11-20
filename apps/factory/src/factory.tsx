@@ -2,7 +2,6 @@ import {
   createEffect,
   createMemo,
   createSignal,
-  lazy,
   onCleanup,
   onSettled,
   Show,
@@ -90,19 +89,6 @@ import { workspacePanelID, workspaceTabElementID } from "./workspace-tabbar";
 import { selectedWorkspaceTab, type WorkspaceTab } from "./workspace-tabs";
 import { FactoryReadProvider } from "./zero/reads";
 import { PlanningSyncStatus } from "./zero/sync-status";
-
-const _KnowledgeWorkspace = lazy(async () => ({
-  default: (await import("./knowledge-workspace")).KnowledgeWorkspace,
-}));
-const _RuntimeWorkspaceTabs = lazy(async () => ({
-  default: (await import("./runtime-workspace")).RuntimeWorkspaceTabs,
-}));
-const _DeveloperIDEWorkspace = lazy(async () => ({
-  default: (await import("./developer-ide-workspace")).DeveloperIDEWorkspace,
-}));
-const _SettingsWorkspace = lazy(async () => ({
-  default: (await import("./settings-workspace")).SettingsWorkspace,
-}));
 
 export function AuthenticatedFactory(props: Bootstrap & { session: Session }) {
   return (

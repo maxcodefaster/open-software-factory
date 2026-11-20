@@ -231,6 +231,48 @@ async function dispatchFixture(bootstrap: boolean, starting = false, failure?: E
   }
 }
 
+test("controlled OpenCode peer observes only retained and exactly created Sessions", async () => {
+  const owned = await fixture();
+  const sessionID = `ses_factory_${owned.changeID.replaceAll("-", "")}`;
+  const path = `/api/session/${sessionID}`;
+  const permissions = [{ action: "question", resource: "*", effect: "deny" }];
+  const request = (method: string, path: string, body?: Record<string, unknown>) =>
+    owned.hub.request(
+      owned.attemptID,
+      "agent",
+      new Request(`http://owned.invalid${path}`, {
+        method,
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      }),
+      path,
+    );
+  try {
+    expect(await (await request("GET", `/api/session/${owned.sessionID}`)).json()).toMatchObject({
+      data: { id: owned.sessionID },
+    });
+    expect(await (await request("GET", path)).json()).toEqual({ data: [] });
+    expect(await (await request("PATCH", path, { permissions })).json()).toEqual({ data: [] });
+    await request("POST", "/api/session", { id: sessionID });
+    expect(await (await request("GET", path)).json()).toMatchObject({ data: { id: sessionID } });
+    expect((await request("PATCH", path, { permissions })).status).toBe(204);
+    expect(await (await request("GET", path)).json()).toMatchObject({
+      data: { id: sessionID, permissions },
+    });
+    for (const absent of [
+      `ses_factory_${crypto.randomUUID().replaceAll("-", "")}`,
+      `ses_factory_review_${crypto.randomUUID().replaceAll("-", "")}`,
+    ]) {
+      expect(await (await request("GET", `/api/session/${absent}`)).json()).toEqual({ data: [] });
+      expect(
+        await (await request("PATCH", `/api/session/${absent}`, { permissions })).json(),
+      ).toEqual({ data: [] });
+    }
+    expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+});
+
 test.each([
   ["bootstrap", true, true],
   ["bootstrap on already-ready compute", true, false],

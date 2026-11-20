@@ -1,0 +1,35 @@
+Factory release {{ .Release.Name }} in Namespace {{ .Release.Namespace }}.
+Factory: {{ include "factory.publicURL" . }}
+Forgejo: {{ include "factory.forgeURL" . }}
+
+{{ if include "factory.managedIngressTLS" . -}}
+This installation owns its HTTPS CA and renews Ingress leaf certificates automatically.
+Native workloads receive only the public CA. Browsers and other clients must trust
+that CA separately; a successful Helm install does not enroll client trust.
+
+Using the same authenticated Kubernetes context as this Helm installation, export
+only the public root and inspect its SHA-256 fingerprint:
+
+  kubectl --context YOUR_SELECTED_CONTEXT --namespace {{ .Release.Namespace | quote }} get secret {{ printf "%s-ingress-ca" (include "factory.name" .) | quote }} -o jsonpath='{.data.ca\.crt}' | base64 --decode > factory-ca.pem
+  openssl x509 -in factory-ca.pem -noout -fingerprint -sha256 -dates
+
+Verify the fingerprint with the installation administrator before enrolling the
+public root in client or enterprise trust policy. Never export signing keys or
+disable certificate or hostname verification. Root replacement requires a planned
+trust transition before the ten-year CA expires.
+{{ else if .Values.ingress.enabled -}}
+Ingress uses the operator-owned TLS Secret {{ .Values.ingress.tlsSecret | quote }}.
+The operator owns certificate renewal and client trust. Supply the matching public
+CA as factory-ca.pem in the native configuration Secret. No managed issuer runs.
+{{ else -}}
+Ingress is disabled. This chart has not created a public HTTPS route or Ingress CA.
+The configured transport owner must supply reachable TLS origins and public trust.
+{{ end }}
+Reachable Factory, Forgejo and *.runtime.<factory-hostname> DNS names and an
+existing HTTPS Ingress listener remain operator prerequisites when Ingress is used.
+The controller must reload its referenced TLS Secret when a leaf is renewed.
+Factory does not configure DNS, change host trust or install cluster infrastructure.
+
+Run helm test {{ .Release.Name | quote }} --namespace {{ .Release.Namespace | quote }}
+in the same context for the read-only native preflight. It is not browser or native
+product acceptance.

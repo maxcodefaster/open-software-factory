@@ -20,6 +20,14 @@ Test cleanup needs observed preserved defect detection. Similar names or repeate
 do not establish redundant coverage; an opaque snapshot mismatch alone does not make a test obsolete.
 Missing artifacts, tool traces or outcome evidence mean unknown, not success. Truncated
 evidence cannot prove an absence. Do not infer wasted time from elapsed wall-clock time.
+Native tool counts and completed states alone prove neither product fulfillment nor executed checks.
+Discovery category repeated means multiple category calls, not equal inputs. Only the bounded
+groups describe equal explicit inputs, using turn-local ordinal IDs, never cross-turn identities.
+Equal inputs do not establish unchanged state or avoidable rework. Retries, changed configuration
+and independent checks can require repetition. Corroborate an avoidable-rediscovery cause with
+observed outcomes or guidance before proposing a change; otherwise leave rework unknown.
+Inventory completeness is separate from tool classification, method-input completeness and omitted
+equivalence groups. Finite discovery hints are not an exhaustive audit; missing detail proves no absence.
 Assess fulfillment, avoidable rework and verification separately. Necessary clarification,
 failed experiments and detecting genuine defects are not avoidable rework by themselves.
 For implementation work, judge the requested product behavior separately from its checks.

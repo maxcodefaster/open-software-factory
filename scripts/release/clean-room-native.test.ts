@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import { X509Certificate } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseAllDocuments } from "yaml";
 import { nativeInstallationFixture } from "../../test/fixtures/native-installation";
-import { cluster } from "./clean-room-cluster";
+import { cluster, type RunOptions } from "./clean-room-cluster";
 import {
   cleanRoomValues,
   createReceipt,
@@ -15,6 +16,7 @@ import {
 import {
   createNativeCleanRoomSecrets,
   prepareNativeCleanRoom,
+  readManagedCleanRoomCA,
   readNativeCleanRoomReadiness,
   requireFreshNativeIngress,
 } from "./clean-room-native";
@@ -125,7 +127,7 @@ test.each(["trusted", "wrong CA", "wrong hostname", "cancelled"] as const)(
           );
         },
       });
-      let ca = native.ca;
+      let ca = native.ca ?? "";
       if (scenario === "wrong CA") {
         other = await fixture();
         ca = await readFile(other.input.factoryCAFile, "utf8");
@@ -154,6 +156,460 @@ test.each(["trusted", "wrong CA", "wrong hostname", "cancelled"] as const)(
   },
   15_000,
 );
+
+function managedInput(input: Record<string, unknown>) {
+  return {
+    ...Object.fromEntries(
+      Object.entries(input).filter(
+        ([key]) =>
+          !["tlsMode", "factoryCAFile", "ingressCertificateFile", "ingressKeyFile"].includes(key),
+      ),
+    ),
+    tlsMode: "managed",
+  };
+}
+
+test("explicit managed TLS renders the issuer without any certificate-file input", async () => {
+  const f = await fixture();
+  try {
+    await f.save(managedInput(f.input));
+    await rm(f.input.ingressCertificateFile);
+    await rm(f.input.ingressKeyFile);
+    const native = await f.prepare();
+    expect(native.metadata.tlsMode).toBe("managed");
+    expect(native.ca).toBeUndefined();
+    expect(native.values.tlsSecret).toBe("");
+    expect(native.manifests.map((secret) => secret.metadata.name)).toEqual([
+      "factory-native-configuration",
+      "factory-native-provisioner",
+    ]);
+    expect(Object.keys(native.manifests[0]?.stringData ?? {})).toEqual(["configuration.json"]);
+    expect(native.metadata.certificateSHA256).toBeUndefined();
+    expect(native.redactions).not.toContain("undefined");
+    const generated = cleanRoomValues({ node: "owned-node", image, native: native.values });
+    const valuesPath = join(f.directory, "values.yaml");
+    await writeFile(valuesPath, Bun.YAML.stringify(generated.values), { mode: 0o600 });
+    const child = Bun.spawn(
+      ["helm", "template", release, "deploy/helm/factory", "-n", namespace, "-f", valuesPath],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [text, error, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (exit) throw Error(`Owned managed chart render failed: ${error}`);
+    const documents = parseAllDocuments(text).map((document) => document.toJSON());
+    expect(
+      documents.filter(
+        (doc) => doc?.kind === "Secret" && doc.metadata?.name.startsWith("factory-ingress-"),
+      ),
+    ).toHaveLength(2);
+    expect(
+      documents.some(
+        (doc) => doc?.kind === "CronJob" && doc.metadata?.name === "factory-ingress-tls",
+      ),
+    ).toBe(true);
+    const pod = documents.find((doc) => doc?.kind === "Deployment")?.spec.template.spec;
+    expect(
+      pod.initContainers.some(
+        (container: { name: string }) => container.name === "ensure-ingress-tls",
+      ),
+    ).toBe(true);
+    const projection = pod.volumes.find(
+      (volume: { name: string }) => volume.name === "substrate-configuration",
+    );
+    expect(projection.projected.sources[0].secret.items).toEqual([
+      { key: "configuration.json", path: "configuration.json" },
+    ]);
+    expect(projection.projected.sources[1].secret.items).toEqual([
+      { key: "ca.crt", path: "factory-ca.pem" },
+    ]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("complete external fixtures retain their default without a tlsMode field", async () => {
+  const f = await fixture();
+  try {
+    expect("tlsMode" in f.input).toBe(false);
+    const implicit = await f.prepare();
+    expect(implicit.metadata.tlsMode).toBe("external");
+    expect(implicit.values.tlsSecret).toBe("factory-ingress-tls");
+    expect(implicit.ca).toBe(await readFile(f.input.factoryCAFile, "utf8"));
+    await f.save({ ...f.input, tlsMode: "external" });
+    const explicit = await f.prepare();
+    expect(explicit.metadata).toEqual(implicit.metadata);
+    expect(explicit.values).toEqual(implicit.values);
+  } finally {
+    await f.close();
+  }
+});
+
+test("external TLS requires the complete bundle and managed TLS requires explicit mode without TLS files", async () => {
+  const f = await fixture();
+  try {
+    for (const tlsMode of ["managed", "unknown"]) {
+      await f.save({ ...f.input, tlsMode });
+      await expect(f.prepare()).rejects.toThrow("invalid or unexpected fields");
+    }
+    for (const missing of ["factoryCAFile", "ingressCertificateFile", "ingressKeyFile"]) {
+      await f.save({ ...f.input, [missing]: undefined });
+      await expect(f.prepare()).rejects.toThrow("invalid or unexpected fields");
+    }
+    await f.save({ ...managedInput(f.input), tlsMode: "external" });
+    await expect(f.prepare()).rejects.toThrow("invalid or unexpected fields");
+    await f.save({ ...managedInput(f.input), tlsMode: undefined });
+    await expect(f.prepare()).rejects.toThrow("invalid or unexpected fields");
+  } finally {
+    await f.close();
+  }
+});
+
+async function managedTrustFixture() {
+  const f = await fixture();
+  await f.save(managedInput(f.input));
+  const prepared = await f.prepare();
+  const ca = await readFile(f.input.factoryCAFile, "utf8");
+  const namespaceObject = {
+    metadata: {
+      ...namespaceManifest("1234abcd", new Date()).metadata,
+      uid: "original-namespace",
+    },
+  };
+  const fields = [
+    "factory-ingress-ca",
+    namespace,
+    "original-ca",
+    "123",
+    "factory",
+    release,
+    "Helm",
+    "ingress-tls",
+    release,
+    namespace,
+    JSON.stringify([
+      "factory.owned-cleanroom.invalid",
+      "git.owned-cleanroom.invalid",
+      "*.runtime.factory.owned-cleanroom.invalid",
+    ]),
+    "",
+    "true",
+    "Opaque",
+    Buffer.from(ca).toString("base64"),
+  ];
+  const state = {
+    fields,
+    namespaceObject,
+    reads: 0,
+    namespaceReads: 0,
+    failure: false,
+    beforeRead: () => {},
+    beforeNamespace: () => {},
+  };
+  const calls: { args: string[]; signal: AbortSignal | undefined }[] = [];
+  const cl = {
+    async json(args: string[], options?: RunOptions) {
+      calls.push({ args, signal: options?.signal });
+      state.namespaceReads++;
+      state.beforeNamespace();
+      return structuredClone(state.namespaceObject);
+    },
+    async kubectl(args: string[], options?: RunOptions) {
+      calls.push({ args, signal: options?.signal });
+      state.reads++;
+      state.beforeRead();
+      return {
+        code: state.failure ? 1 : 0,
+        stdout: state.fields.join("\n"),
+        stderr: "untrusted diagnostic must never be shown",
+      };
+    },
+  };
+  return { ...f, prepared, ca, state, calls, cl };
+}
+
+test("managed public trust extraction fences ownership and uses a real public-only kubectl projection", async () => {
+  const f = await managedTrustFixture();
+  try {
+    const controller = new AbortController();
+    const result = await readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace", {
+      signal: controller.signal,
+    });
+    expect(result.ca).toBe(f.ca);
+    expect(result.metadata).toMatchObject({
+      caSecretName: "factory-ingress-ca",
+      caSecretUID: "original-ca",
+      caSecretResourceVersion: "123",
+      caFingerprint256: new X509Certificate(f.ca).fingerprint256,
+    });
+    expect(f.state.reads).toBe(2);
+    expect(f.state.namespaceReads).toBe(2);
+    expect(f.calls.every((call) => call.signal === controller.signal)).toBe(true);
+    const secretCalls = f.calls.filter((call) => call.args.includes("secret"));
+    expect(secretCalls.every((call) => !call.args.includes("json"))).toBe(true);
+    const output = secretCalls[0]?.args.at(-1) ?? "";
+    expect(output).toContain(".data.ca\\.crt");
+    expect(output).not.toContain("ca.key");
+    expect(output).not.toContain("tls.key");
+    const secret = {
+      apiVersion: "v1",
+      kind: "Secret",
+      type: "Opaque",
+      immutable: true,
+      metadata: {
+        name: "factory-ingress-ca",
+        namespace,
+        uid: "original-ca",
+        resourceVersion: "123",
+        labels: {
+          "app.kubernetes.io/name": "factory",
+          "app.kubernetes.io/instance": release,
+          "app.kubernetes.io/managed-by": "Helm",
+          "app.kubernetes.io/component": "ingress-tls",
+        },
+        annotations: {
+          "meta.helm.sh/release-name": release,
+          "meta.helm.sh/release-namespace": namespace,
+          "factory.dev/tls-hosts": f.state.fields[10],
+        },
+      },
+      data: { "ca.crt": f.state.fields[14], "ca.key": "synthetic-signing-key-must-not-leak" },
+    };
+    const child = Bun.spawn(
+      [
+        "kubectl",
+        "--kubeconfig",
+        "/dev/null",
+        "patch",
+        "--local",
+        "-f",
+        "-",
+        "--type=json",
+        "--patch=[]",
+        "-o",
+        output,
+      ],
+      { stdin: Buffer.from(JSON.stringify(secret)), stdout: "pipe", stderr: "pipe" },
+    );
+    const [printed, error, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (exit) throw Error(`Owned public-only local printer failed: ${error}`);
+    expect(printed).toBe(f.state.fields.join("\n"));
+    expect(printed).not.toContain("synthetic-signing-key");
+  } finally {
+    await f.close();
+  }
+});
+
+test("the extracted managed CA verifies real HTTPS readiness without ambient trust", async () => {
+  const f = await managedTrustFixture();
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    await f.certificate(f.input.ingressCertificateFile, f.input.ingressKeyFile, [
+      "factory.owned-cleanroom.invalid",
+      "git.owned-cleanroom.invalid",
+      "*.runtime.factory.owned-cleanroom.invalid",
+      "127.0.0.1",
+    ]);
+    const trust = await readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace");
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: {
+        cert: await readFile(f.input.ingressCertificateFile),
+        key: await readFile(f.input.ingressKeyFile),
+      },
+      fetch() {
+        return new Response("ready", {
+          headers: { "x-open-factory": "ready", "x-open-factory-startup": "managed-startup" },
+        });
+      },
+    });
+    const response = await readNativeCleanRoomReadiness(
+      `https://127.0.0.1:${server.port}`,
+      trust.ca,
+      new AbortController().signal,
+    );
+    expect(readinessVerdict(response)).toEqual({ ready: true, startupID: "managed-startup" });
+    await response.body?.cancel();
+  } finally {
+    await server?.stop(true);
+    await f.close();
+  }
+});
+
+test("managed public trust refuses wrong Secret identities, hosts, types and malformed certificate data", async () => {
+  const f = await managedTrustFixture();
+  try {
+    const original = [...f.state.fields];
+    for (const index of Array.from({ length: 15 }, (_, index) => index)) {
+      f.state.fields = [...original];
+      f.state.fields[index] =
+        index === 2 || index === 3 ? "" : index === 11 ? "2026-11-20T00:00:00Z" : "changed";
+      f.state.reads = 0;
+      await expect(readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace")).rejects.toThrow(
+        "public CA observation failed or ownership changed",
+      );
+      expect(f.state.reads).toBe(1);
+    }
+    for (const value of [
+      "",
+      "PRIVATE KEY",
+      `${f.ca}\n-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----`,
+      f.ca + f.ca,
+      await readFile(f.input.ingressCertificateFile, "utf8"),
+    ]) {
+      f.state.fields = [...original];
+      f.state.fields[14] = Buffer.from(value).toString("base64");
+      await expect(readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace")).rejects.toThrow(
+        "public CA observation failed or ownership changed",
+      );
+    }
+    f.state.fields = [...original];
+    for (const now of [new Date("2000-01-01"), new Date("2100-01-01"), new Date("invalid")])
+      await expect(
+        readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace", { now }),
+      ).rejects.toThrow("public CA observation failed or ownership changed");
+  } finally {
+    await f.close();
+  }
+});
+
+test("public readiness refuses absent or non-public trust before any request", async () => {
+  const controller = new AbortController();
+  for (const ca of ["", "not a certificate", "-----BEGIN PRIVATE KEY-----\nprivate"])
+    await expect(
+      readNativeCleanRoomReadiness("https://127.0.0.1:1", ca, controller.signal),
+    ).rejects.toThrow("public trust");
+  await expect(
+    readNativeCleanRoomReadiness("http://127.0.0.1:1", "", controller.signal),
+  ).rejects.toThrow("requires HTTPS");
+});
+
+test.each(["managed", "external", "disabled"] as const)(
+  "Helm install notes explain TLS ownership without exposing certificates or keys: %s",
+  async (mode) => {
+    const child = Bun.spawn(
+      [
+        "helm",
+        "install",
+        "owned-notes",
+        "deploy/helm/factory",
+        "--namespace",
+        namespace,
+        "--kubeconfig",
+        "/dev/null",
+        "--kube-apiserver",
+        "http://127.0.0.1:1",
+        "--dry-run=client",
+        "--hide-secret",
+        "--set-string",
+        `image=${image}`,
+        "--set",
+        "publicURL=https://factory.owned-cleanroom.invalid",
+        "--set",
+        "forgejoPublicURL=https://git.owned-cleanroom.invalid",
+        "--set",
+        "substrate.workspaceConfigurationSecret=owned-configuration",
+        "--set",
+        "substrate.provisionerTokenSecret=owned-provisioner",
+        "--set",
+        `ingress.enabled=${mode !== "disabled"}`,
+        ...(mode === "external" ? ["--set", "ingress.tlsSecret=owned-enterprise-tls"] : []),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (exit) throw Error(`Owned notes client-only render failed: ${stderr}`);
+    const notes = stdout.split("NOTES:")[1] ?? "";
+    expect(notes).toContain(`Factory release owned-notes in Namespace ${namespace}`);
+    expect(notes).not.toContain("BEGIN CERTIFICATE");
+    expect(notes).not.toContain("PRIVATE KEY");
+    expect(notes).not.toContain(".data.ca\\.key");
+    if (mode === "managed") {
+      expect(notes).toContain('get secret "owned-notes-ingress-ca"');
+      expect(notes).toContain(`--namespace "${namespace}"`);
+      expect(notes).toContain("-o jsonpath='{.data.ca\\.crt}'");
+      expect(notes).toContain("openssl x509 -in factory-ca.pem -noout -fingerprint -sha256 -dates");
+      expect(notes).toContain("Verify the fingerprint");
+      expect(notes).toContain("does not enroll client trust");
+    } else {
+      expect(notes).not.toContain("get secret");
+      expect(notes).toContain(
+        mode === "external" ? "operator-owned TLS Secret" : "Ingress is disabled",
+      );
+    }
+  },
+  15_000,
+);
+
+test("managed public trust refuses replacement, unavailable observations and cancellation without writes or retries", async () => {
+  const f = await managedTrustFixture();
+  try {
+    for (const field of [2, 3, 14]) {
+      f.state.reads = 0;
+      const original = [...f.state.fields];
+      f.state.beforeRead = () => {
+        if (f.state.reads === 2) f.state.fields[field] = "replacement";
+      };
+      await expect(readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace")).rejects.toThrow(
+        "ownership changed",
+      );
+      expect(f.state.reads).toBe(2);
+      f.state.fields = original;
+    }
+    f.state.beforeRead = () => {};
+    for (const boundary of ["before", "after"]) {
+      f.state.namespaceReads = 0;
+      f.state.beforeNamespace = () => {
+        if (boundary === "before" || f.state.namespaceReads === 2)
+          f.state.namespaceObject.metadata.uid = "replacement";
+      };
+      await expect(readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace")).rejects.toThrow(
+        "ownership changed",
+      );
+      f.state.namespaceObject.metadata.uid = "original-namespace";
+    }
+    f.state.beforeNamespace = () => {};
+    f.state.failure = true;
+    f.state.reads = 0;
+    await expect(readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace")).rejects.toThrow(
+      "public CA observation failed or ownership changed",
+    );
+    expect(f.state.reads).toBe(1);
+    f.state.failure = false;
+    const controller = new AbortController();
+    f.state.beforeRead = () => controller.abort(new Error("Owned public trust cancelled"));
+    await expect(
+      readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace", {
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("Owned public trust cancelled");
+    expect(f.calls.every((call) => call.args.includes("get"))).toBe(true);
+    const count = f.calls.length;
+    await expect(
+      readManagedCleanRoomCA(f.cl, f.prepared, "original-namespace", {
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("cancelled");
+    expect(f.calls).toHaveLength(count);
+    await expect(readManagedCleanRoomCA(f.cl, f.prepared, "")).rejects.toThrow(
+      "original managed clean-room identity",
+    );
+    expect(f.calls).toHaveLength(count);
+  } finally {
+    await f.close();
+  }
+});
 
 test("native commissioning renders the real chart with separate fresh Secrets and no retained identities", async () => {
   const f = await fixture();

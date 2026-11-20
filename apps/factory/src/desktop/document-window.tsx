@@ -38,6 +38,7 @@ import type { InboxItem } from "../inbox/contracts";
 import type { InboxPosition } from "../inbox/navigation";
 import { InboxSourceNavigation } from "../inbox/source-navigation";
 import { TicketAttentionControls } from "../inbox/ticket-people";
+import { InboxWorkspace } from "../inbox/workspace";
 import type { createKnowledgeState } from "../knowledge/state";
 import type { createProjectPlanning } from "../projects/planning";
 import { ticketReference } from "../projects/ticket-content";
@@ -53,7 +54,6 @@ import type { TicketDraft } from "../ticket-workspace";
 import { TicketWorkspace } from "../ticket-workspace";
 import { TrashWorkspace } from "../trash-workspace";
 import type { createWindowPresence } from "../window-presence";
-import { InboxWorkspace } from "../workspace-chrome";
 import {
   loadDeveloperIDEWorkspace,
   loadRuntimeWorkspace,

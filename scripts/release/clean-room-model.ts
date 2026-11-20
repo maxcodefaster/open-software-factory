@@ -210,14 +210,19 @@ export const help = `Check an owned native-chart control plane. This is not nati
 --chart defaults to packaging this working tree with scripts/release/package-chart.ts, using
 --factory-image (required then) and its exact embedded native artifact catalog.
 --factory-image must be an immutable digest reference.
---native-fixture supplies explicit fresh native runtime, provisioner, Ingress certificate/key
-and public trust inputs. See deploy/helm/factory/README.md. No retained installation is copied.
+--native-fixture supplies fresh native runtime and provisioner inputs. Helper TLS defaults to an
+external certificate/key/CA bundle; existing complete external fixtures need no tlsMode field.
+Use explicit tlsMode: "managed" for the chart-managed proof path without certificate files.
+That path does not enroll Chromium trust or pass browser acceptance until its CA is trusted.
+Ordinary Helm installation still defaults to managed TLS. See deploy/helm/factory/README.md.
+No retained installation is copied.
 --node is required when the cluster has more than one node.
 --values supplies extra settings. Only storage and size settings are used; identity is never copied.
 --small-requests lowers scheduling memory requests so the control plane fits a crowded node.
 --with-sandbox runs the Project, Ticket and Wiki steps. Creating a Starter Project makes Factory
 create native execution resources, so it is off by default. Public HTTPS is required; the
-browser host must already trust the Ingress certificate. DNS and native workers are operator inputs.
+browser must trust the Ingress certificate. The helper never edits browser or host trust; unavailable
+trust fails browser checks, even without --with-sandbox. DNS and native workers are operator inputs.
 Native cleanup still refuses recorded or unobserved native resources rather than deleting them.
 --keep skips cleanup so you can debug the installation.
 Writes .factory/test-results/clean-room/<namespace>.json.`;
@@ -510,7 +515,7 @@ type SchedulingLine = MemoryLine & { cpuMilli: number };
 const backupStoreMiB = 8;
 const testProbeMiB = 128;
 
-/** Scheduler reservations, including the backup store, backup init peak and test hook. */
+/** Scheduler reservations, including backup, test and managed TLS renewal Jobs. */
 export function controlPlaneRequests(values: Values): SchedulingLine[] {
   const request = (value: unknown, resource: "cpu" | "memory") => {
     const resources = record(value);
@@ -537,6 +542,9 @@ export function controlPlaneRequests(values: Values): SchedulingLine[] {
     { name: "backup store", mib: backupStoreMiB, cpuMilli: 5 },
     { ...backup, mib: Math.max(16, backup.mib), cpuMilli: Math.max(10, backup.cpuMilli) },
     { name: "helm test probe", mib: testProbeMiB, cpuMilli: 50 },
+    ...(record(values["ingress"])["enabled"] && !record(values["ingress"])["tlsSecret"]
+      ? [{ name: "managed ingress TLS renewal", mib: 64, cpuMilli: 10 }]
+      : []),
   ];
 }
 
@@ -668,6 +676,8 @@ export const projectLimit =
   "Creating a Starter Project prepares native images and starts Preview. This harness has not qualified native provisioning, cleanup or the complete Ticket journey. Without --with-sandbox the run stops at the empty board.";
 export const wikiLimit =
   "Wiki pages exist only after Wiki generation, which needs a configured model connection. A clean installation has none, so the page edit is skipped rather than faked.";
+export const managedBrowserTrustLimit =
+  "Managed public CA trust is supplied only to the helper's HTTPS probe, not Chromium. The helper never changes browser or host trust. An untrusted root fails browser checks and the run, including with --with-sandbox; HTTPS readiness alone is not browser acceptance.";
 
 // ---- Backup
 
@@ -745,8 +755,14 @@ export type Receipt = {
   chart: Record<string, unknown>;
   images: Record<string, unknown>;
   native: {
+    tlsMode?: "managed" | "external";
     configurationSHA256?: string;
     certificateSHA256?: string;
+    caSecretName?: string;
+    caSecretUID?: string;
+    caSecretResourceVersion?: string;
+    caFingerprint256?: string;
+    caExpiresAt?: string;
     editorPrincipal?: string;
     factoryOrigin?: string;
     forgejoOrigin?: string;
@@ -811,6 +827,7 @@ export const requiredChecks = [
   "namespace",
   "native-secrets",
   "install",
+  "public-trust",
   "helm-test",
   "readiness",
   "admin-credential",

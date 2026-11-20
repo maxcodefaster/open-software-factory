@@ -244,7 +244,7 @@ type TextSurfaceProps = {
 };
 
 function RichTextSurface(props: TextSurfaceProps) {
-  let editor: HTMLElement | undefined;
+  const [editor, setEditor] = createSignal<HTMLElement>();
   const sourceMode = () => !props.plain && !supportsDocumentMarkdown(props.value);
 
   function writeValue(element: HTMLElement, value: string) {
@@ -256,9 +256,15 @@ function RichTextSurface(props: TextSurfaceProps) {
   }
 
   createEffect(
-    () => props.value,
-    (value) => {
-      if (editor && document.activeElement !== editor) writeValue(editor, value);
+    () => ({ element: editor(), value: props.value }),
+    ({ element, value }) => {
+      if (element && document.activeElement !== element) writeValue(element, value);
+    },
+  );
+  createEffect(
+    () => ({ element: editor(), onElement: props.onElement }),
+    ({ element, onElement }) => {
+      if (element) onElement?.(element);
     },
   );
 
@@ -269,11 +275,7 @@ function RichTextSurface(props: TextSurfaceProps) {
         <Show when={props.plain} fallback={<RichDocumentSurface {...props} />}>
           {/* biome-ignore lint/a11y: Inline title editing retains its document typography. Solid's lowercase tabindex makes this textbox keyboard focusable. */}
           <div
-            ref={(element) => {
-              editor = element;
-              writeValue(element, props.value);
-              props.onElement?.(element);
-            }}
+            ref={setEditor}
             class={`${props.class}${props.editable ? " inline-editor-surface" : ""}`}
             contenteditable={props.editable ? (props.plain ? "plaintext-only" : "true") : "false"}
             role="textbox"

@@ -1262,6 +1262,13 @@ for (const width of [1440, 900]) {
         initialToolbar.y >= selectionBounds.bottom ||
           initialToolbar.y + initialToolbar.height <= selectionBounds.top,
       ).toBe(true);
+      // Settle the prior native selection before taking the Link action's scroll baseline.
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
       const scrollTop = await viewport.evaluate((element) => element.scrollTop);
       await toolbar.getByRole("button", { name: "Link", exact: true }).click();
       const link = toolbar.getByRole("textbox", { name: "Link URL" });

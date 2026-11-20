@@ -22,7 +22,6 @@ import {
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";
-import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
   browserFunction,
@@ -103,11 +102,10 @@ test.afterEach(async () => {
 });
 
 async function selectProject(page: Parameters<typeof signIn>[0]) {
-  await openProjectMenu(page);
-  await page
-    .getByRole("button")
-    .filter({ hasText: `implementation-ux-${projectID}` })
-    .click();
+  // These cases exercise implementation, not the independently tested Project menu.
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  await page.goto(`/projects/${projectID}`);
+  await expect(page.getByRole("region", { name: "Ticket board", exact: true })).toBeVisible();
 }
 
 async function mockCodingConversation(
@@ -478,9 +476,16 @@ for (const state of [
     if (state.primary)
       await expect(toolbar.locator('[data-primary="true"]')).toHaveText(state.primary);
     else await expect(toolbar.locator('[data-primary="true"]')).toHaveCount(0);
+    await page.evaluate(() => document.fonts.ready);
     for (const width of [1440, 900, 430, 320]) {
       await page.setViewportSize({ width, height: 960 });
       await page.mouse.move(1, 1);
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
       for (const button of await toolbar.locator(":scope > .ticket-header-action:visible").all())
         await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       const metrics = await toolbar.evaluate((element) => {

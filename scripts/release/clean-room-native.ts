@@ -18,20 +18,28 @@ import {
 } from "./clean-room-model";
 
 const file = z.string().refine((value) => isAbsolute(value) && !/[\0\r\n]/.test(value));
-const inputSchema = z.strictObject({
-  schema: z.literal(1),
-  factoryOrigin: z.string(),
-  forgejoOrigin: z.string(),
-  ingressClass: z.string().regex(/^[a-z0-9][a-z0-9.-]*$/),
-  ingressNamespaceLabels: z
-    .record(z.string(), z.string())
-    .refine((value) => Object.keys(value).length > 0),
-  configuration: z.record(z.string(), z.unknown()),
-  factoryCAFile: file,
-  provisionerTokenFile: file,
-  ingressCertificateFile: file,
-  ingressKeyFile: file,
-});
+const inputSchema = z
+  .strictObject({
+    schema: z.literal(1),
+    factoryOrigin: z.string(),
+    forgejoOrigin: z.string(),
+    ingressClass: z.string().regex(/^[a-z0-9][a-z0-9.-]*$/),
+    ingressNamespaceLabels: z
+      .record(z.string(), z.string())
+      .refine((value) => Object.keys(value).length > 0),
+    configuration: z.record(z.string(), z.unknown()),
+    provisionerTokenFile: file,
+    tlsMode: z.enum(["managed", "external"]).default("external"),
+    factoryCAFile: file.optional(),
+    ingressCertificateFile: file.optional(),
+    ingressKeyFile: file.optional(),
+  })
+  .refine((input) => {
+    const files = [input.factoryCAFile, input.ingressCertificateFile, input.ingressKeyFile];
+    return input.tlsMode === "external"
+      ? files.every((value) => value !== undefined)
+      : files.every((value) => value === undefined);
+  });
 
 export type NativeCleanRoomValues = {
   factoryOrigin: string;
@@ -83,6 +91,19 @@ async function privateFile(path: string) {
     throw Error("Native fixture token and TLS key must be readable, owned private regular files");
   } finally {
     await handle?.close();
+  }
+}
+
+function publicCertificates(pem: string) {
+  const certificates = pem.match(
+    /-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/g,
+  );
+  if (!certificates?.length || certificates.join("").replace(/\s/g, "") !== pem.replace(/\s/g, ""))
+    throw Error("Native public trust must contain only PEM certificates");
+  try {
+    return certificates.map((value) => new X509Certificate(value));
+  } catch {
+    throw Error("Native public trust contains an invalid certificate");
   }
 }
 
@@ -157,6 +178,8 @@ export async function prepareNativeCleanRoom(
   options.signal?.throwIfAborted();
   const id = cleanRoomIDFromNamespace(namespace);
   if (!id) throw Error("Native commissioning requires its exactly owned clean-room Namespace");
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,51}[a-z0-9])?$/.test(release))
+    throw Error("Native commissioning requires an exact Helm release name");
   let value: unknown;
   try {
     value = JSON.parse(await readFile(path, "utf8"));
@@ -216,48 +239,49 @@ export async function prepareNativeCleanRoom(
     },
     configuration,
   );
-  const [ca, cert, key, token] = await Promise.all([
-    readFile(input.factoryCAFile, "utf8"),
-    readFile(input.ingressCertificateFile, "utf8"),
-    privateFile(input.ingressKeyFile),
-    privateFile(input.provisionerTokenFile).then((value) => value.trim()),
-  ]);
+  const token = (await privateFile(input.provisionerTokenFile)).trim();
   if (!token || /[\s\0]/.test(token))
     throw Error("Native provisioner token must be one opaque nonempty token");
-  if (
-    !ca.includes("-----BEGIN CERTIFICATE-----") ||
-    ca.includes("PRIVATE KEY") ||
-    cert.includes("PRIVATE KEY")
-  )
-    throw Error(
-      "Factory trust and Ingress certificate files must contain public certificates only",
-    );
-  let certificate: X509Certificate;
-  try {
-    certificate = new X509Certificate(cert);
-    if (!certificate.checkPrivateKey(createPrivateKey(key))) throw Error("Mismatched key");
-  } catch {
-    throw Error("Native Ingress certificate and private key do not match");
+  let external: { ca: string; cert: string; key: string; certificate: X509Certificate } | undefined;
+  if (input.tlsMode === "external") {
+    // The schema requires all three paths only for this explicit opt-out.
+    const [ca, cert, key] = await Promise.all([
+      readFile(input.factoryCAFile ?? "", "utf8"),
+      readFile(input.ingressCertificateFile ?? "", "utf8"),
+      privateFile(input.ingressKeyFile ?? ""),
+    ]);
+    publicCertificates(ca);
+    publicCertificates(cert);
+    let certificate: X509Certificate;
+    try {
+      certificate = new X509Certificate(cert);
+      if (!certificate.checkPrivateKey(createPrivateKey(key))) throw Error("Mismatched key");
+    } catch {
+      throw Error("Native Ingress certificate and private key do not match");
+    }
+    const now = (options.now ?? new Date()).getTime();
+    if (
+      certificate.ca ||
+      !Number.isFinite(now) ||
+      now < Date.parse(certificate.validFrom) ||
+      now >= Date.parse(certificate.validTo)
+    )
+      throw Error("Native Ingress requires a currently valid leaf certificate");
+    const factoryHost = new URL(factoryOrigin).hostname;
+    const forgeHost = new URL(forgejoOrigin).hostname;
+    const runtimeHost = `${id}-app.runtime.${factoryHost}`;
+    if (
+      !certificate.checkHost(factoryHost) ||
+      !certificate.checkHost(forgeHost) ||
+      certificate.checkHost(runtimeHost)?.toLowerCase() !== `*.runtime.${factoryHost}`
+    )
+      throw Error(
+        "Native Ingress certificate must cover Factory, Forge and the complete runtime wildcard",
+      );
+    await verifyTLS(cert, key, ca, [factoryHost, forgeHost, runtimeHost], options.signal);
+    external = { ca, cert, key, certificate };
   }
-  const now = (options.now ?? new Date()).getTime();
-  if (
-    certificate.ca ||
-    now < Date.parse(certificate.validFrom) ||
-    now >= Date.parse(certificate.validTo)
-  )
-    throw Error("Native Ingress requires a currently valid leaf certificate");
-  const factoryHost = new URL(factoryOrigin).hostname;
-  const forgeHost = new URL(forgejoOrigin).hostname;
-  const runtimeHost = `${id}-app.runtime.${factoryHost}`;
-  if (
-    !certificate.checkHost(factoryHost) ||
-    !certificate.checkHost(forgeHost) ||
-    certificate.checkHost(runtimeHost)?.toLowerCase() !== `*.runtime.${factoryHost}`
-  )
-    throw Error(
-      "Native Ingress certificate must cover Factory, Forge and the complete runtime wildcard",
-    );
-  await verifyTLS(cert, key, ca, [factoryHost, forgeHost, runtimeHost], options.signal);
+  options.signal?.throwIfAborted();
   const values: NativeCleanRoomValues = {
     factoryOrigin,
     forgejoOrigin,
@@ -265,7 +289,7 @@ export async function prepareNativeCleanRoom(
     ingressNamespaceLabels: input.ingressNamespaceLabels,
     configurationSecret: `${name}-native-configuration`,
     provisionerSecret: `${name}-native-provisioner`,
-    tlsSecret: `${name}-ingress-tls`,
+    tlsSecret: external ? `${name}-ingress-tls` : "",
   };
   const secret = (secretName: string, stringData: Record<string, string>, type = "Opaque") => ({
     apiVersion: "v1",
@@ -281,20 +305,26 @@ export async function prepareNativeCleanRoom(
   const configurationJSON = JSON.stringify(configuration);
   return {
     namespace,
+    release,
     values,
     configuration,
-    ca,
+    ca: external?.ca,
     metadata: {
+      tlsMode: input.tlsMode,
       configurationSHA256: createHash("sha256").update(configurationJSON).digest("hex"),
-      certificateSHA256: certificate.fingerprint256,
+      ...(external ? { certificateSHA256: external.certificate.fingerprint256 } : {}),
       editorPrincipal: configuration.editorPrincipal,
       factoryOrigin,
       forgejoOrigin,
-      secretNames: [values.configurationSecret, values.provisionerSecret, values.tlsSecret],
+      secretNames: [
+        values.configurationSecret,
+        values.provisionerSecret,
+        ...(external ? [values.tlsSecret] : []),
+      ],
     },
     redactions: [
       ...new Set(
-        [token, key].flatMap((value) => [
+        [token, ...(external ? [external.key] : [])].flatMap((value) => [
           value,
           JSON.stringify(value).slice(1, -1),
           Buffer.from(value).toString("base64"),
@@ -304,12 +334,163 @@ export async function prepareNativeCleanRoom(
     manifests: [
       secret(values.configurationSecret, {
         "configuration.json": configurationJSON,
-        "factory-ca.pem": ca,
+        ...(external ? { "factory-ca.pem": external.ca } : {}),
       }),
       secret(values.provisionerSecret, { token }),
-      secret(values.tlsSecret, { "tls.crt": cert, "tls.key": key }, "kubernetes.io/tls"),
+      ...(external
+        ? [
+            secret(
+              values.tlsSecret,
+              { "tls.crt": external.cert, "tls.key": external.key },
+              "kubernetes.io/tls",
+            ),
+          ]
+        : []),
     ],
   };
+}
+
+// kubectl filters the API response before it reaches this process. Do not fetch
+// a Secret as JSON: the managed CA Secret also contains its signing authority.
+const managedCAProjection = [
+  ".metadata.name",
+  ".metadata.namespace",
+  ".metadata.uid",
+  ".metadata.resourceVersion",
+  ".metadata.labels.app\\.kubernetes\\.io/name",
+  ".metadata.labels.app\\.kubernetes\\.io/instance",
+  ".metadata.labels.app\\.kubernetes\\.io/managed-by",
+  ".metadata.labels.app\\.kubernetes\\.io/component",
+  ".metadata.annotations.meta\\.helm\\.sh/release-name",
+  ".metadata.annotations.meta\\.helm\\.sh/release-namespace",
+  ".metadata.annotations.factory\\.dev/tls-hosts",
+  ".metadata.deletionTimestamp",
+  ".immutable",
+  ".type",
+  ".data.ca\\.crt",
+]
+  .map((field) => `{${field}}`)
+  .join('{"\\n"}');
+
+/** Read public trust only after an acknowledged install in the original owned Namespace. */
+export async function readManagedCleanRoomCA(
+  cl: Pick<Cluster, "json" | "kubectl">,
+  prepared: Awaited<ReturnType<typeof prepareNativeCleanRoom>>,
+  namespaceUID: string,
+  options: { signal?: AbortSignal; now?: Date } = {},
+) {
+  const signal = options.signal;
+  signal?.throwIfAborted();
+  const id = cleanRoomIDFromNamespace(prepared.namespace);
+  if (!id || !namespaceUID || prepared.metadata.tlsMode !== "managed" || prepared.values.tlsSecret)
+    throw Error("Managed public trust requires the original managed clean-room identity");
+  const secretName = `${chartName(prepared.release)}-ingress-ca`;
+  try {
+    const namespace = async () => {
+      signal?.throwIfAborted();
+      const observed = await cl.json(["get", "namespace", prepared.namespace], { signal });
+      if (observed.metadata?.deletionTimestamp != null) throw Error();
+      verifyOwnedNamespace(observed, id, namespaceUID);
+      signal?.throwIfAborted();
+    };
+    const observe = async () => {
+      signal?.throwIfAborted();
+      const observed = await cl.kubectl(
+        [
+          "--namespace",
+          prepared.namespace,
+          "get",
+          "secret",
+          secretName,
+          "-o",
+          `jsonpath=${managedCAProjection}`,
+        ],
+        { signal, allowFailure: true },
+      );
+      signal?.throwIfAborted();
+      if (observed.code !== 0 || observed.stdout.length > 128 * 1024) throw Error();
+      return observed.stdout;
+    };
+    await namespace();
+    const observed = await observe();
+    const fields = observed.split("\n");
+    const [
+      name,
+      namespaceName,
+      uid,
+      resourceVersion,
+      application,
+      instance,
+      manager,
+      component,
+      helmRelease,
+      helmNamespace,
+      hosts,
+      deletionTimestamp,
+      immutable,
+      type,
+      encoded,
+    ] = fields;
+    const factoryHost = new URL(prepared.values.factoryOrigin).hostname;
+    if (
+      fields.length !== 15 ||
+      name !== secretName ||
+      namespaceName !== prepared.namespace ||
+      !uid?.trim() ||
+      !resourceVersion?.trim() ||
+      application !== "factory" ||
+      instance !== prepared.release ||
+      manager !== "Helm" ||
+      component !== "ingress-tls" ||
+      helmRelease !== prepared.release ||
+      helmNamespace !== prepared.namespace ||
+      hosts !==
+        JSON.stringify([
+          factoryHost,
+          new URL(prepared.values.forgejoOrigin).hostname,
+          `*.runtime.${factoryHost}`,
+        ]) ||
+      deletionTimestamp !== "" ||
+      immutable !== "true" ||
+      type !== "Opaque" ||
+      !encoded ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+    )
+      throw Error();
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.toString("base64") !== encoded) throw Error();
+    const ca = bytes.toString("utf8");
+    const certificates = publicCertificates(ca);
+    const certificate = certificates[0];
+    const now = (options.now ?? new Date()).getTime();
+    if (
+      certificates.length !== 1 ||
+      !certificate?.ca ||
+      certificate.subject !== certificate.issuer ||
+      !certificate.verify(certificate.publicKey) ||
+      !Number.isFinite(now) ||
+      now < Date.parse(certificate.validFrom) ||
+      now >= Date.parse(certificate.validTo)
+    )
+      throw Error();
+    // Detect replacement or mutation during extraction, including a same-name
+    // Namespace replacement. This is a bounded observation, not a global lock.
+    if ((await observe()) !== observed) throw Error();
+    await namespace();
+    return {
+      ca,
+      metadata: {
+        caSecretName: secretName,
+        caSecretUID: uid,
+        caSecretResourceVersion: resourceVersion,
+        caFingerprint256: certificate.fingerprint256,
+        caExpiresAt: new Date(certificate.validTo).toISOString(),
+      },
+    };
+  } catch {
+    signal?.throwIfAborted();
+    throw Error("Managed Ingress public CA observation failed or ownership changed");
+  }
 }
 
 export async function readNativeCleanRoomReadiness(
@@ -318,8 +499,10 @@ export async function readNativeCleanRoomReadiness(
   signal: AbortSignal,
 ) {
   signal.throwIfAborted();
+  if (new URL(origin).protocol !== "https:") throw Error("Native public readiness requires HTTPS");
+  publicCertificates(ca);
   return fetch(`${origin}/health/ready?installation=complete`, {
-    tls: { ca },
+    tls: { ca, rejectUnauthorized: true },
     signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
     redirect: "error",
   });

@@ -1,5 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { buildBrowserToolCatalogue } from "../../../../packages/conversation-domain/src/browser-tools";
+import { candidateReviewToolCatalogue } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { LearningCase } from "../../../../packages/conversation-domain/src/learning";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { memoryPrivateObjects } from "../../../../test/fixtures/private-objects";
@@ -34,11 +35,18 @@ function tool(
     name,
     state: {
       status,
-      input: { command, password: "PRIVATE-INPUT" },
+      input: { ...(name === "read" ? { path: command } : { command }), password: "PRIVATE-INPUT" },
       error: "PRIVATE-ERROR",
       content: [{ type: "text", text: "PRIVATE-OUTPUT" }],
     },
     time,
+  };
+}
+function configRead(path: string, offset = 1, limit = 100) {
+  const part = tool("read", "PRIVATE-UNUSED");
+  return {
+    ...part,
+    state: { ...part.state, input: { path, offset, limit, password: "PRIVATE-INPUT" } },
   };
 }
 async function archive(
@@ -296,7 +304,7 @@ test("selected completed Coding work retains safe checkpoint-bound tool counts a
     timed: 1,
     elapsedMS: 15,
   });
-  expect(packet.methods).toEqual([
+  expect(packet.methods).toMatchObject([
     { category: "port-discovery", calls: 2, repeated: true },
     { category: "process-discovery", calls: 2, repeated: true },
   ]);
@@ -473,7 +481,7 @@ test("discovery method hints do not interpret quoted command names or arbitrary 
     tool("shell", "/usr/bin/pgrep -af PRIVATE-PROCESS"),
   ]);
   const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
-  expect(JSON.parse(item.body).methods).toEqual([
+  expect(JSON.parse(item.body).methods).toMatchObject([
     { category: "process-discovery", calls: 1, repeated: false },
   ]);
   expect(item.body).not.toContain("PRIVATE-");
@@ -508,7 +516,13 @@ test("projection bounds preserve complete JSON and mark uninspected parts and co
     toolCalls: 2_047,
     oversizedShellInputs: 1,
   });
-  expect(packet.methods).toEqual([{ category: "port-discovery", calls: 2_046, repeated: true }]);
+  expect(packet.methods).toMatchObject([
+    { category: "port-discovery", calls: 2_046, repeated: true },
+  ]);
+  expect(packet.coverage).toMatchObject({
+    inventoryComplete: false,
+    methodInputsComplete: false,
+  });
   expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
   expect(item.body).not.toContain("PRIVATE-");
 });
@@ -756,6 +770,365 @@ test("the actual Factory browser_open and exact catalogue are browser tools, spe
   expect(item.body).not.toContain("browser_navigate");
 });
 
+test("offline exact 42 known review calls and 18 browser calls retain a classified 60-call inventory", async () => {
+  // Counts from the retained native independent-review tool-shape observation.
+  // Replay only trusted catalogue names and counts, never private archive bytes.
+  const counts = {
+    review_diff: 2,
+    review_execution: 16,
+    review_files: 2,
+    review_read: 11,
+    review_report: 1,
+    review_scenario: 5,
+    review_scenario_result: 5,
+  };
+  const registered = new Set<string>(candidateReviewToolCatalogue.map(({ name }) => name));
+  expect(Object.keys(counts).every((name) => registered.has(name))).toBe(true);
+  const owned = await archive([
+    ...Object.entries(counts).flatMap(([name, count]) =>
+      Array.from({ length: count }, () => tool(`factory_browser_${name}`, "PRIVATE-INPUT")),
+    ),
+    ...Array.from({ length: 18 }, () =>
+      tool("factory_browser_browser_open", "https://PRIVATE-URL"),
+    ),
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(item.kind).toBe("artifact");
+  expect(item.truncated).toBe(false);
+  expect(packet.tools).toEqual([
+    {
+      tool: "browser",
+      calls: 18,
+      completed: 18,
+      failed: 0,
+      unknown: 0,
+      timed: 18,
+      elapsedMS: 270,
+    },
+    {
+      tool: "review",
+      calls: 42,
+      completed: 42,
+      failed: 0,
+      unknown: 0,
+      timed: 42,
+      elapsedMS: 630,
+    },
+  ]);
+  expect(packet.coverage).toMatchObject({
+    toolCalls: 60,
+    unclassifiedToolCalls: 0,
+    inventoryComplete: true,
+    toolClassificationComplete: true,
+  });
+  expect(item.body).not.toContain("PRIVATE-");
+  expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
+});
+
+test("all exact registered review names and pinned subagent classify without admitting lookalikes", async () => {
+  const owned = await archive([
+    ...candidateReviewToolCatalogue.map(({ name }) =>
+      tool(`factory_browser_${name}`, "PRIVATE-INPUT"),
+    ),
+    tool("subagent", "PRIVATE-CHILD"),
+    tool("question", "PRIVATE-QUESTION"),
+    tool("factory_browser_review_PRIVATE", "PRIVATE-INPUT"),
+    tool("factory_browser_review_read_PRIVATE", "PRIVATE-INPUT"),
+    tool("Factory_browser_review_read", "PRIVATE-INPUT"),
+    tool("subagent_PRIVATE", "PRIVATE-INPUT"),
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.tools).toContainEqual({
+    tool: "review",
+    calls: candidateReviewToolCatalogue.length,
+    completed: candidateReviewToolCatalogue.length,
+    failed: 0,
+    unknown: 0,
+    timed: candidateReviewToolCatalogue.length,
+    elapsedMS: candidateReviewToolCatalogue.length * 15,
+  });
+  expect(packet.tools.find((entry: { tool: string }) => entry.tool === "subagent")?.calls).toBe(1);
+  expect(packet.tools.find((entry: { tool: string }) => entry.tool === "question")?.calls).toBe(1);
+  expect(packet.coverage).toMatchObject({
+    unclassifiedToolCalls: 4,
+    inventoryComplete: true,
+    toolClassificationComplete: false,
+  });
+  expect(item.body).not.toContain("PRIVATE");
+  expect(item.body).not.toContain("Factory_browser");
+  expect(item.truncated).toBe(false);
+});
+
+test("discovery equivalence distinguishes repeated explicit inputs, working directories and read pages privately", async () => {
+  const shell = tool("shell", "ss -ltnp");
+  const first = {
+    ...shell,
+    state: { ...shell.state, input: { ...shell.state.input, workdir: "/PRIVATE-A" } },
+  };
+  const retry = structuredClone(first);
+  retry.state.status = "error";
+  const elsewhere = structuredClone(first);
+  elsewhere.state.input.workdir = "/PRIVATE-B";
+  const owned = await archive([
+    first,
+    retry,
+    elsewhere,
+    tool("shell", "pgrep -af PRIVATE-PROCESS"),
+    tool("shell", "pgrep -af PRIVATE-PROCESS"),
+    configRead("/PRIVATE-A/package.json"),
+    configRead("/PRIVATE-A/package.json"),
+    configRead("/PRIVATE-A/package.json", 101),
+    tool("shell", "cat /PRIVATE-A/.env"),
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.methods).toMatchObject([
+    { category: "config-discovery", calls: 4, repeated: true },
+    { category: "port-discovery", calls: 3, repeated: true },
+    { category: "process-discovery", calls: 2, repeated: true },
+  ]);
+  const groups = (category: string) =>
+    packet.methods.find((method: { category: string }) => method.category === category).groups;
+  expect(groups("port-discovery")).toMatchObject([
+    { calls: 2, completed: 1, failed: 1 },
+    { calls: 1, completed: 1, failed: 0 },
+  ]);
+  expect(groups("process-discovery")).toMatchObject([{ calls: 2, completed: 2, failed: 0 }]);
+  expect(groups("config-discovery").map((group: { calls: number }) => group.calls)).toEqual([
+    2, 1, 1,
+  ]);
+  expect(
+    packet.methods.flatMap((method: { groups: { id: number }[] }) =>
+      method.groups.map((group) => group.id),
+    ),
+  ).toEqual(expect.arrayContaining([0, 1, 2, 3, 4, 5]));
+  expect(packet.coverage).toMatchObject({
+    inventoryComplete: true,
+    toolClassificationComplete: true,
+    methodInputsComplete: true,
+    omittedEquivalenceGroups: 0,
+    omittedEquivalenceCalls: 0,
+  });
+  expect(item.truncated).toBe(false);
+  for (const secret of ["PRIVATE", "package.json", ".env", "ss -ltnp", "pgrep"]) {
+    expect(item.body).not.toContain(secret);
+  }
+  expect(item.body).not.toContain(objectDigest(new TextEncoder().encode("ss -ltnp")));
+  expect(await readNativeToolEvidence(turnID, owned.saved, owned.objects)).toEqual(item);
+});
+
+test("different discovery commands do not become repeated equivalent observations", async () => {
+  const repeated = await archive([
+    tool("shell", "ss -ltnp"),
+    tool("shell", "ss -ltnp"),
+    tool("shell", "ss -ltnp"),
+  ]);
+  const distinct = await archive([
+    tool("shell", "ss -ltnp"),
+    tool("shell", "ss -lunp"),
+    tool("shell", "lsof -nP -iTCP -sTCP:LISTEN"),
+  ]);
+  const summarize = async (owned: Awaited<ReturnType<typeof archive>>) =>
+    JSON.parse((await readNativeToolEvidence(turnID, owned.saved, owned.objects)).body);
+  const a = await summarize(repeated);
+  const b = await summarize(distinct);
+  expect(a.tools).toEqual(b.tools);
+  expect(a.methods[0].groups).toMatchObject([{ calls: 3, completed: 3, failed: 0 }]);
+  expect(b.methods[0].groups).toHaveLength(3);
+  expect(b.methods[0].groups.every((group: { calls: number }) => group.calls === 1)).toBe(true);
+});
+
+test("shell execution options and read limits remain part of explicit-input equivalence", async () => {
+  const shell = (options: Record<string, unknown> = {}) => {
+    const part = tool("shell", "pgrep -af PRIVATE-PROCESS");
+    return { ...part, state: { ...part.state, input: { ...part.state.input, ...options } } };
+  };
+  const owned = await archive([
+    shell(),
+    shell(),
+    shell({ background: true }),
+    shell({ timeout: 1_000 }),
+    configRead("/PRIVATE/package.json"),
+    configRead("/PRIVATE/package.json"),
+    configRead("/PRIVATE/package.json", 1, 200),
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.methods[0].groups.map((group: { calls: number }) => group.calls)).toEqual([2, 1]);
+  expect(packet.methods[1].groups.map((group: { calls: number }) => group.calls)).toEqual([
+    2, 1, 1,
+  ]);
+  expect(item.body).not.toContain("PRIVATE");
+  expect(item.truncated).toBe(false);
+});
+
+test("unavailable discovery inputs do not erase a complete classified call inventory", async () => {
+  const inputs = [
+    { command: 42 },
+    { command: "ps aux", workdir: "PRIVATE".repeat(700) },
+    { command: "ps aux", timeout: -1 },
+    { command: "ps aux", background: "true" },
+  ];
+  const owned = await archive([
+    ...inputs.map((input) => ({
+      ...tool("shell", "PRIVATE"),
+      state: { status: "completed", input },
+    })),
+    {
+      ...configRead("/PRIVATE/package.json"),
+      state: { status: "completed", input: { path: "/PRIVATE/package.json", offset: 0 } },
+    },
+    configRead("/PRIVATE/package.json", 1, 2_001),
+    tool("shell", "ps aux", "pending"),
+    tool("shell", `ps ${"PRIVATE".repeat(700)}`),
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.methods).toEqual([]);
+  expect(packet.coverage).toMatchObject({
+    toolCalls: 8,
+    unavailableMethodInputs: 7,
+    oversizedShellInputs: 1,
+    inventoryComplete: true,
+    toolClassificationComplete: true,
+    methodInputsComplete: false,
+  });
+  expect(item.kind).toBe("artifact");
+  expect(item.truncated).toBe(true);
+  expect(item.body).not.toContain("PRIVATE");
+});
+
+test("finite discovery patterns do not interpret shell programs, quoted prose or speculative read fields", async () => {
+  const owned = await archive([
+    tool("shell", 'echo "ss -ltnp"'),
+    tool("shell", "cd PRIVATE && ss -ltnp"),
+    tool("shell", "ss -ltnp; cat PRIVATE"),
+    tool("shell", "ss -ltnp\ncat PRIVATE"),
+    tool("shell", "cat /PRIVATE/package.json | node PRIVATE"),
+    tool("shell", "cat /PRIVATE/arbitrary.json"),
+    tool("shell", "cat /PRIVATE/package.json /PRIVATE/.env"),
+    configRead("/PRIVATE/source.ts"),
+    {
+      ...configRead("/PRIVATE/package.json"),
+      state: { status: "completed", input: { filePath: "/PRIVATE/package.json" } },
+    },
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.methods).toEqual([]);
+  expect(packet.coverage).toMatchObject({
+    classifiedShellCalls: 0,
+    inventoryComplete: true,
+    methodInputsComplete: false,
+    unavailableMethodInputs: 1,
+  });
+  expect(item.body).not.toContain("PRIVATE");
+});
+
+test("known non-assistant messages are excluded explicitly and unknown part kinds keep inventory incomplete", async () => {
+  const excluded = [
+    "agent-switched",
+    "model-switched",
+    "location-switched",
+    "synthetic",
+    "system",
+    "skill",
+    "shell",
+    "compaction",
+    "idle",
+  ];
+  const content: unknown[] = [
+    { type: "reasoning", text: "PRIVATE-REASONING" },
+    tool("shell", "ps aux"),
+  ];
+  const messages: unknown[] = [
+    { id: checkpoint.promptID, type: "user" },
+    ...excluded.map((type, index) => ({ id: `msg_${index}`, type, text: "PRIVATE-CONTEXT" })),
+    {
+      id: checkpoint.throughMessageID,
+      type: "assistant",
+      finish: "stop",
+      time: { completed: 30 },
+      content,
+    },
+  ];
+  const owned = await archive([], messages);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  expect(item.truncated).toBe(false);
+  expect(JSON.parse(item.body).coverage).toMatchObject({
+    excludedMessages: excluded.length,
+    unclassifiedMessages: 0,
+    unclassifiedParts: 0,
+    inventoryComplete: true,
+    toolCalls: 1,
+  });
+  content.push({ type: "PRIVATE-UNKNOWN-PART" });
+  messages.splice(1, 0, { id: "msg_unknown", type: "PRIVATE-UNKNOWN-MESSAGE" });
+  const unfamiliar = await archive([], messages);
+  const incomplete = await readNativeToolEvidence(turnID, unfamiliar.saved, unfamiliar.objects);
+  expect(incomplete.truncated).toBe(true);
+  expect(JSON.parse(incomplete.body).coverage).toMatchObject({
+    unclassifiedMessages: 1,
+    unclassifiedParts: 1,
+    inventoryComplete: false,
+    toolCalls: 1,
+  });
+  expect(incomplete.body).not.toContain("PRIVATE");
+});
+
+test("equivalence detail is bounded without losing category counts or known tool inventory", async () => {
+  const owned = await archive(
+    Array.from({ length: 100 }, (_, index) => tool("shell", `pgrep -af PRIVATE-${index}`)),
+  );
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(item.kind).toBe("artifact");
+  expect(packet.methods).toMatchObject([
+    { category: "process-discovery", calls: 100, repeated: true },
+  ]);
+  const groups = packet.methods[0].groups;
+  expect(groups.length).toBeGreaterThan(0);
+  expect(groups.length).toBeLessThanOrEqual(8);
+  expect(packet.coverage).toMatchObject({
+    toolCalls: 100,
+    inventoryComplete: true,
+    toolClassificationComplete: true,
+    methodInputsComplete: true,
+    omittedEquivalenceGroups: 100 - groups.length,
+    omittedEquivalenceCalls: 100 - groups.length,
+  });
+  expect(item.truncated).toBe(true);
+  expect(item.body).not.toContain("PRIVATE");
+  expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
+});
+
+test("repeated discovery survives the group bound ahead of earlier one-off inputs", async () => {
+  const owned = await archive([
+    ...Array.from({ length: 100 }, (_, index) => tool("shell", `pgrep -af PRIVATE-${index}`)),
+    ...Array.from({ length: 10 }, (_, index) =>
+      tool("shell", "pgrep -af PRIVATE-REPEATED", index === 0 ? "error" : "completed"),
+    ),
+  ]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.methods[0].groups[0]).toEqual({
+    id: 100,
+    calls: 10,
+    completed: 9,
+    failed: 1,
+  });
+  expect(packet.coverage).toMatchObject({
+    toolCalls: 110,
+    omittedEquivalenceGroups: 93,
+    omittedEquivalenceCalls: 93,
+    inventoryComplete: true,
+    methodInputsComplete: true,
+  });
+  expect(item.body).not.toContain("PRIVATE");
+});
+
 test("a normal multi-tool summary fits the complete declared 4KB projection", async () => {
   const names = [
     "shell",
@@ -781,4 +1154,121 @@ test("a normal multi-tool summary fits the complete declared 4KB projection", as
   expect(JSON.parse(item.body).coverage.toolCalls).toBe(names.length);
   expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
   expect(item.body).not.toContain("PRIVATE-");
+});
+
+test("maximal categories, discovery groups and large timings remain useful within 4KB", async () => {
+  const names = [
+    "shell",
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "patch",
+    "glob",
+    "grep",
+    "list",
+    "webfetch",
+    "websearch",
+    "task",
+    "skill",
+    "subagent",
+    "question",
+    ...buildBrowserToolCatalogue.map(({ name }) => `factory_browser_${name}`),
+    ...candidateReviewToolCatalogue.map(({ name }) => `factory_browser_${name}`),
+    "PRIVATE-CUSTOM",
+  ];
+  const content = [
+    ...names.map((name) =>
+      name === "read" ? configRead("/PRIVATE/package.json") : tool(name, "ss -ltnp"),
+    ),
+    ...Array.from({ length: 12 }, (_, index) =>
+      tool("shell", `pgrep -af PRIVATE-PROCESS-${index}`),
+    ),
+    ...Array.from({ length: 12 }, (_, index) => configRead(`/PRIVATE-${index}/.env`)),
+  ].map((part) => ({ ...part, time: { created: 0, completed: 123_456_789_012 } }));
+  const owned = await archive(content);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(item.kind).toBe("artifact");
+  expect(packet.status).toBe("observed");
+  expect(packet.coverage).toMatchObject({
+    toolCalls: content.length,
+    unclassifiedToolCalls: 1,
+    inventoryComplete: true,
+    toolClassificationComplete: false,
+    methodInputsComplete: true,
+  });
+  expect(packet.tools).toHaveLength(18);
+  expect(
+    packet.tools.reduce((calls: number, entry: { calls: number }) => calls + entry.calls, 0),
+  ).toBe(content.length);
+  expect(packet.methods.map((method: { category: string }) => method.category)).toEqual([
+    "config-discovery",
+    "port-discovery",
+    "process-discovery",
+  ]);
+  expect(
+    packet.methods.flatMap((method: { groups: unknown[] }) => method.groups).length,
+  ).toBeGreaterThan(0);
+  expect(item.body).not.toContain("PRIVATE");
+  expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
+});
+
+test("projection byte pressure removes only optional groups, not tool or discovery category totals", async () => {
+  const names = [
+    "shell",
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "patch",
+    "glob",
+    "grep",
+    "list",
+    "webfetch",
+    "websearch",
+    "task",
+    "skill",
+    "subagent",
+    "question",
+    "factory_browser_browser_open",
+    "factory_browser_review_execution",
+    "PRIVATE-CUSTOM",
+  ];
+  const content = [
+    ...names.flatMap((name) =>
+      Array.from({ length: 100 }, () =>
+        name === "read" ? configRead("/PRIVATE/package.json") : tool(name, "ss -ltnp"),
+      ),
+    ),
+    ...Array.from({ length: 12 }, (_, index) => tool("shell", `pgrep -af PRIVATE-${index}`)),
+    ...Array.from({ length: 12 }, (_, index) => configRead(`/PRIVATE-${index}/.env`)),
+  ].map((part) => ({ ...part, time: { created: 0, completed: 90_000_000_000_000 } }));
+  const owned = await archive(content);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(item.kind).toBe("artifact");
+  expect(packet.tools).toHaveLength(18);
+  expect(packet.methods).toMatchObject([
+    { category: "config-discovery", calls: 112 },
+    { category: "port-discovery", calls: 200 },
+    { category: "process-discovery", calls: 12 },
+  ]);
+  const groups = packet.methods.flatMap((method: { groups: { calls: number }[] }) => method.groups);
+  expect(groups.length).toBeGreaterThan(0);
+  expect(groups.length).toBeLessThan(8);
+  expect(packet.coverage).toMatchObject({
+    toolCalls: 1_824,
+    omittedMessages: 0,
+    omittedParts: 0,
+    inventoryComplete: true,
+    methodInputsComplete: true,
+  });
+  expect(
+    groups.reduce((calls: number, group: { calls: number }) => calls + group.calls, 0) +
+      packet.coverage.omittedEquivalenceCalls,
+  ).toBe(324);
+  expect(item.truncated).toBe(true);
+  expect(item.body).not.toContain("PRIVATE");
+  expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
 });

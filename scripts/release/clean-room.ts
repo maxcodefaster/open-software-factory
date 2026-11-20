@@ -46,6 +46,7 @@ import {
   finishReceipt,
   imageKind,
   listSetsScript,
+  managedBrowserTrustLimit,
   namespaceManifest,
   newestSet,
   type Options,
@@ -73,6 +74,7 @@ import {
 import {
   createNativeCleanRoomSecrets,
   prepareNativeCleanRoom,
+  readManagedCleanRoomCA,
   readNativeCleanRoomReadiness,
   requireFreshNativeIngress,
 } from "./clean-room-native";
@@ -420,6 +422,7 @@ async function main(options: Options) {
   let adminPassword = "";
   let adminEmail = "admin@factory.local";
   let native: Awaited<ReturnType<typeof prepareNativeCleanRoom>> | undefined;
+  let publicCA: string | undefined;
 
   try {
     await step("native-inputs", async () => {
@@ -428,7 +431,7 @@ async function main(options: Options) {
       });
       secrets.push(...native.redactions);
       receipt.native = native.metadata;
-      return "Fresh native identity, separate provisioner credential and TLS bundle validated; no cluster resource created";
+      return `Fresh native identity and separate provisioner credential validated; ${native.metadata.tlsMode === "managed" ? "chart-managed TLS selected" : "external TLS bundle validated"}; no cluster resource created`;
     });
     await step("tools", async () => {
       const helmVersion = (
@@ -675,7 +678,7 @@ async function main(options: Options) {
         throw Error("Original native installation identity is unavailable");
       await persist();
       await createNativeCleanRoomSecrets(cl, native, receipt.namespaceUID, connection.signal);
-      return "Created only this fresh Namespace's native configuration, provisioner and Ingress Secrets";
+      return `Created only this fresh Namespace's native configuration and provisioner Secrets${native.metadata.tlsMode === "external" ? " and explicit external Ingress Secret" : "; Helm owns TLS issuance"}`;
     });
 
     await step("install", async () => {
@@ -705,14 +708,31 @@ async function main(options: Options) {
       return `release ${releaseName} installed with --wait=legacy --timeout 20m`;
     });
 
+    await step("public-trust", async () => {
+      if (!native || !receipt.namespaceUID)
+        throw Error("Original native installation identity is unavailable");
+      if (native.metadata.tlsMode === "managed") {
+        const trust = await readManagedCleanRoomCA(cl, native, receipt.namespaceUID, {
+          signal: connection.signal,
+        });
+        publicCA = trust.ca;
+        Object.assign(receipt.native, trust.metadata);
+        receipt.limits.push(managedBrowserTrustLimit);
+        return `Read only the managed public CA from ${trust.metadata.caSecretName}, UID ${trust.metadata.caSecretUID}; SHA-256 ${trust.metadata.caFingerprint256}; browser trust unchanged`;
+      }
+      publicCA = native.ca;
+      if (!publicCA) throw Error("External public readiness trust is unavailable");
+      return "Using the explicitly supplied external public CA; browser trust unchanged";
+    });
+
     await step("helm-test", async () => {
       log("Running helm test (read-only native preflight, not Actor or product acceptance)");
       return testCleanRoomChart(cl, releaseName, namespace, connection.signal);
     });
 
     await step("readiness", async () => {
-      if (!native) throw Error("Native public readiness trust is unavailable");
-      const ca = native.ca;
+      if (!publicCA) throw Error("Native public readiness trust is unavailable");
+      const ca = publicCA;
       let startupID = "";
       await until(
         "public readiness",
@@ -770,6 +790,7 @@ async function main(options: Options) {
     });
 
     await timed("browser", async () => {
+      if (native?.metadata.tlsMode === "managed") log(managedBrowserTrustLimit);
       const journey = await browserJourney({
         origin,
         email: adminEmail,
@@ -779,7 +800,17 @@ async function main(options: Options) {
         directory: join(outputDirectory, namespace),
         signal: connection.signal,
       });
-      for (const check of journey.checks) record_(check);
+      for (const check of journey.checks)
+        record_(
+          native?.metadata.tlsMode === "managed" &&
+            check.status === "failed" &&
+            /ERR_CERT_|certificate.*(?:invalid|authority|trust)/i.test(check.detail)
+            ? {
+                ...check,
+                detail: `${check.detail} Managed CA trust is not configured by this helper in Chromium; browser qualification failed, not skipped.`,
+              }
+            : check,
+        );
       receipt.limits.push(...journey.limits);
       receipt.screenshots = journey.screenshots.map((path) => path.replace(`${root}/`, ""));
     });

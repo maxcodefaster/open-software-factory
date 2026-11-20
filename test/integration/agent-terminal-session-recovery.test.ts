@@ -1,12 +1,12 @@
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { nativeBuildProcessFixture } from "../fixtures/native-build-process";
 import { nativeProcessProtocol } from "../fixtures/native-process-protocol";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test.each(["failed", "pre-dispatch failed"] as const)(
@@ -56,6 +56,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       let promptID: string | undefined;
       let promptText = "";
       let installedSkills: string[] = [];
+      let permissions: unknown[] | undefined;
       const instructions = new Map<string, unknown>();
       const mcpServers = new Set<string>();
       let promptCalls = 0;
@@ -173,12 +174,18 @@ test.each(["failed", "pre-dispatch failed"] as const)(
               data = [{ providerID: "factory", id: buildModelID }];
             } else if (request.path.endsWith("/agent")) {
               status = 204;
-            } else if (request.path.endsWith(`/${owned.sessionID}`)) {
-              data = {
-                id: owned.sessionID,
-                location: { directory: "/workspace/project" },
-                model: { providerID: "factory", id: buildModelID },
-              };
+            } else if (request.path === `/api/session/${owned.sessionID}`) {
+              if (request.method === "PATCH") {
+                const body = JSON.parse(request.body) as { permissions?: unknown[] };
+                if (body.permissions) permissions = structuredClone(body.permissions);
+                status = 204;
+              } else
+                data = {
+                  id: owned.sessionID,
+                  ...(permissions ? { permissions: structuredClone(permissions) } : {}),
+                  location: { directory: "/workspace/project" },
+                  model: { providerID: "factory", id: buildModelID },
+                };
             } else if (request.path.endsWith("/active")) {
               data = {};
             } else if (request.path.endsWith("/prompt")) {
@@ -250,17 +257,20 @@ test.each(["failed", "pre-dispatch failed"] as const)(
           });
         });
       }
+      const readiness = async () => {
+        const [row] = await database.client<{ state: string; updatedAt: string }[]>`
+          SELECT state,updated_at::text AS "updatedAt" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        return row;
+      };
+      const beforeConnection = await readiness();
       await connect("parent");
       await connect("child");
+      // The completed prior input retained a ready row. Require this process's
+      // hello observation to finish before competing for its Source owner.
       await eventually(
-        async () => {
-          const rows = await database.client<
-            { state: string }[]
-          >`SELECT state FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
-          return rows[0]?.state;
-        },
-        (state) => state === "ready",
-        "Owned runtime readiness missing",
+        readiness,
+        (row) => row?.state === "ready" && row.updatedAt !== beforeConnection?.updatedAt,
+        "Current Connector readiness was not observed",
       );
       // Block only the Session projection, not the Turn transaction. Kill the
       // actual server after its terminal Turn commits and before this write.
@@ -369,10 +379,12 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       expect(peer.calls.filter((call) => !call.method.startsWith("Get"))).toEqual(lifecycleBefore);
     } finally {
       for (const socket of sockets) socket.close();
-      await process.shutdown();
-      await creating?.catch(() => undefined);
+      // An earlier assertion may fail while the projection is held. Release
+      // this fixture's latch before asking shutdown to drain that SQL write.
       if (latchHeld) await latch`SELECT pg_advisory_unlock(hashtext('owned-terminal-projection'))`;
       latch.release();
+      await process.shutdown();
+      await creating?.catch(() => undefined);
       await ownedFixture?.shutdown();
       ownedFixture?.restoreEnvironment();
       await native?.close();

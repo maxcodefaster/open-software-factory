@@ -34,6 +34,30 @@ interface BoardProjectionDependencies {
 }
 
 export function createBoardProjection(dependencies: BoardProjectionDependencies) {
+  const activeTickets = () =>
+    (dependencies.tickets.data() as Ticket[] | undefined)?.slice(0, dependencies.ticketLimit()) ??
+    [];
+
+  const retainedTickets = () =>
+    (dependencies.history.data() as Ticket[] | undefined)?.slice(0, dependencies.historyLimit()) ??
+    [];
+
+  const ticketList = () => {
+    const selected = dependencies.detail()?.ticket;
+    return [
+      ...new Map(
+        [
+          ...activeTickets(),
+          ...retainedTickets(),
+          ...((dependencies.prerequisiteTickets.data() as Ticket[] | undefined) ?? []),
+          ...((dependencies.foundTickets.data() as Ticket[] | undefined) ?? []),
+          ...((dependencies.trashTickets.data() as Ticket[] | undefined) ?? []),
+          ...(selected ? [selected] : []),
+        ].map((ticket) => [ticket.id, ticket]),
+      ).values(),
+    ];
+  };
+
   const changesByTicket = createMemo(
     () => new Map(dependencies.changes().map((change) => [change.ticketId, change])),
   );
@@ -135,30 +159,6 @@ export function createBoardProjection(dependencies: BoardProjectionDependencies)
     return list.filter((project) =>
       `${project.name} ${project.slug}`.toLocaleLowerCase().includes(query),
     );
-  };
-
-  const activeTickets = () =>
-    (dependencies.tickets.data() as Ticket[] | undefined)?.slice(0, dependencies.ticketLimit()) ??
-    [];
-
-  const retainedTickets = () =>
-    (dependencies.history.data() as Ticket[] | undefined)?.slice(0, dependencies.historyLimit()) ??
-    [];
-
-  const ticketList = () => {
-    const selected = dependencies.detail()?.ticket;
-    return [
-      ...new Map(
-        [
-          ...activeTickets(),
-          ...retainedTickets(),
-          ...((dependencies.prerequisiteTickets.data() as Ticket[] | undefined) ?? []),
-          ...((dependencies.foundTickets.data() as Ticket[] | undefined) ?? []),
-          ...((dependencies.trashTickets.data() as Ticket[] | undefined) ?? []),
-          ...(selected ? [selected] : []),
-        ].map((ticket) => [ticket.id, ticket]),
-      ).values(),
-    ];
   };
 
   const epicList = () => dependencies.epics.data() ?? [];

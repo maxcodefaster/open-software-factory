@@ -19,7 +19,7 @@
       "node",
       "vite/client",
       "@solidjs/vite-plugin/boundary-modules",
-      "@solidjs/vite-plugin/virtual-solid-manifest"
+      "@solidjs/vite-plugin/virtual-modules"
     ]
   },
   "include": ["src", "test", "vite.config.ts"]

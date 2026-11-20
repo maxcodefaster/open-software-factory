@@ -37,8 +37,14 @@ export async function substrateFixture(
   sourceRevision = "a".repeat(40),
   kind: "personal" | "ticket" = "personal",
 ) {
-  const server = await ownedPostgresServer();
-  const target = await ownedTestDatabase(server.identity, crypto.randomUUID());
+  const inherited = process.env["FACTORY_TEST_POSTGRES"];
+  const server = inherited ? undefined : await ownedPostgresServer();
+  const identity = inherited ? JSON.parse(inherited) : server?.identity;
+  if (!identity) throw new Error("Owned Substrate PostgreSQL identity is missing");
+  const target = await ownedTestDatabase(identity, crypto.randomUUID()).catch(async (cause) => {
+    await server?.dispose();
+    throw cause;
+  });
   const prior = process.env["DATABASE_URL"];
   process.env["DATABASE_URL"] = target.url;
   const database = createDatabase();
@@ -124,6 +130,16 @@ export async function substrateFixture(
       },
       status: { state: "ACTOR_STATE_SUSPENDED" },
     });
+  async function createdActor() {
+    // Simulated native creation shares the dispatch fact's database clock.
+    // Host/VM clock skew must not make a new Actor appear pre-existing.
+    const [clock] = await database.client<{ createdAt: string }[]>`
+      SELECT clock_timestamp()::text AS "createdAt"`;
+    if (!clock) throw Error("Owned native fixture clock is unavailable");
+    const created = actor();
+    created.metadata.createTime = new Date(clock.createdAt).toISOString();
+    return created;
+  }
   let controller: ReturnType<typeof createRuntimeController> | undefined;
   const hub = new RuntimeHub(async (id, phase, error) => {
     await controller?.status(id, phase, error);
@@ -146,6 +162,7 @@ export async function substrateFixture(
     space,
     template,
     actor,
+    createdActor,
     userID,
     projectID,
     workspaceID,
@@ -240,7 +257,7 @@ export async function substrateFixture(
       }
       await database.client.end({ timeout: 1 });
       await target.dispose();
-      await server.dispose();
+      await server?.dispose();
     },
   };
 }
@@ -257,7 +274,7 @@ export async function startSubstrateFixtureWorkspace(
       return structuredClone(actor);
     }
     if (method === "CreateActor") {
-      actor = fixture.actor();
+      actor = await fixture.createdActor();
       return structuredClone(actor);
     }
     if (method === "ResumeActor" && actor) {

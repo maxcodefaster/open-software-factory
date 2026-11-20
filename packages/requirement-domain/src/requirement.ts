@@ -41,13 +41,3 @@ export function createRequirementRevision(input: {
     contentDigest: requirementDigest(canonicalContent),
   });
 }
-
-export function approveRequirementRevision(
-  revision: { id: string; ticketId: string },
-  input: { id: string; ticketId: string; requirementRevisionId: string; approvedBy: string },
-) {
-  if (input.ticketId !== revision.ticketId || input.requirementRevisionId !== revision.id) {
-    throw new Error("Requirement Approval must identify the exact Ticket revision");
-  }
-  return Object.freeze({ ...input });
-}

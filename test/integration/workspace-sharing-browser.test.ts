@@ -4,7 +4,6 @@ import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { workspaceSourceIdentity } from "../../packages/workspace-domain/src/source";
 import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 
 test("sharing uses real owner decisions, readable narrow/touch controls and returns focus", async () => {
@@ -55,7 +54,7 @@ test("sharing uses real owner decisions, readable narrow/touch controls and retu
       const source = {
         workspaceID,
         label: "My workspace",
-        serviceID: workspaceSourceIdentity(workspaceID, 1).serviceID,
+        serviceID: `source-${workspaceID.replaceAll("-", "")}`,
         epoch: 1,
         state: "ready" as const,
         failure: null,

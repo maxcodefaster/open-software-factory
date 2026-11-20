@@ -12,7 +12,10 @@ async function commandFixture(loseStartReply = false) {
   const guest = crypto.randomUUID();
   await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${guest},'Command fixture',${`${guest}@factory.invalid`})`;
   await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${guest},'developer',${owner})`;
-  const runtime = await startSubstrateFixtureWorkspace(fixture);
+  const runtime = await startSubstrateFixtureWorkspace(fixture).catch(async (cause) => {
+    await fixture.dispose();
+    throw cause;
+  });
   type Native = {
     id: string;
     digest: string;

@@ -1,6 +1,8 @@
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import type { createDatabase } from "../../packages/db/src/client";
 import { buildModelID, fixture } from "./change-agent-turns";
 import { seedMonitoringDelegation } from "./monitoring";
@@ -80,6 +82,16 @@ export async function candidateReviewFixture(
     await owned.database.client`UPDATE factory.change_agent_session SET active_turn_id=${turn.id},
       opencode_session_id=${intent.session},state='starting' WHERE change_id=${owned.changeID}`;
     await turns.beginDispatch(turn.id, turn.ownerToken);
+    // This retained running review must exist in the native peer too. An ID
+    // pattern alone is not proof that its Session was ever created.
+    await createOpenCodeClient((request, path) =>
+      owned.hub.request(owned.attemptID, "opencode", request, path),
+    ).session.create({
+      id: intent.session,
+      location: { directory: "/workspace/project" },
+      model: { id: buildModelID, providerID: "factory" },
+      permissions: candidateReviewPermissions,
+    });
     await turns.markRunning(turn.id, turn.ownerToken, async (sql) => {
       await sql`UPDATE factory.change_agent_session SET state='working' WHERE change_id=${owned.changeID}`;
       await sql`UPDATE factory.candidate_review SET state='running' WHERE id=${targetID}`;

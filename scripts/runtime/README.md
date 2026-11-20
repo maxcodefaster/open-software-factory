@@ -182,28 +182,18 @@ commands, historical-table queries, worker-Pod inspection and installation-ident
 The read-only `scripts/kubernetes/restore-check.ts` still checks backup archive readability and
 checksums. That is not restore qualification.
 
-The remaining clean-room control-plane check uses the same scheduler reservation accounting as
-native capacity admission. It includes restartable init sidecars, resize reservations, overhead
-and terminating Pods; it does not report those requests as measured usage. It rejects old chart
-contracts and missing native configuration before creating installation resources. Helm preflight
-failure cannot become a pass because a worker has no capacity. Its receipt remains explicitly
-`nativeProductAcceptance: false`, even if the limited optional Project steps run.
-The clean-room command requires `--native-fixture` with explicit fresh runtime, provisioner,
-Ingress certificate/key and public trust inputs. It derives a new installation's ServiceAccount
-principal, creates only that original Namespace's Secrets, and checks public readiness through
-normal HTTPS rather than loopback forwarding. Its `--values` option still copies only sizes and
-storage settings, never retained identities or Secrets. See
+The `release:clean-room` control-plane check requires `--native-fixture` with fresh native and
+TLS inputs. Its receipt remains `nativeProductAcceptance: false`, even if the limited optional
+Project steps run. See
 [fresh native commissioning](../../deploy/helm/factory/README.md#owned-native-clean-room-inputs)
-for the input contract and remaining limits. Native cleanup still refuses recorded or unavailable
-native inventory. Do not substitute an older chart, disable TLS or delete retained data to get a
-passing receipt.
+for the input contract, capacity/preflight checks and exact-owner cleanup limits. Native cleanup
+still refuses recorded or unavailable native inventory. Do not substitute an older chart,
+disable TLS or delete retained data to get a passing receipt.
 
 The exact-commit `beta:gate` source receipt also includes `substrate:check` alongside the Connector,
 controller and UI checks. Release receipt reuse requires that bridge result and its declared
 `source-controller-ui` scope. It cannot turn a source receipt into native product acceptance.
 
-The replacement remains incomplete until a fresh native-only Helm installation serves two normal
-Projects and an approved Ticket passes implementation, exact-commit Verification, independent
-review and deliberate Delivery to healthy Staging. Native Starter, Source/Writer handoff, external
-MCP, shared Workspace and publication journeys also need their live evidence.
-See [installation and operation](../../deploy/helm/factory/README.md).
+The [native qualification scope](../../deploy/substrate/README.md#qualification-scope) records
+the exercised ARM product journeys and remaining limits. A passing component or control-plane
+receipt does not extend that scope.

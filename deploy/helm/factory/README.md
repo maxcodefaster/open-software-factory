@@ -94,9 +94,9 @@ The OpenBao certificate must cover the OpenBao Service names and `127.0.0.1`, wh
 ### Installation-owned HTTPS
 
 With `ingress.enabled: true` and no `ingress.tlsSecret`, the chart creates a private CA and
-certificates for Factory, Forgejo and `*.runtime.<factory-hostname>`. Issuance uses Kubernetes
-Secrets and OpenSSL in the Factory image. It needs no external certificate service, ACME account,
-cert-manager, mkcert, OrbStack or public wildcard DNS service.
+certificates for Factory, Forgejo and `*.runtime.<factory-hostname>`. Helm creates the initial
+certificate Secrets; renewal uses OpenSSL in the Factory image. It needs no external certificate
+service, ACME account, cert-manager, mkcert, OrbStack or public wildcard DNS service.
 
 The retained immutable Secret `<release>-ingress-ca` holds the ten-year CA. Only the issuer init
 container and the daily `<release>-ingress-tls` CronJob mount its signing-key Secret. Native workloads
@@ -110,7 +110,7 @@ copy automatically. It contains a signing key and needs the same encrypted prote
 OpenBao unseal key. Factory's infrastructure ServiceAccount already has Secret access; public-only
 runtime mounts do not make a compromised control plane unable to read the signing authority.
 
-The initial leaf lasts 90 days. The issuer replaces leaves with fewer than 30 days remaining,
+The initial leaf lasts 90 days. The issuer replaces leaves with 30 days or less remaining,
 both before Factory starts and on the daily schedule. Ingress must reload its referenced TLS
 Secret when it changes. The issuer validates the original CA, key, exact hostnames, Secret
 ownership, UID and resource version. A lost patch reply is not retried blindly. It never replaces
@@ -124,10 +124,13 @@ certificate for the client or enterprise trust policy:
 ```sh
 mise exec -- kubectl get secret factory-ingress-ca --namespace factory \
   -o jsonpath='{.data.ca\.crt}' | base64 --decode > factory-ca.pem
+openssl x509 -in factory-ca.pem -noout -fingerprint -sha256 -dates
 ```
 
-Verify that fingerprint through the installation administrator before trusting it. Never export
-`ca.key` to a browser, Project, runtime image or test artifact. Clients that cannot accept a
+Helm's post-install notes print the release-specific export and fingerprint commands. Use the same
+authenticated Kubernetes context as the installation. Verify the fingerprint through the
+installation administrator before trusting it. Never export `ca.key` to a browser, Project,
+runtime image or test artifact. Clients that cannot accept a
 private root need an already trusted enterprise certificate through `ingress.tlsSecret`.
 That option also retains the operator's `factory-ca.pem` in the native configuration Secret.
 It creates no built-in issuer or renewal Job. Offline GitOps renderers must use that explicit
@@ -1238,26 +1241,40 @@ complete clean-install qualification.
 
 ### Owned native clean-room inputs
 
-This helper currently qualifies the operator-owned certificate path below. The built-in issuer uses
-the ordinary Helm installation path; do not provide fake certificate inputs to make this helper
-claim managed-issuer acceptance.
-
 Reserve distinct, unused public Factory and Forgejo DNS names through the existing Ingress
-controller. Supply a currently valid leaf certificate and matching private key covering both
-names and `*.runtime.<factory-hostname>`, plus its public CA bundle. The command checks for
-overlapping existing Ingress hosts before creating resources. It does not configure DNS, install
-a runtime or weaken certificate validation. Public readiness uses the supplied CA bundle.
-The browser host must already trust the certificate.
+controller, including `*.runtime.<factory-hostname>`. Unlike ordinary Helm installation, this helper
+retains an external certificate/key/public CA bundle as its default for existing browser-trusted
+fixtures. Complete existing external fixtures need no `tlsMode` field. Ordinary Helm installation
+still defaults to the chart's managed issuer.
+
+The helper's managed-issuer proof path requires explicit `tlsMode: "managed"`. Do not supply
+certificate files or precreate TLS Secrets for that path. After an acknowledged Helm installation
+it extracts only the public CA and selected identity fields from the chart's immutable CA Secret,
+checks the exact Helm owner and hosts, and rechecks the Secret and original Namespace UID.
+Its receipt records the CA UID, resource version, fingerprint and expiry. Public readiness uses
+that CA with normal certificate and hostname verification. Capacity accounting includes the
+managed renewal Job's 10m CPU and 64Mi memory reservation.
+
+The command checks for overlapping existing Ingress hosts before creating resources. It does not
+configure DNS, install a runtime, change host trust or weaken certificate validation. Chromium does
+not inherit the helper's public CA. Its browser must already trust the certificate independently.
+An untrusted new managed root fails the browser checks and the overall run, with or without
+`--with-sandbox`. A fresh direct managed-TLS run cannot pass browser acceptance until its CA is
+trusted independently, even when Helm and the helper's HTTPS probe succeed. This is not a turnkey
+managed-browser path. No browser trust is silently installed and no required browser check is
+skipped to make the run pass. Managed-helper source tests are not live clean-install qualification.
 
 Create a separate input JSON file. The `configuration` object supplies the actually observed
 pinned native runtime/profile, immutable Actor image, WorkerPool selector and admitted egress.
 Do not include database, Editor principal, callback URL or credential paths there. The command
 derives those for its new Namespace and the chart's normal mounts; it never converts a retained
-installation configuration.
+installation configuration. This example explicitly selects the managed proof path; it does not
+configure Chromium trust.
 
 ```json
 {
   "schema": 1,
+  "tlsMode": "managed",
   "factoryOrigin": "https://factory-cleanroom.example.com",
   "forgejoOrigin": "https://git-cleanroom.example.com",
   "ingressClass": "your-existing-ingress-class",
@@ -1284,18 +1301,30 @@ installation configuration.
     "egressHosts": ["git-cleanroom.example.com"],
     "resources": {"cpuMilli": 2000, "memoryMiB": 4096}
   },
-  "factoryCAFile": "/absolute/public-ca-bundle.pem",
-  "provisionerTokenFile": "/absolute/private-owner-token",
-  "ingressCertificateFile": "/absolute/ingress-chain.pem",
-  "ingressKeyFile": "/absolute/private-ingress-key.pem"
+  "provisionerTokenFile": "/absolute/private-owner-token"
 }
 ```
 
 Replace the example image/runtime values with the qualified artifact and observed upstream
 runtime. Choose resources for the actual Project recipe; these example limits do not qualify the
-Starter. The provisioner token and TLS key must be private regular files owned by the invoking
-user, without group/other access or symlinks. No CA private key is requested. Only the public trust
-bundle reaches Actors; the Owner token and Ingress key stay in their separate intended Secrets.
+Starter. The provisioner token must be a private regular file owned by the invoking user, without
+group/other access or symlinks. No CA private key is requested or extracted.
+
+To use the helper's external default, remove `"tlsMode": "managed"` from the example and add the
+three fields below. Setting `tlsMode: "external"` is optional; existing complete external fixtures
+remain accepted without it. The external leaf must be currently valid, match its private key, and
+cover both public names and the complete runtime wildcard. The TLS key has the same private-file
+requirements as the provisioner token. External certificate renewal and browser trust remain
+operator-owned. Only the public CA bundle reaches Actors; the Owner token and Ingress key stay in
+their separate intended Secrets.
+
+```json
+{
+  "factoryCAFile": "/absolute/public-ca-bundle.pem",
+  "ingressCertificateFile": "/absolute/ingress-chain.pem",
+  "ingressKeyFile": "/absolute/private-ingress-key.pem"
+}
+```
 
 ```sh
 mise exec -- bun run release:clean-room \

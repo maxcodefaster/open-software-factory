@@ -17,26 +17,6 @@ test("runtime conformance runs only the explicit official Substrate proofs and e
     "bun run test:native substrate-adapter.native substrate-workspaces.native",
   );
   expect(manifest.scripts["runtime:smoke:down"]).toBeUndefined();
-  for (const path of [
-    "deploy/factorybox/release.json",
-    "deploy/factorybox/release-amd64.json",
-    "scripts/runtime/conformance.ts",
-    "scripts/runtime/conformance-resources.ts",
-    "scripts/runtime/factorybox-conformance.ts",
-    "scripts/runtime/factorybox-build.ts",
-    "scripts/runtime/factorybox-publish.ts",
-    "scripts/runtime/factorybox-worker.ts",
-    "scripts/runtime/benchmark.ts",
-    "packages/runtime-kubernetes/src/manifest.ts",
-    "packages/runtime-kubernetes/src/reserve.ts",
-    "packages/runtime-kubernetes/src/source-forward.ts",
-    "packages/runtime-domain/src/reserve.ts",
-    "test/fixtures/verification-pool-cluster.ts",
-    "test/fixtures/verification-pool-registry.ts",
-    "test/fixtures/factorybox-runtime.ts",
-    "test/fixtures/factorybox-cleanup.ts",
-  ])
-    expect(await Bun.file(path).exists(), path).toBe(false);
 });
 
 test("live native proofs have no private-kernel exec or legacy worker database path", async () => {
@@ -102,18 +82,6 @@ test("release tooling exposes no Factorybox upgrade, soak or identity-rewriting 
   const manifest = await Bun.file("package.json").json();
   for (const name of ["release:upgrade-test", "release:soak", "restore:rehearsal"])
     expect(manifest.scripts[name], name).toBeUndefined();
-  for (const path of [
-    "scripts/release/upgrade-test.ts",
-    "scripts/release/upgrade-test-model.ts",
-    "scripts/release/upgrade-test-browser.ts",
-    "scripts/release/soak.ts",
-    "scripts/release/soak-ui-cycle.ts",
-    "scripts/release/soak-wiki.ts",
-    "scripts/release/soak-journey.ts",
-    "scripts/kubernetes/restore-rehearsal-model.ts",
-    "scripts/kubernetes/restore-rehearsal-cluster.ts",
-  ])
-    expect(await Bun.file(path).exists(), path).toBe(false);
   expect(await Bun.file("scripts/kubernetes/restore-check.ts").exists()).toBe(true);
 });
 

@@ -44,5 +44,3 @@ export function WindowHeading(props: {
     </header>
   );
 }
-
-export { InboxWorkspace } from "./inbox/workspace";

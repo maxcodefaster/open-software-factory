@@ -44,20 +44,26 @@ test("the authored Starter uses the selected exact toolchain and database images
     return file.content;
   };
   const manifest = JSON.parse(content("package.json"));
+  const factory = await Bun.file(new URL("../../../../package.json", import.meta.url)).json();
   const compose = parse(content(".devcontainer/compose.yaml"));
   const local = parse(
     await readFile(new URL("../../../../deploy/local/compose.yaml", import.meta.url), "utf8"),
   );
   expect(manifest.engines.node).toBe(upstream.nodeDevelopment.version);
   for (const name of ["solid-js", "@solidjs/web"]) {
-    expect(manifest.dependencies[name]).toBe("2.0.0-rc.18");
-    expect(manifest.dependencies[name]).not.toMatch(/^[~^*]/);
+    expect(manifest.dependencies[name]).toBe(factory.dependencies[name]);
+    expect(manifest.dependencies[name]).toMatch(/^2\.\d+\.\d+$/);
   }
-  expect(manifest.devDependencies["@solidjs/vite-plugin"]).toBe("3.0.0-next.51");
+  expect(manifest.devDependencies["@solidjs/vite-plugin"]).toBe(
+    factory.devDependencies["@solidjs/vite-plugin"],
+  );
+  expect(manifest.devDependencies["@solidjs/vite-plugin"]).toMatch(/^3\.\d+\.\d+$/);
   for (const name of ["@tanstack/solid-router", "@tanstack/solid-start"])
-    expect(manifest.dependencies[name]).toBe("2.0.0-rc.9");
-  for (const name of ["@solidjs/compiler", "@solidjs/signals", "@solidjs/babel-plugin"])
-    expect(manifest.overrides[name]).toBe(manifest.dependencies["solid-js"]);
+    expect(manifest.dependencies[name]).toBe(factory.dependencies[name]);
+  for (const name of ["@solidjs/compiler", "@solidjs/signals", "@solidjs/babel-plugin"]) {
+    expect(manifest.overrides[name]).toBe(factory.overrides[name]);
+    expect(manifest.overrides[name]).toMatch(/^2\.\d+\.\d+$/);
+  }
   const lock = JSON.parse(content("package-lock.json"));
   expect(lock.packages[""].dependencies).toEqual(manifest.dependencies);
   expect(lock.packages[""].devDependencies).toEqual(manifest.devDependencies);

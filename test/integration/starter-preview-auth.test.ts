@@ -204,6 +204,10 @@ test.each(["development", "production"] as const)(
           : {}),
       });
       const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+      // The compiler may preload its decoder before signup. Observe the whole
+      // mount's requests, not one particular lazy-loading schedule.
+      const pageRequests: string[] = [];
+      page.on("request", (request) => pageRequests.push(new URL(request.url()).pathname));
       if (mode === "development") {
         const directPage = await browser.newPage();
         let directHMR = false;
@@ -281,8 +285,6 @@ test.each(["development", "production"] as const)(
         await new Response(check.stderr).text();
         expect(await check.exited).toBe(0);
       }
-      const pageRequests: string[] = [];
-      page.on("request", (request) => pageRequests.push(new URL(request.url()).pathname));
       const directEmail = `${crypto.randomUUID()}@starter.test`;
       const directPassword = crypto.randomUUID();
       await page.getByRole("button", { name: "Create an account", exact: true }).click();

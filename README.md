@@ -57,7 +57,8 @@ Your approval promotes the change to Staging. Production deployment remains your
 
 Project Wikis keep revisions and human edits. Roles separate product work, development and
 administration. OpenBao encrypts secrets. Backups include Git, database, objects and secrets.
-Learning proposals need approval before adoption.
+Learning reviews completed work and compact native tool evidence, including repeated discovery.
+Its proposals need approval before adoption; repeated calls alone do not prove wasted work.
 Personal Skills stay private in personal Project conversations. Exact Skill versions admitted to
 shared Ticket work are inspectable by that Project's members; this does not share the private library.
 
@@ -161,6 +162,7 @@ the pinned official runtime on workers matching the selected Linux arm64 or amd6
 services and credentials. Use the exact images qualified for the selected architecture; a source-chart
 qualification is not publication of a new Factory release.
 With Ingress enabled, the chart creates its own CA and renews its HTTPS certificates automatically.
+The default issuer needs no manually generated certificate, private key or CA file.
 It distributes public trust to native workloads without mkcert, OrbStack or a public DNS service.
 Clients still need to trust that CA, and the installation needs reachable DNS and an Ingress controller.
 An existing enterprise TLS Secret can replace the built-in issuer.

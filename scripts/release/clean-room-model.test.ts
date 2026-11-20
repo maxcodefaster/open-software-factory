@@ -13,8 +13,10 @@ import {
   disappeared,
   finishReceipt,
   genericSettings,
+  help,
   imageKind,
   listSetsScript,
+  managedBrowserTrustLimit,
   namespaceManifest,
   newestSet,
   openbaoVerdict,
@@ -68,6 +70,26 @@ test("native clean-room values carry their explicit HTTPS and fresh Secret input
   });
   expect(values["developmentZeroURL"]).toBeUndefined();
   expect(values["ingress"]).toMatchObject({ enabled: true, tlsSecret: nativeValues.tlsSecret });
+});
+
+test("managed clean-room values leave TLS issuance to Helm and ignore inherited TLS overrides", () => {
+  const { values, ignored } = cleanRoomValues({
+    node: "owned",
+    native: { ...nativeValues, tlsSecret: "" },
+    extra: { ingress: { enabled: false, tlsSecret: "retained-certificate" } },
+  });
+  expect(values["ingress"]).toMatchObject({ enabled: true, tlsSecret: "" });
+  expect(ignored).toEqual(["ingress.enabled", "ingress.tlsSecret"]);
+});
+
+test("clean-room help distinguishes the external default from explicit managed browser qualification", () => {
+  expect(help).toContain("external certificate/key/CA bundle");
+  expect(help).toContain("existing complete external fixtures need no tlsMode field");
+  expect(help).toContain('Use explicit tlsMode: "managed"');
+  expect(help).toContain(
+    "does not enroll Chromium trust or pass browser acceptance until its CA is trusted",
+  );
+  expect(help).toContain("Ordinary Helm installation still defaults to managed TLS");
 });
 
 test("native commissioning is required before a clean-room creation can start", () => {
@@ -456,6 +478,43 @@ const defaults = {
   backup: { resources: { requests: { memory: "128Mi" } } },
 };
 
+test("managed TLS reserves its renewal Job without charging external or disabled TLS", () => {
+  const baseline = controlPlaneRequests(defaults);
+  const managed = controlPlaneRequests({ ...defaults, ingress: { enabled: true, tlsSecret: "" } });
+  expect(managed.at(-1)).toEqual({
+    name: "managed ingress TLS renewal",
+    mib: 64,
+    cpuMilli: 10,
+  });
+  expect(totalMiB(managed) - totalMiB(baseline)).toBe(64);
+  expect(
+    managed.reduce((sum, line) => sum + line.cpuMilli, 0) -
+      baseline.reduce((sum, line) => sum + line.cpuMilli, 0),
+  ).toBe(10);
+  for (const ingress of [
+    { enabled: false, tlsSecret: "" },
+    { enabled: true, tlsSecret: "operator-owned" },
+  ])
+    expect(controlPlaneRequests({ ...defaults, ingress })).toEqual(baseline);
+  const input = {
+    node: "owned",
+    allocatable: `${totalMiB(baseline)}Mi`,
+    allocatableCPU: "8",
+    pods: [],
+    smallRequests: false,
+  };
+  expect(capacityVerdict({ ...input, needed: baseline }).fits).toBe(true);
+  expect(capacityVerdict({ ...input, needed: managed }).fits).toBe(false);
+  expect(
+    capacityVerdict({
+      ...input,
+      allocatable: "20Gi",
+      allocatableCPU: `${baseline.reduce((sum, line) => sum + line.cpuMilli, 0)}m`,
+      needed: managed,
+    }).fits,
+  ).toBe(false);
+});
+
 test("small requests lower the control plane's scheduling memory and keep limits", () => {
   const full = totalMiB(controlPlaneRequests(defaults));
   expect(full).toBe(512 + 128 + 256 + 128 + 256 + 128 + 8 + 128 + 128);
@@ -824,6 +883,24 @@ test("skips are accepted only where the limit is documented", () => {
     true,
   );
   expect(receiptVerdict(skip(passing(), ["install"])).problems).toEqual(["install was skipped"]);
+});
+
+test("managed HTTPS readiness or a browser-trust limitation never substitutes for browser acceptance", () => {
+  for (const withSandbox of [false, true])
+    for (const status of ["failed", "skipped"] as const) {
+      const receipt = passing(withSandbox);
+      receipt.native.tlsMode = "managed";
+      receipt.limits.push(managedBrowserTrustLimit);
+      receipt.checks = receipt.checks.map((check) =>
+        ["sign-in", "settings-models", "browser-clean"].includes(check.name)
+          ? { ...check, status, detail: "Managed CA is not trusted by Chromium" }
+          : check,
+      );
+      expect(finishReceipt(receipt, new Date()).passed).toBe(false);
+    }
+  const missingTrust = passing();
+  missingTrust.checks = missingTrust.checks.filter((check) => check.name !== "public-trust");
+  expect(finishReceipt(missingTrust, new Date()).failure).toContain("public-trust was not run");
 });
 
 test("--keep passes only when cleanup was deliberately skipped", () => {

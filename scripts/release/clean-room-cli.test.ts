@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { nativeInstallationFixture } from "../../test/fixtures/native-installation";
 import { namespaceManifest, receiptPath } from "./clean-room-model";
 
 const root = resolve(import.meta.dir, "../..");
@@ -85,6 +86,154 @@ test("unreadable native input records failure without contacting Kubernetes, Doc
     await f.close();
   }
 });
+
+test.each(["unconfirmed install", "unconfirmed public CA"] as const)(
+  "managed commissioning never adopts trust or reports browser acceptance after %s",
+  async (boundary) => {
+    const f = await fixture();
+    let ownedReceipt: string | undefined;
+    try {
+      const token = join(f.directory, "token");
+      await writeFile(token, "owned-private-provisioner-token", { mode: 0o600 });
+      const input = join(f.directory, "native.json");
+      const base = nativeInstallationFixture();
+      await writeFile(
+        input,
+        JSON.stringify({
+          schema: 1,
+          tlsMode: "managed",
+          factoryOrigin: "https://factory.owned-cleanroom.invalid",
+          forgejoOrigin: "https://git.owned-cleanroom.invalid",
+          ingressClass: "owned",
+          ingressNamespaceLabels: { "kubernetes.io/metadata.name": "owned-ingress" },
+          provisionerTokenFile: token,
+          configuration: {
+            profile: base.profile,
+            runtime: base.runtime,
+            workloadImage: base.workloadImage,
+            workerSelector: base.workerSelector,
+            resources: base.resources,
+            egressHosts: ["git.owned-cleanroom.invalid"],
+          },
+        }),
+        { mode: 0o600 },
+      );
+      const chart = join(f.directory, "owned-chart.tgz");
+      await writeFile(chart, "synthetic chart handled only by the owned Helm stub");
+      const defaults = Bun.YAML.parse(
+        await readFile(join(root, "deploy/helm/factory/values.yaml"), "utf8"),
+      ) as Record<string, unknown>;
+      defaults["image"] = image;
+      const state = join(f.directory, "namespace.json");
+      const stub = `
+        import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+        const args = process.argv.slice(2);
+        appendFileSync(${JSON.stringify(f.trace)}, JSON.stringify({ tool: process.argv[1].split("/").at(-1), args }) + "\\n");
+      `;
+      await writeFile(
+        join(f.directory, "helm"),
+        `#!${process.execPath}
+        ${stub}
+        if (args.includes("version")) console.log("v4.2.2");
+        else if (args.includes("show") && args.includes("chart"))
+          console.log(JSON.stringify({ name: "factory", version: "0.0.0-owned", appVersion: "0.0.0-owned" }));
+        else if (args.includes("show") && args.includes("values"))
+          console.log(${JSON.stringify(JSON.stringify(defaults))});
+        else if (args.includes("template")) console.log("");
+        else if (args.includes("install")) {
+          const values = Bun.YAML.parse(readFileSync(args[args.indexOf("--values") + 1], "utf8"));
+          if (values.ingress.tlsSecret !== "") process.exit(3);
+          process.exit(${boundary === "unconfirmed install" ? 1 : 0});
+        } else process.exit(2);
+        `,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(f.directory, "kubectl"),
+        `#!${process.execPath}
+        ${stub}
+        if (args.includes("version")) console.log(JSON.stringify({
+          clientVersion: { gitVersion: "v1.35.6" }, serverVersion: { gitVersion: "v1.35.6" }
+        }));
+        else if (args.includes("create") && args.includes("-f")) {
+          const body = await Bun.stdin.json();
+          if (body.kind === "Namespace") {
+            body.metadata.uid = "original-managed-namespace";
+            writeFileSync(${JSON.stringify(state)}, JSON.stringify(body));
+            console.log(JSON.stringify(body));
+          } else if (body.kind === "Secret" && !body.metadata.name.endsWith("-ingress-tls")) {
+            appendFileSync(${JSON.stringify(f.trace)}, JSON.stringify({ createdSecretKeys: Object.keys(body.stringData) }) + "\\n");
+            console.log("secret/" + body.metadata.name);
+          } else process.exit(3);
+        } else if (args.includes("get")) {
+          const kind = args[args.indexOf("get") + 1];
+          if (kind === "nodes") console.log(JSON.stringify({ items: [{
+            metadata: { name: "owned-node" }, status: { allocatable: { memory: "100Gi", cpu: "16" } }
+          }] }));
+          else if (kind === "pods" || kind === "namespaces" || kind === "ingresses")
+            console.log(JSON.stringify({ items: [] }));
+          else if (kind === "namespace") {
+            try { console.log(readFileSync(${JSON.stringify(state)}, "utf8")); }
+            catch { process.exit(1); }
+          } else if (kind === "secret") {
+            console.error("synthetic-private-diagnostic-must-not-leak");
+            process.exit(1);
+          } else process.exit(2);
+        } else process.exit(2);
+        `,
+        { mode: 0o700 },
+      );
+      const result = await f.run([
+        "--chart",
+        chart,
+        "--native-fixture",
+        input,
+        "--context",
+        "owned-context",
+        "--keep",
+      ]);
+      expect(result.exit).toBe(1);
+      ownedReceipt = /receipt (.+\/factory-cleanroom-[a-f0-9]{8}\.json)/.exec(result.stdout)?.[1];
+      if (!ownedReceipt) throw Error("Owned managed commissioning receipt was not recorded");
+      const text = await readFile(ownedReceipt, "utf8");
+      const receipt = JSON.parse(text);
+      expect(receipt.native.tlsMode).toBe("managed");
+      expect(receipt.namespaceUID).toBe("original-managed-namespace");
+      expect(receipt.cleanup.state).toBe("kept");
+      expect(receipt.passed).toBe(false);
+      expect(receipt.checks.some((check: { name: string }) => check.name === "sign-in")).toBe(
+        false,
+      );
+      const trace = (await readFile(f.trace, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const trustReads = trace.filter((call) => call.args?.includes("secret"));
+      if (boundary === "unconfirmed install") {
+        expect(trustReads).toHaveLength(0);
+        expect(
+          receipt.checks.find((check: { name: string }) => check.name === "install").status,
+        ).toBe("failed");
+      } else {
+        expect(trustReads).toHaveLength(1);
+        expect(trustReads[0].args.at(-1)).toStartWith("jsonpath=");
+        expect(trustReads[0].args.at(-1)).not.toContain("ca.key");
+        expect(
+          receipt.checks.find((check: { name: string }) => check.name === "public-trust").status,
+        ).toBe("failed");
+      }
+      expect(
+        trace.filter((call) => call.createdSecretKeys).map((call) => call.createdSecretKeys),
+      ).toEqual([["configuration.json"], ["token"]]);
+      expect(result.stdout + result.stderr + text).not.toContain("synthetic-private-diagnostic");
+      expect(result.stdout + result.stderr + text).not.toContain("owned-private-provisioner-token");
+    } finally {
+      if (ownedReceipt) await rm(ownedReceipt, { force: true });
+      await f.close();
+    }
+  },
+  15_000,
+);
 
 test.each(["missing UID", "changed context"] as const)(
   "cleanup refuses %s before inventory or destructive commands",

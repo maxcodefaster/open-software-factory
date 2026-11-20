@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  approveRequirementRevision,
-  canonicalRequirementContent,
-  createRequirementRevision,
-} from "./requirement";
+import { canonicalRequirementContent, createRequirementRevision } from "./requirement";
 
 describe("Requirement Revision", () => {
   const content = {
@@ -27,7 +23,7 @@ describe("Requirement Revision", () => {
     expect(canonicalRequirementContent(content)).toBe(revision.canonicalContent);
   });
 
-  test("rejects duplicate criteria and mismatched approval", () => {
+  test("rejects duplicate criteria", () => {
     expect(() =>
       canonicalRequirementContent({
         summary: "Export",
@@ -35,16 +31,5 @@ describe("Requirement Revision", () => {
         nonGoals: [],
       }),
     ).toThrow("duplicates");
-    expect(() =>
-      approveRequirementRevision(
-        { id: crypto.randomUUID(), ticketId: crypto.randomUUID() },
-        {
-          id: crypto.randomUUID(),
-          ticketId: crypto.randomUUID(),
-          requirementRevisionId: crypto.randomUUID(),
-          approvedBy: crypto.randomUUID(),
-        },
-      ),
-    ).toThrow("exact Ticket revision");
   });
 });

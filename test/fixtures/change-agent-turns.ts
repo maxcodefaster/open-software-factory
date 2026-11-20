@@ -155,6 +155,7 @@ export async function fixture(
   let installedSkills: string[] = [];
   const nativeInstructions = new Map<string, unknown>();
   const nativeMCPServers = new Set<string>();
+  const nativeSessions = new Set([sessionID]);
   const nativePermissions = new Map<
     string,
     Array<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }>
@@ -236,6 +237,7 @@ export async function fixture(
     if (path === "/api/session") {
       if (request.method === "POST") {
         const body = await request.json();
+        nativeSessions.add(body.id);
         if (body.permissions) nativePermissions.set(body.id, structuredClone(body.permissions));
         return Response.json({ data: body });
       }
@@ -308,11 +310,8 @@ export async function fixture(
           },
         ],
       });
-    if (
-      path.endsWith(`/${sessionID}`) ||
-      /^\/api\/session\/ses_factory_review_[a-f0-9]+$/.test(path)
-    ) {
-      const nativeID = fixtureValue(path.split("/").at(-1), "native Session ID");
+    const nativeID = path.match(/^\/api\/session\/([^/]+)$/)?.[1];
+    if (nativeID && nativeSessions.has(nativeID)) {
       if (request.method === "PATCH") {
         const body = await request.json();
         if (body.permissions) nativePermissions.set(nativeID, structuredClone(body.permissions));

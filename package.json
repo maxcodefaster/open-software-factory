@@ -65,7 +65,7 @@
     "@opencode/client": "2.0.27",
     "@plantuml/mcp-js": "0.2.3",
     "@rocicorp/zero": "1.10.0",
-    "@solidjs/web": "2.0.0-rc.18",
+    "@solidjs/web": "2.0.3",
     "@tanstack/solid-router": "2.0.0-rc.9",
     "@tanstack/solid-start": "2.0.0-rc.9",
     "@tiptap/core": "3.31.4",
@@ -92,7 +92,7 @@
     "modern-screenshot": "4.7.0",
     "pdfjs-dist": "6.4.299",
     "postgres": "3.4.9",
-    "solid-js": "2.0.0-rc.18",
+    "solid-js": "2.0.3",
     "stream-json": "3.8.0",
     "turndown": "7.2.4",
     "turndown-plugin-gfm": "1.0.2",
@@ -104,9 +104,9 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@playwright/test": "1.64.0",
-    "@solidjs/compiler": "2.0.0-rc.18",
-    "@solidjs/signals": "2.0.0-rc.18",
-    "@solidjs/vite-plugin": "3.0.0-next.51",
+    "@solidjs/compiler": "2.0.2",
+    "@solidjs/signals": "2.0.3",
+    "@solidjs/vite-plugin": "3.0.1",
     "@types/bun": "1.4.3",
     "@types/node": "24.19.2",
     "typescript": "6.0.3",
@@ -116,11 +116,11 @@
     "@tanstack/start-server-core@1.169.26": "patches/tanstack-start-server-core-security.patch"
   },
   "overrides": {
-    "@solidjs/babel-plugin": "2.0.0-rc.18",
-    "@solidjs/compiler": "2.0.0-rc.18",
-    "@solidjs/signals": "2.0.0-rc.18",
-    "solid-js": "2.0.0-rc.18",
-    "@solidjs/web": "2.0.0-rc.18",
+    "@solidjs/babel-plugin": "2.0.2",
+    "@solidjs/compiler": "2.0.2",
+    "@solidjs/signals": "2.0.3",
+    "solid-js": "2.0.3",
+    "@solidjs/web": "2.0.3",
     "@tanstack/solid-start": "2.0.0-rc.9",
     "tinypool": "2.1.2"
   }

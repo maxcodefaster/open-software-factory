@@ -8,12 +8,12 @@ import {
   comparisonCases,
   learningComparisonPlan,
 } from "../../../../packages/conversation-domain/src/learning-comparison";
+import { calibratedResult } from "../../../../test/fixtures/learning";
 import {
   comparisonAfter,
   comparisonBefore,
   comparisonExample,
 } from "../../../../test/fixtures/learning-comparison";
-import { calibratedResult } from "../../../../test/fixtures/learning";
 import { fixtureValue } from "../../../../test/fixtures/value";
 import { calibrationCases, calibrationPassed } from "./calibration";
 
@@ -124,6 +124,19 @@ test("the judge contract separates product evidence from verification claims", (
     "An observed product defect is a fulfillment problem even if checks pass.",
   );
   expect(workReviewInstructions).not.toContain("calibration:");
+});
+
+test("the judge treats discovery groups as bounded observations, not proof of waste or successful checks", () => {
+  for (const instruction of [
+    "Native tool counts and completed states alone prove neither product fulfillment nor executed checks.",
+    "Discovery category repeated means multiple category calls, not equal inputs.",
+    "turn-local ordinal IDs, never cross-turn identities",
+    "Equal inputs do not establish unchanged state or avoidable rework.",
+    "otherwise leave rework unknown",
+    "Inventory completeness is separate from tool classification",
+    "Finite discovery hints are not an exhaustive audit",
+  ])
+    expect(workReviewInstructions).toContain(instruction);
 });
 
 test("the scope calibration states a product requirement separately from required checks", () => {

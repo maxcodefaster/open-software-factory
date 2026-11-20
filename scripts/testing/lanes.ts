@@ -8,6 +8,7 @@ const nativeNames = new Set([
   "substrate-workspaces.native",
   "developer-ide-kubernetes.native",
   "substrate-coding-stop",
+  "substrate-writer-input-stop",
   "repository-mirrors.native",
   "forgejo-diagnostics.native",
   "native-project-releases",

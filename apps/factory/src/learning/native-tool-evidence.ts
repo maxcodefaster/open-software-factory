@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { buildBrowserToolCatalogue } from "../../../../packages/conversation-domain/src/browser-tools";
+import { candidateReviewToolCatalogue } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { LearningCase } from "../../../../packages/conversation-domain/src/learning";
 import { readNativeSessionArchive } from "../agent/session-archive";
 import { objectDigest, type PrivateObjects } from "../storage/objects";
@@ -17,7 +18,7 @@ export type SavedNativeToolArchive = {
   producerVersion: string;
 };
 type Evidence = LearningCase["evidence"][number];
-const limits = { messages: 256, parts: 2_048, commandCharacters: 4_096 };
+const limits = { messages: 256, parts: 2_048, commandCharacters: 4_096, equivalenceGroups: 8 };
 const archiveLimits = {
   bytes: 2 * 1024 ** 2,
   chunks: 2,
@@ -38,10 +39,53 @@ const toolNames = new Set([
   "websearch",
   "task",
   "skill",
+  "subagent",
+  "question",
 ]);
 const browserTools = new Set<string>(
   buildBrowserToolCatalogue.map(({ name }) => `factory_browser_${name}`),
 );
+const reviewTools = new Set<string>(
+  candidateReviewToolCatalogue.map(({ name }) => `factory_browser_${name}`),
+);
+// Pinned SessionMessageInfo variants outside this projection's assistant-tool scope.
+const excludedMessages = new Set([
+  "agent-switched",
+  "model-switched",
+  "location-switched",
+  "synthetic",
+  "system",
+  "skill",
+  "shell",
+  "compaction",
+  "idle",
+]);
+const configurationFiles = new Set([
+  "package.json",
+  "tsconfig.json",
+  "jsconfig.json",
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.production",
+  "vite.config.ts",
+  "vite.config.js",
+  "vite.config.mts",
+  "vite.config.mjs",
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "Dockerfile",
+]);
+type DiscoveryCategory = "port-discovery" | "process-discovery" | "config-discovery";
+type DiscoveryGroup = {
+  category: DiscoveryCategory;
+  id: number;
+  calls: number;
+  completed: number;
+  failed: number;
+};
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -150,11 +194,15 @@ function boundedArchiveObjects(objects: PrivateObjects) {
     },
   };
 }
-function discovery(command: string) {
-  // Deliberately recognize only a leading executable, not quoted prose or an
-  // arbitrary shell program. These are method hints, not an execution audit.
+function configurationPath(path: string) {
+  return configurationFiles.has(path.slice(path.lastIndexOf("/") + 1));
+}
+function discovery(command: string): DiscoveryCategory | null {
+  // Finite simple-command hints, never a shell parser. In particular do not
+  // interpret quoting, expansion, pipelines, redirection or command sequences.
+  if (!/^[\t A-Za-z0-9_./:=,+%@-]+$/.test(command)) return null;
   const executable = command.match(
-    /^\s*(?:\/(?:usr\/)?s?bin\/)?(ss|netstat|lsof|ps|pgrep)(?=\s|$)/,
+    /^\s*(?:\/(?:usr\/)?s?bin\/)?(ss|netstat|lsof|ps|pgrep|cat)(?=\s|$)/,
   )?.[1];
   if (executable === "ps" || executable === "pgrep") return "process-discovery";
   if (
@@ -163,6 +211,12 @@ function discovery(command: string) {
     (executable === "lsof" && /\s-[a-zA-Z]*i(?:TCP|UDP|\b)/.test(command))
   )
     return "port-discovery";
+  if (executable === "cat") {
+    const args = command.trim().split(/\s+/).slice(1);
+    if (args[0] === "--") args.shift();
+    if (args.length === 1 && args[0] && !args[0].startsWith("-") && configurationPath(args[0]))
+      return "config-discovery";
+  }
   return null;
 }
 
@@ -177,7 +231,7 @@ export async function readNativeToolEvidence(
   const unknown = (reason: string): Evidence => ({
     id,
     kind: "configuration",
-    body: JSON.stringify({ version: 1, status: "unknown", reason }),
+    body: JSON.stringify({ version: 2, status: "unknown", reason }),
     truncated: false,
   });
   if (!saved) return unknown("no-saved-checkpoint");
@@ -232,7 +286,10 @@ export async function readNativeToolEvidence(
         elapsedMS: number;
       }
     >();
-    const methods = new Map<string, number>();
+    const methods = new Map<DiscoveryCategory, number>();
+    // Raw comparison keys live only in this bounded read. Emit ordinal IDs, not
+    // raw inputs or dictionary-testable hashes. Groups never join across turns.
+    const groups = new Map<string, DiscoveryGroup>();
     const coverage = {
       earlierMessagesExcluded: start,
       turnMessages: turn.length,
@@ -240,6 +297,7 @@ export async function readNativeToolEvidence(
       inspectedParts: 0,
       omittedMessages: Math.max(0, turn.length - limits.messages),
       omittedParts: 0,
+      excludedMessages: 0,
       unclassifiedMessages: 0,
       unclassifiedParts: 0,
       toolCalls: 0,
@@ -247,11 +305,21 @@ export async function readNativeToolEvidence(
       shellCalls: 0,
       classifiedShellCalls: 0,
       oversizedShellInputs: 0,
+      unavailableMethodInputs: 0,
+      omittedEquivalenceGroups: 0,
+      omittedEquivalenceCalls: 0,
+      inventoryComplete: false,
+      toolClassificationComplete: false,
+      methodInputsComplete: false,
       limits: { ...limits, archive: archiveLimits },
     };
     for (const message of turn.slice(0, limits.messages)) {
       coverage.inspectedMessages++;
       const value = record(message);
+      if (typeof value["type"] === "string" && excludedMessages.has(value["type"])) {
+        coverage.excludedMessages++;
+        continue;
+      }
       if (value["type"] !== "assistant" || !Array.isArray(value["content"])) {
         coverage.unclassifiedMessages++;
         continue;
@@ -262,18 +330,20 @@ export async function readNativeToolEvidence(
       for (const raw of content.slice(0, take)) {
         coverage.inspectedParts++;
         const part = record(raw);
-        if (typeof part["type"] !== "string") {
+        if (part["type"] === "text" || part["type"] === "reasoning") continue;
+        if (part["type"] !== "tool") {
           coverage.unclassifiedParts++;
           continue;
         }
-        if (part["type"] !== "tool") continue;
         const name = part["name"];
         const tool =
           typeof name === "string" && toolNames.has(name)
             ? name
             : typeof name === "string" && browserTools.has(name)
               ? "browser"
-              : "other";
+              : typeof name === "string" && reviewTools.has(name)
+                ? "review"
+                : "other";
         const entry = tools.get(tool) ?? {
           tool,
           calls: 0,
@@ -308,31 +378,99 @@ export async function readNativeToolEvidence(
           entry.timed++;
           entry.elapsedMS += completed - created;
         }
-        if (tool === "shell" || tool === "bash") {
-          coverage.shellCalls++;
-          if (status !== "completed" && status !== "error") continue;
-          const command = record(state["input"])["command"];
-          if (typeof command !== "string") continue;
+        const shell = tool === "shell" || tool === "bash";
+        if (shell) coverage.shellCalls++;
+        if (!shell && tool !== "read") continue;
+        if (status !== "completed" && status !== "error") {
+          coverage.unavailableMethodInputs++;
+          continue;
+        }
+        // Pinned OpenCode 2 shell: command/workdir/timeout/background.
+        // Pinned read: path/offset/limit. Do not guess alternate input fields.
+        const input = record(state["input"]);
+        let category: DiscoveryCategory | null;
+        let key: string;
+        if (shell) {
+          const command = input["command"];
+          if (typeof command !== "string") {
+            coverage.unavailableMethodInputs++;
+            continue;
+          }
           if (command.length > limits.commandCharacters) {
             coverage.oversizedShellInputs++;
             continue;
           }
-          const category = discovery(command);
-          if (category) {
-            coverage.classifiedShellCalls++;
-            methods.set(category, (methods.get(category) ?? 0) + 1);
+          const workdir = input["workdir"],
+            timeout = input["timeout"],
+            background = input["background"];
+          if (
+            (workdir !== undefined &&
+              (typeof workdir !== "string" || workdir.length > limits.commandCharacters)) ||
+            (timeout !== undefined &&
+              (typeof timeout !== "number" || !Number.isSafeInteger(timeout) || timeout < 0)) ||
+            (background !== undefined && typeof background !== "boolean")
+          ) {
+            coverage.unavailableMethodInputs++;
+            continue;
           }
+          category = discovery(command);
+          key = JSON.stringify([tool, command, workdir, timeout, background]);
+          if (category) coverage.classifiedShellCalls++;
+        } else {
+          const path = input["path"],
+            offset = input["offset"],
+            limit = input["limit"];
+          if (
+            typeof path !== "string" ||
+            path.length > limits.commandCharacters ||
+            [offset, limit].some(
+              (value) =>
+                value !== undefined &&
+                (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1),
+            ) ||
+            (typeof limit === "number" && limit > 2_000)
+          ) {
+            coverage.unavailableMethodInputs++;
+            continue;
+          }
+          category = configurationPath(path) ? "config-discovery" : null;
+          key = JSON.stringify([tool, path, offset, limit]);
         }
+        if (!category) continue;
+        methods.set(category, (methods.get(category) ?? 0) + 1);
+        const group = groups.get(key) ?? {
+          category,
+          id: groups.size,
+          calls: 0,
+          completed: 0,
+          failed: 0,
+        };
+        groups.set(key, group);
+        group.calls++;
+        if (status === "completed") group.completed++;
+        else group.failed++;
       }
     }
-    const truncated =
-      coverage.omittedMessages > 0 ||
-      coverage.omittedParts > 0 ||
-      coverage.unclassifiedMessages > 0 ||
-      coverage.unclassifiedParts > 0 ||
-      coverage.oversizedShellInputs > 0;
-    const body = JSON.stringify({
-      version: 1,
+    coverage.inventoryComplete =
+      coverage.omittedMessages === 0 &&
+      coverage.omittedParts === 0 &&
+      coverage.unclassifiedMessages === 0 &&
+      coverage.unclassifiedParts === 0;
+    coverage.toolClassificationComplete =
+      coverage.inventoryComplete && coverage.unclassifiedToolCalls === 0;
+    coverage.methodInputsComplete =
+      coverage.inventoryComplete &&
+      coverage.oversizedShellInputs === 0 &&
+      coverage.unavailableMethodInputs === 0;
+    const ranked = [...groups.values()].sort((a, b) => b.calls - a.calls || a.id - b.id);
+    const visible = ranked.slice(0, limits.equivalenceGroups);
+    function omit(group: DiscoveryGroup) {
+      coverage.omittedEquivalenceGroups++;
+      coverage.omittedEquivalenceCalls += group.calls;
+    }
+    for (const group of ranked.slice(limits.equivalenceGroups)) omit(group);
+    const packet = {
+      version: 2,
       status: "observed",
       provenance: {
         turnID,
@@ -354,13 +492,33 @@ export async function readNativeToolEvidence(
           category,
           calls,
           repeated: calls > 1,
+          groups: [] as Omit<DiscoveryGroup, "category">[],
         })),
       coverage,
       limitations:
-        "This saved turn's assistant tool parts only, not child Sessions, external effects or correctness. Failures are native error states. Timings are recorded created-to-completed milliseconds, including waits; summed tool times are not wall time. Discovery categories are leading-executable hints, not shell interpretation. Arguments, outputs, URLs, paths and transcript text are withheld. Source references identify the last confirmed generation, not turn-atomic Source.",
-    });
+        "Assistant tool parts only; no child Sessions, effects or correctness. Native error states; timings include waits and are not wall time. Discovery hints are finite; groups compare explicit inputs in this turn, not unchanged state or wasted work. Arguments, outputs, custom names, URLs, paths and text withheld. Source is last confirmed, not turn-atomic.",
+    };
+    function serialize() {
+      for (const method of packet.methods)
+        method.groups = visible
+          .filter((group) => group.category === method.category)
+          .map(({ category: _category, ...group }) => group);
+      return JSON.stringify(packet);
+    }
+    let body = serialize();
+    // Keep every tool/category count before optional equivalence detail. Prefer
+    // repeated groups and report every omitted group/call, never cut JSON.
+    while (Buffer.byteLength(body) > nativeToolEvidenceMaximumBytes && visible.length) {
+      const group = visible.pop();
+      if (group) omit(group);
+      body = serialize();
+    }
     if (Buffer.byteLength(body) > nativeToolEvidenceMaximumBytes)
       return unknown("projection-exceeds-bound");
+    const truncated =
+      !coverage.inventoryComplete ||
+      !coverage.methodInputsComplete ||
+      coverage.omittedEquivalenceGroups > 0;
     return { id, kind: "artifact", body, truncated };
   } catch (cause) {
     // Archive/object errors can contain private text and signed URLs.

@@ -35,6 +35,17 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(() => browserLane("unclassified.live.spec.ts")).toThrow("Unclassified");
 });
 
+test("writer input Stop requires native OpenCode but polling-only proofs stay in controllers", () => {
+  expect(integrationLane("test/integration/substrate-writer-input-stop.test.ts")).toBe("native");
+  for (const name of [
+    "candidate-review-delivery",
+    "candidate-review",
+    "review-recording",
+    "session-archive-store",
+  ])
+    expect(integrationLane(`test/integration/${name}.test.ts`)).toBe("controllers");
+});
+
 test("the isolated rootless proxy component needs neither Factory build nor PostgreSQL", () => {
   const component = "test/integration/substrate-rootless-proxy.native.test.ts";
   const product = "test/integration/substrate-workspaces.native.test.ts";
