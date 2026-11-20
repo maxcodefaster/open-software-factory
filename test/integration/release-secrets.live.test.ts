@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { releaseInstallation } from "../fixtures/release-installation";
+import {
+  readReleaseNativeBinding,
+  readReleaseNativeTemplate,
+  releaseInstallation,
+} from "../fixtures/release-installation";
 import { callFactoryFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { z } from "zod";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
 test.skipIf(!installation)(
@@ -54,37 +59,64 @@ test.skipIf(!installation)(
       expect(
         await callFactoryFunction(f.base, "getProjectModels", [project], { cookie: outsider }),
       ).toMatchObject({ ok: false, status: 404 });
-      const runtimes = await f.database.client<
-        { id: string; namespace: string; state: string }[]
-      >`SELECT id, kubernetes_namespace AS namespace, state FROM factory.runtime_attempt WHERE project_id = ${project} AND state IN ('ready', 'starting')`;
+      const runtimes = await f.database.client<{ id: string }[]>`
+        SELECT id FROM factory.runtime_attempt WHERE project_id=${project}
+        AND state IN ('ready','starting') ORDER BY id`;
+      expect(runtimes.length).toBeGreaterThan(0);
+      const templates = [];
       for (const runtime of runtimes) {
-        const child = Bun.spawn(
-          [
-            "kubectl",
-            "--context",
-            "orbstack",
-            "-n",
-            runtime.namespace,
-            "get",
-            "secret",
-            "runtime-assignment",
-            "-o",
-            "json",
-          ],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        const [text, exit] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-        if (exit !== 0) throw new Error("Exact release assignment could not be inspected");
-        const secret = JSON.parse(text) as {
-          metadata: { labels: Record<string, string> };
-          data: Record<string, string>;
-        };
-        expect(secret.metadata.labels["factory.dev/project"]).toBe(project);
-        const assignment = Buffer.from(secret.data["assignment.json"] ?? "", "base64").toString();
-        f.noSecrets(assignment);
-        expect((JSON.parse(assignment) as { runtimeAttemptId: string }).runtimeAttemptId).toBe(
-          runtime.id,
-        );
+        const binding = await readReleaseNativeBinding(f.database, project, runtime.id);
+        const native = f.native(binding.intent.connection);
+        const original = await readReleaseNativeTemplate(native, binding);
+        // Inspect the entire credential-bearing frozen native specification,
+        // not Factory's deliberately compact metadata or redacted API output.
+        const text = JSON.stringify(original);
+        f.noSecrets(text);
+        const credential = await native.credential();
+        expect(text.includes(credential)).toBe(false);
+        expect(() => f.noSecrets(`negative native disclosure probe ${credential}`)).toThrow();
+        const template = z
+          .object({
+            containers: z.array(
+              z.object({
+                name: z.string(),
+                env: z.array(z.object({ name: z.string(), value: z.string() })),
+              }),
+            ),
+          })
+          .parse(original);
+        const environments = template.containers
+          .flatMap((container) => container.env)
+          .filter(({ name }) => name === "FACTORY_SUBSTRATE_BOOTSTRAP");
+        expect(environments.length).toBe(1);
+        const bootstrap = z
+          .object({
+            sourceHandoff: z.boolean(),
+            assignment: z.object({
+              runtimeAttemptId: z.uuid(),
+              generation: z.number().int().positive(),
+              repositoryIdentity: z.uuid(),
+              controlUrl: z.string(),
+            }),
+            source: z.object({ projectId: z.uuid(), workspaceId: z.uuid() }),
+          })
+          .parse(JSON.parse(environments[0]?.value ?? ""));
+        expect(bootstrap).toMatchObject({
+          sourceHandoff: Boolean(binding.workspaceID),
+          assignment: {
+            runtimeAttemptId: runtime.id,
+            generation: binding.generation,
+            repositoryIdentity: project,
+            controlUrl: binding.intent.connectorURL,
+          },
+          source: { projectId: project, workspaceId: binding.workspaceID ?? runtime.id },
+        });
+        templates.push({
+          attemptID: runtime.id,
+          templateUID: binding.intent.templateUID,
+          version: binding.intent.templateVersion,
+          sha256: binding.intent.templateSHA256,
+        });
       }
       const outcomes = await f.database
         .client`SELECT outcome_summary FROM factory.agent_turn WHERE project_id = ${project}`;
@@ -126,8 +158,10 @@ test.skipIf(!installation)(
           "getSystemSkills",
         ],
         runtimeIDs: runtimes.map(({ id }) => id),
+        nativeTemplates: templates,
         sourceFiles: files.length,
         negativeProviderAndForgeProbes: true,
+        negativeNativeCredentialProbes: true,
       });
     } finally {
       await f.close();

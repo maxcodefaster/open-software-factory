@@ -1,7 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { and, eq, sql as query } from "drizzle-orm";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { createTicketService } from "../../apps/factory/src/change/service";
 import type {
   RequirementApprovalView,
   RequirementRevisionView,
@@ -27,7 +29,10 @@ import {
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import { insertInitialTicketIn } from "../../packages/ticket-authoring/src/authoring";
+import {
+  appendTicketAuthoringIn,
+  insertInitialTicketIn,
+} from "../../packages/ticket-authoring/src/authoring";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 
@@ -139,6 +144,20 @@ function controller(options?: {
     options?.protect,
     forge,
   );
+}
+
+function ticketService(changes = controller()) {
+  const unused = async () => {
+    throw new Error("Reads and ordinary saves must not start an engine");
+  };
+  return createTicketService({
+    database,
+    access: createAccessController(database),
+    documents: createTicketDocumentController(database),
+    trash: { trash: unused, restore: unused },
+    changes: { ...changes, start: unused },
+    agent: { admitStartIn: unused },
+  });
 }
 
 async function settle(changes: ReturnType<typeof controller>, id: string, state: string) {
@@ -452,6 +471,7 @@ test("manual documents keep CAS, partial replay bases, authority and no implicit
   await expect(documents.save(ticketID, stranger, input)).rejects.toThrow("Project not found");
   const [saved] = await database.client`
     SELECT title,description,state,version::integer FROM factory.ticket WHERE id=${ticketID}`;
+  if (!saved) throw new Error("Saved Ticket is missing");
   expect(saved).toEqual({
     title: input.title,
     description: input.description,
@@ -459,6 +479,33 @@ test("manual documents keep CAS, partial replay bases, authority and no implicit
     version: 4,
   });
   expect(await database.client`SELECT id FROM factory.requirement_approval`).toHaveLength(0);
+  expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
+  expect(await database.client`SELECT id FROM factory.change`).toHaveLength(0);
+  const detail = await ticketService().detail(userID, ticketID);
+  expect(detail.ticket).toMatchObject(saved);
+  expect(detail.documentRevisions.map((revision) => revision.id)).toEqual([
+    complete.id,
+    partial.id,
+    current.id,
+  ]);
+  expect(detail.revisions.map((revision) => revision.id)).toEqual([complete.id, current.id]);
+  expect(detail.documentRevisions[1]).toMatchObject({
+    requirementRevisionId: null,
+    author: "Owned Change author",
+    authorKind: "human",
+  });
+  expect(detail.documentRevisions[1]?.approvalId).toBeUndefined();
+  for (const revision of [...detail.revisions, ...detail.documentRevisions])
+    expect(revision.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+  expect(detail).toMatchObject({
+    proposal: null,
+    origin: null,
+    followUps: [],
+    technicalDesignPresent: false,
+    technicalPlanningPending: false,
+    technicalDesigns: [],
+    implementationOrder: null,
+  });
   expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
   expect(await database.client`SELECT id FROM factory.change`).toHaveLength(0);
 });
@@ -533,6 +580,29 @@ test.each([false, true])(
     expect(
       await database.client`SELECT id FROM factory.change WHERE ticket_id=${follow.commandId}`,
     ).toHaveLength(0);
+    const service = ticketService(changes);
+    const detail = await service.detail(userID, ticketID);
+    expect(detail.revisions[0]).toMatchObject({
+      id: revision.id,
+      canonicalContent: revision.canonicalContent,
+      contentDigest: revision.contentDigest,
+      author: "Owned Change author",
+    });
+    expect(detail.revisions[0]?.approvalId).toBeString();
+    expect(detail.revisions[0]?.approvedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+    if (saved) {
+      expect(detail.documentRevisions[0]).toMatchObject({
+        id: saved.id,
+        requirementRevisionId: revision.id,
+        canonicalContent: canonical,
+      });
+      expect(detail.documentRevisions[0]?.approvalId).toBeUndefined();
+    }
+    expect(detail.followUps).toEqual([{ id: follow.commandId, title: "Follow-up: Saved Ticket" }]);
+    expect((await service.detail(userID, follow.commandId)).origin).toEqual({
+      id: ticketID,
+      title: "Saved Ticket",
+    });
     await expect(
       documents.followUp(ticketID, userID, { ...follow, expectedDocumentId: crypto.randomUUID() }),
     ).rejects.toThrow("different work");
@@ -562,6 +632,8 @@ test("proposal supersession and full Planning rollback use the caller transactio
     INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,created_by)
     VALUES(${proposalID},${conversationID},1,'requirement','project-agent','plan','Proposal',
       ${JSON.stringify(payload)}::jsonb,${userID})`;
+  const service = ticketService();
+  expect((await service.detail(userID, ticketID)).proposal?.id).toBe(proposalID);
   const input = { ...documentInput(), proposalEntryId: proposalID };
   const documents = createTicketDocumentController(database, async (sql, context) => {
     expect(context).toEqual({
@@ -584,16 +656,35 @@ test("proposal supersession and full Planning rollback use the caller transactio
     .update(projectMembership)
     .set({ role: "product-contributor" })
     .where(eq(projectMembership.userId, userID));
+  expect((await service.detail(userID, ticketID)).proposal).toBeNull();
   await expect(documents.save(ticketID, userID, input)).rejects.toThrow("Developer access");
   await database.db
     .update(projectMembership)
     .set({ role: "developer" })
     .where(eq(projectMembership.userId, userID));
+  const newerID = crypto.randomUUID();
   await database.client`
     INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,created_by)
-    VALUES(${crypto.randomUUID()},${conversationID},2,'requirement','project-agent','plan','Newer',
+    VALUES(${newerID},${conversationID},2,'requirement','project-agent','plan','Newer',
       ${JSON.stringify(payload)}::jsonb,${userID})`;
+  expect((await service.detail(userID, ticketID)).proposal?.id).toBe(newerID);
   await expect(documents.save(ticketID, userID, input)).rejects.toThrow("Elaborate");
+  await appendTicketAuthoringIn(database.db, {
+    ticketId: ticketID,
+    createdBy: userID,
+    title: payload.ticket.title,
+    description: payload.ticket.description,
+    canonicalContent: canonicalRequirementContent(requirement),
+    document: {
+      id: crypto.randomUUID(),
+      ordinal: 1,
+      requirementRevisionId: null,
+      inputDigest: "a".repeat(64),
+      authorKind: "ai",
+      proposalEntryId: newerID,
+    },
+  });
+  expect((await service.detail(userID, ticketID)).proposal).toBeNull();
 });
 
 test("admission rolls back its intent, then persists exact branch identity before external create", async () => {
@@ -715,8 +806,51 @@ test("waiting dependencies retain order identity, exact source and explicit canc
   await expect(
     changes.start(ticketID, userID, { ...admission, commandID: crypto.randomUUID() }),
   ).rejects.toThrow("different implementation order");
-  await database.client`UPDATE factory.implementation_order SET state='cancelled' WHERE command_id=${admission.commandID}`;
+  const service = ticketService(changes);
+  const peer = crypto.randomUUID();
+  await database.db.insert(authUser).values({
+    id: peer,
+    name: "Project contributor",
+    email: `${peer}@change.invalid`,
+  });
+  await database.db.insert(projectMembership).values({
+    projectId: projectID,
+    userId: peer,
+    role: "product-contributor",
+    updatedBy: userID,
+  });
+  expect((await service.detail(peer, ticketID)).implementationOrder).toMatchObject({
+    commandId: admission.commandID,
+    state: "waiting",
+    reason: null,
+    canCancel: false,
+  });
+  await expect(
+    service.cancelImplementation(peer, ticketID, admission.commandID),
+  ).rejects.toMatchObject({ code: "forbidden" });
+  await database.db
+    .update(projectMembership)
+    .set({ role: "product-contributor" })
+    .where(eq(projectMembership.userId, userID));
+  expect((await service.detail(userID, ticketID)).implementationOrder?.canCancel).toBe(true);
+  await service.cancelImplementation(userID, ticketID, admission.commandID);
+  const [cancelled] = await database.client`
+    SELECT cancelled_by AS author,cancelled_at AS at,requirement_revision_id AS revision,
+      source_sha AS source,coding_reasoning AS reasoning FROM factory.implementation_order WHERE command_id=${admission.commandID}`;
+  expect(cancelled).toMatchObject({
+    author: userID,
+    revision: revision.id,
+    source: baseSHA,
+    reasoning: "high",
+  });
+  expect(new Date(String(cancelled?.["at"])).toISOString()).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+  await expect(service.cancelImplementation(userID, ticketID, admission.commandID)).rejects.toThrow(
+    "no longer waiting",
+  );
+  expect((await service.detail(userID, ticketID)).implementationOrder?.state).toBe("cancelled");
   await expect(changes.start(ticketID, userID, admission)).rejects.toThrow("no longer waiting");
+  expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
+  expect(await database.client`SELECT id FROM factory.change`).toHaveLength(0);
 });
 
 test("implementation rejects incomplete documents and pins the exact technical revision and source", async () => {

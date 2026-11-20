@@ -1,7 +1,33 @@
 import { createHash } from "node:crypto";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  sql as expression,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+} from "drizzle-orm";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  administrator,
+  change,
+  developmentWorkspace,
+  projectMembership,
+  runtimeAttempt,
+  ticket,
+  workspaceLifecycleCommand,
+  workspaceShare,
+} from "../../../../packages/db/src/schema";
 import {
   workspaceCommandInput,
   workspaceCommandRead,
@@ -86,8 +112,12 @@ export function createExternalFactoryMCP(services: Services) {
     runtimeHub,
   } = services;
   async function current(workspaceID: string) {
-    const [attempt] = await database.client<{ id: string; state: string }[]>`
-      SELECT id,state FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} ORDER BY generation DESC LIMIT 1`;
+    const [attempt] = await drizzleTransaction(database.client)
+      .select({ id: runtimeAttempt.id, state: runtimeAttempt.state })
+      .from(runtimeAttempt)
+      .where(eq(runtimeAttempt.workspaceId, workspaceID))
+      .orderBy(desc(runtimeAttempt.generation))
+      .limit(1);
     return attempt;
   }
   async function claimLifecycle(
@@ -98,19 +128,28 @@ export function createExternalFactoryMCP(services: Services) {
     targetID?: string,
   ) {
     await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
-    await sql`INSERT INTO factory.workspace_lifecycle_command(id,workspace_id,runtime_attempt_id,actor_id,action)
-      VALUES(${input.requestID},${input.workspaceID},${targetID ?? null},${userID},${action}) ON CONFLICT(id) DO NOTHING`;
-    const [record] = await sql<
-      {
-        workspaceID: string;
-        actorID: string;
-        action: string;
-        attempted: boolean;
-        result: unknown;
-      }[]
-    >`
-      SELECT workspace_id AS "workspaceID",actor_id AS "actorID",action,dispatch_attempted_at IS NOT NULL AS attempted,result
-      FROM factory.workspace_lifecycle_command WHERE id=${input.requestID} FOR UPDATE`;
+    const db = drizzleTransaction(sql);
+    await db
+      .insert(workspaceLifecycleCommand)
+      .values({
+        id: input.requestID,
+        workspaceId: input.workspaceID,
+        runtimeAttemptId: targetID ?? null,
+        actorId: userID,
+        action,
+      })
+      .onConflictDoNothing({ target: workspaceLifecycleCommand.id });
+    const [record] = await db
+      .select({
+        workspaceID: workspaceLifecycleCommand.workspaceId,
+        actorID: workspaceLifecycleCommand.actorId,
+        action: workspaceLifecycleCommand.action,
+        dispatchAttemptedAt: workspaceLifecycleCommand.dispatchAttemptedAt,
+        result: workspaceLifecycleCommand.result,
+      })
+      .from(workspaceLifecycleCommand)
+      .where(eq(workspaceLifecycleCommand.id, input.requestID))
+      .for("update");
     if (
       !record ||
       record.workspaceID !== input.workspaceID ||
@@ -121,8 +160,11 @@ export function createExternalFactoryMCP(services: Services) {
         "conflict",
         "This lifecycle request already records another operation",
       );
-    if (record.attempted) return { claimed: false, result: record.result };
-    await sql`UPDATE factory.workspace_lifecycle_command SET dispatch_attempted_at=now() WHERE id=${input.requestID}`;
+    if (record.dispatchAttemptedAt !== null) return { claimed: false, result: record.result };
+    await db
+      .update(workspaceLifecycleCommand)
+      .set({ dispatchAttemptedAt: expression`now()` })
+      .where(eq(workspaceLifecycleCommand.id, input.requestID));
     return { claimed: true, result: null };
   }
   async function completeLifecycle(
@@ -130,8 +172,10 @@ export function createExternalFactoryMCP(services: Services) {
     input: z.infer<typeof lifecycleInput>,
     result: unknown,
   ) {
-    const retained = JSON.stringify(result ?? { state: "uncertain" });
-    await database.client`UPDATE factory.workspace_lifecycle_command SET result=${retained}::text::jsonb,completed_at=now() WHERE id=${input.requestID}`;
+    await drizzleTransaction(database.client)
+      .update(workspaceLifecycleCommand)
+      .set({ result: result ?? { state: "uncertain" }, completedAt: expression`now()` })
+      .where(eq(workspaceLifecycleCommand.id, input.requestID));
     await database.client.begin((sql) => workspaceAuthorityIn(sql, input.workspaceID, userID));
     return result;
   }
@@ -142,9 +186,18 @@ export function createExternalFactoryMCP(services: Services) {
     await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, projectID));
     const { workspaceID } = personalWorkspaceIdentity(projectID, userID);
     const command = { workspaceID, requestID: input.requestID };
-    const [retained] = await database.client`SELECT id FROM factory.workspace_lifecycle_command
-      WHERE id=${input.requestID} AND workspace_id=${workspaceID} AND actor_id=${userID}
-        AND action='start' AND dispatch_attempted_at IS NOT NULL`;
+    const [retained] = await drizzleTransaction(database.client)
+      .select({ id: workspaceLifecycleCommand.id })
+      .from(workspaceLifecycleCommand)
+      .where(
+        and(
+          eq(workspaceLifecycleCommand.id, input.requestID),
+          eq(workspaceLifecycleCommand.workspaceId, workspaceID),
+          eq(workspaceLifecycleCommand.actorId, userID),
+          eq(workspaceLifecycleCommand.action, "start"),
+          isNotNull(workspaceLifecycleCommand.dispatchAttemptedAt),
+        ),
+      );
     if (retained) return lifecycle(userID, command, "start");
     try {
       const result = await runtimeController.start(
@@ -299,12 +352,28 @@ export function createExternalFactoryMCP(services: Services) {
             await database.client.begin((sql) =>
               projectDevelopmentAuthorityIn(sql, userID, input.projectID),
             );
-            const rows =
-              await database.client`SELECT change.id AS "changeID",ticket.id AS "ticketID",ticket.title,change.state,workspace.id AS "workspaceID"
-            FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-            LEFT JOIN factory.development_workspace workspace ON workspace.change_id=change.id
-            WHERE change.project_id=${input.projectID} AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
-              AND change.state IN ('starting','active','failed') ORDER BY change.created_at DESC,change.id DESC OFFSET ${input.offset} LIMIT ${input.limit + 1}`;
+            const rows = await drizzleTransaction(database.client)
+              .select({
+                changeID: change.id,
+                ticketID: ticket.id,
+                title: ticket.title,
+                state: change.state,
+                workspaceID: developmentWorkspace.id,
+              })
+              .from(change)
+              .innerJoin(ticket, eq(ticket.id, change.ticketId))
+              .leftJoin(developmentWorkspace, eq(developmentWorkspace.changeId, change.id))
+              .where(
+                and(
+                  eq(change.projectId, input.projectID),
+                  isNull(change.cancelRequestedAt),
+                  isNull(ticket.trashedAt),
+                  inArray(change.state, ["starting", "active", "failed"]),
+                ),
+              )
+              .orderBy(desc(change.createdAt), desc(change.id))
+              .offset(input.offset)
+              .limit(input.limit + 1);
             return {
               workspaces: rows.slice(0, input.limit),
               nextOffset: rows.length > input.limit ? input.offset + input.limit : null,
@@ -513,16 +582,59 @@ export function createExternalFactoryMCP(services: Services) {
               await database.client.begin((sql) =>
                 projectDevelopmentAuthorityIn(sql, userID, projectID),
               );
-            const rows =
-              await database.client`SELECT workspace.id AS "workspaceID",workspace.project_id AS "projectID",workspace.kind,
-          workspace.owner_user_id AS "ownerID",workspace.change_id AS "changeID",workspace.collaboration_enabled AS collaborative
-          FROM factory.development_workspace workspace
-          WHERE (${projectID ?? null}::uuid IS NULL OR workspace.project_id=${projectID ?? null})
-          AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=${userID}) OR EXISTS(
-            SELECT 1 FROM factory.project_membership WHERE project_id=workspace.project_id AND user_id=${userID} AND role='developer'))
-          AND (workspace.kind='ticket' OR workspace.owner_user_id=${userID} OR EXISTS(
-            SELECT 1 FROM factory.workspace_share WHERE workspace_id=workspace.id AND user_id=${userID} AND revoked_at IS NULL))
-          ORDER BY workspace.created_at,workspace.id`;
+            const db = drizzleTransaction(database.client);
+            const rows = await db
+              .select({
+                workspaceID: developmentWorkspace.id,
+                projectID: developmentWorkspace.projectId,
+                kind: developmentWorkspace.kind,
+                ownerID: developmentWorkspace.ownerUserId,
+                changeID: developmentWorkspace.changeId,
+                collaborative: developmentWorkspace.collaborationEnabled,
+              })
+              .from(developmentWorkspace)
+              .where(
+                and(
+                  projectID ? eq(developmentWorkspace.projectId, projectID) : undefined,
+                  or(
+                    exists(
+                      db
+                        .select({ userID: administrator.userId })
+                        .from(administrator)
+                        .where(eq(administrator.userId, userID)),
+                    ),
+                    exists(
+                      db
+                        .select({ userID: projectMembership.userId })
+                        .from(projectMembership)
+                        .where(
+                          and(
+                            eq(projectMembership.projectId, developmentWorkspace.projectId),
+                            eq(projectMembership.userId, userID),
+                            eq(projectMembership.role, "developer"),
+                          ),
+                        ),
+                    ),
+                  ),
+                  or(
+                    eq(developmentWorkspace.kind, "ticket"),
+                    eq(developmentWorkspace.ownerUserId, userID),
+                    exists(
+                      db
+                        .select({ userID: workspaceShare.userId })
+                        .from(workspaceShare)
+                        .where(
+                          and(
+                            eq(workspaceShare.workspaceId, developmentWorkspace.id),
+                            eq(workspaceShare.userId, userID),
+                            isNull(workspaceShare.revokedAt),
+                          ),
+                        ),
+                    ),
+                  ),
+                ),
+              )
+              .orderBy(asc(developmentWorkspace.createdAt), asc(developmentWorkspace.id));
             return { workspaces: rows };
           },
         );
@@ -975,8 +1087,15 @@ export function createExternalFactoryMCP(services: Services) {
             await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, userID));
             const attempt = await current(workspaceID);
             if (!attempt) throw new CommandError("not-found", "No Workspace execution exists");
-            const [declared] =
-              await database.client`SELECT id FROM factory.runtime_attempt WHERE id=${attempt.id} AND declared_apps @> ${JSON.stringify([app])}::text::jsonb`;
+            const [declared] = await drizzleTransaction(database.client)
+              .select({ id: runtimeAttempt.id })
+              .from(runtimeAttempt)
+              .where(
+                and(
+                  eq(runtimeAttempt.id, attempt.id),
+                  expression`${runtimeAttempt.declaredApps} @> ${JSON.stringify([app])}::jsonb`,
+                ),
+              );
             if (!declared) throw new CommandError("not-found", "Declared App not found");
             const token = await runtimeAccess.issue({
               attemptID: attempt.id,

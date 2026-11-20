@@ -1,6 +1,30 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  sql as expression,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  notExists,
+  or,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  projectEnvironment,
+  projectImagePreparation,
+  runtimeAttempt,
+  runtimeEnvironmentIntent,
+  substrateBinding,
+  substratePrebuild,
+} from "../../../../packages/db/src/schema";
 import type { ProjectEnvironment } from "../../../../packages/project-domain/src/environment";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
 import { requireSetupReady } from "../setup/execution-gate";
@@ -60,16 +84,39 @@ export function createProjectPreparation(input: {
       throw new Error("Project default branch is unavailable");
     for (const environment of ["development", "main-preview"] as const) {
       await sql.begin(async (transaction) => {
+        const db = drizzleTransaction(transaction);
         await transaction`SELECT pg_advisory_xact_lock(hashtext(${`project-environment:${projectID}:${environment}`}))`;
-        const [settings] = await transaction<
-          Array<{ version: string }>
-        >`SELECT version::text AS version FROM factory.project_environment WHERE project_id=${projectID} AND environment=${environment}`;
+        const [settings] = await db
+          .select({ version: expression<string>`${projectEnvironment.version}::text` })
+          .from(projectEnvironment)
+          .where(
+            and(
+              eq(projectEnvironment.projectId, projectID),
+              eq(projectEnvironment.environment, environment),
+            ),
+          );
         const version = settings?.version ?? "0";
         const identity = createHash("sha256")
           .update(`${projectID}:${environment}:${revision}:${version}`)
           .digest("hex");
         const id = `${identity.slice(0, 8)}-${identity.slice(8, 12)}-5${identity.slice(13, 16)}-a${identity.slice(17, 20)}-${identity.slice(20, 32)}`;
-        await transaction`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version) VALUES(${id},${projectID},${environment},${revision},${version}) ON CONFLICT(project_id,environment,revision,environment_version) DO NOTHING`;
+        await db
+          .insert(projectImagePreparation)
+          .values({
+            id,
+            projectId: projectID,
+            environment,
+            revision,
+            environmentVersion: expression`${version}::bigint`,
+          })
+          .onConflictDoNothing({
+            target: [
+              projectImagePreparation.projectId,
+              projectImagePreparation.environment,
+              projectImagePreparation.revision,
+              projectImagePreparation.environmentVersion,
+            ],
+          });
       });
     }
   }
@@ -84,33 +131,145 @@ export function createProjectPreparation(input: {
         >`SELECT pg_try_advisory_lock(hashtext('project-image-preparation')) AS held`;
         if (!lock?.held) return;
         try {
-          const expired = await connection<
-            Array<{ id: string }>
-          >`SELECT attempt.id FROM factory.project_image_preparation preparation JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id WHERE preparation.state='running' AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL AND preparation.updated_at<now()-interval '12 minutes'`;
+          const db = drizzleTransaction(connection);
+          const newer = alias(projectImagePreparation, "newer");
+          const expired = await db
+            .select({ id: runtimeAttempt.id })
+            .from(projectImagePreparation)
+            .innerJoin(
+              runtimeAttempt,
+              eq(runtimeAttempt.id, projectImagePreparation.runtimeAttemptId),
+            )
+            .where(
+              and(
+                eq(projectImagePreparation.state, "running"),
+                inArray(runtimeAttempt.state, ["create-intended", "starting", "ready"]),
+                isNull(runtimeAttempt.stopIntendedAt),
+                lt(projectImagePreparation.updatedAt, expression`now()-interval '12 minutes'`),
+              ),
+            );
           for (const attempt of expired) await input.expire?.(attempt.id);
-          const completed = await connection<
-            Array<{ id: string }>
-          >`SELECT attempt.id FROM factory.project_image_preparation preparation JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id WHERE preparation.state='succeeded'
-             AND ((attempt.state IN ('starting','ready') AND attempt.stop_intended_at IS NULL)
-               OR attempt.state IN ('stop-intended','stopping','cleanup-failed'))`;
+          const completed = await db
+            .select({ id: runtimeAttempt.id })
+            .from(projectImagePreparation)
+            .innerJoin(
+              runtimeAttempt,
+              eq(runtimeAttempt.id, projectImagePreparation.runtimeAttemptId),
+            )
+            .where(
+              and(
+                eq(projectImagePreparation.state, "succeeded"),
+                or(
+                  and(
+                    inArray(runtimeAttempt.state, ["starting", "ready"]),
+                    isNull(runtimeAttempt.stopIntendedAt),
+                  ),
+                  inArray(runtimeAttempt.state, ["stop-intended", "stopping", "cleanup-failed"]),
+                ),
+              ),
+            );
           for (const attempt of completed) await input.finish?.(attempt.id);
-          await connection`UPDATE factory.project_image_preparation preparation SET state=CASE WHEN attempt.failure LIKE 'prebuild Compose cannot depend on the producer environment%' THEN 'unsupported' ELSE 'failed' END,failure=CASE WHEN attempt.failure LIKE 'prebuild Compose cannot depend on the producer environment%' THEN 'Image preparation was skipped: the Compose file references environment variables, which a prebuilt image cannot resolve. Normal startup remains available.' ELSE 'Image preparation was interrupted; normal startup remains available.' END,updated_at=now()
-            FROM factory.runtime_attempt attempt WHERE preparation.runtime_attempt_id=attempt.id AND preparation.state='running'
-              AND (attempt.state IN ('stopped','failed','cleanup-failed') OR EXISTS(
-                SELECT 1 FROM factory.substrate_binding binding
-                WHERE binding.runtime_attempt_id=attempt.id AND binding.deleted_at IS NOT NULL))`;
-          await connection`UPDATE factory.project_image_preparation preparation SET state='unsupported',failure='Replaced by newer Project inputs.',updated_at=now() WHERE state='pending' AND EXISTS(SELECT 1 FROM factory.project_image_preparation newer WHERE newer.project_id=preparation.project_id AND newer.environment=preparation.environment AND newer.created_at>preparation.created_at)`;
+          await db
+            .update(projectImagePreparation)
+            .set({
+              state: expression`CASE WHEN ${runtimeAttempt.failure} LIKE 'prebuild Compose cannot depend on the producer environment%' THEN 'unsupported' ELSE 'failed' END`,
+              failure: expression`CASE WHEN ${runtimeAttempt.failure} LIKE 'prebuild Compose cannot depend on the producer environment%' THEN 'Image preparation was skipped: the Compose file references environment variables, which a prebuilt image cannot resolve. Normal startup remains available.' ELSE 'Image preparation was interrupted; normal startup remains available.' END`,
+              updatedAt: expression`now()`,
+            })
+            .from(runtimeAttempt)
+            .where(
+              and(
+                eq(projectImagePreparation.runtimeAttemptId, runtimeAttempt.id),
+                eq(projectImagePreparation.state, "running"),
+                or(
+                  inArray(runtimeAttempt.state, ["stopped", "failed", "cleanup-failed"]),
+                  exists(
+                    db
+                      .select({ attemptID: substrateBinding.runtimeAttemptId })
+                      .from(substrateBinding)
+                      .where(
+                        and(
+                          eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id),
+                          isNotNull(substrateBinding.deletedAt),
+                        ),
+                      ),
+                  ),
+                ),
+              ),
+            );
+          await db
+            .update(projectImagePreparation)
+            .set({
+              state: "unsupported",
+              failure: "Replaced by newer Project inputs.",
+              updatedAt: expression`now()`,
+            })
+            .where(
+              and(
+                eq(projectImagePreparation.state, "pending"),
+                exists(
+                  db
+                    .select({ id: newer.id })
+                    .from(newer)
+                    .where(
+                      and(
+                        eq(newer.projectId, projectImagePreparation.projectId),
+                        eq(newer.environment, projectImagePreparation.environment),
+                        gt(newer.createdAt, projectImagePreparation.createdAt),
+                      ),
+                    ),
+                ),
+              ),
+            );
           // Unknown native cleanup retains this producer's admission. A
           // completed image alone cannot authorize another active producer.
-          const active =
-            await connection`SELECT preparation.id FROM factory.project_image_preparation preparation LEFT JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id
-              WHERE preparation.state='running' OR EXISTS(
-                SELECT 1 FROM factory.substrate_binding binding
-                WHERE binding.runtime_attempt_id=attempt.id AND binding.deleted_at IS NULL) LIMIT 1`;
+          const active = await db
+            .select({ id: projectImagePreparation.id })
+            .from(projectImagePreparation)
+            .leftJoin(
+              runtimeAttempt,
+              eq(runtimeAttempt.id, projectImagePreparation.runtimeAttemptId),
+            )
+            .where(
+              or(
+                eq(projectImagePreparation.state, "running"),
+                exists(
+                  db
+                    .select({ attemptID: substrateBinding.runtimeAttemptId })
+                    .from(substrateBinding)
+                    .where(
+                      and(
+                        eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id),
+                        isNull(substrateBinding.deletedAt),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .limit(1);
           if (active.length) return;
-          const [pending] = await connection<
-            Array<{ id: string }>
-          >`SELECT preparation.id FROM factory.project_image_preparation preparation WHERE state='pending' AND NOT EXISTS(SELECT 1 FROM factory.project_image_preparation newer WHERE newer.project_id=preparation.project_id AND newer.environment=preparation.environment AND newer.created_at>preparation.created_at) ORDER BY created_at DESC LIMIT 1`;
+          const [pending] = await db
+            .select({ id: projectImagePreparation.id })
+            .from(projectImagePreparation)
+            .where(
+              and(
+                eq(projectImagePreparation.state, "pending"),
+                notExists(
+                  db
+                    .select({ id: newer.id })
+                    .from(newer)
+                    .where(
+                      and(
+                        eq(newer.projectId, projectImagePreparation.projectId),
+                        eq(newer.environment, projectImagePreparation.environment),
+                        gt(newer.createdAt, projectImagePreparation.createdAt),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .orderBy(desc(projectImagePreparation.createdAt))
+            .limit(1);
           if (pending) await input.start(pending.id);
         } finally {
           await connection`SELECT pg_advisory_unlock(hashtext('project-image-preparation'))`;
@@ -140,27 +299,53 @@ export function createProjectPreparation(input: {
     if (request.method === "POST" && !upload) return denied();
     return sql
       .begin(async (transaction) => {
-        const [attempt] = await transaction<
-          Array<{
-            projectID: string;
-            revision: string;
-            generation: number;
-            hash: string;
-            environment: ProjectEnvironment;
-            version: number;
-            jobID: string | null;
-            jobRevision: string | null;
-            jobVersion: number | null;
-            imageRepository: string | null;
-            jobEnvironment: string | null;
-            publicBuild: boolean;
-            userID: string;
-          }>
-        >`SELECT attempt.project_id AS "projectID",attempt.created_by AS "userID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,factory.image_build_is_public(intent.secret_key) AS "publicBuild",preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",
-          native.intent->>'imageRepository' AS "imageRepository"
-          FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id AND attempt.isolated_kind='prebuild'
-          LEFT JOIN factory.substrate_prebuild native ON native.runtime_attempt_id=attempt.id AND native.preparation_id=preparation.id
-          WHERE attempt.id=${attemptID} AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL FOR SHARE OF attempt`;
+        const db = drizzleTransaction(transaction);
+        const attemptTable = alias(runtimeAttempt, "attempt");
+        const [attempt] = await db
+          .select({
+            projectID: attemptTable.projectId,
+            userID: attemptTable.createdBy,
+            revision: attemptTable.revision,
+            generation: attemptTable.generation,
+            hash: attemptTable.parentConnectorTokenHash,
+            environment: expression<ProjectEnvironment>`${runtimeEnvironmentIntent.environment}`,
+            version: runtimeEnvironmentIntent.version,
+            publicBuild: expression<boolean>`factory.image_build_is_public(${runtimeEnvironmentIntent.secretKey})`,
+            jobID: projectImagePreparation.id,
+            jobRevision: projectImagePreparation.revision,
+            jobVersion: projectImagePreparation.environmentVersion,
+            jobEnvironment: projectImagePreparation.environment,
+            imageRepository: expression<
+              string | null
+            >`${substratePrebuild.intent}->>'imageRepository'`,
+          })
+          .from(attemptTable)
+          .innerJoin(
+            runtimeEnvironmentIntent,
+            eq(runtimeEnvironmentIntent.runtimeAttemptId, attemptTable.id),
+          )
+          .leftJoin(
+            projectImagePreparation,
+            and(
+              eq(projectImagePreparation.runtimeAttemptId, attemptTable.id),
+              eq(attemptTable.isolatedKind, "prebuild"),
+            ),
+          )
+          .leftJoin(
+            substratePrebuild,
+            and(
+              eq(substratePrebuild.runtimeAttemptId, attemptTable.id),
+              eq(substratePrebuild.preparationId, projectImagePreparation.id),
+            ),
+          )
+          .where(
+            and(
+              eq(attemptTable.id, attemptID),
+              inArray(attemptTable.state, ["create-intended", "starting", "ready"]),
+              isNull(attemptTable.stopIntendedAt),
+            ),
+          )
+          .for("share", { of: attemptTable });
         const hash = hashConnectorToken(token);
         if (
           !attempt ||
@@ -170,17 +355,47 @@ export function createProjectPreparation(input: {
         )
           return denied();
         if (request.method === "GET") {
-          const [image] = await transaction<
-            Array<{ identity: string; image: string }>
-          >`SELECT preparation.identity,preparation.image FROM factory.project_image_preparation preparation
-            JOIN factory.runtime_environment_intent producer_environment ON producer_environment.runtime_attempt_id=preparation.runtime_attempt_id
-              AND producer_environment.environment=preparation.environment AND producer_environment.version=preparation.environment_version
-            WHERE preparation.project_id=${attempt.projectID}
-              AND preparation.revision=${attempt.revision} AND preparation.state='succeeded'
-              AND ((preparation.environment=${attempt.environment} AND preparation.environment_version=${attempt.version}) OR
-                (${attempt.publicBuild} AND factory.image_build_is_public(producer_environment.secret_key)))
-            ORDER BY CASE WHEN ${attempt.publicBuild} THEN preparation.environment_version ELSE 0 END,
-              preparation.updated_at DESC LIMIT 1`;
+          const [image] = await db
+            .select({
+              identity: projectImagePreparation.identity,
+              image: projectImagePreparation.image,
+            })
+            .from(projectImagePreparation)
+            .innerJoin(
+              runtimeEnvironmentIntent,
+              and(
+                eq(
+                  runtimeEnvironmentIntent.runtimeAttemptId,
+                  projectImagePreparation.runtimeAttemptId,
+                ),
+                eq(runtimeEnvironmentIntent.environment, projectImagePreparation.environment),
+                eq(runtimeEnvironmentIntent.version, projectImagePreparation.environmentVersion),
+              ),
+            )
+            .where(
+              and(
+                eq(projectImagePreparation.projectId, attempt.projectID),
+                eq(projectImagePreparation.revision, attempt.revision),
+                eq(projectImagePreparation.state, "succeeded"),
+                or(
+                  and(
+                    eq(projectImagePreparation.environment, attempt.environment),
+                    eq(projectImagePreparation.environmentVersion, attempt.version),
+                  ),
+                  and(
+                    expression`${attempt.publicBuild}`,
+                    expression`factory.image_build_is_public(${runtimeEnvironmentIntent.secretKey})`,
+                  ),
+                ),
+              ),
+            )
+            .orderBy(
+              asc(
+                expression`CASE WHEN ${attempt.publicBuild} THEN ${projectImagePreparation.environmentVersion} ELSE 0 END`,
+              ),
+              desc(projectImagePreparation.updatedAt),
+            )
+            .limit(1);
           return Response.json(image ?? null, { headers: { "cache-control": "no-store" } });
         }
         if (
@@ -197,9 +412,15 @@ export function createProjectPreparation(input: {
           !upload.image.startsWith(`${attempt.imageRepository}@`)
         )
           return denied();
-        const [job] = await transaction<
-          Array<{ state: string; identity: string | null; image: string | null }>
-        >`SELECT state,identity,image FROM factory.project_image_preparation WHERE id=${attempt.jobID} FOR UPDATE`;
+        const [job] = await db
+          .select({
+            state: projectImagePreparation.state,
+            identity: projectImagePreparation.identity,
+            image: projectImagePreparation.image,
+          })
+          .from(projectImagePreparation)
+          .where(eq(projectImagePreparation.id, attempt.jobID))
+          .for("update");
         if (job?.state === "succeeded")
           return new Response(null, {
             status: job.identity === upload.identity && job.image === upload.image ? 204 : 409,
@@ -217,7 +438,21 @@ export function createProjectPreparation(input: {
         } catch {
           return denied();
         }
-        await transaction`UPDATE factory.project_image_preparation SET state='succeeded',identity=${upload.identity},image=${upload.image},failure=NULL,updated_at=now() WHERE id=${attempt.jobID} AND state='running'`;
+        await db
+          .update(projectImagePreparation)
+          .set({
+            state: "succeeded",
+            identity: upload.identity,
+            image: upload.image,
+            failure: null,
+            updatedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(projectImagePreparation.id, attempt.jobID),
+              eq(projectImagePreparation.state, "running"),
+            ),
+          );
         return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
       })
       .catch(() => new Response(null, { status: 503, headers: { "cache-control": "no-store" } }));

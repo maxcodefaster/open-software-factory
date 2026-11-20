@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { releaseNativeControl } from "../../test/fixtures/release-installation";
+import { SubstrateRPCError } from "../../packages/runtime-kubernetes/src/substrate-control";
 import {
   factoryServerComposeOverlay,
   prepareFactoryServerContainer,
@@ -78,6 +80,152 @@ async function fixture(nodeEnv?: string) {
   };
   return { directory, prepared, intended, actual };
 }
+
+test("release observation executes original available bridge paths with only PATH and preserves native errors", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "release-native-bridge-"));
+  const original = {
+    bridge: resolve(directory, "bridge"),
+    endpoint: "original.native.test:443",
+    serverName: "api.ate-system.svc" as const,
+    caFile: resolve(directory, "ca"),
+    tokenFile: resolve(directory, "token"),
+  };
+  try {
+    await writeFile(original.caFile, "owned public CA");
+    await writeFile(original.tokenFile, "owned native credential");
+    await writeFile(
+      original.bridge,
+      `#!${process.execPath} --no-env-file
+const input = await new Response(Bun.stdin.stream()).json();
+console.log(JSON.stringify(input.request.fail
+  ? {error: {code: input.request.fail, message: "owned native error"}}
+  : {input, environment: Object.keys(process.env)}));
+`,
+      { mode: 0o700 },
+    );
+    const native = releaseNativeControl(directory, original, async () => {
+      throw new Error("Available original paths must not use Docker");
+    });
+    const request = { actor: { atespace: "owned", name: "runtime" } };
+    expect(await native.call("GetActor", request)).toEqual({
+      input: {
+        endpoint: original.endpoint,
+        serverName: original.serverName,
+        caFile: original.caFile,
+        tokenFile: original.tokenFile,
+        method: "GetActor",
+        request,
+      },
+      environment: ["PATH"],
+    });
+    expect(await native.credential()).toBe("owned native credential");
+    await expect(native.call("GetActor", { fail: "NotFound" })).rejects.toBeInstanceOf(
+      SubstrateRPCError,
+    );
+    await expect(native.call("DeleteActor", request)).rejects.toThrow();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("release Linux bridge uses only the currently confirmed server ID and refuses changed ownership before exec", async () => {
+  const f = await fixture();
+  try {
+    await f.prepared.confirm();
+    const retained = await retainedFactoryServerContainer(f.directory);
+    if (!retained?.containerID) throw Error("Confirmed owned server receipt required");
+    let receipt = { ...retained, containerID: retained.containerID };
+    let actual = { ...f.actual, running: true };
+    const original = {
+      bridge: "/owned/linux/bridge",
+      endpoint: "original.native.test:443",
+      serverName: "api.ate-system.svc" as const,
+      caFile: "/owned/linux/ca",
+      tokenFile: "/owned/linux/editor",
+    };
+    const commands: string[][] = [];
+    let failure: string | undefined;
+    let corrupt = false;
+    const native = releaseNativeControl(f.directory, original, async (args, input) => {
+      commands.push([...args]);
+      if (args[1] === "inspect") return ok(JSON.stringify(actual));
+      expect(args.slice(0, 7)).toEqual([
+        "docker",
+        "exec",
+        "-i",
+        receipt.containerID,
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+      ]);
+      if (args[7] === "/usr/bin/cat") {
+        expect(args.slice(8)).toEqual(["--", original.tokenFile]);
+        return ok("owned native editor credential\n");
+      }
+      expect(args[7]).toBe(original.bridge);
+      expect(JSON.parse(input ?? "")).toEqual({
+        endpoint: original.endpoint,
+        serverName: original.serverName,
+        caFile: original.caFile,
+        tokenFile: original.tokenFile,
+        method: "GetActor",
+        request: { actor: { atespace: "original", name: "runtime" } },
+      });
+      return ok(
+        JSON.stringify(
+          corrupt ? null : failure ? { error: { code: failure, message: "owned error" } } : {},
+        ),
+      );
+    });
+    const observe = () =>
+      native.call("GetActor", { actor: { atespace: "original", name: "runtime" } });
+    await observe();
+    expect(await native.credential()).toBe("owned native editor credential");
+    for (const change of [
+      { id: "c".repeat(64) },
+      { name: "/other" },
+      { image: `sha256:${"c".repeat(64)}` },
+      { labels: { ...f.actual.labels, "factory.dev/server-owner": "other" } },
+      { labels: { ...f.actual.labels, "factory.dev/server-startup": crypto.randomUUID() } },
+      { running: false },
+    ]) {
+      actual = { ...f.actual, running: true, ...change };
+      const before = commands.length;
+      await expect(observe()).rejects.toThrow("different or stopped");
+      expect(commands.slice(before).every((args) => args[1] === "inspect")).toBe(true);
+    }
+    const startupID = crypto.randomUUID();
+    receipt = {
+      ...receipt,
+      containerID: "c".repeat(64),
+      startupID,
+      name: `factory-server-${receipt.owner}-${startupID}`,
+    };
+    await writeFile(resolve(f.directory, "server-container.json"), JSON.stringify(receipt));
+    actual = {
+      id: receipt.containerID,
+      image,
+      name: `/${receipt.name}`,
+      running: true,
+      labels: {
+        "factory.dev/server-owner": receipt.owner,
+        "factory.dev/server-startup": startupID,
+      },
+    };
+    await observe();
+    for (failure of ["NotFound", "PermissionDenied", "Unavailable"])
+      await expect(observe()).rejects.toMatchObject({ code: failure });
+    corrupt = true;
+    await expect(observe()).rejects.toThrow();
+    await writeFile(
+      resolve(f.directory, "server-container.json"),
+      JSON.stringify({ ...receipt, containerID: null }),
+    );
+    await expect(observe()).rejects.toThrow("no confirmed Factory server container");
+  } finally {
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
 
 test("server image is resolved before replacement and rejects missing or unsafe references", async () => {
   expect(await requireFactoryServerImage("factory:local", async () => ok(`${image}\n`))).toBe(

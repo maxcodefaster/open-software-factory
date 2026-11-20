@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
+import {
+  createOpenCodeClient,
+  ensureOpenCodeMessageBoundary,
+} from "../../apps/factory/src/agent/opencode-client";
 import { createUsageJournal, type UsageEntry } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage, openCodeUsageEntry } from "../../apps/factory/src/usage/opencode";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
@@ -7,6 +10,7 @@ import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/e
 import upstream from "../../upstream.json";
 import { buildModelID, fixture as changeFixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 // No fixture may inherit the retained installation's forge token or artifacts.
@@ -28,6 +32,117 @@ afterAll(() => {
   for (const [key, value] of previousRuntimeConfiguration) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
+  }
+});
+
+test("recorded usage keeps native microsecond operation ordering, inclusive cursor boundaries and unknown attribution", async () => {
+  const owned = await candidateReviewFixture();
+  let observing = false;
+  const client = createOpenCodeClient(async (request) => {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    expect(request.method).toBe("GET");
+    if (path === "/api/info") return Response.json({ version: upstream.openCode.version });
+    if (path === "/api/session") return Response.json({ data: [], cursor: {} });
+    expect(path).toEndWith("/log");
+    const sessionID = path.split("/").at(-2);
+    const after = Number(url.searchParams.get("after") ?? 0);
+    const entries =
+      observing && sessionID === owned.sessionID
+        ? [6, 10, 11]
+            .filter((sequence) => sequence > after)
+            .map((sequence) => ({
+              id: `owned-consumption-${sequence}`,
+              created: Date.parse("2026-11-20T12:34:56Z"),
+              type: "session.usage.recorded",
+              durable: { aggregateID: sessionID, seq: sequence, version: 1 },
+              data: {
+                sessionID,
+                source: "title",
+                tokens: {
+                  input: 7,
+                  output: 3,
+                  reasoning: 0,
+                  cache: { read: 0, write: 0 },
+                },
+              },
+            }))
+        : [];
+    return new Response(
+      [
+        ...entries,
+        {
+          type: "log.synced",
+          aggregateID: sessionID,
+          seq: observing ? 11 : 5,
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join(""),
+      {
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
+  });
+  try {
+    const recorder = createRecordedOpenCodeUsage(owned.database);
+    await owned.database.client`UPDATE factory.change_agent_turn_intent
+      SET runtime_attempt_id=${owned.attemptID} WHERE turn_id=${owned.initial.id}`;
+    const review = await owned.activeReview();
+    const initialID = `turn:${owned.initial.id}`;
+    const nextID = `turn:${review.id}`;
+    // Pin precision at the original INSERT. Attribution/timestamp snapshots
+    // cannot be rewritten after admission, even in an owned fixture.
+    await owned.database.client`INSERT INTO factory.usage_operation(
+      id,project_id,user_id,purpose,engine,provider,model,created_at)
+      SELECT 'turn:'||id,project_id,created_by,'coding','opencode','openai',authority->>'modelId',
+        CASE WHEN id=${owned.initial.id} THEN '2026-11-20T12:34:56.123456Z'::timestamptz
+          ELSE '2026-11-20T12:34:56.123457Z'::timestamptz END
+      FROM factory.agent_turn WHERE id IN (${owned.initial.id},${review.id})`;
+    await owned.database
+      .client`INSERT INTO factory.usage_replay_cursor(operation_id,session_id,sequence,start_sequence)
+      VALUES(${initialID},${owned.sessionID},5,5),(${nextID},${owned.sessionID},10,10)`;
+    await recorder.prepare(owned.initial.id, client, owned.sessionID);
+    await recorder.prepare(review.id, client, review.sessionID);
+    observing = true;
+    await recorder.drain(owned.initial.id, client, owned.sessionID, [owned.sessionID]);
+    const journal = createUsageJournal(owned.database);
+    expect(await journal.cursor(initialID, owned.sessionID)).toBe(10);
+    const read = () => owned.database.client<{ event: string }[]>`
+      SELECT event_id AS event FROM factory.usage_entry WHERE operation_id=${initialID} ORDER BY event_id`;
+    expect([...(await read())]).toEqual([
+      { event: "owned-consumption-10" },
+      { event: "owned-consumption-6" },
+    ]);
+    await recorder.drain(owned.initial.id, client, owned.sessionID, [owned.sessionID]);
+    expect(await read()).toHaveLength(2);
+    await recorder.drainAttempt(owned.attemptID, client);
+    expect(await read()).toHaveLength(2);
+    await recorder.settle(owned.initial.id, "interrupted");
+    await recorder.markUnavailable(owned.attemptID);
+    const unknown = await owned.database.client<{ id: string; event: string; counters: unknown }[]>`
+      SELECT operation_id AS id,event_id AS event,counters FROM factory.usage_entry
+      WHERE event_id IN ('unobserved','storage-unavailable') ORDER BY operation_id,event_id`;
+    expect(unknown).toHaveLength(3);
+    expect(
+      unknown.every((entry) =>
+        Object.values(entry.counters as object).every((count) => count === null),
+      ),
+    ).toBe(true);
+    expect(
+      unknown
+        .filter((entry) => entry.event === "storage-unavailable")
+        .map((entry) => entry.id)
+        .sort(),
+    ).toEqual([initialID, nextID].sort());
+    await recorder.markUnavailable(owned.attemptID);
+    expect(
+      await owned.database.client`SELECT event_id FROM factory.usage_entry
+      WHERE event_id='storage-unavailable'`,
+    ).toHaveLength(2);
+    expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
   }
 });
 

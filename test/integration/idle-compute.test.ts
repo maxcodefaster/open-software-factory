@@ -196,7 +196,9 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
       1,
       0,
     );
-    await expect(idle.sweep()).rejects.toThrow("Owned idle intent failure");
+    await expect(idle.sweep()).rejects.toMatchObject({
+      cause: { message: "Owned idle intent failure" },
+    });
     expect(released).toBe(1);
     const [attempt] = await database.client<Array<{ state: string; stopped: boolean }>>`
       SELECT state,stop_intended_at IS NOT NULL AS stopped FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
@@ -207,3 +209,53 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
     await processFixture.dispose();
   }
 }, 30_000);
+
+test.each(["pending", "recent-verdict", "old-verdict"] as const)(
+  "idle review demand keeps the exact submitted Change warm only for active or recent Verification: %s",
+  async (kind) => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    let idle: ReturnType<typeof createIdleCompute> | undefined;
+    try {
+      const owned = await fixture(undefined, undefined, database);
+      await database.client`INSERT INTO factory.verification
+        (id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,state,updated_at,completed_at,created_by)
+        VALUES(${crypto.randomUUID()},${owned.changeID},${"a".repeat(40)},1,'owned-idle-review',1,
+          ${kind === "pending" ? "pending" : "failed"},
+          CASE WHEN ${kind === "recent-verdict"} THEN now() ELSE now()-interval '2 hours' END,
+          CASE WHEN ${kind === "pending"} THEN NULL ELSE now() END,${owned.userID})`;
+      let claims = 0;
+      let pauses = 0;
+      idle = createIdleCompute(
+        database,
+        {
+          claimIdle: () => {
+            claims++;
+            return true;
+          },
+          releaseIdle: () => {},
+        },
+        {
+          pause: async (id) => {
+            expect(id).toBe(owned.attemptID);
+            const [intent] = await database.client`SELECT state,stop_intended_at
+              FROM factory.runtime_attempt WHERE id=${id}`;
+            expect(intent).toEqual({ state: "pausing", stop_intended_at: null });
+            pauses++;
+          },
+        },
+        1,
+        1,
+        60_000,
+      );
+      await idle.sweep();
+      expect(claims).toBe(kind === "old-verdict" ? 1 : 0);
+      expect(pauses).toBe(kind === "old-verdict" ? 1 : 0);
+    } finally {
+      await idle?.close();
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  15_000,
+);

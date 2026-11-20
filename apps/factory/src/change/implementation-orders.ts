@@ -1,5 +1,7 @@
+import { and, asc, eq, inArray, isNotNull, notExists, or, sql } from "drizzle-orm";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { implementationOrder, ticket } from "../../../../packages/db/src/schema";
 import type { createAgentController } from "../agent/controller";
 import { CommandError } from "../command-error";
 import type { createChangeController } from "./controller";
@@ -21,23 +23,48 @@ export function createImplementationOrders(
       if (running) return;
       running = true;
       try {
-        await database.client`UPDATE factory.implementation_order ordering SET state='cancelled',cancelled_at=now(),updated_at=now()
-          FROM factory.ticket ticket WHERE ticket.id=ordering.ticket_id AND ordering.state='waiting'
-            AND (ticket.trashed_at IS NOT NULL OR ticket.state IN ('cancelled','done') OR ticket.converted_to_epic_id IS NOT NULL)`;
-        const orders = await database.client<
-          {
-            commandID: string;
-            ticketID: string;
-            userID: string;
-            revisionID: string;
-            technicalID: string | null;
-            reasoning: CodingReasoning | null;
-          }[]
-        >`SELECT command_id AS "commandID",ticket_id AS "ticketID",created_by AS "userID",
-          requirement_revision_id AS "revisionID",technical_design_revision_id AS "technicalID",coding_reasoning AS reasoning
-          FROM factory.implementation_order ordering WHERE state='waiting'
-            AND NOT EXISTS(SELECT 1 FROM factory.ticket_prerequisites(ordering.project_id,ordering.ticket_id) WHERE NOT delivered)
-          ORDER BY created_at,command_id LIMIT 32`;
+        const db = database.db;
+        await db
+          .update(implementationOrder)
+          .set({ state: "cancelled", cancelledAt: sql<Date>`now()`, updatedAt: sql<Date>`now()` })
+          .from(ticket)
+          .where(
+            and(
+              eq(ticket.id, implementationOrder.ticketId),
+              eq(implementationOrder.state, "waiting"),
+              or(
+                isNotNull(ticket.trashedAt),
+                inArray(ticket.state, ["cancelled", "done"]),
+                isNotNull(ticket.convertedToEpicId),
+              ),
+            ),
+          );
+        const orders = await db
+          .select({
+            commandID: implementationOrder.commandId,
+            ticketID: implementationOrder.ticketId,
+            userID: implementationOrder.createdBy,
+            revisionID: implementationOrder.requirementRevisionId,
+            technicalID: implementationOrder.technicalDesignRevisionId,
+            reasoning: sql<CodingReasoning | null>`${implementationOrder.codingReasoning}`,
+          })
+          .from(implementationOrder)
+          .where(
+            and(
+              eq(implementationOrder.state, "waiting"),
+              notExists(
+                // The existing native routine owns the prerequisite Delivery predicate.
+                db
+                  .select({ delivered: sql<boolean>`prerequisite.delivered` })
+                  .from(
+                    sql`factory.ticket_prerequisites(${implementationOrder.projectId},${implementationOrder.ticketId}) AS prerequisite`,
+                  )
+                  .where(sql<boolean>`NOT prerequisite.delivered`),
+              ),
+            ),
+          )
+          .orderBy(asc(implementationOrder.createdAt), asc(implementationOrder.commandId))
+          .limit(32);
         for (const order of orders) {
           try {
             await changes.start(order.ticketID, order.userID, {
@@ -56,13 +83,34 @@ export function createImplementationOrders(
             });
           } catch (cause) {
             if (cause instanceof CommandError)
-              await database.client`UPDATE factory.implementation_order SET state='blocked',last_error=${cause.message.slice(0, 2000)},updated_at=now()
-                WHERE command_id=${order.commandID} AND state='waiting'`;
+              await db
+                .update(implementationOrder)
+                .set({
+                  state: "blocked",
+                  lastError: cause.message.slice(0, 2000),
+                  updatedAt: sql<Date>`now()`,
+                })
+                .where(
+                  and(
+                    eq(implementationOrder.commandId, order.commandID),
+                    eq(implementationOrder.state, "waiting"),
+                  ),
+                );
             else
-              await database.client`UPDATE factory.implementation_order
-                SET last_error='Implementation start is unconfirmed. Factory will reconcile this retained order.',updated_at=now()
-                WHERE command_id=${order.commandID} AND state='waiting'
-                  AND last_error IS DISTINCT FROM 'Implementation start is unconfirmed. Factory will reconcile this retained order.'`;
+              await db
+                .update(implementationOrder)
+                .set({
+                  lastError:
+                    "Implementation start is unconfirmed. Factory will reconcile this retained order.",
+                  updatedAt: sql<Date>`now()`,
+                })
+                .where(
+                  and(
+                    eq(implementationOrder.commandId, order.commandID),
+                    eq(implementationOrder.state, "waiting"),
+                    sql<boolean>`${implementationOrder.lastError} IS DISTINCT FROM 'Implementation start is unconfirmed. Factory will reconcile this retained order.'`,
+                  ),
+                );
             // External outcomes are recovered by the existing deterministic
             // Change/turn intents. Never invent another command on recovery.
           }

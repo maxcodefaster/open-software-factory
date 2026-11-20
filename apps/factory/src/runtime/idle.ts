@@ -1,4 +1,26 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import {
+  and,
+  asc,
+  eq,
+  exists,
+  sql as expression,
+  gt,
+  inArray,
+  isNotNull,
+  notInArray,
+  or,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentSession,
+  changeCommitOperation,
+  runtimeAttempt,
+  ticket,
+  verification,
+} from "../../../../packages/db/src/schema";
 import { reportFailure } from "../failure-log";
 import type { RuntimeHub } from "./hub";
 
@@ -52,11 +74,23 @@ export function createIdleCompute(
 
   async function reconcile() {
     if (!idleMS || closed) return;
-    const candidates = await database.client<
-      Array<{ id: string; projectID: string; workspaceID: string; changeID: string | null }>
-    >`SELECT id,project_id AS "projectID",workspace_id AS "workspaceID",change_id AS "changeID" FROM factory.runtime_attempt
-      WHERE workspace_id IS NOT NULL AND state='ready'
-        AND (${after}::uuid IS NULL OR id>${after}::uuid) ORDER BY id LIMIT 64`;
+    const candidates = await database.db
+      .select({
+        id: runtimeAttempt.id,
+        projectID: runtimeAttempt.projectId,
+        workspaceID: expression<string>`${runtimeAttempt.workspaceId}`,
+        changeID: runtimeAttempt.changeId,
+      })
+      .from(runtimeAttempt)
+      .where(
+        and(
+          isNotNull(runtimeAttempt.workspaceId),
+          eq(runtimeAttempt.state, "ready"),
+          after ? gt(runtimeAttempt.id, after) : undefined,
+        ),
+      )
+      .orderBy(asc(runtimeAttempt.id))
+      .limit(64);
     // Advance even when every candidate is busy. Activity remains ephemeral.
     after = candidates.length === 64 ? (candidates.at(-1)?.id ?? null) : null;
     for (const attempt of candidates) {
@@ -65,31 +99,113 @@ export function createIdleCompute(
       let recorded = false;
       try {
         recorded = await database.client.begin(async (sql) => {
+          const db = drizzleTransaction(sql);
           await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${attempt.projectID}`}))`;
           await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${attempt.workspaceID}`}))`;
           if (attempt.changeID) {
             // Same locks as Build admission. Read work again only after acquiring them.
-            await sql`SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-              WHERE change.id=${attempt.changeID} FOR UPDATE OF change,ticket`;
+            const changeTable = alias(change, "change");
+            const ticketTable = alias(ticket, "ticket");
+            await db
+              .select({ id: changeTable.id })
+              .from(changeTable)
+              .innerJoin(ticketTable, eq(ticketTable.id, changeTable.ticketId))
+              .where(eq(changeTable.id, attempt.changeID))
+              .for("update", { of: [changeTable, ticketTable] });
           }
-          const [current] = await sql<Array<{ state: string }>>`
-            SELECT state FROM factory.runtime_attempt WHERE id=${attempt.id} FOR UPDATE`;
+          const [current] = await db
+            .select({ state: runtimeAttempt.state })
+            .from(runtimeAttempt)
+            .where(eq(runtimeAttempt.id, attempt.id))
+            .for("update");
           if (current?.state !== "ready") return false;
-          const [work] = await sql<Array<{ active: boolean; reviewing: boolean }>>`
-            SELECT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${attempt.changeID}
-              AND state IN ('pending','dispatching','running','uncertain'))
-              OR EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${attempt.changeID}
-                AND (state IN ('starting','working') OR stop_pending))
-              OR EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${attempt.changeID}
-                AND state NOT IN ('succeeded','failed')) AS active,
-              ${reviewMS} > 0 AND (
-                EXISTS(SELECT 1 FROM factory.verification verification
-                  WHERE verification.change_id=${attempt.changeID}
-                    AND (verification.state IN ('pending','runner-starting','running')
-                      OR verification.updated_at > now() - make_interval(secs => ${reviewMS / 1000})))
-                OR EXISTS(SELECT 1 FROM factory.change_commit_operation commit
-                  WHERE commit.change_id=${attempt.changeID} AND commit.state='succeeded'
-                    AND commit.updated_at > now() - make_interval(secs => ${reviewMS / 1000}))) AS reviewing`;
+          // The locked Attempt supplies its immutable, nullable Change identity
+          // to all work predicates in this single demand snapshot.
+          const [work] = await db
+            .select({
+              active: expression<boolean>`${or(
+                exists(
+                  db
+                    .select({ id: agentTurn.id })
+                    .from(agentTurn)
+                    .where(
+                      and(
+                        eq(agentTurn.changeId, runtimeAttempt.changeId),
+                        inArray(agentTurn.state, [
+                          "pending",
+                          "dispatching",
+                          "running",
+                          "uncertain",
+                        ]),
+                      ),
+                    ),
+                ),
+                exists(
+                  db
+                    .select({ changeID: changeAgentSession.changeId })
+                    .from(changeAgentSession)
+                    .where(
+                      and(
+                        eq(changeAgentSession.changeId, runtimeAttempt.changeId),
+                        or(
+                          inArray(changeAgentSession.state, ["starting", "working"]),
+                          changeAgentSession.stopPending,
+                        ),
+                      ),
+                    ),
+                ),
+                exists(
+                  db
+                    .select({ id: changeCommitOperation.id })
+                    .from(changeCommitOperation)
+                    .where(
+                      and(
+                        eq(changeCommitOperation.changeId, runtimeAttempt.changeId),
+                        notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+                      ),
+                    ),
+                ),
+              )}`,
+              reviewing: expression<boolean>`${and(
+                expression`${reviewMS} > 0`,
+                or(
+                  exists(
+                    db
+                      .select({ id: verification.id })
+                      .from(verification)
+                      .where(
+                        and(
+                          eq(verification.changeId, runtimeAttempt.changeId),
+                          or(
+                            inArray(verification.state, ["pending", "runner-starting", "running"]),
+                            gt(
+                              verification.updatedAt,
+                              expression`now() - make_interval(secs => ${reviewMS / 1000})`,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ),
+                  exists(
+                    db
+                      .select({ id: changeCommitOperation.id })
+                      .from(changeCommitOperation)
+                      .where(
+                        and(
+                          eq(changeCommitOperation.changeId, runtimeAttempt.changeId),
+                          eq(changeCommitOperation.state, "succeeded"),
+                          gt(
+                            changeCommitOperation.updatedAt,
+                            expression`now() - make_interval(secs => ${reviewMS / 1000})`,
+                          ),
+                        ),
+                      ),
+                  ),
+                ),
+              )}`,
+            })
+            .from(runtimeAttempt)
+            .where(eq(runtimeAttempt.id, attempt.id));
           // A submitted Change stays warm while Verification runs and for the
           // review window after its last commit or verdict. Fences are unchanged.
           if (work?.active || work?.reviewing || !hub.claimIdle(attempt.id, idleMS, quietMS))
@@ -97,8 +213,10 @@ export function createIdleCompute(
           claimed = true;
           // Idle is Pause, never an implicit destructive Stop. Official
           // Substrate owns snapshot retention; no Factorybox pause cap applies.
-          await sql`UPDATE factory.runtime_attempt SET state='pausing',updated_at=now()
-            WHERE id=${attempt.id} AND state='ready'`;
+          await db
+            .update(runtimeAttempt)
+            .set({ state: "pausing", updatedAt: expression`now()` })
+            .where(and(eq(runtimeAttempt.id, attempt.id), eq(runtimeAttempt.state, "ready")));
           return true;
         });
         if (recorded) await runtimes.pause(attempt.id);

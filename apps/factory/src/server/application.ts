@@ -1,8 +1,17 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { asc, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
 import { createDatabase } from "../../../../packages/db/src/client";
+import {
+  projectImagePreparation,
+  projectRepositoryIntent,
+  projectSetupReadiness,
+  project as projectTable,
+  runtimeAttempt,
+  wikiSourceUpdate,
+} from "../../../../packages/db/src/schema";
 import { createForgejoAccess } from "../../../../packages/forge/src/access";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { createForgejoReleases } from "../../../../packages/forge/src/releases";
@@ -514,10 +523,11 @@ export async function createFactoryApplication() {
   }
 
   async function runtimeReady(attemptID: string) {
-    const attempts = await database.client<Array<{ ready: boolean }>>`
-    SELECT state = 'ready' AS ready FROM factory.runtime_attempt WHERE id = ${attemptID}
-  `;
-    return attempts[0]?.ready === true;
+    const [attempt] = await database.db
+      .select({ state: runtimeAttempt.state })
+      .from(runtimeAttempt)
+      .where(eq(runtimeAttempt.id, attemptID));
+    return attempt?.state === "ready";
   }
 
   const demandRuntime = createRuntimeDemand(runtimeController, runtimeHub);
@@ -541,9 +551,10 @@ export async function createFactoryApplication() {
         "Project image preparation exceeded its twelve-minute bound; normal startup remains available",
       ),
     head: async (projectID) => {
-      const [project] = await database.client<
-        Array<{ url: string }>
-      >`SELECT repository_url AS url FROM factory.project WHERE id=${projectID}`;
+      const [project] = await database.db
+        .select({ url: projectTable.repositoryUrl })
+        .from(projectTable)
+        .where(eq(projectTable.id, projectID));
       if (!project) throw new Error("Project not found");
       const repository = factoryForgeSource(
         project.url,
@@ -586,9 +597,10 @@ export async function createFactoryApplication() {
     environments: environmentController,
     signingKey: runtimeSecret,
     requiredVariables: async (projectID) => {
-      const [project] = await database.client<
-        { slug: string }[]
-      >`SELECT slug FROM factory.project WHERE id=${projectID}`;
+      const [project] = await database.db
+        .select({ slug: projectTable.slug })
+        .from(projectTable)
+        .where(eq(projectTable.id, projectID));
       if (!project) throw new Error("Project not found");
       const repository = { owner: forgeOwner, name: project.slug };
       const head = await preparationForge.getDefaultBranch(repository);
@@ -608,9 +620,10 @@ export async function createFactoryApplication() {
       );
     },
     protection: async (projectID) => {
-      const [project] = await database.client<
-        { slug: string; branch: string }[]
-      >`SELECT slug,default_branch AS branch FROM factory.project WHERE id=${projectID}`;
+      const [project] = await database.db
+        .select({ slug: projectTable.slug, branch: projectTable.defaultBranch })
+        .from(projectTable)
+        .where(eq(projectTable.id, projectID));
       if (!project) throw new Error("Project not found");
       await preparationForge.ensureDefaultBranchProtection(
         { owner: forgeOwner, name: project.slug },
@@ -623,9 +636,11 @@ export async function createFactoryApplication() {
     },
     hook: async (projectID) => {
       await wikiSourceUpdates.ensure(projectID);
-      const [hook] =
-        await database.client`SELECT hook_state FROM factory.wiki_source_update WHERE project_id=${projectID}`;
-      if (hook?.["hook_state"] !== "ready") throw new Error("Repository hook needs retry");
+      const [hook] = await database.db
+        .select({ state: wikiSourceUpdate.hookState })
+        .from(wikiSourceUpdate)
+        .where(eq(wikiSourceUpdate.projectId, projectID));
+      if (hook?.state !== "ready") throw new Error("Repository hook needs retry");
     },
     wiki: async (projectID, userID, automatic) => {
       const generation = await knowledgeController.generate(projectID, userID, automatic);
@@ -634,9 +649,14 @@ export async function createFactoryApplication() {
     },
     prepare: async (projectID) => {
       await projectPreparation.ensure(projectID);
-      const images = await database.client<
-        { id: string; environment: string }[]
-      >`SELECT DISTINCT ON(environment) id,environment FROM factory.project_image_preparation WHERE project_id=${projectID} ORDER BY environment,created_at DESC`;
+      const images = await database.db
+        .selectDistinctOn([projectImagePreparation.environment], {
+          id: projectImagePreparation.id,
+          environment: projectImagePreparation.environment,
+        })
+        .from(projectImagePreparation)
+        .where(eq(projectImagePreparation.projectId, projectID))
+        .orderBy(asc(projectImagePreparation.environment), desc(projectImagePreparation.createdAt));
       const development = images.find((image) => image.environment === "development")?.id;
       const preview = images.find((image) => image.environment === "main-preview")?.id;
       if (!development || !preview) throw new Error("Image preparation was not admitted");
@@ -659,12 +679,14 @@ export async function createFactoryApplication() {
     onCreated: async (projectID, userID) => {
       // Configuration confirmation owns runtime readiness. Creation itself keeps
       // planning available without starting arbitrary imported Project code.
-      const [intent] =
-        await database.client`SELECT kind FROM factory.project_repository_intent WHERE project_id=${projectID}`;
+      const [intent] = await database.db
+        .select({ kind: projectRepositoryIntent.kind })
+        .from(projectRepositoryIntent)
+        .where(eq(projectRepositoryIntent.projectId, projectID));
       void setupReadiness
-        .start(projectID, userID, intent?.["kind"] === "starter")
+        .start(projectID, userID, intent?.kind === "starter")
         .catch(reportFailure("Project preparation needs attention"));
-      if (intent?.["kind"] === "import")
+      if (intent?.kind === "import")
         void setupInspection
           .start(projectID, userID, projectID)
           .catch(reportFailure("Project configuration inspection needs attention"));
@@ -690,9 +712,18 @@ export async function createFactoryApplication() {
         ? modelConnections.resolve(reference.connectionID, reference.connectionVersion)
         : installationPlanningConnection(),
     ready: async (projectID, userID) => {
-      await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,command_id,state)
-      VALUES(${projectID},'configuration',${crypto.randomUUID()},'ready')
-      ON CONFLICT(project_id,task) DO UPDATE SET state='ready',failure=NULL`;
+      await database.db
+        .insert(projectSetupReadiness)
+        .values({
+          projectId: projectID,
+          task: "configuration",
+          commandId: crypto.randomUUID(),
+          state: "ready",
+        })
+        .onConflictDoUpdate({
+          target: [projectSetupReadiness.projectId, projectSetupReadiness.task],
+          set: { state: "ready", failure: null },
+        });
       void setupReadiness
         .start(projectID, userID, false)
         .catch(reportFailure("Confirmed Project preparation needs attention"));

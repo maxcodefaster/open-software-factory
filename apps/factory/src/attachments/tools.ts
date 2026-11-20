@@ -1,10 +1,12 @@
+import { and, asc, eq, sql as query } from "drizzle-orm";
 import {
   attachmentIDs,
   attachmentToolCallInput,
   attachmentToolCatalogue,
 } from "../../../../packages/conversation-domain/src/attachments";
 import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { attachment, attachmentReference } from "../../../../packages/db/src/schema";
 import { createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { attachmentContextIn, createAttachmentStore, readableAttachmentIn } from "./store";
@@ -19,9 +21,16 @@ export function createAttachmentTools(
     if (!turn || !(await turns.validateExecution(turnID, token)))
       throw new CommandError("forbidden", "Attachment access no longer owns this task.");
     if (id) {
-      const [reference] =
-        await database.client`SELECT attachment_id FROM factory.attachment_reference
-        WHERE kind='turn' AND reference_id=${turnID} AND attachment_id=${id}`;
+      const [reference] = await database.db
+        .select({ attachmentId: attachmentReference.attachmentId })
+        .from(attachmentReference)
+        .where(
+          and(
+            eq(attachmentReference.kind, "turn"),
+            eq(attachmentReference.referenceId, turnID),
+            eq(attachmentReference.attachmentId, id),
+          ),
+        );
       if (!reference)
         throw new CommandError("not-found", "This file is not admitted for this task.");
     }
@@ -36,8 +45,10 @@ export function createAttachmentTools(
           const asset = await readableAttachmentIn(sql, turn.command.createdBy, id);
           if (asset.projectId !== turn.command.projectId || asset.state !== "ready")
             throw new CommandError("not-found", "Source attachment is unavailable.");
-          await sql`INSERT INTO factory.attachment_reference(attachment_id,kind,reference_id,shared)
-            VALUES(${id},'turn',${turnID},false) ON CONFLICT DO NOTHING`;
+          await drizzleTransaction(sql)
+            .insert(attachmentReference)
+            .values({ attachmentId: id, kind: "turn", referenceId: turnID, shared: false })
+            .onConflictDoNothing();
         }
       });
       if (!current) throw new CommandError("forbidden", "Source attachment authority changed.");
@@ -50,11 +61,28 @@ export function createAttachmentTools(
         call.name === "attachment_read" ? call.arguments.id : undefined,
       );
       if (call.name === "attachment_list") {
-        const files = await database.client`SELECT a.id,a.name,a.media_type AS "mediaType",a.sha256,
-          jsonb_array_length(a.objects)-1 AS pages,length(a.text_content) AS "textCharacters"
-          FROM factory.attachment a JOIN factory.attachment_reference r ON r.attachment_id=a.id
-          WHERE r.kind='turn' AND r.reference_id=${turnID} AND a.project_id=${turn.command.projectId} AND a.state='ready'
-          ORDER BY a.created_at,a.id LIMIT 41 OFFSET ${call.arguments.offset}`;
+        const files = await database.db
+          .select({
+            id: attachment.id,
+            name: attachment.name,
+            mediaType: attachment.mediaType,
+            sha256: attachment.sha256,
+            pages: query<number>`jsonb_array_length(${attachment.objects})-1`,
+            textCharacters: query<number>`length(${attachment.textContent})`,
+          })
+          .from(attachment)
+          .innerJoin(attachmentReference, eq(attachmentReference.attachmentId, attachment.id))
+          .where(
+            and(
+              eq(attachmentReference.kind, "turn"),
+              eq(attachmentReference.referenceId, turnID),
+              eq(attachment.projectId, turn.command.projectId),
+              eq(attachment.state, "ready"),
+            ),
+          )
+          .orderBy(asc(attachment.createdAt), asc(attachment.id))
+          .limit(41)
+          .offset(call.arguments.offset);
         const context = await database.client.begin((sql) => attachmentContextIn(sql, turnID));
         const offset = call.arguments.contextOffset;
         if (offset > context.length)

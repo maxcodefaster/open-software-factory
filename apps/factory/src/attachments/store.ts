@@ -20,8 +20,8 @@ import {
   attachmentSummary,
 } from "../../../../packages/conversation-domain/src/attachments";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -42,7 +42,7 @@ import { type AttachmentObjects, attachmentDigest, createAttachmentObjects } fro
 import { processAttachment } from "./process";
 
 type Database = ReturnType<typeof createDatabase>;
-type StoredObject = { key: string; sha256: string; bytes: number; mediaType: string; name: string };
+type StoredObject = (typeof attachment.$inferSelect)["objects"][number];
 const attachmentFields = {
   id: attachment.id,
   projectId: attachment.projectId,
@@ -55,7 +55,7 @@ const attachmentFields = {
   state: attachment.state,
   failure: attachment.failure,
   text: attachment.textContent,
-  objects: expression<StoredObject[]>`${attachment.objects}`,
+  objects: attachment.objects,
 };
 type Row = Awaited<ReturnType<typeof readableAttachmentIn>>;
 

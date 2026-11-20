@@ -1,5 +1,11 @@
+import { and, eq, isNotNull, isNull, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import { substrateActorRpc } from "../../../../packages/db/src/schema";
 import type { NativeActor } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { CommandError } from "../command-error";
 
@@ -25,11 +31,25 @@ export async function actorRPCIn(
   action: ActorRPC["action"],
   originKey: string,
 ) {
-  const [row] = await sql<ActorRPC[]>`
-    SELECT action,origin_key AS "originKey",origin_checkpoint AS "originCheckpoint",actor_uid::text AS "actorUID",
-      native_version AS "nativeVersion",stop_id::text AS "stopID",attempted_at IS NOT NULL AS attempted,outcome
-    FROM factory.substrate_actor_rpc
-    WHERE runtime_attempt_id=${attemptID} AND action=${action} AND origin_key=${originKey}`;
+  const [row] = await drizzleTransaction(sql)
+    .select({
+      action: query<ActorRPC["action"]>`${substrateActorRpc.action}`,
+      originKey: substrateActorRpc.originKey,
+      originCheckpoint: substrateActorRpc.originCheckpoint,
+      actorUID: substrateActorRpc.actorUid,
+      nativeVersion: substrateActorRpc.nativeVersion,
+      stopID: substrateActorRpc.stopId,
+      attempted: query<boolean>`${substrateActorRpc.attemptedAt} IS NOT NULL`,
+      outcome: substrateActorRpc.outcome,
+    })
+    .from(substrateActorRpc)
+    .where(
+      and(
+        eq(substrateActorRpc.runtimeAttemptId, attemptID),
+        eq(substrateActorRpc.action, action),
+        eq(substrateActorRpc.originKey, originKey),
+      ),
+    );
   return row ?? null;
 }
 
@@ -44,11 +64,24 @@ export async function intendActorRPCIn(
   stopID?: string,
 ) {
   const originKey = actorRPCOrigin(checkpoint);
-  await sql`INSERT INTO factory.substrate_actor_rpc(runtime_attempt_id,action,origin_key,
-    actor_uid,native_version,origin_checkpoint,stop_id)
-    VALUES(${attemptID},${action},${originKey},${actor.metadata.uid},${actor.metadata.version},
-      ${checkpoint === null ? null : JSON.stringify(checkpoint)}::text::jsonb,${stopID ?? null})
-    ON CONFLICT(runtime_attempt_id,action,origin_key) DO NOTHING`;
+  await drizzleTransaction(sql)
+    .insert(substrateActorRpc)
+    .values({
+      runtimeAttemptId: attemptID,
+      action,
+      originKey,
+      actorUid: actor.metadata.uid,
+      nativeVersion: actor.metadata.version,
+      originCheckpoint: checkpoint,
+      stopId: stopID ?? null,
+    })
+    .onConflictDoNothing({
+      target: [
+        substrateActorRpc.runtimeAttemptId,
+        substrateActorRpc.action,
+        substrateActorRpc.originKey,
+      ],
+    });
   const row = await actorRPCIn(sql, attemptID, action, originKey);
   if (!row || row.actorUID !== actor.metadata.uid || row.stopID !== (stopID ?? null))
     throw new Error("Native lifecycle intent differs from the original Actor");
@@ -56,10 +89,20 @@ export async function intendActorRPCIn(
 }
 
 export async function dispatchActorRPCIn(sql: SQL, attemptID: string, operation: ActorRPC) {
-  const result = await sql`UPDATE factory.substrate_actor_rpc SET attempted_at=now()
-    WHERE runtime_attempt_id=${attemptID} AND action=${operation.action}
-      AND origin_key=${operation.originKey} AND actor_uid=${operation.actorUID} AND attempted_at IS NULL`;
-  if (result.count !== 1)
+  const result = await drizzleTransaction(sql)
+    .update(substrateActorRpc)
+    .set({ attemptedAt: query`now()` })
+    .where(
+      and(
+        eq(substrateActorRpc.runtimeAttemptId, attemptID),
+        eq(substrateActorRpc.action, operation.action),
+        eq(substrateActorRpc.originKey, operation.originKey),
+        eq(substrateActorRpc.actorUid, operation.actorUID),
+        isNull(substrateActorRpc.attemptedAt),
+      ),
+    )
+    .returning({ originKey: substrateActorRpc.originKey });
+  if (result.length !== 1)
     throw new CommandError(
       "unavailable",
       `Recorded native ${operation.action} remains unconfirmed; its RPC was not repeated`,
@@ -79,9 +122,17 @@ export async function observeActorRPCIn(
     state: actor.status.state,
     ...(checkpoint ? { checkpoint } : {}),
   };
-  await sql`UPDATE factory.substrate_actor_rpc SET outcome=${JSON.stringify(outcome)}::text::jsonb,
-    outcome_recorded_at=now()
-    WHERE runtime_attempt_id=${attemptID} AND action=${operation.action}
-      AND origin_key=${operation.originKey} AND actor_uid=${operation.actorUID}
-      AND attempted_at IS NOT NULL AND outcome IS NULL`;
+  await drizzleTransaction(sql)
+    .update(substrateActorRpc)
+    .set({ outcome, outcomeRecordedAt: query`now()` })
+    .where(
+      and(
+        eq(substrateActorRpc.runtimeAttemptId, attemptID),
+        eq(substrateActorRpc.action, operation.action),
+        eq(substrateActorRpc.originKey, operation.originKey),
+        eq(substrateActorRpc.actorUid, operation.actorUID),
+        isNotNull(substrateActorRpc.attemptedAt),
+        isNull(substrateActorRpc.outcome),
+      ),
+    );
 }

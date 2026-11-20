@@ -1,5 +1,31 @@
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  notInArray,
+  or,
+  sql as query,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  authUser,
+  change,
+  changeAgentSession,
+  changeCommitOperation,
+  developmentWorkspace,
+  project,
+  runtimeAttempt,
+  substrateBinding,
+  workspaceSharedDocument,
+  workspaceSubmission,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
@@ -30,7 +56,8 @@ type Saved = {
   authorName: string;
   authorEmail: string;
 };
-type Operation = Saved & {
+type Operation = Omit<Saved, "base"> & {
+  base: string | null;
   id: string;
   actorID: string;
   expectedHead: string;
@@ -56,17 +83,51 @@ export function createWorkspaceSubmission(
   let closing = false;
   async function scope(userID: string, workspaceID: string): Promise<Saved> {
     await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, userID, true));
-    const [row] = await database.client<
-      Saved[]
-    >`SELECT workspace.id AS "workspaceID",workspace.change_id AS "changeID",change.runtime_attempt_id AS "attemptID",
-      project.repository_url AS "repositoryURL",binding.intent AS "nativeIntent",change.branch_name AS branch,change.base_sha AS base,person.name AS "authorName",person.email AS "authorEmail"
-      FROM factory.development_workspace workspace JOIN factory.change change ON change.id=workspace.change_id
-      JOIN factory.runtime_attempt attempt ON attempt.id=change.runtime_attempt_id AND attempt.workspace_id=workspace.id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-      JOIN factory.project project ON project.id=workspace.project_id JOIN auth."user" person ON person.id=${userID}
-      WHERE workspace.id=${workspaceID} AND workspace.kind='ticket' AND change.state IN ('active','starting','failed') AND change.cancel_requested_at IS NULL
-        AND attempt.state='ready' AND attempt.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-        AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id AND session.stop_pending)`;
+    const db = database.db;
+    const [row] = await db
+      .select({
+        workspaceID: developmentWorkspace.id,
+        changeID: change.id,
+        attemptID: runtimeAttempt.id,
+        repositoryURL: project.repositoryUrl,
+        nativeIntent: substrateBinding.intent,
+        branch: change.branchName,
+        base: change.baseSha,
+        authorName: authUser.name,
+        authorEmail: authUser.email,
+      })
+      .from(developmentWorkspace)
+      .innerJoin(change, eq(change.id, developmentWorkspace.changeId))
+      .innerJoin(
+        runtimeAttempt,
+        and(
+          eq(runtimeAttempt.id, change.runtimeAttemptId),
+          eq(runtimeAttempt.workspaceId, developmentWorkspace.id),
+        ),
+      )
+      .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+      .innerJoin(project, eq(project.id, developmentWorkspace.projectId))
+      .innerJoin(authUser, eq(authUser.id, userID))
+      .where(
+        and(
+          eq(developmentWorkspace.id, workspaceID),
+          eq(developmentWorkspace.kind, "ticket"),
+          inArray(change.state, ["active", "starting", "failed"]),
+          isNull(change.cancelRequestedAt),
+          eq(runtimeAttempt.state, "ready"),
+          isNull(runtimeAttempt.stopIntendedAt),
+          isNull(substrateBinding.deleteIntendedAt),
+          isNull(substrateBinding.deletedAt),
+          notExists(
+            db
+              .select({ id: changeAgentSession.changeId })
+              .from(changeAgentSession)
+              .where(
+                and(eq(changeAgentSession.changeId, change.id), changeAgentSession.stopPending),
+              ),
+          ),
+        ),
+      );
     if (!row || !hub.connected(row.attemptID))
       throw new CommandError(
         "conflict",
@@ -76,15 +137,35 @@ export function createWorkspaceSubmission(
     return row;
   }
   async function row(id: string) {
-    const [result] = await database.client<
-      Operation[]
-    >`SELECT operation.id,submission.workspace_id AS "workspaceID",submission.actor_id AS "actorID",operation.change_id AS "changeID",
-      operation.runtime_attempt_id AS "attemptID",submission.repository_url AS "repositoryURL",binding.intent AS "nativeIntent",operation.branch_name AS branch,operation.integration_base_sha AS base,
-      operation.expected_parent_sha AS "expectedHead",submission.remote_head AS "remoteHead",operation.commit_message AS message,operation.state,operation.commit_sha AS "commitSHA",
-      submission.prepare_attempted_at IS NOT NULL AS attempted,submission.writer_epoch::text AS epoch,person.name AS "authorName",person.email AS "authorEmail"
-      FROM factory.workspace_submission submission JOIN factory.change_commit_operation operation ON operation.id=submission.id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=operation.runtime_attempt_id
-      JOIN auth."user" person ON person.id=submission.actor_id WHERE submission.id=${id}`;
+    const [result] = await database.db
+      .select({
+        id: changeCommitOperation.id,
+        workspaceID: workspaceSubmission.workspaceId,
+        actorID: workspaceSubmission.actorId,
+        changeID: changeCommitOperation.changeId,
+        attemptID: substrateBinding.runtimeAttemptId,
+        repositoryURL: workspaceSubmission.repositoryUrl,
+        nativeIntent: substrateBinding.intent,
+        branch: changeCommitOperation.branchName,
+        base: changeCommitOperation.integrationBaseSha,
+        expectedHead: changeCommitOperation.expectedParentSha,
+        remoteHead: workspaceSubmission.remoteHead,
+        message: changeCommitOperation.commitMessage,
+        state: changeCommitOperation.state,
+        commitSHA: changeCommitOperation.commitSha,
+        attempted: isNotNull(workspaceSubmission.prepareAttemptedAt).mapWith(Boolean),
+        epoch: query<string>`${workspaceSubmission.writerEpoch}::text`,
+        authorName: authUser.name,
+        authorEmail: authUser.email,
+      })
+      .from(workspaceSubmission)
+      .innerJoin(changeCommitOperation, eq(changeCommitOperation.id, workspaceSubmission.id))
+      .innerJoin(
+        substrateBinding,
+        eq(substrateBinding.runtimeAttemptId, changeCommitOperation.runtimeAttemptId),
+      )
+      .innerJoin(authUser, eq(authUser.id, workspaceSubmission.actorId))
+      .where(eq(workspaceSubmission.id, id));
     if (!result) throw new CommandError("not-found", "Workspace submission not found");
     return result;
   }
@@ -124,20 +205,44 @@ export function createWorkspaceSubmission(
       await workspaceAuthorityIn(sql, op.workspaceID, op.actorID, true);
       if (writer.state !== "unassigned" || writer.epoch !== op.epoch || !writer.available)
         throw new CommandError("conflict", "Shared submission authority changed");
-      const [active] = await sql<
-        { id: string; repositoryURL: string; nativeIntent: unknown }[]
-      >`SELECT operation.id,project.repository_url AS "repositoryURL",binding.intent AS "nativeIntent"
-          FROM factory.change_commit_operation operation
-          JOIN factory.change change ON change.id=operation.change_id
-          JOIN factory.project project ON project.id=change.project_id
-          JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-          WHERE operation.id=${op.id} AND operation.runtime_attempt_id=${op.attemptID}
-            AND change.runtime_attempt_id=attempt.id AND attempt.state='ready'
-            AND attempt.stop_intended_at IS NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id AND session.stop_pending)
-            AND operation.state=${action === "git-push" ? "push-intended" : "commit-intended"}
-          FOR SHARE OF attempt,project`;
+      const db = drizzleTransaction(sql);
+      const attempt = alias(runtimeAttempt, "attempt");
+      const destination = alias(project, "project");
+      const [active] = await db
+        .select({
+          id: changeCommitOperation.id,
+          repositoryURL: destination.repositoryUrl,
+          nativeIntent: substrateBinding.intent,
+        })
+        .from(changeCommitOperation)
+        .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
+        .innerJoin(destination, eq(destination.id, change.projectId))
+        .innerJoin(attempt, eq(attempt.id, changeCommitOperation.runtimeAttemptId))
+        .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, attempt.id))
+        .where(
+          and(
+            eq(changeCommitOperation.id, op.id),
+            eq(changeCommitOperation.runtimeAttemptId, op.attemptID),
+            eq(change.runtimeAttemptId, attempt.id),
+            eq(attempt.state, "ready"),
+            isNull(attempt.stopIntendedAt),
+            isNull(substrateBinding.deleteIntendedAt),
+            isNull(substrateBinding.deletedAt),
+            notExists(
+              db
+                .select({ id: changeAgentSession.changeId })
+                .from(changeAgentSession)
+                .where(
+                  and(eq(changeAgentSession.changeId, change.id), changeAgentSession.stopPending),
+                ),
+            ),
+            eq(
+              changeCommitOperation.state,
+              action === "git-push" ? "push-intended" : "commit-intended",
+            ),
+          ),
+        )
+        .for("share", { of: [attempt, destination] });
       if (!active)
         throw new CommandError(
           "conflict",
@@ -153,7 +258,10 @@ export function createWorkspaceSubmission(
     // admission locks across it. The actual frame rechecks the same authority.
     await writing.fenceSource(op.changeID, op.epoch, false);
     if (action === "git-prepare-commit")
-      await database.client`UPDATE factory.workspace_submission SET prepare_attempted_at=now() WHERE id=${op.id}`;
+      await database.db
+        .update(workspaceSubmission)
+        .set({ prepareAttemptedAt: query`now()` })
+        .where(eq(workspaceSubmission.id, op.id));
     return hub.parentOperation(
       op.attemptID,
       {
@@ -219,8 +327,10 @@ export function createWorkspaceSubmission(
       if (closing) throw new CommandError("unavailable", "Factory is stopping");
       const task = (async () => {
         const input = workspaceSubmissionInput.parse(raw);
-        const [recorded] =
-          await database.client`SELECT id FROM factory.workspace_submission WHERE id=${input.requestID}`;
+        const [recorded] = await database.db
+          .select({ id: workspaceSubmission.id })
+          .from(workspaceSubmission)
+          .where(eq(workspaceSubmission.id, input.requestID));
         if (recorded) {
           const previous = await row(input.requestID);
           await database.client.begin((sql) =>
@@ -233,23 +343,52 @@ export function createWorkspaceSubmission(
         const lock = database.coordination();
         try {
           await lock`SELECT pg_advisory_lock(hashtext(${`workspace-submission:${saved.changeID}`}))`;
-          const [exists] =
-            await database.client`SELECT id FROM factory.workspace_submission WHERE id=${input.requestID}`;
+          const [exists] = await database.db
+            .select({ id: workspaceSubmission.id })
+            .from(workspaceSubmission)
+            .where(eq(workspaceSubmission.id, input.requestID));
           if (!exists) {
             await collaboration.assertSaved(input.workspaceID);
             await database.client.begin(async (sql) => {
               await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
               const writer = await lockChangeWriterIn(sql, saved.changeID);
-              const [draft] =
-                await sql`SELECT path FROM factory.workspace_shared_document WHERE workspace_id=${input.workspaceID} AND (dirty OR conflict) LIMIT 1`;
+              const db = drizzleTransaction(sql);
+              const [draft] = await db
+                .select({ path: workspaceSharedDocument.path })
+                .from(workspaceSharedDocument)
+                .where(
+                  and(
+                    eq(workspaceSharedDocument.workspaceId, input.workspaceID),
+                    or(workspaceSharedDocument.dirty, workspaceSharedDocument.conflict),
+                  ),
+                )
+                .limit(1);
               if (draft)
                 throw new CommandError(
                   "conflict",
                   "Save or resolve shared editor buffers before submitting the saved checkout.",
                 );
-              const [work] =
-                await sql`SELECT id FROM factory.agent_turn WHERE change_id=${saved.changeID} AND state IN ('pending','dispatching','running','uncertain')
-                UNION ALL SELECT id FROM factory.change_commit_operation WHERE change_id=${saved.changeID} AND state NOT IN ('succeeded','failed') LIMIT 1`;
+              const [work] = await db
+                .select({ id: agentTurn.id })
+                .from(agentTurn)
+                .where(
+                  and(
+                    eq(agentTurn.changeId, saved.changeID),
+                    inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+                  ),
+                )
+                .unionAll(
+                  db
+                    .select({ id: changeCommitOperation.id })
+                    .from(changeCommitOperation)
+                    .where(
+                      and(
+                        eq(changeCommitOperation.changeId, saved.changeID),
+                        notInArray(changeCommitOperation.state, ["succeeded", "failed"]),
+                      ),
+                    ),
+                )
+                .limit(1);
               if (work)
                 throw new CommandError(
                   "conflict",
@@ -293,9 +432,13 @@ export function createWorkspaceSubmission(
       return view(op);
     },
     async recover() {
-      const rows = await database.client<
-        { id: string }[]
-      >`SELECT operation.id FROM factory.workspace_submission submission JOIN factory.change_commit_operation operation ON operation.id=submission.id WHERE operation.state IN ('commit-intended','push-intended') ORDER BY submission.created_at LIMIT 16`;
+      const rows = await database.db
+        .select({ id: changeCommitOperation.id })
+        .from(workspaceSubmission)
+        .innerJoin(changeCommitOperation, eq(changeCommitOperation.id, workspaceSubmission.id))
+        .where(inArray(changeCommitOperation.state, ["commit-intended", "push-intended"]))
+        .orderBy(asc(workspaceSubmission.createdAt))
+        .limit(16);
       for (const saved of rows) {
         const op = await row(saved.id);
         await this.submit(op.actorID, {

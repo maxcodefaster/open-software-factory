@@ -139,6 +139,7 @@ test("database-only feature checks skip the application build while endpoint che
     "skills-controllers-drizzle",
     "substrate-drizzle",
     "substrate-bound-provisioning",
+    "substrate-lifecycle-facts",
     "usage-journal",
     "usage-policy",
     "coding-budget",

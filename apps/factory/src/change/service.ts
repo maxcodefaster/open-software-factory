@@ -1,7 +1,21 @@
+import { and, desc, eq, exists, gt, notExists, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import type { implementationInput } from "../../../../packages/change-domain/src/implementation";
 import { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  authUser,
+  conversationEntry,
+  implementationOrder,
+  requirementApproval,
+  requirementRevision,
+  technicalDesignRevision,
+  ticket,
+  ticketConversation,
+  ticketDocumentRevision,
+  ticketFollowUp,
+} from "../../../../packages/db/src/schema";
 import type { RequirementContent } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
@@ -70,76 +84,186 @@ export function createTicketService(options: {
     },
     async detail(userID: string, ticketID: string) {
       await access.requireTicket(userID, ticketID);
-      const [ticket] = await database.client<Array<Record<string, unknown>>>`
-        SELECT id, project_id AS "projectId", epic_id AS "epicId", converted_to_epic_id AS "convertedToEpicId", title, description, state, version::integer AS version,
-          trashed_at AS "trashedAt", trash_stop_pending AS "trashStopPending", trash_error AS "trashError"
-        FROM factory.ticket WHERE id = ${ticketID}`;
-      if (!ticket) throw new CommandError("not-found", "Ticket not found");
-      const revisions = await database.client<Array<Record<string, unknown>>>`
-        SELECT revision.id, revision.ticket_id AS "ticketId", revision.ordinal,
-          revision.canonical_content AS "canonicalContent",
-          revision.content_digest AS "contentDigest", revision.created_at AS "createdAt",
-          approval.id AS "approvalId", approval.approved_at AS "approvedAt",
-          approval.monitoring_incident_id AS "monitoringIncidentId",author.name AS author
-        FROM factory.requirement_revision revision
-        LEFT JOIN auth."user" author ON author.id = revision.created_by
-        LEFT JOIN factory.requirement_approval approval ON approval.requirement_revision_id = revision.id
-        WHERE revision.ticket_id = ${ticketID} ORDER BY revision.ordinal DESC`;
-      const documentRevisions = await database.client<Array<Record<string, unknown>>>`
-        SELECT revision.id, revision.ordinal, revision.title, revision.description,
-          revision.canonical_content AS "canonicalContent", revision.content_digest AS "contentDigest",
-          revision.requirement_revision_id AS "requirementRevisionId", revision.created_at AS "createdAt", author.name AS author,
-          revision.author_kind AS "authorKind", revision.proposal_entry_id AS "proposalEntryId",
-          approval.id AS "approvalId",approval.monitoring_incident_id AS "monitoringIncidentId"
-        FROM factory.ticket_document_revision revision LEFT JOIN auth."user" author ON author.id = revision.created_by
-        LEFT JOIN factory.requirement_approval approval ON approval.requirement_revision_id = revision.requirement_revision_id
-          AND EXISTS(SELECT 1 FROM factory.requirement_revision scope WHERE scope.id=revision.requirement_revision_id AND scope.canonical_content=revision.canonical_content)
-        WHERE revision.ticket_id = ${ticketID} ORDER BY revision.ordinal DESC`;
-      const [origin] = await database.client<Array<{ id: string; title: string }>>`
-        SELECT ticket.id, ticket.title FROM factory.ticket_follow_up follow JOIN factory.ticket ticket ON ticket.id = follow.source_ticket_id WHERE follow.ticket_id = ${ticketID}`;
-      const followUps = await database.client<Array<{ id: string; title: string }>>`
-        SELECT ticket.id, ticket.title FROM factory.ticket_follow_up follow JOIN factory.ticket ticket ON ticket.id = follow.ticket_id WHERE follow.source_ticket_id = ${ticketID}`;
-      const [proposal] = await database.client<
-        Array<{ id: string; payload: Record<string, unknown> }>
-      >`
-        SELECT entry.id,entry.payload FROM factory.conversation_entry entry
-        JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-        WHERE conversation.ticket_id=${ticketID} AND entry.kind='requirement'
-          AND NOT EXISTS(SELECT 1 FROM factory.ticket_document_revision document WHERE document.proposal_entry_id=entry.id)
-          AND NOT EXISTS(SELECT 1 FROM factory.conversation_entry newer WHERE newer.conversation_id=entry.conversation_id
-            AND newer.kind='requirement' AND newer.ordinal>entry.ordinal)
-        ORDER BY entry.ordinal DESC LIMIT 1`;
+      const db = database.db;
+      const [savedTicket] = await db
+        .select({
+          id: ticket.id,
+          projectId: ticket.projectId,
+          epicId: ticket.epicId,
+          convertedToEpicId: ticket.convertedToEpicId,
+          title: ticket.title,
+          description: ticket.description,
+          state: ticket.state,
+          version: ticket.version,
+          trashedAt: ticket.trashedAt,
+          trashStopPending: ticket.trashStopPending,
+          trashError: ticket.trashError,
+        })
+        .from(ticket)
+        .where(eq(ticket.id, ticketID));
+      if (!savedTicket) throw new CommandError("not-found", "Ticket not found");
+      const revisions = await db
+        .select({
+          id: requirementRevision.id,
+          ticketId: requirementRevision.ticketId,
+          ordinal: requirementRevision.ordinal,
+          canonicalContent: requirementRevision.canonicalContent,
+          contentDigest: requirementRevision.contentDigest,
+          createdAt: requirementRevision.createdAt,
+          approvalId: requirementApproval.id,
+          approvedAt: requirementApproval.approvedAt,
+          monitoringIncidentId: requirementApproval.monitoringIncidentId,
+          author: authUser.name,
+        })
+        .from(requirementRevision)
+        .leftJoin(authUser, eq(authUser.id, requirementRevision.createdBy))
+        .leftJoin(
+          requirementApproval,
+          eq(requirementApproval.requirementRevisionId, requirementRevision.id),
+        )
+        .where(eq(requirementRevision.ticketId, ticketID))
+        .orderBy(desc(requirementRevision.ordinal));
+      const documentRevisions = await db
+        .select({
+          id: ticketDocumentRevision.id,
+          ordinal: ticketDocumentRevision.ordinal,
+          title: ticketDocumentRevision.title,
+          description: ticketDocumentRevision.description,
+          canonicalContent: ticketDocumentRevision.canonicalContent,
+          contentDigest: ticketDocumentRevision.contentDigest,
+          requirementRevisionId: ticketDocumentRevision.requirementRevisionId,
+          createdAt: ticketDocumentRevision.createdAt,
+          author: authUser.name,
+          authorKind: ticketDocumentRevision.authorKind,
+          proposalEntryId: ticketDocumentRevision.proposalEntryId,
+          approvalId: requirementApproval.id,
+          monitoringIncidentId: requirementApproval.monitoringIncidentId,
+        })
+        .from(ticketDocumentRevision)
+        .leftJoin(authUser, eq(authUser.id, ticketDocumentRevision.createdBy))
+        .leftJoin(
+          requirementApproval,
+          and(
+            eq(
+              requirementApproval.requirementRevisionId,
+              ticketDocumentRevision.requirementRevisionId,
+            ),
+            exists(
+              db
+                .select({ id: requirementRevision.id })
+                .from(requirementRevision)
+                .where(
+                  and(
+                    eq(requirementRevision.id, ticketDocumentRevision.requirementRevisionId),
+                    eq(
+                      requirementRevision.canonicalContent,
+                      ticketDocumentRevision.canonicalContent,
+                    ),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .where(eq(ticketDocumentRevision.ticketId, ticketID))
+        .orderBy(desc(ticketDocumentRevision.ordinal));
+      const [origin] = await db
+        .select({ id: ticket.id, title: ticket.title })
+        .from(ticketFollowUp)
+        .innerJoin(ticket, eq(ticket.id, ticketFollowUp.sourceTicketId))
+        .where(eq(ticketFollowUp.ticketId, ticketID));
+      const followUps = await db
+        .select({ id: ticket.id, title: ticket.title })
+        .from(ticketFollowUp)
+        .innerJoin(ticket, eq(ticket.id, ticketFollowUp.ticketId))
+        .where(eq(ticketFollowUp.sourceTicketId, ticketID));
+      const newer = alias(conversationEntry, "newer");
+      const [proposal] = await db
+        .select({ id: conversationEntry.id, payload: conversationEntry.payload })
+        .from(conversationEntry)
+        .innerJoin(ticketConversation, eq(ticketConversation.id, conversationEntry.conversationId))
+        .where(
+          and(
+            eq(ticketConversation.ticketId, ticketID),
+            eq(conversationEntry.kind, "requirement"),
+            notExists(
+              db
+                .select({ id: ticketDocumentRevision.id })
+                .from(ticketDocumentRevision)
+                .where(eq(ticketDocumentRevision.proposalEntryId, conversationEntry.id)),
+            ),
+            notExists(
+              db
+                .select({ id: newer.id })
+                .from(newer)
+                .where(
+                  and(
+                    eq(newer.conversationId, conversationEntry.conversationId),
+                    eq(newer.kind, "requirement"),
+                    gt(newer.ordinal, conversationEntry.ordinal),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .orderBy(desc(conversationEntry.ordinal))
+        .limit(1);
       const visibleProposal =
         proposal?.payload["visibility"] !== "developer" ||
-        (typeof ticket["projectId"] === "string" &&
-          (await access.canDevelop(userID, ticket["projectId"])));
-      const developer = await access.canDevelop(userID, String(ticket["projectId"]));
-      const [technical] = await database.client<{ present: boolean }[]>`
-        SELECT EXISTS(SELECT 1 FROM factory.technical_design_revision WHERE ticket_id=${ticketID}) AS present`;
+        (await access.canDevelop(userID, savedTicket.projectId));
+      const developer = await access.canDevelop(userID, savedTicket.projectId);
+      const [technical] = await db
+        .select({ id: technicalDesignRevision.id })
+        .from(technicalDesignRevision)
+        .where(eq(technicalDesignRevision.ticketId, ticketID))
+        .limit(1);
       const technicalDesigns = developer
-        ? await database.client<Record<string, unknown>[]>`
-          SELECT design.id,design.ordinal,design.requirement_revision_id AS "requirementRevisionId",
-            design.source_commit AS "sourceCommit",design.canonical_content AS "canonicalContent",
-            design.citations,design.diagram_renders AS "diagramRenders",design.renderer_version AS "rendererVersion",
-            design.author_kind AS "authorKind",design.created_at AS "createdAt",
-            EXISTS(SELECT 1 FROM factory.requirement_approval WHERE technical_design_revision_id=design.id) AS approved
-          FROM factory.technical_design_revision design WHERE ticket_id=${ticketID} ORDER BY ordinal DESC`
+        ? await db
+            .select({
+              id: technicalDesignRevision.id,
+              ordinal: technicalDesignRevision.ordinal,
+              requirementRevisionId: technicalDesignRevision.requirementRevisionId,
+              sourceCommit: technicalDesignRevision.sourceCommit,
+              canonicalContent: technicalDesignRevision.canonicalContent,
+              citations: technicalDesignRevision.citations,
+              diagramRenders: technicalDesignRevision.diagramRenders,
+              rendererVersion: technicalDesignRevision.rendererVersion,
+              authorKind: technicalDesignRevision.authorKind,
+              createdAt: technicalDesignRevision.createdAt,
+              approved: exists(
+                db
+                  .select({ id: requirementApproval.id })
+                  .from(requirementApproval)
+                  .where(
+                    eq(requirementApproval.technicalDesignRevisionId, technicalDesignRevision.id),
+                  ),
+              ),
+            })
+            .from(technicalDesignRevision)
+            .where(eq(technicalDesignRevision.ticketId, ticketID))
+            .orderBy(desc(technicalDesignRevision.ordinal))
         : [];
       const technicalPlanningPending = await database.client.begin((sql) =>
-        technicalPlanningOutstandingIn(sql, ticketID, String(revisions[0]?.["id"] ?? "") || null),
+        technicalPlanningOutstandingIn(sql, ticketID, revisions[0]?.id ?? null),
       );
-      const [implementationOrder] = await database.client<
-        { commandId: string; state: string; reason: string | null; createdBy: string }[]
-      >`SELECT command_id AS "commandId",state,last_error AS reason,created_by AS "createdBy" FROM factory.implementation_order
-        WHERE ticket_id=${ticketID} ORDER BY created_at DESC LIMIT 1`;
-      if (developer) await access.requireDevelopment(userID, String(ticket["projectId"]));
+      const [order] = await db
+        .select({
+          commandId: implementationOrder.commandId,
+          state: implementationOrder.state,
+          reason: implementationOrder.lastError,
+          createdBy: implementationOrder.createdBy,
+        })
+        .from(implementationOrder)
+        .where(eq(implementationOrder.ticketId, ticketID))
+        .orderBy(desc(implementationOrder.createdAt))
+        .limit(1);
+      if (developer) await access.requireDevelopment(userID, savedTicket.projectId);
       return ticketDetailSchema.parse({
         ticket: {
-          ...ticket,
+          ...savedTicket,
           trashedAt:
-            ticket["trashedAt"] instanceof Date
-              ? ticket["trashedAt"].toISOString()
-              : ticket["trashedAt"],
+            savedTicket.trashedAt instanceof Date
+              ? savedTicket.trashedAt.toISOString()
+              : savedTicket.trashedAt,
         },
         revisions: revisions.map(revisionDTO),
         documentRevisions: documentRevisions.map(revisionDTO),
@@ -149,40 +273,56 @@ export function createTicketService(options: {
             : null,
         origin: origin ?? null,
         followUps,
-        technicalDesignPresent: technical?.present ?? false,
+        technicalDesignPresent: Boolean(technical),
         technicalPlanningPending,
         technicalDesigns: technicalDesigns.map((design) => ({
           ...revisionDTO(design),
           content: JSON.parse(String(design["canonicalContent"])),
         })),
-        implementationOrder: implementationOrder
+        implementationOrder: order
           ? {
-              ...implementationOrder,
-              canCancel: developer || implementationOrder.createdBy === userID,
+              ...order,
+              canCancel: developer || order.createdBy === userID,
             }
           : null,
       });
     },
     async cancelImplementation(userID: string, ticketID: string, commandID: string) {
       await access.requireTicket(userID, ticketID);
-      await database.client.begin(async (sql) => {
-        await sql`SELECT id FROM factory.ticket WHERE id=${ticketID} FOR UPDATE`;
-        const [ticket] = await sql<
-          { projectID: string }[]
-        >`SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
-        if (!ticket) throw new CommandError("not-found", "Ticket not found.");
-        await projectAuthorityIn(sql, userID, ticket.projectID);
-        const [order] = await sql<
-          { userID: string }[]
-        >`SELECT created_by AS "userID" FROM factory.implementation_order
-          WHERE command_id=${commandID} AND ticket_id=${ticketID} AND state='waiting' FOR UPDATE`;
+      await database.client.begin(async (transaction) => {
+        const db = drizzleTransaction(transaction);
+        const [savedTicket] = await db
+          .select({ projectID: ticket.projectId })
+          .from(ticket)
+          .where(eq(ticket.id, ticketID))
+          .for("update");
+        if (!savedTicket) throw new CommandError("not-found", "Ticket not found.");
+        await projectAuthorityIn(transaction, userID, savedTicket.projectID);
+        const [order] = await db
+          .select({ userID: implementationOrder.createdBy })
+          .from(implementationOrder)
+          .where(
+            and(
+              eq(implementationOrder.commandId, commandID),
+              eq(implementationOrder.ticketId, ticketID),
+              eq(implementationOrder.state, "waiting"),
+            ),
+          )
+          .for("update");
         if (!order)
           throw new CommandError("conflict", "This implementation order is no longer waiting.");
         if (order.userID !== userID) {
-          await projectDevelopmentAuthorityIn(sql, userID, ticket.projectID);
+          await projectDevelopmentAuthorityIn(transaction, userID, savedTicket.projectID);
         }
-        await sql`UPDATE factory.implementation_order SET state='cancelled',cancelled_by=${userID},cancelled_at=now(),updated_at=now()
-          WHERE command_id=${commandID}`;
+        await db
+          .update(implementationOrder)
+          .set({
+            state: "cancelled",
+            cancelledBy: userID,
+            cancelledAt: sql<Date>`now()`,
+            updatedAt: sql<Date>`now()`,
+          })
+          .where(eq(implementationOrder.commandId, commandID));
       });
     },
     async saveTechnicalDesign(
@@ -191,22 +331,33 @@ export function createTicketService(options: {
       input: z.output<typeof saveTechnicalDesignInput>,
     ) {
       await access.requireTicket(userID, ticketID);
-      const [ticket] = await database.client<{ projectID: string }[]>`
-        SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
-      if (!ticket) throw new CommandError("not-found", "Ticket not found.");
-      await access.requireDevelopment(userID, ticket.projectID);
-      const [previous] = await database.client<
-        {
-          requirementRevisionId: string;
-          sourceCommit: string;
-          citations: unknown;
-          planningTurnID: string | null;
-        }[]
-      >`SELECT requirement_revision_id AS "requirementRevisionId",source_commit AS "sourceCommit",citations
-        ,planning_turn_id AS "planningTurnID" FROM factory.technical_design_revision WHERE id=${input.expectedRevisionId} AND ticket_id=${ticketID}`;
+      const [savedTicket] = await database.db
+        .select({ projectID: ticket.projectId })
+        .from(ticket)
+        .where(eq(ticket.id, ticketID));
+      if (!savedTicket) throw new CommandError("not-found", "Ticket not found.");
+      await access.requireDevelopment(userID, savedTicket.projectID);
+      const [previous] = await database.db
+        .select({
+          requirementRevisionId: technicalDesignRevision.requirementRevisionId,
+          sourceCommit: technicalDesignRevision.sourceCommit,
+          citations: technicalDesignRevision.citations,
+          planningTurnID: technicalDesignRevision.planningTurnId,
+        })
+        .from(technicalDesignRevision)
+        .where(
+          and(
+            eq(technicalDesignRevision.id, input.expectedRevisionId),
+            eq(technicalDesignRevision.ticketId, ticketID),
+          ),
+        );
       if (!previous) throw new CommandError("conflict", "The technical design is unavailable.");
-      const [document] = await database.client<{ id: string }[]>`
-        SELECT id FROM factory.ticket_document_revision WHERE ticket_id=${ticketID} ORDER BY ordinal DESC LIMIT 1`;
+      const [document] = await database.db
+        .select({ id: ticketDocumentRevision.id })
+        .from(ticketDocumentRevision)
+        .where(eq(ticketDocumentRevision.ticketId, ticketID))
+        .orderBy(desc(ticketDocumentRevision.ordinal))
+        .limit(1);
       const renders = await renderArchitectureDiagrams(input.content);
       await database.client.begin((sql) =>
         saveTechnicalDesignIn(sql, {
@@ -249,10 +400,12 @@ export function createTicketService(options: {
     async implement(userID: string, ticketID: string, input: z.output<typeof implementationInput>) {
       await access.requireTicket(userID, ticketID);
       if (input.codingReasoning) {
-        const [ticket] = await database.client<Array<{ projectID: string }>>`
-          SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
-        if (!ticket) throw new CommandError("not-found", "Ticket not found");
-        await access.requireDevelopment(userID, ticket.projectID);
+        const [savedTicket] = await database.db
+          .select({ projectID: ticket.projectId })
+          .from(ticket)
+          .where(eq(ticket.id, ticketID));
+        if (!savedTicket) throw new CommandError("not-found", "Ticket not found");
+        await access.requireDevelopment(userID, savedTicket.projectID);
       }
       const change = await options.changes.start(ticketID, userID, {
         commandID: input.commandId,

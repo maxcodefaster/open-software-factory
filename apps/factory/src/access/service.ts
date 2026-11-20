@@ -1,10 +1,17 @@
+import { and, asc, eq, exists, isNotNull, sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import {
   emergencyAdministratorID,
   PasswordChangeError,
 } from "../../../../packages/auth/src/policy";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import type { ProjectRole } from "../../../../packages/project-domain/src/access";
+import {
+  accountAccess,
+  administrator,
+  authAccount,
+  authUser,
+  projectMembership,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { createAccountCommands } from "./accounts";
 import type { managedUserInput, memberInput, passwordChangeInput } from "./commands";
@@ -37,9 +44,10 @@ export function createAccessService(options: {
       return { ...identity.policy };
     },
     async authentication(userID: string, fresh: boolean) {
-      const [person] = await database.client<
-        { email: string }[]
-      >`SELECT email FROM auth."user" WHERE id=${userID}`;
+      const [person] = await database.db
+        .select({ email: authUser.email })
+        .from(authUser)
+        .where(eq(authUser.id, userID));
       return {
         fresh,
         email: person?.email ?? "",
@@ -48,8 +56,16 @@ export function createAccessService(options: {
     },
     /** Only accounts holding a Factory password are offered a change. Company sign-in accounts are not. */
     async passwordChange(userID: string) {
-      const [credential] = await database.client<{ id: string }[]>`
-        SELECT id FROM auth.account WHERE user_id=${userID} AND provider_id='credential' AND password IS NOT NULL`;
+      const [credential] = await database.db
+        .select({ id: authAccount.id })
+        .from(authAccount)
+        .where(
+          and(
+            eq(authAccount.userId, userID),
+            eq(authAccount.providerId, "credential"),
+            isNotNull(authAccount.password),
+          ),
+        );
       return {
         available:
           Boolean(credential) &&
@@ -90,20 +106,23 @@ export function createAccessService(options: {
     },
     async users(userID: string) {
       await access.requireSystemManager(userID);
-      const users = await database.client<
-        Array<{
-          id: string;
-          name: string;
-          email: string;
-          disabled: boolean;
-          directoryDisabled: boolean;
-          systemManager: boolean;
-        }>
-      >`SELECT auth."user".id, name, email,
-        (access.disabled_at IS NOT NULL) AS disabled,
-        (access.directory_disabled_at IS NOT NULL) AS "directoryDisabled",
-        EXISTS(SELECT 1 FROM factory.administrator WHERE user_id = auth."user".id) AS "systemManager"
-        FROM auth."user" JOIN factory.account_access access ON access.user_id=auth."user".id ORDER BY name, auth."user".id`;
+      const users = await database.db
+        .select({
+          id: authUser.id,
+          name: authUser.name,
+          email: authUser.email,
+          disabled: query<boolean>`${accountAccess.disabledAt} IS NOT NULL`,
+          directoryDisabled: query<boolean>`${accountAccess.directoryDisabledAt} IS NOT NULL`,
+          systemManager: query<boolean>`${exists(
+            database.db
+              .select({ userId: administrator.userId })
+              .from(administrator)
+              .where(eq(administrator.userId, authUser.id)),
+          )}`,
+        })
+        .from(authUser)
+        .innerJoin(accountAccess, eq(accountAccess.userId, authUser.id))
+        .orderBy(asc(authUser.name), asc(authUser.id));
       return {
         users: users.map((user) => ({
           ...user,
@@ -138,18 +157,19 @@ export function createAccessService(options: {
     },
     async members(userID: string, projectID: string) {
       await access.requireProject(userID, projectID, true);
-      const rows = await database.client<
-        Array<{
-          userId: string;
-          role: ProjectRole;
-          manageProject: boolean;
-          name: string;
-          email: string;
-        }>
-      >`SELECT member.user_id AS "userId", member.role, member.manage_project AS "manageProject", user_row.name, user_row.email
-        FROM factory.project_membership member JOIN auth."user" user_row ON user_row.id = member.user_id
-        WHERE member.project_id = ${projectID} ORDER BY user_row.name, user_row.id`;
-      return { members: [...rows] };
+      const members = await database.db
+        .select({
+          userId: projectMembership.userId,
+          role: projectMembership.role,
+          manageProject: projectMembership.manageProject,
+          name: authUser.name,
+          email: authUser.email,
+        })
+        .from(projectMembership)
+        .innerJoin(authUser, eq(authUser.id, projectMembership.userId))
+        .where(eq(projectMembership.projectId, projectID))
+        .orderBy(asc(authUser.name), asc(authUser.id));
+      return { members };
     },
     async setMember(userID: string, projectID: string, input: z.output<typeof memberInput>) {
       await access.requireProject(userID, projectID, true);

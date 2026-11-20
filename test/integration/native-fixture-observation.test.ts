@@ -3,6 +3,10 @@ import { z } from "zod";
 import { nativeActor } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
+import {
+  readReleaseNativeBinding,
+  readReleaseNativeTemplate,
+} from "../fixtures/release-installation";
 
 test("native fixture evidence reads the saved original Actor binding without worker exec, liveness claims or capabilities", async () => {
   const f = await nativeRuntimeFixture();
@@ -31,6 +35,42 @@ test("native fixture evidence reads the saved original Actor binding without wor
     expect(JSON.stringify(result)).not.toMatch(
       /token|credential|connection|assignment|bootstrap|kubernetes/i,
     );
+    expect(f.calls).toHaveLength(calls);
+    const binding = await readReleaseNativeBinding(f.database, f.projectID, started.id);
+    expect(binding).toMatchObject({
+      id: started.id,
+      projectID: f.projectID,
+      workspaceID: f.workspaceID,
+      generation: 1,
+      actorUID: selected.actorUID,
+      intent: { connection: f.configuration.connection },
+    });
+    const resources = f.resources.get(binding.atespace);
+    if (!resources) throw Error("Owned native resource scope missing");
+    const originalTemplate = resources.get("ActorTemplate");
+    if (!originalTemplate) throw Error("Owned frozen native template missing");
+    let template = originalTemplate;
+    const native = {
+      async call(method: string) {
+        if (method === "GetAtespace") return resources.get("Atespace");
+        if (method === "GetActorTemplate") return template;
+        throw Error("Unexpected release native observation");
+      },
+      async credential() {
+        throw Error("Binding proof must not read credentials");
+      },
+    };
+    expect(await readReleaseNativeTemplate(native, binding)).toBe(originalTemplate);
+    template = {
+      ...originalTemplate,
+      metadata: { ...(originalTemplate["metadata"] as object), version: "999" },
+    };
+    await expect(readReleaseNativeTemplate(native, binding)).rejects.toThrow(
+      "frozen original binding",
+    );
+    await expect(
+      readReleaseNativeBinding(f.database, crypto.randomUUID(), started.id),
+    ).rejects.toThrow("no confirmed");
     expect(f.calls).toHaveLength(calls);
     for (const field of ["projectID", "workspaceID", "actorUID"] as const)
       await expect(

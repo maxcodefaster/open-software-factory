@@ -1,4 +1,7 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, sql as query } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { change, changeAgentSession, ticketConversation } from "../../../../packages/db/src/schema";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
@@ -21,16 +24,24 @@ export function createCodingContexts(database: ReturnType<typeof createDatabase>
   ) =>
     database.client.begin(async (sql) => {
       const writer = await lockChangeWriterIn(sql, changeID);
+      const db = drizzleTransaction(sql);
       await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
-      const [change] = await sql<
-        { ticketID: string }[]
-      >`SELECT ticket_id AS "ticketID" FROM factory.change WHERE id=${changeID}`;
-      if (!change) throw new CommandError("not-found", "Change not found");
-      await ensureConversationIn(sql, writer.projectID, change.ticketID, userID);
-      const [conversation] = await sql<{ id: string; contextID: string | null }[]>`
-      SELECT conversation.id,conversation.active_coding_context_id AS "contextID"
-      FROM factory.ticket_conversation conversation JOIN factory.change change ON change.ticket_id=conversation.ticket_id
-      WHERE change.id=${changeID} AND conversation.mode='build' FOR UPDATE OF conversation`;
+      const [currentChange] = await db
+        .select({ ticketID: change.ticketId })
+        .from(change)
+        .where(eq(change.id, changeID));
+      if (!currentChange) throw new CommandError("not-found", "Change not found");
+      await ensureConversationIn(sql, writer.projectID, currentChange.ticketID, userID);
+      const selectedConversation = alias(ticketConversation, "conversation");
+      const [conversation] = await db
+        .select({
+          id: selectedConversation.id,
+          contextID: selectedConversation.activeCodingContextId,
+        })
+        .from(selectedConversation)
+        .innerJoin(change, eq(change.ticketId, selectedConversation.ticketId))
+        .where(and(eq(change.id, changeID), eq(selectedConversation.mode, "build")))
+        .for("update", { of: selectedConversation });
       if (!conversation)
         throw new CommandError("conflict", "Open this Ticket's Coding conversation first.");
       const previous = await contextCommandIn(sql, {
@@ -104,10 +115,23 @@ export function createCodingContexts(database: ReturnType<typeof createDatabase>
         mode: "build",
       });
       await activateCodingContextIn(sql, conversation.id, id);
-      await sql`UPDATE factory.change_agent_session SET state='stopped',opencode_session_id=${nativeID},
-      native_session_confirmed_at=NULL,implementation_session_id=${nativeID},implementation_session_confirmed_at=NULL,
-      active_turn_id=NULL,active_inbox_id=NULL,last_error=NULL,stop_id=NULL,stop_turn_id=NULL,
-      stop_dispatched=false,updated_at=now() WHERE change_id=${changeID}`;
+      await db
+        .update(changeAgentSession)
+        .set({
+          state: "stopped",
+          opencodeSessionId: nativeID,
+          nativeSessionConfirmedAt: null,
+          implementationSessionId: nativeID,
+          implementationSessionConfirmedAt: null,
+          activeTurnId: null,
+          activeInboxId: null,
+          lastError: null,
+          stopId: null,
+          stopTurnId: null,
+          stopDispatched: false,
+          updatedAt: query`now()`,
+        })
+        .where(eq(changeAgentSession.changeId, changeID));
       return id;
     });
 }

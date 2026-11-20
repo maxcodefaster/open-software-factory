@@ -1,6 +1,18 @@
 import { timingSafeEqual } from "node:crypto";
-import type { TransactionSql } from "postgres";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, eq, sql as expression, inArray, isNull } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  environmentWrite,
+  projectEnvironment,
+  projectImagePreparation,
+  runtimeAttempt,
+  runtimeEnvironmentIntent,
+} from "../../../../packages/db/src/schema";
 import {
   type EnvironmentBundle,
   environmentManifest,
@@ -13,7 +25,7 @@ import type { EnvironmentSecrets } from "./openbao";
 import { emptyEnvironment } from "./openbao";
 
 type Database = ReturnType<typeof createDatabase>;
-type SQL = Database["client"] | TransactionSql;
+type SQL = Database["client"] | DatabaseTransaction;
 export type RuntimeEnvironmentIntent = {
   environment: ProjectEnvironment;
   version: number;
@@ -24,25 +36,60 @@ export async function freezeRuntimeEnvironment(
   sql: SQL,
   attemptID: string,
 ): Promise<RuntimeEnvironmentIntent> {
+  const db = drizzleTransaction(sql);
   const read = async () =>
     (
-      await sql<
-        RuntimeEnvironmentIntent[]
-      >`SELECT environment,version::float8 AS version,secret_key AS "secretKey" FROM factory.runtime_environment_intent WHERE runtime_attempt_id=${attemptID}`
+      await db
+        .select({
+          environment: expression<ProjectEnvironment>`${runtimeEnvironmentIntent.environment}`,
+          version: runtimeEnvironmentIntent.version,
+          secretKey: runtimeEnvironmentIntent.secretKey,
+        })
+        .from(runtimeEnvironmentIntent)
+        .where(eq(runtimeEnvironmentIntent.runtimeAttemptId, attemptID))
     )[0];
   const retained = await read();
   if (retained) return retained;
-  const [attempt] = await sql<
-    Array<{ projectID: string; environment: ProjectEnvironment; publication: boolean }>
-  >`SELECT project_id AS "projectID",isolated_kind='publication' AS publication, COALESCE((SELECT environment FROM factory.project_image_preparation WHERE runtime_attempt_id=attempt.id),CASE WHEN isolated_kind='staging' THEN 'main-preview' ELSE 'development' END) AS environment FROM factory.runtime_attempt attempt WHERE id=${attemptID} AND state='create-intended' AND stop_intended_at IS NULL`;
+  const [attempt] = await db
+    .select({
+      projectID: runtimeAttempt.projectId,
+      publication: expression<boolean | null>`${runtimeAttempt.isolatedKind}='publication'`,
+      environment: expression<ProjectEnvironment>`COALESCE(${projectImagePreparation.environment},CASE WHEN ${runtimeAttempt.isolatedKind}='staging' THEN 'main-preview' ELSE 'development' END)`,
+    })
+    .from(runtimeAttempt)
+    .leftJoin(
+      projectImagePreparation,
+      eq(projectImagePreparation.runtimeAttemptId, runtimeAttempt.id),
+    )
+    .where(
+      and(
+        eq(runtimeAttempt.id, attemptID),
+        eq(runtimeAttempt.state, "create-intended"),
+        isNull(runtimeAttempt.stopIntendedAt),
+      ),
+    );
   if (!attempt) throw new Error("Runtime Environment selection requires active create intent");
   await sql`SELECT pg_advisory_xact_lock(hashtext(${`project-environment:${attempt.projectID}:${attempt.environment}`}))`;
   const [current] = attempt.publication
     ? []
-    : await sql<
-        Array<{ version: number; secretKey: string | null }>
-      >`SELECT version::float8 AS version,secret_key AS "secretKey" FROM factory.project_environment WHERE project_id=${attempt.projectID} AND environment=${attempt.environment}`;
-  await sql`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key) VALUES(${attemptID},${attempt.environment},${current?.version ?? 0},${current?.secretKey ?? null}) ON CONFLICT(runtime_attempt_id) DO NOTHING`;
+    : await db
+        .select({ version: projectEnvironment.version, secretKey: projectEnvironment.secretKey })
+        .from(projectEnvironment)
+        .where(
+          and(
+            eq(projectEnvironment.projectId, attempt.projectID),
+            eq(projectEnvironment.environment, attempt.environment),
+          ),
+        );
+  await db
+    .insert(runtimeEnvironmentIntent)
+    .values({
+      runtimeAttemptId: attemptID,
+      environment: attempt.environment,
+      version: current?.version ?? 0,
+      secretKey: current?.secretKey ?? null,
+    })
+    .onConflictDoNothing({ target: runtimeEnvironmentIntent.runtimeAttemptId });
   const intent = await read();
   if (!intent) throw new Error("Runtime Environment intent was not recorded");
   return intent;
@@ -79,15 +126,29 @@ export function createRuntimeEnvironmentEndpoint(database: Database, secrets: En
     if (!token) return denied();
     return database.client
       .begin(async (sql) => {
-        const [runtime] = await sql<
-          Array<{
-            generation: number;
-            parentHash: string;
-            verification: boolean;
-            secretKey: string | null;
-            version: number;
-          }>
-        >`SELECT attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS "parentHash",COALESCE(attempt.isolated_kind='verification',false) AS verification,intent.secret_key AS "secretKey",intent.version::float8 AS version FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id WHERE attempt.id=${attemptID} AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL FOR SHARE OF attempt`;
+        const db = drizzleTransaction(sql);
+        const attempt = alias(runtimeAttempt, "attempt");
+        const [runtime] = await db
+          .select({
+            generation: attempt.generation,
+            parentHash: attempt.parentConnectorTokenHash,
+            verification: expression<boolean>`COALESCE(${attempt.isolatedKind}='verification',false)`,
+            secretKey: runtimeEnvironmentIntent.secretKey,
+            version: runtimeEnvironmentIntent.version,
+          })
+          .from(attempt)
+          .innerJoin(
+            runtimeEnvironmentIntent,
+            eq(runtimeEnvironmentIntent.runtimeAttemptId, attempt.id),
+          )
+          .where(
+            and(
+              eq(attempt.id, attemptID),
+              inArray(attempt.state, ["create-intended", "starting", "ready"]),
+              isNull(attempt.stopIntendedAt),
+            ),
+          )
+          .for("share", { of: attempt });
         const hash = hashConnectorToken(token);
         if (
           !runtime ||
@@ -99,9 +160,19 @@ export function createRuntimeEnvironmentEndpoint(database: Database, secrets: En
         let bundle = emptyEnvironment;
         if (runtime.secretKey) {
           const stored = await secrets.read(runtime.secretKey);
-          const [write] = await sql<
-            Array<{ fingerprint: string; commandID: string; manifest: unknown }>
-          >`SELECT fingerprint,command_id AS "commandID",manifest FROM factory.environment_write WHERE secret_key=${runtime.secretKey} AND state='committed'`;
+          const [write] = await db
+            .select({
+              fingerprint: environmentWrite.fingerprint,
+              commandID: environmentWrite.commandId,
+              manifest: environmentWrite.manifest,
+            })
+            .from(environmentWrite)
+            .where(
+              and(
+                eq(environmentWrite.secretKey, runtime.secretKey),
+                eq(environmentWrite.state, "committed"),
+              ),
+            );
           if (
             !stored ||
             !write ||

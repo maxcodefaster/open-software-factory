@@ -32,7 +32,10 @@ export const attachment = factorySchema.table(
     reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull(),
     state: text("state").notNull(),
     textContent: text("text_content").default("").notNull(),
-    objects: jsonb("objects").default([]).notNull(),
+    objects: jsonb("objects")
+      .$type<{ key: string; sha256: string; bytes: number; mediaType: string; name: string }[]>()
+      .default([])
+      .notNull(),
     failure: text("failure"),
     uploadToken: uuid("upload_token"),
     uploadExpiresAt: timestamp("upload_expires_at", { withTimezone: true }),

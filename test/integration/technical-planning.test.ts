@@ -5,8 +5,8 @@ import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createTicketService } from "../../apps/factory/src/change/service";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
 import { admittedTicketContext } from "../../apps/factory/src/project-agent/ticket-context";
 import { renderArchitectureDiagrams } from "../../apps/factory/src/technical-design/diagrams";
@@ -90,6 +90,33 @@ test("technical revisions are exact, immutable, retry-safe and developer-only", 
     const detail = await service.detail(owned.userID, ticketID);
     expect(detail.technicalDesigns?.[0]?.content).toEqual(planningDesign);
     expect(detail.technicalDesigns?.[0]?.diagramRenders[0]).toContain("<svg");
+    const editID = crypto.randomUUID();
+    const edited = { ...planningDesign, diagrams: [] };
+    expect(
+      await service.saveTechnicalDesign(owned.userID, ticketID, {
+        commandId: editID,
+        expectedRevisionId: id,
+        content: edited,
+      }),
+    ).toEqual({ id: editID });
+    const history = await service.detail(owned.userID, ticketID);
+    expect(history.technicalDesigns?.map((design) => design.id)).toEqual([editID, id]);
+    expect(history.technicalDesigns?.[0]).toMatchObject({
+      requirementRevisionId: product.requirementRevisionId,
+      sourceCommit: base.sourceCommit,
+      content: edited,
+      citations: input.citations,
+      approved: false,
+      authorKind: "human",
+    });
+    expect(history.technicalDesigns?.[0]?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+    await expect(
+      service.saveTechnicalDesign(owned.userID, owned.ticketID, {
+        commandId: crypto.randomUUID(),
+        expectedRevisionId: editID,
+        content: edited,
+      }),
+    ).rejects.toThrow("unavailable");
     await db.client`UPDATE factory.project_membership SET role='product-contributor'
       WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
     const contributor = await service.detail(owned.userID, ticketID);
@@ -250,12 +277,14 @@ test("full Planning confirmation durably admits exactly one technical task again
         technicalPlanningOutstandingIn(sql, ticketID, confirmed.requirementRevisionId),
       ),
     ).toBe(true);
+    const designID = crypto.randomUUID();
+    const technicalBase = technicalPlanningBaseInput.parse(entry?.payload["technicalBase"]);
     await db.client.begin((sql) =>
       saveTechnicalDesignIn(sql, {
-        id: crypto.randomUUID(),
+        id: designID,
         ticketID,
         userID: owned.userID,
-        base: technicalPlanningBaseInput.parse(entry?.payload["technicalBase"]),
+        base: technicalBase,
         content: { ...planningDesign, diagrams: [] },
         renders: [],
         citations: [],
@@ -266,6 +295,36 @@ test("full Planning confirmation durably admits exactly one technical task again
         technicalPlanningOutstandingIn(sql, ticketID, confirmed.requirementRevisionId),
       ),
     ).toBe(false);
+    const unused = async () => {
+      throw new Error("Editing a technical document must not start Coding or inference");
+    };
+    const service = createTicketService({
+      database: db,
+      access: createAccessController(db),
+      documents,
+      trash: { trash: unused, restore: unused },
+      changes: { start: unused, approve: unused, createRevision: unused },
+      agent: { admitStartIn: unused },
+    });
+    const manualID = crypto.randomUUID();
+    await service.saveTechnicalDesign(owned.userID, ticketID, {
+      commandId: manualID,
+      expectedRevisionId: designID,
+      content: { ...planningDesign, diagrams: [] },
+    });
+    const [manual] = await db.client`
+      SELECT planning_turn_id AS request,source_commit AS source,
+        requirement_revision_id AS revision,previous_revision_id AS previous
+      FROM factory.technical_design_revision WHERE id=${manualID}`;
+    expect(manual).toEqual({
+      request: technicalBase.requestId,
+      source: "a".repeat(40),
+      revision: confirmed.requirementRevisionId,
+      previous: designID,
+    });
+    expect(
+      await db.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${ticketID}`,
+    ).toHaveLength(1);
   } finally {
     await db.client.end();
     await host.dispose();

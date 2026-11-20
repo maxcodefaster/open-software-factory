@@ -1,5 +1,20 @@
 import { isDeepStrictEqual } from "node:util";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { and, asc, desc, eq, isNotNull, lte, ne, notExists, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change,
+  changeAgentTurnIntent,
+  conversationContext,
+  requirementApproval,
+  runtimeAttempt,
+  runtimeEnvironmentIntent,
+  sessionArchive,
+  substrateBinding,
+  substrateSource,
+  substrateWorkspace,
+} from "../../../../packages/db/src/schema";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { projectMessages } from "./message-projection";
 import type { createOpenCodeClient } from "./opencode-client";
@@ -23,52 +38,122 @@ export function createSessionArchives(
   async function enqueue() {
     // Derive identity and approved Source references from authoritative storage,
     // not caller supplied values. This is read-only with respect to execution.
-    await database.client`INSERT INTO factory.session_archive(turn_id,runtime_attempt_id,session_id,prompt_id,source_refs)
-      SELECT turn.id,intent.runtime_attempt_id,intent.session_id,intent.prompt_id,
-        jsonb_build_object('projectID',turn.project_id,'workspaceID',attempt.workspace_id,
-          'revision',attempt.revision,'requirementApprovalID',change.requirement_approval_id,
-          'branch',change.branch_name,
-          'runtimeArtifacts',provision.intent#>>'{configuration,workloadImage}',
-          'environment',environment.environment,'environmentVersion',environment.version,
-          'requirementRevisionID',approval.requirement_revision_id)
+    const archive = alias(sessionArchive, "archive");
+    await database.db
+      .insert(sessionArchive)
+      .select(
+        database.db
+          .select({
+            turnId: agentTurn.id,
+            runtimeAttemptId: sql<string>`${changeAgentTurnIntent.runtimeAttemptId}`.as(
+              "runtime_attempt_id",
+            ),
+            sessionId: changeAgentTurnIntent.sessionId,
+            promptId: changeAgentTurnIntent.promptId,
+            sourceRefs: sql<Record<string, unknown>>`
+        jsonb_build_object('projectID',${agentTurn.projectId},'workspaceID',${runtimeAttempt.workspaceId},
+          'revision',${runtimeAttempt.revision},'requirementApprovalID',${change.requirementApprovalId},
+          'branch',${change.branchName},
+          'runtimeArtifacts',${substrateWorkspace.intent}#>>'{configuration,workloadImage}',
+          'environment',${runtimeEnvironmentIntent.environment},'environmentVersion',${runtimeEnvironmentIntent.version},
+          'requirementRevisionID',${requirementApproval.requirementRevisionId})
         || jsonb_build_object(
-          'nativeRuntime',jsonb_build_object('engine','substrate','profile',binding.intent->'profile',
-            'runtime',binding.intent->'runtime','actorUID',binding.actor_uid,
-            'templateUID',binding.intent->'templateUID','templateSHA256',binding.intent->'templateSHA256'),
-          'lastConfirmedSource',CASE WHEN source.checkpoint IS NOT NULL THEN jsonb_build_object(
-            'id',source.checkpoint->'id','generation',source.checkpoint->'generation',
-            'writerEpoch',source.checkpoint->'writerEpoch','bundleSHA256',source.checkpoint#>'{bundle,sha256}',
-            'manifestKey','workspace-source/v1/'||attempt.workspace_id::text||'/'||(source.checkpoint->>'id')||'/manifest.json',
+          'nativeRuntime',jsonb_build_object('engine','substrate','profile',${substrateBinding.intent}->'profile',
+            'runtime',${substrateBinding.intent}->'runtime','actorUID',${substrateBinding.actorUid},
+            'templateUID',${substrateBinding.intent}->'templateUID','templateSHA256',${substrateBinding.intent}->'templateSHA256'),
+          'lastConfirmedSource',CASE WHEN ${substrateSource.checkpoint} IS NOT NULL THEN jsonb_build_object(
+            'id',${substrateSource.checkpoint}->'id','generation',${substrateSource.checkpoint}->'generation',
+            'writerEpoch',${substrateSource.checkpoint}->'writerEpoch','bundleSHA256',${substrateSource.checkpoint}#>'{bundle,sha256}',
+            'manifestKey','workspace-source/v1/'||${runtimeAttempt.workspaceId}::text||'/'||(${substrateSource.checkpoint}->>'id')||'/manifest.json',
             'relationship','last-confirmed-generation-not-turn-atomic') ELSE NULL END)
-      FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-      JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
-      JOIN factory.change change ON change.id=turn.change_id AND change.id=attempt.change_id
-      JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
-       LEFT JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=attempt.id
-       JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-       LEFT JOIN factory.substrate_workspace provision ON provision.workspace_id=attempt.workspace_id AND provision.generation=attempt.generation
-       LEFT JOIN factory.substrate_source source ON source.workspace_id=attempt.workspace_id
-      WHERE turn.state='completed'
-        AND NOT EXISTS(SELECT 1 FROM factory.session_archive archive WHERE archive.turn_id=turn.id)
-      ORDER BY turn.created_at,turn.id LIMIT 16 ON CONFLICT DO NOTHING`;
+      `.as("source_refs"),
+            state: sql<string>`'pending'::text`.as("state"),
+            attempts: sql<number>`0::integer`.as("attempts"),
+            manifestKey: sql<null>`NULL::text`.as("manifest_key"),
+            manifestSha256: sql<null>`NULL::text`.as("manifest_sha256"),
+            throughMessageId: sql<null>`NULL::text`.as("through_message_id"),
+            producerVersion: sql<null>`NULL::text`.as("producer_version"),
+            summary: sql<null>`NULL::jsonb`.as("summary"),
+            lastError: sql<null>`NULL::text`.as("last_error"),
+            retryAfter: sql<Date>`now()`.as("retry_after"),
+            savedAt: sql<null>`NULL::timestamptz`.as("saved_at"),
+            createdAt: sql<Date>`now()`.as("created_at"),
+          })
+          .from(agentTurn)
+          .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+          .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentTurnIntent.runtimeAttemptId))
+          .innerJoin(
+            change,
+            and(eq(change.id, agentTurn.changeId), eq(change.id, runtimeAttempt.changeId)),
+          )
+          .innerJoin(requirementApproval, eq(requirementApproval.id, change.requirementApprovalId))
+          .leftJoin(
+            runtimeEnvironmentIntent,
+            eq(runtimeEnvironmentIntent.runtimeAttemptId, runtimeAttempt.id),
+          )
+          .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+          .leftJoin(
+            substrateWorkspace,
+            and(
+              eq(substrateWorkspace.workspaceId, runtimeAttempt.workspaceId),
+              eq(substrateWorkspace.generation, runtimeAttempt.generation),
+            ),
+          )
+          .leftJoin(substrateSource, eq(substrateSource.workspaceId, runtimeAttempt.workspaceId))
+          .where(
+            and(
+              eq(agentTurn.state, "completed"),
+              notExists(
+                database.db
+                  .select({ turnId: archive.turnId })
+                  .from(archive)
+                  .where(eq(archive.turnId, agentTurn.id)),
+              ),
+            ),
+          )
+          .orderBy(asc(agentTurn.createdAt), asc(agentTurn.id))
+          .limit(16),
+      )
+      .onConflictDoNothing();
   }
   async function save() {
-    const sql = database.coordination();
+    const connection = database.coordination();
     try {
-      const [lock] = await sql<
+      const [lock] = await connection<
         { granted: boolean }[]
       >`SELECT pg_try_advisory_lock(hashtext('factory-session-archive-save')) AS granted`;
       if (!lock?.granted) return;
       await enqueue();
-      const pending = await sql<Pending[]>`SELECT archive.turn_id AS "turnID",
-        archive.runtime_attempt_id AS "runtimeAttemptID",archive.session_id AS "sessionID",
-        archive.prompt_id AS "promptID",archive.source_refs AS source
-        FROM factory.session_archive archive JOIN factory.runtime_attempt attempt ON attempt.id=archive.runtime_attempt_id
-        WHERE archive.state<>'saved' AND archive.retry_after<=now() AND attempt.state='ready'
-        ORDER BY archive.created_at,archive.turn_id LIMIT 4`;
+      const db = drizzleTransaction(connection);
+      const pending: Pending[] = await db
+        .select({
+          turnID: sessionArchive.turnId,
+          runtimeAttemptID: sessionArchive.runtimeAttemptId,
+          sessionID: sessionArchive.sessionId,
+          promptID: sessionArchive.promptId,
+          source: sql<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
+        })
+        .from(sessionArchive)
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, sessionArchive.runtimeAttemptId))
+        .where(
+          and(
+            ne(sessionArchive.state, "saved"),
+            lte(sessionArchive.retryAfter, sql`now()`),
+            eq(runtimeAttempt.state, "ready"),
+          ),
+        )
+        .orderBy(asc(sessionArchive.createdAt), asc(sessionArchive.turnId))
+        .limit(4);
       for (const checkpoint of pending) {
-        await sql`UPDATE factory.session_archive SET attempts=attempts+1,retry_after=now()+interval '1 minute'
-          WHERE turn_id=${checkpoint.turnID} AND state<>'saved'`;
+        await db
+          .update(sessionArchive)
+          .set({
+            attempts: sql`${sessionArchive.attempts}+1`,
+            retryAfter: sql`now()+interval '1 minute'`,
+          })
+          .where(
+            and(eq(sessionArchive.turnId, checkpoint.turnID), ne(sessionArchive.state, "saved")),
+          );
         try {
           const saved = await saveNativeSessionArchive(
             client(checkpoint.runtimeAttemptID),
@@ -76,24 +161,42 @@ export function createSessionArchives(
             checkpoint,
             checkpoint.source,
           );
-          await sql`UPDATE factory.session_archive SET state='saved',manifest_key=${saved.key},
-            manifest_sha256=${saved.manifestSHA256},through_message_id=${saved.manifest.checkpoint.throughMessageID},
-            producer_version=${saved.manifest.producer.version},summary=${JSON.stringify(saved.summary)}::text::jsonb,
-            last_error=NULL,saved_at=now() WHERE turn_id=${checkpoint.turnID} AND state<>'saved'`;
+          await db
+            .update(sessionArchive)
+            .set({
+              state: "saved",
+              manifestKey: saved.key,
+              manifestSha256: saved.manifestSHA256,
+              throughMessageId: saved.manifest.checkpoint.throughMessageID,
+              producerVersion: saved.manifest.producer.version,
+              summary: saved.summary,
+              lastError: null,
+              savedAt: sql`now()`,
+            })
+            .where(
+              and(eq(sessionArchive.turnId, checkpoint.turnID), ne(sessionArchive.state, "saved")),
+            );
         } catch {
           // Neither native errors nor object-store errors may leak transcript
           // bytes, credentials or signed URLs into product diagnostics.
-          await sql`UPDATE factory.session_archive SET state='failed',
-            retry_after=now()+interval '1 minute',
-            last_error='Transcript archive save could not be confirmed; retry pending. Recovery uses the last successfully saved checkpoint.'
-            WHERE turn_id=${checkpoint.turnID} AND state<>'saved'`;
+          await db
+            .update(sessionArchive)
+            .set({
+              state: "failed",
+              retryAfter: sql`now()+interval '1 minute'`,
+              lastError:
+                "Transcript archive save could not be confirmed; retry pending. Recovery uses the last successfully saved checkpoint.",
+            })
+            .where(
+              and(eq(sessionArchive.turnId, checkpoint.turnID), ne(sessionArchive.state, "saved")),
+            );
           console.warn("[factory] native transcript archive save failed", {
             turnID: checkpoint.turnID,
           });
         }
       }
     } finally {
-      await sql.end({ timeout: 1 });
+      await connection.end({ timeout: 1 });
     }
   }
   return {
@@ -102,21 +205,47 @@ export function createSessionArchives(
     // A previous checkpoint cannot stand in for the captured terminal turn, and
     // separate implementation/review Sessions still require their own history.
     async retainedMessages(contextID: string) {
-      const [saved] = await database.client<
-        (Pending & { changeID: string; key: string; sha256: string; throughMessageID: string })[]
-      >`SELECT archive.turn_id AS "turnID",archive.runtime_attempt_id AS "runtimeAttemptID",
-          archive.session_id AS "sessionID",archive.prompt_id AS "promptID",archive.source_refs AS source,
-          archive.manifest_key AS key,archive.manifest_sha256 AS sha256,
-          archive.through_message_id AS "throughMessageID",context.change_id AS "changeID"
-        FROM factory.conversation_context context
-        JOIN factory.agent_turn turn ON turn.id=(context.archived_session->>'active_turn_id')::uuid
-          AND turn.change_id=context.change_id AND turn.state='completed'
-          AND turn.input->>'contextId' IS NOT DISTINCT FROM CASE WHEN context.original THEN NULL ELSE context.id::text END
-        JOIN factory.session_archive archive ON archive.turn_id=turn.id AND archive.state='saved'
-          AND archive.session_id=context.native_session_id
-          AND archive.session_id=context.archived_session->>'opencode_session_id'
-          AND archive.runtime_attempt_id=(context.archived_session->>'runtime_attempt_id')::uuid
-        WHERE context.id=${contextID} AND context.kind='coding' AND context.archived_session IS NOT NULL`;
+      const [saved] = await database.db
+        .select({
+          turnID: sessionArchive.turnId,
+          runtimeAttemptID: sessionArchive.runtimeAttemptId,
+          sessionID: sessionArchive.sessionId,
+          promptID: sessionArchive.promptId,
+          source: sql<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
+          // Saved archive/context invariants require these checkpoint fields.
+          key: sql<string>`${sessionArchive.manifestKey}`,
+          sha256: sql<string>`${sessionArchive.manifestSha256}`,
+          throughMessageID: sql<string>`${sessionArchive.throughMessageId}`,
+          changeID: sql<string>`${conversationContext.changeId}`,
+        })
+        .from(conversationContext)
+        .innerJoin(
+          agentTurn,
+          and(
+            sql`${agentTurn.id}=(${conversationContext.archivedSession}->>'active_turn_id')::uuid`,
+            eq(agentTurn.changeId, conversationContext.changeId),
+            eq(agentTurn.state, "completed"),
+            sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM CASE WHEN ${conversationContext.original}
+          THEN NULL ELSE ${conversationContext.id}::text END`,
+          ),
+        )
+        .innerJoin(
+          sessionArchive,
+          and(
+            eq(sessionArchive.turnId, agentTurn.id),
+            eq(sessionArchive.state, "saved"),
+            eq(sessionArchive.sessionId, conversationContext.nativeSessionId),
+            sql`${sessionArchive.sessionId}=${conversationContext.archivedSession}->>'opencode_session_id'`,
+            sql`${sessionArchive.runtimeAttemptId}=(${conversationContext.archivedSession}->>'runtime_attempt_id')::uuid`,
+          ),
+        )
+        .where(
+          and(
+            eq(conversationContext.id, contextID),
+            eq(conversationContext.kind, "coding"),
+            isNotNull(conversationContext.archivedSession),
+          ),
+        );
       if (!saved) return;
       const { manifest, native } = await readNativeSessionArchive(objects, saved.key, saved.sha256);
       if (
@@ -130,11 +259,20 @@ export function createSessionArchives(
         !isDeepStrictEqual(manifest.source, saved.source)
       )
         throw new Error("Native transcript checkpoint differs from its retained context");
-      const inputs = await database.client<{ promptID: string; text: string | null }[]>`
-        SELECT intent.prompt_id AS "promptID",CASE WHEN turn.input->>'kind'='change-start'
-          THEN NULL ELSE turn.input->>'text' END AS text
-        FROM factory.change_agent_turn_intent intent JOIN factory.agent_turn turn ON turn.id=intent.turn_id
-        WHERE intent.change_id=${saved.changeID} AND intent.session_id=${saved.sessionID}`;
+      const inputs = await database.db
+        .select({
+          promptID: changeAgentTurnIntent.promptId,
+          text: sql<string | null>`CASE WHEN ${agentTurn.input}->>'kind'='change-start'
+          THEN NULL ELSE ${agentTurn.input}->>'text' END`,
+        })
+        .from(changeAgentTurnIntent)
+        .innerJoin(agentTurn, eq(agentTurn.id, changeAgentTurnIntent.turnId))
+        .where(
+          and(
+            eq(changeAgentTurnIntent.changeId, saved.changeID),
+            eq(changeAgentTurnIntent.sessionId, saved.sessionID),
+          ),
+        );
       return {
         messages: projectMessages(
           { data: native.messages.toReversed() },
@@ -156,26 +294,31 @@ export function createSessionArchives(
       return saving;
     },
     async status(changeID: string) {
-      const latest = await database.client<
-        { turnID: string; state: string; attempts: number; lastError: string | null }[]
-      >`
-        SELECT archive.turn_id AS "turnID",archive.state,archive.attempts,archive.last_error AS "lastError"
-        FROM factory.session_archive archive JOIN factory.agent_turn turn ON turn.id=archive.turn_id
-        WHERE turn.change_id=${changeID} ORDER BY turn.created_at DESC,turn.id DESC LIMIT 1`;
-      const [checkpoint] = await database.client<
-        {
-          turnID: string;
-          sessionID: string;
-          runtimeAttemptID: string;
-          savedAt: string;
-          throughMessageID: string;
-        }[]
-      >`
-        SELECT archive.turn_id AS "turnID",archive.session_id AS "sessionID",
-          archive.runtime_attempt_id AS "runtimeAttemptID",archive.saved_at::text AS "savedAt",
-          archive.through_message_id AS "throughMessageID"
-        FROM factory.session_archive archive JOIN factory.agent_turn turn ON turn.id=archive.turn_id
-        WHERE turn.change_id=${changeID} AND archive.state='saved' ORDER BY turn.created_at DESC,turn.id DESC LIMIT 1`;
+      const latest = await database.db
+        .select({
+          turnID: sessionArchive.turnId,
+          state: sessionArchive.state,
+          attempts: sessionArchive.attempts,
+          lastError: sessionArchive.lastError,
+        })
+        .from(sessionArchive)
+        .innerJoin(agentTurn, eq(agentTurn.id, sessionArchive.turnId))
+        .where(eq(agentTurn.changeId, changeID))
+        .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+        .limit(1);
+      const [checkpoint] = await database.db
+        .select({
+          turnID: sessionArchive.turnId,
+          sessionID: sessionArchive.sessionId,
+          runtimeAttemptID: sessionArchive.runtimeAttemptId,
+          savedAt: sql<string>`${sessionArchive.savedAt}::text`,
+          throughMessageID: sql<string>`${sessionArchive.throughMessageId}`,
+        })
+        .from(sessionArchive)
+        .innerJoin(agentTurn, eq(agentTurn.id, sessionArchive.turnId))
+        .where(and(eq(agentTurn.changeId, changeID), eq(sessionArchive.state, "saved")))
+        .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
+        .limit(1);
       return {
         latest: latest[0] ?? null,
         lastSaved: checkpoint ?? null,

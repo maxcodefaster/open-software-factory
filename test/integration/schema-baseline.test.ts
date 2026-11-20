@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { eq, is, sql } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
-import { drizzleTransaction } from "../../packages/db/src/client";
+import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
+import { createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { baselineDigest, readMigration, shippedMigrations } from "../../packages/db/src/migrations";
 import * as schema from "../../packages/db/src/schema";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
@@ -97,6 +98,44 @@ test("reserved connection queries retain the owning connection and manual rollba
     await reserved`ROLLBACK`.catch(() => {});
     reserved.release();
     await client.end({ timeout: 2 });
+    await server.dispose();
+  }
+});
+
+test("a fresh coordination pool retains native JSON objects in its first typed transaction", async () => {
+  const server = await ownedPostgresServer();
+  const original = process.env["DATABASE_URL"];
+  process.env["DATABASE_URL"] = server.identity.url;
+  const database = createDatabase(1);
+  if (original === undefined) delete process.env["DATABASE_URL"];
+  else process.env["DATABASE_URL"] = original;
+  const connection = database.coordination();
+  const id = crypto.randomUUID();
+  const policy = { ...defaultExecutionPolicy(), codingUSD: 2, values: ["α", "second"] };
+  try {
+    await connection.begin(async (transaction) => {
+      const db = drizzleTransaction(transaction);
+      await db
+        .insert(schema.authUser)
+        .values({ id, name: "Coordination", email: `${id}@test.invalid` });
+      await db.insert(schema.executionPolicy).values({
+        scope: "factory",
+        version: 1,
+        policy,
+        timezone: "UTC",
+        updatedBy: id,
+      });
+      const [native] = await transaction<{ kind: string; policy: unknown }[]>`
+        SELECT jsonb_typeof(policy) AS kind,policy FROM factory.execution_policy`;
+      expect(native).toEqual({ kind: "object", policy });
+      const [typed] = await db
+        .select({ policy: schema.executionPolicy.policy })
+        .from(schema.executionPolicy);
+      expect(typed?.policy).toEqual(policy);
+    });
+  } finally {
+    await connection.end({ timeout: 2 });
+    await database.client.end({ timeout: 2 });
     await server.dispose();
   }
 });

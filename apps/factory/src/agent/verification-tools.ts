@@ -1,3 +1,4 @@
+import { and, eq, isNotNull, sql as query } from "drizzle-orm";
 import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
 import {
   verificationDiagnosisInput,
@@ -5,6 +6,7 @@ import {
   verificationToolCatalogue,
 } from "../../../../packages/conversation-domain/src/verification";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { agentTurn, change, project, verification } from "../../../../packages/db/src/schema";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { CommandError } from "../command-error";
 import { createAgentTurnStore } from "./turn-store";
@@ -24,34 +26,50 @@ export function createVerificationTools(
     const turn = await turns.get(turnID);
     if (turn?.command.kind !== "change-repair" || !(await turns.validateExecution(turnID, token)))
       throw new CommandError("forbidden", "Verification evidence no longer owns this correction.");
-    const [verification] = await database.client<
-      {
-        id: string;
-        commit: string;
-        runID: string;
-        diagnosis: unknown;
-        repository: string;
-      }[]
-    >`SELECT verification.id,verification.commit_sha AS commit,verification.action_run_id AS "runID",
-      verification.diagnosis,project.repository_url AS repository
-      FROM factory.verification verification
-      JOIN factory.change change ON change.id=verification.change_id
-      JOIN factory.project project ON project.id=change.project_id
-      WHERE verification.id=${turn.command.commandId} AND verification.change_id=${turn.command.changeId}
-        AND verification.state='failed' AND verification.action_run_id IS NOT NULL`;
-    if (!verification)
+    const [current] = await database.db
+      .select({
+        id: verification.id,
+        commit: verification.commitSha,
+        runID: verification.actionRunId,
+        diagnosis: verification.diagnosis,
+        repository: project.repositoryUrl,
+      })
+      .from(verification)
+      .innerJoin(change, eq(change.id, verification.changeId))
+      .innerJoin(project, eq(project.id, change.projectId))
+      .where(
+        and(
+          eq(verification.id, turn.command.commandId),
+          eq(verification.changeId, turn.command.changeId),
+          eq(verification.state, "failed"),
+          isNotNull(verification.actionRunId),
+        ),
+      );
+    if (!current)
       throw new CommandError(
         "not-found",
         "No failed Verification is admitted for this correction.",
       );
-    return verification;
+    return current;
   }
   return {
     async tools(turnID: string) {
-      const [bound] = await database.client`SELECT verification.id FROM factory.agent_turn turn
-        JOIN factory.verification verification ON verification.id=turn.command_id
-          AND verification.change_id=turn.change_id
-        WHERE turn.id=${turnID} AND turn.input->>'kind'='change-repair'`;
+      const [bound] = await database.db
+        .select({ id: verification.id })
+        .from(agentTurn)
+        .innerJoin(
+          verification,
+          and(
+            eq(verification.id, agentTurn.commandId),
+            eq(verification.changeId, agentTurn.changeId),
+          ),
+        )
+        .where(
+          and(
+            eq(agentTurn.id, turnID),
+            eq(query<string>`${agentTurn.input}->>'kind'`, "change-repair"),
+          ),
+        );
       return bound ? verificationToolCatalogue : [];
     },
     async call(turnID: string, token: string, raw: unknown): Promise<BuildBrowserResult> {

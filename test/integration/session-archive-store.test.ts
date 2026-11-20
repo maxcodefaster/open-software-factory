@@ -250,6 +250,9 @@ test("native transcript checkpoint retains pinned recovery references without co
     >`SELECT state,manifest_key AS key,manifest_sha256 AS sha256,source_refs AS source FROM factory.session_archive WHERE turn_id=${turn.id}`;
     expect(saved?.state).toBe("saved");
     if (!saved) throw new Error("Owned native archive missing");
+    const [timestamp] = await f.database.client<{ value: string }[]>`
+      SELECT saved_at::text AS value FROM factory.session_archive WHERE turn_id=${turn.id}`;
+    expect((await archives.status(f.changeID)).lastSaved?.savedAt).toBe(timestamp?.value);
     expect(saved.source["runtimeArtifacts"]).toBe(image);
     expect(saved.source["nativeRuntime"]).toEqual({
       engine: "substrate",

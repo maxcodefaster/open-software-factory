@@ -112,6 +112,7 @@ export function integrationNeedsApplicationBuild(path: string) {
     "skills-controllers-drizzle.test.ts",
     "substrate-drizzle.test.ts",
     "substrate-bound-provisioning.test.ts",
+    "substrate-lifecycle-facts.test.ts",
     "usage-journal.test.ts",
     "usage-policy.test.ts",
     "coding-budget.test.ts",

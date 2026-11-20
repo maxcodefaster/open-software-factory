@@ -8,8 +8,8 @@ import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing
 import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import { fixtureValue } from "../fixtures/value";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
+import { fixtureValue } from "../fixtures/value";
 
 test("personal Git retains intent before dispatch, rechecks authority and never replays uncertain writes", async () => {
   const previousInternalURL = process.env["FACTORY_INTERNAL_URL"];
@@ -33,13 +33,14 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
       childHash: "d".repeat(64),
       connectorURL: "wss://owned-build.factory.invalid/internal/runtime-connect",
     });
-    let mode: "success" | "lost" | "rejected" | "revoked" = "success";
+    let currentAttemptID = attemptID;
+    let mode: "success" | "lost" | "rejected" | "stopped" | "revoked" = "success";
     let sends = 0;
     let remoteHead = head;
     const hub: Pick<RuntimeHub, "connected" | "parentOperation"> = {
-      connected: (id) => id === attemptID,
+      connected: (id) => id === currentAttemptID,
       async parentOperation(id, operation, beforeSend) {
-        expect(id).toBe(attemptID);
+        expect(id).toBe(currentAttemptID);
         const input = JSON.parse(String(operation["data"])) as {
           action: string;
           repository?: string;
@@ -47,6 +48,9 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
         if (mode === "revoked")
           await database.client`UPDATE factory.project_membership SET role='product-contributor'
             WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+        if (mode === "stopped")
+          await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now()
+            WHERE id=${attemptID}`;
         await beforeSend?.(() => {
           sends++;
         });
@@ -120,8 +124,19 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
       expectedHead: head,
       message: "Personal work",
     };
-    const result = await git.mutate(workspaceID, owned.userID, "commit", command);
+    const beforeCommit = sends;
+    const [result, replay] = await Promise.all([
+      git.mutate(workspaceID, owned.userID, "commit", command),
+      git.mutate(workspaceID, owned.userID, "commit", command),
+    ]);
+    expect(replay).toEqual(result);
+    expect(sends).toBe(beforeCommit + 1);
     expect(result.head).toBe(next);
+    const [source] = await database.client<{ revision: string; generation: string }[]>`
+      SELECT workspace.source_revision AS revision,attempt.generation
+      FROM factory.development_workspace workspace JOIN factory.runtime_attempt attempt
+        ON attempt.workspace_id=workspace.id WHERE attempt.id=${attemptID}`;
+    expect(source).toEqual({ revision: head, generation: "1" });
     const sent = sends;
     expect(await git.mutate(workspaceID, owned.userID, "commit", command)).toEqual(result);
     expect(sends).toBe(sent);
@@ -156,6 +171,39 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
     const [rejected] = await database.client<Array<{ state: string }>>`
       SELECT state FROM factory.personal_git_operation WHERE id=${rejectedID}`;
     expect(rejected?.state).toBe("failed");
+    mode = "stopped";
+    const stopCommandID = crypto.randomUUID();
+    const beforeStop = sends;
+    await expect(
+      git.mutate(workspaceID, owned.userID, "fetch", {
+        commandID: stopCommandID,
+        expectedHead: next,
+      }),
+    ).rejects.toThrow("Personal Workspace execution changed");
+    expect(sends).toBe(beforeStop);
+    expect(await personalGitRepository(database, stopCommandID)).toBeNull();
+    const [stopped] = await database.client<{ state: string; attempt: string }[]>`
+      SELECT state,runtime_attempt_id AS attempt FROM factory.personal_git_operation
+      WHERE id=${stopCommandID}`;
+    expect(stopped).toEqual({ state: "failed", attempt: attemptID });
+    // Continue the authority regression on a separate fresh fixture generation.
+    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${attemptID}`;
+    currentAttemptID = await recordUncreatedWorkspaceAttempt(database, {
+      workspaceID,
+      generation: 2,
+      createdBy: owned.userID,
+      parentHash: "e".repeat(64),
+      childHash: "f".repeat(64),
+      connectorURL: "wss://owned-build.factory.invalid/internal/runtime-connect",
+    });
+    mode = "success";
+    await expect(git.mutate(workspaceID, owned.userID, "fetch", lost)).rejects.toThrow(
+      "unconfirmed",
+    );
+    expect(sends).toBe(beforeStop);
+    const [retained] = await database.client<{ attempt: string }[]>`
+      SELECT runtime_attempt_id AS attempt FROM factory.personal_git_operation WHERE id=${lost.commandID}`;
+    expect(retained?.attempt).toBe(attemptID);
     mode = "revoked";
     const beforeRevoked = sends;
     await expect(

@@ -17,11 +17,11 @@ test("mirrors reject the shared malformed binding before native observation, wri
   let writes = 0;
   const fixture = forgeBindingDatabase(
     (text) => {
-      if (text.includes("SELECT repository_url AS url")) return [{ url: repositoryURL }];
-      if (text.includes("FROM factory.repository_mirror_command")) return [];
-      throw new Error(`Unexpected mirror query: ${text}`);
+      throw new Error(`Unexpected native mirror query: ${text}`);
     },
     (text) => {
+      if (text.includes('"factory"."project"')) return [[repositoryURL]];
+      if (text.includes('"factory"."repository_mirror_command"')) return [];
       if (text.includes('"auth"."user"')) return [[actor]];
       if (text.includes('"factory"."account_access"')) return [[null, null]];
       if (text.includes('"factory"."administrator"')) return manager ? [[actor]] : [];

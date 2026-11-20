@@ -9,7 +9,8 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
   const database = process.connect();
   const actor = crypto.randomUUID(),
     outsider = crypto.randomUUID(),
-    projectID = crypto.randomUUID();
+    projectID = crypto.randomUUID(),
+    otherProjectID = crypto.randomUUID();
   const mirrors: RepositoryMirror[] = [];
   let creates = 0,
     syncs = 0,
@@ -82,6 +83,12 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${actor})`;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
       VALUES(${projectID},'owned-mirror','Owned mirror Project','https://forge.factory.test/factory/source','main','.devcontainer/devcontainer.json',${actor},'river-landscape')`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${otherProjectID},'other-owned-mirror','Other mirror Project','https://forge.factory.test/factory/other','main','.devcontainer/devcontainer.json',${actor})`;
+    expect(await controller.projects(actor)).toEqual([
+      { id: otherProjectID, name: "Other mirror Project" },
+      { id: projectID, name: "Owned mirror Project" },
+    ]);
     await expect(controller.get(outsider, projectID)).rejects.toThrow("System Manager");
     await expect(controller.create(outsider, projectID, input)).rejects.toThrow("System Manager");
     expect(creates).toBe(0);
@@ -131,6 +138,31 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
     await expect(controller.create(actor, projectID, unconfirmed)).rejects.toThrow("unconfirmed");
     const pending = await controller.get(actor, projectID);
     expect(pending.pending?.commandID).toBe(unconfirmed.commandID);
+    // Matching only the URL must not settle a command for different native settings.
+    for (const changed of [
+      { targetURL: "https://github.com/team/different.git" },
+      { syncOnCommit: false },
+      { branchFilter: "main" },
+      { interval: "2h" },
+    ]) {
+      mirrors.push({
+        remoteName: "remote_mirror_unconfirmed",
+        targetURL,
+        syncOnCommit: true,
+        branchFilter: "",
+        interval: "1h",
+        lastAttempt: null,
+        failed: false,
+        ...changed,
+      });
+      expect((await controller.get(actor, projectID)).pending).toEqual(pending.pending);
+      mirrors.pop();
+    }
+    await controller.acknowledge(actor, otherProjectID, unconfirmed.commandID);
+    const [retained] =
+      await database.client`SELECT state,completed_at,before_state='[]'::jsonb AS empty
+      FROM factory.repository_mirror_command WHERE id=${unconfirmed.commandID}`;
+    expect(retained).toEqual({ state: "uncertain", completed_at: null, empty: true });
     expect((await controller.create(actor, projectID, unconfirmed)).pending).toEqual(
       pending.pending,
     );
@@ -161,9 +193,18 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
       await database.client`SELECT row_to_json(command) FROM factory.repository_mirror_command command`;
     expect(JSON.stringify(rows)).not.toContain(input.token);
     expect(JSON.stringify(rows)).not.toContain(input.username);
+    expect(
+      await database.client`SELECT id FROM factory.repository_mirror_command
+        WHERE jsonb_typeof(before_state)<>'array'`,
+    ).toHaveLength(0);
     await expect(
       (async () => {
         await database.client`UPDATE factory.repository_mirror_command SET target_url='changed' WHERE id=${input.commandID}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.repository_mirror_command SET state='uncertain' WHERE id=${input.commandID}`;
       })(),
     ).rejects.toThrow("immutable");
   } finally {

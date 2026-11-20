@@ -1,4 +1,30 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notExists,
+  or,
+  sql as query,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  change as changeTable,
+  changeAgentSession,
+  changeAgentTurnIntent,
+  runtimeAttempt,
+} from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
@@ -37,18 +63,42 @@ export async function confirmUndispatchedReviewStopsIn(
   sql: DatabaseTransaction,
   target?: { changeID: string; stopID: string },
 ) {
-  const candidates = await sql<{ changeID: string; stopID: string; workspaceID: string }[]>`
-    SELECT session.change_id AS "changeID",session.stop_id AS "stopID",attempt.workspace_id AS "workspaceID"
-    FROM factory.change_agent_session session
-    JOIN factory.change change ON change.id=session.change_id AND change.runtime_attempt_id=session.runtime_attempt_id
-    JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id AND attempt.workspace_id IS NOT NULL
-    JOIN factory.agent_turn turn ON turn.id=session.stop_turn_id
-    WHERE session.state='stopped' AND session.stop_pending AND session.stop_id IS NOT NULL
-      AND session.native_session_confirmed_at IS NULL
-      AND turn.state='stopped' AND turn.input->>'kind'='change-review'
-      AND (${target?.changeID ?? null}::uuid IS NULL OR change.id=${target?.changeID ?? null})
-      AND (${target?.stopID ?? null}::uuid IS NULL OR session.stop_id=${target?.stopID ?? null})
-    ORDER BY attempt.workspace_id,session.change_id`;
+  const db = drizzleTransaction(sql);
+  const candidates = await db
+    .select({
+      changeID: changeAgentSession.changeId,
+      stopID: query<string>`${changeAgentSession.stopId}`,
+      workspaceID: query<string>`${runtimeAttempt.workspaceId}`,
+    })
+    .from(changeAgentSession)
+    .innerJoin(
+      changeTable,
+      and(
+        eq(changeTable.id, changeAgentSession.changeId),
+        eq(changeTable.runtimeAttemptId, changeAgentSession.runtimeAttemptId),
+      ),
+    )
+    .innerJoin(
+      runtimeAttempt,
+      and(
+        eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId),
+        isNotNull(runtimeAttempt.workspaceId),
+      ),
+    )
+    .innerJoin(agentTurn, eq(agentTurn.id, changeAgentSession.stopTurnId))
+    .where(
+      and(
+        eq(changeAgentSession.state, "stopped"),
+        eq(changeAgentSession.stopPending, true),
+        isNotNull(changeAgentSession.stopId),
+        isNull(changeAgentSession.nativeSessionConfirmedAt),
+        eq(agentTurn.state, "stopped"),
+        query`${agentTurn.input}->>'kind'='change-review'`,
+        target ? eq(changeTable.id, target.changeID) : undefined,
+        target ? eq(changeAgentSession.stopId, target.stopID) : undefined,
+      ),
+    )
+    .orderBy(asc(runtimeAttempt.workspaceId), asc(changeAgentSession.changeId));
   let count = 0;
   for (const candidate of candidates) {
     // Native metadata-worker admission uses this same Workspace lock. Never
@@ -196,11 +246,22 @@ export function createChangeAgentStop(
           : "Execution stopped";
     // Never hold Change while waiting on Turn: execution locks Turn first.
     // A delayed caller can affect only the Turn captured when its Stop began.
-    await sql`UPDATE factory.agent_turn SET state = 'stopped',
-      owner_token = NULL, owner_expires_at = NULL,
-      outcome_summary = ${summary}, updated_at = now()
-      WHERE id = ${target.turnID} AND change_id = ${changeID}
-        AND state IN ('pending', 'dispatching', 'running', 'uncertain')`;
+    await drizzleTransaction(sql)
+      .update(agentTurn)
+      .set({
+        state: "stopped",
+        ownerToken: null,
+        ownerExpiresAt: null,
+        outcomeSummary: summary,
+        updatedAt: query`now()`,
+      })
+      .where(
+        and(
+          eq(agentTurn.id, target.turnID),
+          eq(agentTurn.changeId, changeID),
+          inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+        ),
+      );
   }
 
   return {
@@ -211,6 +272,7 @@ export function createChangeAgentStop(
         // Admission locks Change/Ticket before reading the barrier. Publish it
         // without waiting for any Turn lock: execution locks Turn before Change.
         const target = await database.client.begin(async (sql) => {
+          const db = drizzleTransaction(sql);
           const [change] = await sql<{ attemptID: string | null }[]>`
           SELECT change.runtime_attempt_id AS "attemptID" FROM factory.change change
           JOIN factory.ticket ticket ON ticket.id = change.ticket_id
@@ -226,24 +288,58 @@ export function createChangeAgentStop(
           // A pending admission may not yet have prepared the Session. With no
           // active turn, retain this exact Session's last assigned input: a failed
           // outcome does not prove that its native Inbox entry was removed.
-          const turns = await sql<Array<{ id: string; unbound: boolean }>>`
-          SELECT turn.id,turn.state='pending' AND EXISTS(
-            SELECT 1 FROM factory.change_agent_turn_intent intent
-            WHERE intent.turn_id=turn.id AND intent.change_id=turn.change_id
-              AND intent.runtime_attempt_id IS NULL) AS unbound
-          FROM factory.agent_turn turn
-          WHERE turn.change_id = ${changeID} AND turn.state IN ('pending', 'dispatching', 'running', 'uncertain')
-            AND turn.id IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid
-          ORDER BY turn.created_at DESC LIMIT 1`;
+          const turns = await db
+            .select({
+              id: agentTurn.id,
+              unbound: query<boolean>`${agentTurn.state}='pending' AND ${exists(
+                db
+                  .select({ turnId: changeAgentTurnIntent.turnId })
+                  .from(changeAgentTurnIntent)
+                  .where(
+                    and(
+                      eq(changeAgentTurnIntent.turnId, agentTurn.id),
+                      eq(changeAgentTurnIntent.changeId, agentTurn.changeId),
+                      isNull(changeAgentTurnIntent.runtimeAttemptId),
+                    ),
+                  ),
+              )}`,
+            })
+            .from(agentTurn)
+            .where(
+              and(
+                eq(agentTurn.changeId, changeID),
+                inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+                query`${agentTurn.id} IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid`,
+              ),
+            )
+            .orderBy(desc(agentTurn.createdAt))
+            .limit(1);
           const pending = turns[0];
           if (!handoff && pending?.unbound) {
-            const [settled] = await sql`SELECT session.change_id
-              FROM factory.change_agent_session session
-              WHERE session.change_id=${changeID} AND session.state='stopped' AND NOT session.stop_pending
-                AND session.active_turn_id IS DISTINCT FROM ${pending.id}::uuid
-                AND NOT EXISTS(SELECT 1 FROM factory.agent_turn other
-                  WHERE other.change_id=session.change_id AND other.id<>${pending.id}
-                    AND other.state IN ('pending','dispatching','running','uncertain'))`;
+            const other = alias(agentTurn, "other");
+            const [settled] = await db
+              .select({ changeId: changeAgentSession.changeId })
+              .from(changeAgentSession)
+              .where(
+                and(
+                  eq(changeAgentSession.changeId, changeID),
+                  eq(changeAgentSession.state, "stopped"),
+                  eq(changeAgentSession.stopPending, false),
+                  query`${changeAgentSession.activeTurnId} IS DISTINCT FROM ${pending.id}::uuid`,
+                  notExists(
+                    db
+                      .select({ id: other.id })
+                      .from(other)
+                      .where(
+                        and(
+                          eq(other.changeId, changeAgentSession.changeId),
+                          ne(other.id, pending.id),
+                          inArray(other.state, ["pending", "dispatching", "running", "uncertain"]),
+                        ),
+                      ),
+                  ),
+                ),
+              );
             if (settled) {
               // Never wait on Turn while holding Change. If execute already
               // owns it, publish the normal Stop barrier below. Otherwise this
@@ -258,17 +354,49 @@ export function createChangeAgentStop(
                 // Binding can commit after the locking statement took its
                 // snapshot without updating Turn itself. Recheck both records
                 // in a fresh statement, now that the Turn lock excludes it.
-                const [cancellable] = await sql`SELECT session.change_id
-                  FROM factory.change_agent_session session
-                  JOIN factory.change_agent_turn_intent intent ON intent.turn_id=${pending.id}
-                    AND intent.change_id=session.change_id
-                  JOIN factory.agent_turn turn ON turn.id=intent.turn_id AND turn.state='pending'
-                  WHERE session.change_id=${changeID} AND session.state='stopped'
-                    AND NOT session.stop_pending AND intent.runtime_attempt_id IS NULL
-                    AND session.active_turn_id IS DISTINCT FROM turn.id
-                    AND NOT EXISTS(SELECT 1 FROM factory.agent_turn other
-                      WHERE other.change_id=session.change_id AND other.id<>turn.id
-                        AND other.state IN ('pending','dispatching','running','uncertain'))`;
+                const [cancellable] = await db
+                  .select({ changeId: changeAgentSession.changeId })
+                  .from(changeAgentSession)
+                  .innerJoin(
+                    changeAgentTurnIntent,
+                    and(
+                      eq(changeAgentTurnIntent.turnId, pending.id),
+                      eq(changeAgentTurnIntent.changeId, changeAgentSession.changeId),
+                    ),
+                  )
+                  .innerJoin(
+                    agentTurn,
+                    and(
+                      eq(agentTurn.id, changeAgentTurnIntent.turnId),
+                      eq(agentTurn.state, "pending"),
+                    ),
+                  )
+                  .where(
+                    and(
+                      eq(changeAgentSession.changeId, changeID),
+                      eq(changeAgentSession.state, "stopped"),
+                      eq(changeAgentSession.stopPending, false),
+                      isNull(changeAgentTurnIntent.runtimeAttemptId),
+                      query`${changeAgentSession.activeTurnId} IS DISTINCT FROM ${agentTurn.id}`,
+                      notExists(
+                        db
+                          .select({ id: other.id })
+                          .from(other)
+                          .where(
+                            and(
+                              eq(other.changeId, changeAgentSession.changeId),
+                              ne(other.id, agentTurn.id),
+                              inArray(other.state, [
+                                "pending",
+                                "dispatching",
+                                "running",
+                                "uncertain",
+                              ]),
+                            ),
+                          ),
+                      ),
+                    ),
+                  );
                 if (cancellable) {
                   await settleTarget(changeID, { stopID: null, turnID: pending.id }, origin, sql);
                   // There is no new native input. Preserve the previous
@@ -278,20 +406,46 @@ export function createChangeAgentStop(
               }
             }
           }
-          const rows = await sql<
-            StopTarget[]
-          >`UPDATE factory.change_agent_session session SET state = 'stopped',
-          stop_id = CASE WHEN stop_pending THEN stop_id ELSE ${stopID}::uuid END,
-          stop_turn_id = CASE WHEN stop_pending THEN stop_turn_id ELSE COALESCE(
+          const rows = await db
+            .update(changeAgentSession)
+            .set({
+              state: "stopped",
+              stopId: query`CASE WHEN ${changeAgentSession.stopPending} THEN ${changeAgentSession.stopId} ELSE ${stopID}::uuid END`,
+              stopTurnId: query`CASE WHEN ${changeAgentSession.stopPending} THEN ${changeAgentSession.stopTurnId} ELSE COALESCE(
             ${turns[0]?.id ?? null}::uuid,
-            (SELECT intent.turn_id FROM factory.change_agent_turn_intent intent
-              WHERE intent.turn_id=session.active_turn_id AND intent.change_id=session.change_id
-                AND intent.session_id=session.opencode_session_id
-                AND (intent.runtime_attempt_id IS NULL OR intent.runtime_attempt_id=session.runtime_attempt_id))
-          ) END,
-          stop_pending = true, active_inbox_id = NULL, updated_at = now()
-          WHERE change_id = ${changeID} AND (stop_pending OR state <> 'stopped' OR ${turns[0]?.id ?? null}::uuid IS NOT NULL)
-          RETURNING stop_id AS "stopID", stop_turn_id AS "turnID"`;
+            ${db
+              .select({ turnId: changeAgentTurnIntent.turnId })
+              .from(changeAgentTurnIntent)
+              .where(
+                and(
+                  eq(changeAgentTurnIntent.turnId, changeAgentSession.activeTurnId),
+                  eq(changeAgentTurnIntent.changeId, changeAgentSession.changeId),
+                  eq(changeAgentTurnIntent.sessionId, changeAgentSession.opencodeSessionId),
+                  or(
+                    isNull(changeAgentTurnIntent.runtimeAttemptId),
+                    eq(changeAgentTurnIntent.runtimeAttemptId, changeAgentSession.runtimeAttemptId),
+                  ),
+                ),
+              )}
+          ) END`,
+              stopPending: true,
+              activeInboxId: null,
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                eq(changeAgentSession.changeId, changeID),
+                or(
+                  eq(changeAgentSession.stopPending, true),
+                  ne(changeAgentSession.state, "stopped"),
+                  query`${turns[0]?.id ?? null}::uuid IS NOT NULL`,
+                ),
+              ),
+            )
+            .returning({
+              stopID: changeAgentSession.stopId,
+              turnID: changeAgentSession.stopTurnId,
+            });
           return {
             ...(rows[0] ?? { stopID: null, turnID: turns[0]?.id ?? null }),
             pendingTurnID: handoff ? null : (turns[0]?.id ?? null),
@@ -319,31 +473,45 @@ export function createChangeAgentStop(
     ) {
       // One compact recovery outcome after the observer's finite budget, not
       // persistent polling history. A late observer cannot overwrite a new Stop.
-      await database.client`UPDATE factory.change_agent_session session SET
-        last_error = 'Stop remains unconfirmed. The last confirmation check ended without confirmation. ' || CASE
-          WHEN change.runtime_attempt_id IS DISTINCT FROM session.runtime_attempt_id
-            OR (intent.runtime_attempt_id IS NOT NULL AND intent.runtime_attempt_id <> session.runtime_attempt_id)
+      const current = alias(changeAgentSession, "current");
+      await database.db
+        .update(changeAgentSession)
+        .set({
+          lastError: query`'Stop remains unconfirmed. The last confirmation check ended without confirmation. ' || CASE
+          WHEN ${changeTable.runtimeAttemptId} IS DISTINCT FROM ${changeAgentSession.runtimeAttemptId}
+            OR (${changeAgentTurnIntent.runtimeAttemptId} IS NOT NULL AND ${changeAgentTurnIntent.runtimeAttemptId} <> ${changeAgentSession.runtimeAttemptId})
             THEN 'The stopped input belongs to a different Workspace generation; its outcome still needs confirmation.'
-          WHEN attempt.state = 'stopped' AND intent.runtime_attempt_id IS NOT NULL
+          WHEN ${runtimeAttempt.state} = 'stopped' AND ${changeAgentTurnIntent.runtimeAttemptId} IS NOT NULL
             THEN 'Stopped compute cannot prove that assigned input was canceled. Restarting alone does not confirm Stop.'
-          WHEN attempt.state = 'paused' AND intent.runtime_attempt_id IS NOT NULL
+          WHEN ${runtimeAttempt.state} = 'paused' AND ${changeAgentTurnIntent.runtimeAttemptId} IS NOT NULL
             THEN 'Paused compute retains assigned input. A durable Source checkpoint does not confirm its cancellation.'
-          WHEN session.opencode_session_id IS NULL
+          WHEN ${changeAgentSession.opencodeSessionId} IS NULL
             THEN 'The OpenCode Session is not yet identifiable; its create outcome still needs confirmation.'
-          WHEN attempt.state <> 'ready' OR NOT ${hub.connected(target.attemptID)}
+          WHEN ${runtimeAttempt.state} <> 'ready' OR NOT ${hub.connected(target.attemptID)}
             THEN 'Live Workspace status is unavailable; execution and queued input still need confirmation.'
-          WHEN NOT session.stop_dispatched
+          WHEN NOT ${changeAgentSession.stopDispatched}
             THEN 'Interruption has not been dispatched. A read-only check will not send it.'
           ELSE 'Ordered history has not proved that execution and queued input are settled.'
-        END, updated_at = now()
-        FROM factory.change change, factory.runtime_attempt attempt,
-          factory.change_agent_session current
-          LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id = current.stop_turn_id
-        WHERE session.change_id = ${changeID} AND current.change_id = session.change_id
-          AND change.id = session.change_id AND attempt.id = session.runtime_attempt_id
-          AND session.state = 'stopped' AND session.stop_pending AND session.stop_id = ${target.stopID}
-          AND session.runtime_attempt_id = ${target.attemptID}
-          AND session.opencode_session_id IS NOT DISTINCT FROM ${target.sessionID}`;
+        END`,
+          updatedAt: query`now()`,
+        })
+        .from(changeTable)
+        .innerJoin(current, eq(current.changeId, changeTable.id))
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, current.runtimeAttemptId))
+        .leftJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, current.stopTurnId))
+        .where(
+          and(
+            eq(changeAgentSession.changeId, changeID),
+            eq(current.changeId, changeAgentSession.changeId),
+            eq(changeTable.id, changeAgentSession.changeId),
+            eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId),
+            eq(changeAgentSession.state, "stopped"),
+            eq(changeAgentSession.stopPending, true),
+            eq(changeAgentSession.stopId, target.stopID),
+            eq(changeAgentSession.runtimeAttemptId, target.attemptID),
+            query`${changeAgentSession.opencodeSessionId} IS NOT DISTINCT FROM ${target.sessionID}`,
+          ),
+        );
     },
 
     async confirm(
@@ -351,39 +519,41 @@ export function createChangeAgentStop(
       expectedStopID?: string,
       mode: RetainedStopTarget["mode"] = "interrupt",
     ) {
-      const rows = await database.client<
-        Array<
-          StopTarget & {
-            attemptID: string;
-            sessionID: string | null;
-            runtimeState: string;
-            dispatched: boolean;
-            promptID: string | null;
-            intentAttemptID: string | null;
-            currentAttemptID: string | null;
-            bootstrap: boolean | null;
-            intendedSessionID: string | null;
-            sessionConfirmed: boolean;
-            implementationConfirmed: boolean;
-            turnState: string | null;
-          }
-        >
-      >`SELECT session.runtime_attempt_id AS "attemptID", session.opencode_session_id AS "sessionID",
-        attempt.state AS "runtimeState", session.stop_dispatched AS dispatched,
-        session.stop_id AS "stopID", session.stop_turn_id AS "turnID",
-        intent.prompt_id AS "promptID", intent.runtime_attempt_id AS "intentAttemptID",
-        change.runtime_attempt_id AS "currentAttemptID",intent.bootstrap,
-        intent.session_id AS "intendedSessionID",
-        session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed",
-        session.implementation_session_confirmed_at IS NOT NULL AS "implementationConfirmed",
-        stopped_turn.state AS "turnState"
-        FROM factory.change_agent_session session
-        JOIN factory.runtime_attempt attempt ON attempt.id = session.runtime_attempt_id
-        JOIN factory.change change ON change.id = session.change_id
-        LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id = session.stop_turn_id
-        LEFT JOIN factory.agent_turn stopped_turn ON stopped_turn.id = session.stop_turn_id
-        WHERE session.change_id = ${changeID} AND session.state = 'stopped' AND session.stop_pending
-          AND (${expectedStopID ?? null}::uuid IS NULL OR session.stop_id = ${expectedStopID ?? null})`;
+      const rows = await database.db
+        .select({
+          attemptID: changeAgentSession.runtimeAttemptId,
+          sessionID: changeAgentSession.opencodeSessionId,
+          runtimeState: runtimeAttempt.state,
+          dispatched: changeAgentSession.stopDispatched,
+          stopID: changeAgentSession.stopId,
+          turnID: changeAgentSession.stopTurnId,
+          promptID: changeAgentTurnIntent.promptId,
+          intentAttemptID: changeAgentTurnIntent.runtimeAttemptId,
+          currentAttemptID: changeTable.runtimeAttemptId,
+          bootstrap: changeAgentTurnIntent.bootstrap,
+          intendedSessionID: changeAgentTurnIntent.sessionId,
+          sessionConfirmed: query<boolean>`${changeAgentSession.nativeSessionConfirmedAt} IS NOT NULL`,
+          implementationConfirmed: query<boolean>`${changeAgentSession.implementationSessionConfirmedAt} IS NOT NULL`,
+          turnState: agentTurn.state,
+        })
+        .from(changeAgentSession)
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId))
+        .innerJoin(changeTable, eq(changeTable.id, changeAgentSession.changeId))
+        .leftJoin(
+          changeAgentTurnIntent,
+          eq(changeAgentTurnIntent.turnId, changeAgentSession.stopTurnId),
+        )
+        .leftJoin(agentTurn, eq(agentTurn.id, changeAgentSession.stopTurnId))
+        .where(
+          and(
+            eq(changeAgentSession.changeId, changeID),
+            eq(changeAgentSession.state, "stopped"),
+            eq(changeAgentSession.stopPending, true),
+            expectedStopID === undefined
+              ? undefined
+              : eq(changeAgentSession.stopId, expectedStopID),
+          ),
+        );
       const current = rows[0];
       if (!current) return true;
       // Recovery fences the captured Turn after a crash between publication
@@ -492,12 +662,24 @@ export function createChangeAgentStop(
         } else {
           // Commit the CAS before HTTP. It elects one dispatcher without holding
           // a pool connection. Unknown external outcomes are never replayed.
-          const dispatched = await database.client<Array<{ id: string }>>`
-          UPDATE factory.change_agent_session SET stop_dispatched = true, updated_at = now()
-          WHERE change_id = ${changeID} AND state = 'stopped' AND stop_pending AND NOT stop_dispatched
-            AND stop_id = ${current.stopID} AND runtime_attempt_id = ${current.attemptID}
-            AND opencode_session_id IS NOT DISTINCT FROM ${current.sessionID}
-          RETURNING change_id AS id`;
+          const dispatched = await database.db
+            .update(changeAgentSession)
+            .set({
+              stopDispatched: true,
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                eq(changeAgentSession.changeId, changeID),
+                eq(changeAgentSession.state, "stopped"),
+                eq(changeAgentSession.stopPending, true),
+                eq(changeAgentSession.stopDispatched, false),
+                eq(changeAgentSession.stopId, current.stopID),
+                eq(changeAgentSession.runtimeAttemptId, current.attemptID),
+                query`${changeAgentSession.opencodeSessionId} IS NOT DISTINCT FROM ${current.sessionID}`,
+              ),
+            )
+            .returning({ id: changeAgentSession.changeId });
           if (!dispatched[0]) return false;
           const interruption = await interruptOpenCodeSession(client, current.sessionID);
           if (interruption === "unconfirmed") return false;
@@ -523,31 +705,62 @@ export function createChangeAgentStop(
         await usage.settle(current.turnID, "interrupted");
       }
       return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
         // Serialize proof publication with runtime replacement and admission.
         // No external I/O or Turn lock is held while Change is locked.
         const changes = await sql<Array<{ id: string }>>`SELECT id FROM factory.change
           WHERE id = ${changeID} AND runtime_attempt_id = ${current.attemptID} FOR UPDATE`;
         if (!changes[0]) return false;
         if (pausedBootstrap) {
-          const [paused] = await sql`SELECT id FROM factory.runtime_attempt
-            WHERE id=${current.attemptID} AND change_id=${changeID} AND state='paused'`;
+          const [paused] = await db
+            .select({ id: runtimeAttempt.id })
+            .from(runtimeAttempt)
+            .where(
+              and(
+                eq(runtimeAttempt.id, current.attemptID),
+                eq(runtimeAttempt.changeId, changeID),
+                eq(runtimeAttempt.state, "paused"),
+              ),
+            );
           if (!paused) return false;
         }
         if (retainedSettled) {
-          const [stopped] = await sql`SELECT id FROM factory.runtime_attempt
-            WHERE id=${current.attemptID} AND state IN ('stopped','paused')`;
+          const [stopped] = await db
+            .select({ id: runtimeAttempt.id })
+            .from(runtimeAttempt)
+            .where(
+              and(
+                eq(runtimeAttempt.id, current.attemptID),
+                inArray(runtimeAttempt.state, ["stopped", "paused"]),
+              ),
+            );
           if (!stopped) return false;
         }
-        const confirmed = await sql<Array<{ id: string }>>`
-        UPDATE factory.change_agent_session SET stop_pending = false, stop_dispatched = false,
-          last_error = NULL,
-          updated_at = now()
-        WHERE change_id = ${changeID} AND state = 'stopped' AND stop_pending
-          AND stop_id IS NOT DISTINCT FROM ${current.stopID} AND runtime_attempt_id = ${current.attemptID}
-          AND opencode_session_id IS NOT DISTINCT FROM ${current.sessionID}
-          AND (NOT ${unsubmittedBootstrap} OR native_session_confirmed_at IS NULL)
-          AND (NOT ${pausedBootstrap} OR implementation_session_confirmed_at IS NULL)
-        RETURNING change_id AS id`;
+        const confirmed = await db
+          .update(changeAgentSession)
+          .set({
+            stopPending: false,
+            stopDispatched: false,
+            lastError: null,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(changeAgentSession.changeId, changeID),
+              eq(changeAgentSession.state, "stopped"),
+              eq(changeAgentSession.stopPending, true),
+              query`${changeAgentSession.stopId} IS NOT DISTINCT FROM ${current.stopID}`,
+              eq(changeAgentSession.runtimeAttemptId, current.attemptID),
+              query`${changeAgentSession.opencodeSessionId} IS NOT DISTINCT FROM ${current.sessionID}`,
+              unsubmittedBootstrap
+                ? isNull(changeAgentSession.nativeSessionConfirmedAt)
+                : undefined,
+              pausedBootstrap
+                ? isNull(changeAgentSession.implementationSessionConfirmedAt)
+                : undefined,
+            ),
+          )
+          .returning({ id: changeAgentSession.changeId });
         return confirmed.length === 1;
       });
     },

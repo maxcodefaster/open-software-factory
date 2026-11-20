@@ -13,11 +13,13 @@ import {
   type RuntimeSocketData,
 } from "../../apps/factory/src/runtime/hub";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import {
   runtimeBuildBrowserToken,
   runtimeModelToken,
 } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
 import { observe } from "../fixtures/pinned-opencode";
 
@@ -162,6 +164,106 @@ test("browser create intent is immutable, deterministic and persisted before exa
     ).rejects.toThrow("immutable");
   } finally {
     await scope.dispose();
+  }
+});
+
+test("independent review browser intent rolls back and recording retains exact native timestamp and commit", async () => {
+  const owned = await candidateReviewFixture(undefined, installation.connect());
+  let browser: ReturnType<typeof createBuildBrowserController> | undefined;
+  let turnID: string | undefined;
+  const startedAt = "2026-11-20T12:34:56.123456Z";
+  const effects: string[] = [];
+  try {
+    const turn = await owned.activeReview();
+    turnID = turn.id;
+    const database = {
+      ...owned.database,
+      client: new Proxy(owned.database.client, {
+        get(target, property, receiver) {
+          if (property === "begin")
+            return (callback: (sql: DatabaseTransaction) => Promise<unknown>) =>
+              target.begin(async (sql) => {
+                await callback(sql);
+                throw new Error("Owned browser admission rollback");
+              });
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+    };
+    owned.hub.parentOperation = async (_attempt, payload, beforeSend) => {
+      await beforeSend?.(() => {});
+      effects.push(payload.action);
+      if (payload.action === "browser-close") return {};
+      const data = JSON.parse(String(payload["data"])) as { sessionId: string };
+      if (payload.action === "browser-recording-start") {
+        const [intent] = await owned.database.client<
+          { state: string; commit: string; review: string }[]
+        >`
+          SELECT state,commit_sha AS commit,review_id AS review FROM factory.review_media WHERE id=${data.sessionId}`;
+        expect(intent).toEqual({ state: "intended", commit: owned.commit, review: owned.reviewID });
+        return { data: JSON.stringify({ startedAt }) };
+      }
+      return {
+        data: JSON.stringify({
+          content: [{ type: "text", text: "Owned independent review observation" }],
+          structuredContent: {
+            sessionId: data.sessionId,
+            turnId: turn.id,
+            runtimeAttemptId: owned.attemptID,
+            generation: 1,
+            app: "app",
+            headCommit: owned.commit,
+            workingTreeModified: false,
+            observedAt: new Date().toISOString(),
+          },
+        }),
+      };
+    };
+    await expect(
+      createBuildBrowserController(database, owned.hub, "owned-recording").prepare(
+        turn.id,
+        turn.ownerToken,
+      ),
+    ).rejects.toThrow("Owned browser admission rollback");
+    expect(
+      await owned.database
+        .client`SELECT id FROM factory.build_browser_session WHERE turn_id=${turn.id}`,
+    ).toHaveLength(0);
+    expect(effects).toHaveLength(0);
+    browser = createBuildBrowserController(owned.database, owned.hub, "owned-recording");
+    const grant = await browser.prepare(turn.id, turn.ownerToken);
+    const authorized = await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`);
+    if (!authorized) throw new Error("Owned review browser grant unavailable");
+    await browser.call(
+      authorized.session,
+      turn.ownerToken,
+      {
+        name: "browser_open",
+        arguments: { app: "app" },
+      },
+      1,
+    );
+    const read = () => owned.database.client<{ state: string; started: string }[]>`
+      SELECT state,created_at::text AS started FROM factory.review_media WHERE id=${grant.sessionID}`;
+    expect([...(await read())]).toEqual([
+      { state: "recording", started: "2026-11-20 12:34:56.123456+00" },
+    ]);
+    await browser.call(
+      authorized.session,
+      turn.ownerToken,
+      {
+        name: "browser_open",
+        arguments: { app: "app" },
+      },
+      2,
+    );
+    expect([...(await read())]).toEqual([
+      { state: "recording", started: "2026-11-20 12:34:56.123456+00" },
+    ]);
+    expect(effects.filter((action) => action === "browser-recording-start")).toHaveLength(1);
+  } finally {
+    if (browser && turnID) await browser.closeTurn(turnID);
+    await owned.dispose();
   }
 });
 

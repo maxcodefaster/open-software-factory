@@ -8,6 +8,7 @@ import { createExternalFactoryMCP } from "../../apps/factory/src/mcp/external";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { removeRuntimeRepository } from "../../apps/factory/src/runtime/git-http";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import { emergencyAdministratorID } from "../../packages/auth/src/policy";
@@ -28,8 +29,8 @@ function mcpValue(result: Awaited<ReturnType<Client["callTool"]>>) {
   return JSON.parse(text.text);
 }
 
-async function mcpFirstStartFixture() {
-  const f = await substrateFixture();
+async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
+  const f = await substrateFixture("a".repeat(40), kind);
   const directory = await mkdtemp(join(tmpdir(), "factory-mcp-first-start-"));
   const clients: Client[] = [];
   let server: ReturnType<typeof Bun.serve> | undefined;
@@ -93,6 +94,7 @@ async function mcpFirstStartFixture() {
       creates: new Map<string, number>(),
       lose: "",
       afterStart: undefined as (() => Promise<void>) | undefined,
+      previewGrants: [] as Array<{ attemptID: string; appChannel: string }>,
     };
     async function retainedIntent() {
       const commands = await f.database
@@ -191,6 +193,13 @@ async function mcpFirstStartFixture() {
         },
       },
       workspaceSources,
+      workspaceSharing: createWorkspaceSharing(f.database, () => {}),
+      runtimeAccess: {
+        async issue(input: { attemptID: string; appChannel: string }) {
+          probe.previewGrants.push(input);
+          return "owned-preview-grant";
+        },
+      },
       runtimeController: {
         ...runtimeController,
         async start(...args: Parameters<typeof runtimeController.start>) {
@@ -274,6 +283,24 @@ test("MCP explicit Project Start initializes a fresh personal native Workspace w
       native: { state: "ACTOR_STATE_RUNNING" },
     });
     expect(probe.creates.get("Actor")).toBe(1);
+    const beforePreview = probe.calls.length;
+    const missingApp = await client.callTool({
+      name: "getPreview",
+      arguments: { workspaceID: f.workspaceID, app: "app-undeclared" },
+    });
+    expect(missingApp.isError).toBe(true);
+    expect(mcpValue(missingApp).error.code).toBe("not-found");
+    expect(probe.previewGrants).toHaveLength(0);
+    const preview = await client.callTool({
+      name: "getPreview",
+      arguments: { workspaceID: f.workspaceID, app: "app" },
+    });
+    expect(preview.isError).not.toBe(true);
+    expect(mcpValue(preview)).toMatchObject({ attemptID: f.attemptID, app: "app" });
+    expect(probe.previewGrants).toEqual([
+      expect.objectContaining({ attemptID: f.attemptID, appChannel: "app" }),
+    ]);
+    expect(probe.calls).toHaveLength(beforePreview);
     const beforeReplay = probe.calls.length;
     f.recreateHandler();
     for (const target of [{ projectID: f.projectID }, { workspaceID: f.workspaceID }])
@@ -416,6 +443,9 @@ test("MCP explicit Project Start rejects request reuse across Projects, actors a
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${f.projectID},${developer},'developer',${f.userID})`;
     const before = f.probe.calls.length;
+    const retained = [
+      ...(await f.database.client`SELECT * FROM factory.workspace_lifecycle_command`),
+    ];
     const other = await f.connect(developer);
     for (const [client, name, target] of [
       [f.client, "startWorkspace", { projectID: otherProject }],
@@ -437,6 +467,9 @@ test("MCP explicit Project Start rejects request reuse across Projects, actors a
     expect([
       ...(await f.database.client`SELECT id FROM factory.workspace_lifecycle_command`),
     ]).toEqual([{ id: requestID }]);
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.workspace_lifecycle_command`),
+    ]).toEqual(retained);
     await f.database.client`UPDATE factory.project_membership SET role='product-contributor'
       WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
     const revoked = await f.client.callTool({
@@ -558,6 +591,110 @@ test("MCP explicit Project Start observes a concurrent duplicate while the first
   } finally {
     release.resolve();
     await first?.catch(() => undefined);
+    await f.dispose();
+  }
+}, 60_000);
+
+test("MCP retained lists keep personal privacy and current Project grants separate from Ticket selection", async () => {
+  const f = await mcpFirstStartFixture("ticket");
+  try {
+    const guest = crypto.randomUUID();
+    const personalID = personalWorkspaceIdentity(f.projectID, f.userID).workspaceID;
+    await f.database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${guest},'Owned list guest',${`${guest}@factory.invalid`})`;
+    await f.database.client`INSERT INTO factory.administrator(user_id) VALUES(${guest})`;
+    await f.database
+      .client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+      VALUES(${personalID},${f.projectID},'personal',${f.userID},'main',${"a".repeat(40)},${f.userID})`;
+    const client = await f.connect(guest);
+    const list = async () =>
+      mcpValue(await client.callTool({ name: "listWorkspaces", arguments: {} })).workspaces;
+    expect(await list()).toEqual([]);
+    const ticketArguments = { projectID: f.projectID, limit: 1 };
+    const ticketRow = {
+      changeID: f.changeID,
+      ticketID: f.ticketID,
+      title: "Owned native Ticket fence",
+      state: "active",
+      workspaceID: null,
+    };
+    expect(
+      mcpValue(await client.callTool({ name: "listTicketWorkspaces", arguments: ticketArguments })),
+    ).toEqual({ workspaces: [ticketRow], nextOffset: null });
+    expect(
+      mcpValue(
+        await client.callTool({
+          name: "listTicketWorkspaces",
+          arguments: { ...ticketArguments, offset: 1 },
+        }),
+      ),
+    ).toEqual({ workspaces: [], nextOffset: null });
+    await f.database
+      .client`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by)
+      SELECT ${f.workspaceID},project_id,'ticket',ticket_id,id,branch_name,base_sha,created_by
+      FROM factory.change WHERE id=${f.changeID}`;
+    expect(await list()).toEqual([
+      {
+        workspaceID: f.workspaceID,
+        projectID: f.projectID,
+        kind: "ticket",
+        ownerID: null,
+        changeID: f.changeID,
+        collaborative: false,
+      },
+    ]);
+    const share = async (permission: "observe" | null, expectedVersion: number) =>
+      f.client.callTool({
+        name: "shareWorkspace",
+        arguments: {
+          commandID: crypto.randomUUID(),
+          workspaceID: personalID,
+          userID: guest,
+          permission,
+          expectedVersion,
+        },
+      });
+    expect((await share("observe", 0)).isError).not.toBe(true);
+    expect((await list()).map((row: { workspaceID: string }) => row.workspaceID).sort()).toEqual(
+      [personalID, f.workspaceID].sort(),
+    );
+    await f.database.client`DELETE FROM factory.administrator WHERE user_id=${guest}`;
+    await f.database
+      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${f.projectID},${guest},'product-contributor',${f.userID})`;
+    expect(await list()).toEqual([]);
+    const denied = await client.callTool({
+      name: "listWorkspaces",
+      arguments: { projectID: f.projectID },
+    });
+    expect(mcpValue(denied).error.code).toBe("forbidden");
+    await f.database.client`UPDATE factory.project_membership SET role='developer'
+      WHERE project_id=${f.projectID} AND user_id=${guest}`;
+    expect((await list()).length).toBe(2);
+    expect((await share(null, 1)).isError).not.toBe(true);
+    expect((await list()).map((row: { workspaceID: string }) => row.workspaceID)).toEqual([
+      f.workspaceID,
+    ]);
+    for (const unavailable of ["cancelled", "trashed"]) {
+      if (unavailable === "cancelled")
+        await f.database
+          .client`UPDATE factory.change SET cancel_requested_at=now() WHERE id=${f.changeID}`;
+      else {
+        await f.database
+          .client`UPDATE factory.change SET cancel_requested_at=NULL WHERE id=${f.changeID}`;
+        await f.database.client`UPDATE factory.ticket SET trashed_at=now() WHERE id=${f.ticketID}`;
+      }
+      expect(
+        mcpValue(
+          await client.callTool({ name: "listTicketWorkspaces", arguments: ticketArguments }),
+        ),
+      ).toEqual({ workspaces: [], nextOffset: null });
+    }
+    expect(f.probe.calls).toHaveLength(0);
+    expect([
+      ...(await f.database.client`SELECT id FROM factory.workspace_lifecycle_command`),
+    ]).toEqual([]);
+  } finally {
     await f.dispose();
   }
 }, 60_000);

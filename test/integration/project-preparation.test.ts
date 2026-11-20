@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
@@ -162,6 +163,23 @@ test("native image preparation coalesces exact jobs and admits one saved produce
           .client`SELECT count(*)::int AS count FROM factory.project_image_preparation WHERE state='unsupported'`
       )[0]?.["count"],
     ).toBe(2);
+    const version = "9007199254740993";
+    await f.database.client`INSERT INTO factory.project_environment(project_id,environment,version)
+      VALUES(${f.projectID},'development',${version}::bigint)`;
+    await preparation.ensure(f.projectID);
+    const identity = createHash("sha256")
+      .update(`${f.projectID}:development:${head}:${version}`)
+      .digest("hex");
+    const expectedID = `${identity.slice(0, 8)}-${identity.slice(8, 12)}-5${identity.slice(13, 16)}-a${identity.slice(17, 20)}-${identity.slice(20, 32)}`;
+    const [recipe] = await f.database.client`SELECT id,environment_version::text AS version
+      FROM factory.project_image_preparation WHERE id=${expectedID}`;
+    expect(recipe).toEqual({ id: expectedID, version });
+    await preparation.ensure(f.projectID);
+    expect(
+      await f.database
+        .client`SELECT id FROM factory.project_image_preparation WHERE id=${expectedID}`,
+    ).toHaveLength(1);
+    expect(started).toHaveLength(1);
   } finally {
     await f.dispose();
   }

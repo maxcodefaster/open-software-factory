@@ -1,7 +1,7 @@
 import {
   createTableRelationsHelpers,
-  extractTablesRelationalConfig,
   type ExtractTablesWithRelations,
+  extractTablesRelationalConfig,
 } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { drizzle, PostgresJsDatabase, PostgresJsSession } from "drizzle-orm/postgres-js";
@@ -62,6 +62,12 @@ export function createDatabase(max = 10) {
   return {
     client,
     db: drizzleTransaction(client),
-    coordination: () => postgres(url, { max: 1, idle_timeout: 0 }),
+    coordination: () => {
+      const connection = postgres(url, { max: 1, idle_timeout: 0 });
+      // Configure the same codecs before its first raw or typed transaction.
+      // Binding only the transaction cannot initialize its pool serializers.
+      drizzleTransaction(connection);
+      return connection;
+    },
   };
 }

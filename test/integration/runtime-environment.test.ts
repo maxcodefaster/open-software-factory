@@ -95,6 +95,18 @@ test("runtime environment freezes version, authenticates parent generation, isol
       "PRIVATE_DEV",
       "TEST_TOKEN",
     ]);
+    const original = [...values.entries()][0];
+    if (!original) throw new Error("Owned environment credential missing");
+    const [key, stored] = original;
+    try {
+      values.set(key, { ...stored, fingerprint: "0".repeat(64) });
+      const unavailable = await endpoint(request(), developmentAttempt);
+      expect(unavailable.status).toBe(503);
+      expect(unavailable.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      values.set(key, stored);
+    }
+    expect((await endpoint(request(), developmentAttempt)).status).toBe(200);
     await controller.save(owned.projectID, owned.userID, "development", {
       commandID: crypto.randomUUID(),
       version: 1,

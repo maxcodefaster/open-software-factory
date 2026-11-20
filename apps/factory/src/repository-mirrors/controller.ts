@@ -1,6 +1,12 @@
 import { createHmac } from "node:crypto";
+import { and, asc, eq, sql as expression, inArray } from "drizzle-orm";
 import type { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import {
+  administrator,
+  project as projectTable,
+  repositoryMirrorCommand,
+} from "../../../../packages/db/src/schema";
 import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
 import { ForgeMirrorWriteError } from "../../../../packages/forge/src/mirrors";
 import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
@@ -41,13 +47,18 @@ export function createRepositoryMirrorController(options: {
   const access = createAccessController(database);
   async function manager(sql: Parameters<typeof requireActiveAccountIn>[0], actor: string) {
     await requireActiveAccountIn(sql, actor);
-    const [row] =
-      await sql`SELECT user_id FROM factory.administrator WHERE user_id=${actor} FOR SHARE`;
+    const [row] = await drizzleTransaction(sql)
+      .select({ userID: administrator.userId })
+      .from(administrator)
+      .where(eq(administrator.userId, actor))
+      .for("share");
     if (!row) throw new CommandError("forbidden", "System Manager access required");
   }
   async function project(projectID: string): Promise<ForgeRepository> {
-    const [row] = await database.client<{ url: string }[]>`
-      SELECT repository_url AS url FROM factory.project WHERE id=${projectID}`;
+    const [row] = await drizzleTransaction(database.client)
+      .select({ url: projectTable.repositoryUrl })
+      .from(projectTable)
+      .where(eq(projectTable.id, projectID));
     if (!row) throw new CommandError("not-found", "Project not found");
     return boundForgeRepositoryFromURL(
       row.url,
@@ -56,11 +67,31 @@ export function createRepositoryMirrorController(options: {
     );
   }
   async function commands(projectID: string, sql: SQL = database.client) {
-    return sql<Command[]>`
-      SELECT id,action,target_url AS "targetURL",remote_name AS "remoteName",fingerprint,
-        created_by AS "createdBy",state,before_state AS before
-      FROM factory.repository_mirror_command WHERE project_id=${projectID}
-        AND state IN ('executing','uncertain') ORDER BY created_at`;
+    const rows = await drizzleTransaction(sql)
+      .select({
+        id: repositoryMirrorCommand.id,
+        action: repositoryMirrorCommand.action,
+        targetURL: repositoryMirrorCommand.targetUrl,
+        remoteName: repositoryMirrorCommand.remoteName,
+        fingerprint: repositoryMirrorCommand.fingerprint,
+        createdBy: repositoryMirrorCommand.createdBy,
+        state: repositoryMirrorCommand.state,
+        before: repositoryMirrorCommand.beforeState,
+      })
+      .from(repositoryMirrorCommand)
+      .where(
+        and(
+          eq(repositoryMirrorCommand.projectId, projectID),
+          inArray(repositoryMirrorCommand.state, ["executing", "uncertain"]),
+        ),
+      )
+      .orderBy(asc(repositoryMirrorCommand.createdAt));
+    return rows.map((row) => ({
+      ...row,
+      action: row.action as Command["action"],
+      state: row.state as Command["state"],
+      before: row.before as RepositoryMirror[],
+    }));
   }
   async function observe(projectID: string, mirrors: RepositoryMirror[]) {
     for (const command of await commands(projectID)) {
@@ -86,10 +117,21 @@ export function createRepositoryMirrorController(options: {
                 ),
               );
       if (completed)
-        await database.client`UPDATE factory.repository_mirror_command
-          SET state=${command.action === "sync" && mirrors.some((item) => item.failed) ? "failed" : "completed"},
-          completed_at=now() WHERE id=${command.id}
-          AND state IN ('executing','uncertain')`;
+        await drizzleTransaction(database.client)
+          .update(repositoryMirrorCommand)
+          .set({
+            state:
+              command.action === "sync" && mirrors.some((item) => item.failed)
+                ? "failed"
+                : "completed",
+            completedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(repositoryMirrorCommand.id, command.id),
+              inArray(repositoryMirrorCommand.state, ["executing", "uncertain"]),
+            ),
+          );
     }
   }
   async function get(actor: string, projectID: string): Promise<RepositoryMirrorView> {
@@ -126,13 +168,22 @@ export function createRepositoryMirrorController(options: {
     // One existing owner serializes native configuration commands, not a sync loop.
     const sql = database.coordination();
     try {
+      // Configure this pool's JSON/date codecs before binding its transactions.
+      const db = drizzleTransaction(sql);
       await sql`SELECT pg_advisory_lock(hashtextextended(${`repository-mirror:${projectID}`},0))`;
       const before = await get(actor, projectID);
       const admitted = await sql.begin(async (tx) => {
         await manager(tx, actor);
-        const [previous] = await tx<Command[]>`
-          SELECT id,created_by AS "createdBy",fingerprint,state FROM factory.repository_mirror_command
-          WHERE id=${commandID}`;
+        const db = drizzleTransaction(tx);
+        const [previous] = await db
+          .select({
+            id: repositoryMirrorCommand.id,
+            createdBy: repositoryMirrorCommand.createdBy,
+            fingerprint: repositoryMirrorCommand.fingerprint,
+            state: repositoryMirrorCommand.state,
+          })
+          .from(repositoryMirrorCommand)
+          .where(eq(repositoryMirrorCommand.id, commandID));
         if (previous) {
           if (previous.createdBy !== actor || previous.fingerprint !== fingerprint)
             throw new CommandError("conflict", "This mirror command belongs to different input.");
@@ -165,10 +216,17 @@ export function createRepositoryMirrorController(options: {
           throw new CommandError("conflict", "Mirror identity changed. Reload before removing it.");
         if (action === "sync" && before.mirrors.length === 0)
           throw new CommandError("conflict", "Configure a mirror before synchronizing.");
-        await tx`INSERT INTO factory.repository_mirror_command
-          (id,project_id,created_by,action,target_url,remote_name,fingerprint,before_state,state)
-          VALUES(${commandID},${projectID},${actor},${action},${value.targetURL ?? null},
-            ${value.remoteName ?? null},${fingerprint},${tx.json(before.mirrors)},'executing')`;
+        await db.insert(repositoryMirrorCommand).values({
+          id: commandID,
+          projectId: projectID,
+          createdBy: actor,
+          action,
+          targetUrl: value.targetURL ?? null,
+          remoteName: value.remoteName ?? null,
+          fingerprint,
+          beforeState: before.mirrors,
+          state: "executing",
+        });
         return true;
       });
       if (!admitted) return get(actor, projectID);
@@ -177,8 +235,18 @@ export function createRepositoryMirrorController(options: {
         await effect(repo);
       } catch (cause) {
         const uncertain = !(cause instanceof ForgeMirrorWriteError) || cause.unconfirmed;
-        await sql`UPDATE factory.repository_mirror_command SET state=${uncertain ? "uncertain" : "failed"},
-          completed_at=${uncertain ? null : new Date()} WHERE id=${commandID} AND state='executing'`;
+        await db
+          .update(repositoryMirrorCommand)
+          .set({
+            state: uncertain ? "uncertain" : "failed",
+            completedAt: uncertain ? null : new Date(),
+          })
+          .where(
+            and(
+              eq(repositoryMirrorCommand.id, commandID),
+              eq(repositoryMirrorCommand.state, "executing"),
+            ),
+          );
         throw new CommandError(
           "unavailable",
           uncertain
@@ -186,8 +254,15 @@ export function createRepositoryMirrorController(options: {
             : "Forgejo refused the mirror operation. Check the target URL, allowed host and access token.",
         );
       }
-      await sql`UPDATE factory.repository_mirror_command SET state='completed',completed_at=now()
-        WHERE id=${commandID} AND state='executing'`;
+      await db
+        .update(repositoryMirrorCommand)
+        .set({ state: "completed", completedAt: expression`now()` })
+        .where(
+          and(
+            eq(repositoryMirrorCommand.id, commandID),
+            eq(repositoryMirrorCommand.state, "executing"),
+          ),
+        );
       return get(actor, projectID);
     } finally {
       await sql.end({ timeout: 1 });
@@ -197,9 +272,10 @@ export function createRepositoryMirrorController(options: {
     get,
     async projects(actor: string): Promise<RepositoryMirrorProject[]> {
       await access.requireSystemManager(actor);
-      return database.client<
-        RepositoryMirrorProject[]
-      >`SELECT id,name FROM factory.project ORDER BY name,id`;
+      return drizzleTransaction(database.client)
+        .select({ id: projectTable.id, name: projectTable.name })
+        .from(projectTable)
+        .orderBy(asc(projectTable.name), asc(projectTable.id));
     },
     async create(actor: string, projectID: string, value: z.output<typeof repositoryMirrorCreate>) {
       const input = repositoryMirrorCreate.parse(value);
@@ -239,12 +315,20 @@ export function createRepositoryMirrorController(options: {
       await access.requireSystemManager(actor);
       const sql = database.coordination();
       try {
+        drizzleTransaction(sql);
         await sql`SELECT pg_advisory_lock(hashtextextended(${`repository-mirror:${projectID}`},0))`;
         await sql.begin(async (tx) => {
           await manager(tx, actor);
-          await tx`UPDATE factory.repository_mirror_command
-            SET state='acknowledged',completed_at=now()
-            WHERE id=${commandID} AND project_id=${projectID} AND state IN ('executing','uncertain')`;
+          await drizzleTransaction(tx)
+            .update(repositoryMirrorCommand)
+            .set({ state: "acknowledged", completedAt: expression`now()` })
+            .where(
+              and(
+                eq(repositoryMirrorCommand.id, commandID),
+                eq(repositoryMirrorCommand.projectId, projectID),
+                inArray(repositoryMirrorCommand.state, ["executing", "uncertain"]),
+              ),
+            );
         });
         return await get(actor, projectID);
       } finally {

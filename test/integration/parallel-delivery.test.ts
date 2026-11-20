@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createImplementationOrders } from "../../apps/factory/src/change/implementation-orders";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import {
   createDeliveryCoordination,
@@ -659,6 +660,130 @@ test("one explicit implementation order waits for successful prerequisite Delive
   } finally {
     await dependent.dispose();
     await f.dispose();
+  }
+}, 60_000);
+
+test("implementation dispatcher cancels obsolete commands and retains blocked or unknown outcomes without planning idle Tickets", async () => {
+  const f = await candidateReviewFixture();
+  const tickets: Awaited<ReturnType<typeof additionalTicket>>[] = [];
+  const epicID = crypto.randomUUID();
+  const commands: {
+    ticketID: string;
+    commandID: string;
+    revisionID: string;
+    reasoning: string | undefined;
+  }[] = [];
+  let admissions = 0;
+  try {
+    await f.database.client`INSERT INTO factory.epic(id,project_id,title,created_by)
+      VALUES(${epicID},${f.projectID},'Owned converted intent',${f.userID})`;
+    const states = [
+      "trashed",
+      "cancelled",
+      "done",
+      "converted",
+      "blocked",
+      "unknown",
+      "idle",
+    ] as const;
+    for (const state of states) {
+      const saved = await additionalTicket(f);
+      tickets.push(saved);
+      if (state === "trashed")
+        await f.database
+          .client`UPDATE factory.ticket SET trashed_at=now() WHERE id=${saved.ticketID}`;
+      else if (state === "cancelled" || state === "done")
+        await f.database
+          .client`UPDATE factory.ticket SET state=${state} WHERE id=${saved.ticketID}`;
+      else if (state === "converted")
+        await f.database
+          .client`UPDATE factory.ticket SET converted_to_epic_id=${epicID} WHERE id=${saved.ticketID}`;
+      if (state !== "idle")
+        await f.database
+          .client`INSERT INTO factory.implementation_order(command_id,project_id,ticket_id,
+          created_by,requirement_revision_id,source_sha,coding_reasoning)
+          VALUES(${saved.ticketID},${f.projectID},${saved.ticketID},${f.userID},${saved.revisionID},
+            ${"a".repeat(40)},'high')`;
+    }
+    const blocked = fixtureValue(tickets[4], "blocked");
+    const unknown = fixtureValue(tickets[5], "unknown");
+    const dispatcher = createImplementationOrders(
+      f.database,
+      {
+        async start(ticketID, userID, input) {
+          expect(userID).toBe(f.userID);
+          if (!input?.commandID || !input.revisionID)
+            throw new Error("Explicit saved command required");
+          commands.push({
+            ticketID,
+            commandID: input.commandID,
+            revisionID: input.revisionID,
+            reasoning: input.codingReasoning,
+          });
+          if (ticketID === blocked.ticketID) throw new CommandError("forbidden", "x".repeat(2100));
+          expect(ticketID).toBe(unknown.ticketID);
+          throw new Error("Owned external acknowledgement is unknown");
+        },
+      },
+      {
+        async admitStartIn() {
+          admissions++;
+        },
+      },
+    );
+    await Promise.all([dispatcher.reconcile(), dispatcher.reconcile()]);
+    expect(commands).toEqual(
+      [blocked, unknown].map((saved) => ({
+        ticketID: saved.ticketID,
+        commandID: saved.ticketID,
+        revisionID: saved.revisionID,
+        reasoning: "high",
+      })),
+    );
+    for (const saved of tickets.slice(0, 4)) {
+      const [order] = await f.database.client`
+        SELECT state,cancelled_at AS at,source_sha AS source,requirement_revision_id AS revision
+        FROM factory.implementation_order WHERE command_id=${saved.ticketID}`;
+      expect(order).toMatchObject({
+        state: "cancelled",
+        source: "a".repeat(40),
+        revision: saved.revisionID,
+      });
+      expect(order?.["at"]).toBeTruthy();
+    }
+    const [rejected] = await f.database
+      .client`SELECT state,last_error FROM factory.implementation_order WHERE command_id=${blocked.ticketID}`;
+    expect(rejected).toEqual({ state: "blocked", last_error: "x".repeat(2000) });
+    const readUnknown = async () =>
+      (
+        await f.database.client`
+      SELECT state,last_error,updated_at,source_sha,created_by FROM factory.implementation_order WHERE command_id=${unknown.ticketID}`
+      )[0];
+    const retained = await readUnknown();
+    expect(retained).toMatchObject({
+      state: "waiting",
+      source_sha: "a".repeat(40),
+      created_by: f.userID,
+      last_error:
+        "Implementation start is unconfirmed. Factory will reconcile this retained order.",
+    });
+    await dispatcher.reconcile();
+    expect(await readUnknown()).toEqual(retained);
+    expect(commands.at(-1)).toEqual(commands[1]);
+    expect(commands).toHaveLength(3);
+    expect(admissions).toBe(0);
+    expect(
+      await f.database
+        .client`SELECT id FROM factory.change WHERE ticket_id=ANY(${tickets.map((saved) => saved.ticketID)}::uuid[])`,
+    ).toHaveLength(0);
+  } finally {
+    try {
+      for (const saved of tickets) await saved.dispose();
+      await f.database
+        .client`DELETE FROM factory.epic WHERE id=${epicID} AND project_id=${f.projectID}`;
+    } finally {
+      await f.dispose();
+    }
   }
 }, 60_000);
 

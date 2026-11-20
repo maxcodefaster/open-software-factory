@@ -46,9 +46,6 @@ function codingContextFixture() {
       if (text.startsWith("SELECT change.project_id"))
         return [{ projectID, available: state.writer.available }];
       if (text.startsWith("SELECT state,epoch")) return [state.writer];
-      if (text.startsWith("SELECT ticket_id")) return [{ ticketID }];
-      if (text.startsWith("SELECT conversation.id"))
-        return [{ id: conversationID, contextID: state.contextID }];
       if (text.startsWith("SELECT to_jsonb(session)")) {
         expect(text).toContain("state IN ('committed','stopped') AND NOT stop_pending");
         expect(text).toContain("factory.agent_turn");
@@ -74,23 +71,39 @@ function codingContextFixture() {
             ]
           : [];
       }
-      if (text.startsWith("UPDATE factory.change_agent_session")) {
+      throw new Error(`Unexpected Coding context query: ${text}`);
+    },
+    ({ text, parameters }) => {
+      if (text.startsWith('select "ticket_id" from "factory"."change"')) return [[ticketID]];
+      if (text.includes('from "factory"."ticket_conversation" "conversation"')) {
+        expect(text).toContain('for update of "conversation"');
+        expect(parameters).toEqual([changeID, "build"]);
+        return [[conversationID, state.contextID]];
+      }
+      if (text.startsWith('update "factory"."change_agent_session"')) {
         expect(parameters).toEqual([
           state.contextID ? `ses_factory_${state.contextID.replaceAll("-", "")}` : null,
+          "stopped",
+          null,
+          null,
+          null,
+          false,
+          null,
+          null,
+          null,
           parameters[0],
+          null,
           changeID,
         ]);
-        expect(text).toContain("native_session_confirmed_at=NULL");
-        expect(text).toContain("implementation_session_confirmed_at=NULL");
-        expect(text).toContain("active_turn_id=NULL,active_inbox_id=NULL");
+        expect(text).toContain('"native_session_confirmed_at" = $9');
+        expect(text).toContain('"implementation_session_confirmed_at" = $11');
+        expect(text).toContain('"active_turn_id" = $5');
+        expect(text).toContain('"active_inbox_id" = $3');
         state.nativeID = String(parameters[0]);
         state.latestTurnID = null;
         state.resets++;
         return [];
       }
-      throw new Error(`Unexpected Coding context query: ${text}`);
-    },
-    ({ text, parameters }) => {
       if (text.includes('from "factory"."ticket"')) return [[ticketID]];
       if (text.includes("pg_advisory_xact_lock")) return [];
       if (text.includes('from "factory"."ticket_conversation"')) {
@@ -225,7 +238,7 @@ test("Coding archives and rotates through the shared owner while keeping exact s
   expect(writes.filter(({ transaction }) => transaction === 3)).toHaveLength(0);
   for (const transaction of [1, 2]) {
     const current = writes.filter((statement) => statement.transaction === transaction);
-    expect(current.at(-1)?.text).toStartWith("UPDATE factory.change_agent_session");
+    expect(current.at(-1)?.text).toStartWith('update "factory"."change_agent_session"');
     expect(current.at(-2)?.text).toStartWith('update "factory"."ticket_conversation"');
   }
 });

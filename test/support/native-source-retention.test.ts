@@ -1,5 +1,25 @@
 import { expect, test } from "bun:test";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
+import { releaseSourceFile } from "../fixtures/release-cleanup";
+import { createHash } from "node:crypto";
+
+test("release Source proof decodes the native file bytes and rejects mismatched versions or text encoding", () => {
+  const contract = {
+    version: 1 as const,
+    primaryApp: "web",
+    apps: [
+      { id: "web", label: "Owned App", command: ["node", "web.js"], port: 4321, healthPath: "/" },
+    ],
+  };
+  const bytes = Buffer.from(JSON.stringify(contract));
+  const file = {
+    content: bytes.toString("base64"),
+    version: createHash("sha256").update(bytes).digest("hex"),
+  };
+  expect(releaseSourceFile(file)).toEqual({ version: file.version, contract });
+  expect(() => releaseSourceFile({ ...file, version: "f".repeat(64) })).toThrow("reported version");
+  expect(() => releaseSourceFile({ ...file, content: bytes.toString() })).toThrow();
+});
 
 test("native fixture teardown only observes Source retention and refuses unsettled recorded owners", async () => {
   let unsettled: { kind: string }[] = [];

@@ -1,6 +1,14 @@
 import { expect, test } from "bun:test";
-import { releaseInstallation } from "../fixtures/release-installation";
+import {
+  readReleaseNativeBinding,
+  readReleaseNativeTemplate,
+  releaseInstallation,
+} from "../fixtures/release-installation";
 import { eventually } from "../fixtures/factory-process";
+import { requireSubstrateActor } from "../../apps/factory/src/runtime/substrate";
+import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
+import { runtimeAccessCookie } from "../fixtures/runtime-access";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
 test.skipIf(!installation)(
@@ -11,56 +19,134 @@ test.skipIf(!installation)(
     try {
       const { projectID, dependentChangeID } = f.state;
       if (!projectID || !dependentChangeID) throw new Error("Complete release journey required");
-      const read = () => f.database.client<
-        Array<{
-          id: string;
-          state: string;
-          workspace_id: string | null;
-          kubernetes_uid: string;
-          kubernetes_namespace_uid: string;
-        }>
-      >`
-      SELECT attempt.id, attempt.state, attempt.workspace_id, attempt.kubernetes_uid, attempt.kubernetes_namespace_uid
-      FROM factory.runtime_attempt attempt WHERE attempt.id IN
-      (SELECT runtime_attempt_id FROM factory.change WHERE id = ${dependentChangeID}
-       UNION SELECT runtime_attempt_id FROM factory.staging_preview WHERE project_id = ${projectID}) ORDER BY attempt.id`;
+      const selected = await f.database.client<{ id: string; kind: string }[]>`
+        SELECT runtime_attempt_id AS id,'ticket' AS kind FROM factory.change
+          WHERE id=${dependentChangeID} AND project_id=${projectID}
+        UNION ALL SELECT runtime_attempt_id,'staging' FROM factory.staging_preview WHERE project_id=${projectID}
+        ORDER BY kind`;
+      expect(selected.map(({ kind }) => kind)).toEqual(["staging", "ticket"]);
+      expect(new Set(selected.map(({ id }) => id)).size).toBe(2);
+      const cookie = await f.login("developer");
+      const grants = new Map<string, string>();
+      const authorize = async () => {
+        for (const { id } of selected)
+          grants.set(id, await runtimeAccessCookie(f.base, cookie, id, "app"));
+      };
+      await authorize();
+      const originals = new Map<string, Awaited<ReturnType<typeof readReleaseNativeBinding>>>();
+      const read = async () => {
+        const observations = [];
+        for (const { id, kind } of selected) {
+          const binding = await readReleaseNativeBinding(f.database, projectID, id);
+          const original = originals.get(id);
+          if (original) {
+            expect(binding.intent).toEqual(original.intent);
+            expect(binding.actorUID).toBe(original.actorUID);
+          } else originals.set(id, binding);
+          if (kind === "ticket") {
+            if (!binding.workspaceID) throw new Error("Release Ticket has no original Workspace");
+            await readNativeWorkspaceObservation(f.database, {
+              attemptID: id,
+              projectID,
+              workspaceID: binding.workspaceID,
+              actorUID: binding.actorUID,
+            });
+          } else {
+            expect(binding.workspaceID).toBeNull();
+            expect(binding.intent).toMatchObject({ isolatedKind: "staging" });
+          }
+          expect(binding.state).toBe("ready");
+          expect(binding.stopIntendedAt).toBeNull();
+          expect(binding.deletedAt).toBeNull();
+          const native = f.native(binding.intent.connection);
+          await readReleaseNativeTemplate(native, binding);
+          const actor = requireSubstrateActor(
+            await native.call("GetActor", {
+              actor: { atespace: binding.atespace, name: binding.actorName },
+            }),
+            binding,
+          );
+          expect(actor.status.state).toBe("ACTOR_STATE_RUNNING");
+          expect(actor.status.lastAssignedGeneration).toBeGreaterThan(0);
+          // This route calls runtime.get and requires both current Connector
+          // connections through hub.use. A saved ready row cannot satisfy it.
+          const grant = grants.get(id);
+          if (!grant) throw new Error("Current runtime access grant missing");
+          const activity = await fetch(`${f.base}/runtime/${id}/app/__factory/activity`, {
+            method: "POST",
+            headers: { cookie: grant, origin: f.base },
+            signal: AbortSignal.timeout(15_000),
+          });
+          await activity.body?.cancel();
+          const after = requireSubstrateActor(
+            await native.call("GetActor", {
+              actor: { atespace: binding.atespace, name: binding.actorName },
+            }),
+            binding,
+          );
+          expect(after.status.state).toBe("ACTOR_STATE_RUNNING");
+          expect(after.status.lastAssignedGeneration).toBe(actor.status.lastAssignedGeneration);
+          observations.push({
+            id,
+            kind,
+            workspaceID: binding.workspaceID,
+            actorUID: actor.metadata.uid,
+            generation: binding.generation,
+            templateUID: binding.intent.templateUID,
+            templateVersion: binding.intent.templateVersion,
+            templateSHA256: binding.intent.templateSHA256,
+            allocation: actor.status.lastAssignedGeneration,
+            connected: activity.status === 204,
+          });
+        }
+        return observations;
+      };
       const before = await eventually(
         read,
-        (rows) => rows.length === 2 && rows.every((row) => row.state === "ready"),
-        "Native runtimes not ready before restart",
+        (rows) => rows.every((row) => row.connected),
+        "Native Ticket and Staging not connected before restart",
         300_000,
       );
+      const startup = async () => {
+        const response = await fetch(`${f.base}/health/ready`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("x-open-factory")).toBe("ready");
+        const id = response.headers.get("x-open-factory-startup");
+        await response.body?.cancel();
+        if (!id) throw new Error("Factory startup identity missing");
+        return id;
+      };
+      const previousStartup = await startup();
       const turns = await f.database
         .client`SELECT id, state FROM factory.agent_turn WHERE project_id = ${projectID} ORDER BY id`;
       const started = Date.now();
-      const child = Bun.spawn(
+      const restarted = await runCommand(
         [process.execPath, "scripts/factory/index.ts", "restart", "--disposable", installation],
-        { stdout: "pipe", stderr: "pipe" },
+        undefined,
+        { timeoutMS: 300_000, outputBytes: 4 << 20 },
       );
-      const [output, error, status] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      f.noSecrets(output + error);
-      expect(status).toBe(0);
-      const states: Array<{ elapsedMS: number; attempts: Array<{ id: string; state: string }> }> =
-        [];
+      f.noSecrets(restarted.stdout + restarted.stderr);
+      expect(restarted.exitCode).toBe(0);
+      const currentStartup = await startup();
+      expect(currentStartup).not.toBe(previousStartup);
+      // App grants are process-local. Reauthenticate through the normal issuer
+      // after restart, rather than treating the old cookie as current authority.
+      await authorize();
       const after = await eventually(
-        async () => {
-          const rows = await read();
-          const attempts = rows.map(({ id, state }) => ({ id, state }));
-          if (JSON.stringify(states.at(-1)?.attempts) !== JSON.stringify(attempts))
-            states.push({ elapsedMS: Date.now() - started, attempts });
-          return rows;
-        },
-        (rows) =>
-          rows.length === 2 &&
-          rows.every((row) => ["ready", "failed", "stopped"].includes(row.state)),
-        "Native connectors did not settle",
+        read,
+        (rows) => rows.every((row) => row.connected),
+        "Current native Ticket and Staging connectors did not reconnect",
         90_000,
       );
-      await f.record("native-restart", { before: [...before], after: [...after], states });
+      await f.record("native-restart", {
+        before,
+        after,
+        previousStartup,
+        currentStartup,
+        elapsedMS: Date.now() - started,
+      });
       expect([...after]).toEqual([...before]);
       expect([
         ...(await f.database

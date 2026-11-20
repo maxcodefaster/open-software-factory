@@ -200,6 +200,37 @@ test("Stop confirmation works with a single database connection", async () => {
   }
 });
 
+test("Stop publication rolls back its typed barrier without settling or interrupting the captured Turn", async () => {
+  const owned = await fixture();
+  try {
+    const original = await admit(owned, "Retain this Turn after a rolled-back Stop");
+    const before = await pendingStop(owned);
+    const database = {
+      ...owned.database,
+      client: new Proxy(owned.database.client, {
+        get(target, property, receiver) {
+          if (property === "begin")
+            return (callback: (sql: DatabaseTransaction) => Promise<unknown>) =>
+              target.begin(async (sql) => {
+                await callback(sql);
+                throw new Error("Owned rollback before Stop publication");
+              });
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+    };
+    await expect(
+      createChangeAgentStop(database, owned.hub).persist(owned.changeID),
+    ).rejects.toThrow("Owned rollback");
+    expect(await pendingStop(owned)).toEqual(before);
+    expect((await owned.turn(original.turn.commandId))?.state).toBe("pending");
+    expect(owned.interrupts()).toBe(0);
+    expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+});
+
 test("a delayed Stop persistence phase cannot stop newly admitted work", async () => {
   const owned = await fixture();
   const entered = Promise.withResolvers<void>();

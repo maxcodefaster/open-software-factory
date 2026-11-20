@@ -1,15 +1,203 @@
 import { expect } from "bun:test";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, type Page, expect as visible } from "@playwright/test";
 import { z } from "zod";
+import {
+  type requireSubstrateActor,
+  substrateTemplateSHA256,
+} from "../../apps/factory/src/runtime/substrate";
+import { boundNativeProvisioningResource } from "../../apps/factory/src/runtime/substrate-bound-provisioning";
 import { createDatabase } from "../../packages/db/src/client";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import {
+  createSubstrateControl,
+  type SubstrateConnection,
+  SubstrateRPCError,
+  substrateConnection,
+} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
 import {
   requireNativeForgeOrigin,
   requireNativeInstallation,
 } from "../../scripts/factory/native-installation";
+import { retainedFactoryServerContainer } from "../../scripts/factory/server-container";
 import { openProjectMenu } from "./project-menu";
+
+// Read-only bridge adapter. Keep the original connection and process user;
+// a source launcher on macOS can execute the Linux bridge in its confirmed server.
+export function releaseNativeControl(
+  directory: string,
+  original: SubstrateConnection,
+  execute = runCommand,
+) {
+  const { bridge, ...connection } = substrateConnection.parse(original);
+  async function context() {
+    const available = await Promise.all(
+      (
+        [
+          [bridge, constants.X_OK],
+          [connection.caFile, constants.R_OK],
+          [connection.tokenFile, constants.R_OK],
+        ] as const
+      ).map(([file, mode]) =>
+        access(file, mode).then(
+          () => true,
+          () => false,
+        ),
+      ),
+    );
+    if (available.every(Boolean)) return [];
+    const receipt = await retainedFactoryServerContainer(directory);
+    if (!receipt?.containerID)
+      throw new Error(
+        "Original native paths unavailable and no confirmed Factory server container",
+      );
+    const inspected = await execute([
+      "docker",
+      "inspect",
+      "--format",
+      '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},"labels":{{json .Config.Labels}},"running":{{json .State.Running}}}',
+      receipt.containerID,
+    ]);
+    if (inspected.exitCode !== 0) throw new Error("Original Factory server container unavailable");
+    const actual = JSON.parse(inspected.stdout);
+    if (
+      actual.id !== receipt.containerID ||
+      actual.name !== `/${receipt.name}` ||
+      actual.image !== receipt.image ||
+      actual.labels?.["factory.dev/server-owner"] !== receipt.owner ||
+      actual.labels?.["factory.dev/server-startup"] !== receipt.startupID ||
+      actual.running !== true
+    )
+      throw new Error(
+        "Refusing native observation in a different or stopped Factory server container",
+      );
+    // docker exec otherwise inherits every Factory credential. The native
+    // bridge receives only PATH, just as createSubstrateControl does.
+    return [
+      "docker",
+      "exec",
+      "-i",
+      receipt.containerID,
+      "/usr/bin/env",
+      "-i",
+      "PATH=/usr/local/bin:/usr/bin:/bin",
+    ];
+  }
+  return {
+    async call(method: string, request: unknown): Promise<unknown> {
+      z.enum(["GetActor", "GetActorTemplate", "GetAtespace"]).parse(method);
+      const prefix = await context();
+      if (!prefix.length)
+        return z
+          .record(z.string(), z.unknown())
+          .parse(await createSubstrateControl({ bridge, ...connection })(method, request));
+      const result = await execute(
+        [...prefix, bridge],
+        JSON.stringify({ ...connection, method, request }),
+        { timeoutMS: 185_000, outputBytes: 2 << 20 },
+      );
+      if (result.exitCode !== 0) throw new Error("Original native bridge response unavailable");
+      const value: unknown = JSON.parse(result.stdout);
+      const failure = z
+        .object({ error: z.object({ code: z.string(), message: z.string() }) })
+        .safeParse(value);
+      if (failure.success)
+        throw new SubstrateRPCError(failure.data.error.code, failure.data.error.message);
+      return z.record(z.string(), z.unknown()).parse(value);
+    },
+    async credential() {
+      const prefix = await context();
+      const result = prefix.length
+        ? await execute([...prefix, "/usr/bin/cat", "--", connection.tokenFile], undefined, {
+            timeoutMS: 15_000,
+            outputBytes: 64 << 10,
+          })
+        : { exitCode: 0, stdout: await readFile(connection.tokenFile, "utf8") };
+      if (result.exitCode !== 0 || !result.stdout.trim())
+        throw new Error("Original native credential unavailable");
+      return result.stdout.trim();
+    },
+  };
+}
+
+export async function readReleaseNativeTemplate(
+  native: ReturnType<typeof releaseNativeControl>,
+  binding: Awaited<ReturnType<typeof readReleaseNativeBinding>>,
+) {
+  const space = boundNativeProvisioningResource.parse(
+    await native.call("GetAtespace", { atespace: { name: binding.atespace } }),
+  );
+  const original = await native.call("GetActorTemplate", {
+    actorTemplate: { atespace: binding.atespace, name: "runtime" },
+  });
+  const template = boundNativeProvisioningResource.parse(original);
+  if (
+    space.metadata.name !== binding.atespace ||
+    space.metadata.uid !== binding.intent.atespaceUID ||
+    template.metadata.atespace !== binding.atespace ||
+    template.metadata.name !== "runtime" ||
+    template.metadata.uid !== binding.intent.templateUID ||
+    template.metadata.version !== binding.intent.templateVersion ||
+    substrateTemplateSHA256(original) !== binding.intent.templateSHA256
+  )
+    throw new Error("Release native Atespace/template differs from its frozen original binding");
+  return original;
+}
+
+export async function readReleaseNativeBinding(
+  database: ReturnType<typeof createDatabase>,
+  projectID: string,
+  attemptID: string,
+) {
+  type Bound = Parameters<typeof requireSubstrateActor>[1];
+  const [row] = await database.client<
+    Array<
+      Bound & {
+        id: string;
+        projectID: string;
+        workspaceID: string | null;
+        generation: number;
+        state: string;
+        stopIntendedAt: string | null;
+        deletedAt: string | null;
+        rejected: boolean;
+      }
+    >
+  >`
+    SELECT attempt.id,attempt.project_id AS "projectID",attempt.workspace_id AS "workspaceID",
+      attempt.generation::float8 AS generation,attempt.state,attempt.stop_intended_at::text AS "stopIntendedAt",
+      binding.atespace,binding.actor_name AS "actorName",binding.actor_uid AS "actorUID",
+      binding.create_attempted_at::text AS "attemptedAt",binding.intent,
+      binding.deleted_at::text AS "deletedAt",binding.create_rejected AS rejected
+    FROM factory.runtime_attempt attempt
+    LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+    WHERE attempt.id=${z.uuid().parse(attemptID)} AND attempt.project_id=${z.uuid().parse(projectID)}`;
+  if (!row?.intent || !row.actorUID || !row.attemptedAt || row.rejected)
+    throw new Error("Release attempt has no confirmed original native binding");
+  const ownerID =
+    "workspaceID" in row.intent
+      ? row.intent.workspaceID
+      : "isolatedID" in row.intent
+        ? row.intent.isolatedID
+        : "verificationID" in row.intent
+          ? row.intent.verificationID
+          : row.intent.preparationID;
+  if (
+    row.intent.projectID !== projectID ||
+    row.intent.generation !== row.generation ||
+    (row.workspaceID !== null && row.workspaceID !== ownerID) ||
+    runtimeIdentity(ownerID, row.generation).attemptID !== attemptID ||
+    row.atespace !== `fa-${attemptID.replaceAll("-", "")}` ||
+    row.actorName !== `runtime-${attemptID.replaceAll("-", "")}`
+  )
+    throw new Error("Release native binding differs from its original Attempt/Workspace identity");
+  substrateConnection.parse(row.intent.connection);
+  return { ...row, actorUID: row.actorUID };
+}
 
 const stateInput = z
   .object({
@@ -93,10 +281,29 @@ export async function releaseInstallation(name: string) {
     else process.env["DATABASE_URL"] = original;
   }
   const secrets = await Promise.all(
-    ["admin-password", "database-password", "zero-password", "auth-secret", "forgejo-token"].map(
-      secret,
-    ),
+    [
+      "admin-password",
+      "database-password",
+      "zero-password",
+      "auth-secret",
+      "forgejo-token",
+      "forgejo-admin-token",
+    ].map(secret),
   );
+  const native = (connection: SubstrateConnection) => {
+    const control = releaseNativeControl(directory, connection);
+    return {
+      ...control,
+      async credential() {
+        const token = await control.credential();
+        if (!secrets.includes(token)) secrets.push(token);
+        return token;
+      },
+    };
+  };
+  const configuration = requireNativeInstallation(process.env, { database: "factory" });
+  await native(configuration.connection).credential();
+  await native(configuration.provisioner).credential();
   const providerKey = process.env["FACTORY_MODEL_API_KEY"];
   if (providerKey) secrets.push(providerKey);
   const browser = await chromium.launch({
@@ -187,6 +394,7 @@ export async function releaseInstallation(name: string) {
   }
   return {
     installation,
+    native,
     state,
     database,
     browser,

@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, sql as query } from "drizzle-orm";
 import { z } from "zod";
 import {
   type BuildBrowserCall,
@@ -7,7 +8,20 @@ import {
   buildBrowserCallInput,
   buildBrowserResultInput,
 } from "../../../../packages/conversation-domain/src/browser-tools";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import {
+  type DatabaseTransaction,
+  type createDatabase,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  agentTurn,
+  buildBrowserSession,
+  candidateReview,
+  changeAgentTurnIntent,
+  reviewMedia,
+  runtimeAttempt,
+  substrateBinding,
+} from "../../../../packages/db/src/schema";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
@@ -145,10 +159,20 @@ export function createBuildBrowserController(
   }
 
   async function row(id: string) {
-    const [session] = await database.client<BrowserSession[]>`
-      SELECT id, ordinal, turn_id AS "turnID", change_id AS "changeID", runtime_attempt_id AS "attemptID",
-        generation::float8 AS generation, agent_session_id AS "agentSessionID", owner_id AS "ownerID", state
-      FROM factory.build_browser_session WHERE id = ${id}`;
+    const [session] = await database.db
+      .select({
+        id: buildBrowserSession.id,
+        ordinal: buildBrowserSession.ordinal,
+        turnID: buildBrowserSession.turnId,
+        changeID: buildBrowserSession.changeId,
+        attemptID: buildBrowserSession.runtimeAttemptId,
+        generation: buildBrowserSession.generation,
+        agentSessionID: buildBrowserSession.agentSessionId,
+        ownerID: buildBrowserSession.ownerId,
+        state: query<BrowserSession["state"]>`${buildBrowserSession.state}`,
+      })
+      .from(buildBrowserSession)
+      .where(eq(buildBrowserSession.id, id));
     return session;
   }
 
@@ -219,45 +243,82 @@ export function createBuildBrowserController(
         : null;
     const reopenAllowed = reopenableBrowserFailure(cause);
     const work = (async () => {
-      await database.client`UPDATE factory.build_browser_session SET state = 'closing',
-        reopen_allowed = ${reopenAllowed},
-        cleanup_intended_at = COALESCE(cleanup_intended_at, now()),
-        outcome_summary = COALESCE(${summary}, outcome_summary)
-        WHERE id = ${id} AND state IN ('intended', 'active')`;
+      await database.db
+        .update(buildBrowserSession)
+        .set({
+          state: "closing",
+          reopenAllowed,
+          cleanupIntendedAt: query`COALESCE(${buildBrowserSession.cleanupIntendedAt}, now())`,
+          outcomeSummary: query`COALESCE(${summary}, ${buildBrowserSession.outcomeSummary})`,
+        })
+        .where(
+          and(
+            eq(buildBrowserSession.id, id),
+            inArray(buildBrowserSession.state, ["intended", "active"]),
+          ),
+        );
       const session = await row(id);
       if (!session || session.state === "closed") return;
-      await database.client`UPDATE factory.review_media SET state='unavailable',
-        reason='Recording interrupted. App observations and QA results are retained separately.'
-        WHERE browser_session_id=${id} AND state IN ('intended','recording')`.catch(() => {});
+      await database.db
+        .update(reviewMedia)
+        .set({
+          state: "unavailable",
+          reason: "Recording interrupted. App observations and QA results are retained separately.",
+        })
+        .where(
+          and(
+            eq(reviewMedia.browserSessionId, id),
+            inArray(reviewMedia.state, ["intended", "recording"]),
+          ),
+        )
+        .catch(() => {});
       needsObservation.delete(id);
-      const ended = await database.client`UPDATE factory.build_browser_session browser
-        SET state='closed',cleanup_confirmed_at=now(),
-          outcome_summary=CASE WHEN browser.outcome_summary LIKE 'Inspection ended: %'
-            THEN browser.outcome_summary ELSE 'Exact Runtime Attempt teardown confirmed browser cleanup' END
-        FROM factory.runtime_attempt attempt
-        WHERE browser.id=${id} AND browser.state='closing'
-          AND attempt.id=browser.runtime_attempt_id AND attempt.generation=browser.generation
-          AND attempt.state='stopped' AND attempt.stopped_at IS NOT NULL
-        RETURNING browser.id`;
+      const ended = await database.db
+        .update(buildBrowserSession)
+        .set({
+          state: "closed",
+          cleanupConfirmedAt: query`now()`,
+          outcomeSummary: query`CASE WHEN ${buildBrowserSession.outcomeSummary} LIKE 'Inspection ended: %'
+          THEN ${buildBrowserSession.outcomeSummary} ELSE 'Exact Runtime Attempt teardown confirmed browser cleanup' END`,
+        })
+        .from(runtimeAttempt)
+        .where(
+          and(
+            eq(buildBrowserSession.id, id),
+            eq(buildBrowserSession.state, "closing"),
+            eq(runtimeAttempt.id, buildBrowserSession.runtimeAttemptId),
+            eq(runtimeAttempt.generation, buildBrowserSession.generation),
+            eq(runtimeAttempt.state, "stopped"),
+            isNotNull(runtimeAttempt.stoppedAt),
+          ),
+        )
+        .returning({ id: buildBrowserSession.id });
       if (ended.length) return;
       try {
         await hub.parentOperation(
           session.attemptID,
           operation(session, "browser-close", new Date(0).toISOString()),
         );
-        await database.client`UPDATE factory.build_browser_session SET state = 'closed',
-          cleanup_confirmed_at = now(), outcome_summary = CASE
-            WHEN outcome_summary LIKE 'Inspection ended: %' THEN outcome_summary
-            ELSE 'Exact owned browser and App proxy cleanup confirmed' END
-          WHERE id = ${id} AND state = 'closing'`;
+        await database.db
+          .update(buildBrowserSession)
+          .set({
+            state: "closed",
+            cleanupConfirmedAt: query`now()`,
+            outcomeSummary: query`CASE WHEN ${buildBrowserSession.outcomeSummary} LIKE 'Inspection ended: %'
+            THEN ${buildBrowserSession.outcomeSummary} ELSE 'Exact owned browser and App proxy cleanup confirmed' END`,
+          })
+          .where(and(eq(buildBrowserSession.id, id), eq(buildBrowserSession.state, "closing")));
       } catch {
         // Disconnected is not absent. Keep the exact cleanup intent for the next
         // parent connection, even though independent leases already end access.
-        await database.client`UPDATE factory.build_browser_session
-          SET outcome_summary = CASE
-            WHEN outcome_summary LIKE 'Inspection ended: %' THEN outcome_summary
-            ELSE 'Browser cleanup is unconfirmed; retry exact owned cleanup when the Connector returns' END
-          WHERE id = ${id} AND state = 'closing'`;
+        await database.db
+          .update(buildBrowserSession)
+          .set({
+            outcomeSummary: query`CASE WHEN ${buildBrowserSession.outcomeSummary} LIKE 'Inspection ended: %'
+            THEN ${buildBrowserSession.outcomeSummary}
+            ELSE 'Browser cleanup is unconfirmed; retry exact owned cleanup when the Connector returns' END`,
+          })
+          .where(and(eq(buildBrowserSession.id, id), eq(buildBrowserSession.state, "closing")));
       }
     })();
     closing.set(id, work);
@@ -356,10 +417,17 @@ export function createBuildBrowserController(
       )
     )
       return null;
-    const [owner] = await database.client<Array<{ token: string }>>`
-      SELECT owner_token AS token FROM factory.agent_turn WHERE id = ${session.turnID}
-        AND owner_token IS NOT NULL AND owner_expires_at > clock_timestamp()
-        AND state IN ('dispatching', 'running')`;
+    const [owner] = await database.db
+      .select({ token: query<string>`${agentTurn.ownerToken}` })
+      .from(agentTurn)
+      .where(
+        and(
+          eq(agentTurn.id, session.turnID),
+          isNotNull(agentTurn.ownerToken),
+          query`${agentTurn.ownerExpiresAt}>clock_timestamp()`,
+          inArray(agentTurn.state, ["dispatching", "running"]),
+        ),
+      );
     if (!owner || ownerIdentity(owner.token) !== session.ownerID) return null;
     try {
       const allowed = await turns.validateExecution(session.turnID, owner.token, async (sql) => {
@@ -376,12 +444,40 @@ export function createBuildBrowserController(
     const id = browserIdentity(previous.turnID, previous.ownerID, ordinal);
     const allowed = await turns.validateExecution(previous.turnID, ownerToken, async (sql) => {
       await currentIn(sql, previous, ownerToken, "reopen");
-      await sql`INSERT INTO factory.build_browser_session(
-        id,ordinal,turn_id,change_id,runtime_attempt_id,generation,agent_session_id,owner_id)
-        SELECT ${id},${ordinal},turn_id,change_id,runtime_attempt_id,generation,agent_session_id,owner_id
-        FROM factory.build_browser_session WHERE id=${previous.id}
-          AND state='closed' AND reopen_allowed AND cleanup_confirmed_at IS NOT NULL
-        ON CONFLICT DO NOTHING`;
+      const db = drizzleTransaction(sql);
+      await db
+        .insert(buildBrowserSession)
+        .select(
+          db
+            .select({
+              id: query<string>`${id}::uuid`.as("id"),
+              turnId: buildBrowserSession.turnId,
+              changeId: buildBrowserSession.changeId,
+              runtimeAttemptId: buildBrowserSession.runtimeAttemptId,
+              generation: buildBrowserSession.generation,
+              agentSessionId: buildBrowserSession.agentSessionId,
+              ownerId: buildBrowserSession.ownerId,
+              state: query<string>`'intended'::text`.as("state"),
+              createIntendedAt: query<Date>`now()`.as("create_intended_at"),
+              createConfirmedAt: query<null>`NULL::timestamptz`.as("create_confirmed_at"),
+              cleanupIntendedAt: query<null>`NULL::timestamptz`.as("cleanup_intended_at"),
+              cleanupConfirmedAt: query<null>`NULL::timestamptz`.as("cleanup_confirmed_at"),
+              outcomeSummary: query<null>`NULL::text`.as("outcome_summary"),
+              inspectionContext: query<null>`NULL::jsonb`.as("inspection_context"),
+              ordinal: query<number>`${ordinal}::integer`.as("ordinal"),
+              reopenAllowed: query<boolean>`false`.as("reopen_allowed"),
+            })
+            .from(buildBrowserSession)
+            .where(
+              and(
+                eq(buildBrowserSession.id, previous.id),
+                eq(buildBrowserSession.state, "closed"),
+                eq(buildBrowserSession.reopenAllowed, true),
+                isNotNull(buildBrowserSession.cleanupConfirmedAt),
+              ),
+            ),
+        )
+        .onConflictDoNothing();
     });
     const next = allowed ? await row(id) : undefined;
     if (!next || !["intended", "active"].includes(next.state))
@@ -393,9 +489,14 @@ export function createBuildBrowserController(
   }
 
   async function recordingFailure(id: string) {
-    await database.client`UPDATE factory.review_media SET state='unavailable',
-      reason='QA recording unavailable. App observations and review results are separate.'
-      WHERE id=${id} AND state IN ('intended','recording')`.catch(() => {});
+    await database.db
+      .update(reviewMedia)
+      .set({
+        state: "unavailable",
+        reason: "QA recording unavailable. App observations and review results are separate.",
+      })
+      .where(and(eq(reviewMedia.id, id), inArray(reviewMedia.state, ["intended", "recording"])))
+      .catch(() => {});
   }
   async function beginRecording(session: BrowserSession, ownerToken: string) {
     // Persist the fixed recording identity before asking upstream to create it.
@@ -404,13 +505,42 @@ export function createBuildBrowserController(
     try {
       const allowed = await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
         await currentIn(sql, session, ownerToken);
-        const [intent] = await sql<{ id: string; state: string }[]>`
-          INSERT INTO factory.review_media(id,change_id,review_id,browser_session_id,kind,commit_sha,runtime_attempt_id,state)
-          SELECT ${session.id},review.change_id,review.id,${session.id},'recording',review.commit_sha,
-            ${session.attemptID},'intended'
-          FROM factory.candidate_review review WHERE review.turn_id=${session.turnID}
-            AND review.finding_source_id IS NULL
-          ON CONFLICT DO NOTHING RETURNING id,state`;
+        const db = drizzleTransaction(sql);
+        const [intent] = await db
+          .insert(reviewMedia)
+          .select(
+            db
+              .select({
+                id: query<string>`${session.id}::uuid`.as("id"),
+                changeId: candidateReview.changeId,
+                reviewId: candidateReview.id,
+                browserSessionId: query<string>`${session.id}::uuid`.as("browser_session_id"),
+                createdBy: query<null>`NULL::uuid`.as("created_by"),
+                kind: query<string>`'recording'::text`.as("kind"),
+                commitSha: candidateReview.commitSha,
+                runtimeAttemptId: query<string>`${session.attemptID}::uuid`.as(
+                  "runtime_attempt_id",
+                ),
+                sourceContext: query<null>`NULL::jsonb`.as("source_context"),
+                state: query<string>`'intended'::text`.as("state"),
+                byteLength: query<null>`NULL::integer`.as("byte_length"),
+                sha256: query<null>`NULL::text`.as("sha256"),
+                durationMs: query<null>`NULL::integer`.as("duration_ms"),
+                reason: query<null>`NULL::text`.as("reason"),
+                createdAt: query<Date>`clock_timestamp()`.as("created_at"),
+                completedAt: query<null>`NULL::timestamptz`.as("completed_at"),
+                deletedAt: query<null>`NULL::timestamptz`.as("deleted_at"),
+              })
+              .from(candidateReview)
+              .where(
+                and(
+                  eq(candidateReview.turnId, session.turnID),
+                  isNull(candidateReview.findingSourceId),
+                ),
+              ),
+          )
+          .onConflictDoNothing()
+          .returning({ id: reviewMedia.id, state: reviewMedia.state });
         if (intent?.state === "intended") id = intent.id;
       });
       if (!allowed || !id) return;
@@ -418,8 +548,13 @@ export function createBuildBrowserController(
       const started = z
         .object({ startedAt: z.iso.datetime() })
         .parse(JSON.parse(output.data ?? ""));
-      await database.client`UPDATE factory.review_media SET state='recording',created_at=${started.startedAt}
-        WHERE id=${id} AND state='intended'`;
+      await database.db
+        .update(reviewMedia)
+        .set({
+          state: "recording",
+          createdAt: query`${started.startedAt}::timestamptz`,
+        })
+        .where(and(eq(reviewMedia.id, id), eq(reviewMedia.state, "intended")));
     } catch {
       if (id) await recordingFailure(id);
       // Never turn a successful browser action into a retriable failure just
@@ -431,23 +566,60 @@ export function createBuildBrowserController(
     async prepare(turnID: string, ownerToken: string) {
       const id = browserIdentity(turnID, ownerIdentity(ownerToken));
       const allowed = await turns.validateExecution(turnID, ownerToken, async (sql) => {
-        const [turn] = await sql<Array<{ projectID: string; userID: string }>>`
-          SELECT project_id AS "projectID", created_by AS "userID" FROM factory.agent_turn WHERE id = ${turnID}`;
+        const db = drizzleTransaction(sql);
+        const [turn] = await db
+          .select({ projectID: agentTurn.projectId, userID: agentTurn.createdBy })
+          .from(agentTurn)
+          .where(eq(agentTurn.id, turnID));
         if (!turn) throw new CommandError("conflict", "Build admission was not found");
         await projectAuthorityIn(sql, turn.userID, turn.projectID);
-        await sql`INSERT INTO factory.build_browser_session(id, turn_id, change_id, runtime_attempt_id,
-          generation, agent_session_id, owner_id)
-          SELECT ${id}, turn.id, intent.change_id, intent.runtime_attempt_id, attempt.generation,
-            intent.session_id, ${ownerIdentity(ownerToken)}
-          FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
-          JOIN factory.runtime_attempt attempt ON attempt.id = intent.runtime_attempt_id
-          WHERE turn.id = ${turnID} ON CONFLICT (turn_id, owner_id, ordinal) DO NOTHING`;
+        await db
+          .insert(buildBrowserSession)
+          .select(
+            db
+              .select({
+                id: query<string>`${id}::uuid`.as("id"),
+                turnId: agentTurn.id,
+                changeId: changeAgentTurnIntent.changeId,
+                runtimeAttemptId: query<string>`${changeAgentTurnIntent.runtimeAttemptId}`.as(
+                  "runtime_attempt_id",
+                ),
+                generation: runtimeAttempt.generation,
+                agentSessionId: changeAgentTurnIntent.sessionId,
+                ownerId: query<string>`${ownerIdentity(ownerToken)}::text`.as("owner_id"),
+                state: query<string>`'intended'::text`.as("state"),
+                createIntendedAt: query<Date>`now()`.as("create_intended_at"),
+                createConfirmedAt: query<null>`NULL::timestamptz`.as("create_confirmed_at"),
+                cleanupIntendedAt: query<null>`NULL::timestamptz`.as("cleanup_intended_at"),
+                cleanupConfirmedAt: query<null>`NULL::timestamptz`.as("cleanup_confirmed_at"),
+                outcomeSummary: query<null>`NULL::text`.as("outcome_summary"),
+                inspectionContext: query<null>`NULL::jsonb`.as("inspection_context"),
+                ordinal: query<number>`1::integer`.as("ordinal"),
+                reopenAllowed: query<boolean>`false`.as("reopen_allowed"),
+              })
+              .from(agentTurn)
+              .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
+              .innerJoin(
+                runtimeAttempt,
+                eq(runtimeAttempt.id, changeAgentTurnIntent.runtimeAttemptId),
+              )
+              .where(eq(agentTurn.id, turnID)),
+          )
+          .onConflictDoNothing({
+            target: [
+              buildBrowserSession.turnId,
+              buildBrowserSession.ownerId,
+              buildBrowserSession.ordinal,
+            ],
+          });
       });
       const session = allowed ? await row(id) : undefined;
       if (!session || !["intended", "active"].includes(session.state))
         throw new CommandError("conflict", "Browser requires the current admitted Build execution");
-      const [binding] = await database.client<{ intent: unknown }[]>`
-        SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${session.attemptID}`;
+      const [binding] = await database.db
+        .select({ intent: substrateBinding.intent })
+        .from(substrateBinding)
+        .where(eq(substrateBinding.runtimeAttemptId, session.attemptID));
       return {
         sessionID: session.id,
         bearer: capability(session.id),
@@ -473,12 +645,23 @@ export function createBuildBrowserController(
       authorization: string | null,
       purpose: "browser" | "facade" = "browser",
     ) {
-      const [current] = await database.client<Array<{ generation: number; ownerToken: string }>>`
-        SELECT attempt.generation::float8 AS generation, turn.owner_token AS "ownerToken"
-        FROM factory.runtime_attempt attempt JOIN factory.agent_turn turn ON turn.id = ${turnID}
-        WHERE attempt.id = ${attemptID} AND attempt.state = 'ready' AND attempt.change_id = turn.change_id
-          AND turn.state IN ('dispatching', 'running') AND turn.owner_token IS NOT NULL
-          AND turn.owner_expires_at > clock_timestamp()`;
+      const [current] = await database.db
+        .select({
+          generation: runtimeAttempt.generation,
+          ownerToken: query<string>`${agentTurn.ownerToken}`,
+        })
+        .from(runtimeAttempt)
+        .innerJoin(agentTurn, eq(agentTurn.id, turnID))
+        .where(
+          and(
+            eq(runtimeAttempt.id, attemptID),
+            eq(runtimeAttempt.state, "ready"),
+            eq(runtimeAttempt.changeId, agentTurn.changeId),
+            inArray(agentTurn.state, ["dispatching", "running"]),
+            isNotNull(agentTurn.ownerToken),
+            query`${agentTurn.ownerExpiresAt}>clock_timestamp()`,
+          ),
+        );
       if (!current) return null;
       const expected = `Bearer ${runtimeBuildBrowserToken(secret, attemptID, current.generation)}`;
       if (
@@ -487,11 +670,19 @@ export function createBuildBrowserController(
         !timingSafeEqual(Buffer.from(authorization), Buffer.from(expected))
       )
         return null;
-      const [session] = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.build_browser_session WHERE runtime_attempt_id = ${attemptID}
-          AND turn_id = ${turnID} AND generation = ${current.generation}
-          AND owner_id = ${ownerIdentity(current.ownerToken)}
-        ORDER BY ordinal DESC LIMIT 1`;
+      const [session] = await database.db
+        .select({ id: buildBrowserSession.id })
+        .from(buildBrowserSession)
+        .where(
+          and(
+            eq(buildBrowserSession.runtimeAttemptId, attemptID),
+            eq(buildBrowserSession.turnId, turnID),
+            eq(buildBrowserSession.generation, current.generation),
+            eq(buildBrowserSession.ownerId, ownerIdentity(current.ownerToken)),
+          ),
+        )
+        .orderBy(desc(buildBrowserSession.ordinal))
+        .limit(1);
       return session
         ? authorizeSession(
             session.id,
@@ -509,8 +700,10 @@ export function createBuildBrowserController(
       signal?: AbortSignal,
     ): Promise<BuildBrowserResult> {
       const call = buildBrowserCallInput.parse(input);
-      const [reported] = await database.client`SELECT id FROM factory.candidate_review
-        WHERE turn_id=${session.turnID} AND result IS NOT NULL`;
+      const [reported] = await database.db
+        .select({ id: candidateReview.id })
+        .from(candidateReview)
+        .where(and(eq(candidateReview.turnId, session.turnID), isNotNull(candidateReview.result)));
       if (reported)
         throw new CommandError(
           "conflict",
@@ -589,9 +782,19 @@ export function createBuildBrowserController(
         const inspection = { ...context, changeId: session.changeID };
         if (call.name === "browser_snapshot") needsObservation.delete(session.id);
         if (freshInspection) needsObservation.add(session.id);
-        await database.client`UPDATE factory.build_browser_session SET state = 'active',
-          create_confirmed_at = COALESCE(create_confirmed_at, now()), inspection_context = ${JSON.stringify(inspection)}::jsonb
-          WHERE id = ${session.id} AND state IN ('intended','active')`;
+        await database.db
+          .update(buildBrowserSession)
+          .set({
+            state: "active",
+            createConfirmedAt: query`COALESCE(${buildBrowserSession.createConfirmedAt}, now())`,
+            inspectionContext: inspection,
+          })
+          .where(
+            and(
+              eq(buildBrowserSession.id, session.id),
+              inArray(buildBrowserSession.state, ["intended", "active"]),
+            ),
+          );
         if (call.name === "browser_open" || session.state === "intended")
           await beginRecording(session, ownerToken);
         return {
@@ -640,10 +843,16 @@ export function createBuildBrowserController(
     },
 
     async finishRecording(session: BrowserSession, ownerToken: string, signal?: AbortSignal) {
-      const [recording] = await database.client<
-        { id: string }[]
-      >`SELECT id FROM factory.review_media
-        WHERE browser_session_id=${session.id} AND kind='recording' AND state='recording'`;
+      const [recording] = await database.db
+        .select({ id: reviewMedia.id })
+        .from(reviewMedia)
+        .where(
+          and(
+            eq(reviewMedia.browserSessionId, session.id),
+            eq(reviewMedia.kind, "recording"),
+            eq(reviewMedia.state, "recording"),
+          ),
+        );
       if (!recording) return;
       try {
         const manifestInput = z.object({
@@ -706,11 +915,18 @@ export function createBuildBrowserController(
 
     async finishTurnRecording(turnID: string, ownerToken: string, signal?: AbortSignal) {
       try {
-        const [latest] = await database.client<
-          { id: string }[]
-        >`SELECT id FROM factory.build_browser_session
-        WHERE turn_id=${turnID} AND owner_id=${ownerIdentity(ownerToken)}
-          AND state='active' ORDER BY ordinal DESC LIMIT 1`;
+        const [latest] = await database.db
+          .select({ id: buildBrowserSession.id })
+          .from(buildBrowserSession)
+          .where(
+            and(
+              eq(buildBrowserSession.turnId, turnID),
+              eq(buildBrowserSession.ownerId, ownerIdentity(ownerToken)),
+              eq(buildBrowserSession.state, "active"),
+            ),
+          )
+          .orderBy(desc(buildBrowserSession.ordinal))
+          .limit(1);
         const session = latest ? await row(latest.id) : undefined;
         if (session) await this.finishRecording(session, ownerToken, signal);
       } catch {
@@ -722,9 +938,16 @@ export function createBuildBrowserController(
       if (renewing.has(turnID)) return;
       renewing.add(turnID);
       try {
-        const [session] = await database.client<Array<{ id: string }>>`
-          SELECT id FROM factory.build_browser_session WHERE turn_id = ${turnID}
-            AND owner_id = ${ownerIdentity(ownerToken)} AND state IN ('intended', 'active')`;
+        const [session] = await database.db
+          .select({ id: buildBrowserSession.id })
+          .from(buildBrowserSession)
+          .where(
+            and(
+              eq(buildBrowserSession.turnId, turnID),
+              eq(buildBrowserSession.ownerId, ownerIdentity(ownerToken)),
+              inArray(buildBrowserSession.state, ["intended", "active"]),
+            ),
+          );
         if (!session) return;
         const current = await row(session.id);
         if (!current) return;
@@ -745,33 +968,66 @@ export function createBuildBrowserController(
     },
 
     async closeTurn(turnID: string) {
-      await database.client`UPDATE factory.review_media SET state='unavailable',
-        reason='Recording interrupted. No App actions were repeated.'
-        WHERE browser_session_id IN (SELECT id FROM factory.build_browser_session WHERE turn_id=${turnID})
-          AND state IN ('intended','recording')`.catch(() => {});
-      const sessions = await database.client<Array<{ id: string; ownerID: string }>>`
-        SELECT id,owner_id AS "ownerID" FROM factory.build_browser_session WHERE turn_id = ${turnID}`;
+      await database.db
+        .update(reviewMedia)
+        .set({
+          state: "unavailable",
+          reason: "Recording interrupted. No App actions were repeated.",
+        })
+        .where(
+          and(
+            inArray(
+              reviewMedia.browserSessionId,
+              database.db
+                .select({ id: buildBrowserSession.id })
+                .from(buildBrowserSession)
+                .where(eq(buildBrowserSession.turnId, turnID)),
+            ),
+            inArray(reviewMedia.state, ["intended", "recording"]),
+          ),
+        )
+        .catch(() => {});
+      const sessions = await database.db
+        .select({ id: buildBrowserSession.id, ownerID: buildBrowserSession.ownerId })
+        .from(buildBrowserSession)
+        .where(eq(buildBrowserSession.turnId, turnID));
       await Promise.all(sessions.map(({ id }) => close(id)));
       for (const session of sessions) dispatchedCalls.delete(`${turnID}:${session.ownerID}`);
     },
 
     async closeChange(changeID: string) {
-      const sessions = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.build_browser_session WHERE change_id = ${changeID} AND state <> 'closed'`;
+      const sessions = await database.db
+        .select({ id: buildBrowserSession.id })
+        .from(buildBrowserSession)
+        .where(
+          and(eq(buildBrowserSession.changeId, changeID), ne(buildBrowserSession.state, "closed")),
+        );
       await Promise.all(sessions.map(({ id }) => close(id)));
     },
 
     async reconcileCleanup() {
-      const sessions = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.build_browser_session WHERE state = 'closing'`;
+      const sessions = await database.db
+        .select({ id: buildBrowserSession.id })
+        .from(buildBrowserSession)
+        .where(eq(buildBrowserSession.state, "closing"));
       await Promise.all(sessions.map(({ id }) => close(id)));
     },
 
     async recover(attemptID?: string) {
-      const sessions = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.build_browser_session WHERE state <> 'closed'
-          AND (${attemptID ?? null}::uuid IS NULL OR
-            (runtime_attempt_id = ${attemptID ?? null}::uuid AND state = 'closing'))`;
+      const sessions = await database.db
+        .select({ id: buildBrowserSession.id })
+        .from(buildBrowserSession)
+        .where(
+          and(
+            ne(buildBrowserSession.state, "closed"),
+            attemptID === undefined
+              ? undefined
+              : and(
+                  eq(buildBrowserSession.runtimeAttemptId, attemptID),
+                  eq(buildBrowserSession.state, "closing"),
+                ),
+          ),
+        );
       await Promise.all(sessions.map(({ id }) => close(id)));
     },
   };

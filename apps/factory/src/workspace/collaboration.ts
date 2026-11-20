@@ -1,8 +1,22 @@
 import { createHash } from "node:crypto";
+import { and, eq, gt, or, sql as query } from "drizzle-orm";
 import * as Y from "yjs";
 import { z } from "zod";
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
-import { workspaceWriteAuthorityIn, lockChangeWriterIn } from "../access/change-writer";
+import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  authSession,
+  authUser,
+  developmentWorkspace,
+  oauthClient,
+  sharedDocumentResolution,
+  workspaceCollaborationDecision,
+  workspaceSharedDocument,
+} from "../../../../packages/db/src/schema";
+import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 import type { createWorkspaceSourceController } from "./source-controller";
@@ -47,7 +61,6 @@ type Actor = {
   kind: "person" | "agent";
   oauthClientID?: string;
 };
-type DocumentRow = { state: Uint8Array; diskVersion: string; dirty: boolean; conflict: boolean };
 type Presence = {
   oauthClientID?: string;
   workspaceID: string;
@@ -80,9 +93,10 @@ export function createWorkspaceCollaboration(
     userID: string,
     write = false,
   ) => {
-    const [workspace] = await sql<
-      { changeID: string | null }[]
-    >`SELECT change_id AS "changeID" FROM factory.development_workspace WHERE id=${workspaceID}`;
+    const [workspace] = await drizzleTransaction(sql)
+      .select({ changeID: developmentWorkspace.changeId })
+      .from(developmentWorkspace)
+      .where(eq(developmentWorkspace.id, workspaceID));
     if (workspace?.changeID) await lockChangeWriterIn(sql, workspace.changeID);
     const access = await workspaceAuthorityIn(sql, workspaceID, userID, write);
     if (!access.collaborative)
@@ -152,10 +166,20 @@ export function createWorkspaceCollaboration(
     return { file, content };
   }
   async function load(workspaceID: string, userID: string, path: string, incomingEdits = false) {
-    const [row] = await database.client<
-      DocumentRow[]
-    >`SELECT y_state AS state,disk_version AS "diskVersion",dirty,conflict
-      FROM factory.workspace_shared_document WHERE workspace_id=${workspaceID} AND path=${path}`;
+    const [row] = await database.db
+      .select({
+        state: workspaceSharedDocument.yState,
+        diskVersion: workspaceSharedDocument.diskVersion,
+        dirty: workspaceSharedDocument.dirty,
+        conflict: workspaceSharedDocument.conflict,
+      })
+      .from(workspaceSharedDocument)
+      .where(
+        and(
+          eq(workspaceSharedDocument.workspaceId, workspaceID),
+          eq(workspaceSharedDocument.path, path),
+        ),
+      );
     const current = await disk(workspaceID, userID, path).catch((cause) => {
       if (row && cause instanceof CommandError && cause.code === "not-found")
         return {
@@ -208,10 +232,19 @@ export function createWorkspaceCollaboration(
         "invalid",
         "Shared document exceeds its size bound. Keep your local buffer.",
       );
-    await sql`INSERT INTO factory.workspace_shared_document(workspace_id,path,y_state,disk_version,dirty,conflict)
-      VALUES(${workspaceID},${path},${state},${value.diskVersion},${value.dirty},${value.conflict})
-      ON CONFLICT(workspace_id,path) DO UPDATE SET y_state=EXCLUDED.y_state,disk_version=EXCLUDED.disk_version,
-        dirty=EXCLUDED.dirty,conflict=EXCLUDED.conflict,updated_at=now()`;
+    const document = {
+      yState: state,
+      diskVersion: value.diskVersion,
+      dirty: value.dirty,
+      conflict: value.conflict,
+    };
+    await drizzleTransaction(sql)
+      .insert(workspaceSharedDocument)
+      .values({ workspaceId: workspaceID, path, ...document })
+      .onConflictDoUpdate({
+        target: [workspaceSharedDocument.workspaceId, workspaceSharedDocument.path],
+        set: { ...document, updatedAt: query`now()` },
+      });
   }
   async function participants(workspaceID: string, userID: string, path?: string) {
     await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, userID));
@@ -223,8 +256,16 @@ export function createWorkspaceCollaboration(
     for (const peer of peers) {
       const key = `${peer.userID}:${peer.sessionID}`;
       if (!allowed.has(key)) {
-        const [session] =
-          await database.client`SELECT id FROM auth.session WHERE id=${peer.sessionID} AND user_id=${peer.userID} AND expires_at>now()`;
+        const [session] = await database.db
+          .select({ id: authSession.id })
+          .from(authSession)
+          .where(
+            and(
+              eq(authSession.id, peer.sessionID),
+              eq(authSession.userId, peer.userID),
+              gt(authSession.expiresAt, query`now()`),
+            ),
+          );
         try {
           await database.client.begin((sql) => workspaceAuthorityIn(sql, workspaceID, peer.userID));
           allowed.set(key, Boolean(session));
@@ -268,13 +309,15 @@ export function createWorkspaceCollaboration(
       )
     )
       throw new CommandError("conflict", "Document client identity is already connected");
-    const [person] = await database.client<
-      { name: string }[]
-    >`SELECT left(name,160) AS name FROM auth."user" WHERE id=${actor.userID}`;
+    const [person] = await database.db
+      .select({ name: query<string>`left(${authUser.name},160)` })
+      .from(authUser)
+      .where(eq(authUser.id, actor.userID));
     const [client] = actor.oauthClientID
-      ? await database.client<
-          { name: string | null }[]
-        >`SELECT left(name,80) AS name FROM auth."oauthClient" WHERE "clientId"=${actor.oauthClientID}`
+      ? await database.db
+          .select({ name: query<string | null>`left(${oauthClient.name},80)` })
+          .from(oauthClient)
+          .where(eq(oauthClient.clientId, actor.oauthClientID))
       : [];
     presence.set(input.participantID, {
       workspaceID,
@@ -305,13 +348,24 @@ export function createWorkspaceCollaboration(
             "forbidden",
             "Only the owner enables personal Workspace collaboration",
           );
-        const [previous] = await sql<
-          { workspaceID: string; actorID: string }[]
-        >`SELECT workspace_id AS "workspaceID",actor_id AS "actorID" FROM factory.workspace_collaboration_decision WHERE id=${commandID}`;
+        const db = drizzleTransaction(sql);
+        const [previous] = await db
+          .select({
+            workspaceID: workspaceCollaborationDecision.workspaceId,
+            actorID: workspaceCollaborationDecision.actorId,
+          })
+          .from(workspaceCollaborationDecision)
+          .where(eq(workspaceCollaborationDecision.id, commandID));
         if (previous && (previous.workspaceID !== workspaceID || previous.actorID !== userID))
           throw new CommandError("conflict", "Collaboration decision identity differs");
-        await sql`INSERT INTO factory.workspace_collaboration_decision(id,workspace_id,actor_id) VALUES(${commandID},${workspaceID},${userID}) ON CONFLICT(id) DO NOTHING`;
-        await sql`UPDATE factory.development_workspace SET collaboration_enabled=true WHERE id=${workspaceID}`;
+        await db
+          .insert(workspaceCollaborationDecision)
+          .values({ id: commandID, workspaceId: workspaceID, actorId: userID })
+          .onConflictDoNothing({ target: workspaceCollaborationDecision.id });
+        await db
+          .update(developmentWorkspace)
+          .set({ collaborationEnabled: true })
+          .where(eq(developmentWorkspace.id, workspaceID));
         return { workspaceID, collaborative: true };
       });
     },
@@ -508,18 +562,18 @@ export function createWorkspaceCollaboration(
         .parse(raw);
       return locked(workspaceID, input.path, async () => {
         await authorize(workspaceID, userID, true);
-        const [previous] = await database.client<
-          {
-            actorID: string;
-            workspaceID: string;
-            path: string;
-            choice: string;
-            revision: string;
-            diskVersion: string;
-            result: unknown;
-          }[]
-        >`
-          SELECT actor_id AS "actorID",workspace_id AS "workspaceID",path,choice,document_revision AS revision,disk_version AS "diskVersion",result FROM factory.shared_document_resolution WHERE id=${input.requestID}`;
+        const [previous] = await database.db
+          .select({
+            actorID: sharedDocumentResolution.actorId,
+            workspaceID: sharedDocumentResolution.workspaceId,
+            path: sharedDocumentResolution.path,
+            choice: sharedDocumentResolution.choice,
+            revision: sharedDocumentResolution.documentRevision,
+            diskVersion: sharedDocumentResolution.diskVersion,
+            result: sharedDocumentResolution.result,
+          })
+          .from(sharedDocumentResolution)
+          .where(eq(sharedDocumentResolution.id, input.requestID));
         if (previous) {
           if (
             previous.actorID !== userID ||
@@ -561,8 +615,16 @@ export function createWorkspaceCollaboration(
           await database.client.begin(async (sql) => {
             await authorizeIn(sql, workspaceID, userID, true);
             await persist(workspaceID, input.path, value, sql);
-            await sql`INSERT INTO factory.shared_document_resolution(id,workspace_id,path,actor_id,choice,document_revision,disk_version,result)
-              VALUES(${input.requestID},${workspaceID},${input.path},${userID},${input.choice},${input.revision},${input.diskVersion},${JSON.stringify(result)}::text::jsonb)`;
+            await drizzleTransaction(sql).insert(sharedDocumentResolution).values({
+              id: input.requestID,
+              workspaceId: workspaceID,
+              path: input.path,
+              actorId: userID,
+              choice: input.choice,
+              documentRevision: input.revision,
+              diskVersion: input.diskVersion,
+              result,
+            });
           });
           return result;
         } finally {
@@ -576,8 +638,16 @@ export function createWorkspaceCollaboration(
         if (peer.workspaceID === workspaceID && peer.userID === userID) presence.delete(id);
     },
     async assertSaved(workspaceID: string) {
-      const [dirty] =
-        await database.client`SELECT path FROM factory.workspace_shared_document WHERE workspace_id=${workspaceID} AND (dirty OR conflict) LIMIT 1`;
+      const [dirty] = await database.db
+        .select({ path: workspaceSharedDocument.path })
+        .from(workspaceSharedDocument)
+        .where(
+          and(
+            eq(workspaceSharedDocument.workspaceId, workspaceID),
+            or(workspaceSharedDocument.dirty, workspaceSharedDocument.conflict),
+          ),
+        )
+        .limit(1);
       if (dirty)
         throw new CommandError(
           "conflict",

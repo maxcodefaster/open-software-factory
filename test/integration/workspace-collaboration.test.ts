@@ -1,8 +1,14 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import * as Y from "yjs";
 import { createWorkspaceCollaboration } from "../../apps/factory/src/workspace/collaboration";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
+import {
+  developmentWorkspace,
+  workspaceCollaborationDecision,
+  workspaceSharedDocument,
+} from "../../packages/db/src/schema";
 import { factoryProcess } from "../fixtures/factory-process";
 
 const encoded = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
@@ -32,12 +38,16 @@ async function fixture() {
   await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by,collaboration_enabled)
     VALUES(${workspaceID},${projectID},'personal',${owner},'main',${"a".repeat(40)},${owner},true)`;
   const files = new Map([["file.txt", "original\n"]]);
+  let writeBoundary: "disk CAS" | "lost Save acknowledgement" | undefined;
   let blockedRead:
     | { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> }
     | undefined;
   const source = {
     async forward(_workspaceID: string, _userID: string, action: string, request: Request) {
       const input = (await request.json()) as { path: string; content?: string; version?: string };
+      const boundary = action === "write" ? writeBoundary : undefined;
+      if (action === "write") writeBoundary = undefined;
+      if (boundary === "disk CAS") files.set(input.path, "concurrent shell write\n");
       const previous = files.get(input.path);
       if (action === "read" && blockedRead) {
         const gate = blockedRead;
@@ -51,6 +61,8 @@ async function fixture() {
         if ((previous === undefined ? "" : version(previous)) !== input.version)
           return new Response(null, { status: 409 });
         files.set(input.path, Buffer.from(input.content ?? "", "base64").toString());
+        if (boundary === "lost Save acknowledgement")
+          throw Error("Owned Save acknowledgement lost");
       }
       const text = files.get(input.path) ?? "";
       return Response.json({
@@ -102,8 +114,12 @@ async function fixture() {
     database,
     owner,
     guest,
+    projectID,
     workspaceID,
     files,
+    interruptNextWrite(boundary: NonNullable<typeof writeBoundary>) {
+      writeBoundary = boundary;
+    },
     sharing,
     actor,
     sync,
@@ -147,6 +163,29 @@ test("concurrent Yjs editor buffers converge and survive the owner's disconnect 
     expect(owner.getText("text").toString()).toContain("owner ");
     expect(owner.getText("text").toString()).toContain("guest ");
     expect(f.files.get("file.txt")).toBe("original\n");
+    const [stored] = await f.database.db
+      .select({ state: workspaceSharedDocument.yState })
+      .from(workspaceSharedDocument)
+      .where(
+        and(
+          eq(workspaceSharedDocument.workspaceId, f.workspaceID),
+          eq(workspaceSharedDocument.path, "file.txt"),
+        ),
+      );
+    const [native] = await f.database.client<{ hex: string; type: string }[]>`
+      SELECT encode(y_state,'hex') AS hex,pg_typeof(y_state)::text AS type
+      FROM factory.workspace_shared_document WHERE workspace_id=${f.workspaceID} AND path='file.txt'`;
+    expect(native?.type).toBe("bytea");
+    expect(Buffer.isBuffer(stored?.state)).toBe(true);
+    expect(stored?.state.toString("hex")).toBe(native?.hex);
+    const restored = new Y.Doc();
+    try {
+      if (!stored) throw Error("Persisted Yjs state missing");
+      Y.applyUpdate(restored, stored.state);
+      expect(restored.getText("text").toString()).toBe(owner.getText("text").toString());
+    } finally {
+      restored.destroy();
+    }
     await f.restart();
     guest.getText("text").insert(guest.getText("text").length, "after disconnect\n");
     const observed = await f.sync(f.guest, guest);
@@ -190,6 +229,12 @@ test("external disk writes conflict without discarding the shared unsaved docume
     };
     const resolved = await f.collaboration.resolve(f.owner, f.workspaceID, decision);
     expect(await f.collaboration.resolve(f.owner, f.workspaceID, decision)).toEqual(resolved);
+    await expect(
+      f.collaboration.resolve(f.owner, f.workspaceID, { ...decision, choice: "use-saved" }),
+    ).rejects.toThrow("another decision");
+    await expect(f.collaboration.resolve(f.guest, f.workspaceID, decision)).rejects.toThrow(
+      "another decision",
+    );
     expect(f.files.get("file.txt")).toBe("external formatter\n");
     const ready = await f.collaboration.read(f.owner, f.workspaceID, "file.txt");
     await f.collaboration.save(f.owner, f.workspaceID, {
@@ -202,6 +247,58 @@ test("external disk writes conflict without discarding the shared unsaved docume
     await f.dispose();
   }
 }, 30000);
+
+test.each(["disk CAS", "lost Save acknowledgement"] as const)(
+  "unconfirmed %s keeps the persisted buffer until disk is observed",
+  async (boundary) => {
+    const f = await fixture();
+    const doc = new Y.Doc();
+    try {
+      await f.sync(f.owner, doc);
+      doc.getText("text").insert(0, "retained draft ");
+      const edited = await f.sync(f.owner, doc);
+      f.interruptNextWrite(boundary);
+      await expect(
+        f.collaboration.save(f.owner, f.workspaceID, {
+          path: "file.txt",
+          revision: edited.revision,
+        }),
+      ).rejects.toThrow(
+        boundary === "disk CAS" ? "Save was not confirmed" : "Save acknowledgement lost",
+      );
+      const [stored] = await f.database.db
+        .select({
+          dirty: workspaceSharedDocument.dirty,
+          diskVersion: workspaceSharedDocument.diskVersion,
+        })
+        .from(workspaceSharedDocument)
+        .where(eq(workspaceSharedDocument.workspaceId, f.workspaceID));
+      expect(stored).toEqual({ dirty: true, diskVersion: version("original\n") });
+      await f.restart();
+      const observed = await f.collaboration.read(f.owner, f.workspaceID, "file.txt");
+      expect(observed.content).toBe("retained draft original\n");
+      expect(observed.conflict).toBe(boundary === "disk CAS");
+      expect(observed.dirty).toBe(boundary === "disk CAS");
+      if (boundary === "disk CAS") {
+        expect(f.files.get("file.txt")).toBe("concurrent shell write\n");
+        await f.collaboration.resolve(f.owner, f.workspaceID, {
+          requestID: crypto.randomUUID(),
+          path: "file.txt",
+          revision: observed.revision,
+          diskVersion: observed.diskVersion,
+          choice: "use-saved",
+        });
+        expect((await f.collaboration.read(f.owner, f.workspaceID, "file.txt")).content).toBe(
+          "concurrent shell write\n",
+        );
+      } else expect(f.files.get("file.txt")).toBe(observed.content);
+      await f.collaboration.assertSaved(f.workspaceID);
+    } finally {
+      await f.dispose();
+    }
+  },
+  30000,
+);
 
 test("observers and kicked collaborators cannot submit document updates and agent edits keep identity", async () => {
   const f = await fixture();
@@ -245,6 +342,39 @@ test("observers and kicked collaborators cannot submit document updates and agen
     expect((await f.collaboration.read(f.owner, f.workspaceID, "file.txt")).content).not.toContain(
       "forbidden ",
     );
+  } finally {
+    await f.dispose();
+  }
+}, 30000);
+
+test("collaboration enablement retains its exact decision and cannot be rebound to another owner", async () => {
+  const f = await fixture();
+  const commandID = crypto.randomUUID();
+  const otherWorkspaceID = crypto.randomUUID();
+  try {
+    const result = await f.collaboration.enable(f.owner, f.workspaceID, commandID);
+    expect(await f.collaboration.enable(f.owner, f.workspaceID, commandID)).toEqual(result);
+    await expect(
+      f.collaboration.enable(f.guest, f.workspaceID, crypto.randomUUID()),
+    ).rejects.toThrow("Only the owner");
+    await f.database.db.insert(developmentWorkspace).values({
+      id: otherWorkspaceID,
+      projectId: f.projectID,
+      kind: "personal",
+      ownerUserId: f.guest,
+      sourceBranch: "main",
+      sourceRevision: "a".repeat(40),
+      createdBy: f.guest,
+    });
+    await expect(f.collaboration.enable(f.guest, otherWorkspaceID, commandID)).rejects.toThrow(
+      "decision identity differs",
+    );
+    expect(await f.database.db.select().from(workspaceCollaborationDecision)).toHaveLength(1);
+    const [other] = await f.database.db
+      .select({ enabled: developmentWorkspace.collaborationEnabled })
+      .from(developmentWorkspace)
+      .where(eq(developmentWorkspace.id, otherWorkspaceID));
+    expect(other?.enabled).toBe(false);
   } finally {
     await f.dispose();
   }

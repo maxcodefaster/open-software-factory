@@ -246,3 +246,104 @@ test("Trash prevents an already dispatched Interview from publishing or retainin
     }
   }
 }, 60_000);
+
+test("Trash retains unknown Stop outcomes, rechecks access and recovers only its persisted attempts", async () => {
+  const process = await factoryProcess();
+  const db = process.connect();
+  let controller: ReturnType<typeof createTicketTrashController> | undefined;
+  let scope: Awaited<ReturnType<typeof fixture>> | undefined;
+  let confirm = false;
+  const stopped: string[] = [];
+  try {
+    const owned = await fixture(undefined, undefined, db);
+    scope = owned;
+    const otherID = crypto.randomUUID();
+    await db.client`INSERT INTO auth."user"(id,name,email) VALUES(${otherID},'Unrelated author',${`${otherID}@trash.test`})`;
+    // Failed attempts also require exact Stop confirmation before Restore.
+    await db.client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${owned.attemptID}`;
+    controller = createTicketTrashController(
+      db,
+      {
+        async stop(id) {
+          stopped.push(id);
+          expect(id).toBe(owned.attemptID);
+          if (!confirm) throw new Error("Owned Stop acknowledgement unavailable");
+          await db.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${id}`;
+        },
+      },
+      { async stop() {} },
+      { async stopForTrash() {} },
+    );
+    await expect(controller.trash(owned.ticketID, otherID)).rejects.toMatchObject({
+      code: "not-found",
+    });
+    expect(stopped).toHaveLength(0);
+    await controller.trash(owned.ticketID, owned.userID);
+    const read = async () =>
+      (
+        await db.client`
+      SELECT version::integer AS version,trashed_at AS at,trashed_by AS author,
+        trash_stop_pending AS pending,trash_error AS error FROM factory.ticket WHERE id=${owned.ticketID}`
+      )[0];
+    const first = await eventually(
+      read,
+      (row) => typeof row?.["error"] === "string",
+      "Unknown Stop was not retained",
+    );
+    expect(first).toMatchObject({ version: 2, author: owned.userID, pending: true });
+    await expect(controller.restore(owned.ticketID, owned.userID, 2)).rejects.toThrow(
+      "stop confirmation",
+    );
+    await controller.trash(owned.ticketID, owned.userID);
+    const repeated = await eventually(
+      read,
+      (row) => typeof row?.["error"] === "string",
+      "Repeated Stop was not observed",
+    );
+    expect(repeated).toEqual(first);
+    await db.client`DELETE FROM factory.project_membership WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    await expect(controller.restore(owned.ticketID, owned.userID, 2)).rejects.toMatchObject({
+      code: "not-found",
+    });
+    await expect(controller.trash(owned.ticketID, owned.userID)).rejects.toMatchObject({
+      code: "not-found",
+    });
+    await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${owned.projectID},${owned.userID},'product-contributor',${owned.userID})`;
+    confirm = true;
+    await controller.recover();
+    await eventually(
+      read,
+      (row) => row?.["pending"] === false,
+      "Persisted Stop recovery did not finish",
+    );
+    const stopCount = stopped.length;
+    await controller.restore(owned.ticketID, owned.userID, 2);
+    expect(await read()).toMatchObject({
+      version: 3,
+      at: null,
+      author: null,
+      pending: false,
+      error: null,
+    });
+    controller.close();
+    await controller.recover();
+    expect(stopped).toHaveLength(stopCount);
+    expect(stopped.every((id) => id === owned.attemptID)).toBe(true);
+    expect(owned.requests()).toBe(0);
+    expect(
+      await db.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${owned.ticketID} AND requirement_revision_id=${owned.revisionID}`,
+    ).toHaveLength(1);
+    expect(
+      await db.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${owned.ticketID}`,
+    ).toHaveLength(0);
+  } finally {
+    controller?.close();
+    try {
+      await db.client.end();
+      await process.dispose();
+    } finally {
+      scope?.restoreEnvironment();
+    }
+  }
+}, 60_000);
