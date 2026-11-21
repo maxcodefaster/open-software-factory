@@ -5,6 +5,18 @@ import { z } from "zod";
 import { verificationEnvironment } from "../../scripts/testing/test-prerequisites";
 
 const readiness = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
+const hostPhase = z.enum([
+  "postgres-starting",
+  "postgres-ready",
+  "factory-preparing",
+  "factory-prepared",
+  "cache-starting",
+  "cache-ready",
+  "application-starting",
+  "application-ready",
+  "cleanup-starting",
+  "cleanup-complete",
+]);
 export type BrowserHost = z.infer<typeof readiness>;
 type SpawnHost = (
   command: string[],
@@ -53,11 +65,14 @@ export async function ownedBrowserHost(
   host.once("exit", (code, signal) =>
     ready.reject(new Error(`Owned browser host exited before readiness: ${code ?? signal}`)),
   );
-  // Raw stdout/stderr can contain provider or authentication diagnostics. Publish only
-  // the validated identity, and never attach raw output or parse errors to failures.
+  // Publish only validated identity and fixed phase timings, never raw provider/auth
+  // diagnostics or parse errors. Timings identify a stalled owned startup stage.
   host.stderr.resume();
   const lines = createInterface({ input: host.stdout });
   lines.on("line", (line) => {
+    const phase = /^Owned Skill host phase: ([a-z-]+) (\d+)ms$/.exec(line);
+    if (phase && hostPhase.safeParse(phase[1]).success)
+      console.info(`Owned browser host phase: ${phase[1]} ${Number(phase[2])}ms`);
     if (!line.startsWith('{"fixtureBase"')) return;
     try {
       ready.resolve(readiness.parse(JSON.parse(line)));

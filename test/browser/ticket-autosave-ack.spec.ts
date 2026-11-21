@@ -68,9 +68,11 @@ test("a newer background read cannot discard the exact autosave acknowledgement"
           return value;
         },
         async detail(_actor, id) {
+          // The write refresh starts before the newer background read, but their
+          // real responses can arrive out of order. Own gates by request order.
+          const number = saved && reads < 2 ? ++reads : 0;
           const value = await serverCall(browserFunction(page, "getTicketDetail", [id]));
-          if (!saved || reads >= 2) return value;
-          const number = ++reads;
+          if (!number) return value;
           if (number === 1) {
             capturedAck.resolve();
             await releaseAck.promise;

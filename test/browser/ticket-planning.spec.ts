@@ -606,10 +606,11 @@ for (const width of [1440, 390]) {
           if (!entry.hadRecentInput) shifts.total += entry.value;
       }).observe({ type: "layout-shift", buffered: true });
     });
+    const gate = Promise.withResolvers<void>();
     await mockFactoryFunctions(page, {
       review: {
         get: async () => {
-          await new Promise((done) => setTimeout(done, 700));
+          await gate.promise;
           return visualReviewSchema.parse({
             feedback: [],
             recording: {
@@ -636,16 +637,21 @@ for (const width of [1440, 390]) {
         },
       },
     });
-    await page.setViewportSize({ width, height: 960 });
-    await page.goto(`${origin}/ticket-planning.html?review`);
-    await expect(page.getByLabel("Ticket requirements")).toBeVisible();
-    await expect(page.getByText("Loading review…")).toBeVisible();
-    await expect(page.getByText("Loading review…")).toHaveCount(0);
-    await page.waitForTimeout(500);
-    const shift = await page.evaluate(
-      () => (window as unknown as { __shifts: { total: number } }).__shifts.total,
-    );
-    expect(shift).toBeLessThan(0.1);
+    try {
+      await page.setViewportSize({ width, height: 960 });
+      await page.goto(`${origin}/ticket-planning.html?review`);
+      await expect(page.getByLabel("Ticket requirements")).toBeVisible();
+      await expect(page.getByText("Loading review…")).toBeVisible();
+      gate.resolve();
+      await expect(page.getByText("Loading review…")).toHaveCount(0);
+      await page.waitForTimeout(500);
+      const shift = await page.evaluate(
+        () => (window as unknown as { __shifts: { total: number } }).__shifts.total,
+      );
+      expect(shift).toBeLessThan(0.1);
+    } finally {
+      gate.resolve();
+    }
   });
 }
 
