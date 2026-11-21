@@ -120,7 +120,7 @@ test("the unit lane preserves an owned credential probe while conversion workers
     FACTORY_CONVERSION_TEST_CREDENTIAL: credential,
   };
   const environment = verificationEnvironment(parent);
-  expect(environment.FACTORY_CONVERSION_TEST_CREDENTIAL).toBe(credential);
+  expect(environment["FACTORY_CONVERSION_TEST_CREDENTIAL"]).toBe(credential);
   expect(parent.FACTORY_CONVERSION_TEST_CREDENTIAL).toBe(credential);
   expect(environment).not.toBe(parent);
   const root = join(import.meta.dirname, "../..");
