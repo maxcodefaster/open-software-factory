@@ -19,6 +19,7 @@ const nativeNames = new Set([
   "agent-native-commit-recovery",
   "build-browser",
   "build-browser-client",
+  "browser-tools-package.native",
   "change-writer-source",
   "native-skill-loading",
   "project-setup-forge",
@@ -28,6 +29,7 @@ const nativeNames = new Set([
 ]);
 const selfContainedControllerTests = new Set([
   "backup-runner.native.test.ts",
+  "browser-tools-package.native.test.ts",
   "substrate-adapter.test.ts",
   "substrate-adapter.native.test.ts",
   "substrate-rootless-proxy.native.test.ts",
@@ -92,6 +94,7 @@ export function controllerNeedsDatabase(path: string) {
 export function integrationNeedsApplicationBuild(path: string) {
   return ![
     "backup-runner.native.test.ts",
+    "browser-tools-package.native.test.ts",
     "substrate-rootless-proxy.native.test.ts",
     "openbao.test.ts",
     "schema-baseline.test.ts",

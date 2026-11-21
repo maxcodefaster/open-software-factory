@@ -10,6 +10,22 @@ import {
   requireNativeBrowserImage,
 } from "./native-installation";
 import { runtimeArtifactNames, runtimeArtifactsSchema } from "./artifacts";
+import upstream from "../../upstream.json";
+
+test("browser worker and image check the same pinned MCP package-bin launcher and version", async () => {
+  const [worker, runtime, recipe] = await Promise.all([
+    Bun.file("services/runtime-connector/connector/browser_worker.go").text(),
+    Bun.file("services/runtime-connector/connector/browser_runtime.go").text(),
+    Bun.file("deploy/browser-tools/Dockerfile").text(),
+  ]);
+  expect(worker).toContain(`const browserMCPVersion = "${upstream.chromeDevToolsMcp.version}"`);
+  expect(runtime).toContain("identity.ServerInfo.Version != browserMCPVersion");
+  expect(worker).toContain('"/opt/factory/browser-mcp/entrypoint.js"');
+  expect(recipe).toContain("p.bin['chrome-devtools-mcp'],'entrypoint.js'");
+  expect(recipe).toContain(
+    `test "$(node entrypoint.js --version)" = "${upstream.chromeDevToolsMcp.version}"`,
+  );
+});
 
 test("startup accepts an observed official ARM runtime without substituting its immutable version", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-native-arm-installation-"));

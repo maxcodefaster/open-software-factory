@@ -425,7 +425,7 @@ func (manager *browserRuntimeManager) start(runtime *browserRuntime) error {
 			Version string `json:"version"`
 		} `json:"serverInfo"`
 	}
-	if json.Unmarshal(initialized, &identity) != nil || identity.ServerInfo.Version != "1.10.1" {
+	if json.Unmarshal(initialized, &identity) != nil || identity.ServerInfo.Version != browserMCPVersion {
 		return errors.New("browser MCP did not report the pinned upstream version")
 	}
 	if err := json.NewEncoder(runtime.input).Encode(map[string]string{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {

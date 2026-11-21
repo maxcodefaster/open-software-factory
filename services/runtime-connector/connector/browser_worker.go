@@ -15,6 +15,7 @@ import (
 
 const browserSocketPath = "/factory/browser/app.sock"
 const browserAppsPath = "/factory/browser/config/apps.json"
+const browserMCPVersion = "1.13.0"
 
 // RunBrowserWorker is the fixed entrypoint of the isolated browser container.
 // It has no checkout, credentials, Docker socket or external network interface.
@@ -110,19 +111,19 @@ func browserWorkerArguments(channels []Channel) ([]string, error) {
 		return nil, errors.New("browser requires between one and eight declared Apps")
 	}
 	arguments := []string{
-		"/opt/factory/browser-mcp/build/src/bin/chrome-devtools-mcp.js",
+		"/opt/factory/browser-mcp/entrypoint.js",
 		"--isolated", "--headless", "--executable-path=/opt/factory/chromium",
 		"--proxy-server=http://127.0.0.1:3128", "--viewport=1280x720",
 		"--chrome-arg=--proxy-bypass-list=<-loopback>", "--chrome-arg=--disable-quic",
 		"--chrome-arg=--no-sandbox", "--chrome-arg=--disable-dev-shm-usage",
 		"--no-usage-statistics", "--no-performance-crux", "--no-source-maps",
 		"--no-javascript-evaluation", "--no-category-performance", "--no-category-memory",
-		"--no-category-extensions", "--no-category-webmcp", "--no-category-third-party",
+		"--no-category-extensions", "--no-category-experimental-webmcp", "--no-category-experimental-third-party",
 		"--no-category-pwa", "--no-category-network",
 		"--experimental-structured-content",
 		"--experimental-screencast", "--experimental-ffmpeg-path=/usr/local/bin/factory-recording-encoder",
 		"--experimental-screencast-fps=15",
-		"--redact-network-headers", "--screenshot-format=jpeg", "--screenshot-quality=75",
+		"--screenshot-format=jpeg", "--screenshot-quality=75",
 		"--screenshot-max-width=1280", "--screenshot-max-height=720",
 	}
 	seen := make(map[string]bool)

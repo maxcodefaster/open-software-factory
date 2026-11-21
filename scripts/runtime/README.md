@@ -121,6 +121,16 @@ The commissioned registry and unrelated installation resources stay unchanged.
 
 ## Component checks
 
+The packaged browser check initializes the actual worker and verifies the pinned MCP version and
+restricted tool list, without starting Chromium, an Actor or inference:
+
+```sh
+FACTORY_BROWSER_TOOLS_IMAGE='your-registry/browser-tools@sha256:YOUR_CACHED_DIGEST' \
+  mise exec -- bun run test:native browser-tools-package.native
+```
+
+It owns one networkless Docker container and removes it after the check.
+
 The rootless proxy regression requires an explicitly selected, already cached Actor or qualified
 bootstrap image with Python 3 and Tinyproxy 1.11.2. Supply its immutable digest reference:
 

@@ -13,7 +13,9 @@ COPY upstream.json /tmp/upstream.json
 RUN tarball="$(npm pack --silent --ignore-scripts chrome-devtools-mcp@1.13.0)" \
   && node -e "const fs=require('fs'),crypto=require('crypto');const expected=JSON.parse(fs.readFileSync('/tmp/upstream.json')).chromeDevToolsMcp.integrity;const actual='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64');if(actual!==expected)throw new Error('Browser MCP integrity mismatch')" "$tarball" \
   && tar -xzf "$tarball" --strip-components=1 \
-  && rm "$tarball"
+  && rm "$tarball" \
+  && node -e "const fs=require('fs'),p=require('./package.json');fs.symlinkSync(p.bin['chrome-devtools-mcp'],'entrypoint.js')" \
+  && test "$(node entrypoint.js --version)" = "1.13.0"
 
 FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579 AS browsers
 # Copy the unmodified, digest-pinned Chromium distribution, not the upstream
