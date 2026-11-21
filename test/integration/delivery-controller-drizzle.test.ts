@@ -320,10 +320,11 @@ test("superseded Verification cleanup retains the current candidate and its regi
     await f.database.client`UPDATE factory.verification SET runner_id=99,
       runner_uuid=${crypto.randomUUID()},runner_token='owned-current-runner'
       WHERE id=${f.verificationID}`;
+    // Cancellation frees the active slot before runner revocation is confirmed.
     const previousID = crypto.randomUUID();
     await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,runner_id,state,created_by)
-      VALUES(${previousID},${f.changeID},${"c".repeat(40)},1,'owned-superseded',42,'running',${f.userID})`;
+      id,change_id,commit_sha,pull_request_number,runner_name,runner_id,action_run_id,state,completed_at,created_by)
+      VALUES(${previousID},${f.changeID},${"c".repeat(40)},1,'owned-superseded',42,2,'cancelled',now(),${f.userID})`;
     const delivery = f.controller();
     await delivery.reconcile(f.changeID);
     const [previous] = await f.database.client`SELECT state,runner_id::text AS runner

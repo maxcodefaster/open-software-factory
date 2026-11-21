@@ -17,7 +17,7 @@ import {
   startCoding,
   stopCoding,
 } from "../server-functions/agent";
-import { newProjectConversation, setConversationMode } from "../server-functions/conversations";
+import { newProjectConversation } from "../server-functions/conversations";
 import { serverCall } from "../server-functions/result";
 import type { DesktopMutation } from "./contracts";
 
@@ -54,9 +54,7 @@ interface CodingCommandsDependencies {
   delivery: Accessor<DeliveryView | undefined>;
   retryReview: (changeID: string) => Promise<void>;
   selectedTicketID: SourceAccessor<string | undefined>;
-  selectedConversation: () => string | undefined;
   conversationMode: () => ConversationMode;
-  setConversation: (value: ConversationView | undefined) => void;
   agentReadFence: {
     beginRead: () => { revision: number; read: number };
     current: (token: { revision: number; read: number }) => boolean;
@@ -190,27 +188,6 @@ export function createCodingCommands(dependencies: CodingCommandsDependencies) {
     });
   }
 
-  async function prepareBuildConversation(changeID: string) {
-    const projectID = dependencies.selectedProjectID();
-    const ticketID = dependencies.selectedTicketID();
-    const selected = dependencies.selectedConversation();
-    const current = () =>
-      dependencies.selectedProjectID() === projectID &&
-      dependencies.selectedTicketID() === ticketID &&
-      dependencies.selectedConversation() === selected &&
-      dependencies.selectedChange()?.id === changeID &&
-      dependencies.conversationMode() === "build";
-    if (!projectID || !ticketID || !current()) return false;
-    if (dependencies.conversation()?.mode !== "build") {
-      const value = await serverCall(
-        setConversationMode({ data: [projectID, { ticketId: ticketID, mode: "build" }] }),
-      );
-      if (!current()) return false;
-      dependencies.setConversation(value);
-    }
-    return current();
-  }
-
   async function stopAgent() {
     const change = dependencies.selectedChange();
     if (!change) return;
@@ -262,8 +239,13 @@ export function createCodingCommands(dependencies: CodingCommandsDependencies) {
     const contextId = dependencies.conversation()?.contextId ?? undefined;
     const targetKey = dependencies.assistantKey();
     await dependencies.mutate(async () => {
-      if (!(await prepareBuildConversation(change.id))) return;
-      if (dependencies.assistantKey() !== targetKey || dependencies.historicalCoding()) return;
+      if (
+        dependencies.selectedChange()?.id !== change.id ||
+        dependencies.assistantKey() !== targetKey ||
+        dependencies.conversationMode() !== "build" ||
+        dependencies.historicalCoding()
+      )
+        return;
       const commandId = dependencies.agentCommandIds.forInput(
         scope,
         JSON.stringify({ changeID: change.id, text }),

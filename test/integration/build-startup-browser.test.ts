@@ -284,6 +284,8 @@ test("Build preparation distinguishes lost history and retains correction routin
     ).toBeVisible();
     if (prompts[0]?.text !== correction || researchRequests || mutations !== 1)
       throw Error("Correction must make exactly one scoped Build request, never research or Start");
+    if (commandRequests.some((request) => request.command === "setConversationMode"))
+      throw Error("Coding already owns its conversation; sending must not switch Planning modes");
     await page.screenshot({
       path: ".factory/test-results/build-startup-browser/retained-correction-sent.png",
     });

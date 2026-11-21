@@ -1210,11 +1210,9 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     delivery,
     retryReview,
     selectedTicketID,
-    selectedConversation,
     get conversationMode() {
       return conversationMode;
     },
-    setConversation,
     agentReadFence,
     get historicalCoding() {
       return historicalCoding;
