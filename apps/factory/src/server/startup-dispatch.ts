@@ -1,16 +1,22 @@
 import { readFileSync } from "node:fs";
+import { substrateFactoryURL } from "../runtime/endpoints";
 
 // A listening process and a completed bootstrap marker precede Kubernetes
 // endpoint publication. Cold Actors must not call an unrouted public origin.
 export function createStartupDispatchGate(input: {
   required: boolean;
   origin: string;
+  nativeBinding?: unknown;
   startupID: string;
   caFile?: string | undefined;
 }) {
   if (!input.required) return async () => true;
-  const origin = new URL(input.origin);
-  if (origin.protocol !== "https:" || input.origin !== origin.origin || !input.caFile)
+  const target =
+    input.nativeBinding === undefined
+      ? input.origin
+      : new URL(substrateFactoryURL("/internal/runtime-connect", input.nativeBinding)).origin;
+  const origin = new URL(target);
+  if (origin.protocol !== "https:" || target !== origin.origin || !input.caFile)
     throw new Error("Installation dispatch requires its HTTPS origin and public CA");
   const ca = readFileSync(input.caFile, "utf8");
   if (!ca.trim()) throw new Error("Installation dispatch requires its nonempty public CA");

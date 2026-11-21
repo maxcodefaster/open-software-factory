@@ -25,6 +25,35 @@ test("source development needs no Helm callback readiness probe", async () => {
   }
 });
 
+test("local Helm browsers dispatch only after the bound native HTTPS origin is ready", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-startup-dispatch-"));
+  const caFile = join(directory, "public-ca.pem");
+  await writeFile(caFile, "Owned public CA");
+  const request = spyOn(globalThis, "fetch").mockImplementation(
+    fetchImplementation(async (url, options) => {
+      expect(String(url)).toBe("https://native.example.test/health/ready?installation=complete");
+      expect(options).toMatchObject({ tls: { ca: "Owned public CA" }, redirect: "error" });
+      return new Response("ready", {
+        headers: { "x-open-factory": "ready", "x-open-factory-startup": "current" },
+      });
+    }),
+  );
+  try {
+    const ready = createStartupDispatchGate({
+      required: true,
+      origin: "http://127.0.0.1:58000",
+      nativeBinding: { connectorURL: "wss://native.example.test/internal/runtime-connect" },
+      startupID: "current",
+      caFile,
+    });
+    expect(await ready()).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
+  } finally {
+    request.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Helm dispatch requires verified HTTPS from its own startup, never a redirect or old Pod", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-startup-dispatch-"));
   const caFile = join(directory, "public-ca.pem");
