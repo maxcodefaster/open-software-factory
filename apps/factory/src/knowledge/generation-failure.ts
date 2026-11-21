@@ -1,5 +1,5 @@
-import { modelProbeFailure } from "../models/probe";
-import { isStructuredOutputFailure } from "../project-agent/structured-output";
+import { modelProbeFailure } from "../models/probe-result";
+import { isStructuredOutputFailure } from "../project-agent/output-api";
 
 export class WikiHumanEditConflict extends Error {
   constructor() {

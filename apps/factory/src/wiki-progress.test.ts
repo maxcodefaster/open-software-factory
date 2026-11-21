@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { knowledgeGenerationSchema } from "./api-contracts";
+import { knowledgeGenerationSchema } from "./knowledge/contracts";
 import { wikiElapsed, wikiGenerationProgress } from "./wiki-progress";
 
 const id = crypto.randomUUID();

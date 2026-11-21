@@ -10,8 +10,9 @@ import {
   type PrerequisiteView,
   prerequisiteIsDelivered,
 } from "../../../../packages/ticket-domain/src/dependency";
-import type { Change, RuntimeAttempt, Ticket } from "../api-contracts";
+import { type Change, type Ticket } from "../change/contracts";
 import type { createProjectPlanning } from "../projects/planning";
+import { type RuntimeAttempt } from "../runtime/contracts";
 import type { TicketDetail } from "./contracts";
 
 interface BoardProjectionDependencies {

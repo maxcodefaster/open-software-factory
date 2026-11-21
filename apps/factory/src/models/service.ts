@@ -1,4 +1,4 @@
-import type { createAccessController } from "../access/controller";
+import { type createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { createModelConnections } from "./connections";
 import type { createModelSettingsController } from "./controller";

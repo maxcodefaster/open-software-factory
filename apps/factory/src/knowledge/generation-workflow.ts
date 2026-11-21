@@ -13,10 +13,10 @@ import {
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../models/native";
 import { installationPlanningConnection } from "../models/resolver";
-import { isStructuredOutputFailure } from "../project-agent/structured-output";
-import { createMastraUsage } from "../usage/mastra";
+import { isStructuredOutputFailure } from "../project-agent/output-api";
+import { createMastraUsage } from "../usage/model-api";
 import { findReadableCodePaths } from "./code-read";
-import type { WikiGenerationInput } from "./generation-agent";
+import type { WikiGenerationInput } from "./generation-contracts";
 import {
   describeStructuredFailure,
   rejectedWikiStructuredResult,
@@ -1153,9 +1153,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           providerRequests?.remaining === 0,
       )
       .commit();
+    const mastra = new Mastra({ workflows: { topic: workflow }, logger: noopLogger });
     let outcome = "failed";
     try {
-      const result = await (await workflow.createRun()).start({ inputData: {} });
+      const result = await (await mastra.getWorkflow("topic").createRun()).start({ inputData: {} });
       if (result.status !== "success")
         throw topicFailureRecorder.error() ?? new Error("Wiki topic workflow did not complete");
       if (result.result.issues.length)
@@ -1180,8 +1181,11 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     .then(planning)
     .then(packages)
     .commit();
+  const mastra = new Mastra({ workflows: { generation: workflow }, logger: noopLogger });
   try {
-    const result = await (await workflow.createRun()).start({ inputData: {} });
+    const result = await (await mastra.getWorkflow("generation").createRun()).start({
+      inputData: {},
+    });
     if (result.status !== "success")
       throw generationFailure.error() ?? new Error("Wiki workflow did not complete");
     return result.result;

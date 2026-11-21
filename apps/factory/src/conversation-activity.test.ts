@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { AgentMessage } from "./api-contracts";
+import { type AgentMessage } from "./agent/contracts";
 import {
   activeActivity,
   activityGroupState,

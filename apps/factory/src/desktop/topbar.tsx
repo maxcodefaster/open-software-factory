@@ -1,16 +1,16 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
 import { For, Show, untrack } from "solid-js";
 import type { DesktopBackgroundKey } from "../../../../packages/interface-domain/src/background";
-import type { Change, RuntimeDockTarget, Ticket } from "../api-contracts";
 import type { DesktopBackground } from "../artworks";
+import { type Change, type PersonalTicketDraft, type Ticket } from "../change/contracts";
 import { DockAppButton, DockButton } from "../dock";
 import { Icon } from "../icon";
 import type { InboxItem } from "../inbox/contracts";
 import type { createKnowledgeState } from "../knowledge/state";
 import type { createProjectPlanning } from "../projects/planning";
 import { ticketReference } from "../projects/ticket-content";
+import { type RuntimeDockTarget } from "../runtime/contracts";
 import type { createProjectSetupInteraction } from "../setup/panel";
-import type { PersonalTicketDraft } from "../ticket-draft-workspace";
 import { TicketQuickFind } from "../ticket-quick-find";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import type { DesktopProject, FactoryDesktopProps, TicketDetail } from "./contracts";

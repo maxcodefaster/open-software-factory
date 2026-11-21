@@ -3,44 +3,23 @@ import { Agent } from "@mastra/core/agent";
 import { noopLogger } from "@mastra/core/logger";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
   applicationFixNonGoals,
   applicationFixPath,
 } from "../../../../packages/requirement-domain/src/autofix";
-import { codeReadInput, codeReadResult } from "../knowledge/code-read";
-import type { createKnowledgeController } from "../knowledge/controller";
-import type { createMCPConnections } from "../mcp/connections";
-import { mcpSourceAlias } from "../mcp/sources";
+import { codeReadInput, codeReadResult } from "../knowledge/contracts";
+import { mcpSourceAlias } from "../mcp/sources-api";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
-import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "../models/native";
-import { isStructuredOutputFailure } from "../project-agent/structured-output";
-import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
-import { MonitoringDiagnosisError, monitoringDiagnosis } from "./diagnosis";
+import { modelProviderOptions, nativeModel } from "../models/native";
+import { isStructuredOutputFailure } from "../project-agent/output-api";
+import { createMastraUsage } from "../usage/model-api";
+import {
+  MonitoringDiagnosisError,
+  type MonitoringDiagnosisInput,
+  monitoringDiagnosis,
+} from "./diagnosis-contract";
 
-export async function diagnoseMonitoringIncident(input: {
-  projectId: string;
-  userId: string;
-  title: string;
-  reference: string | null;
-  context: string;
-  assignment: MCPAssignment;
-  assignments?: MCPAssignment[];
-  instructions?: string;
-  modelId: string;
-  connection: ResolvedModelConnection;
-  mcp: Pick<ReturnType<typeof createMCPConnections>, "call">;
-  code: Pick<ReturnType<typeof createKnowledgeController>, "codePaths" | "code">;
-  signal: AbortSignal;
-  authorize(): Promise<void>;
-  usage: MastraUsageSink;
-  observe(value: {
-    kind: string;
-    digest: string;
-    path?: string;
-    commitSha?: string;
-  }): Promise<void>;
-}) {
+export async function diagnoseMonitoringIncident(input: MonitoringDiagnosisInput) {
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(90_000)]);
   let calls = 0;
   let sourceReads = 0;

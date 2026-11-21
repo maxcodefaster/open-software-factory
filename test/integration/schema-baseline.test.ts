@@ -3,13 +3,185 @@ import { createHash } from "node:crypto";
 import { eq, is, sql } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
+import { createUIPreferenceController } from "../../apps/factory/src/preferences/controller";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { baselineDigest, readMigration, shippedMigrations } from "../../packages/db/src/migrations";
 import * as schema from "../../packages/db/src/schema";
+import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { verificationEnvironment } from "../../scripts/testing/test-prerequisites";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
+
+test("personal backgrounds save every catalog choice and reject unknown keys in PostgreSQL", async () => {
+  const server = await ownedPostgresServer();
+  const original = process.env["DATABASE_URL"];
+  process.env["DATABASE_URL"] = server.identity.url;
+  const database = createDatabase(1);
+  if (original === undefined) delete process.env["DATABASE_URL"];
+  else process.env["DATABASE_URL"] = original;
+  const preferences = createUIPreferenceController(database);
+  const userID = crypto.randomUUID();
+  try {
+    await database.db.insert(schema.authUser).values({
+      id: userID,
+      name: "Owned artwork catalog",
+      email: `${userID}@artwork.test`,
+    });
+    for (const key of desktopBackgroundKeys) {
+      await database.db
+        .insert(schema.userUIPreference)
+        .values({ userId: userID, desktopBackgroundKey: key })
+        .onConflictDoUpdate({
+          target: schema.userUIPreference.userId,
+          set: { desktopBackgroundKey: key },
+        });
+      expect(await preferences.get(userID)).toEqual({ desktopBackgroundKey: key });
+      for (const invalid of ["custom-theme", "https://example.invalid/artwork.jpg"])
+        await expect(
+          Promise.resolve().then(
+            () => database.client`UPDATE factory.user_ui_preference
+              SET desktop_background_key=${invalid} WHERE user_id=${userID}`,
+          ),
+        ).rejects.toMatchObject({
+          code: "23514",
+          constraint_name: "user_ui_preference_desktop_background_key_check",
+        });
+      expect(await preferences.get(userID)).toEqual({ desktopBackgroundKey: key });
+    }
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await server.dispose();
+  }
+}, 60_000);
+
+test("Runtime Attempt ownership keeps all forty NULL/value combinations equivalent", async () => {
+  const server = await ownedPostgresServer();
+  const client = postgres(server.identity.url, { max: 1 });
+  let accepted = 0;
+  try {
+    // Copy the installed checks without foreign keys or lifecycle triggers so every
+    // ownership shape reaches PostgreSQL's real CHECK evaluator independently.
+    await client.unsafe(`CREATE TEMP TABLE runtime_attempt_owner_cases
+      (LIKE factory.runtime_attempt INCLUDING DEFAULTS INCLUDING CONSTRAINTS)`);
+    const checks = await client<{ name: string }[]>`
+      SELECT conname AS name FROM pg_constraint
+      WHERE conrelid='factory.runtime_attempt'::regclass AND contype='c'
+        AND conname IN ('runtime_attempt_native_owner','runtime_attempt_owner_shape_check',
+          'runtime_attempt_verification_shape_check') ORDER BY conname`;
+    expect([...checks]).toEqual([{ name: "runtime_attempt_native_owner" }]);
+    for (const workspace of [null, crypto.randomUUID()])
+      for (const change of [null, crypto.randomUUID()])
+        for (const kind of [null, "verification", "prebuild", "staging", "publication"])
+          for (const verification of [null, crypto.randomUUID()]) {
+            const [previous] = await client<{ allowed: boolean }[]>`
+              WITH shape AS (SELECT ${workspace}::uuid AS workspace_id,${change}::uuid AS change_id,
+                ${kind}::factory.isolated_runtime_kind AS isolated_kind,${verification}::uuid AS verification_id)
+              SELECT (
+                (((workspace_id IS NOT NULL AND isolated_kind IS NULL AND verification_id IS NULL)
+                  OR (workspace_id IS NULL AND change_id IS NULL AND isolated_kind='verification'
+                    AND verification_id IS NOT NULL)
+                  OR (workspace_id IS NULL AND change_id IS NULL
+                    AND isolated_kind IN ('prebuild','staging','publication') AND verification_id IS NULL))
+                  IS NOT FALSE)
+                AND (((workspace_id IS NOT NULL AND isolated_kind IS NULL)
+                  OR (change_id IS NOT NULL AND workspace_id IS NOT NULL AND isolated_kind IS NULL)
+                  OR (change_id IS NULL AND workspace_id IS NULL AND isolated_kind IS NOT NULL))
+                  IS NOT FALSE)
+                AND (((isolated_kind='verification')=(verification_id IS NOT NULL)) IS NOT FALSE)
+              ) AS allowed FROM shape`;
+            const allowed =
+              workspace !== null
+                ? kind === null && verification === null
+                : change === null &&
+                  (kind === "verification"
+                    ? verification !== null
+                    : kind !== null && verification === null);
+            expect(previous?.allowed).toBe(allowed);
+            const insert = async () => {
+              await client`INSERT INTO runtime_attempt_owner_cases
+                (id,project_id,workspace_id,change_id,isolated_kind,verification_id,generation,revision,
+                  state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+                VALUES(${crypto.randomUUID()},${crypto.randomUUID()},${workspace},${change},${kind},
+                  ${verification},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},
+                  ${"c".repeat(64)},now(),${crypto.randomUUID()})`;
+            };
+            if (allowed) {
+              await insert();
+              accepted++;
+            } else
+              await expect(insert()).rejects.toMatchObject({
+                code: "23514",
+                constraint_name: "runtime_attempt_native_owner",
+              });
+          }
+    expect(accepted).toBe(6);
+    expect(await client`SELECT id FROM runtime_attempt_owner_cases`).toHaveLength(6);
+  } finally {
+    await client.end({ timeout: 2 });
+    await server.dispose();
+  }
+}, 60_000);
+
+test("usage and policy commands remain immutable through the existing shared update routine", async () => {
+  const server = await ownedPostgresServer();
+  const client = postgres(server.identity.url, { max: 1 });
+  const actor = crypto.randomUUID();
+  const command = crypto.randomUUID();
+  const operation = `owned:immutable:${command}`;
+  try {
+    const triggers = await client<{ name: string; routine: string }[]>`
+      SELECT t.tgname AS name,p.proname AS routine
+      FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE t.tgrelid IN ('factory.execution_policy_command'::regclass,'factory.usage_entry'::regclass)
+        AND NOT t.tgisinternal ORDER BY t.tgname`;
+    expect([...triggers]).toEqual([
+      { name: "execution_policy_command_immutable", routine: "reject_mutation" },
+      { name: "guard_usage_entry", routine: "reject_mutation" },
+    ]);
+    expect([
+      ...(await client`SELECT to_regprocedure('factory.guard_usage_entry()') AS duplicate`),
+    ]).toEqual([{ duplicate: null }]);
+    await client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${actor},'Owned immutable journal',${`${actor}@journal.test`})`;
+    await client`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
+      VALUES(${command},'factory',${actor},'{}','{}')`;
+    await client`INSERT INTO factory.usage_operation(id,purpose,engine,provider,model)
+      VALUES(${operation},'probe','mastra','owned','exact')`;
+    await client`INSERT INTO factory.usage_entry
+      (operation_id,event_id,source,outcome,counters,nano_usd,known_nano_usd,occurred_at)
+      VALUES(${operation},'step:1','step','completed',
+        '{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}',0,0,now())`;
+    const retained =
+      await client`SELECT to_jsonb(c) AS value FROM factory.execution_policy_command c
+      WHERE command_id=${command}
+      UNION ALL SELECT to_jsonb(e) FROM factory.usage_entry e WHERE operation_id=${operation}`;
+    for (const update of [
+      () =>
+        client`UPDATE factory.execution_policy_command SET result='{"changed":true}' WHERE command_id=${command}`,
+      () =>
+        client`UPDATE factory.execution_policy_command SET result=result WHERE command_id=${command}`,
+      () => client`UPDATE factory.usage_entry SET nano_usd=1 WHERE operation_id=${operation}`,
+      () =>
+        client`UPDATE factory.usage_entry SET nano_usd=nano_usd WHERE operation_id=${operation}`,
+    ])
+      await expect(Promise.resolve().then(update)).rejects.toThrow("immutable");
+    expect(
+      await client`SELECT to_jsonb(c) AS value FROM factory.execution_policy_command c
+        WHERE command_id=${command}
+        UNION ALL SELECT to_jsonb(e) FROM factory.usage_entry e WHERE operation_id=${operation}`,
+    ).toEqual(retained);
+    await client`UPDATE factory.usage_operation SET settled_at=now(),outcome='completed' WHERE id=${operation}`;
+    await expect(
+      Promise.resolve().then(
+        () => client`UPDATE factory.usage_operation SET outcome='failed' WHERE id=${operation}`,
+      ),
+    ).rejects.toThrow("immutable");
+  } finally {
+    await client.end({ timeout: 2 });
+    await server.dispose();
+  }
+}, 60_000);
 
 test("typed and native queries share commit, rollback and nested savepoints on the same connection", async () => {
   const server = await ownedPostgresServer();

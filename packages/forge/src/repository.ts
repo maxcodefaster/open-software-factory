@@ -1,4 +1,4 @@
-import type { ForgeRepository } from "./forge";
+import type { ForgeRepository } from "./contracts";
 
 /** Bind a Project URL to this installation's configured Forge transport/public origins and owner. */
 export function boundForgeRepositoryFromURL(

@@ -8,9 +8,9 @@ import type {
   candidateReviewRetryInput,
   verificationResumeInput,
 } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { createAccessController } from "../access/controller";
-import { deliveryViewSchema } from "../api-contracts";
+import { type createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
+import { deliveryViewSchema } from "./contracts";
 import type { createDeliveryController } from "./controller";
 
 export function createDeliveryService(options: {

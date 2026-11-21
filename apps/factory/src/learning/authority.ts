@@ -1,7 +1,7 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
 import { learningPolicy } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 export async function learningAuthorityIn(

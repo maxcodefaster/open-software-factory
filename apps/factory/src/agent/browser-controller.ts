@@ -9,8 +9,8 @@ import {
   buildBrowserResultInput,
 } from "../../../../packages/conversation-domain/src/browser-tools";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -23,11 +23,11 @@ import {
   substrateBinding,
 } from "../../../../packages/db/src/schema";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
-import { createReviewMedia, maximumRecordingBytes } from "../review/media";
+import { createReviewMedia, maximumRecordingBytes } from "../review/api";
 import { substrateFactoryURL } from "../runtime/endpoints";
-import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
+import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/transport-api";
 import { createAgentTurnStore } from "./turn-store";
 
 type BrowserSession = {

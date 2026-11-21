@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { TicketDocumentRevision } from "./api-contracts";
+import { type TicketDocumentRevision } from "./change/contracts";
 import { approvedDocument, documentChangedSinceImplementation } from "./ticket-document-notice";
 
 const implementation = {

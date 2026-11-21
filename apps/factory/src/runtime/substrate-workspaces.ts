@@ -38,11 +38,11 @@ import {
   ticketWorkspaceIdentity,
 } from "../../../../packages/workspace-domain/src/workspace";
 import upstream from "../../../../upstream.json";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
+import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { CommandError } from "../command-error";
-import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
+import { type SubstrateSourceHandoff } from "../workspace/source-api";
 import { agentConfiguration } from "./agent-configuration";
 import { runtimeAppOrigins } from "./app-origins";
 import {
@@ -56,7 +56,7 @@ import {
   type SubstrateConfiguration,
   substrateTemplateSHA256,
 } from "./substrate";
-import type { createSubstrateCapacity } from "./substrate-capacity";
+import type { SubstrateCapacity } from "./substrate-capacity-contract";
 import {
   substrateBootstrapContinuationBlocked,
   substrateBootstrapRetentionIn,
@@ -169,7 +169,7 @@ export function createSubstrateWorkspaces(
   provisionerCall?: SubstrateCall,
   readContract?: (repository: string, revision: string) => Promise<SystemContract>,
   sources?: SubstrateSourceHandoff,
-  capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "requireReady">,
+  capacity?: SubstrateCapacity,
   shutdownCoding = createCodingRuntimeShutdown(database, hub),
 ) {
   const config = configuration.parse(input);

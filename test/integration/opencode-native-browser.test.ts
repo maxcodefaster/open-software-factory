@@ -7,14 +7,14 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import {
-  connectOpenCodeBrowser,
-  connectOpenCodeSources,
-} from "../../apps/factory/src/agent/opencode-browser";
-import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
+import {
+  connectOpenCodeBrowser,
+  connectOpenCodeSources,
+} from "../../apps/factory/src/agent/opencode-browser";
 import {
   buildBrowserCallInput,
   buildBrowserToolCatalogue,

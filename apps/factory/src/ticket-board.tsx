@@ -3,9 +3,10 @@ import { boardGroups } from "../../../packages/interface-domain/src/board-groups
 import { type BoardStage, boardStages } from "../../../packages/interface-domain/src/ticket-board";
 import type { PrerequisiteView } from "../../../packages/ticket-domain/src/dependency";
 import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
-import type { Epic, Ticket } from "./api-contracts";
+import { type Ticket } from "./change/contracts";
 import { type EpicEdit, EpicEditor } from "./epic-controls";
 import { Icon } from "./icon";
+import { type Epic } from "./projects/contracts";
 
 export function TicketBoardContents(props: {
   tickets: readonly Ticket[];

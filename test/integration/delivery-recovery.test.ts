@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { createChangeController } from "../../apps/factory/src/change/controller";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { retryPromotion } from "../../apps/factory/src/delivery/promotion-retry";
 import { retryVerificationBootstrap } from "../../apps/factory/src/delivery/verification-retry";

@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { S3Client } from "bun";
 import { CommandError } from "../command-error";
 
 export type PrivateObjects = {
@@ -22,14 +21,14 @@ export function createPrivateObjects(): PrivateObjects {
   const env = process.env;
   const bucket = env["FACTORY_OBJECT_S3_BUCKET"];
   const endpoint = env["FACTORY_OBJECT_S3_ENDPOINT"];
-  let client: S3Client | undefined;
+  let client: InstanceType<typeof Bun.S3Client> | undefined;
   function storage() {
     if (!bucket || !endpoint)
       throw new CommandError(
         "unavailable",
         "Factory file storage is unavailable. Check the installation's object storage service.",
       );
-    client ??= new S3Client({
+    client ??= new Bun.S3Client({
       bucket,
       endpoint,
       region: env["FACTORY_OBJECT_S3_REGION"] ?? "garage",

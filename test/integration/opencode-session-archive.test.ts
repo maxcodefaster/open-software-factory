@@ -8,7 +8,7 @@ import {
   interruptOpenCodeSession,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import {
   importNativeSessionArchive,
   readNativeSessionArchive,

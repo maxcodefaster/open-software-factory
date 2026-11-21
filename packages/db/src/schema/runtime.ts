@@ -57,24 +57,24 @@ export const runtimeAttempt = factorySchema.table(
         table.state.asc().nullsLast(),
       )
       .where(
-        sql`((isolated_kind IS NOT NULL) AND (state = ANY (ARRAY['create-intended'::runtime_attempt_state, 'starting'::runtime_attempt_state, 'ready'::runtime_attempt_state, 'stop-intended'::runtime_attempt_state, 'stopping'::runtime_attempt_state, 'cleanup-failed'::runtime_attempt_state])))`,
+        sql`((${table.isolatedKind} IS NOT NULL) AND (${table.state} = ANY (ARRAY['create-intended'::runtime_attempt_state, 'starting'::runtime_attempt_state, 'ready'::runtime_attempt_state, 'stop-intended'::runtime_attempt_state, 'stopping'::runtime_attempt_state, 'cleanup-failed'::runtime_attempt_state])))`,
       ),
     uniqueIndex("runtime_attempt_change_generation_uidx")
       .using("btree", table.changeId.asc().nullsLast(), table.generation.asc().nullsLast())
-      .where(sql`(change_id IS NOT NULL)`),
+      .where(sql`(${table.changeId} IS NOT NULL)`),
     uniqueIndex("runtime_attempt_one_active_per_change")
       .using("btree", table.changeId.asc().nullsLast())
       .where(
-        sql`((change_id IS NOT NULL) AND (state <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])))`,
+        sql`((${table.changeId} IS NOT NULL) AND (${table.state} <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])))`,
       ),
     uniqueIndex("runtime_attempt_one_active_per_workspace")
       .using("btree", table.workspaceId.asc().nullsLast())
       .where(
-        sql`((workspace_id IS NOT NULL) AND (state <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])))`,
+        sql`((${table.workspaceId} IS NOT NULL) AND (${table.state} <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])))`,
       ),
     uniqueIndex("runtime_attempt_workspace_generation_uidx")
       .using("btree", table.workspaceId.asc().nullsLast(), table.generation.asc().nullsLast())
-      .where(sql`(workspace_id IS NOT NULL)`),
+      .where(sql`(${table.workspaceId} IS NOT NULL)`),
     foreignKey({
       columns: [table.changeId],
       foreignColumns: [change.id],
@@ -121,21 +121,22 @@ export const runtimeAttempt = factorySchema.table(
     unique("runtime_attempt_verification_identity_unique").on(table.id, table.verificationId),
     check(
       "runtime_attempt_app_ready_shape",
-      sql`(jsonb_typeof(app_ready_at) = 'object'::text) AND (octet_length((app_ready_at)::text) <= 4096)`,
+      sql`(jsonb_typeof(${table.appReadyAt}) = 'object'::text) AND (octet_length((${table.appReadyAt})::text) <= 4096)`,
     ),
-    check("runtime_attempt_declared_apps_check", sql`jsonb_typeof(declared_apps) = 'array'::text`),
-    check("runtime_attempt_generation_check", sql`generation > 0`),
+    check(
+      "runtime_attempt_declared_apps_check",
+      sql`jsonb_typeof(${table.declaredApps}) = 'array'::text`,
+    ),
+    check("runtime_attempt_generation_check", sql`${table.generation} > 0`),
     check(
       "runtime_attempt_native_owner",
-      sql`((workspace_id IS NOT NULL) AND (isolated_kind IS NULL) AND (verification_id IS NULL)) OR ((workspace_id IS NULL) AND (change_id IS NULL) AND (isolated_kind = 'verification'::isolated_runtime_kind) AND (verification_id IS NOT NULL)) OR ((workspace_id IS NULL) AND (change_id IS NULL) AND (isolated_kind = ANY (ARRAY['prebuild'::isolated_runtime_kind, 'staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind])) AND (verification_id IS NULL))`,
-    ),
-    check(
-      "runtime_attempt_owner_shape_check",
-      sql`((workspace_id IS NOT NULL) AND (isolated_kind IS NULL)) OR ((change_id IS NOT NULL) AND (workspace_id IS NOT NULL) AND (isolated_kind IS NULL)) OR ((change_id IS NULL) AND (workspace_id IS NULL) AND (isolated_kind IS NOT NULL))`,
-    ),
-    check(
-      "runtime_attempt_verification_shape_check",
-      sql`(isolated_kind = 'verification'::isolated_runtime_kind) = (verification_id IS NOT NULL)`,
+      sql`(
+        (${table.workspaceId} IS NOT NULL AND ${table.isolatedKind} IS NULL AND ${table.verificationId} IS NULL)
+        OR (${table.workspaceId} IS NULL AND ${table.changeId} IS NULL AND (
+          (${table.isolatedKind} = 'verification'::isolated_runtime_kind AND ${table.verificationId} IS NOT NULL)
+          OR (${table.isolatedKind} = ANY (ARRAY['prebuild'::isolated_runtime_kind, 'staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind]) AND ${table.verificationId} IS NULL)
+        ))
+      ) IS TRUE`,
     ),
   ],
 );
@@ -160,7 +161,7 @@ export const runtimeComputeWait = factorySchema.table(
     }).onDelete("cascade"),
     check(
       "runtime_compute_wait_reason_check",
-      sql`reason = ANY (ARRAY['compute-capacity'::text, 'accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text])`,
+      sql`${table.reason} = ANY (ARRAY['compute-capacity'::text, 'accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text])`,
     ),
   ],
 );
@@ -189,12 +190,15 @@ export const substrateBinding = factorySchema.table(
     unique("substrate_binding_atespace_actor_name_key").on(table.atespace, table.actorName),
     unique("substrate_binding_atespace_key").on(table.atespace),
     unique("substrate_binding_actor_uid_key").on(table.actorUid),
-    check("substrate_binding_check", sql`(actor_uid IS NULL) OR (create_attempted_at IS NOT NULL)`),
+    check(
+      "substrate_binding_check",
+      sql`(${table.actorUid} IS NULL) OR (${table.createAttemptedAt} IS NOT NULL)`,
+    ),
     check(
       "substrate_binding_check1",
-      sql`(deleted_at IS NULL) OR (delete_intended_at IS NOT NULL)`,
+      sql`(${table.deletedAt} IS NULL) OR (${table.deleteIntendedAt} IS NOT NULL)`,
     ),
-    check("substrate_binding_intent_check", sql`jsonb_typeof(intent) = 'object'::text`),
+    check("substrate_binding_intent_check", sql`jsonb_typeof(${table.intent}) = 'object'::text`),
   ],
 );
 
@@ -224,18 +228,18 @@ export const substratePrebuild = factorySchema.table(
     unique("substrate_prebuild_runtime_attempt_id_key").on(table.runtimeAttemptId),
     check(
       "substrate_prebuild_check",
-      sql`(atespace IS NULL) OR ((atespace_attempted_at IS NOT NULL) AND (jsonb_typeof(atespace) = 'object'::text))`,
+      sql`(${table.atespace} IS NULL) OR ((${table.atespaceAttemptedAt} IS NOT NULL) AND (jsonb_typeof(${table.atespace}) = 'object'::text))`,
     ),
     check(
       "substrate_prebuild_check1",
-      sql`(policy IS NULL) OR ((policy_attempted_at IS NOT NULL) AND (jsonb_typeof(policy) = 'object'::text))`,
+      sql`(${table.policy} IS NULL) OR ((${table.policyAttemptedAt} IS NOT NULL) AND (jsonb_typeof(${table.policy}) = 'object'::text))`,
     ),
     check(
       "substrate_prebuild_check2",
-      sql`(template IS NULL) OR ((template_attempted_at IS NOT NULL) AND (jsonb_typeof(template) = 'object'::text))`,
+      sql`(${table.template} IS NULL) OR ((${table.templateAttemptedAt} IS NOT NULL) AND (jsonb_typeof(${table.template}) = 'object'::text))`,
     ),
-    check("substrate_prebuild_generation_check", sql`generation = 1`),
-    check("substrate_prebuild_intent_check", sql`jsonb_typeof(intent) = 'object'::text`),
+    check("substrate_prebuild_generation_check", sql`${table.generation} = 1`),
+    check("substrate_prebuild_intent_check", sql`jsonb_typeof(${table.intent}) = 'object'::text`),
   ],
 );
 
@@ -244,7 +248,7 @@ export const substrateSource = factorySchema.table(
   {
     workspaceId: uuid("workspace_id").primaryKey().notNull(),
     actorUid: uuid("actor_uid").notNull(),
-    owner: text("owner").default("actor").notNull(),
+    owner: text("owner").$type<"actor" | "service">().default("actor").notNull(),
     writerEpoch: bigint("writer_epoch", { mode: "number" }).default(1).notNull(),
     writable: boolean("writable").default(true).notNull(),
     generation: bigint("generation", { mode: "number" }).default(0).notNull(),
@@ -258,12 +262,18 @@ export const substrateSource = factorySchema.table(
       foreignColumns: [developmentWorkspace.id],
       name: "substrate_source_workspace_id_fkey",
     }),
-    check("substrate_source_check", sql`(generation = 0) = (checkpoint IS NULL)`),
-    check("substrate_source_check1", sql`writable = (checkpoint_id IS NULL)`),
-    check("substrate_source_check2", sql`(owner <> 'service'::text) OR (service_base IS NOT NULL)`),
-    check("substrate_source_generation_check", sql`generation >= 0`),
-    check("substrate_source_owner_check", sql`owner = ANY (ARRAY['actor'::text, 'service'::text])`),
-    check("substrate_source_writer_epoch_check", sql`writer_epoch > 0`),
+    check("substrate_source_check", sql`(${table.generation} = 0) = (${table.checkpoint} IS NULL)`),
+    check("substrate_source_check1", sql`${table.writable} = (${table.checkpointId} IS NULL)`),
+    check(
+      "substrate_source_check2",
+      sql`(${table.owner} <> 'service'::text) OR (${table.serviceBase} IS NOT NULL)`,
+    ),
+    check("substrate_source_generation_check", sql`${table.generation} >= 0`),
+    check(
+      "substrate_source_owner_check",
+      sql`${table.owner} = ANY (ARRAY['actor'::text, 'service'::text])`,
+    ),
+    check("substrate_source_writer_epoch_check", sql`${table.writerEpoch} > 0`),
   ],
 );
 
@@ -298,29 +308,32 @@ export const substrateVerification = factorySchema.table(
 
     check(
       "substrate_verification_atespace_check",
-      sql`(atespace IS NULL) OR (jsonb_typeof(atespace) = 'object'::text)`,
+      sql`(${table.atespace} IS NULL) OR (jsonb_typeof(${table.atespace}) = 'object'::text)`,
     ),
     check(
       "substrate_verification_check",
-      sql`(atespace IS NULL) OR (atespace_attempted_at IS NOT NULL)`,
+      sql`(${table.atespace} IS NULL) OR (${table.atespaceAttemptedAt} IS NOT NULL)`,
     ),
     check(
       "substrate_verification_check1",
-      sql`(policy IS NULL) OR (policy_attempted_at IS NOT NULL)`,
+      sql`(${table.policy} IS NULL) OR (${table.policyAttemptedAt} IS NOT NULL)`,
     ),
     check(
       "substrate_verification_check2",
-      sql`(template IS NULL) OR (template_attempted_at IS NOT NULL)`,
+      sql`(${table.template} IS NULL) OR (${table.templateAttemptedAt} IS NOT NULL)`,
     ),
-    check("substrate_verification_generation_check", sql`generation > 0`),
-    check("substrate_verification_intent_check", sql`jsonb_typeof(intent) = 'object'::text`),
+    check("substrate_verification_generation_check", sql`${table.generation} > 0`),
+    check(
+      "substrate_verification_intent_check",
+      sql`jsonb_typeof(${table.intent}) = 'object'::text`,
+    ),
     check(
       "substrate_verification_policy_check",
-      sql`(policy IS NULL) OR (jsonb_typeof(policy) = 'object'::text)`,
+      sql`(${table.policy} IS NULL) OR (jsonb_typeof(${table.policy}) = 'object'::text)`,
     ),
     check(
       "substrate_verification_template_check",
-      sql`(template IS NULL) OR (jsonb_typeof(template) = 'object'::text)`,
+      sql`(${table.template} IS NULL) OR (jsonb_typeof(${table.template}) = 'object'::text)`,
     ),
   ],
 );
@@ -363,33 +376,36 @@ export const substrateInputStop = factorySchema.table(
     }),
     check(
       "substrate_input_stop_assignment_check",
-      sql`(jsonb_typeof(assignment) = 'object'::text) AND (octet_length((assignment)::text) <= 8192)`,
+      sql`(jsonb_typeof(${table.assignment}) = 'object'::text) AND (octet_length((${table.assignment})::text) <= 8192)`,
     ),
-    check("substrate_input_stop_checkpoint_check", sql`jsonb_typeof(checkpoint) = 'object'::text`),
-    check("substrate_input_stop_source_writer_epoch_check", sql`source_writer_epoch > 0`),
+    check(
+      "substrate_input_stop_checkpoint_check",
+      sql`jsonb_typeof(${table.checkpoint}) = 'object'::text`,
+    ),
+    check("substrate_input_stop_source_writer_epoch_check", sql`${table.sourceWriterEpoch} > 0`),
     check(
       "substrate_input_stop_result_check",
-      sql`(jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 8192)`,
+      sql`(jsonb_typeof(${table.result}) = 'object'::text) AND (octet_length((${table.result})::text) <= 8192)`,
     ),
     check(
       "substrate_input_stop_check",
-      sql`(source_checkpoint_id IS NULL) = (source_writer_epoch IS NULL)`,
+      sql`(${table.sourceCheckpointId} IS NULL) = (${table.sourceWriterEpoch} IS NULL)`,
     ),
     check(
       "substrate_input_stop_check1",
-      sql`(resume_attempted_at IS NULL) OR (source_checkpoint_id IS NOT NULL)`,
+      sql`(${table.resumeAttemptedAt} IS NULL) OR (${table.sourceCheckpointId} IS NOT NULL)`,
     ),
     check(
       "substrate_input_stop_check2",
-      sql`(result IS NULL) OR (resume_attempted_at IS NOT NULL)`,
+      sql`(${table.result} IS NULL) OR (${table.resumeAttemptedAt} IS NOT NULL)`,
     ),
     check(
       "substrate_input_stop_check3",
-      sql`(snapshot_attempted_at IS NULL) OR (resume_attempted_at IS NOT NULL)`,
+      sql`(${table.snapshotAttemptedAt} IS NULL) OR (${table.resumeAttemptedAt} IS NOT NULL)`,
     ),
     check(
       "substrate_input_stop_check4",
-      sql`(completed_at IS NULL) OR ((result IS NOT NULL) AND ((result -> 'confirmed'::text) = 'true'::jsonb) AND (completed_checkpoint IS NOT NULL) AND (completed_source_checkpoint_id IS NOT NULL))`,
+      sql`(${table.completedAt} IS NULL) OR ((${table.result} IS NOT NULL) AND ((${table.result} -> 'confirmed'::text) = 'true'::jsonb) AND (${table.completedCheckpoint} IS NOT NULL) AND (${table.completedSourceCheckpointId} IS NOT NULL))`,
     ),
   ],
 );
@@ -400,11 +416,14 @@ export const substrateCapacityInstallation = factorySchema.table(
     owner: text("owner").primaryKey().notNull(),
     intent: jsonb("intent").notNull(),
   },
-  (_table): PgTableExtraConfigValue[] => [
-    check("substrate_capacity_installation_owner_check", sql`owner ~ '^[a-f0-9]{32}$'::text`),
+  (table): PgTableExtraConfigValue[] => [
+    check(
+      "substrate_capacity_installation_owner_check",
+      sql`${table.owner} ~ '^[a-f0-9]{32}$'::text`,
+    ),
     check(
       "substrate_capacity_installation_intent_check",
-      sql`jsonb_typeof(intent) = 'object'::text`,
+      sql`jsonb_typeof(${table.intent}) = 'object'::text`,
     ),
   ],
 );
@@ -421,12 +440,18 @@ export const substrateWorkerCapacity = factorySchema.table(
   },
   (table): PgTableExtraConfigValue[] => [
     primaryKey({ columns: [table.owner, table.nodeUid], name: "substrate_worker_capacity_pkey" }),
-    check("substrate_worker_capacity_check", sql`(pool IS NULL) OR (attempted_at IS NOT NULL)`),
-    check("substrate_worker_capacity_intent_check", sql`jsonb_typeof(intent) = 'object'::text`),
-    check("substrate_worker_capacity_owner_check", sql`owner ~ '^[a-f0-9]{32}$'::text`),
+    check(
+      "substrate_worker_capacity_check",
+      sql`(${table.pool} IS NULL) OR (${table.attemptedAt} IS NOT NULL)`,
+    ),
+    check(
+      "substrate_worker_capacity_intent_check",
+      sql`jsonb_typeof(${table.intent}) = 'object'::text`,
+    ),
+    check("substrate_worker_capacity_owner_check", sql`${table.owner} ~ '^[a-f0-9]{32}$'::text`),
     check(
       "substrate_worker_capacity_pool_check",
-      sql`(pool IS NULL) OR (jsonb_typeof(pool) = 'object'::text)`,
+      sql`(${table.pool} IS NULL) OR (jsonb_typeof(${table.pool}) = 'object'::text)`,
     ),
   ],
 );
@@ -435,7 +460,7 @@ export const substrateActorRpc = factorySchema.table(
   "substrate_actor_rpc",
   {
     runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
-    action: text("action").notNull(),
+    action: text("action").$type<"resume" | "suspend">().notNull(),
     originKey: text("origin_key").notNull(),
     actorUid: uuid("actor_uid").notNull(),
     nativeVersion: text("native_version").notNull(),
@@ -463,23 +488,32 @@ export const substrateActorRpc = factorySchema.table(
     }),
     check(
       "substrate_actor_rpc_action_check",
-      sql`action = ANY (ARRAY['resume'::text, 'suspend'::text])`,
+      sql`${table.action} = ANY (ARRAY['resume'::text, 'suspend'::text])`,
     ),
-    check("substrate_actor_rpc_native_version_check", sql`native_version ~ '^[1-9][0-9]*$'::text`),
+    check(
+      "substrate_actor_rpc_native_version_check",
+      sql`${table.nativeVersion} ~ '^[1-9][0-9]*$'::text`,
+    ),
     check(
       "substrate_actor_rpc_origin_checkpoint_check",
-      sql`jsonb_typeof(origin_checkpoint) = 'object'::text`,
+      sql`jsonb_typeof(${table.originCheckpoint}) = 'object'::text`,
     ),
     check(
       "substrate_actor_rpc_outcome_check",
-      sql`(jsonb_typeof(outcome) = 'object'::text) AND (octet_length((outcome)::text) <= 65536)`,
+      sql`(jsonb_typeof(${table.outcome}) = 'object'::text) AND (octet_length((${table.outcome})::text) <= 65536)`,
     ),
     check(
       "substrate_actor_rpc_check",
-      sql`origin_key = COALESCE((origin_checkpoint ->> 'uuid'::text), 'initial'::text)`,
+      sql`${table.originKey} = COALESCE((${table.originCheckpoint} ->> 'uuid'::text), 'initial'::text)`,
     ),
-    check("substrate_actor_rpc_check1", sql`(outcome IS NULL) = (outcome_recorded_at IS NULL)`),
-    check("substrate_actor_rpc_check2", sql`(outcome IS NULL) OR (attempted_at IS NOT NULL)`),
+    check(
+      "substrate_actor_rpc_check1",
+      sql`(${table.outcome} IS NULL) = (${table.outcomeRecordedAt} IS NULL)`,
+    ),
+    check(
+      "substrate_actor_rpc_check2",
+      sql`(${table.outcome} IS NULL) OR (${table.attemptedAt} IS NOT NULL)`,
+    ),
   ],
 );
 
@@ -511,18 +545,21 @@ export const substrateWorkspace = factorySchema.table(
     }),
     check(
       "substrate_workspace_check",
-      sql`(atespace IS NULL) OR (atespace_attempted_at IS NOT NULL)`,
+      sql`(${table.atespace} IS NULL) OR (${table.atespaceAttemptedAt} IS NOT NULL)`,
     ),
-    check("substrate_workspace_check1", sql`(policy IS NULL) OR (policy_attempted_at IS NOT NULL)`),
+    check(
+      "substrate_workspace_check1",
+      sql`(${table.policy} IS NULL) OR (${table.policyAttemptedAt} IS NOT NULL)`,
+    ),
     check(
       "substrate_workspace_check2",
-      sql`(template IS NULL) OR (template_attempted_at IS NOT NULL)`,
+      sql`(${table.template} IS NULL) OR (${table.templateAttemptedAt} IS NOT NULL)`,
     ),
     check(
       "substrate_workspace_generation_check",
-      sql`(generation > 0) AND (generation <= '9007199254740991'::bigint)`,
+      sql`(${table.generation} > 0) AND (${table.generation} <= '9007199254740991'::bigint)`,
     ),
-    check("substrate_workspace_intent_check", sql`jsonb_typeof(intent) = 'object'::text`),
+    check("substrate_workspace_intent_check", sql`jsonb_typeof(${table.intent}) = 'object'::text`),
   ],
 );
 
@@ -530,7 +567,7 @@ export const substrateIsolated = factorySchema.table(
   "substrate_isolated",
   {
     ownerId: uuid("owner_id").notNull(),
-    kind: text("kind").notNull(),
+    kind: text("kind").$type<"staging" | "publication">().notNull(),
     projectId: uuid("project_id").notNull(),
     generation: bigint("generation", { mode: "number" }).notNull(),
     runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
@@ -558,30 +595,33 @@ export const substrateIsolated = factorySchema.table(
     unique("substrate_isolated_runtime_attempt_id_key").on(table.runtimeAttemptId),
     check(
       "substrate_isolated_check",
-      sql`(atespace IS NULL) OR ((atespace_attempted_at IS NOT NULL) AND (jsonb_typeof(atespace) = 'object'::text))`,
+      sql`(${table.atespace} IS NULL) OR ((${table.atespaceAttemptedAt} IS NOT NULL) AND (jsonb_typeof(${table.atespace}) = 'object'::text))`,
     ),
     check(
       "substrate_isolated_check1",
-      sql`(policy IS NULL) OR ((policy_attempted_at IS NOT NULL) AND (jsonb_typeof(policy) = 'object'::text))`,
+      sql`(${table.policy} IS NULL) OR ((${table.policyAttemptedAt} IS NOT NULL) AND (jsonb_typeof(${table.policy}) = 'object'::text))`,
     ),
     check(
       "substrate_isolated_check2",
-      sql`(template IS NULL) OR ((template_attempted_at IS NOT NULL) AND (jsonb_typeof(template) = 'object'::text))`,
+      sql`(${table.template} IS NULL) OR ((${table.templateAttemptedAt} IS NOT NULL) AND (jsonb_typeof(${table.template}) = 'object'::text))`,
     ),
-    check("substrate_isolated_check3", sql`(kind = 'staging'::text) OR (generation = 1)`),
+    check(
+      "substrate_isolated_check3",
+      sql`(${table.kind} = 'staging'::text) OR (${table.generation} = 1)`,
+    ),
     check(
       "substrate_isolated_check4",
-      sql`((intent ->> 'promotionID'::text) IS NULL) OR ((kind = 'staging'::text) AND (generation = 1))`,
+      sql`((${table.intent} ->> 'promotionID'::text) IS NULL) OR ((${table.kind} = 'staging'::text) AND (${table.generation} = 1))`,
     ),
     check(
       "substrate_isolated_check5",
-      sql`(kind = 'staging'::text) = (jsonb_typeof((intent -> 'declaration'::text)) = 'object'::text)`,
+      sql`(${table.kind} = 'staging'::text) = (jsonb_typeof((${table.intent} -> 'declaration'::text)) = 'object'::text)`,
     ),
-    check("substrate_isolated_generation_check", sql`generation > 0`),
-    check("substrate_isolated_intent_check", sql`jsonb_typeof(intent) = 'object'::text`),
+    check("substrate_isolated_generation_check", sql`${table.generation} > 0`),
+    check("substrate_isolated_intent_check", sql`jsonb_typeof(${table.intent}) = 'object'::text`),
     check(
       "substrate_isolated_kind_check",
-      sql`kind = ANY (ARRAY['staging'::text, 'publication'::text])`,
+      sql`${table.kind} = ANY (ARRAY['staging'::text, 'publication'::text])`,
     ),
   ],
 );

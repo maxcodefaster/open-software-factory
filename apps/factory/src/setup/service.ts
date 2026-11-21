@@ -10,7 +10,7 @@ import type {
   SetupTask,
 } from "../../../../packages/project-domain/src/setup";
 import { setupReadiness } from "../../../../packages/project-domain/src/setup";
-import { createAccessController } from "../access/controller";
+import { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { createProjectSetupController } from "./controller";
 import type { createSetupInspection } from "./inspection";

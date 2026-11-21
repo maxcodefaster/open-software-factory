@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { ForgeRepository } from "./forge";
+import type { ForgeRepository } from "./contracts";
 
 const user = z
   .object({

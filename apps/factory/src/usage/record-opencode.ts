@@ -9,7 +9,7 @@ import {
   usageOperation,
   usageReplayCursor,
 } from "../../../../packages/db/src/schema";
-import { type createOpenCodeClient, listOpenCodeSessionTree } from "../agent/opencode-client";
+import { type createOpenCodeClient, listOpenCodeSessionTree } from "../agent/opencode-api";
 import { createContractRates } from "./contract-rates";
 import { createUsageJournal } from "./journal";
 import { drainOpenCodeUsage } from "./opencode";

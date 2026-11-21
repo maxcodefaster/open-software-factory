@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createCodingContexts } from "../../apps/factory/src/agent/conversation-contexts";
-import upstream from "../../upstream.json";
-import { createSessionArchives } from "../../apps/factory/src/agent/session-archive-store";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { readNativeSessionArchive } from "../../apps/factory/src/agent/session-archive";
+import { createSessionArchives } from "../../apps/factory/src/agent/session-archive-store";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { ensureConversationIn } from "../../apps/factory/src/conversations/store";
+import upstream from "../../upstream.json";
 import { fixture } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
 import { memoryPrivateObjects } from "../fixtures/private-objects";

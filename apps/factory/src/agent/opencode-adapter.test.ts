@@ -6,12 +6,12 @@ import {
   createOpenCodeClient,
   decodeOpenCodeAdmission,
   ensureOpenCodeMessageBoundary,
-  interruptOpenCodeSession,
   installedOpenCodeSkillIDs,
+  interruptOpenCodeSession,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
   syncOpenCodeInputGuidance,
-} from "./opencode-client";
+} from "./opencode-adapter";
 import { checkTerminalOpenCodeInbox } from "./opencode-terminal";
 
 const input = {

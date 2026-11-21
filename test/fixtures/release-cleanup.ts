@@ -1,27 +1,27 @@
-import { callFactoryFunction } from "./server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
-import {
-  attemptsResponseSchema,
-  deliveryViewSchema,
-  runtimeAttemptSchema,
-} from "../../apps/factory/src/api-contracts";
-import { absentBoundNativeResource } from "../../apps/factory/src/runtime/substrate-bound-provisioning";
-import { requireSubstrateActor } from "../../apps/factory/src/runtime/substrate";
-import { systemContract } from "../../packages/system-contract/src/system-contract";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
+import {
+  attemptsResponseSchema,
+  runtimeAttemptSchema,
+} from "../../apps/factory/src/runtime/contracts";
+import { requireSubstrateActor } from "../../apps/factory/src/runtime/substrate";
+import { absentBoundNativeResource } from "../../apps/factory/src/runtime/substrate-bound-provisioning";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { systemContract } from "../../packages/system-contract/src/system-contract";
 import { readResetResources } from "../../scripts/factory/reset-resources";
+import {
+  editorFixtureNamespaces,
+  requireOwnedProjectSourceRetention,
+} from "./editor-source-resources";
+import { eventually } from "./factory-process";
 import {
   readReleaseNativeBinding,
   readReleaseNativeTemplate,
   type releaseInstallation,
 } from "./release-installation";
-import { eventually } from "./factory-process";
-import {
-  editorFixtureNamespaces,
-  requireOwnedProjectSourceRetention,
-} from "./editor-source-resources";
+import { callFactoryFunction } from "./server-functions";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 

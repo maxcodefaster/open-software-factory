@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createOpenCodeClient } from "./opencode-client";
+import { createOpenCodeClient } from "./opencode-adapter";
 import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
 
 async function until(accepts: () => boolean) {

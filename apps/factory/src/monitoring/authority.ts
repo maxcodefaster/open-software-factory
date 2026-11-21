@@ -19,9 +19,9 @@ import {
   monitoringPolicy,
   requirementApproval,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
-import { createMCPLibrary } from "../mcp/controller";
+import { createMCPLibrary } from "../mcp/library-api";
 import { monitoringDigest } from "./payload";
 
 type Database = ReturnType<typeof createDatabase>;

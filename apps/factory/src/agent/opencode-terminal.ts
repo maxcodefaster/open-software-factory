@@ -1,4 +1,4 @@
-import type { createOpenCodeClient } from "./opencode-client";
+import type { createOpenCodeClient } from "./opencode-adapter";
 
 // Terminal cleanup may turn a recorded background shell into a synthetic
 // error notification which wakes the parent. Never cancel user/unknown work,

@@ -1,6 +1,6 @@
 import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
 import { CommandError } from "../command-error";
-import type { ResolvedModelConnection } from "./native";
+import { type ResolvedModelConnection } from "./inference-contracts";
 
 export function installationPlanningConnection(): ResolvedModelConnection {
   const baseURL =

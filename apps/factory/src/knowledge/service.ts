@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
-import type { createAccessController } from "../access/controller";
+import { type createAccessController } from "../access/api";
 import {
   knowledgeGenerationSchema,
   knowledgeHistorySchema,
@@ -9,7 +9,7 @@ import {
   knowledgeSourcesSchema,
   openRepositoryDocumentSchema,
   repositoryDocumentsSchema,
-} from "../api-contracts";
+} from "./contracts";
 import type { createKnowledgeController } from "./controller";
 
 export function createKnowledgeService(options: {

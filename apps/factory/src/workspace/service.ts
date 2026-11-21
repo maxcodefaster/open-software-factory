@@ -1,21 +1,21 @@
 import { and, asc, eq, exists, isNull, or, sql } from "drizzle-orm";
+import type { z } from "zod";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   authUser,
   developmentWorkspace,
   ticket,
   workspaceShare,
 } from "../../../../packages/db/src/schema";
-import type { createDeveloperIDEController } from "./developer-ide-controller";
-import type { createWorkspaceSourceController } from "./source-controller";
-import type { createWorkspaceSharing } from "./sharing";
 import type { WorkspaceShareInput } from "../../../../packages/workspace-domain/src/sharing";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
+import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 import type { createWorkspaceCollaboration } from "./collaboration";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
-import { workspaceAuthorityIn } from "../access/workspace";
+import type { createDeveloperIDEController } from "./developer-ide-controller";
+import type { createWorkspaceSharing } from "./sharing";
+import type { createWorkspaceSourceController } from "./source-controller";
 import type { createWorkspaceSubmission, workspaceSubmissionInput } from "./submission";
-import type { z } from "zod";
 
 export function createWorkspaceService(options: {
   sources: Pick<

@@ -3,6 +3,7 @@ import {
   and,
   asc,
   eq,
+  sql as expression,
   gt,
   inArray,
   isNotNull,
@@ -11,7 +12,6 @@ import {
   ne,
   notExists,
   or,
-  sql as expression,
 } from "drizzle-orm";
 import type { z } from "zod";
 import {
@@ -22,8 +22,8 @@ import {
   assertAgentTurnAuthority,
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -36,19 +36,20 @@ import {
   ticket,
   ticketConversation,
 } from "../../../../packages/db/src/schema";
+import { projectAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectAuthorityIn } from "../access/controller";
-import { freezeAttachmentContextIn } from "../attachments/store";
+import { freezeAttachmentContextIn } from "../attachments/api";
 import { CommandError } from "../command-error";
-import { createMCPLibrary } from "../mcp/controller";
+import { lockConversation } from "../conversations/api";
+import { createMCPLibrary } from "../mcp/library-api";
 import { inputTicketAssignmentsIn, monitoringChangeAuthorityIn } from "../monitoring/authority";
-import { lockConversation } from "../conversations/store";
-import { codingBudgetIn } from "../usage/policy";
+import { codingBudgetIn } from "../usage/api";
+import type { AgentTurnRecord } from "./turn-record";
 
 type Database = ReturnType<typeof createDatabase>;
 type TurnRow = typeof agentTurn.$inferSelect;
 
-function turn(row: TurnRow) {
+function turn(row: TurnRow): AgentTurnRecord {
   return {
     id: row.id,
     commandId: row.commandId,
@@ -60,7 +61,6 @@ function turn(row: TurnRow) {
     outcomeSummary: row.outcomeSummary,
   };
 }
-export type AgentTurnRecord = ReturnType<typeof turn>;
 
 function fingerprint(command: AgentTurnCommand) {
   // Zod's fixed object schemas normalize key order, trim text and fill answer defaults.

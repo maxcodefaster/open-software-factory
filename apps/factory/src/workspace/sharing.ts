@@ -13,7 +13,7 @@ import {
   workspaceShareInput,
   workspaceShareView,
 } from "../../../../packages/workspace-domain/src/sharing";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 

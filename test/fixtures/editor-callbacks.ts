@@ -14,7 +14,13 @@ export function editorCallbacks<T>(options: {
   component: string;
   expose: string[];
   imports: Record<string, unknown>;
+  /** Dependencies used only by JSX or callbacks outside this case. Access fails explicitly. */
+  stubs?: string[];
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+  timers?: {
+    setTimeout: (callback: () => void, milliseconds?: number) => number;
+    clearTimeout: (id: number | undefined) => void;
+  };
 }): (props: unknown) => T {
   const source = options.source ?? readFileSync(options.path, "utf8");
   let replaced = false;
@@ -27,42 +33,74 @@ export function editorCallbacks<T>(options: {
     },
     transformers: {
       before: [
-        (context) => (file) =>
-          ts.visitEachChild(
+        (context) => (file) => {
+          const transformed = ts.visitEachChild(
             file,
             (node) => {
               if (!ts.isFunctionDeclaration(node) || node.name?.text !== options.component)
                 return node;
-              return ts.visitEachChild(
+              if (!node.body) return node;
+              return ts.factory.updateFunctionDeclaration(
                 node,
-                (child) => {
-                  if (!ts.isBlock(child)) return child;
-                  return ts.factory.updateBlock(
-                    child,
-                    child.statements.map((statement) => {
-                      if (!ts.isReturnStatement(statement)) return statement;
-                      replaced = true;
-                      return ts.factory.createReturnStatement(
-                        ts.factory.createObjectLiteralExpression(
-                          options.expose.map((name) =>
-                            ts.factory.createShorthandPropertyAssignment(name),
-                          ),
+                node.modifiers,
+                node.asteriskToken,
+                node.name,
+                node.typeParameters,
+                node.parameters,
+                node.type,
+                ts.factory.updateBlock(
+                  node.body,
+                  node.body.statements.map((statement) => {
+                    if (!ts.isReturnStatement(statement)) return statement;
+                    replaced = true;
+                    return ts.factory.createReturnStatement(
+                      ts.factory.createObjectLiteralExpression(
+                        options.expose.map((name) =>
+                          ts.factory.createShorthandPropertyAssignment(name),
                         ),
-                      );
-                    }),
-                  );
-                },
-                context,
+                      ),
+                    );
+                  }),
+                ),
               );
             },
             context,
-          ),
+          );
+          // Bind private components too. Adding an export modifier after TypeScript's
+          // module analysis does not reliably emit a CommonJS export for them.
+          return ts.factory.updateSourceFile(transformed, [
+            ...transformed.statements,
+            ts.factory.createExpressionStatement(
+              ts.factory.createAssignment(
+                ts.factory.createElementAccessExpression(
+                  ts.factory.createIdentifier("exports"),
+                  ts.factory.createStringLiteral(options.component),
+                ),
+                ts.factory.createIdentifier(options.component),
+              ),
+            ),
+          ]);
+        },
       ],
     },
   });
   if (!replaced) throw new Error(`Missing component return in ${options.path}`);
   const exports: Record<string, (props: unknown) => T> = {};
-  const require = (name: string) => options.imports[name] ?? {};
+  const require = (name: string) => {
+    if (Object.hasOwn(options.imports, name)) return options.imports[name];
+    if (options.stubs?.includes(name))
+      return new Proxy(
+        {},
+        {
+          get(_, property) {
+            throw new Error(
+              `Stubbed editor dependency ${name}.${String(property)} in ${options.path}`,
+            );
+          },
+        },
+      );
+    throw new Error(`Unspecified editor dependency ${name} in ${options.path}`);
+  };
   new Function(
     "require",
     "exports",
@@ -74,8 +112,8 @@ export function editorCallbacks<T>(options: {
     require,
     exports,
     options.storage,
-    () => 0,
-    () => {},
+    options.timers?.setTimeout ?? (() => 0),
+    options.timers?.clearTimeout ?? (() => {}),
   );
   const component = exports[options.component];
   if (!component) throw new Error(`Missing component ${options.component}`);

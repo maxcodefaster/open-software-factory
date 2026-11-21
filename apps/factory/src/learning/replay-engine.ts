@@ -5,8 +5,8 @@ import {
 } from "../../../../packages/conversation-domain/src/learning-comparison";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../models/native";
-import { createMastraUsage } from "../usage/mastra";
-import { type ReplayInput, replayInstructions } from "./replay";
+import { createMastraUsage } from "../usage/model-api";
+import { type ReplayInput, replayInstructions } from "./replay-contract";
 export async function replayPlanningWithModel(input: ReplayInput) {
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(90_000)]);
   const usage = createMastraUsage(input.usage, input.connection.provider ?? "openai", signal);

@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { buildBrowserToolCatalogue } from "../../../../packages/conversation-domain/src/browser-tools";
 import { candidateReviewToolCatalogue } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { LearningCase } from "../../../../packages/conversation-domain/src/learning";
-import { readNativeSessionArchive } from "../agent/session-archive";
+import { readNativeSessionArchive } from "../agent/turns-api";
 import { objectDigest, type PrivateObjects } from "../storage/objects";
 
 export const nativeToolEvidenceMaximumBytes = 4_000;

@@ -9,7 +9,8 @@ import {
   ticket,
   verification,
 } from "../../../../packages/db/src/schema";
-import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
+import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
+import { type createForgejoClient } from "../../../../packages/forge/src/forge";
 import type { RuntimeAttemptView } from "../runtime/types";
 
 type PromotionChange = {

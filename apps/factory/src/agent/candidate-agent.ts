@@ -27,7 +27,7 @@ import {
 } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
-import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
+import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/transport-api";
 import { advanceCandidateCommit, earlierSubmissionUnchanged, noChangesToSubmit } from "./candidate";
 import { createAgentCommitTransport } from "./commit-transport";
 import { bounded, readableError } from "./native-errors";

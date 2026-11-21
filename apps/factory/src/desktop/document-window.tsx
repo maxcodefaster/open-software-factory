@@ -22,16 +22,16 @@ import {
   zeroMutators,
 } from "../../../../packages/zero-schema/src";
 import type { useZero } from "../../../../packages/zero-solid/src";
-import type {
-  AgentView,
-  AppPreview,
-  Change,
-  DeliveryView,
-  RuntimeAttempt,
-  RuntimeDockTarget,
-  Ticket,
-} from "../api-contracts";
+import { type AgentView } from "../agent/contracts";
+import {
+  type Change,
+  type PersonalTicketDraft,
+  type Ticket,
+  type TicketDraft,
+} from "../change/contracts";
+import { readPersonalTicketDraft } from "../change/drafts";
 import { plainErrorMessage } from "../command-error";
+import { type DeliveryView } from "../delivery/contracts";
 import { EpicProposalWorkspace } from "../epic-proposal-workspace";
 import type { ActivityNavigationRequest } from "../ide-messages";
 import type { InboxItem } from "../inbox/contracts";
@@ -42,15 +42,11 @@ import { InboxWorkspace } from "../inbox/workspace";
 import type { createKnowledgeState } from "../knowledge/state";
 import type { createProjectPlanning } from "../projects/planning";
 import { ticketReference } from "../projects/ticket-content";
+import { type AppPreview, type RuntimeAttempt, type RuntimeDockTarget } from "../runtime/contracts";
 import { getKnowledgeSources, restoreKnowledgePage } from "../server-functions/knowledge";
 import { serverCall } from "../server-functions/result";
 import { cancelTicketImplementation } from "../server-functions/tickets";
-import {
-  type PersonalTicketDraft,
-  readPersonalTicketDraft,
-  TicketDraftWorkspace,
-} from "../ticket-draft-workspace";
-import type { TicketDraft } from "../ticket-workspace";
+import { TicketDraftWorkspace } from "../ticket-draft-workspace";
 import { TicketWorkspace } from "../ticket-workspace";
 import { TrashWorkspace } from "../trash-workspace";
 import type { createWindowPresence } from "../window-presence";

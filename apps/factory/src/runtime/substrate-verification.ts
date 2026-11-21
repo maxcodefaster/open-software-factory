@@ -19,7 +19,7 @@ import {
   type SubstrateCall,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
-import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
+import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { substrateRepositoryCloneURL } from "./endpoints";
 import { runtimeSourceCapability } from "./git-http";
 import type { RuntimeHub } from "./hub";

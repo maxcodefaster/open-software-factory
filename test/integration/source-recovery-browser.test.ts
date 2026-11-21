@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
-} from "../../apps/factory/src/api-contracts";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+} from "../../apps/factory/src/workspace/contracts";
 import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";

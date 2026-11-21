@@ -16,7 +16,19 @@ export const readVersion = factorySchema.table(
   {
     projectId: uuid("project_id").notNull(),
     audience: text("audience").notNull(),
-    scope: text("scope").notNull(),
+    scope: text("scope")
+      .$type<
+        | "lifecycle"
+        | "ticket"
+        | "conversation"
+        | "review"
+        | "inbox"
+        | "knowledge"
+        | "inputs"
+        | "sources"
+        | "releases"
+      >()
+      .notNull(),
     resourceId: uuid("resource_id").notNull(),
     revision: uuid("revision").defaultRandom().notNull(),
   },
@@ -37,11 +49,11 @@ export const readVersion = factorySchema.table(
     }),
     check(
       "read_version_audience_check",
-      sql`(audience = ANY (ARRAY['shared'::text, 'developer'::text])) OR (audience ~ '^[0-9a-f-]{36}$'::text)`,
+      sql`(${table.audience} = ANY (ARRAY['shared'::text, 'developer'::text])) OR (${table.audience} ~ '^[0-9a-f-]{36}$'::text)`,
     ),
     check(
       "read_version_scope_check",
-      sql`scope = ANY (ARRAY['lifecycle'::text, 'ticket'::text, 'conversation'::text, 'review'::text, 'inbox'::text, 'knowledge'::text, 'inputs'::text, 'sources'::text, 'releases'::text])`,
+      sql`${table.scope} = ANY (ARRAY['lifecycle'::text, 'ticket'::text, 'conversation'::text, 'review'::text, 'inbox'::text, 'knowledge'::text, 'inputs'::text, 'sources'::text, 'releases'::text])`,
     ),
   ],
 );

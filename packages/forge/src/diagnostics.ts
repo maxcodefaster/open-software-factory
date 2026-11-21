@@ -4,10 +4,8 @@ import {
   type VerificationReceipt,
   verificationReceiptInput,
 } from "../../conversation-domain/src/verification";
+import type { ForgeRepository } from "./contracts";
 import { readVerificationDiagnostic, sanitizeVerificationOutput } from "./diagnostic-output";
-import type { ForgeRepository } from "./forge";
-
-export { sanitizeVerificationOutput } from "./diagnostic-output";
 
 const runInput = z.object({
   id: z.number().int().positive(),

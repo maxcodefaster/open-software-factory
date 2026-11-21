@@ -1,5 +1,5 @@
 import type { ProcessLLMRequestArgs, Processor } from "@mastra/core/processors";
-import { codeReadInput } from "../knowledge/code-read";
+import { codeReadInput } from "../knowledge/contracts";
 import { nativeInputSize, nativeStepGuard } from "../models/execution-policy";
 
 type Prompt = ProcessLLMRequestArgs["prompt"];

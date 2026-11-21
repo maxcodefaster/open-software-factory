@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
+import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";

@@ -8,14 +8,14 @@ import {
   ticket,
 } from "../../../../packages/db/src/schema";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { workspaceAuthorityIn } from "../access/workspace";
 import type { createRuntimeAccess } from "../access/runtime";
+import { workspaceAuthorityIn } from "../access/workspace";
+import { type createChangeWriterController } from "../access/writer-api";
 import { executeEditingCommand } from "../access/writer-command";
-import type { createChangeWriterController } from "../access/writer-controller";
 import { CommandError } from "../command-error";
 import { json } from "../http";
-import type { createRuntimeController } from "../runtime/controller";
-import type { RuntimeHub, RuntimeSocketData } from "../runtime/hub";
+import { type createRuntimeController } from "../runtime/api";
+import { type RuntimeHub, type RuntimeSocketData } from "../runtime/transport-api";
 import type { DeveloperIDEGrant } from "./developer-ide-access";
 import { createPersonalGit } from "./personal-git";
 

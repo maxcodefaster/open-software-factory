@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { createOpenCodeClient } from "./opencode-adapter";
 import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
-import { createOpenCodeClient } from "./opencode-client";
 
 const admissions = [
   {

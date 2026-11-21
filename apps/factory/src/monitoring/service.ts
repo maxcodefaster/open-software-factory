@@ -4,7 +4,7 @@ import {
   monitoringSave,
   monitoringView,
 } from "../../../../packages/conversation-domain/src/monitoring";
-import type { createAccessController } from "../access/controller";
+import { type createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { createMonitoringController } from "./controller";
 

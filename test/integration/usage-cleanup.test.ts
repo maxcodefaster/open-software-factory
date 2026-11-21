@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
+import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 
 test.each([

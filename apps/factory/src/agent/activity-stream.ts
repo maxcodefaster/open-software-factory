@@ -1,10 +1,9 @@
 import { CommandError } from "../command-error";
+import type { ActivityEvent } from "./contracts";
 import { createActivityWake } from "./opencode-events";
 
 // The browser observes an admitted Build. Detaching never interrupts or repeats
 // it. Full replacement snapshots also reconcile gaps in OpenCode's live-only SSE.
-export type ActivityEvent<T> = { type: "snapshot"; view: T } | { type: "heartbeat" };
-
 export function agentActivityStream<T>(options: {
   signal: AbortSignal;
   authorize(): Promise<void>;

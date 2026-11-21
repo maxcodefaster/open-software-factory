@@ -6,7 +6,6 @@ import {
   type ModelConnectionView,
   type ModelConnectionWrite,
   type ModelProbeResult,
-  type ModelProvider,
   modelConnectionWrite,
   modelProbeResult,
   modelRoleConnectionInput,
@@ -29,11 +28,12 @@ import {
   usageOperation,
 } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
-import { createUsageJournal } from "../usage/journal";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { codingReasoningIn, createModelSettingsController, modelEnvironment } from "./controller";
 import { deploymentModelConnections } from "./deployment";
-import { type ResolvedModelConnection, validateModelEndpoint } from "./native";
+import { type ResolvedModelConnection } from "./inference-contracts";
+import { validateModelEndpoint } from "./native";
 import { probeModel } from "./probe";
 import type { ModelSecrets, StoredModelConnection } from "./secrets";
 
@@ -88,11 +88,11 @@ export function createModelConnections(
         commandID: connectionWrite.commandId,
         connectionID: connectionWrite.connectionId,
         baseVersion: connectionWrite.baseVersion,
-        provider: expression<ModelProvider>`${connectionWrite.provider}`,
+        provider: connectionWrite.provider,
         endpoint: connectionWrite.endpoint,
         fingerprint: connectionWrite.fingerprint,
         secretKey: connectionWrite.secretKey,
-        state: expression<"write-intended" | "committed">`${connectionWrite.state}`,
+        state: connectionWrite.state,
         createdBy: connectionWrite.createdBy,
       })
       .from(connectionWrite)
@@ -141,7 +141,7 @@ export function createModelConnections(
       const [pending] = await drizzleTransaction(sql)
         .select({
           commandID: connectionWrite.commandId,
-          provider: expression<ModelProvider>`${connectionWrite.provider}`,
+          provider: connectionWrite.provider,
           endpoint: connectionWrite.endpoint,
         })
         .from(connectionWrite)

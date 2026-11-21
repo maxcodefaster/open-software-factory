@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
+import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-adapter";
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
-import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-client";
 import {
   candidateReviewInstructions,
   candidateReviewPermissions,

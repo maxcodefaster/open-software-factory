@@ -33,8 +33,8 @@ import {
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -57,7 +57,8 @@ import {
   requirementDigest,
 } from "../../../../packages/requirement-domain/src/requirement";
 import { insertInitialTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { pendingReviewRequests } from "./requests";

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
-import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
+import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
 import {
   assertMessageAttachmentsIn,

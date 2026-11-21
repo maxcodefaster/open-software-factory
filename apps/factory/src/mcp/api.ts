@@ -1,0 +1,1 @@
+export { connectFactoryMCP } from "./factory";

@@ -8,10 +8,10 @@ import {
 import { candidateReviewCallInput } from "../../../../packages/conversation-domain/src/candidate-review";
 import { verificationToolCallInput } from "../../../../packages/conversation-domain/src/verification";
 import { feedbackToolCallInput } from "../../../../packages/conversation-domain/src/visual-review";
-import type { createAttachmentTools } from "../attachments/tools";
+import { type createAttachmentTools } from "../attachments/tools-api";
 import { CommandError } from "../command-error";
 import { json } from "../http";
-import type { createVisualReviewController } from "../review/controller";
+import { type createVisualReviewController } from "../review/api";
 import type { createBuildBrowserController } from "./browser-controller";
 import type { createCandidateReviewController } from "./candidate-review";
 import type { createVerificationTools } from "./verification-tools";

@@ -6,12 +6,7 @@ import {
 } from "../../../../packages/conversation-domain/src/model-connection";
 import { modelIdInput } from "../../../../packages/conversation-domain/src/model-settings";
 import { CommandError } from "../command-error";
-
-export type ResolvedModelConnection = {
-  provider?: ModelProvider;
-  baseURL?: string;
-  apiKey: string;
-};
+import type { ResolvedModelConnection } from "./inference-contracts";
 
 export const nativeEndpoints = {
   openai: "https://api.openai.com/v1",

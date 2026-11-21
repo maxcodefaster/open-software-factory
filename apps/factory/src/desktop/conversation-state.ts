@@ -1,5 +1,5 @@
 import { type Accessor, createSignal, onCleanup } from "solid-js";
-import type { ConversationView } from "../api-contracts";
+import { type ConversationView } from "../project-agent/contracts";
 import type { createConversationSelection } from "../project-agent/selection";
 
 type Selection = Pick<

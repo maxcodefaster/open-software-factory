@@ -9,7 +9,7 @@ import {
   ticket,
   verification as verificationRecord,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 type TrashRuntime = { stop(id: string): Promise<unknown> };

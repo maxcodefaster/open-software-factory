@@ -202,80 +202,113 @@ test("separate installations never share an editor namespace even with the same 
   }
 }, 30_000);
 
-test("a retained conflicting editor changes resource identity only after explicit confirmed Stop", async () => {
-  const owned = await fixture();
-  const { database, developerID, projectID } = owned;
-  const image = `registry.invalid/editor@sha256:${"3".repeat(64)}`;
-  await database.client`INSERT INTO factory.developer_ide(user_id,resource_id,state,image,namespace_uid)
-    VALUES(${developerID},${developerID},'failed',${image},'retained-namespace')`;
-  const attempts: Array<{ namespace: string; resourceID: string }> = [];
-  let stops = 0;
-  const adapter: DeveloperIDEClient = {
-    async prepare(input) {
-      attempts.push(input.identity);
-      if (input.identity.resourceID === developerID)
+test.each([false, true])(
+  "editor resource identity stays immutable across Stop and epochs, user-ID equality %s",
+  async (matchesUserID) => {
+    const owned = await fixture();
+    const { database, developerID, projectID } = owned;
+    const resourceID = matchesUserID ? developerID : crypto.randomUUID();
+    const image = `registry.invalid/editor@sha256:${"3".repeat(64)}`;
+    await database.client`INSERT INTO factory.developer_ide(user_id,resource_id,state,image,namespace_uid)
+    VALUES(${developerID},${resourceID},'failed',${image},'retained-namespace')`;
+    const attempts: Array<{ namespace: string; resourceID: string }> = [];
+    let stops = 0;
+    const adapter: DeveloperIDEClient = {
+      async prepare(input) {
+        attempts.push(input.identity);
+        expect(input.identity.resourceID).toBe(resourceID);
+        expect(input.namespaceUID).toBe("retained-namespace");
+        if (stops === 0) throw new DeveloperIDEIntentConflict("occupied");
+        expect(stops).toBe(1);
+        expect(input.identity.epoch).toBe(2);
+        expect(input.podUID).toBeNull();
+        return {
+          namespaceUID: "retained-namespace",
+          podUID: "next-epoch-pod",
+          ready: true,
+          failed: false,
+        };
+      },
+      async observe() {
         throw new DeveloperIDEIntentConflict("occupied");
-      expect(stops).toBe(1);
-      expect(input.namespaceUID).toBeNull();
-      return {
-        namespaceUID: "separate-namespace",
-        podUID: "separate-pod",
-        ready: true,
-        failed: false,
-      };
-    },
-    async observe() {
-      throw new DeveloperIDEIntentConflict("occupied");
-    },
-    async endpoint() {
-      return "http://127.0.0.1:4400";
-    },
-    async stop(input) {
-      expect(input.identity.resourceID).toBe(developerID);
-      expect(input.podUID).toBeNull();
-      stops++;
-    },
-    close() {},
-  };
-  const editors = createDeveloperIDEController(database, adapter);
-  try {
-    await editors.ensure(projectID, developerID);
-    await eventually(
-      () => editors.get(developerID),
-      (view) => view.state === "failed",
-      "A known identity conflict must fail without waiting for the startup deadline",
-    );
-    expect((await editors.get(developerID)).failure).toContain(
-      "Existing resources were not changed",
-    );
-    expect(stops).toBe(0);
-    expect(attempts[0]?.resourceID).toBe(developerID);
-    await expect(
-      (async () => {
-        await database.client`UPDATE factory.developer_ide SET resource_id=${crypto.randomUUID()}
+      },
+      async endpoint() {
+        return "http://127.0.0.1:4400";
+      },
+      async stop(input) {
+        expect(input.identity.resourceID).toBe(resourceID);
+        expect(input.namespaceUID).toBe("retained-namespace");
+        expect(input.podUID).toBeNull();
+        stops++;
+      },
+      close() {},
+    };
+    const editors = createDeveloperIDEController(database, adapter);
+    try {
+      await editors.ensure(projectID, developerID);
+      await eventually(
+        () => editors.get(developerID),
+        (view) => view.state === "failed",
+        "A known identity conflict must fail without waiting for the startup deadline",
+      );
+      expect((await editors.get(developerID)).failure).toContain(
+        "Existing resources were not changed",
+      );
+      expect(stops).toBe(0);
+      expect(attempts[0]?.resourceID).toBe(resourceID);
+      await expect(
+        (async () => {
+          await database.client`UPDATE factory.developer_ide SET resource_id=${crypto.randomUUID()}
           WHERE user_id=${developerID}`;
-      })(),
-    ).rejects.toThrow("immutable");
-    await editors.stop(developerID);
-    await eventually(
-      () => editors.get(developerID),
-      (view) => view.state === "stopped",
-      "The uncreated intent must be confirmed stopped",
-    );
-    await editors.ensure(projectID, developerID);
-    await eventually(
-      () => editors.get(developerID),
-      (view) => view.state === "ready",
-      "A separate resource identity must be ready after confirmed Stop",
-    );
-    expect(attempts[1]?.resourceID).not.toBe(developerID);
-    expect(attempts[1]?.namespace).not.toBe(attempts[0]?.namespace);
-    expect((await editors.get(developerID)).epoch).toBe(2);
-  } finally {
-    await editors.close();
-    await owned.dispose();
-  }
-}, 20_000);
+        })(),
+      ).rejects.toThrow("immutable");
+      await editors.stop(developerID);
+      await eventually(
+        () => editors.get(developerID),
+        (view) => view.state === "stopped",
+        "The uncreated intent must be confirmed stopped",
+      );
+      await expect(
+        (async () => {
+          await database.client`UPDATE factory.developer_ide
+          SET service_epoch=2,state='create-intended',resource_id=${crypto.randomUUID()}
+          WHERE user_id=${developerID}`;
+        })(),
+      ).rejects.toThrow("immutable");
+      for (const update of [
+        () => database.client`UPDATE factory.developer_ide SET service_epoch=2,state='create-intended',
+        namespace_uid='replacement-namespace' WHERE user_id=${developerID}`,
+        () => database.client`UPDATE factory.developer_ide SET service_epoch=2,state='create-intended',
+        pod_uid='unconfirmed-pod' WHERE user_id=${developerID}`,
+        () => database.client`UPDATE factory.developer_ide SET service_epoch=3,state='create-intended'
+        WHERE user_id=${developerID}`,
+      ])
+        await expect(Promise.resolve().then(update)).rejects.toThrow("Stop the Developer IDE");
+      expect((await editors.get(developerID)).state).toBe("stopped");
+      await editors.ensure(projectID, developerID);
+      await eventually(
+        () => editors.get(developerID),
+        (view) => view.state === "ready",
+        "The same resource identity must be ready in the next epoch after confirmed Stop",
+      );
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]?.resourceID).toBe(resourceID);
+      expect(attempts[1]?.namespace).toBe(attempts[0]?.namespace);
+      expect((await editors.get(developerID)).epoch).toBe(2);
+      const [retained] = await database.client`SELECT resource_id,namespace_uid,pod_uid
+      FROM factory.developer_ide WHERE user_id=${developerID}`;
+      expect(retained).toEqual({
+        resource_id: resourceID,
+        namespace_uid: "retained-namespace",
+        pod_uid: "next-epoch-pod",
+      });
+    } finally {
+      await editors.close();
+      await owned.dispose();
+    }
+  },
+  20_000,
+);
 
 test("editor preparation keeps the application pool available with one connection", async () => {
   const owned = await fixture(1);

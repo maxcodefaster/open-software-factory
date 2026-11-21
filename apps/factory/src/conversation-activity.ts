@@ -1,4 +1,4 @@
-import type { AgentMessage } from "./api-contracts";
+import { type AgentMessage } from "./agent/contracts";
 import type { ConversationTimelineItem } from "./conversation-timeline";
 
 export type ConversationDisplayItem<TEntry, TMessage> =

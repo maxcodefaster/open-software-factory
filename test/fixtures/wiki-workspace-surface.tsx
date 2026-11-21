@@ -1,11 +1,11 @@
 import { render } from "@solidjs/web";
 import { createSignal, Loading } from "solid-js";
-import type {
-  KnowledgeGeneration,
-  KnowledgePage,
-  KnowledgeRevision,
-  KnowledgeSearchResult,
-} from "../../apps/factory/src/api-contracts";
+import {
+  type KnowledgeGeneration,
+  type KnowledgePage,
+  type KnowledgeRevision,
+  type KnowledgeSearchResult,
+} from "../../apps/factory/src/knowledge/contracts";
 import type { KnowledgeDraft } from "../../apps/factory/src/knowledge/draft";
 import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge-workspace";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";

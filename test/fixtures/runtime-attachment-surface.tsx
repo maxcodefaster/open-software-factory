@@ -8,7 +8,7 @@ import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/runtime-workspace.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
-import type { RuntimeAttempt } from "../../apps/factory/src/api-contracts";
+import { type RuntimeAttempt } from "../../apps/factory/src/runtime/contracts";
 import type { WorkspaceTab } from "../../apps/factory/src/workspace-tabs";
 import { fixtureValue } from "./value";
 

@@ -13,13 +13,12 @@ import {
   workspaceCommandInput,
   workspaceCommandRead,
 } from "../../../../packages/workspace-domain/src/commands";
-import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { workspaceAuthorityIn } from "../access/workspace";
+import { workspaceAuthorityIn, workspaceWriteAuthorityIn } from "../access/api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
-import type { createRuntimeController } from "../runtime/controller";
-import type { RuntimeHub } from "../runtime/hub";
-import { createWorkspaceComputeAccess } from "./compute-access";
+import { type createRuntimeController } from "../runtime/api";
+import { type RuntimeHub } from "../runtime/transport-api";
+import { createWorkspaceComputeAccess } from "./compute-api";
 
 const nativeView = z.object({
   id: z.uuid(),
@@ -56,7 +55,12 @@ type CommandRow = {
   result: unknown;
   kind: "shell" | "terminal";
 };
-const terminalStates = ["exited", "cancelled", "failed", "interrupted"];
+const terminalStates: Array<(typeof workspaceCommand.$inferSelect)["state"]> = [
+  "exited",
+  "cancelled",
+  "failed",
+  "interrupted",
+];
 const commandFields = {
   id: workspaceCommand.id,
   workspaceID: workspaceCommand.workspaceId,

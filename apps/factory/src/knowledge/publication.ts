@@ -12,7 +12,7 @@ import type {
   WikiGenerationOutput,
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { WikiHumanEditConflict } from "./generation-failure";
 
 export class WikiPublicationConflict extends Error {}

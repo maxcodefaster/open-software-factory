@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import rendererSource from "modern-screenshot/dist/index.js" with { type: "text" };
-import { previewBridge } from "../review/preview-bridge";
+import { previewBridge } from "../review/api";
 
 export function previewBridgeResponse(factoryOrigin: string) {
   return new Response(previewBridge(factoryOrigin), {

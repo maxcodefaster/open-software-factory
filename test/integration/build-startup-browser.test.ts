@@ -2,13 +2,10 @@ import { test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
-import type { AgentView } from "../../apps/factory/src/api-contracts";
-import {
-  agentViewSchema,
-  changesResponseSchema,
-  deliveryViewSchema,
-} from "../../apps/factory/src/api-contracts";
+import { type AgentView, agentViewSchema } from "../../apps/factory/src/agent/contracts";
+import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { turnObservationInput } from "../../packages/conversation-domain/src/turn-observation";
 import { factoryProcess } from "../fixtures/factory-process";

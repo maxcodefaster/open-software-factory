@@ -1,13 +1,13 @@
 import { and, desc, eq, sql } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
-import { conversationEntry, ticket } from "../../../../packages/db/src/schema";
 import { z } from "zod";
 import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
+import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { conversationEntry, ticket } from "../../../../packages/db/src/schema";
 import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
-import type { AgentTurnRecord } from "../agent/turn-store";
+import { type AgentTurnRecord } from "../agent/turn-record";
 import { CommandError } from "../command-error";
-import { saveTechnicalDesignIn } from "../technical-design/store";
-import { appendConversationEntry, lockConversation } from "../conversations/store";
+import { appendConversationEntry, lockConversation } from "../conversations/api";
+import { saveTechnicalDesignIn } from "../technical-design/api";
 
 export async function persistProjectOutput(
   transaction: DatabaseTransaction,

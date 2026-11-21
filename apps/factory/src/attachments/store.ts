@@ -41,8 +41,8 @@ import {
   ticketConversation,
   ticketDocumentRevision,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn } from "../access/controller";
-import type { AgentTurnRecord } from "../agent/turn-store";
+import { projectAuthorityIn } from "../access/authority";
+import type { AgentTurnRecord } from "../agent/turn-record";
 import { CommandError } from "../command-error";
 import { objectStorageConfigured } from "../storage/objects";
 import { retainAttachmentDraftInput } from "./commands";
@@ -135,7 +135,10 @@ export async function assertMessageAttachmentsIn(
     );
 }
 
-export async function freezeAttachmentContextIn(sql: DatabaseTransaction, record: AgentTurnRecord) {
+export async function freezeAttachmentContextIn(
+  sql: DatabaseTransaction,
+  record: Pick<AgentTurnRecord, "id" | "command" | "authority">,
+) {
   const db = drizzleTransaction(sql);
   const sources: { label: string; content: string }[] = [];
   const { command, authority } = record;

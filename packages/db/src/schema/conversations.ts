@@ -1,5 +1,4 @@
 import { sql } from "drizzle-orm";
-import type { SourceCitation } from "../../../conversation-domain/src/conversation";
 import {
   bigint,
   boolean,
@@ -14,6 +13,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { SourceCitation } from "../../../conversation-domain/src/conversation";
 import { authUser } from "./auth";
 import { change } from "./delivery";
 import { conversationActor, conversationEntryKind, conversationMode } from "./enums";
@@ -42,11 +42,11 @@ export const conversationEntry = factorySchema.table(
     uniqueIndex("conversation_entry_question_answer_uidx")
       .using("btree", table.inReplyToEntryId.asc().nullsLast())
       .where(
-        sql`((kind = 'answer'::conversation_entry_kind) AND (in_reply_to_entry_id IS NOT NULL))`,
+        sql`((${table.kind} = 'answer'::conversation_entry_kind) AND (${table.inReplyToEntryId} IS NOT NULL))`,
       ),
     uniqueIndex("conversation_entry_requirement_uidx")
       .using("btree", table.requirementRevisionId.asc().nullsLast())
-      .where(sql`(requirement_revision_id IS NOT NULL)`),
+      .where(sql`(${table.requirementRevisionId} IS NOT NULL)`),
     foreignKey({
       columns: [table.conversationId],
       foreignColumns: [ticketConversation.id],
@@ -71,8 +71,8 @@ export const conversationEntry = factorySchema.table(
       table.conversationId,
       table.ordinal,
     ),
-    check("conversation_entry_body_check", sql`length(body) <= 12000`),
-    check("conversation_entry_ordinal_check", sql`ordinal > 0`),
+    check("conversation_entry_body_check", sql`length(${table.body}) <= 12000`),
+    check("conversation_entry_ordinal_check", sql`${table.ordinal} > 0`),
   ],
 );
 
@@ -82,7 +82,7 @@ export const conversationContext = factorySchema.table(
     id: uuid("id").primaryKey().notNull(),
     conversationId: uuid("conversation_id").notNull(),
     commandId: uuid("command_id").notNull(),
-    kind: text("kind").notNull(),
+    kind: text("kind").$type<"research" | "coding">().notNull(),
     mode: conversationMode("mode").default("investigate").notNull(),
     ordinal: integer("ordinal").notNull(),
     title: text("title").notNull(),
@@ -98,7 +98,7 @@ export const conversationContext = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("conversation_context_original")
       .using("btree", table.conversationId.asc().nullsLast())
-      .where(sql`original`),
+      .where(sql`${table.original}`),
     foreignKey({
       columns: [table.changeId],
       foreignColumns: [change.id],
@@ -124,21 +124,27 @@ export const conversationContext = factorySchema.table(
       table.ordinal,
     ),
     unique("conversation_context_command_id_key").on(table.commandId),
-    check("conversation_context_check", sql`(kind = 'coding'::text) = (change_id IS NOT NULL)`),
+    check(
+      "conversation_context_check",
+      sql`(${table.kind} = 'coding'::text) = (${table.changeId} IS NOT NULL)`,
+    ),
     check(
       "conversation_context_check1",
-      sql`(kind = 'coding'::text) = (mode = 'build'::conversation_mode)`,
+      sql`(${table.kind} = 'coding'::text) = (${table.mode} = 'build'::conversation_mode)`,
     ),
     check(
       "conversation_context_check2",
-      sql`(kind = 'coding'::text) OR ((native_session_id IS NULL) AND (archived_session IS NULL) AND (NOT original))`,
+      sql`(${table.kind} = 'coding'::text) OR ((${table.nativeSessionId} IS NULL) AND (${table.archivedSession} IS NULL) AND (NOT ${table.original}))`,
     ),
     check(
       "conversation_context_kind_check",
-      sql`kind = ANY (ARRAY['research'::text, 'coding'::text])`,
+      sql`${table.kind} = ANY (ARRAY['research'::text, 'coding'::text])`,
     ),
-    check("conversation_context_ordinal_check", sql`ordinal > 0`),
-    check("conversation_context_title_check", sql`(length(title) >= 1) AND (length(title) <= 200)`),
+    check("conversation_context_ordinal_check", sql`${table.ordinal} > 0`),
+    check(
+      "conversation_context_title_check",
+      sql`(length(${table.title}) >= 1) AND (length(${table.title}) <= 200)`,
+    ),
   ],
 );
 
@@ -158,10 +164,10 @@ export const ticketConversation = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("ticket_conversation_project_draft_uidx")
       .using("btree", table.projectId.asc().nullsLast(), table.createdBy.asc().nullsLast())
-      .where(sql`(ticket_id IS NULL)`),
+      .where(sql`(${table.ticketId} IS NULL)`),
     uniqueIndex("ticket_conversation_ticket_uidx")
       .using("btree", table.ticketId.asc().nullsLast())
-      .where(sql`(ticket_id IS NOT NULL)`),
+      .where(sql`(${table.ticketId} IS NOT NULL)`),
     foreignKey({
       columns: [table.activeCodingContextId],
       foreignColumns: [conversationContext.id],
@@ -182,6 +188,6 @@ export const ticketConversation = factorySchema.table(
       foreignColumns: [ticket.id],
       name: "ticket_conversation_ticket_id_fkey",
     }).onDelete("restrict"),
-    check("ticket_conversation_version_check", sql`version > 0`),
+    check("ticket_conversation_version_check", sql`${table.version} > 0`),
   ],
 );

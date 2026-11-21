@@ -13,7 +13,7 @@ import {
 } from "../../../../packages/conversation-domain/src/mcp-library";
 import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
-import { monitoringSourceAvailable } from "../monitoring/sources";
+import { monitoringSourceAvailable } from "../monitoring/client";
 import {
   acceptMCPSharing,
   connectMCP,

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { ConversationView } from "../api-contracts";
 import { CommandError } from "../command-error";
+import { type ConversationView } from "./contracts";
 import { projectResponseStream } from "./response-stream";
 
 const conversation: ConversationView = {

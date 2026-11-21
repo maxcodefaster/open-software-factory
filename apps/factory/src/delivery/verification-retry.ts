@@ -2,9 +2,9 @@ import { eq, sql as query } from "drizzle-orm";
 import { verificationDiagnosisInput } from "../../../../packages/conversation-domain/src/verification";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { executionPolicyCommand, verification } from "../../../../packages/db/src/schema";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
-import { submittedCandidate } from "../agent/candidate-state";
+import { submittedCandidate } from "../agent/candidate-api";
 import { CommandError } from "../command-error";
 
 // Retry only a queued workflow whose environment failed before accepting work.

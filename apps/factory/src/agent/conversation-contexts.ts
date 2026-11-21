@@ -2,16 +2,16 @@ import { and, eq, sql as query } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { change, changeAgentSession, ticketConversation } from "../../../../packages/db/src/schema";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import {
   activateCodingContextIn,
   archiveContextIn,
   contextCommandIn,
+  ensureConversationIn,
   insertContextIn,
-} from "../conversations/contexts";
-import { ensureConversationIn } from "../conversations/store";
+} from "../conversations/api";
 
 /** Rotates only conversational context. Source, Sandbox and approved scope stay unchanged. */
 export function createCodingContexts(database: ReturnType<typeof createDatabase>) {

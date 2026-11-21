@@ -21,7 +21,7 @@ import {
   type DeveloperIDEState,
   developerIDEIdentity,
 } from "../../../../packages/workspace-domain/src/developer-ide";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 
@@ -85,7 +85,7 @@ export function createDeveloperIDEController(
         userID: developerIde.userId,
         resourceID: developerIde.resourceId,
         epoch: expression<string>`${developerIde.serviceEpoch}::text`,
-        state: expression<DeveloperIDEState>`${developerIde.state}`,
+        state: developerIde.state,
         image: developerIde.image,
         namespaceUID: developerIde.namespaceUid,
         podUID: developerIde.podUid,
@@ -343,8 +343,6 @@ export function createDeveloperIDEController(
             .update(developerIde)
             .set({
               serviceEpoch: expression`${developerIde.serviceEpoch}+1`,
-              resourceId: expression`CASE WHEN ${developerIde.resourceId}=${developerIde.userId} THEN gen_random_uuid() ELSE ${developerIde.resourceId} END`,
-              namespaceUid: expression`CASE WHEN ${developerIde.resourceId}=${developerIde.userId} THEN NULL ELSE ${developerIde.namespaceUid} END`,
               state: "create-intended",
               image,
               podUid: null,

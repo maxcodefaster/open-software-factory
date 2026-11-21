@@ -5,12 +5,12 @@ import { type createDatabase, drizzleTransaction } from "../../../../packages/db
 import type { ProjectRole } from "../../../../packages/project-domain/src/access";
 import { createAccountCommands } from "./accounts";
 import {
-  createAccessController,
   projectAuthorityIn,
   projectDevelopmentAuthorityIn,
   requireActiveAccountIn,
   requireSystemManagerIn,
-} from "./controller";
+} from "./authority";
+import { createAccessController } from "./controller";
 import { createMembershipCommands } from "./membership";
 
 const actorID = "01994a7d-0000-7000-8000-000000000010";

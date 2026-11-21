@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Locator, type Page } from "@playwright/test";
+import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { documentBlocks } from "../../apps/factory/src/document-model";
 import {
   knowledgeGenerationSchema,
   knowledgeSearchSchema,
   openRepositoryDocumentSchema,
   repositoryDocumentsSchema,
-  ticketDetailSchema,
-} from "../../apps/factory/src/api-contracts";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { documentBlocks } from "../../apps/factory/src/document-model";
+} from "../../apps/factory/src/knowledge/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
@@ -21,8 +21,8 @@ import {
   mockFactoryFunctions,
   requestFunction,
 } from "../fixtures/server-functions";
-import { fixtureValue } from "../fixtures/value";
 import { queuedTicketImplementation } from "../fixtures/ticket-requirements";
+import { fixtureValue } from "../fixtures/value";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 

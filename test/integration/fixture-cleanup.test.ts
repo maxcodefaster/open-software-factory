@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { projectAuthorityIn } from "../../apps/factory/src/access/controller";
+import { projectAuthorityIn } from "../../apps/factory/src/access/authority";
 import type { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";

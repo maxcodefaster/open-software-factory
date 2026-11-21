@@ -8,7 +8,7 @@ import {
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createWriterService } from "../../apps/factory/src/access/writer-service";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { writerViewSchema } from "../../apps/factory/src/api-contracts";
+import { writerViewSchema } from "../../apps/factory/src/agent/contracts";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";

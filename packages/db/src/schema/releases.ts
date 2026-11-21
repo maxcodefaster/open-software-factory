@@ -29,7 +29,19 @@ export const projectRelease = factorySchema.table(
     workflow: text("workflow"),
     contract: jsonb("contract"),
     notes: text("notes").notNull(),
-    state: text("state").default("pending").notNull(),
+    state: text("state")
+      .$type<
+        | "pending"
+        | "dispatching"
+        | "running"
+        | "checking"
+        | "publishing"
+        | "published"
+        | "failed"
+        | "uncertain"
+      >()
+      .default("pending")
+      .notNull(),
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     publishedAt: timestamp("published_at", { withTimezone: true }),
@@ -44,7 +56,7 @@ export const projectRelease = factorySchema.table(
     uniqueIndex("project_release_one_active")
       .using("btree", table.projectId.asc().nullsLast())
       .where(
-        sql`((state = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'uncertain'::text])) AND (ended_at IS NULL))`,
+        sql`((${table.state} = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'uncertain'::text])) AND (${table.endedAt} IS NULL))`,
       ),
     foreignKey({
       columns: [table.createdBy],
@@ -58,19 +70,19 @@ export const projectRelease = factorySchema.table(
     }),
     unique("project_release_project_id_version_key").on(table.projectId, table.version),
     unique("project_release_command_id_key").on(table.commandId),
-    check("project_release_artifacts_check", sql`jsonb_typeof(artifacts) = 'array'::text`),
-    check("project_release_commit_sha_check", sql`commit_sha ~ '^[a-f0-9]{40}$'::text`),
+    check("project_release_artifacts_check", sql`jsonb_typeof(${table.artifacts}) = 'array'::text`),
+    check("project_release_commit_sha_check", sql`${table.commitSha} ~ '^[a-f0-9]{40}$'::text`),
     check(
       "project_release_contract_check",
-      sql`(contract IS NULL) OR (jsonb_typeof(contract) = 'object'::text)`,
+      sql`(${table.contract} IS NULL) OR (jsonb_typeof(${table.contract}) = 'object'::text)`,
     ),
     check(
       "project_release_state_check",
-      sql`state = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'published'::text, 'failed'::text, 'uncertain'::text])`,
+      sql`${table.state} = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'published'::text, 'failed'::text, 'uncertain'::text])`,
     ),
     check(
       "project_release_version_check",
-      sql`version ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'::text`,
+      sql`${table.version} ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'::text`,
     ),
   ],
 );
@@ -106,8 +118,11 @@ export const releaseAttempt = factorySchema.table(
     }),
     unique("release_attempt_release_id_ordinal_key").on(table.releaseId, table.ordinal),
     unique("release_attempt_command_id_key").on(table.commandId),
-    check("release_attempt_check", sql`(run_id IS NULL) OR (dispatch_intended_at IS NOT NULL)`),
-    check("release_attempt_ordinal_check", sql`ordinal > 0`),
+    check(
+      "release_attempt_check",
+      sql`(${table.runId} IS NULL) OR (${table.dispatchIntendedAt} IS NOT NULL)`,
+    ),
+    check("release_attempt_ordinal_check", sql`${table.ordinal} > 0`),
   ],
 );
 
@@ -117,19 +132,21 @@ export const repositoryMirrorCommand = factorySchema.table(
     id: uuid("id").primaryKey().notNull(),
     projectId: uuid("project_id").notNull(),
     createdBy: uuid("created_by").notNull(),
-    action: text("action").notNull(),
+    action: text("action").$type<"create" | "remove" | "sync">().notNull(),
     targetUrl: text("target_url"),
     remoteName: text("remote_name"),
     fingerprint: text("fingerprint").notNull(),
     beforeState: jsonb("before_state").notNull(),
-    state: text("state").notNull(),
+    state: text("state")
+      .$type<"executing" | "completed" | "failed" | "uncertain" | "acknowledged">()
+      .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
   },
   (table): PgTableExtraConfigValue[] => [
     index("repository_mirror_unconfirmed")
       .using("btree", table.projectId.asc().nullsLast())
-      .where(sql`(state = ANY (ARRAY['executing'::text, 'uncertain'::text]))`),
+      .where(sql`(${table.state} = ANY (ARRAY['executing'::text, 'uncertain'::text]))`),
     foreignKey({
       columns: [table.createdBy],
       foreignColumns: [authUser.id],
@@ -142,11 +159,11 @@ export const repositoryMirrorCommand = factorySchema.table(
     }),
     check(
       "repository_mirror_command_action_check",
-      sql`action = ANY (ARRAY['create'::text, 'remove'::text, 'sync'::text])`,
+      sql`${table.action} = ANY (ARRAY['create'::text, 'remove'::text, 'sync'::text])`,
     ),
     check(
       "repository_mirror_command_state_check",
-      sql`state = ANY (ARRAY['executing'::text, 'completed'::text, 'failed'::text, 'uncertain'::text, 'acknowledged'::text])`,
+      sql`${table.state} = ANY (ARRAY['executing'::text, 'completed'::text, 'failed'::text, 'uncertain'::text, 'acknowledged'::text])`,
     ),
   ],
 );
@@ -158,8 +175,10 @@ export const releaseAccess = factorySchema.table(
     projectId: uuid("project_id").notNull(),
     commandId: uuid("command_id").notNull(),
     name: text("name").notNull(),
-    scope: text("scope").notNull(),
-    state: text("state").notNull(),
+    scope: text("scope").$type<"git" | "packages" | "publish">().notNull(),
+    state: text("state")
+      .$type<"pending" | "active" | "revoking" | "revoked" | "uncertain">()
+      .notNull(),
     username: text("username").notNull(),
     secretKey: text("secret_key").notNull(),
     createdBy: uuid("created_by").notNull(),
@@ -173,7 +192,7 @@ export const releaseAccess = factorySchema.table(
     uniqueIndex("release_access_publish_attempt")
       .using("btree", table.releaseId.asc().nullsLast())
       .where(
-        sql`((scope = 'publish'::text) AND (state = ANY (ARRAY['pending'::text, 'active'::text, 'uncertain'::text])))`,
+        sql`((${table.scope} = 'publish'::text) AND (${table.state} = ANY (ARRAY['pending'::text, 'active'::text, 'uncertain'::text])))`,
       ),
     foreignKey({
       columns: [table.createdBy],
@@ -199,11 +218,11 @@ export const releaseAccess = factorySchema.table(
     unique("release_access_username_key").on(table.username),
     check(
       "release_access_scope_check",
-      sql`scope = ANY (ARRAY['git'::text, 'packages'::text, 'publish'::text])`,
+      sql`${table.scope} = ANY (ARRAY['git'::text, 'packages'::text, 'publish'::text])`,
     ),
     check(
       "release_access_state_check",
-      sql`state = ANY (ARRAY['pending'::text, 'active'::text, 'revoking'::text, 'revoked'::text, 'uncertain'::text])`,
+      sql`${table.state} = ANY (ARRAY['pending'::text, 'active'::text, 'revoking'::text, 'revoked'::text, 'uncertain'::text])`,
     ),
   ],
 );

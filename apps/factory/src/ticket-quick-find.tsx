@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
-import type { Ticket } from "./api-contracts";
+import { type Ticket } from "./change/contracts";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
 import { ticketFindSummary } from "./ticket-find-summary";

@@ -788,7 +788,8 @@ then verify the actual snapshot UUID/generation, ActorUID, ActorTemplateUID,
 sandbox runtime/version and **fidelity ROOTFS (2, never VOLUMES=1)**, with
 `durableSnapshot.state=COMPLETED`. `SUSPENDED`, a successful RPC or a local snapshot
 alone is insufficient, including an already-suspended Actor returned by a sync call.
-This profile does not implement that later lifecycle adapter.
+Factory's runtime adapter owns those lifecycle calls; this operator profile pins the native
+binaries and installation configuration.
 
 ## Prepare and build
 

@@ -1,4 +1,4 @@
-import type { createOpenCodeClient } from "./opencode-client";
+import type { createOpenCodeClient } from "./opencode-adapter";
 
 type Client = ReturnType<typeof createOpenCodeClient>;
 type Source = {

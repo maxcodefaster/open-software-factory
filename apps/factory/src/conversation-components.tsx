@@ -5,7 +5,7 @@ import {
   interviewAnswerInput,
   interviewQuestionInput,
 } from "../../../packages/conversation-domain/src/conversation";
-import type { AgentMessage, ConversationEntry } from "./api-contracts";
+import { type AgentMessage } from "./agent/contracts";
 import { composerKeyDown, resizeComposer } from "./assistant-interaction";
 import { attachmentText, readAttachmentContent } from "./attachments/composer";
 import { TextareaAttachments } from "./attachments/ui";
@@ -18,6 +18,7 @@ import {
 import { Icon } from "./icon";
 import { interviewOptions } from "./interview-options";
 import { markdownHTML } from "./markdown";
+import { type ConversationEntry } from "./project-agent/contracts";
 import { CopyButton } from "./ui/feedback";
 
 function MessageCopy(props: { text: string; scope: string; user?: boolean }) {

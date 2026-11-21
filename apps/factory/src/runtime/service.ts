@@ -1,19 +1,14 @@
 import { eq } from "drizzle-orm";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { developmentWorkspace, runtimeAttempt } from "../../../../packages/db/src/schema";
+import { type createAccessController } from "../access/api";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import type { createAccessController } from "../access/controller";
-import type { createProjectAppPreviews } from "../access/previews";
+import { type createProjectAppPreviews } from "../access/preview-api";
 import { workspaceAuthorityIn } from "../access/workspace";
-import {
-  appPreviewsSchema,
-  attemptsResponseSchema,
-  changeSchema,
-  changesResponseSchema,
-  runtimeAttemptSchema,
-} from "../api-contracts";
-import type { createChangeController } from "../change/controller";
+import { type createChangeController } from "../change/api";
+import { changeSchema, changesResponseSchema } from "../change/contracts";
 import { CommandError } from "../command-error";
+import { appPreviewsSchema, attemptsResponseSchema, runtimeAttemptSchema } from "./contracts";
 import type { createRuntimeController } from "./controller";
 
 export function createRuntimeService(options: {

@@ -38,55 +38,54 @@ import {
   ticketConversation,
 } from "../../../../packages/db/src/schema";
 import { technicalPlanningBaseInput } from "../../../../packages/requirement-domain/src/technical-design";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
+import { type AgentTurnRecord } from "../agent/turn-record";
 import {
-  createAccessController,
-  projectAuthorityIn,
-  projectDevelopmentAuthorityIn,
-} from "../access/controller";
-import { readTurnObservation } from "../agent/turn-observation";
-import { type AgentTurnRecord, createAgentTurnStore } from "../agent/turn-store";
-import { createUsageObservations } from "../agent/usage-observations";
-import { attachmentContextIn, readableAttachmentIn } from "../attachments/store";
-import { createAttachmentTools } from "../attachments/tools";
+  createAgentTurnStore,
+  createUsageObservations,
+  readTurnObservation,
+} from "../agent/turns-api";
+import { attachmentContextIn, readableAttachmentIn } from "../attachments/api";
+import { createAttachmentTools } from "../attachments/tools-api";
 import { CommandError } from "../command-error";
-import {
-  contextCommandIn,
-  contextsIn,
-  contextTranscriptIn,
-  insertContextIn,
-} from "../conversations/contexts";
 import {
   appendConversationEntry,
   type Citation,
   type ConversationEntry,
   type ConversationRow,
+  contextCommandIn,
+  contextsIn,
+  contextTranscriptIn,
   ensureConversationIn,
   findConversation,
+  insertContextIn,
   lockConversation,
   readConversation,
   readConversationEntries,
-} from "../conversations/store";
+} from "../conversations/api";
 import { reportFailure } from "../failure-log";
-import { codeReadInput } from "../knowledge/code-read";
-import type { createKnowledgeController } from "../knowledge/controller";
-import { type LearningSourceArtifact, retainLearningArtifactsIn } from "../learning/artifacts";
-import type { createMCPConnections } from "../mcp/connections";
-import { mcpDigest } from "../mcp/controller";
-import { connectFactoryMCP } from "../mcp/factory";
-import { mcpSourceTools } from "../mcp/sources";
-import { createModelConnections } from "../models/connections";
-import { createModelSettingsController } from "../models/controller";
+import { type createKnowledgeController } from "../knowledge/api";
+import { codeReadInput } from "../knowledge/contracts";
+import { type LearningSourceArtifact, retainLearningArtifactsIn } from "../learning/api";
+import { connectFactoryMCP } from "../mcp/api";
+import { type createMCPConnections, mcpDigest } from "../mcp/library-api";
+import { mcpSourceTools } from "../mcp/sources-api";
+import {
+  createModelConnections,
+  createModelSettingsController,
+  createOpenBaoModelSecrets,
+} from "../models/api";
 import {
   knownModelRejection,
   ModelExecutionBoundError,
   modelExecutionBound,
 } from "../models/execution-policy";
-import type { ResolvedModelConnection } from "../models/native";
+import { type ResolvedModelConnection } from "../models/inference-contracts";
 import { installationPlanningConnection } from "../models/resolver";
-import { createOpenBaoModelSecrets } from "../models/secrets";
-import { createSkillController } from "../skills/controller";
+import { createSkillController } from "../skills/api";
 import { renderArchitectureDiagrams } from "../technical-design/diagrams";
-import { createUsageJournal } from "../usage/journal";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { generateProjectResponse } from "./adapter";
 import { ProjectContextLimitError } from "./context";
@@ -505,7 +504,7 @@ export function createProjectAgentController(
         const found = questions[0];
         if (!found) throw new CommandError("conflict", "Interview question not found");
         if (found.payload["visibility"] === "developer") {
-          const { projectDevelopmentAuthorityIn } = await import("../access/controller");
+          const { projectDevelopmentAuthorityIn } = await import("../access/authority");
           await projectDevelopmentAuthorityIn(transaction, command.createdBy, command.projectId);
         }
         if (found.answered)

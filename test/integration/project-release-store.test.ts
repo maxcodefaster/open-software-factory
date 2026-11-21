@@ -406,7 +406,7 @@ test("release history keeps its project, row limit, timestamp strings and last-p
       commitSha: "a".repeat(40),
       notes: `Retained release ${ordinal}`,
       createdBy: f.userID,
-      state: ordinal === 105 ? "failed" : "published",
+      state: ordinal === 105 ? ("failed" as const) : ("published" as const),
       createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, ordinal)),
       publishedAt:
         ordinal >= 103 && ordinal < 105

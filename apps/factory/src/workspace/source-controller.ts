@@ -21,11 +21,11 @@ import {
   personalWorkspaceIdentity,
   ticketWorkspaceIdentity,
 } from "../../../../packages/workspace-domain/src/workspace";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
-import type { RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub } from "../runtime/transport-api";
 import { boundedSourceBody } from "./source-body";
 import { initialSourceRoleIn, type SourceRoleFence } from "./source-role-fence";
 import type { createSubstrateSources } from "./substrate-source";

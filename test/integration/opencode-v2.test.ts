@@ -8,7 +8,7 @@ import {
   ensureOpenCodeMessageBoundary,
   interruptOpenCodeSession,
   promptRecordedOpenCodeInput,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 

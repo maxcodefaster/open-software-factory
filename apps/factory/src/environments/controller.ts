@@ -21,7 +21,7 @@ import {
   type ProjectEnvironment,
   replaceEnvironment,
 } from "../../../../packages/project-domain/src/environment";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { type EnvironmentSecrets, emptyEnvironment, type StoredEnvironment } from "./openbao";
 

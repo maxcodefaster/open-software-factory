@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import { expect as visible } from "@playwright/test";
-import { attemptsResponseSchema } from "../../apps/factory/src/api-contracts";
+import { attemptsResponseSchema } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { releaseInstallation } from "../fixtures/release-installation";
 import { callFactoryFunction, mockFactoryFunctions } from "../fixtures/server-functions";

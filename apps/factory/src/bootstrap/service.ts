@@ -1,10 +1,7 @@
 import { createHmac } from "node:crypto";
-import {
-  type Bootstrap,
-  bootstrapSchema,
-  sessionSchema,
-  type UIPreference,
-} from "../api-contracts";
+import { sessionSchema } from "../access/contracts";
+import { type UIPreference } from "../preferences/contracts";
+import { type Bootstrap, bootstrapSchema } from "./contracts";
 
 export function createBootstrapService(options: {
   policy(): Bootstrap["identity"];

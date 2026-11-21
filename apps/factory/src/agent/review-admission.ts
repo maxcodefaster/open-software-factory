@@ -24,9 +24,9 @@ import {
   reviewFeedback,
   reviewFeedbackMessage,
 } from "../../../../packages/db/src/schema";
+import { projectAuthorityIn } from "../access/authority";
 import { claimAgentWriterIn, lockChangeWriterIn } from "../access/change-writer";
-import { projectAuthorityIn } from "../access/controller";
-import { freezeFeedbackAttachmentsIn } from "../attachments/store";
+import { freezeFeedbackAttachmentsIn } from "../attachments/api";
 import { CommandError } from "../command-error";
 import { createAgentTurnStore } from "./turn-store";
 

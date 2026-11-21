@@ -17,12 +17,13 @@ import {
   setupInspectionOutput,
   setupInspectionView,
 } from "../../../../packages/project-domain/src/setup";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { readableCodePath } from "../knowledge/code-read";
 import { factoryForgeSource } from "../knowledge/forge-source";
-import type { ResolvedModelConnection } from "../models/native";
-import { createUsageJournal } from "../usage/journal";
+import { type ResolvedModelConnection } from "../models/inference-contracts";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import {
   configurationPath,

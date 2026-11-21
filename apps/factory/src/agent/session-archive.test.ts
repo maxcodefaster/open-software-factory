@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import type { SessionTransferData } from "@opencode/client";
 import { memoryPrivateObjects } from "../../../../test/fixtures/private-objects";
 import upstream from "../../../../upstream.json";
-import { agentViewSchema } from "../api-contracts";
-import { createOpenCodeClient } from "./opencode-client";
+import { agentViewSchema } from "./contracts";
+import { createOpenCodeClient } from "./opencode-adapter";
 import {
   importNativeSessionArchive,
   readNativeSessionArchive,

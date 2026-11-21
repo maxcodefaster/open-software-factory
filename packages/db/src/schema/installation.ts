@@ -16,8 +16,8 @@ export const installationMaintenance = factorySchema.table(
     enabled: boolean("enabled").default(false).notNull(),
     requestedAt: timestamp("requested_at", { withTimezone: true }),
   },
-  (_table): PgTableExtraConfigValue[] => [
-    check("installation_maintenance_singleton_check", sql`(singleton)`),
+  (table): PgTableExtraConfigValue[] => [
+    check("installation_maintenance_singleton_check", sql`(${table.singleton})`),
   ],
 );
 
@@ -28,8 +28,11 @@ export const schemaMigration = factorySchema.table(
     appliedAt: timestamp("applied_at", { withTimezone: true }).defaultNow().notNull(),
     sourceDigest: text("source_digest").notNull(),
   },
-  (_table): PgTableExtraConfigValue[] => [
-    check("schema_migration_version_check", sql`version = 1`),
-    check("schema_migration_source_digest_check", sql`source_digest ~ '^[a-f0-9]{64}$'::text`),
+  (table): PgTableExtraConfigValue[] => [
+    check("schema_migration_version_check", sql`${table.version} = 1`),
+    check(
+      "schema_migration_source_digest_check",
+      sql`${table.sourceDigest} ~ '^[a-f0-9]{64}$'::text`,
+    ),
   ],
 );

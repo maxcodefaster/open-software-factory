@@ -125,7 +125,7 @@ test("input Stop builds from its own frozen dependency scope and the original he
   expect(helper?.match(/^COPY .+$/gm)).toEqual([
     "COPY deploy/input-stop/package.json deploy/input-stop/bun.lock ./",
     "COPY upstream.json ./upstream.json",
-    "COPY apps/factory/src/agent/opencode-client.ts apps/factory/src/agent/input-stop-worker.ts ./apps/factory/src/agent/",
+    "COPY apps/factory/src/agent/opencode-adapter.ts apps/factory/src/agent/input-stop-worker.ts ./apps/factory/src/agent/",
     "COPY scripts/factory/build-input-stop.ts ./scripts/factory/build-input-stop.ts",
   ]);
   expect(helper).toContain("RUN bun install --frozen-lockfile --ignore-scripts --production");
@@ -190,7 +190,7 @@ test("input Stop locks only its SDK and validation closure at approved versions 
   const scanner = new Bun.Transpiler({ loader: "ts" });
   for (const path of [
     "apps/factory/src/agent/input-stop-worker.ts",
-    "apps/factory/src/agent/opencode-client.ts",
+    "apps/factory/src/agent/opencode-adapter.ts",
   ])
     for (const imported of scanner.scanImports(await readFile(path, "utf8")))
       if (!imported.path.startsWith(".") && !imported.path.startsWith("node:"))

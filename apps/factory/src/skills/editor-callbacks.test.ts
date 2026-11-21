@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import type { SkillScope } from "../../../../packages/conversation-domain/src/skill-library";
-import { APIRequestError } from "../api-client";
 import * as skills from "../../../../packages/conversation-domain/src/skills";
 import { editorCallbacks, editorSolid as solid } from "../../../../test/fixtures/editor-callbacks";
+import { APIRequestError } from "../api-client";
 
 const content: skills.SkillContent = {
   key: "test-skill",
@@ -40,6 +40,7 @@ function setup(
       "../command-error": { plainErrorMessage: (message: string) => message },
       "../api-client": { APIRequestError },
     },
+    stubs: ["diff"],
   });
   return solid.createRoot((dispose) => ({
     dispose,

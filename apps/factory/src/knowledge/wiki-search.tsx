@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, Show, untrack } from "solid-js";
-import type { KnowledgeSearchResult } from "../api-contracts";
 import { bindDialogKeyboard } from "../dialog-keyboard";
 import { Icon } from "../icon";
+import { type KnowledgeSearchResult } from "./contracts";
 
 export function WikiSearch(props: {
   query: string;

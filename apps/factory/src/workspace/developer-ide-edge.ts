@@ -1,17 +1,20 @@
 import type { ServerWebSocket } from "bun";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { boundedSourceBody } from "./source-body";
 import { CommandError } from "../command-error";
 import { developerIDEOrigin } from "../developer-ide-origin";
 import { json } from "../http";
 import { factoryRequestURL } from "../request-origin";
-import { scopeRuntimeEmbedding } from "../runtime/embedding";
-import { scopeTheiaConnectionCookie, theiaConnectionToken } from "../runtime/hub";
+import {
+  scopeRuntimeEmbedding,
+  scopeTheiaConnectionCookie,
+  theiaConnectionToken,
+} from "../runtime/transport-api";
+import type { createWorkspaceCollaboration } from "./collaboration";
 import { createDeveloperIDEAccess, developerIDEPath } from "./developer-ide-access";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import type { createDeveloperIDERuntime } from "./developer-ide-runtime";
+import { boundedSourceBody } from "./source-body";
 import type { createWorkspaceSourceController } from "./source-controller";
-import type { createWorkspaceCollaboration } from "./collaboration";
 
 export interface DeveloperEditorSocketData {
   readonly kind: "developer-editor";

@@ -2,7 +2,7 @@ import type { SessionTransferData } from "@opencode/client";
 import { z } from "zod";
 import upstream from "../../../../upstream.json";
 import { objectDigest, type PrivateObjects } from "../storage/objects";
-import type { createOpenCodeClient } from "./opencode-client";
+import type { createOpenCodeClient } from "./opencode-adapter";
 
 type Client = ReturnType<typeof createOpenCodeClient>;
 const maximumBytes = 125 * 1024 ** 2;

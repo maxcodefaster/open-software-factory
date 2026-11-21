@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import { objectDigest, type PrivateObjects } from "../../apps/factory/src/storage/objects";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";

@@ -56,12 +56,12 @@ import {
   ForgeConflictError,
 } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import type { RuntimeAttemptView } from "../runtime/types";
-import { technicalPlanningOutstandingIn } from "../technical-design/store";
-import { codingBudgetIn } from "../usage/policy";
+import { technicalPlanningOutstandingIn } from "../technical-design/api";
+import { codingBudgetIn } from "../usage/api";
 import { requireDeliveredPrerequisites } from "./dependencies";
 import type { ChangeView } from "./types";
 

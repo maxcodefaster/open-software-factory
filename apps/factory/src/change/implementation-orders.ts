@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, isNotNull, notExists, or, sql } from "drizzle-or
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { implementationOrder, ticket } from "../../../../packages/db/src/schema";
-import type { createAgentController } from "../agent/controller";
+import { type createAgentController } from "../agent/api";
 import { CommandError } from "../command-error";
 import type { createChangeController } from "./controller";
 

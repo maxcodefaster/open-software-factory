@@ -1,18 +1,18 @@
 import { createEffect, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import { withoutRepeatedTitle } from "../../../packages/knowledge-domain/src/document-merge";
 import type { knowledgeIcons } from "../../../packages/knowledge-domain/src/page-tree";
-import type {
-  KnowledgeGeneration,
-  KnowledgePage,
-  KnowledgePageOutline,
-  KnowledgeRevision,
-  KnowledgeSave,
-  KnowledgeSearchResult,
-  OpenRepositoryDocument,
-  RepositoryDocument,
-} from "./api-contracts";
 import { plainErrorMessage } from "./command-error";
 import { Icon } from "./icon";
+import {
+  type KnowledgeGeneration,
+  type KnowledgePage,
+  type KnowledgePageOutline,
+  type KnowledgeRevision,
+  type KnowledgeSave,
+  type KnowledgeSearchResult,
+  type OpenRepositoryDocument,
+  type RepositoryDocument,
+} from "./knowledge/contracts";
 import {
   acknowledgeDraft,
   draftDirty,

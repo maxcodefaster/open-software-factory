@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { ModelExecutionBoundError } from "../models/execution-policy";
 import { generateWiki } from "./generation-agent";
 import {
@@ -111,7 +111,7 @@ test.each([
   [502, "provider could not complete"],
   [503, "provider could not complete"],
 ] as const)(
-  "native Wiki failure preserves safe HTTP %s classification without replay",
+  "native Wiki failure preserves safe HTTP %s classification and logs without replay",
   async (status, expected) => {
     let requests = 0;
     let publications = 0;
@@ -125,6 +125,10 @@ test.each([
           { status },
         );
       },
+    });
+    const logs: unknown[][] = [];
+    const errorLog = spyOn(console, "error").mockImplementation((...args) => {
+      logs.push(args);
     });
     try {
       const failure = await generateWiki({
@@ -154,7 +158,10 @@ test.each([
       expect(diagnostic).not.toContain("127.0.0.1");
       expect(requests).toBe(1);
       expect(publications).toBe(0);
+      expect(JSON.stringify(logs)).not.toContain("private-provider-prose");
+      expect(JSON.stringify(logs)).not.toContain("private-key");
     } finally {
+      errorLog.mockRestore();
       await server.stop(true);
     }
   },

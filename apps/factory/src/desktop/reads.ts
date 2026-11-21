@@ -1,17 +1,14 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
 import { createEffect, createMemo, onCleanup, untrack } from "solid-js";
+import { type AgentView } from "../agent/contracts";
 import { observeAgentActivity } from "../agent-activity-stream";
-import type {
-  AgentView,
-  AppPreview,
-  Change,
-  ConversationView,
-  DeliveryView,
-  RuntimeAttempt,
-} from "../api-contracts";
+import { type Change } from "../change/contracts";
 import { plainErrorMessage } from "../command-error";
+import { type DeliveryView } from "../delivery/contracts";
 import type { createKnowledgeState } from "../knowledge/state";
 import { unavailableLink } from "../navigation/desktop";
+import { type ConversationView } from "../project-agent/contracts";
+import { type AppPreview, type RuntimeAttempt } from "../runtime/contracts";
 import { getAgentView } from "../server-functions/agent";
 import { getConversation } from "../server-functions/conversations";
 import { getDelivery } from "../server-functions/delivery";

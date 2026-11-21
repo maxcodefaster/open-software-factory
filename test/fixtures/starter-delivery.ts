@@ -1,13 +1,13 @@
 import { expect } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { z } from "zod";
-import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type { createDatabase } from "../../packages/db/src/client";
 import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually } from "./factory-process";
 import { callFactoryFunction } from "./server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { saveTicketRequirements } from "./ticket-requirements";
 
 export async function starterDelivery(input: {

@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
 import {
   appPreviewsSchema,
   attemptsResponseSchema,
-  changesResponseSchema,
-  conversationViewSchema,
   runtimeAttemptSchema,
-} from "../../apps/factory/src/api-contracts";
-import { CommandError } from "../../apps/factory/src/command-error";
+} from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { environmentSettingsView } from "../../packages/project-domain/src/environment";

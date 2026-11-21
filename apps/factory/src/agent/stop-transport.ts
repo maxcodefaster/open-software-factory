@@ -1,6 +1,6 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
-import type { RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub } from "../runtime/transport-api";
 
 // Recovery may confirm Stop while its original dispatcher is still awaiting a
 // connection/body. Serialize the actual send with that exact pending Stop.

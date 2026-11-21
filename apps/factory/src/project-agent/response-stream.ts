@@ -1,6 +1,5 @@
-import type { ConversationStreamEvent } from "../api-contracts";
-import { conversationViewSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
+import { type ConversationStreamEvent, conversationViewSchema } from "./contracts";
 import type { ProjectResponseObserver } from "./controller";
 
 // Disconnecting the browser detaches this observer, not the admitted paid work.

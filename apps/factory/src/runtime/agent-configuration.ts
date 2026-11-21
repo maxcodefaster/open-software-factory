@@ -5,7 +5,7 @@ import {
   runtimeBuildBrowserToken,
   runtimeModelToken,
 } from "../../../../packages/runtime-domain/src/identity";
-import { modelEnvironment } from "../models/controller";
+import { modelEnvironment } from "../models/api";
 import { substrateFactoryURL } from "./endpoints";
 
 type Database = ReturnType<typeof createDatabase>;

@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import { z } from "zod";
 import { attachmentIDs } from "../../../packages/conversation-domain/src/attachments";
 import { useAttachmentProject } from "./attachments/ui";
+import type { PersonalTicketDraft } from "./change/contracts";
 import { type DocumentEditor, type DocumentFormat, documentBlocks } from "./document-model";
 import { filterDocumentBlocks } from "./document-slash";
 import { editorPopoverPosition } from "./editor-popover-position";
@@ -9,27 +9,6 @@ import { RichDocumentSurface } from "./rich-document-surface";
 import { retainAttachmentDraft } from "./server-functions/attachments";
 import { serverCall } from "./server-functions/result";
 import { TicketActionBar } from "./ticket-action-bar";
-
-export const personalTicketDraftSchema = z.object({
-  id: z.uuid(),
-  title: z.string().max(200),
-  description: z.string().max(10_000),
-  stage: z.enum(["inbox", "ready"]).optional(),
-  attachmentSequence: z.number().int().nonnegative().optional(),
-});
-export type PersonalTicketDraft = z.infer<typeof personalTicketDraftSchema>;
-
-export function readPersonalTicketDraft(key: string): PersonalTicketDraft {
-  try {
-    const parsed = personalTicketDraftSchema.safeParse(
-      JSON.parse(localStorage.getItem(key) ?? "null"),
-    );
-    if (parsed.success) return parsed.data;
-  } catch {
-    /* A new local draft remains usable without browser storage. */
-  }
-  return { id: crypto.randomUUID(), title: "", description: "" };
-}
 
 export function TicketDraftWorkspace(props: {
   storageKey: string;

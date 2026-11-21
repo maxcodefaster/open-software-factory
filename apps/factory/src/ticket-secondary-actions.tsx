@@ -1,9 +1,9 @@
 import { type JSX, Portal } from "@solidjs/web";
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type { Epic } from "./api-contracts";
 import { plainFailureMessage } from "./command-error";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
+import { type Epic } from "./projects/contracts";
 import type { TicketHeaderAction } from "./ticket-action-bar";
 import type { TicketDependenciesProps } from "./ticket-dependencies";
 

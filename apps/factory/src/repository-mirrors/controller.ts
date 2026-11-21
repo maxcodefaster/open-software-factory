@@ -7,7 +7,8 @@ import {
   project as projectTable,
   repositoryMirrorCommand,
 } from "../../../../packages/db/src/schema";
-import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
+import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
+import { type createForgejoClient } from "../../../../packages/forge/src/forge";
 import { ForgeMirrorWriteError } from "../../../../packages/forge/src/mirrors";
 import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import {
@@ -18,7 +19,8 @@ import {
   repositoryMirrorRemove,
 } from "../../../../packages/project-domain/src/repository-mirror";
 import { projectImportURL } from "../../../../packages/project-domain/src/setup";
-import { createAccessController, requireActiveAccountIn } from "../access/controller";
+import { createAccessController } from "../access/api";
+import { requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 type Database = ReturnType<typeof createDatabase>;

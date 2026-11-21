@@ -29,7 +29,7 @@ import {
   appendTicketAuthoringIn,
   insertInitialTicketIn,
 } from "../../../../packages/ticket-authoring/src/authoring";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 const proposedDocument = z.object({
@@ -276,7 +276,7 @@ export function createTicketDocumentController(
             );
           const payload = entry?.payload;
           if (payload?.["visibility"] === "developer") {
-            const { projectDevelopmentAuthorityIn } = await import("../access/controller");
+            const { projectDevelopmentAuthorityIn } = await import("../access/authority");
             await projectDevelopmentAuthorityIn(sql, userID, ticket.projectID);
           }
           if (payload?.["fullPlanning"] === true) {

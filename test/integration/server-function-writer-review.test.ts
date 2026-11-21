@@ -1,15 +1,15 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createWriterService } from "../../apps/factory/src/access/writer-service";
-import { writerViewSchema } from "../../apps/factory/src/api-contracts";
+import { writerViewSchema } from "../../apps/factory/src/agent/contracts";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createReviewService } from "../../apps/factory/src/review/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
 import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
+import type { DatabaseTransaction } from "../../packages/db/src/client";
 import {
   decodeFactoryResponse as decodeResponse,
   factoryFunctionRequest,

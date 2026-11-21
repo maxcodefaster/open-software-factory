@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
+import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-adapter";
 import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage } from "../../apps/factory/src/usage/opencode";

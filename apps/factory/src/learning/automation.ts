@@ -50,14 +50,16 @@ import {
 } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
 import { knownModelRejection } from "../models/execution-policy";
-import type { ResolvedModelConnection } from "../models/native";
-import { createUsageJournal } from "../usage/journal";
+import { type ResolvedModelConnection } from "../models/inference-contracts";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
-import { reviewWork, workReviewInstructions } from "./judge";
+import { reviewWork } from "./judge";
+import { workReviewInstructions } from "./judge-contract";
 import { relatedProposalEdit } from "./prior-proposals";
 import { learningRejectionReason } from "./rejection-reason";
-import { replayInstructions, replayPlanning } from "./replay";
+import { replayPlanning } from "./replay";
+import { replayInstructions } from "./replay-contract";
 import { createLearningTargets, learningActivation, learningEditDigest } from "./targets";
 
 type Database = ReturnType<typeof createDatabase>;

@@ -1,80 +1,22 @@
-import { spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { z } from "zod";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { createDatabase } from "../../packages/db/src/client";
 import { observeBrowserErrors } from "../fixtures/browser-errors";
-import { test as browserTest } from "../fixtures/browser-test";
+import { test } from "../fixtures/browser-host-test";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { fixtureValue } from "../fixtures/value";
 
-const skillHostSchema = z.object({
-  fixtureBase: z.url(),
-  id: z.uuid(),
-  databaseURL: z.string(),
-});
-const test = browserTest.extend<{ skillHost: z.infer<typeof skillHostSchema> }>({
-  skillHost: [
-    async ({ browser }, use) => {
-      expect(browser.isConnected()).toBe(true);
-      const host = spawn(
-        "mise",
-        ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
-        {
-          cwd: resolve(import.meta.dirname, "../.."),
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-      const ready = Promise.withResolvers<z.infer<typeof skillHostSchema>>();
-      const stopped = new Promise<number | null>((resolve) => {
-        host.once("exit", resolve);
-        host.once("error", () => resolve(null));
-      });
-      host.once("error", ready.reject);
-      host.once("exit", (code) =>
-        ready.reject(new Error(`Owned Skill browser host exited before readiness: ${code}`)),
-      );
-      // Drain diagnostics without publishing raw provider/authentication data.
-      host.stderr.resume();
-      const lines = createInterface({ input: host.stdout });
-      lines.on("line", (line) => {
-        if (line.startsWith("Owned ")) console.info(line);
-        if (line.startsWith('{"fixtureBase"')) {
-          try {
-            ready.resolve(skillHostSchema.parse(JSON.parse(line)));
-          } catch (cause) {
-            ready.reject(cause);
-          }
-        }
-      });
-      try {
-        const fixture = await ready.promise;
-        console.info(`Owned Skill browser host: ${fixture.id}`);
-        await use(fixture);
-      } finally {
-        // This fixture tears down independently of the test's browser contexts,
-        // including when their cleanup rejects after a test timeout.
-        if (host.exitCode === null && host.signalCode === null) host.kill("SIGTERM");
-        const code = await stopped;
-        lines.close();
-        expect(code, "Owned Skill browser host must finish its resource cleanup").toBe(0);
-      }
-    },
-    { timeout: 60_000 },
-  ],
-});
 test.use({ actionTimeout: 30_000 });
 
 test("skill gallery preserves discovery, private drafts, scoped choices, imports and reviewed sharing", async ({
   page,
   browser,
-  skillHost: fixture,
+  browserHost: fixture,
 }) => {
   test.setTimeout(240_000);
   const oldURL = process.env["DATABASE_URL"];

@@ -1,8 +1,8 @@
 import { Agent } from "@mastra/core/agent";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../models/native";
-import { createMastraUsage } from "../usage/mastra";
-import { type WorkReviewInput, workReviewInstructions } from "./judge";
+import { createMastraUsage } from "../usage/model-api";
+import { type WorkReviewInput, workReviewInstructions } from "./judge-contract";
 import { createWorkReviewOutput } from "./judge-output";
 
 export async function reviewWorkWithModel(input: WorkReviewInput) {

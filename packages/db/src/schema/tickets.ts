@@ -65,7 +65,10 @@ export const epicConfirmation = factorySchema.table(
       name: "epic_confirmation_proposal_entry_id_fkey",
     }),
     unique("epic_confirmation_proposal_entry_id_key").on(table.proposalEntryId),
-    check("epic_confirmation_input_digest_check", sql`input_digest ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      "epic_confirmation_input_digest_check",
+      sql`${table.inputDigest} ~ '^[0-9a-f]{64}$'::text`,
+    ),
   ],
 );
 
@@ -106,10 +109,13 @@ export const epic = factorySchema.table(
       name: "epic_project_id_fkey",
     }).onDelete("cascade"),
     unique("epic_id_project_id_key").on(table.id, table.projectId),
-    check("epic_check", sql`parent_id IS DISTINCT FROM id`),
-    check("epic_description_check", sql`length(description) <= 10000`),
-    check("epic_title_check", sql`(length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)`),
-    check("epic_version_check", sql`version > 0`),
+    check("epic_check", sql`${table.parentId} IS DISTINCT FROM ${table.id}`),
+    check("epic_description_check", sql`length(${table.description}) <= 10000`),
+    check(
+      "epic_title_check",
+      sql`(length(btrim(${table.title})) >= 1) AND (length(btrim(${table.title})) <= 200)`,
+    ),
+    check("epic_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -124,7 +130,10 @@ export const implementationOrder = factorySchema.table(
     technicalDesignRevisionId: uuid("technical_design_revision_id"),
     codingReasoning: text("coding_reasoning"),
     sourceSha: text("source_sha").notNull(),
-    state: text("state").default("waiting").notNull(),
+    state: text("state")
+      .$type<"waiting" | "started" | "blocked" | "cancelled">()
+      .default("waiting")
+      .notNull(),
     changeId: uuid("change_id"),
     cancelledBy: uuid("cancelled_by"),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -135,7 +144,7 @@ export const implementationOrder = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("implementation_order_one_waiting")
       .using("btree", table.ticketId.asc().nullsLast())
-      .where(sql`(state = 'waiting'::text)`),
+      .where(sql`(${table.state} = 'waiting'::text)`),
     foreignKey({
       columns: [table.cancelledBy],
       foreignColumns: [authUser.id],
@@ -173,11 +182,11 @@ export const implementationOrder = factorySchema.table(
     }),
     check(
       "implementation_order_source_sha_check",
-      sql`source_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.sourceSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "implementation_order_state_check",
-      sql`state = ANY (ARRAY['waiting'::text, 'started'::text, 'blocked'::text, 'cancelled'::text])`,
+      sql`${table.state} = ANY (ARRAY['waiting'::text, 'started'::text, 'blocked'::text, 'cancelled'::text])`,
     ),
   ],
 );
@@ -234,7 +243,7 @@ export const requirementApproval = factorySchema.table(
     unique("requirement_approval_requirement_revision_id_key").on(table.requirementRevisionId),
     check(
       "requirement_monitoring_basis",
-      sql`(monitoring_incident_id IS NULL) = (monitoring_policy_id IS NULL)`,
+      sql`(${table.monitoringIncidentId} IS NULL) = (${table.monitoringPolicyId} IS NULL)`,
     ),
   ],
 );
@@ -267,16 +276,19 @@ export const requirementRevision = factorySchema.table(
     }),
     unique("requirement_revision_id_ticket_id_key").on(table.id, table.ticketId),
     unique("requirement_revision_ticket_id_ordinal_key").on(table.ticketId, table.ordinal),
-    check("requirement_revision_canonical_content_check", sql`length(canonical_content) > 0`),
+    check(
+      "requirement_revision_canonical_content_check",
+      sql`length(${table.canonicalContent}) > 0`,
+    ),
     check(
       "requirement_revision_check",
-      sql`content_digest = encode(digest(convert_to(canonical_content, 'UTF8'::name), 'sha256'::text), 'hex'::text)`,
+      sql`${table.contentDigest} = encode(digest(convert_to(${table.canonicalContent}, 'UTF8'::name), 'sha256'::text), 'hex'::text)`,
     ),
     check(
       "requirement_revision_content_digest_check",
-      sql`content_digest ~ '^[0-9a-f]{64}$'::text`,
+      sql`${table.contentDigest} ~ '^[0-9a-f]{64}$'::text`,
     ),
-    check("requirement_revision_ordinal_check", sql`ordinal > 0`),
+    check("requirement_revision_ordinal_check", sql`${table.ordinal} > 0`),
   ],
 );
 
@@ -295,7 +307,7 @@ export const technicalDesignRevision = factorySchema.table(
     diagramRenders: jsonb("diagram_renders").default([]).notNull(),
     rendererVersion: text("renderer_version").notNull(),
     createdBy: uuid("created_by").notNull(),
-    authorKind: text("author_kind").notNull(),
+    authorKind: text("author_kind").$type<"human" | "ai">().notNull(),
     turnId: uuid("turn_id"),
     planningTurnId: uuid("planning_turn_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -340,28 +352,28 @@ export const technicalDesignRevision = factorySchema.table(
     unique("technical_design_revision_turn_id_key").on(table.turnId),
     check(
       "technical_design_revision_author_kind_check",
-      sql`author_kind = ANY (ARRAY['human'::text, 'ai'::text])`,
+      sql`${table.authorKind} = ANY (ARRAY['human'::text, 'ai'::text])`,
     ),
     check(
       "technical_design_revision_canonical_content_check",
-      sql`(length(canonical_content) >= 1) AND (length(canonical_content) <= 100000)`,
+      sql`(length(${table.canonicalContent}) >= 1) AND (length(${table.canonicalContent}) <= 100000)`,
     ),
     check(
       "technical_design_revision_check",
-      sql`content_digest = encode(digest(convert_to(canonical_content, 'UTF8'::name), 'sha256'::text), 'hex'::text)`,
+      sql`${table.contentDigest} = encode(digest(convert_to(${table.canonicalContent}, 'UTF8'::name), 'sha256'::text), 'hex'::text)`,
     ),
     check(
       "technical_design_revision_citations_check",
-      sql`jsonb_typeof(citations) = 'array'::text`,
+      sql`jsonb_typeof(${table.citations}) = 'array'::text`,
     ),
     check(
       "technical_design_revision_diagram_renders_check",
-      sql`jsonb_typeof(diagram_renders) = 'array'::text`,
+      sql`jsonb_typeof(${table.diagramRenders}) = 'array'::text`,
     ),
-    check("technical_design_revision_ordinal_check", sql`ordinal > 0`),
+    check("technical_design_revision_ordinal_check", sql`${table.ordinal} > 0`),
     check(
       "technical_design_revision_source_commit_check",
-      sql`source_commit ~ '^[a-f0-9]{40}$'::text`,
+      sql`${table.sourceCommit} ~ '^[a-f0-9]{40}$'::text`,
     ),
   ],
 );
@@ -428,9 +440,12 @@ export const ticket = factorySchema.table(
       name: "ticket_trashed_by_fkey",
     }),
     unique("ticket_id_project_id_key").on(table.id, table.projectId),
-    check("ticket_description_check", sql`length(description) <= 10000`),
-    check("ticket_title_check", sql`(length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)`),
-    check("ticket_version_check", sql`version > 0`),
+    check("ticket_description_check", sql`length(${table.description}) <= 10000`),
+    check(
+      "ticket_title_check",
+      sql`(length(btrim(${table.title})) >= 1) AND (length(btrim(${table.title})) <= 200)`,
+    ),
+    check("ticket_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -448,7 +463,7 @@ export const ticketDocumentRevision = factorySchema.table(
     inputDigest: text("input_digest").notNull(),
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    authorKind: text("author_kind").default("human").notNull(),
+    authorKind: text("author_kind").$type<"human" | "ai">().default("human").notNull(),
     proposalEntryId: uuid("proposal_entry_id"),
   },
   (table): PgTableExtraConfigValue[] => [
@@ -480,22 +495,22 @@ export const ticketDocumentRevision = factorySchema.table(
     unique("ticket_document_revision_proposal_entry_id_key").on(table.proposalEntryId),
     check(
       "ticket_document_revision_author_kind_check",
-      sql`author_kind = ANY (ARRAY['human'::text, 'ai'::text])`,
+      sql`${table.authorKind} = ANY (ARRAY['human'::text, 'ai'::text])`,
     ),
     check(
       "ticket_document_revision_check",
-      sql`content_digest = encode(digest(convert_to(canonical_content, 'UTF8'::name), 'sha256'::text), 'hex'::text)`,
+      sql`${table.contentDigest} = encode(digest(convert_to(${table.canonicalContent}, 'UTF8'::name), 'sha256'::text), 'hex'::text)`,
     ),
     check(
       "ticket_document_revision_content_digest_check",
-      sql`content_digest ~ '^[0-9a-f]{64}$'::text`,
+      sql`${table.contentDigest} ~ '^[0-9a-f]{64}$'::text`,
     ),
     check(
       "ticket_document_revision_input_digest_check",
-      sql`input_digest ~ '^[0-9a-f]{64}$'::text`,
+      sql`${table.inputDigest} ~ '^[0-9a-f]{64}$'::text`,
     ),
-    check("ticket_document_revision_ordinal_check", sql`ordinal > 0`),
-    check("ticket_document_revision_title_check", sql`length(title) > 0`),
+    check("ticket_document_revision_ordinal_check", sql`${table.ordinal} > 0`),
+    check("ticket_document_revision_title_check", sql`length(${table.title}) > 0`),
   ],
 );
 
@@ -517,7 +532,7 @@ export const ticketResponsibility = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "ticket_responsibility_user_id_fkey",
     }),
-    check("ticket_responsibility_version_check", sql`version > 0`),
+    check("ticket_responsibility_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -584,7 +599,7 @@ export const ticketFollowUp = factorySchema.table(
       foreignColumns: [ticket.id],
       name: "ticket_follow_up_ticket_id_fkey",
     }),
-    check("ticket_follow_up_check", sql`ticket_id <> source_ticket_id`),
+    check("ticket_follow_up_check", sql`${table.ticketId} <> ${table.sourceTicketId}`),
   ],
 );
 
@@ -692,6 +707,6 @@ export const ticketDependency = factorySchema.table(
       columns: [table.projectId, table.ticketId, table.prerequisiteId],
       name: "ticket_dependency_pkey",
     }),
-    check("ticket_dependency_check", sql`ticket_id <> prerequisite_id`),
+    check("ticket_dependency_check", sql`${table.ticketId} <> ${table.prerequisiteId}`),
   ],
 );

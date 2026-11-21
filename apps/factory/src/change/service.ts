@@ -21,15 +21,15 @@ import type {
   TicketFollowUpInput,
 } from "../../../../packages/requirement-domain/src/document";
 import type { saveTechnicalDesignInput } from "../../../../packages/requirement-domain/src/technical-design";
-import type { createAccessController } from "../access/controller";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { createAgentController } from "../agent/controller";
-import { ticketDetailSchema } from "../api-contracts";
+import { type createAccessController } from "../access/api";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
+import { type createAgentController } from "../agent/api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
-import type { createProjectAgentController } from "../project-agent/controller";
+import { type createProjectAgentController } from "../project-agent/api";
+import { saveTechnicalDesignIn, technicalPlanningOutstandingIn } from "../technical-design/api";
 import { renderArchitectureDiagrams } from "../technical-design/diagrams";
-import { saveTechnicalDesignIn, technicalPlanningOutstandingIn } from "../technical-design/store";
+import { ticketDetailSchema } from "./contracts";
 import type { createChangeController } from "./controller";
 import type { createTicketDocumentController } from "./document";
 import type { createTicketTrashController } from "./trash";

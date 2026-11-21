@@ -10,7 +10,7 @@ import {
   workspaceSharedDocument,
 } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
-import { projectDevelopmentAuthorityIn } from "./controller";
+import { projectDevelopmentAuthorityIn } from "./authority";
 import { workspaceAuthorityIn } from "./workspace";
 import { writerActivity } from "./writer-activity";
 

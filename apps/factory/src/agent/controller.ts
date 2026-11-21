@@ -5,18 +5,18 @@ import {
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
   agentTurn,
   agentTurnSkill,
   candidateReview,
-  change as changeTable,
   changeAgentSession,
   changeAgentTurnIntent,
   changeCommitOperation,
+  change as changeTable,
   codingPause,
   conversationContext,
   executionPolicyCommand,
@@ -26,21 +26,23 @@ import {
   ticketConversation,
 } from "../../../../packages/db/src/schema";
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import type { createChangeWriterController } from "../access/writer-controller";
+import { type createChangeWriterController } from "../access/writer-api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
-import { createModelConnections } from "../models/connections";
-import { createModelSettingsController } from "../models/controller";
-import { createOpenBaoModelSecrets } from "../models/secrets";
-import type { createRuntimeController } from "../runtime/controller";
-import type { RuntimeHub } from "../runtime/hub";
+import {
+  createModelConnections,
+  createModelSettingsController,
+  createOpenBaoModelSecrets,
+} from "../models/api";
+import { type createRuntimeController } from "../runtime/api";
+import { type RuntimeHub } from "../runtime/transport-api";
 import type { RuntimeAttemptView } from "../runtime/types";
-import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/native";
-import { codingAllowanceDenial } from "../usage/opencode";
+import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/api";
+import { codingAllowanceDenial } from "../usage/api";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
-import { personalGitStatus } from "../workspace/personal-git";
+import { personalGitStatus } from "../workspace/api";
 import type { createBuildBrowserController } from "./browser-controller";
 import { earlierSubmissionUnchanged, noChangesToSubmit } from "./candidate";
 import { createAgentCandidates } from "./candidate-agent";
@@ -49,19 +51,19 @@ import { createChangeAgentTransport } from "./change-transport";
 import { createCodingContexts } from "./conversation-contexts";
 import { navigationMessages, projectMessages } from "./message-projection";
 import { bounded, readableError } from "./native-errors";
-import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
 import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
-  interruptOpenCodeSession,
   installedOpenCodeSkillIDs,
+  interruptOpenCodeSession,
   isOpenCodeObservationTransportError,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
   syncOpenCodeInputGuidance,
-} from "./opencode-client";
+} from "./opencode-adapter";
+import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
 import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
 import { checkTerminalOpenCodeInbox } from "./opencode-terminal";
 import { observeOpenCodeUsage } from "./opencode-usage";
@@ -72,7 +74,8 @@ import { createChangeAgentStop, type PendingWriterHandoff, type RetainedStopTarg
 import { captureTerminalOutcome, validateTerminalMessages } from "./terminal-outcome";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
-import { type AgentTurnRecord, createAgentTurnStore } from "./turn-store";
+import { type AgentTurnRecord } from "./turn-record";
+import { createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -2285,12 +2288,14 @@ export function createAgentController(
     },
   };
 }
+
 import {
   and,
   asc,
   desc,
   eq,
   exists,
+  sql as expression,
   gt,
   inArray,
   isNotNull,
@@ -2299,6 +2304,5 @@ import {
   not,
   notExists,
   or,
-  sql as expression,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";

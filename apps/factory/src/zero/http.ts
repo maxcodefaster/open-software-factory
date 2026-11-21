@@ -4,7 +4,7 @@ import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { zeroQueries, zeroSchema } from "../../../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../../../packages/zero-schema/src/server";
-import { createAccessController } from "../access/controller";
+import { createAccessController } from "../access/api";
 
 type Database = ReturnType<typeof createDatabase>;
 type Session = { user: { id: string } };

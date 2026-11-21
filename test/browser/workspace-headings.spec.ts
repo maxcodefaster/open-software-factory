@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Locator } from "@playwright/test";
-import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { repositoryDocumentsSchema } from "../../apps/factory/src/knowledge/contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";

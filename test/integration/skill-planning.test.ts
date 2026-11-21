@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";

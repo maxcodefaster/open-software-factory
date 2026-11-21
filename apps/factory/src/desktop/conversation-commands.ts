@@ -6,10 +6,11 @@ import type {
 } from "../../../../packages/conversation-domain/src/conversation";
 import { normalizeInterviewAnswer } from "../../../../packages/conversation-domain/src/conversation";
 import type { createAgentCommandIds } from "../agent-command-ids";
-import type { Change, ConversationView, Ticket } from "../api-contracts";
 import { readAttachmentContent } from "../attachments/composer";
+import { type Change, type Ticket } from "../change/contracts";
 import { plainErrorMessage } from "../command-error";
 import { streamConversation } from "../conversation-stream";
+import { type ConversationView } from "../project-agent/contracts";
 import {
   answerConversationQuestion,
   sendConversationMessage as commissionConversationMessage,

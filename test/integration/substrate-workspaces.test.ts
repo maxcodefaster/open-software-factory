@@ -17,7 +17,7 @@ import {
 } from "../../apps/factory/src/runtime/substrate-grant";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import type { RuntimeAttemptView } from "../../apps/factory/src/runtime/types";
-import { computeAllocationIn } from "../../apps/factory/src/usage/compute";
+import { computeAllocationIn } from "../../apps/factory/src/usage/journal-api";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";

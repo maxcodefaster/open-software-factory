@@ -1,12 +1,13 @@
 import { expect } from "bun:test";
-import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
+import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
 import { eventually } from "./factory-process";
 import type { releaseInstallation } from "./release-installation";
 import { callFactoryFunction } from "./server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 

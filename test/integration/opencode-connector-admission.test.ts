@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeOpenCodeAdmission } from "../../apps/factory/src/agent/opencode-client";
+import { decodeOpenCodeAdmission } from "../../apps/factory/src/agent/opencode-adapter";
 import { createOpenCodeEvents } from "../../apps/factory/src/agent/opencode-events";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { connectorBoundary } from "../fixtures/connector-boundary";

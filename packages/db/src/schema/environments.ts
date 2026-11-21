@@ -1,5 +1,4 @@
 import { sql } from "drizzle-orm";
-import type { EnvironmentManifest } from "../../../project-domain/src/environment";
 import {
   bigint,
   check,
@@ -13,6 +12,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { EnvironmentManifest } from "../../../project-domain/src/environment";
 import { authUser } from "./auth";
 import { factorySchema } from "./namespaces";
 import { project } from "./projects";
@@ -22,7 +22,7 @@ export const runtimeEnvironmentIntent = factorySchema.table(
   "runtime_environment_intent",
   {
     runtimeAttemptId: uuid("runtime_attempt_id").primaryKey().notNull(),
-    environment: text("environment").notNull(),
+    environment: text("environment").$type<"development" | "main-preview">().notNull(),
     version: bigint("version", { mode: "number" }).notNull(),
     secretKey: text("secret_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -33,10 +33,10 @@ export const runtimeEnvironmentIntent = factorySchema.table(
       foreignColumns: [runtimeAttempt.id],
       name: "runtime_environment_intent_runtime_attempt_id_fkey",
     }),
-    check("runtime_environment_intent_version_check", sql`version >= 0`),
+    check("runtime_environment_intent_version_check", sql`${table.version} >= 0`),
     check(
       "runtime_environment_intent_environment_check",
-      sql`environment = ANY (ARRAY['development'::text, 'main-preview'::text])`,
+      sql`${table.environment} = ANY (ARRAY['development'::text, 'main-preview'::text])`,
     ),
   ],
 );
@@ -62,7 +62,7 @@ export const environmentWrite = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("environment_one_pending")
       .using("btree", table.projectId.asc().nullsLast(), table.environment.asc().nullsLast())
-      .where(sql`(state = 'write-intended'::text)`),
+      .where(sql`(${table.state} = 'write-intended'::text)`),
     foreignKey({
       columns: [table.createdBy],
       foreignColumns: [authUser.id],
@@ -74,15 +74,18 @@ export const environmentWrite = factorySchema.table(
       name: "environment_write_project_id_fkey",
     }),
     unique("environment_write_secret_key_key").on(table.secretKey),
-    check("environment_write_base_version_check", sql`base_version >= 0`),
+    check("environment_write_base_version_check", sql`${table.baseVersion} >= 0`),
     check(
       "environment_write_environment_check",
-      sql`environment = ANY (ARRAY['development'::text, 'main-preview'::text])`,
+      sql`${table.environment} = ANY (ARRAY['development'::text, 'main-preview'::text])`,
     ),
-    check("environment_write_fingerprint_check", sql`fingerprint ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      "environment_write_fingerprint_check",
+      sql`${table.fingerprint} ~ '^[0-9a-f]{64}$'::text`,
+    ),
     check(
       "environment_write_state_check",
-      sql`state = ANY (ARRAY['write-intended'::text, 'committed'::text, 'discarded'::text])`,
+      sql`${table.state} = ANY (ARRAY['write-intended'::text, 'committed'::text, 'discarded'::text])`,
     ),
   ],
 );
@@ -109,8 +112,8 @@ export const projectEnvironment = factorySchema.table(
     primaryKey({ columns: [table.projectId, table.environment], name: "project_environment_pkey" }),
     check(
       "project_environment_environment_check",
-      sql`environment = ANY (ARRAY['development'::text, 'main-preview'::text])`,
+      sql`${table.environment} = ANY (ARRAY['development'::text, 'main-preview'::text])`,
     ),
-    check("project_environment_version_check", sql`version >= 0`),
+    check("project_environment_version_check", sql`${table.version} >= 0`),
   ],
 );

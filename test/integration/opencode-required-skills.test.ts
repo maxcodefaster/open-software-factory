@@ -1,17 +1,17 @@
 import { expect, test } from "bun:test";
 import {
+  observeOpenCodeWork,
+  promptRecordedOpenCodeInput,
+  readOpenCodeInputMessages,
+  syncOpenCodeInputGuidance,
+} from "../../apps/factory/src/agent/opencode-adapter";
+import {
   nativeInputSkills,
   nativeSkillId,
   nativeSkillManifest,
   observedNativeSkillIds,
 } from "../../apps/factory/src/skills/native";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import {
-  observeOpenCodeWork,
-  promptRecordedOpenCodeInput,
-  readOpenCodeInputMessages,
-  syncOpenCodeInputGuidance,
-} from "../../apps/factory/src/agent/opencode-client";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 

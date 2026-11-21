@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { writerViewSchema } from "../api-contracts";
+import { writerViewSchema } from "../agent/contracts";
 import { CommandError } from "../command-error";
 import type { createAccessController } from "./controller";
 import { editingCommand, writerActivityCommand, writerTakeoverCommand } from "./writer-command";

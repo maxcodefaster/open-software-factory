@@ -27,9 +27,9 @@ import {
   reviewScenario,
   runtimeAttempt,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import { createAgentTurnStore } from "../agent/turn-store";
-import { assertMessageAttachmentsIn, freezeFeedbackAttachmentsIn } from "../attachments/store";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
+import { createAgentTurnStore } from "../agent/turns-api";
+import { assertMessageAttachmentsIn, freezeFeedbackAttachmentsIn } from "../attachments/api";
 import { CommandError } from "../command-error";
 
 type Database = ReturnType<typeof createDatabase>;

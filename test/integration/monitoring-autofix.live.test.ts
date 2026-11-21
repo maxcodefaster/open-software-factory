@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
 import { monitoringView } from "../../packages/conversation-domain/src/monitoring";

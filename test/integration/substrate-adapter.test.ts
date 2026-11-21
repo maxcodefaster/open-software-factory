@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";

@@ -18,7 +18,7 @@ import {
   ticket,
   ticketConversation,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { contextIn } from "./contexts";
 

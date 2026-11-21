@@ -1,7 +1,6 @@
 import { render } from "@solidjs/web";
 import { createMemo, createSignal, For, Show } from "solid-js";
-import type { AgentMessage, ConversationEntry } from "../../apps/factory/src/api-contracts";
-import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
+import { type AgentMessage } from "../../apps/factory/src/agent/contracts";
 import { composerKeyDown } from "../../apps/factory/src/assistant-interaction";
 import { groupConversationActivities } from "../../apps/factory/src/conversation-activity";
 import {
@@ -11,6 +10,10 @@ import {
 } from "../../apps/factory/src/conversation-components";
 import { ConversationSwitcher } from "../../apps/factory/src/conversation-switcher";
 import { conversationTimeline } from "../../apps/factory/src/conversation-timeline";
+import {
+  type ConversationEntry,
+  conversationViewSchema,
+} from "../../apps/factory/src/project-agent/contracts";
 import { ChatSkillPicker } from "../../apps/factory/src/skills/chat-picker";
 import { ChangeWriterStatus } from "../../apps/factory/src/writer-status";
 import "../../apps/factory/src/tokens.css";

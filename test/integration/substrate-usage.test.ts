@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { drainNativeOperations } from "../../apps/factory/src/runtime/native-lock";
-import { admitComputeIn, computeAllocationIn } from "../../apps/factory/src/usage/compute";
+import { admitComputeIn } from "../../apps/factory/src/usage/compute";
+import { computeAllocationIn } from "../../apps/factory/src/usage/journal-api";
 import { createUsageService } from "../../apps/factory/src/usage/service";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import {

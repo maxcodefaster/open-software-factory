@@ -5,8 +5,8 @@ import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
-import type { createRuntimeController } from "../runtime/controller";
-import type { RuntimeHub } from "../runtime/hub";
+import { type createRuntimeController } from "../runtime/api";
+import { type RuntimeHub } from "../runtime/transport-api";
 
 /** Demand resumes an existing Sandbox. It never replaces explicit Stop or a failed attempt. */
 export function createWorkspaceComputeAccess(

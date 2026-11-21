@@ -2,7 +2,7 @@ import { and, desc, eq, sql as expression } from "drizzle-orm";
 import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
 import { knowledgePage, knowledgeRevision } from "../../../../packages/db/src/schema";
 import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 // One versioned write boundary for the editor, restoration and an explicitly

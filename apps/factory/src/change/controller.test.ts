@@ -1,14 +1,14 @@
 import { expect, spyOn, test } from "bun:test";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { conversationDatabase } from "../../../../test/support/conversation-persistence";
-import { ticketRequirementsInput } from "../../../../test/fixtures/ticket-requirements";
 import { ticketDocumentInput } from "../../../../packages/requirement-domain/src/document";
-import type { TicketDetail } from "../api-contracts";
+import { ticketRequirementsInput } from "../../../../test/fixtures/ticket-requirements";
+import { conversationDatabase } from "../../../../test/support/conversation-persistence";
 import { createAccessController } from "../access/controller";
+import { type TicketDetail } from "./contracts";
+import { createChangeController } from "./controller";
 import { createTicketService } from "./service";
 import type { ChangeView } from "./types";
-import { createChangeController } from "./controller";
 
 test("Change start requires explicit Implement admission before any database or Forge operation", async () => {
   const keys = {

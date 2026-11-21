@@ -1,7 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
-import type { RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub } from "../runtime/transport-api";
 import { createAgentTurnStore } from "./turn-store";
 
 // Serialize only the frame send with Stop, approval/mode and runtime changes.

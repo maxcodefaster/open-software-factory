@@ -1,7 +1,7 @@
 import { mock } from "bun:test";
 import { strict as assert } from "node:assert";
 import { createAgentCommandIds } from "../../apps/factory/src/agent-command-ids";
-import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 
 // Separate process: replacements never affect another test or a running Factory.
 const scenario = process.argv[2] ?? "failed";

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, exists, notExists, sql as expression } from "drizzle-orm";
+import { and, desc, eq, exists, sql as expression, notExists } from "drizzle-orm";
+import type { z } from "zod";
+import type { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
 import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
   agentTurn,
@@ -9,8 +11,6 @@ import {
   ticket,
   ticketDocumentRevision,
 } from "../../../../packages/db/src/schema";
-import type { z } from "zod";
-import type { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import {
   type TechnicalDesignContent,
@@ -18,7 +18,7 @@ import {
   technicalDesignContentInput,
   validateTechnicalDesignCoverage,
 } from "../../../../packages/requirement-domain/src/technical-design";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { diagramRendererVersion } from "./diagrams";
 

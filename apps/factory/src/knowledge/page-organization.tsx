@@ -4,9 +4,9 @@ import {
   pageParentWouldCycle,
   pageSiblings,
 } from "../../../../packages/knowledge-domain/src/page-tree";
-import type { KnowledgePage, KnowledgePageOutline } from "../api-contracts";
 import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
+import { type KnowledgePage, type KnowledgePageOutline } from "./contracts";
 import type { PageMove } from "./page-tree";
 
 export function PageOrganization(props: {

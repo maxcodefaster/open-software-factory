@@ -30,7 +30,7 @@ import {
   reviewFeedback,
   ticket,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 export async function deliveryDelegationIn(

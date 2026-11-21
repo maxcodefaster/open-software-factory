@@ -61,16 +61,16 @@ import {
   substrateConnection,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
-import type { CodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import {
+  type CodingRuntimeShutdown,
   type PendingWriterHandoff,
   type RetainedStopTarget,
   requireStoppedAgentInputsIn,
-} from "../agent/stop";
+} from "../agent/runtime-api";
 import { CommandError } from "../command-error";
 import { admitComputeIn } from "../usage/compute";
+import { type SubstrateSourceHandoff } from "../workspace/source-api";
 import { templateInitialSourceRole } from "../workspace/source-role-fence";
-import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
 import type { RuntimeHub } from "./hub";
 import { trackNativeOperation } from "./native-lock";
 import {

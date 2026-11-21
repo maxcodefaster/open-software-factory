@@ -1,4 +1,4 @@
-import { ticketDetailSchema } from "../../apps/factory/src/api-contracts";
+import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
 
 export const titleProjectID = "10000000-0000-4000-8000-000000000001";
 export const titleTicketID = "10000000-0000-4000-8000-000000000002";

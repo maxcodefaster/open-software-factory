@@ -1,12 +1,12 @@
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import type { RequirementContent } from "../../packages/requirement-domain/src/content";
-import type { TicketDocumentInput } from "../../packages/requirement-domain/src/document";
-import type { TicketDetail } from "../../apps/factory/src/api-contracts";
 import { createAccessController } from "../../apps/factory/src/access/controller";
+import { type TicketDetail } from "../../apps/factory/src/change/contracts";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketService } from "../../apps/factory/src/change/service";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type { createDatabase } from "../../packages/db/src/client";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
+import type { RequirementContent } from "../../packages/requirement-domain/src/content";
+import type { TicketDocumentInput } from "../../packages/requirement-domain/src/document";
 import { callFactoryFunction } from "./server-functions";
 
 export function ticketRequirementsInput(

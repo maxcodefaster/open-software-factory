@@ -21,9 +21,12 @@ import {
 } from "../../../../packages/db/src/schema";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
 import { CommandError } from "../command-error";
-import type { RuntimeHub } from "../runtime/hub";
-import { substrateRuntimePrincipalIn, substrateWorkspaceGrantIn } from "../runtime/substrate-grant";
-import { nativeInputStopIn } from "../runtime/substrate-input-stop";
+import {
+  nativeInputStopIn,
+  substrateRuntimePrincipalIn,
+  substrateWorkspaceGrantIn,
+} from "../runtime/source-api";
+import { type RuntimeHub } from "../runtime/transport-api";
 import { createPrivateObjects, objectDigest, type PrivateObjects } from "../storage/objects";
 
 type Database = ReturnType<typeof createDatabase>;

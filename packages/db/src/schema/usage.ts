@@ -72,19 +72,22 @@ export const usageOperation = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "usage_operation_user_id_fkey",
     }),
-    check("usage_operation_check", sql`(settled_at IS NULL) = (outcome IS NULL)`),
+    check("usage_operation_check", sql`(${table.settledAt} IS NULL) = (${table.outcome} IS NULL)`),
     check(
       "usage_operation_engine_check",
-      sql`engine = ANY (ARRAY['opencode'::text, 'mastra'::text])`,
+      sql`${table.engine} = ANY (ARRAY['opencode'::text, 'mastra'::text])`,
     ),
-    check("usage_operation_id_check", sql`(length(id) >= 1) AND (length(id) <= 400)`),
+    check(
+      "usage_operation_id_check",
+      sql`(length(${table.id}) >= 1) AND (length(${table.id}) <= 400)`,
+    ),
     check(
       "usage_operation_outcome_check",
-      sql`outcome = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])`,
+      sql`${table.outcome} = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])`,
     ),
     check(
       "usage_operation_purpose_check",
-      sql`purpose = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text, 'learning'::text])`,
+      sql`${table.purpose} = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text, 'learning'::text])`,
     ),
   ],
 );
@@ -112,7 +115,7 @@ export const codingPause = factorySchema.table(
     }).onDelete("cascade"),
     check(
       "coding_pause_reason_check",
-      sql`reason = ANY (ARRAY['accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text])`,
+      sql`${table.reason} = ANY (ARRAY['accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text])`,
     ),
   ],
 );
@@ -133,13 +136,16 @@ export const executionPolicy = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "execution_policy_updated_by_fkey",
     }),
-    check("execution_policy_check", sql`(scope = 'factory'::text) OR (timezone IS NULL)`),
-    check("execution_policy_policy_check", sql`jsonb_typeof(policy) = 'object'::text`),
+    check(
+      "execution_policy_check",
+      sql`(${table.scope} = 'factory'::text) OR (${table.timezone} IS NULL)`,
+    ),
+    check("execution_policy_policy_check", sql`jsonb_typeof(${table.policy}) = 'object'::text`),
     check(
       "execution_policy_scope_check",
-      sql`(scope = 'factory'::text) OR (scope ~ '^[0-9a-f-]{36}$'::text)`,
+      sql`(${table.scope} = 'factory'::text) OR (${table.scope} ~ '^[0-9a-f-]{36}$'::text)`,
     ),
-    check("execution_policy_version_check", sql`version >= 1`),
+    check("execution_policy_version_check", sql`${table.version} >= 1`),
   ],
 );
 
@@ -158,8 +164,8 @@ export const usageReplayCursor = factorySchema.table(
       name: "usage_replay_cursor_operation_id_fkey",
     }).onDelete("cascade"),
     primaryKey({ columns: [table.operationId, table.sessionId], name: "usage_replay_cursor_pkey" }),
-    check("usage_replay_cursor_sequence_check", sql`sequence >= 0`),
-    check("usage_replay_cursor_start_sequence_check", sql`start_sequence >= 0`),
+    check("usage_replay_cursor_sequence_check", sql`${table.sequence} >= 0`),
+    check("usage_replay_cursor_start_sequence_check", sql`${table.startSequence} >= 0`),
   ],
 );
 
@@ -180,7 +186,7 @@ export const usageRateOverride = factorySchema.table(
       name: "usage_rate_override_updated_by_fkey",
     }),
     primaryKey({ columns: [table.provider, table.model], name: "usage_rate_override_pkey" }),
-    check("usage_rate_override_version_check", sql`version > 0`),
+    check("usage_rate_override_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -204,16 +210,19 @@ export const usageEntry = factorySchema.table(
       name: "usage_entry_operation_id_fkey",
     }).onDelete("cascade"),
     primaryKey({ columns: [table.operationId, table.eventId], name: "usage_entry_pkey" }),
-    check("usage_entry_event_id_check", sql`(length(event_id) >= 1) AND (length(event_id) <= 400)`),
-    check("usage_entry_known_nano_usd_check", sql`known_nano_usd >= 0`),
-    check("usage_entry_nano_usd_check", sql`nano_usd >= 0`),
+    check(
+      "usage_entry_event_id_check",
+      sql`(length(${table.eventId}) >= 1) AND (length(${table.eventId}) <= 400)`,
+    ),
+    check("usage_entry_known_nano_usd_check", sql`${table.knownNanoUsd} >= 0`),
+    check("usage_entry_nano_usd_check", sql`${table.nanoUsd} >= 0`),
     check(
       "usage_entry_outcome_check",
-      sql`outcome = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])`,
+      sql`${table.outcome} = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])`,
     ),
     check(
       "usage_entry_source_check",
-      sql`source = ANY (ARRAY['step'::text, 'title'::text, 'compaction'::text, 'unobserved'::text])`,
+      sql`${table.source} = ANY (ARRAY['step'::text, 'title'::text, 'compaction'::text, 'unobserved'::text])`,
     ),
   ],
 );

@@ -28,7 +28,7 @@ export const changeEditingDecision = factorySchema.table(
     targetId: uuid("target_id"),
     requestId: uuid("request_id"),
     writerEpoch: bigint("writer_epoch", { mode: "number" }).notNull(),
-    kind: text("kind").notNull(),
+    kind: text("kind").$type<"takeover" | "idle-takeover" | "approve" | "release">().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
@@ -54,7 +54,7 @@ export const changeEditingDecision = factorySchema.table(
     }),
     check(
       "change_editing_decision_kind_check",
-      sql`kind = ANY (ARRAY['takeover'::text, 'idle-takeover'::text, 'approve'::text, 'release'::text])`,
+      sql`${table.kind} = ANY (ARRAY['takeover'::text, 'idle-takeover'::text, 'approve'::text, 'release'::text])`,
     ),
   ],
 );
@@ -107,7 +107,10 @@ export const changeEditingRequest = factorySchema.table(
     requesterId: uuid("requester_id").notNull(),
     ownerId: uuid("owner_id").notNull(),
     writerEpoch: bigint("writer_epoch", { mode: "number" }).notNull(),
-    state: text("state").default("requested").notNull(),
+    state: text("state")
+      .$type<"requested" | "accepted" | "superseded">()
+      .default("requested")
+      .notNull(),
     decidedBy: uuid("decided_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
@@ -120,7 +123,7 @@ export const changeEditingRequest = factorySchema.table(
         table.requesterId.asc().nullsLast(),
         table.writerEpoch.asc().nullsLast(),
       )
-      .where(sql`(state = 'requested'::text)`),
+      .where(sql`(${table.state} = 'requested'::text)`),
     foreignKey({
       columns: [table.changeId],
       foreignColumns: [change.id],
@@ -143,7 +146,7 @@ export const changeEditingRequest = factorySchema.table(
     }),
     check(
       "change_editing_request_state_check",
-      sql`state = ANY (ARRAY['requested'::text, 'accepted'::text, 'superseded'::text])`,
+      sql`${table.state} = ANY (ARRAY['requested'::text, 'accepted'::text, 'superseded'::text])`,
     ),
   ],
 );
@@ -152,7 +155,10 @@ export const changeWriter = factorySchema.table(
   "change_writer",
   {
     changeId: uuid("change_id").primaryKey().notNull(),
-    state: text("state").default("unassigned").notNull(),
+    state: text("state")
+      .$type<"unassigned" | "agent-preparing" | "agent" | "handoff" | "human">()
+      .default("unassigned")
+      .notNull(),
     epoch: bigint("epoch", { mode: "number" }).default(1).notNull(),
     userId: uuid("user_id"),
     turnId: uuid("turn_id"),
@@ -161,7 +167,7 @@ export const changeWriter = factorySchema.table(
     requestedBy: uuid("requested_by"),
     requestId: uuid("request_id"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    handoffKind: text("handoff_kind").default("takeover").notNull(),
+    handoffKind: text("handoff_kind").$type<"takeover" | "release">().default("takeover").notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     foreignKey({
@@ -184,23 +190,26 @@ export const changeWriter = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "change_writer_user_id_fkey",
     }),
-    check("change_writer_check", sql`(state = 'human'::text) = (user_id IS NOT NULL)`),
+    check(
+      "change_writer_check",
+      sql`(${table.state} = 'human'::text) = (${table.userId} IS NOT NULL)`,
+    ),
     check(
       "change_writer_check1",
-      sql`(state = ANY (ARRAY['agent-preparing'::text, 'agent'::text])) = (turn_id IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['agent-preparing'::text, 'agent'::text])) = (${table.turnId} IS NOT NULL)`,
     ),
     check(
       "change_writer_check2",
-      sql`(state = 'handoff'::text) = ((requested_by IS NOT NULL) AND (request_id IS NOT NULL))`,
+      sql`(${table.state} = 'handoff'::text) = ((${table.requestedBy} IS NOT NULL) AND (${table.requestId} IS NOT NULL))`,
     ),
-    check("change_writer_epoch_check", sql`epoch > 0`),
+    check("change_writer_epoch_check", sql`${table.epoch} > 0`),
     check(
       "change_writer_handoff_kind_check",
-      sql`handoff_kind = ANY (ARRAY['takeover'::text, 'release'::text])`,
+      sql`${table.handoffKind} = ANY (ARRAY['takeover'::text, 'release'::text])`,
     ),
     check(
       "change_writer_state_check",
-      sql`state = ANY (ARRAY['unassigned'::text, 'agent-preparing'::text, 'agent'::text, 'handoff'::text, 'human'::text])`,
+      sql`${table.state} = ANY (ARRAY['unassigned'::text, 'agent-preparing'::text, 'agent'::text, 'handoff'::text, 'human'::text])`,
     ),
   ],
 );
@@ -221,7 +230,7 @@ export const accessRevocation = factorySchema.table(
     }).onDelete("cascade"),
     check(
       "access_revocation_check",
-      sql`(processed_version >= 0) AND (processed_version <= version)`,
+      sql`(${table.processedVersion} >= 0) AND (${table.processedVersion} <= ${table.version})`,
     ),
   ],
 );
@@ -253,7 +262,7 @@ export const forgeAccountIntent = factorySchema.table(
     username: text("username").notNull(),
     sourceId: bigint("source_id", { mode: "number" }).notNull(),
     forgeUserId: bigint("forge_user_id", { mode: "number" }),
-    state: text("state").notNull(),
+    state: text("state").$type<"create-intended" | "ready" | "disabled">().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     observedAt: timestamp("observed_at", { withTimezone: true }),
   },
@@ -266,7 +275,7 @@ export const forgeAccountIntent = factorySchema.table(
     unique("forge_account_intent_username_key").on(table.username),
     check(
       "forge_account_intent_state_check",
-      sql`state = ANY (ARRAY['create-intended'::text, 'ready'::text, 'disabled'::text])`,
+      sql`${table.state} = ANY (ARRAY['create-intended'::text, 'ready'::text, 'disabled'::text])`,
     ),
   ],
 );
@@ -279,7 +288,7 @@ export const forgeConnection = factorySchema.table(
     discoveryUrl: text("discovery_url").notNull(),
     redirectUri: text("redirect_uri").notNull(),
     sourceId: bigint("source_id", { mode: "number" }),
-    state: text("state").notNull(),
+    state: text("state").$type<"create-intended" | "ready">().notNull(),
     intendedBy: uuid("intended_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     observedAt: timestamp("observed_at", { withTimezone: true }),
@@ -290,11 +299,11 @@ export const forgeConnection = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "forge_connection_intended_by_fkey",
     }),
-    check("forge_connection_id_check", sql`(id)`),
-    check("forge_connection_source_name_check", sql`source_name = 'Factory'::text`),
+    check("forge_connection_id_check", sql`(${table.id})`),
+    check("forge_connection_source_name_check", sql`${table.sourceName} = 'Factory'::text`),
     check(
       "forge_connection_state_check",
-      sql`state = ANY (ARRAY['create-intended'::text, 'ready'::text])`,
+      sql`${table.state} = ANY (ARRAY['create-intended'::text, 'ready'::text])`,
     ),
   ],
 );
@@ -305,7 +314,7 @@ export const forgeIdentityIntent = factorySchema.table(
     clientId: text("client_id").primaryKey().notNull(),
     redirectUri: text("redirect_uri").notNull(),
     intendedBy: uuid("intended_by").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<"create-intended" | "ready">().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     observedAt: timestamp("observed_at", { withTimezone: true }),
   },
@@ -317,7 +326,7 @@ export const forgeIdentityIntent = factorySchema.table(
     }),
     check(
       "forge_identity_intent_state_check",
-      sql`state = ANY (ARRAY['create-intended'::text, 'ready'::text])`,
+      sql`${table.state} = ANY (ARRAY['create-intended'::text, 'ready'::text])`,
     ),
   ],
 );
@@ -342,7 +351,7 @@ export const identityConfiguration = factorySchema.table(
       foreignColumns: [identitySetup.id],
       name: "identity_configuration_setup_id_fkey",
     }),
-    check("identity_configuration_singleton_check", sql`(singleton)`),
+    check("identity_configuration_singleton_check", sql`(${table.singleton})`),
   ],
 );
 
@@ -355,7 +364,7 @@ export const identitySetup = factorySchema.table(
     fingerprint: text("fingerprint").notNull(),
     secretKey: text("secret_key").notNull(),
     createdBy: uuid("created_by").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<"write-intended" | "saved" | "active" | "superseded">().notNull(),
     testedAt: timestamp("tested_at", { withTimezone: true }),
     testedUserId: uuid("tested_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -372,10 +381,10 @@ export const identitySetup = factorySchema.table(
       name: "identity_setup_tested_user_id_fkey",
     }),
     unique("identity_setup_secret_key_key").on(table.secretKey),
-    check("identity_setup_base_version_check", sql`base_version >= 0`),
+    check("identity_setup_base_version_check", sql`${table.baseVersion} >= 0`),
     check(
       "identity_setup_state_check",
-      sql`state = ANY (ARRAY['write-intended'::text, 'saved'::text, 'active'::text, 'superseded'::text])`,
+      sql`${table.state} = ANY (ARRAY['write-intended'::text, 'saved'::text, 'active'::text, 'superseded'::text])`,
     ),
   ],
 );

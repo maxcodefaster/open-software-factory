@@ -3,7 +3,7 @@ import { type createDatabase, drizzleTransaction } from "../../../../packages/db
 import { accountAccess, authUser, projectMembership } from "../../../../packages/db/src/schema";
 import type { ProjectRole } from "../../../../packages/project-domain/src/access";
 import { CommandError } from "../command-error";
-import { projectAuthorityIn, requireActiveAccountIn } from "./controller";
+import { projectAuthorityIn, requireActiveAccountIn } from "./authority";
 
 type Database = ReturnType<typeof createDatabase>;
 type Membership = { userId: string; role: ProjectRole; manageProject: boolean };

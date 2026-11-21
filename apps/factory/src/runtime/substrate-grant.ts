@@ -2,15 +2,15 @@ import {
   and,
   desc,
   eq,
+  sql as expression,
   inArray,
   isNotNull,
   isNull,
   notExists,
-  sql as expression,
 } from "drizzle-orm";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -23,9 +23,9 @@ import {
   substrateBinding,
   substrateSource,
 } from "../../../../packages/db/src/schema";
+import { projectAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
-import { projectAuthorityIn } from "../access/controller";
-import { createAgentTurnStore } from "../agent/turn-store";
+import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
 
 export const substrateBootstrapContinuationBlocked =

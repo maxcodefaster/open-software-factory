@@ -3,7 +3,7 @@ import { createBuildBrowserController } from "../../apps/factory/src/agent/brows
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";

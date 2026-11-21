@@ -1,7 +1,7 @@
 import { and, desc, eq, sql as expression } from "drizzle-orm";
 import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
 import { knowledgePage } from "../../../../packages/db/src/schema";
-import { searchExpression } from "../knowledge/search-expression";
+import { searchExpression } from "../knowledge/api";
 
 export async function buildKnowledgeContext(
   sql: DatabaseTransaction,

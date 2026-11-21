@@ -7,8 +7,9 @@ import {
 } from "../../../../packages/conversation-domain/src/model-settings";
 import type { TechnicalDesignContent } from "../../../../packages/requirement-domain/src/technical-design";
 import type { createAgentCommandIds } from "../agent-command-ids";
-import type { Change, DeliveryView, Ticket } from "../api-contracts";
+import { type Change, type Ticket, type TicketDraft } from "../change/contracts";
 import { plainErrorMessage } from "../command-error";
+import { type DeliveryView } from "../delivery/contracts";
 import type { createProjectPlanning } from "../projects/planning";
 import { confirmEpicProposal } from "../server-functions/conversations";
 import {
@@ -28,7 +29,6 @@ import {
   saveTicketTechnicalDesign,
   trashTicket,
 } from "../server-functions/tickets";
-import type { TicketDraft } from "../ticket-workspace";
 import type { WorkspaceTab } from "../workspace-tabs";
 import type { DesktopMutation, ReadTicketDetail, TicketDetail } from "./contracts";
 

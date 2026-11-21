@@ -1,6 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { workspacePresence } from "../../../packages/interface-domain/src/workspace-presence";
-import type { AppPreview, RuntimeAttempt } from "./api-contracts";
 import { plainErrorMessage } from "./command-error";
 import {
   appProcessCause,
@@ -13,6 +12,7 @@ import {
   restoreUnknownHeadline,
 } from "./preview-status";
 import { PreviewReview } from "./review/preview";
+import { type AppPreview, type RuntimeAttempt } from "./runtime/contracts";
 import { appRuntimeOrigin } from "./runtime-origins";
 import {
   retryableMainPreview,

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import { factoryRequestURL } from "../request-origin";
+import type { RuntimeProcessSnapshot } from "./process-contract";
 import { RuntimeProcessEvents } from "./process-events";
 
 const protocol = "factory-runtime-connector-v1";
@@ -50,15 +51,6 @@ type ConnectorMessage = {
   action?: string;
   commitSha?: string;
   remoteSha?: string;
-};
-
-export type RuntimeProcessSnapshot = {
-  name: string;
-  label?: string;
-  state: "starting" | "running" | "stopping" | "stopped" | "failed";
-  output: string;
-  startedAt?: string;
-  exitCode?: number;
 };
 
 type ParentOperationResult = { commitSHA?: string; remoteSHA?: string; data?: string };

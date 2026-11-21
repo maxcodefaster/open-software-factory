@@ -1,4 +1,4 @@
-import type { AppPreview, RuntimeAttempt } from "./api-contracts";
+import { type AppPreview, type RuntimeAttempt } from "./runtime/contracts";
 
 export type PreviewStatusInput = {
   attempt?: Pick<RuntimeAttempt, "state" | "failure" | "computeWait"> | undefined;

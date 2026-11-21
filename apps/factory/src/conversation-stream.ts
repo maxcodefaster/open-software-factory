@@ -1,4 +1,7 @@
-import { type ConversationStreamEvent, conversationStreamEventSchema } from "./api-contracts";
+import {
+  type ConversationStreamEvent,
+  conversationStreamEventSchema,
+} from "./project-agent/contracts";
 
 // Consume one admitted command. Only read-only observations may reconnect.
 export async function streamConversation(

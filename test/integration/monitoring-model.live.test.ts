@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { codeReadInput } from "../../apps/factory/src/knowledge/code-read";
-import { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
+import { codeReadInput } from "../../apps/factory/src/knowledge/contracts";
 import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
+import { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
 import { recordedMastraUsage } from "../../apps/factory/src/usage/record-mastra";
 import { monitoringFixture } from "../fixtures/monitoring";
 import { fixtureValue } from "../fixtures/value";

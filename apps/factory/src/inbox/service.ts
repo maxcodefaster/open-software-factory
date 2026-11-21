@@ -59,7 +59,7 @@ import {
   mentionedPeople,
   receivesAttention,
 } from "../../../../packages/ticket-domain/src/attention";
-import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError, plainFailureMessage } from "../command-error";
 import {
   type AttentionPerson,

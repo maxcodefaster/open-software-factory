@@ -6,7 +6,7 @@ import {
   confirmEmptyOpenCodeSession,
   confirmSettledOpenCodeInput,
   interruptOpenCodeSession,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 

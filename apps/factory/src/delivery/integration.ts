@@ -25,13 +25,12 @@ import {
   substrateBinding,
   ticket,
 } from "../../../../packages/db/src/schema";
+import { projectAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectAuthorityIn } from "../access/controller";
-import type { createAgentController } from "../agent/controller";
+import { type createAgentController } from "../agent/api";
 import { CommandError, plainErrorMessage } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
-import type { RuntimeHub } from "../runtime/hub";
-import { RuntimeParentOperationError } from "../runtime/hub";
+import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/transport-api";
 
 type Operation = {
   id: string;

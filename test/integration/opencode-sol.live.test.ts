@@ -5,14 +5,14 @@ import {
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
   syncOpenCodeInputGuidance,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import { nativeInputSkills, nativeSkillManifest } from "../../apps/factory/src/skills/native";
+import { codingReasoningInput } from "../../packages/conversation-domain/src/model-settings";
 import {
   openCodeModelConfiguration,
   openCodeModelMetadata,
 } from "../../packages/runtime-kubernetes/src/opencode-model";
 import { pinnedOpenCode } from "../fixtures/pinned-opencode";
-import { codingReasoningInput } from "../../packages/conversation-domain/src/model-settings";
 
 test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
   "pinned OpenCode implements and tests an owned goal using Azure Sol and selected reasoning",

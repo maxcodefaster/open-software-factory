@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
 import { fixtureValue } from "../../../test/fixtures/value";
+import { type AgentView } from "./agent/contracts";
 import {
   buildAgentActivityNotice,
   buildAgentActivityStopped,
@@ -11,7 +12,6 @@ import {
   createAgentReadFence,
   retainAgentActivity,
 } from "./agent-view-state";
-import type { AgentView } from "./api-contracts";
 
 test("an older activity read cannot undo Stop or another settled command", () => {
   const fence = createAgentReadFence();

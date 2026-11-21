@@ -30,27 +30,30 @@ import {
   type WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
 import type { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
-import { createModelConnections } from "../models/connections";
-import { createModelSettingsController } from "../models/controller";
+import {
+  createModelConnections,
+  createModelSettingsController,
+  createOpenBaoModelSecrets,
+} from "../models/api";
 import { installationPlanningConnection } from "../models/resolver";
-import { createOpenBaoModelSecrets } from "../models/secrets";
-import { createUsageJournal } from "../usage/journal";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import {
-  codeReadInput,
-  codeReadResult,
   findReadableCodePaths,
   maximumReadableCodeBytes,
   readableCodePath,
   readCodePage,
 } from "./code-read";
+import { codeReadInput, codeReadResult } from "./contracts";
 import { createDocumentSearchCache } from "./document-search-cache";
 import { editKnowledgeIn } from "./edit";
 import { factoryForgeSource } from "./forge-source";
-import { generateWiki, type WikiGenerationInput } from "./generation-agent";
+import { generateWiki } from "./generation-agent";
+import { type WikiGenerationInput } from "./generation-contracts";
 import { wikiGenerationFailureMessage } from "./generation-failure";
 import {
   prepareWikiPublication,

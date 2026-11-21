@@ -31,34 +31,36 @@ import {
   ticketDocumentRevision,
 } from "../../../../packages/db/src/schema";
 import { createRequirementRevision } from "../../../../packages/requirement-domain/src/requirement";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
-import type { createAgentController } from "../agent/controller";
-import type { createChangeController } from "../change/controller";
+import { type createAgentController } from "../agent/api";
+import { type createChangeController } from "../change/api";
 import { CommandError } from "../command-error";
-import type { createDeliveryController } from "../delivery/controller";
+import { type createDeliveryController } from "../delivery/api";
 import { reportFailure } from "../failure-log";
-import type { createKnowledgeController } from "../knowledge/controller";
-import type { createMCPConnections } from "../mcp/connections";
-import { createModelConnections } from "../models/connections";
-import { createModelSettingsController } from "../models/controller";
+import { type createKnowledgeController } from "../knowledge/api";
+import { type createMCPConnections } from "../mcp/library-api";
+import {
+  createModelConnections,
+  createModelSettingsController,
+  createOpenBaoModelSecrets,
+} from "../models/api";
 import { knownModelRejection } from "../models/execution-policy";
 import { installationPlanningConnection } from "../models/resolver";
-import { createOpenBaoModelSecrets } from "../models/secrets";
-import { ProjectContextLimitError } from "../project-agent/context";
 import {
   clarifyProjectInput,
   type InputClarification,
   inputClarification,
   type inputSkillAssignment,
-} from "../project-agent/input";
-import { ProjectAgentOutputError } from "../project-agent/structured-output";
-import { admittedProjectContext } from "../project-agent/ticket-context";
-import { createSkillController } from "../skills/controller";
-import { createUsageJournal } from "../usage/journal";
+} from "../project-agent/api";
+import { admittedProjectContext, ProjectContextLimitError } from "../project-agent/context-api";
+import { ProjectAgentOutputError } from "../project-agent/output-api";
+import { createSkillController } from "../skills/api";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { monitoringAuthorityIn } from "./authority";
-import { diagnoseMonitoringIncident, MonitoringDiagnosisError } from "./diagnosis";
+import { diagnoseMonitoringIncident } from "./diagnosis";
+import { MonitoringDiagnosisError } from "./diagnosis-contract";
 
 type Database = ReturnType<typeof createDatabase>;
 type Incident = {

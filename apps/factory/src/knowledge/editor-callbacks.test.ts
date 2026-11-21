@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { withoutRepeatedTitle } from "../../../../packages/knowledge-domain/src/document-merge";
 import { editorCallbacks, editorSolid as solid } from "../../../../test/fixtures/editor-callbacks";
-import type { KnowledgePage, KnowledgeRevision, KnowledgeSave } from "../api-contracts";
+import type { KnowledgePage, KnowledgeRevision, KnowledgeSave } from "./contracts";
 import * as drafts from "./draft";
 
 type Callbacks = {
@@ -41,6 +41,21 @@ function setup(options: {
       "./ui/workspace-navigation": { createWorkspaceNavigation: () => ({}) },
       "./command-error": { plainErrorMessage: (message: string) => message },
     },
+    stubs: [
+      "./icon",
+      "./knowledge/navigation-resize",
+      "./knowledge/page-organization",
+      "./knowledge/page-tree",
+      "./knowledge/source-link",
+      "./knowledge/wiki-search",
+      "./markdown-editor",
+      "./markdown-reader",
+      "./popover-keyboard",
+      "./ui/feedback",
+      "./ui/workspace-actions",
+      "./version-history",
+      "./wiki-progress",
+    ],
     storage: {
       getItem: (key) => storage.get(key) ?? null,
       setItem: (key, value) => {

@@ -1,4 +1,4 @@
-import type { RuntimeProcessSnapshot } from "./hub";
+import type { RuntimeProcessSnapshot } from "./process-contract";
 
 interface Subscription {
   readonly attemptID: string;

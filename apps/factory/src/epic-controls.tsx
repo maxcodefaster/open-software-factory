@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
-import type { Epic } from "./api-contracts";
 import { plainErrorMessage } from "./command-error";
+import { type Epic } from "./projects/contracts";
 import { WindowHeading } from "./workspace-chrome";
 
 export type EpicEdit = { title: string; description: string; parentId: string | null };

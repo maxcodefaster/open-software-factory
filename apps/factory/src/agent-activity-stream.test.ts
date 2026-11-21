@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import type { ActivityEvent } from "./agent/activity-stream";
+import type { ActivityEvent } from "./agent/contracts";
+import { type AgentView } from "./agent/contracts";
 import { observeAgentStream } from "./agent/observe-stream";
-import type { AgentView } from "./api-contracts";
 
 test("native Build observations validate replacements and fence a canceled connection after Stop", async () => {
   const snapshot: AgentView = {

@@ -1,6 +1,6 @@
 import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
-import { projectDevelopmentAuthorityIn } from "./controller";
+import { projectDevelopmentAuthorityIn } from "./authority";
 
 export type WorkspaceAuthority = {
   projectID: string;

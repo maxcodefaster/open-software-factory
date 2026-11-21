@@ -1,4 +1,4 @@
-import type { ForgeRepository } from "../../../../packages/forge/src/forge";
+import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
 import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { CommandError } from "../command-error";
 

@@ -1,21 +1,23 @@
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
 import { APIRequestError } from "../../apps/factory/src/api-client";
+import { attachmentText, readAttachmentContent } from "../../apps/factory/src/attachments/composer";
+import { AttachmentProvider, TextareaAttachments } from "../../apps/factory/src/attachments/ui";
+import {
+  type TicketDraft,
+  ticketDocumentSaveSchema,
+} from "../../apps/factory/src/change/contracts";
+import { Icon } from "../../apps/factory/src/icon";
 import {
   type KnowledgeGeneration,
   type KnowledgePage,
   knowledgeSaveSchema,
-  ticketDocumentSaveSchema,
-} from "../../apps/factory/src/api-contracts";
-import { attachmentText, readAttachmentContent } from "../../apps/factory/src/attachments/composer";
-import { AttachmentProvider, TextareaAttachments } from "../../apps/factory/src/attachments/ui";
-import { Icon } from "../../apps/factory/src/icon";
+} from "../../apps/factory/src/knowledge/contracts";
 import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge-workspace";
 import { MarkdownEditor } from "../../apps/factory/src/markdown-editor";
 import { MarkdownReader } from "../../apps/factory/src/markdown-reader";
 import { ChatSkillPicker } from "../../apps/factory/src/skills/chat-picker";
 import {
-  type TicketDraft,
   TicketWorkspace,
   type TicketWorkspaceProps,
 } from "../../apps/factory/src/ticket-workspace";

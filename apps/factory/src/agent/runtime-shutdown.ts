@@ -1,7 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
-import type { RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub } from "../runtime/transport-api";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
-import { createOpenCodeClient } from "./opencode-client";
+import { createOpenCodeClient } from "./opencode-adapter";
 
 export type CodingRuntimeShutdown = (attemptID: string) => Promise<void>;
 

@@ -5,28 +5,20 @@ import {
   zeroMutators,
 } from "../../../../packages/zero-schema/src";
 import type { useZero } from "../../../../packages/zero-solid/src";
-import type { Epic, Ticket } from "../api-contracts";
+import { type PersonalTicketDraft, type Ticket, type TicketDraft } from "../change/contracts";
+import { readPersonalTicketDraft } from "../change/drafts";
 import type { EpicEdit } from "../epic-controls";
-import type { createProjectPlanning } from "../projects/planning";
-import { type PersonalTicketDraft, readPersonalTicketDraft } from "../ticket-draft-workspace";
-import type { TicketDraft } from "../ticket-workspace";
+import { type Epic } from "../projects/contracts";
 import type { createWorkspaceState } from "../workspace/state";
 import type { WorkspaceTab } from "../workspace-tabs";
-import type {
-  DesktopMutation,
-  FactoryDesktopProps,
-  ReadTicketDetail,
-  TicketDetail,
-} from "./contracts";
+import type { DesktopMutation, ReadTicketDetail, TicketDetail } from "./contracts";
 
 interface ProjectCommandsDependencies {
   mutate: DesktopMutation;
-  setSelectedProjectID: Setter<string | undefined>;
-  setProjectMenuOpen: ReturnType<typeof createProjectPlanning>["setProjectMenuOpen"];
   zero: ReturnType<typeof useZero<FactoryZeroSchema, undefined, FactoryZeroContext>>;
   selectedProjectID: SourceAccessor<string | undefined>;
   commitZeroMutation: (operation: Promise<unknown>) => Promise<void>;
-  setSelectedEpicID: ReturnType<typeof createProjectPlanning>["setSelectedEpicID"];
+  setSelectedEpicID: Setter<string>;
   error: SourceAccessor<string>;
   detail: Accessor<TicketDetail | undefined>;
   refreshTicketDetail: ReadTicketDetail;
@@ -45,8 +37,8 @@ interface ProjectCommandsDependencies {
   setSelectedTicketID: Setter<string | undefined>;
   setDetail: Setter<TicketDetail | undefined>;
   openWorkspaceTab: (tab: WorkspaceTab, publish?: boolean) => void;
-  props: FactoryDesktopProps;
-  workspaces: ReturnType<typeof createWorkspaceState>;
+  userID: string;
+  workspaces: Pick<ReturnType<typeof createWorkspaceState>, "current" | "update" | "close">;
   workspaceVisible: SourceAccessor<boolean>;
   selectTicket: (ticketID: string, fromInbox?: boolean, read?: boolean, publish?: boolean) => void;
 }
@@ -191,7 +183,7 @@ export function createProjectCommands(dependencies: ProjectCommandsDependencies)
         dependencies.ticketDrafts.set(draft.id, editing);
         try {
           localStorage.setItem(
-            `ticket-edit:${dependencies.props.session.user.id}:${draft.id}`,
+            `ticket-edit:${dependencies.userID}:${draft.id}`,
             JSON.stringify(editing),
           );
         } catch {
@@ -204,7 +196,7 @@ export function createProjectCommands(dependencies: ProjectCommandsDependencies)
         dependencies.workspaces.current()?.activeTabID === draftTabID;
       dependencies.personalDrafts.delete(projectID);
       try {
-        localStorage.removeItem(`ticket-draft:${dependencies.props.session.user.id}:${projectID}`);
+        localStorage.removeItem(`ticket-draft:${dependencies.userID}:${projectID}`);
       } catch {
         /* Created work is authoritative even without browser storage. */
       }

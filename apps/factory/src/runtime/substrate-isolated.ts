@@ -22,8 +22,8 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
 import type { SystemContract } from "../../../../packages/system-contract/src/system-contract";
-import { projectAuthorityIn } from "../access/controller";
-import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
+import { projectAuthorityIn } from "../access/authority";
+import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { runtimeAppOrigins } from "./app-origins";
 import { substrateRepositoryCloneURL } from "./endpoints";
 import {

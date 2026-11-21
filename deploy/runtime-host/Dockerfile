@@ -37,6 +37,7 @@ FROM docker.io/oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b
 ARG TARGETARCH
 WORKDIR /opt/factory/opencode/server
 COPY deploy/opencode-server/package.json deploy/opencode-server/bun.lock ./
+COPY patches/gitlab-ai-provider-zod4-types.patch /opt/factory/patches/gitlab-ai-provider-zod4-types.patch
 # Keep upstream dynamic native assets intact for both glibc and musl containers.
 RUN cpu=x64; if [ "$TARGETARCH" = arm64 ]; then cpu=arm64; fi; bun install --frozen-lockfile --ignore-scripts --production --os='*' --cpu="$cpu"
 COPY deploy/opencode-server/server.mjs deploy/opencode-server/retained-events.mjs deploy/opencode-server/install-skills.mjs ./
@@ -48,7 +49,7 @@ WORKDIR /src
 COPY deploy/input-stop/package.json deploy/input-stop/bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts --production
 COPY upstream.json ./upstream.json
-COPY apps/factory/src/agent/opencode-client.ts apps/factory/src/agent/input-stop-worker.ts ./apps/factory/src/agent/
+COPY apps/factory/src/agent/opencode-adapter.ts apps/factory/src/agent/input-stop-worker.ts ./apps/factory/src/agent/
 COPY scripts/factory/build-input-stop.ts ./scripts/factory/build-input-stop.ts
 RUN bun scripts/factory/build-input-stop.ts /out
 

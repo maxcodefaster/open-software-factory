@@ -17,14 +17,15 @@ import type { SkillRevision } from "../../../../packages/conversation-domain/src
 import type { ProjectAgentProgress } from "../../../../packages/conversation-domain/src/turn-observation";
 import type { TurnUsage } from "../../../../packages/conversation-domain/src/turn-usage";
 import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
-import { codeReadInput, codeReadResult } from "../knowledge/code-read";
-import type { MCPSourceTool } from "../mcp/sources";
+import { type ConversationEntry } from "../conversations/api";
+import { codeReadInput, codeReadResult } from "../knowledge/contracts";
+import { type MCPSourceTool } from "../mcp/source-tool-contract";
 import { nativeAgentPolicy } from "../models/execution-policy";
-import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "../models/native";
-import { invokedSkills, nativeSkillId } from "../skills/native";
-import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
+import { type ResolvedModelConnection } from "../models/inference-contracts";
+import { modelProviderOptions, nativeModel } from "../models/native";
+import { invokedSkills, nativeSkillId } from "../skills/api";
+import { createMastraUsage, type MastraUsageSink } from "../usage/model-api";
 import { ProjectContextLimitError, projectModelContext } from "./context";
-import type { ConversationEntry } from "../conversations/store";
 import {
   projectReadInput,
   projectSearchInput,

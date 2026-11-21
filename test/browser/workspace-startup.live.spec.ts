@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, type FrameLocator, type Page } from "@playwright/test";
 import { z } from "zod";
-import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";

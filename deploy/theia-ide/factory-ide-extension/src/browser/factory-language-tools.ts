@@ -10,7 +10,7 @@ import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
 import { ProblemManager } from "@theia/markers/lib/browser";
 import * as monaco from "@theia/monaco-editor-core";
 import { ProtocolToMonacoConverter } from "@theia/monaco/lib/browser/protocol-to-monaco-converter";
-import type { MessageConnection } from "vscode-jsonrpc/browser";
+import type { MessageConnection } from "#factory-jsonrpc";
 import { languageConnection, languageRequest } from "./factory-language-connection";
 import { languagePreset, type FactoryLanguage } from "./factory-language";
 import {

@@ -4,15 +4,11 @@ import { model as deepseekModel } from "@opencode/ai/providers/deepseek";
 import { model as openaiModel } from "@opencode/ai/providers/openai/responses";
 import { z } from "zod";
 import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
-import {
-  type CodingReasoning,
-  codingReasoningInput,
-} from "../../../../packages/conversation-domain/src/model-settings";
+import { codingReasoningInput } from "../../../../packages/conversation-domain/src/model-settings";
 import { unknownCounters, usageCounters } from "../../../../packages/conversation-domain/src/usage";
 import { openCodeModelConfiguration } from "../../../../packages/runtime-kubernetes/src/opencode-model";
-import type { MastraUsageSink } from "../usage/mastra";
-import type { ResolvedModelConnection } from "./native";
-import { modelProbeFailure, reportedModelLimits } from "./probe";
+import type { ModelProbeInput } from "./probe-contracts";
+import { modelProbeFailure, reportedModelLimits } from "./probe-result";
 
 const probeOutput = z.object({
   verified: z.literal(true),
@@ -21,13 +17,9 @@ const probeOutput = z.object({
 
 // The exact native provider modules used by OpenCode 2, without starting compute
 // or copying the provider protocol. One inference, no retries and no fallback.
-export async function probeBuildModel(input: {
-  connection: ResolvedModelConnection;
-  modelId: string;
-  signal: AbortSignal;
-  usageSink?: MastraUsageSink;
-  reasoningEffort?: CodingReasoning;
-}): Promise<ModelProbeResult> {
+export async function probeBuildModel(
+  input: Omit<ModelProbeInput, "role">,
+): Promise<ModelProbeResult> {
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(60_000)]);
   let limits = reportedModelLimits(undefined);
   let toolCall = false;

@@ -1,13 +1,11 @@
-import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { expect, type Page } from "@playwright/test";
 import { z } from "zod";
 import { desktopBackgrounds } from "../../apps/factory/src/artworks";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
-import { test } from "../fixtures/browser-test";
+import { test } from "../fixtures/browser-host-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
@@ -16,30 +14,9 @@ import { luminance } from "../support/visual-contrast";
 test("Project backgrounds stay shared and persistent with a compact, expandable artwork picker", async ({
   page,
   browser,
+  browserHost: fixture,
 }) => {
   test.setTimeout(360_000);
-  const host = spawn(
-    "mise",
-    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
-  let stderr = "";
-  host.stderr.on("data", (chunk) => {
-    stderr += String(chunk);
-  });
-  const fixture = await new Promise<z.infer<typeof ready>>((resolve, reject) => {
-    const lines = createInterface({ input: host.stdout });
-    lines.on("line", (line) => {
-      if (!line.startsWith('{"fixtureBase"')) return;
-      try {
-        resolve(ready.parse(JSON.parse(line)));
-      } catch (cause) {
-        reject(cause);
-      }
-    });
-    host.once("exit", () => reject(new Error(`Owned browser host exited: ${stderr.slice(-3000)}`)));
-  });
   const previousURL = process.env["DATABASE_URL"];
   process.env["DATABASE_URL"] = fixture.databaseURL;
   const database = createDatabase(3);
@@ -110,11 +87,6 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
       observerContext.close(),
       database.client.end(),
     ]);
-    if (host.exitCode === null) {
-      const exited = new Promise<void>((resolve) => host.once("exit", () => resolve()));
-      host.kill("SIGTERM");
-      await exited;
-    }
     for (const result of cleanups) if (result.status === "rejected") throw result.reason;
   }
   try {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { agentMessageSchema } from "../api-contracts";
+import { agentMessageSchema } from "./contracts";
 import { navigationMessages, projectMessages } from "./message-projection";
 import { classifyAgentTurn } from "./turn-outcome";
 

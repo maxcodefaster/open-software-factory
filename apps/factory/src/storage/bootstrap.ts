@@ -9,7 +9,7 @@ import {
   reviewMedia,
   substrateSource,
 } from "../../../../packages/db/src/schema";
-import { sourceCheckpointObjects } from "../workspace/substrate-source";
+import { sourceCheckpointObjects } from "../workspace/source-api";
 import { createPrivateObjects, objectDigest, type PrivateObjects } from "./objects";
 
 export async function requireObjectStorage(

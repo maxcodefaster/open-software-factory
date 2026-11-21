@@ -50,7 +50,11 @@ async function fixture() {
     base = baseSHA,
     merges = 0,
     starts = 0,
-    reviews = 0;
+    reviews = 0,
+    registrations = 0,
+    observations = 0;
+  let candidateHead = commitSHA,
+    candidateMerged = false;
   let beforeRegistration: (() => Promise<void>) | undefined;
   let beforeRevocation: (() => Promise<void>) | undefined;
   let rejectRevocation = false;
@@ -58,8 +62,8 @@ async function fixture() {
   const pullRequest = () => ({
     number: 1,
     url: "https://forge.invalid/owned/delivery/pulls/1",
-    headSha: commitSHA,
-    merged: false,
+    headSha: candidateHead,
+    merged: candidateMerged,
     state: "open",
     baseBranch: "main",
     baseSha: base,
@@ -77,17 +81,24 @@ async function fixture() {
     },
     getPullRequest: async () => pullRequest(),
     getDefaultBranch: async () => ({ name: "main", headSha: base }),
-    listActionRuns: async () => [
-      {
-        id: 1,
-        workflowID: "factory-verification.yml",
-        event: "pull_request",
-        status,
-        commitSha: commitSHA,
-        url: "https://forge.invalid/owned/delivery/actions/runs/1",
-      },
-    ],
+    listActionRuns: async () => {
+      observations++;
+      return [
+        {
+          id: 1,
+          workflowID: "factory-verification.yml",
+          event: "pull_request",
+          status,
+          commitSha: commitSHA,
+          url: "https://forge.invalid/owned/delivery/actions/runs/1",
+        },
+      ];
+    },
     registerEphemeralRunner: async () => {
+      const [intent] = await database.client`SELECT id,commit_sha AS commit,created_by AS actor
+        FROM factory.verification WHERE change_id=${changeID} AND commit_sha=${commitSHA}`;
+      expect(intent).toMatchObject({ commit: commitSHA, actor: userID });
+      registrations++;
       await beforeRegistration?.();
       return { id: 42, uuid: crypto.randomUUID(), token: "owned-private-runner-token" };
     },
@@ -229,6 +240,12 @@ async function fixture() {
       merges: () => merges,
       starts: () => starts,
       reviews: () => reviews,
+      registrations: () => registrations,
+      observations: () => observations,
+      candidate: (headSHA: string, merged: boolean) => {
+        candidateHead = headSHA;
+        candidateMerged = merged;
+      },
       status: (value: string) => {
         status = value;
       },
@@ -259,16 +276,115 @@ test("PR and Verification intents precede external work and retries retain their
       WHERE change_id=${f.changeID}`;
     expect(first?.runner).toBe("42");
     expect(f.starts()).toBe(1);
+    expect(f.registrations()).toBe(1);
     await delivery.reconcile(f.changeID);
     const [second] = await f.database.client<
       { id: string }[]
     >`SELECT id FROM factory.verification WHERE change_id=${f.changeID}`;
     expect(second?.id).toBe(first?.id);
+    expect(f.registrations()).toBe(1);
     expect(
       await f.database
         .client`SELECT id FROM factory.pull_request_operation WHERE change_id=${f.changeID}`,
     ).toHaveLength(1);
   } finally {
+    await f.dispose();
+  }
+});
+
+test.each(["moved", "merged"] as const)(
+  "Verification does not observe or start checks for a %s PR candidate",
+  async (candidate) => {
+    const f = await fixture();
+    try {
+      f.candidate(candidate === "moved" ? "c".repeat(40) : f.commitSHA, candidate === "merged");
+      await f.controller().reconcile(f.changeID);
+      expect(
+        await f.database.client`SELECT id FROM factory.verification WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+      expect(f.observations()).toBe(0);
+      expect(f.registrations()).toBe(0);
+      expect(f.starts()).toBe(0);
+      expect(f.reviews()).toBe(0);
+      expect(f.merges()).toBe(0);
+    } finally {
+      await f.dispose();
+    }
+  },
+);
+
+test("superseded Verification cleanup retains the current candidate and its registered runner", async () => {
+  const f = await fixture();
+  try {
+    await f.seedVerification();
+    await f.database.client`UPDATE factory.verification SET runner_id=99,
+      runner_uuid=${crypto.randomUUID()},runner_token='owned-current-runner'
+      WHERE id=${f.verificationID}`;
+    const previousID = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.verification(
+      id,change_id,commit_sha,pull_request_number,runner_name,runner_id,state,created_by)
+      VALUES(${previousID},${f.changeID},${"c".repeat(40)},1,'owned-superseded',42,'running',${f.userID})`;
+    const delivery = f.controller();
+    await delivery.reconcile(f.changeID);
+    const [previous] = await f.database.client`SELECT state,runner_id::text AS runner
+      FROM factory.verification WHERE id=${previousID}`;
+    const [current] = await f.database
+      .client`SELECT state,runner_id::text AS runner,commit_sha AS commit
+      FROM factory.verification WHERE id=${f.verificationID}`;
+    expect(previous).toEqual({ state: "cancelled", runner: null });
+    expect(current).toEqual({
+      state: "runner-starting",
+      runner: "99",
+      commit: f.commitSHA,
+    });
+    expect(f.revoked).toEqual([42]);
+    expect(f.registrations()).toBe(0);
+    expect(f.starts()).toBe(1);
+    await delivery.reconcile(f.changeID);
+    expect(f.revoked).toEqual([42]);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("Trash waits for in-flight Verification registration and revokes its late runner before returning", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  let reconciliation: Promise<void> | undefined, stopping: Promise<void> | undefined;
+  try {
+    const delivery = f.controller();
+    f.onRegistration(async () => {
+      await f.database.client`UPDATE factory.ticket SET trashed_at=now(),trashed_by=${f.userID}
+        WHERE id=${f.ticketID}`;
+      await delivery.cancel(f.changeID);
+      entered.resolve();
+      await release.promise;
+    });
+    reconciliation = delivery.reconcile(f.changeID);
+    await Promise.race([
+      entered.promise,
+      reconciliation.then(() => {
+        throw new Error("Verification did not reach the owned registration boundary");
+      }),
+    ]);
+    let stopped = false;
+    stopping = delivery.stopForTrash(f.changeID).then(() => {
+      stopped = true;
+    });
+    await Bun.sleep(10);
+    expect(stopped).toBe(false);
+    release.resolve();
+    await Promise.all([reconciliation, stopping]);
+    const [verification] = await f.database.client`SELECT state,runner_id::text AS runner
+      FROM factory.verification WHERE change_id=${f.changeID}`;
+    expect(verification).toEqual({ state: "cancelled", runner: null });
+    expect(f.revoked).toEqual([42]);
+    expect(f.starts()).toBe(0);
+    expect(f.reviews()).toBe(0);
+  } finally {
+    release.resolve();
+    await Promise.all([reconciliation, stopping].map((work) => work?.catch(() => undefined)));
     await f.dispose();
   }
 });

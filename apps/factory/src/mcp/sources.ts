@@ -3,21 +3,16 @@ import { z } from "zod";
 import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { mcpObservation } from "../../../../packages/db/src/schema";
-import type { createBuildBrowserController } from "../agent/browser-controller";
-import { createAgentTurnStore } from "../agent/turn-store";
-import { createAttachmentTools } from "../attachments/tools";
+import { type createBuildBrowserController } from "../agent/browser-api";
+import { createAgentTurnStore } from "../agent/turns-api";
+import { createAttachmentTools } from "../attachments/tools-api";
 import { CommandError } from "../command-error";
 import { json } from "../http";
-import { projectResearchTools } from "../project-agent/build-tools";
+import { projectResearchTools } from "../project-agent/research-api";
 import type { createMCPConnections } from "./connections";
 import { mcpDigest } from "./controller";
+import type { MCPSourceTool } from "./source-tool-contract";
 
-export type MCPSourceTool = {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  run(args: Record<string, unknown>): Promise<{ content: string; isError: boolean }>;
-};
 export function mcpSourceAlias(connectionId: string, name: string) {
   // Leave room for OpenCode's `factory_sources_` namespace within model
   // providers' 64-character function-name limit. Never rely on a UUID prefix.

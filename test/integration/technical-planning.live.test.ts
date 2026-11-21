@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { codeReadInput } from "../../apps/factory/src/knowledge/contracts";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { codeReadInput } from "../../apps/factory/src/knowledge/code-read";
+import { technicalPlanningOutstandingIn } from "../../apps/factory/src/technical-design/store";
+import { unansweredClarification } from "../../packages/conversation-domain/src/clarification";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
-import { unansweredClarification } from "../../packages/conversation-domain/src/clarification";
-import { technicalPlanningOutstandingIn } from "../../apps/factory/src/technical-design/store";
 
 test.skipIf(process.env["FACTORY_TECHNICAL_PLANNING_LIVE"] !== "1")(
   "real configured Planning creates product intent, then a source-grounded technical revision with a rendered diagram",

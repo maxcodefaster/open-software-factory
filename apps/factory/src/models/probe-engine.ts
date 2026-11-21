@@ -4,11 +4,11 @@ import { noopLogger } from "@mastra/core/logger";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
+import { createMastraUsage } from "../usage/model-api";
 import { nativeAgentPolicy, nativeStepGuard } from "./execution-policy";
-import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "./native";
-import { modelProbeFailure, reportedModelLimits } from "./probe";
+import { modelProviderOptions, nativeModel } from "./native";
+import type { ModelProbeInput } from "./probe-contracts";
+import { modelProbeFailure, reportedModelLimits } from "./probe-result";
 
 const output = z
   .object({ verified: z.literal(true), value: z.literal("factory-connection-ok") })
@@ -16,14 +16,7 @@ const output = z
 
 // One explicitly authorized probe, at most two model steps. No retries or fallback.
 // It proves this request's access/capabilities, not sustained token-per-minute capacity.
-export async function probeModel(input: {
-  connection: ResolvedModelConnection;
-  modelId: string;
-  signal: AbortSignal;
-  role?: "planning" | "build";
-  usageSink?: MastraUsageSink;
-  reasoningEffort?: CodingReasoning;
-}): Promise<ModelProbeResult> {
+export async function probeModel(input: ModelProbeInput): Promise<ModelProbeResult> {
   if (input.role === "build") {
     const { probeBuildModel } = await import("./build-probe");
     return probeBuildModel(input);

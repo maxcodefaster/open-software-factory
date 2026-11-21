@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { type AgentView, agentViewSchema } from "../api-contracts";
-import type { ActivityEvent } from "./activity-stream";
+import { type ActivityEvent, type AgentView, agentViewSchema } from "./contracts";
 
 const eventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("snapshot"), view: agentViewSchema }),

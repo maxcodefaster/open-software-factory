@@ -19,8 +19,8 @@ import {
   modelRulesInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -31,7 +31,7 @@ import {
   personalModelSettings,
   projectModelSettings,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { providerCatalogue } from "./native";
 

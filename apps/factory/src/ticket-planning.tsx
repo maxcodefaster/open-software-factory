@@ -12,7 +12,7 @@ import {
   type TechnicalDesignContent,
   technicalDesignContentInput,
 } from "../../../packages/requirement-domain/src/technical-design";
-import type { TechnicalDesignRevision } from "./api-contracts";
+import { type TechnicalDesignRevision } from "./change/contracts";
 import { plainErrorMessage } from "./command-error";
 import { MarkdownReader } from "./markdown-reader";
 import { technicalDesignProblem } from "./proposal-problems";

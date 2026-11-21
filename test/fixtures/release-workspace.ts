@@ -1,10 +1,10 @@
-import { callFactoryFunction } from "./server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type { releaseInstallation } from "./release-installation";
-import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { callFactoryFunction } from "./server-functions";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 

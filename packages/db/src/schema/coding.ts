@@ -53,22 +53,22 @@ export const agentTurn = factorySchema.table(
         table.projectId.asc().nullsLast(),
         sql`(
 CASE
-    WHEN change_id IS NULL AND (input ->> 'contextId'::text) IS NOT NULL THEN 'context:'::text || (input ->> 'contextId'::text)
-    ELSE COALESCE(ticket_id::text, 'draft:'::text || created_by::text)
+    WHEN ${table.changeId} IS NULL AND (${table.input} ->> 'contextId'::text) IS NOT NULL THEN 'context:'::text || (${table.input} ->> 'contextId'::text)
+    ELSE COALESCE(${table.ticketId}::text, 'draft:'::text || ${table.createdBy}::text)
 END) text_ops`,
       )
       .where(
-        sql`(state = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state]))`,
+        sql`(${table.state} = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state]))`,
       ),
     index("agent_turn_recovery_idx")
       .using("btree", table.state.asc().nullsLast(), table.ownerExpiresAt.asc().nullsLast())
       .where(
-        sql`(state = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state]))`,
+        sql`(${table.state} = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state]))`,
       ),
     uniqueIndex("agent_turn_unresolved_change_boundary_uidx")
       .using("btree", table.projectId.asc().nullsLast(), table.ticketId.asc().nullsLast())
       .where(
-        sql`((change_id IS NOT NULL) AND (state = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state])))`,
+        sql`((${table.changeId} IS NOT NULL) AND (${table.state} = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state])))`,
       ),
     foreignKey({
       columns: [table.changeId],
@@ -98,34 +98,37 @@ END) text_ops`,
     unique("agent_turn_command_id_key").on(table.commandId),
     check(
       "agent_turn_authority_check",
-      sql`(jsonb_typeof(authority) = 'object'::text) AND (authority ? 'mode'::text) AND (octet_length((authority)::text) <= 2000)`,
+      sql`(jsonb_typeof(${table.authority}) = 'object'::text) AND (${table.authority} ? 'mode'::text) AND (octet_length((${table.authority})::text) <= 2000)`,
     ),
-    check("agent_turn_check", sql`(owner_token IS NULL) = (owner_expires_at IS NULL)`),
+    check(
+      "agent_turn_check",
+      sql`(${table.ownerToken} IS NULL) = (${table.ownerExpiresAt} IS NULL)`,
+    ),
     check(
       "agent_turn_check1",
-      sql`(((input ->> 'kind'::text) = ANY (ARRAY['project-message'::text, 'project-answer'::text])) AND (conversation_id IS NOT NULL) AND (change_id IS NULL) AND ((authority ->> 'mode'::text) = ANY (ARRAY['investigate'::text, 'plan'::text]))) OR (((input ->> 'kind'::text) = ANY (ARRAY['change-start'::text, 'change-prompt'::text, 'change-repair'::text, 'change-review'::text])) AND (change_id IS NOT NULL) AND (ticket_id IS NOT NULL) AND ((authority ->> 'mode'::text) = 'build'::text))`,
+      sql`(((${table.input} ->> 'kind'::text) = ANY (ARRAY['project-message'::text, 'project-answer'::text])) AND (${table.conversationId} IS NOT NULL) AND (${table.changeId} IS NULL) AND ((${table.authority} ->> 'mode'::text) = ANY (ARRAY['investigate'::text, 'plan'::text]))) OR (((${table.input} ->> 'kind'::text) = ANY (ARRAY['change-start'::text, 'change-prompt'::text, 'change-repair'::text, 'change-review'::text])) AND (${table.changeId} IS NOT NULL) AND (${table.ticketId} IS NOT NULL) AND ((${table.authority} ->> 'mode'::text) = 'build'::text))`,
     ),
     check(
       "agent_turn_check2",
-      sql`((input ->> 'kind'::text) <> 'project-answer'::text) OR ((authority ->> 'mode'::text) = 'plan'::text)`,
+      sql`((${table.input} ->> 'kind'::text) <> 'project-answer'::text) OR ((${table.authority} ->> 'mode'::text) = 'plan'::text)`,
     ),
     check(
       "agent_turn_check3",
-      sql`(state <> ALL (ARRAY['dispatching'::agent_turn_state, 'running'::agent_turn_state])) OR (owner_token IS NOT NULL)`,
+      sql`(${table.state} <> ALL (ARRAY['dispatching'::agent_turn_state, 'running'::agent_turn_state])) OR (${table.ownerToken} IS NOT NULL)`,
     ),
     check(
       "agent_turn_check4",
-      sql`(state <> ALL (ARRAY['completed'::agent_turn_state, 'failed'::agent_turn_state, 'stopped'::agent_turn_state, 'uncertain'::agent_turn_state])) OR (owner_token IS NULL)`,
+      sql`(${table.state} <> ALL (ARRAY['completed'::agent_turn_state, 'failed'::agent_turn_state, 'stopped'::agent_turn_state, 'uncertain'::agent_turn_state])) OR (${table.ownerToken} IS NULL)`,
     ),
     check(
       "agent_turn_input_check",
-      sql`(jsonb_typeof(input) = 'object'::text) AND (input ? 'kind'::text) AND (octet_length((input)::text) <= 100000)`,
+      sql`(jsonb_typeof(${table.input}) = 'object'::text) AND (${table.input} ? 'kind'::text) AND (octet_length((${table.input})::text) <= 100000)`,
     ),
-    check("agent_turn_input_digest_check", sql`input_digest ~ '^[a-f0-9]{64}$'::text`),
-    check("agent_turn_outcome_summary_check", sql`length(outcome_summary) <= 2000`),
+    check("agent_turn_input_digest_check", sql`${table.inputDigest} ~ '^[a-f0-9]{64}$'::text`),
+    check("agent_turn_outcome_summary_check", sql`length(${table.outcomeSummary}) <= 2000`),
     check(
       "agent_turn_review_authority",
-      sql`((input ->> 'kind'::text) = 'change-review'::text) = (authority ? 'review'::text)`,
+      sql`((${table.input} ->> 'kind'::text) = 'change-review'::text) = (${table.authority} ? 'review'::text)`,
     ),
   ],
 );
@@ -140,7 +143,10 @@ export const buildBrowserSession = factorySchema.table(
     generation: bigint("generation", { mode: "number" }).notNull(),
     agentSessionId: text("agent_session_id").notNull(),
     ownerId: text("owner_id").notNull(),
-    state: text("state").default("intended").notNull(),
+    state: text("state")
+      .$type<"intended" | "active" | "closing" | "closed">()
+      .default("intended")
+      .notNull(),
     createIntendedAt: timestamp("create_intended_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -155,10 +161,10 @@ export const buildBrowserSession = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("build_browser_one_unclosed_session")
       .using("btree", table.turnId.asc().nullsLast(), table.ownerId.asc().nullsLast())
-      .where(sql`(state <> 'closed'::text)`),
+      .where(sql`(${table.state} <> 'closed'::text)`),
     index("build_browser_session_cleanup_idx")
       .using("btree", table.runtimeAttemptId.asc().nullsLast())
-      .where(sql`(state <> 'closed'::text)`),
+      .where(sql`(${table.state} <> 'closed'::text)`),
     foreignKey({
       columns: [table.changeId],
       foreignColumns: [change.id],
@@ -181,35 +187,38 @@ export const buildBrowserSession = factorySchema.table(
     ),
     check(
       "build_browser_session_agent_session_id_check",
-      sql`(agent_session_id ~~ 'ses%'::text) AND (length(agent_session_id) <= 200)`,
+      sql`(${table.agentSessionId} ~~ 'ses%'::text) AND (length(${table.agentSessionId}) <= 200)`,
     ),
     check(
       "build_browser_session_check",
-      sql`(inspection_context IS NULL) OR (((jsonb_typeof(inspection_context) = 'object'::text) AND (octet_length((inspection_context)::text) <= 2048) AND ((inspection_context ->> 'sessionId'::text) = (id)::text) AND ((inspection_context ->> 'turnId'::text) = (turn_id)::text) AND ((inspection_context ->> 'changeId'::text) = (change_id)::text) AND ((inspection_context ->> 'runtimeAttemptId'::text) = (runtime_attempt_id)::text) AND (((inspection_context ->> 'generation'::text))::bigint = generation) AND ((inspection_context ->> 'headCommit'::text) ~ '^[a-f0-9]{40}$'::text) AND ((inspection_context ->> 'app'::text) ~ '^[a-z][a-z0-9-]{0,31}$'::text) AND (jsonb_typeof((inspection_context -> 'workingTreeModified'::text)) = 'boolean'::text)) IS TRUE)`,
+      sql`(${table.inspectionContext} IS NULL) OR (((jsonb_typeof(${table.inspectionContext}) = 'object'::text) AND (octet_length((${table.inspectionContext})::text) <= 2048) AND ((${table.inspectionContext} ->> 'sessionId'::text) = (${table.id})::text) AND ((${table.inspectionContext} ->> 'turnId'::text) = (${table.turnId})::text) AND ((${table.inspectionContext} ->> 'changeId'::text) = (${table.changeId})::text) AND ((${table.inspectionContext} ->> 'runtimeAttemptId'::text) = (${table.runtimeAttemptId})::text) AND (((${table.inspectionContext} ->> 'generation'::text))::bigint = ${table.generation}) AND ((${table.inspectionContext} ->> 'headCommit'::text) ~ '^[a-f0-9]{40}$'::text) AND ((${table.inspectionContext} ->> 'app'::text) ~ '^[a-z][a-z0-9-]{0,31}$'::text) AND (jsonb_typeof((${table.inspectionContext} -> 'workingTreeModified'::text)) = 'boolean'::text)) IS TRUE)`,
     ),
     check(
       "build_browser_session_check1",
-      sql`(state <> 'active'::text) OR (create_confirmed_at IS NOT NULL)`,
+      sql`(${table.state} <> 'active'::text) OR (${table.createConfirmedAt} IS NOT NULL)`,
     ),
     check(
       "build_browser_session_check2",
-      sql`(state <> 'active'::text) OR (inspection_context IS NOT NULL)`,
+      sql`(${table.state} <> 'active'::text) OR (${table.inspectionContext} IS NOT NULL)`,
     ),
     check(
       "build_browser_session_check3",
-      sql`(state = ANY (ARRAY['closing'::text, 'closed'::text])) = (cleanup_intended_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['closing'::text, 'closed'::text])) = (${table.cleanupIntendedAt} IS NOT NULL)`,
     ),
     check(
       "build_browser_session_check4",
-      sql`(state = 'closed'::text) = (cleanup_confirmed_at IS NOT NULL)`,
+      sql`(${table.state} = 'closed'::text) = (${table.cleanupConfirmedAt} IS NOT NULL)`,
     ),
-    check("build_browser_session_generation_check", sql`generation > 0`),
-    check("build_browser_session_ordinal_check", sql`ordinal > 0`),
-    check("build_browser_session_outcome_summary_check", sql`octet_length(outcome_summary) <= 512`),
-    check("build_browser_session_owner_id_check", sql`owner_id ~ '^[a-f0-9]{64}$'::text`),
+    check("build_browser_session_generation_check", sql`${table.generation} > 0`),
+    check("build_browser_session_ordinal_check", sql`${table.ordinal} > 0`),
+    check(
+      "build_browser_session_outcome_summary_check",
+      sql`octet_length(${table.outcomeSummary}) <= 512`,
+    ),
+    check("build_browser_session_owner_id_check", sql`${table.ownerId} ~ '^[a-f0-9]{64}$'::text`),
     check(
       "build_browser_session_state_check",
-      sql`state = ANY (ARRAY['intended'::text, 'active'::text, 'closing'::text, 'closed'::text])`,
+      sql`${table.state} = ANY (ARRAY['intended'::text, 'active'::text, 'closing'::text, 'closed'::text])`,
     ),
   ],
 );
@@ -226,7 +235,7 @@ export const changeAgentTurnIntent = factorySchema.table(
     sessionTitle: text("session_title").notNull(),
     runtimeAttemptId: uuid("runtime_attempt_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    skillLoading: text("skill_loading").default("eager").notNull(),
+    skillLoading: text("skill_loading").$type<"eager" | "native">().default("eager").notNull(),
     skillManifest: jsonb("skill_manifest"),
     skillAttachments: jsonb("skill_attachments").default([]).notNull(),
     modelRequestEpoch: bigint("model_request_epoch", { mode: "number" }).default(0).notNull(),
@@ -249,30 +258,30 @@ export const changeAgentTurnIntent = factorySchema.table(
       name: "change_agent_turn_intent_turn_id_fkey",
     }).onDelete("cascade"),
     unique("change_agent_turn_intent_prompt_id_key").on(table.promptId),
-    check("change_agent_turn_intent_model_epoch_check", sql`model_request_epoch >= 0`),
+    check("change_agent_turn_intent_model_epoch_check", sql`${table.modelRequestEpoch} >= 0`),
     check(
       "change_agent_turn_intent_terminal_check",
-      sql`(terminal_outcome IS NULL) OR ((jsonb_typeof(terminal_outcome) = 'object'::text) AND (octet_length((terminal_outcome)::text) <= 8192) AND (terminal_outcome ?& ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) AND ((terminal_outcome - ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) = '{}'::jsonb) AND ((terminal_outcome ->> 'version'::text) = '1'::text) AND (jsonb_typeof((terminal_outcome -> 'version'::text)) = 'number'::text) AND (jsonb_typeof((terminal_outcome -> 'turnID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'attemptID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'sessionID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'promptID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'promptDigest'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'assistantID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'assistantDigest'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'modelRequestEpoch'::text)) = 'string'::text) AND ((terminal_outcome ->> 'turnID'::text) = (turn_id)::text) AND (runtime_attempt_id IS NOT NULL) AND ((terminal_outcome ->> 'attemptID'::text) = (runtime_attempt_id)::text) AND ((terminal_outcome ->> 'sessionID'::text) = session_id) AND ((terminal_outcome ->> 'promptID'::text) = prompt_id) AND ((terminal_outcome ->> 'modelRequestEpoch'::text) = (model_request_epoch)::text) AND ((terminal_outcome ->> 'promptDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND ((terminal_outcome ->> 'assistantDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND ((terminal_outcome ->> 'assistantID'::text) ~~ 'msg_%'::text) AND (length((terminal_outcome ->> 'assistantID'::text)) <= 200) AND (jsonb_typeof((terminal_outcome -> 'completed'::text)) = 'number'::text) AND ((((terminal_outcome ->> 'completed'::text))::numeric >= (1)::numeric) AND (((terminal_outcome ->> 'completed'::text))::numeric <= ('9007199254740991'::bigint)::numeric)) AND (jsonb_typeof((terminal_outcome -> 'shells'::text)) = 'array'::text) AND (jsonb_typeof((terminal_outcome -> 'outcome'::text)) = 'object'::text) AND (jsonb_typeof(((terminal_outcome -> 'outcome'::text) -> 'state'::text)) = 'string'::text) AND ((terminal_outcome -> 'outcome'::text) ? 'state'::text) AND (((terminal_outcome -> 'outcome'::text) - ARRAY['state'::text, 'summary'::text, 'error'::text]) = '{}'::jsonb) AND (((((terminal_outcome -> 'outcome'::text) ->> 'state'::text) = 'succeeded'::text) AND (NOT ((terminal_outcome -> 'outcome'::text) ? 'error'::text)) AND ((NOT ((terminal_outcome -> 'outcome'::text) ? 'summary'::text)) OR ((jsonb_typeof(((terminal_outcome -> 'outcome'::text) -> 'summary'::text)) = 'string'::text) AND (length(((terminal_outcome -> 'outcome'::text) ->> 'summary'::text)) <= 2000)))) OR ((((terminal_outcome -> 'outcome'::text) ->> 'state'::text) = 'failed'::text) AND ((terminal_outcome -> 'outcome'::text) ? 'error'::text) AND (NOT ((terminal_outcome -> 'outcome'::text) ? 'summary'::text)) AND (jsonb_typeof(((terminal_outcome -> 'outcome'::text) -> 'error'::text)) = 'string'::text) AND (length(((terminal_outcome -> 'outcome'::text) ->> 'error'::text)) <= 2000))))`,
+      sql`(${table.terminalOutcome} IS NULL) OR ((jsonb_typeof(${table.terminalOutcome}) = 'object'::text) AND (octet_length((${table.terminalOutcome})::text) <= 8192) AND (${table.terminalOutcome} ?& ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) AND ((${table.terminalOutcome} - ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) = '{}'::jsonb) AND ((${table.terminalOutcome} ->> 'version'::text) = '1'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'version'::text)) = 'number'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'turnID'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'attemptID'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'sessionID'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'promptID'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'promptDigest'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'assistantID'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'assistantDigest'::text)) = 'string'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'modelRequestEpoch'::text)) = 'string'::text) AND ((${table.terminalOutcome} ->> 'turnID'::text) = (${table.turnId})::text) AND (${table.runtimeAttemptId} IS NOT NULL) AND ((${table.terminalOutcome} ->> 'attemptID'::text) = (${table.runtimeAttemptId})::text) AND ((${table.terminalOutcome} ->> 'sessionID'::text) = ${table.sessionId}) AND ((${table.terminalOutcome} ->> 'promptID'::text) = ${table.promptId}) AND ((${table.terminalOutcome} ->> 'modelRequestEpoch'::text) = (${table.modelRequestEpoch})::text) AND ((${table.terminalOutcome} ->> 'promptDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND ((${table.terminalOutcome} ->> 'assistantDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND ((${table.terminalOutcome} ->> 'assistantID'::text) ~~ 'msg_%'::text) AND (length((${table.terminalOutcome} ->> 'assistantID'::text)) <= 200) AND (jsonb_typeof((${table.terminalOutcome} -> 'completed'::text)) = 'number'::text) AND ((((${table.terminalOutcome} ->> 'completed'::text))::numeric >= (1)::numeric) AND (((${table.terminalOutcome} ->> 'completed'::text))::numeric <= ('9007199254740991'::bigint)::numeric)) AND (jsonb_typeof((${table.terminalOutcome} -> 'shells'::text)) = 'array'::text) AND (jsonb_typeof((${table.terminalOutcome} -> 'outcome'::text)) = 'object'::text) AND (jsonb_typeof(((${table.terminalOutcome} -> 'outcome'::text) -> 'state'::text)) = 'string'::text) AND ((${table.terminalOutcome} -> 'outcome'::text) ? 'state'::text) AND (((${table.terminalOutcome} -> 'outcome'::text) - ARRAY['state'::text, 'summary'::text, 'error'::text]) = '{}'::jsonb) AND (((((${table.terminalOutcome} -> 'outcome'::text) ->> 'state'::text) = 'succeeded'::text) AND (NOT ((${table.terminalOutcome} -> 'outcome'::text) ? 'error'::text)) AND ((NOT ((${table.terminalOutcome} -> 'outcome'::text) ? 'summary'::text)) OR ((jsonb_typeof(((${table.terminalOutcome} -> 'outcome'::text) -> 'summary'::text)) = 'string'::text) AND (length(((${table.terminalOutcome} -> 'outcome'::text) ->> 'summary'::text)) <= 2000)))) OR ((((${table.terminalOutcome} -> 'outcome'::text) ->> 'state'::text) = 'failed'::text) AND ((${table.terminalOutcome} -> 'outcome'::text) ? 'error'::text) AND (NOT ((${table.terminalOutcome} -> 'outcome'::text) ? 'summary'::text)) AND (jsonb_typeof(((${table.terminalOutcome} -> 'outcome'::text) -> 'error'::text)) = 'string'::text) AND (length(((${table.terminalOutcome} -> 'outcome'::text) ->> 'error'::text)) <= 2000))))`,
     ),
     check(
       "change_agent_turn_intent_prompt_id_check",
-      sql`(prompt_id ~~ 'msg_%'::text) AND (length(prompt_id) <= 200)`,
+      sql`(${table.promptId} ~~ 'msg_%'::text) AND (length(${table.promptId}) <= 200)`,
     ),
     check(
       "change_agent_turn_intent_prompt_text_check",
-      sql`(length(btrim(prompt_text)) > 0) AND (octet_length(prompt_text) <= 4000000)`,
+      sql`(length(btrim(${table.promptText})) > 0) AND (octet_length(${table.promptText}) <= 4000000)`,
     ),
     check(
       "change_agent_turn_intent_session_id_check",
-      sql`(session_id ~~ 'ses%'::text) AND (length(session_id) <= 200)`,
+      sql`(${table.sessionId} ~~ 'ses%'::text) AND (length(${table.sessionId}) <= 200)`,
     ),
     check(
       "change_agent_turn_intent_session_title_check",
-      sql`(length(session_title) >= 1) AND (length(session_title) <= 200)`,
+      sql`(length(${table.sessionTitle}) >= 1) AND (length(${table.sessionTitle}) <= 200)`,
     ),
     check(
       "change_agent_turn_intent_skill_loading_check",
-      sql`skill_loading = ANY (ARRAY['eager'::text, 'native'::text])`,
+      sql`${table.skillLoading} = ANY (ARRAY['eager'::text, 'native'::text])`,
     ),
   ],
 );
@@ -303,7 +312,7 @@ export const changeAgentSession = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("change_agent_opencode_session_uidx")
       .using("btree", table.opencodeSessionId.asc().nullsLast())
-      .where(sql`(opencode_session_id IS NOT NULL)`),
+      .where(sql`(${table.opencodeSessionId} IS NOT NULL)`),
     foreignKey({
       columns: [table.activeTurnId],
       foreignColumns: [agentTurn.id],
@@ -331,28 +340,31 @@ export const changeAgentSession = factorySchema.table(
     }),
     check(
       "change_agent_implementation_confirmation",
-      sql`(implementation_session_confirmed_at IS NULL) OR (implementation_session_id IS NOT NULL)`,
+      sql`(${table.implementationSessionConfirmedAt} IS NULL) OR (${table.implementationSessionId} IS NOT NULL)`,
     ),
     check(
       "change_agent_native_session_confirmation",
-      sql`(native_session_confirmed_at IS NULL) OR (opencode_session_id IS NOT NULL)`,
+      sql`(${table.nativeSessionConfirmedAt} IS NULL) OR (${table.opencodeSessionId} IS NOT NULL)`,
     ),
     check(
       "change_agent_session_active_inbox_id_check",
-      sql`length(COALESCE(active_inbox_id, ''::text)) <= 200`,
+      sql`length(COALESCE(${table.activeInboxId}, ''::text)) <= 200`,
     ),
     check(
       "change_agent_session_check",
-      sql`(state <> 'starting'::change_agent_state) OR (opencode_session_id IS NULL) OR (length(opencode_session_id) > 0)`,
+      sql`(${table.state} <> 'starting'::change_agent_state) OR (${table.opencodeSessionId} IS NULL) OR (length(${table.opencodeSessionId}) > 0)`,
     ),
     check(
       "change_agent_session_opencode_session_id_check",
-      sql`length(COALESCE(opencode_session_id, ''::text)) <= 200`,
+      sql`length(COALESCE(${table.opencodeSessionId}, ''::text)) <= 200`,
     ),
-    check("change_agent_stop_dispatch_state", sql`(NOT stop_dispatched) OR stop_pending`),
+    check(
+      "change_agent_stop_dispatch_state",
+      sql`(NOT ${table.stopDispatched}) OR ${table.stopPending}`,
+    ),
     check(
       "change_agent_stop_pending_state",
-      sql`(NOT stop_pending) OR (state = 'stopped'::change_agent_state)`,
+      sql`(NOT ${table.stopPending}) OR (${table.state} = 'stopped'::change_agent_state)`,
     ),
   ],
 );
@@ -365,7 +377,7 @@ export const sessionArchive = factorySchema.table(
     sessionId: text("session_id").notNull(),
     promptId: text("prompt_id").notNull(),
     sourceRefs: jsonb("source_refs").notNull(),
-    state: text("state").default("pending").notNull(),
+    state: text("state").$type<"pending" | "failed" | "saved">().default("pending").notNull(),
     attempts: integer("attempts").default(0).notNull(),
     manifestKey: text("manifest_key"),
     manifestSha256: text("manifest_sha256"),
@@ -380,7 +392,7 @@ export const sessionArchive = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     index("session_archive_pending")
       .using("btree", table.retryAfter.asc().nullsLast())
-      .where(sql`(state <> 'saved'::text)`),
+      .where(sql`(${table.state} <> 'saved'::text)`),
     foreignKey({
       columns: [table.runtimeAttemptId],
       foreignColumns: [runtimeAttempt.id],
@@ -391,33 +403,39 @@ export const sessionArchive = factorySchema.table(
       foreignColumns: [agentTurn.id],
       name: "session_archive_turn_id_fkey",
     }),
-    check("session_archive_attempts_check", sql`attempts >= 0`),
-    check("session_archive_check", sql`(state = 'saved'::text) = (saved_at IS NOT NULL)`),
+    check("session_archive_attempts_check", sql`${table.attempts} >= 0`),
+    check(
+      "session_archive_check",
+      sql`(${table.state} = 'saved'::text) = (${table.savedAt} IS NOT NULL)`,
+    ),
     check(
       "session_archive_check1",
-      sql`(state <> 'saved'::text) OR ((manifest_key IS NOT NULL) AND (manifest_sha256 IS NOT NULL) AND (through_message_id IS NOT NULL) AND (producer_version IS NOT NULL) AND (summary IS NOT NULL))`,
+      sql`(${table.state} <> 'saved'::text) OR ((${table.manifestKey} IS NOT NULL) AND (${table.manifestSha256} IS NOT NULL) AND (${table.throughMessageId} IS NOT NULL) AND (${table.producerVersion} IS NOT NULL) AND (${table.summary} IS NOT NULL))`,
     ),
-    check("session_archive_last_error_check", sql`length(last_error) <= 2000`),
-    check("session_archive_manifest_sha256_check", sql`manifest_sha256 ~ '^[a-f0-9]{64}$'::text`),
+    check("session_archive_last_error_check", sql`length(${table.lastError}) <= 2000`),
+    check(
+      "session_archive_manifest_sha256_check",
+      sql`${table.manifestSha256} ~ '^[a-f0-9]{64}$'::text`,
+    ),
     check(
       "session_archive_prompt_id_check",
-      sql`(length(prompt_id) >= 1) AND (length(prompt_id) <= 200)`,
+      sql`(length(${table.promptId}) >= 1) AND (length(${table.promptId}) <= 200)`,
     ),
     check(
       "session_archive_session_id_check",
-      sql`(length(session_id) >= 1) AND (length(session_id) <= 200)`,
+      sql`(length(${table.sessionId}) >= 1) AND (length(${table.sessionId}) <= 200)`,
     ),
     check(
       "session_archive_source_refs_check",
-      sql`(jsonb_typeof(source_refs) = 'object'::text) AND (octet_length((source_refs)::text) <= 16384)`,
+      sql`(jsonb_typeof(${table.sourceRefs}) = 'object'::text) AND (octet_length((${table.sourceRefs})::text) <= 16384)`,
     ),
     check(
       "session_archive_state_check",
-      sql`state = ANY (ARRAY['pending'::text, 'failed'::text, 'saved'::text])`,
+      sql`${table.state} = ANY (ARRAY['pending'::text, 'failed'::text, 'saved'::text])`,
     ),
     check(
       "session_archive_summary_check",
-      sql`(jsonb_typeof(summary) = 'object'::text) AND (octet_length((summary)::text) <= 16384)`,
+      sql`(jsonb_typeof(${table.summary}) = 'object'::text) AND (octet_length((${table.summary})::text) <= 16384)`,
     ),
   ],
 );

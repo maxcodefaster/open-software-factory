@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
 import {
   type ConversationStreamEvent,
   type ConversationView,
-  changesResponseSchema,
   conversationViewSchema,
-  sourceWorkspaceViewSchema,
-} from "../../apps/factory/src/api-contracts";
-import { CommandError } from "../../apps/factory/src/command-error";
+} from "../../apps/factory/src/project-agent/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { sourceWorkspaceViewSchema } from "../../apps/factory/src/workspace/contracts";
 import {
   type InterviewQuestion,
   interviewAnswerCommandInput,

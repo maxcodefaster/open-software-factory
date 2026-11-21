@@ -252,7 +252,9 @@ not delete Substrate resources for you or reset the developer installation.
 controller tests. `bun run test:browser` runs UI journeys. `bun run beta:gate` writes an exact-commit
 source/controller/UI receipt, including Connector and Substrate bridge checks. It is not native
 product acceptance. Native runtime and clean-install commands are in [scripts/runtime](scripts/runtime/README.md)
-and the [chart guide](deploy/helm/factory/README.md). GitHub checks run only for releases or by request.
+and the [chart guide](deploy/helm/factory/README.md). Pushes and pull requests run the lightweight
+source gate: schema drift, formatting, lint, types and architecture regressions. Full controller,
+browser and image checks run for releases or by request.
 
 For an affected controller check, select its exact path. Database-only checks skip the application
 build; compiled endpoint checks retain it:
@@ -290,6 +292,15 @@ imports, re-exports, dynamic imports and import types, including normalized rela
 Domain rules stay independent of application, database and runtime adapters. Browser code uses
 domain contracts and authenticated server functions instead of importing server implementations.
 Keep each correction in its owning API or regression check rather than adding a repeated prose rule.
+
+Public request and response contracts live in each feature's `contracts.ts`, not a shared
+application-wide barrel. Desktop composition imports those contracts rather than deriving them
+from controllers or UI components. Ticket draft models belong to Change; Delivery owns its
+Verification orchestration. Cross-feature operations use named `api.ts` or responsibility-specific
+`*-api.ts` exports; browser entrypoints use `client.ts` or `*-client.ts`. Contracts cannot depend
+on those implementation facades. Native SDK integration stays in server adapters.
+Shared test launchers reuse code while keeping each fixture's installation, process and resource
+ownership separate.
 
 The optional `bun run test:formal` Writer safety pilot requires a deliberate stale-epoch
 counterexample before checking the healthy bounded TLA+ model. It also sends generated event

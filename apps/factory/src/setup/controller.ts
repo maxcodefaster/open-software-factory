@@ -17,7 +17,7 @@ import {
   projectSetupSave,
   projectSetupView,
 } from "../../../../packages/project-domain/src/setup";
-import { createAccessController } from "../access/controller";
+import { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import { createProjectIn } from "../projects/creation";
 import type { ImportSecrets } from "./secrets";

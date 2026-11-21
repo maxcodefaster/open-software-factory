@@ -4,7 +4,7 @@ import { createAgentCommandIds } from "../../apps/factory/src/agent-command-ids"
 import {
   type ConversationView,
   conversationViewSchema,
-} from "../../apps/factory/src/api-contracts";
+} from "../../apps/factory/src/project-agent/contracts";
 
 // Each test runs this fixture in a separate process. Transport replacements must
 // never leak into another test or the live Factory.

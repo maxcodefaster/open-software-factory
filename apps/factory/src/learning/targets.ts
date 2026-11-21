@@ -11,8 +11,8 @@ import {
 import type { LibraryChoice } from "../../../../packages/conversation-domain/src/skill-library";
 import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -25,12 +25,12 @@ import {
   skillLibraryRevision,
   skillRevision,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { editKnowledgeIn } from "../knowledge/edit";
 import { manageMonitoringIn } from "../monitoring/authority";
 import { editInputInstructionsIn } from "../monitoring/instructions";
-import { createSkillController } from "../skills/controller";
+import { createSkillController } from "../skills/api";
 
 type Database = ReturnType<typeof createDatabase>;
 export const learningActivation = z.object({

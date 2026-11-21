@@ -24,7 +24,7 @@ test.skipIf(process.env["FACTORY_CODE_RESEARCH_LIVE"] !== "1")(
         },
         code: async (_projectID, value) => {
           reads++;
-          const { codeReadInput } = await import("../../apps/factory/src/knowledge/code-read");
+          const { codeReadInput } = await import("../../apps/factory/src/knowledge/contracts");
           const input = codeReadInput.parse(value);
           expect(input.path).toBe("src/server.ts");
           expect(input.commitSha).toBe(sha);

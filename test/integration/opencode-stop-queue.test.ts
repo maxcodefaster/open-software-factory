@@ -6,7 +6,7 @@ import {
   createOpenCodeClient,
   decodeOpenCodeAdmission,
   ensureOpenCodeMessageBoundary,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { connectorBoundary } from "../fixtures/connector-boundary";

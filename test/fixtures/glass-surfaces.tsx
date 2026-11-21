@@ -1,10 +1,11 @@
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
-import type { KnowledgePage, Ticket } from "../../apps/factory/src/api-contracts";
+import { type Ticket, type TicketDraft } from "../../apps/factory/src/change/contracts";
+import { type KnowledgePage } from "../../apps/factory/src/knowledge/contracts";
 import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge-workspace";
 import { SignIn } from "../../apps/factory/src/sign-in";
 import { TicketBoardContents } from "../../apps/factory/src/ticket-board";
-import { type TicketDraft, TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
+import { TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
 import "../../apps/factory/src/tokens.css";

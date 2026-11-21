@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createRoot, createSignal, flush, untrack } from "solid-js";
-import type { ConversationView } from "../api-contracts";
+import { type ConversationView } from "../project-agent/contracts";
 import { createConversationSelection } from "../project-agent/selection";
 import { createConversationState } from "./conversation-state";
 

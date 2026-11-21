@@ -1,6 +1,6 @@
 import type { RequirementContent } from "../../../../packages/requirement-domain/src/content";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
-import type { RequirementRevision } from "../api-contracts";
+import { type RequirementRevision } from "../change/contracts";
 
 export function requirementContent(revision?: RequirementRevision): RequirementContent | undefined {
   if (!revision) return undefined;

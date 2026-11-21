@@ -47,20 +47,21 @@ import {
   SystemContractError,
 } from "../../../../packages/system-contract/src/system-contract";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
-import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
 import {
   createChangeAgentStop,
+  createCodingRuntimeShutdown,
   type PendingWriterHandoff,
   type RetainedStopTarget,
   requirePendingWriterHandoffIn,
   requireStoppedAgentInputsIn,
-} from "../agent/stop";
+} from "../agent/runtime-api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
-import type { SubstrateSourceHandoff } from "../workspace/substrate-source";
+import { type SubstrateSourceHandoff } from "../workspace/source-api";
 import { readRepositoryFileAtRevision } from "./git-http";
 import type { RuntimeHub } from "./hub";
 import type { createSubstrateCapacity } from "./substrate-capacity";

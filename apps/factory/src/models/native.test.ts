@@ -8,7 +8,8 @@ import {
   providerCatalogue,
   validateModelEndpoint,
 } from "./native";
-import { modelProbeFailure, probeModel, reportedModelLimits } from "./probe";
+import { probeModel } from "./probe";
+import { modelProbeFailure, reportedModelLimits } from "./probe-result";
 
 test("native catalogue comes from pinned Mastra and contains only Factory-supported providers", async () => {
   const catalogue = await providerCatalogue();

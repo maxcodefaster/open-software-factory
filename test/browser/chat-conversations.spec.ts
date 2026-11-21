@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";

@@ -17,7 +17,7 @@ import {
   type SubstrateCall,
 } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
-import { createCodingRuntimeShutdown } from "../agent/runtime-shutdown";
+import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { CommandError } from "../command-error";
 import { runtimeSourceCapability } from "./git-http";
 import type { RuntimeHub } from "./hub";

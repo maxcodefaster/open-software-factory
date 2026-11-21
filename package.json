@@ -53,16 +53,16 @@
     "test:postgres": "bun scripts/integration/postgres.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "4.0.106",
-    "@ai-sdk/deepseek": "3.0.88",
-    "@ai-sdk/openai": "4.0.121",
+    "@ai-sdk/anthropic": "4.0.107",
+    "@ai-sdk/deepseek": "3.0.89",
+    "@ai-sdk/openai": "4.0.122",
     "@better-auth/oauth-provider": "1.7.27",
     "@better-auth/scim": "1.7.27",
     "@better-auth/sso": "1.7.27",
     "@mastra/core": "1.85.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/server": "2.4.0",
-    "@napi-rs/canvas": "1.1.1",
+    "@napi-rs/canvas": "1.2.0",
     "@opencode/ai": "2.3.2",
     "@opencode/client": "2.3.2",
     "@plantuml/mcp-js": "0.2.4",
@@ -119,11 +119,23 @@
     "@tanstack/start-server-core@1.169.45": "patches/tanstack-start-server-core-exports.patch"
   },
   "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.28.2"
+    },
     "@solidjs/compiler": "2.0.2",
     "@solidjs/signals": "2.0.3",
     "solid-js": "2.0.3",
     "@solidjs/web": "2.0.3",
     "@tanstack/solid-start": "2.0.0-rc.11",
+    "@ts-morph/common": {
+      "minimatch": "11.0.9"
+    },
+    "cloudevents": {
+      "uuid": "11.1.1"
+    },
+    "rimraf": {
+      "glob": "14.0.6"
+    },
     "marked": "18.2.1",
     "highlight.js": "11.12.0"
   }

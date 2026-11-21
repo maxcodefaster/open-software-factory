@@ -39,24 +39,27 @@ import {
   utf8TextPage,
 } from "../../../../packages/workspace-domain/src/text-page";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
+import { type createIdentityConfiguration } from "../access/api";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
-import type { createIdentityConfiguration } from "../access/identity-configuration";
 import type { createRuntimeAccess } from "../access/runtime";
 import { workspaceAuthorityIn } from "../access/workspace";
-import type { createChangeWriterController } from "../access/writer-controller";
+import { type createChangeWriterController } from "../access/writer-api";
 import { CommandError } from "../command-error";
 import { json } from "../http";
 import type { createProjectService } from "../projects/service";
-import type { createRuntimeController } from "../runtime/controller";
-import type { RuntimeHub } from "../runtime/hub";
+import { type createRuntimeController } from "../runtime/api";
+import { type RuntimeHub } from "../runtime/transport-api";
 import { appRuntimeOrigin } from "../runtime-origins";
-import type { createWorkspaceCollaboration } from "../workspace/collaboration";
-import type { createWorkspaceCommands } from "../workspace/commands";
-import type { createWorkspaceContainerFiles } from "../workspace/container-files";
-import type { createWorkspaceSharing } from "../workspace/sharing";
-import type { createWorkspaceSourceController } from "../workspace/source-controller";
-import { type createWorkspaceSubmission, workspaceSubmissionInput } from "../workspace/submission";
+import {
+  type createWorkspaceCollaboration,
+  type createWorkspaceContainerFiles,
+  type createWorkspaceSharing,
+  type createWorkspaceSubmission,
+  workspaceSubmissionInput,
+} from "../workspace/api";
+import type { createWorkspaceCommands } from "../workspace/execution-api";
+import { type createWorkspaceSourceController } from "../workspace/source-api";
 
 type Services = {
   database: ReturnType<typeof createDatabase>;

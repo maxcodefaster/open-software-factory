@@ -1,13 +1,6 @@
 import { type Accessor, createEffect, createSignal } from "solid-js";
 import { zeroQueries } from "../../../../packages/zero-schema/src";
 import { useZeroPreload, useZeroQuery } from "../../../../packages/zero-solid/src";
-import type {
-  KnowledgeGeneration,
-  KnowledgeRevision,
-  KnowledgeSearchResult,
-  OpenRepositoryDocument,
-  RepositoryDocument,
-} from "../api-contracts";
 import { plainErrorMessage } from "../command-error";
 import type { KnowledgeDraft } from "../knowledge-workspace";
 import {
@@ -22,6 +15,13 @@ import {
 } from "../server-functions/knowledge";
 import { serverCall } from "../server-functions/result";
 import type { WorkspaceTab } from "../workspace-tabs";
+import {
+  type KnowledgeGeneration,
+  type KnowledgeRevision,
+  type KnowledgeSearchResult,
+  type OpenRepositoryDocument,
+  type RepositoryDocument,
+} from "./contracts";
 
 export function createKnowledgeState(options: {
   projectID: Accessor<string | undefined>;

@@ -6,10 +6,10 @@ import type {
   newConversationInput,
 } from "../../../../packages/conversation-domain/src/conversation";
 import type { confirmEpicProposalInput } from "../../../../packages/conversation-domain/src/epic-proposal";
-import type { createAccessController } from "../access/controller";
-import { conversationViewSchema } from "../api-contracts";
+import { type createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { conversationReadInput } from "./commands";
+import { conversationViewSchema } from "./contracts";
 import type { createProjectAgentController } from "./controller";
 import { projectResponseStream } from "./response-stream";
 

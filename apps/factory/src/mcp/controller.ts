@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, max, or, sql as expression } from "drizzle-orm";
+import { and, asc, desc, eq, sql as expression, inArray, isNull, max, or } from "drizzle-orm";
 import { z } from "zod";
 import {
   defaultLibraryCover,
@@ -19,8 +19,8 @@ import {
   validateMCPSelection,
 } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -36,13 +36,13 @@ import {
   mcpRevision as mcpRevisionTable,
   mcpShareProposal,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import {
   initializeLibraryCoverIn,
   libraryCoversIn,
   saveLibraryCoverIn,
-} from "../library-covers/store";
+} from "../library-covers/api";
 
 export function canonicalMCPJSON(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalMCPJSON).join(",")}]`;

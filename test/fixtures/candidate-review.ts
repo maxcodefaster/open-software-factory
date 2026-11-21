@@ -1,5 +1,5 @@
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";

@@ -20,12 +20,12 @@ import {
 import type { RequirementContent } from "../../../packages/requirement-domain/src/content";
 import { ticketDocumentInput } from "../../../packages/requirement-domain/src/document";
 import type { TechnicalDesignContent } from "../../../packages/requirement-domain/src/technical-design";
-import type {
-  Epic,
-  RequirementProposal,
-  TechnicalDesignRevision,
-  TicketDocumentSave,
-} from "./api-contracts";
+import type { TicketDraft } from "./change/contracts";
+import {
+  type RequirementProposal,
+  type TechnicalDesignRevision,
+  type TicketDocumentSave,
+} from "./change/contracts";
 import { DocumentLinkEditor } from "./document-link-editor";
 import {
   type DocumentBlock,
@@ -35,6 +35,7 @@ import {
 } from "./document-model";
 import { documentSlash, filterDocumentBlocks } from "./document-slash";
 import { editorCommandHeight, editorPopoverPosition } from "./editor-popover-position";
+import { type Epic } from "./projects/contracts";
 import { RequirementDocument } from "./requirement-document";
 import { type ReviewActions, ReviewPanel, ReviewThreadStatus } from "./review/panel";
 import { RichDocumentSurface } from "./rich-document-surface";
@@ -108,16 +109,6 @@ type DeliveryView = import("./ticket-checks").TicketCheckDetails & {
   replacementRuntimeState?: string | undefined;
 };
 
-export type TicketEdit = Pick<TicketView, "title" | "description">;
-
-export type TicketDraft = TicketEdit & {
-  requirement: RequirementContent;
-  expectedVersion?: number;
-  expectedDocumentId?: string | null;
-  requirementRevisionId?: string | null;
-  proposalEntryId?: string | undefined;
-};
-
 export type TicketWorkspaceProps = {
   projectID?: string | undefined;
   people?: JSX.Element;
@@ -132,7 +123,7 @@ export type TicketWorkspaceProps = {
     technicalDesigns?: TechnicalDesignRevision[] | undefined;
     technicalDesignPresent?: boolean | undefined;
     technicalPlanningPending?: boolean | undefined;
-    implementationOrder?: import("./api-contracts").TicketDetail["implementationOrder"];
+    implementationOrder?: import("./change/contracts").TicketDetail["implementationOrder"];
   };
   ticketReference: string;
   storageKey: string;

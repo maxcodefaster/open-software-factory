@@ -1,0 +1,64 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1420,15 +1420,5 @@
+     refresh_token: z.ZodOptional<z.ZodString>;
+     expires_in: z.ZodNumber;
+     created_at: z.ZodNumber;
+-}, "strip", z.ZodTypeAny, {
+-    created_at?: number;
+-    access_token?: string;
+-    refresh_token?: string;
+-    expires_in?: number;
+-}, {
+-    created_at?: number;
+-    access_token?: string;
+-    refresh_token?: string;
+-    expires_in?: number;
+ }>;
+ type GitLabOAuthTokenResponse = z.infer<typeof gitlabOAuthTokenResponseSchema>;
+@@ -1632,12 +1622,6 @@
+ declare const directAccessTokenSchema: z.ZodObject<{
+     headers: z.ZodRecord<z.ZodString, z.ZodString>;
+     token: z.ZodString;
+-}, "strip", z.ZodTypeAny, {
+-    token?: string;
+-    headers?: Record<string, string>;
+-}, {
+-    token?: string;
+-    headers?: Record<string, string>;
+ }>;
+ type DirectAccessToken = z.infer<typeof directAccessTokenSchema>;
+ declare const DEFAULT_AI_GATEWAY_URL = "https://cloud.gitlab.com";
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -1420,15 +1420,5 @@
+     refresh_token: z.ZodOptional<z.ZodString>;
+     expires_in: z.ZodNumber;
+     created_at: z.ZodNumber;
+-}, "strip", z.ZodTypeAny, {
+-    created_at?: number;
+-    access_token?: string;
+-    refresh_token?: string;
+-    expires_in?: number;
+-}, {
+-    created_at?: number;
+-    access_token?: string;
+-    refresh_token?: string;
+-    expires_in?: number;
+ }>;
+ type GitLabOAuthTokenResponse = z.infer<typeof gitlabOAuthTokenResponseSchema>;
+@@ -1632,12 +1622,6 @@
+ declare const directAccessTokenSchema: z.ZodObject<{
+     headers: z.ZodRecord<z.ZodString, z.ZodString>;
+     token: z.ZodString;
+-}, "strip", z.ZodTypeAny, {
+-    token?: string;
+-    headers?: Record<string, string>;
+-}, {
+-    token?: string;
+-    headers?: Record<string, string>;
+ }>;
+ type DirectAccessToken = z.infer<typeof directAccessTokenSchema>;
+ declare const DEFAULT_AI_GATEWAY_URL = "https://cloud.gitlab.com";

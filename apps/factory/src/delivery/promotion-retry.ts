@@ -1,7 +1,7 @@
 import { eq, sql as query } from "drizzle-orm";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { executionPolicyCommand, promotionOperation } from "../../../../packages/db/src/schema";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 // Persist a new Promotion, never reset the failed operation or repeat merge.

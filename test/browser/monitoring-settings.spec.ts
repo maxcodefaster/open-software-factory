@@ -1,8 +1,6 @@
-import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { expect, type Page } from "@playwright/test";
-import { z } from "zod";
+import type { z } from "zod";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type {
@@ -12,7 +10,7 @@ import type {
 } from "../../packages/conversation-domain/src/mcp-library";
 import type { monitoringSave } from "../../packages/conversation-domain/src/monitoring";
 import { createDatabase } from "../../packages/db/src/client";
-import { test } from "../fixtures/browser-test";
+import { test } from "../fixtures/browser-host-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
@@ -25,30 +23,9 @@ import { fixtureValue } from "../fixtures/value";
 test("Project Inputs separate automatic preparation, source access, explicit Autofix and one-time keys", async ({
   page,
   browser,
+  browserHost: fixture,
 }) => {
   test.setTimeout(360_000);
-  const host = spawn(
-    "mise",
-    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
-  let stderr = "";
-  host.stderr.on("data", (chunk) => {
-    stderr += String(chunk);
-  });
-  const fixture = await new Promise<z.infer<typeof ready>>((resolve, reject) => {
-    createInterface({ input: host.stdout }).on("line", (line) => {
-      if (line.startsWith('{"fixtureBase"')) {
-        try {
-          resolve(ready.parse(JSON.parse(line)));
-        } catch (cause) {
-          reject(cause);
-        }
-      }
-    });
-    host.once("exit", () => reject(new Error(`Owned browser host exited: ${stderr.slice(-2000)}`)));
-  });
   const previousURL = process.env["DATABASE_URL"];
   process.env["DATABASE_URL"] = fixture.databaseURL;
   const database = createDatabase(1);
@@ -616,8 +593,5 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
   } finally {
     await peer.close();
     await database.client.end();
-    const stopped = new Promise<void>((resolve) => host.once("exit", () => resolve()));
-    host.kill("SIGTERM");
-    await stopped;
   }
 });

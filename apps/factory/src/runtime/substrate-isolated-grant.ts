@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
 import { runtimeAttempt } from "../../../../packages/db/src/schema";
 import { runtimeIdentity } from "../../../../packages/runtime-domain/src/identity";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
 export type SubstrateIsolatedOwner = {

@@ -8,9 +8,9 @@ import {
   environmentManifest,
   environmentMetadata,
 } from "../../../../packages/project-domain/src/environment";
-import type { EnvironmentSecrets } from "../environments/openbao";
-import type { RuntimeHub } from "../runtime/hub";
-import { createOpenCodeClient, listOpenCodeSessionTree } from "./opencode-client";
+import { type EnvironmentSecrets } from "../environments/api";
+import { type RuntimeHub } from "../runtime/transport-api";
+import { createOpenCodeClient, listOpenCodeSessionTree } from "./opencode-adapter";
 
 type Database = ReturnType<typeof createDatabase>;
 type Scope = { id: string; changeID: string; commitSHA: string; attemptID: string };

@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { createAccessController } from "../../apps/factory/src/access/controller";
-import { knowledgeHistorySchema, knowledgeSaveSchema } from "../../apps/factory/src/api-contracts";
+import {
+  knowledgeHistorySchema,
+  knowledgeSaveSchema,
+} from "../../apps/factory/src/knowledge/contracts";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createKnowledgeService } from "../../apps/factory/src/knowledge/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";

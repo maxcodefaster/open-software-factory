@@ -1,17 +1,20 @@
-import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import { createUsageJournal, type UsageEntry } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage, openCodeUsageEntry } from "../../apps/factory/src/usage/opencode";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import upstream from "../../upstream.json";
-import { buildModelID, fixture as changeFixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
+import {
+  buildModelID,
+  fixture as changeFixture,
+  disableStarterSkillsIn,
+} from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 // No fixture may inherit the retained installation's forge token or artifacts.

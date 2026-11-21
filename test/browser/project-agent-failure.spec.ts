@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";

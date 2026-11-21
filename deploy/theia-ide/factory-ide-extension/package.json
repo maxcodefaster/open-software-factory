@@ -6,6 +6,12 @@
     "lib",
     "src"
   ],
+  "imports": {
+    "#factory-jsonrpc": {
+      "browser": "vscode-jsonrpc/browser",
+      "default": "vscode-jsonrpc/node"
+    }
+  },
   "dependencies": {
     "@shikijs/langs": "4.6.0",
     "@theia/core": "1.77.0",
@@ -23,7 +29,7 @@
     "y-monaco": "0.1.6",
     "y-protocols": "1.0.7",
     "yjs": "13.6.33",
-    "vscode-jsonrpc": "8.2.1"
+    "vscode-jsonrpc": "10.0.1"
   },
   "devDependencies": {
     "typescript": "6.0.3"

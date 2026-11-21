@@ -1,5 +1,4 @@
 import { sql } from "drizzle-orm";
-import type { MCPAssignment } from "../../../conversation-domain/src/mcp-library";
 import {
   bigint,
   boolean,
@@ -15,6 +14,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { MCPAssignment } from "../../../conversation-domain/src/mcp-library";
 import { authUser } from "./auth";
 import { mcpConnection } from "./mcp";
 import { factorySchema } from "./namespaces";
@@ -29,7 +29,7 @@ export const monitoringCommand = factorySchema.table(
     hookId: uuid("hook_id").notNull(),
     actorId: uuid("actor_id").notNull(),
     inputDigest: text("input_digest").notNull(),
-    action: text("action").notNull(),
+    action: text("action").$type<"save" | "disable" | "rotate">().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
@@ -50,7 +50,7 @@ export const monitoringCommand = factorySchema.table(
     }),
     check(
       "monitoring_command_action_check",
-      sql`action = ANY (ARRAY['save'::text, 'disable'::text, 'rotate'::text])`,
+      sql`${table.action} = ANY (ARRAY['save'::text, 'disable'::text, 'rotate'::text])`,
     ),
   ],
 );
@@ -72,7 +72,7 @@ export const monitoringEvidence = factorySchema.table(
       foreignColumns: [monitoringIncident.id],
       name: "monitoring_evidence_incident_id_fkey",
     }),
-    check("monitoring_evidence_digest_check", sql`digest ~ '^[a-f0-9]{64}$'::text`),
+    check("monitoring_evidence_digest_check", sql`${table.digest} ~ '^[a-f0-9]{64}$'::text`),
   ],
 );
 
@@ -110,11 +110,11 @@ export const monitoringPolicy = factorySchema.table(
     }),
     check(
       "monitoring_policy_delegation_check",
-      sql`delegation = ANY (ARRAY['prepare-ticket'::text, 'application-fix-and-delivery'::text])`,
+      sql`${table.delegation} = ANY (ARRAY['prepare-ticket'::text, 'application-fix-and-delivery'::text])`,
     ),
     check(
       "monitoring_policy_instructions_check",
-      sql`(length(instructions) >= 1) AND (length(instructions) <= 6000)`,
+      sql`(length(${table.instructions}) >= 1) AND (length(${table.instructions}) <= 6000)`,
     ),
   ],
 );
@@ -143,9 +143,15 @@ export const monitoringHook = factorySchema.table(
       foreignColumns: [project.id],
       name: "monitoring_hook_project_id_fkey",
     }),
-    check("monitoring_hook_name_check", sql`(length(name) >= 1) AND (length(name) <= 100)`),
-    check("monitoring_hook_secret_digest_check", sql`secret_digest ~ '^[a-f0-9]{64}$'::text`),
-    check("monitoring_hook_version_check", sql`version > 0`),
+    check(
+      "monitoring_hook_name_check",
+      sql`(length(${table.name}) >= 1) AND (length(${table.name}) <= 100)`,
+    ),
+    check(
+      "monitoring_hook_secret_digest_check",
+      sql`${table.secretDigest} ~ '^[a-f0-9]{64}$'::text`,
+    ),
+    check("monitoring_hook_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -163,7 +169,20 @@ export const monitoringIncident = factorySchema.table(
     reference: text("reference"),
     context: text("context").notNull(),
     occurrences: bigint("occurrences", { mode: "number" }).default(1).notNull(),
-    state: text("state").default("queued").notNull(),
+    state: text("state")
+      .$type<
+        | "queued"
+        | "diagnosing"
+        | "insufficient-context"
+        | "not-application-defect"
+        | "prepared"
+        | "implementing"
+        | "delivered"
+        | "blocked"
+        | "uncertain"
+      >()
+      .default("queued")
+      .notNull(),
     reason: text("reason"),
     diagnosis: jsonb("diagnosis"),
     modelId: text("model_id"),
@@ -185,10 +204,12 @@ export const monitoringIncident = factorySchema.table(
         table.receivedAt.asc().nullsLast(),
         table.id.asc().nullsLast(),
       )
-      .where(sql`(state = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'implementing'::text]))`),
+      .where(
+        sql`(${table.state} = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'implementing'::text]))`,
+      ),
     uniqueIndex("monitoring_ticket")
       .using("btree", table.ticketId.asc().nullsLast())
-      .where(sql`(ticket_id IS NOT NULL)`),
+      .where(sql`(${table.ticketId} IS NOT NULL)`),
     foreignKey({
       columns: [table.hookId],
       foreignColumns: [monitoringHook.id],
@@ -210,13 +231,19 @@ export const monitoringIncident = factorySchema.table(
       name: "monitoring_incident_ticket_id_fkey",
     }),
     unique("monitoring_incident_hook_id_fingerprint_key").on(table.hookId, table.fingerprint),
-    check("monitoring_incident_context_check", sql`octet_length(context) <= 64000`),
-    check("monitoring_incident_fingerprint_check", sql`fingerprint ~ '^[a-f0-9]{64}$'::text`),
-    check("monitoring_incident_occurrences_check", sql`occurrences > 0`),
-    check("monitoring_incident_payload_digest_check", sql`payload_digest ~ '^[a-f0-9]{64}$'::text`),
+    check("monitoring_incident_context_check", sql`octet_length(${table.context}) <= 64000`),
+    check(
+      "monitoring_incident_fingerprint_check",
+      sql`${table.fingerprint} ~ '^[a-f0-9]{64}$'::text`,
+    ),
+    check("monitoring_incident_occurrences_check", sql`${table.occurrences} > 0`),
+    check(
+      "monitoring_incident_payload_digest_check",
+      sql`${table.payloadDigest} ~ '^[a-f0-9]{64}$'::text`,
+    ),
     check(
       "monitoring_incident_state_check",
-      sql`state = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'insufficient-context'::text, 'not-application-defect'::text, 'prepared'::text, 'implementing'::text, 'delivered'::text, 'blocked'::text, 'uncertain'::text])`,
+      sql`${table.state} = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'insufficient-context'::text, 'not-application-defect'::text, 'prepared'::text, 'implementing'::text, 'delivered'::text, 'blocked'::text, 'uncertain'::text])`,
     ),
   ],
 );

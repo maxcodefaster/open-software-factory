@@ -13,7 +13,7 @@ import {
   ticketDependency,
   ticketDocumentRevision,
 } from "../../../../packages/db/src/schema";
-import { createAccessController } from "../access/controller";
+import { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 
 export const researchSource = z.enum(["knowledge", "ticket", "epic"]);
@@ -295,7 +295,7 @@ export async function readResearch(
 ) {
   z.number().int().min(0).max(2_000_000).parse(offset);
   return database.client.begin(async (transaction) => {
-    const { projectAuthorityIn } = await import("../access/controller");
+    const { projectAuthorityIn } = await import("../access/authority");
     await projectAuthorityIn(transaction, userID, projectID);
     const db = drizzleTransaction(transaction);
     const document = db

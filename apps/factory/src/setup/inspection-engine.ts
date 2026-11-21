@@ -8,8 +8,9 @@ import {
   setupInspectionOutput,
 } from "../../../../packages/project-domain/src/setup";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
-import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "../models/native";
-import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
+import { type ResolvedModelConnection } from "../models/inference-contracts";
+import { modelProviderOptions, nativeModel } from "../models/native";
+import { createMastraUsage, type MastraUsageSink } from "../usage/model-api";
 import { requiredConfiguration } from "./configuration";
 import { setupInspectionTimeoutMS } from "./limits";
 

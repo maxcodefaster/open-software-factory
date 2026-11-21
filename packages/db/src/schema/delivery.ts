@@ -78,29 +78,35 @@ export const branchCreateOperation = factorySchema.table(
       table.branchName,
     ),
     unique("branch_create_operation_idempotency_key_key").on(table.idempotencyKey),
-    check("branch_create_operation_lease_generation_check", sql`lease_generation >= 0`),
-    check("branch_create_operation_attempt_count_check", sql`attempt_count >= 0`),
-    check("branch_create_operation_check", sql`(lease_owner IS NULL) = (lease_expires_at IS NULL)`),
+    check("branch_create_operation_lease_generation_check", sql`${table.leaseGeneration} >= 0`),
+    check("branch_create_operation_attempt_count_check", sql`${table.attemptCount} >= 0`),
+    check(
+      "branch_create_operation_check",
+      sql`(${table.leaseOwner} IS NULL) = (${table.leaseExpiresAt} IS NULL)`,
+    ),
     check(
       "branch_create_operation_check1",
-      sql`(state = ANY (ARRAY['succeeded'::branch_operation_state, 'failed'::branch_operation_state, 'cancelled'::branch_operation_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::branch_operation_state, 'failed'::branch_operation_state, 'cancelled'::branch_operation_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "branch_create_operation_check2",
-      sql`(state <> 'succeeded'::branch_operation_state) OR (observed_head_sha = start_sha)`,
+      sql`(${table.state} <> 'succeeded'::branch_operation_state) OR (${table.observedHeadSha} = ${table.startSha})`,
     ),
     check(
       "branch_create_operation_observed_head_sha_check",
-      sql`(observed_head_sha IS NULL) OR (observed_head_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
+      sql`(${table.observedHeadSha} IS NULL) OR (${table.observedHeadSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
     ),
-    check("branch_create_operation_repository_name_check", sql`length(btrim(repository_name)) > 0`),
+    check(
+      "branch_create_operation_repository_name_check",
+      sql`length(btrim(${table.repositoryName})) > 0`,
+    ),
     check(
       "branch_create_operation_repository_owner_check",
-      sql`length(btrim(repository_owner)) > 0`,
+      sql`length(btrim(${table.repositoryOwner})) > 0`,
     ),
     check(
       "branch_create_operation_start_sha_check",
-      sql`start_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.startSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
   ],
 );
@@ -129,7 +135,7 @@ export const change = factorySchema.table(
     uniqueIndex("change_one_active_per_ticket")
       .using("btree", table.ticketId.asc().nullsLast())
       .where(
-        sql`(state = ANY (ARRAY['branch-pending'::change_state, 'starting'::change_state, 'active'::change_state, 'cancelling'::change_state]))`,
+        sql`(${table.state} = ANY (ARRAY['branch-pending'::change_state, 'starting'::change_state, 'active'::change_state, 'cancelling'::change_state]))`,
       ),
     foreignKey({
       columns: [table.createdBy],
@@ -178,10 +184,16 @@ export const change = factorySchema.table(
     unique("change_project_id_branch_name_key").on(table.projectId, table.branchName),
     unique("change_requirement_approval_id_key").on(table.requirementApprovalId),
     unique("change_runtime_attempt_id_key").on(table.runtimeAttemptId),
-    check("change_base_sha_check", sql`base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`),
-    check("change_branch_name_check", sql`branch_name ~ '^factory/change-[0-9a-f]{12}$'::text`),
-    check("change_check", sql`(state = 'cancelled'::change_state) = (cancelled_at IS NOT NULL)`),
-    check("change_version_check", sql`version > 0`),
+    check("change_base_sha_check", sql`${table.baseSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`),
+    check(
+      "change_branch_name_check",
+      sql`${table.branchName} ~ '^factory/change-[0-9a-f]{12}$'::text`,
+    ),
+    check(
+      "change_check",
+      sql`(${table.state} = 'cancelled'::change_state) = (${table.cancelledAt} IS NOT NULL)`,
+    ),
+    check("change_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -251,15 +263,15 @@ export const deliveryApproval = factorySchema.table(
       .nullsNotDistinct(),
     check(
       "delivery_approval_commit_sha_check",
-      sql`commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "delivery_monitoring_basis",
-      sql`(monitoring_incident_id IS NULL) = (monitoring_policy_id IS NULL)`,
+      sql`(${table.monitoringIncidentId} IS NULL) = (${table.monitoringPolicyId} IS NULL)`,
     ),
     check(
       "delivery_one_delegation",
-      sql`(delivery_policy_id IS NULL) OR (monitoring_policy_id IS NULL)`,
+      sql`(${table.deliveryPolicyId} IS NULL) OR (${table.monitoringPolicyId} IS NULL)`,
     ),
   ],
 );
@@ -295,7 +307,7 @@ export const changeCommitOperation = factorySchema.table(
     uniqueIndex("change_commit_one_active_uidx")
       .using("btree", table.changeId.asc().nullsLast())
       .where(
-        sql`(state <> ALL (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state]))`,
+        sql`(${table.state} <> ALL (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state]))`,
       ),
     foreignKey({
       columns: [table.changeId],
@@ -321,44 +333,44 @@ export const changeCommitOperation = factorySchema.table(
     unique("change_commit_operation_idempotency_key_key").on(table.idempotencyKey),
     check(
       "change_commit_operation_expected_parent_sha_check",
-      sql`expected_parent_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.expectedParentSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "change_commit_integration_base",
-      sql`(integration_base_sha IS NULL) OR (integration_base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
+      sql`(${table.integrationBaseSha} IS NULL) OR (${table.integrationBaseSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
     ),
     check(
       "change_commit_merge_parent",
-      sql`(merge_parent_sha IS NULL) OR ((merge_parent_sha = integration_base_sha) AND (merge_parent_sha <> expected_parent_sha))`,
+      sql`(${table.mergeParentSha} IS NULL) OR ((${table.mergeParentSha} = ${table.integrationBaseSha}) AND (${table.mergeParentSha} <> ${table.expectedParentSha}))`,
     ),
     check(
       "change_commit_operation_check",
-      sql`(state = ANY (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "change_commit_operation_check2",
-      sql`(state <> 'succeeded'::change_commit_state) OR (observed_remote_sha = commit_sha)`,
+      sql`(${table.state} <> 'succeeded'::change_commit_state) OR (${table.observedRemoteSha} = ${table.commitSha})`,
     ),
     check(
       "change_commit_operation_commit_message_check",
-      sql`(length(btrim(commit_message)) >= 1) AND (length(btrim(commit_message)) <= 240)`,
+      sql`(length(btrim(${table.commitMessage})) >= 1) AND (length(btrim(${table.commitMessage})) <= 240)`,
     ),
     check(
       "change_commit_operation_commit_presence_check",
-      sql`(state <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR (commit_sha IS NOT NULL) OR ((source = 'repository-document'::change_commit_source) AND (state = 'push-intended'::change_commit_state))`,
+      sql`(${table.state} <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR (${table.commitSha} IS NOT NULL) OR ((${table.source} = 'repository-document'::change_commit_source) AND (${table.state} = 'push-intended'::change_commit_state))`,
     ),
     check(
       "change_commit_operation_commit_sha_check",
-      sql`(commit_sha IS NULL) OR (commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
+      sql`(${table.commitSha} IS NULL) OR (${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
     ),
     check(
       "change_commit_operation_observed_remote_sha_check",
-      sql`(observed_remote_sha IS NULL) OR (observed_remote_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
+      sql`(${table.observedRemoteSha} IS NULL) OR (${table.observedRemoteSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
     ),
-    check("change_commit_operation_sequence_check", sql`sequence > 0`),
+    check("change_commit_operation_sequence_check", sql`${table.sequence} > 0`),
     check(
       "change_commit_operation_source_check",
-      sql`(((source)::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND (runtime_attempt_id IS NOT NULL) AND (repository_path IS NULL) AND (repository_blob_sha IS NULL) AND (repository_content IS NULL) AND (content_digest IS NULL)) OR (((source)::text = 'repository-document'::text) AND (runtime_attempt_id IS NULL) AND (repository_path IS NOT NULL) AND (repository_blob_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND (repository_content IS NOT NULL) AND (content_digest ~ '^[0-9a-f]{64}$'::text))`,
+      sql`(((${table.source})::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND (${table.runtimeAttemptId} IS NOT NULL) AND (${table.repositoryPath} IS NULL) AND (${table.repositoryBlobSha} IS NULL) AND (${table.repositoryContent} IS NULL) AND (${table.contentDigest} IS NULL)) OR (((${table.source})::text = 'repository-document'::text) AND (${table.runtimeAttemptId} IS NULL) AND (${table.repositoryPath} IS NOT NULL) AND (${table.repositoryBlobSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND (${table.repositoryContent} IS NOT NULL) AND (${table.contentDigest} ~ '^[0-9a-f]{64}$'::text))`,
     ),
   ],
 );
@@ -420,17 +432,17 @@ export const promotionOperation = factorySchema.table(
     unique("promotion_operation_retry_command_id_key").on(table.retryCommandId),
     check(
       "promotion_operation_retry_identity",
-      sql`((ordinal = 1) AND (supersedes_id IS NULL) AND (retry_command_id IS NULL)) OR ((ordinal > 1) AND (supersedes_id IS NOT NULL) AND (retry_command_id = id))`,
+      sql`((${table.ordinal} = 1) AND (${table.supersedesId} IS NULL) AND (${table.retryCommandId} IS NULL)) OR ((${table.ordinal} > 1) AND (${table.supersedesId} IS NOT NULL) AND (${table.retryCommandId} = ${table.id}))`,
     ),
     check(
       "promotion_operation_check",
-      sql`(state = ANY (ARRAY['succeeded'::promotion_operation_state, 'failed'::promotion_operation_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::promotion_operation_state, 'failed'::promotion_operation_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "promotion_operation_commit_sha_check",
-      sql`commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
-    check("promotion_operation_ordinal_check", sql`ordinal > 0`),
+    check("promotion_operation_ordinal_check", sql`${table.ordinal} > 0`),
   ],
 );
 
@@ -463,22 +475,22 @@ export const pullRequestOperation = factorySchema.table(
     }),
     unique("pull_request_operation_change_id_key").on(table.changeId),
     unique("pull_request_operation_idempotency_key_key").on(table.idempotencyKey),
-    check("pull_request_operation_body_check", sql`length(body) <= 10000`),
+    check("pull_request_operation_body_check", sql`length(${table.body}) <= 10000`),
     check(
       "pull_request_operation_check",
-      sql`(state = ANY (ARRAY['succeeded'::pull_request_operation_state, 'failed'::pull_request_operation_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::pull_request_operation_state, 'failed'::pull_request_operation_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "pull_request_operation_check1",
-      sql`(state <> 'succeeded'::pull_request_operation_state) OR ((pull_request_number IS NOT NULL) AND (pull_request_url IS NOT NULL))`,
+      sql`(${table.state} <> 'succeeded'::pull_request_operation_state) OR ((${table.pullRequestNumber} IS NOT NULL) AND (${table.pullRequestUrl} IS NOT NULL))`,
     ),
     check(
       "pull_request_operation_first_head_sha_check",
-      sql`first_head_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.firstHeadSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "pull_request_operation_title_check",
-      sql`(length(btrim(title)) >= 1) AND (length(btrim(title)) <= 240)`,
+      sql`(length(btrim(${table.title})) >= 1) AND (length(btrim(${table.title})) <= 240)`,
     ),
   ],
 );
@@ -503,11 +515,11 @@ export const mergeOperation = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("merge_operation_one_success")
       .using("btree", table.changeId.asc().nullsLast())
-      .where(sql`(state = 'succeeded'::merge_operation_state)`),
+      .where(sql`(${table.state} = 'succeeded'::merge_operation_state)`),
     uniqueIndex("merge_operation_one_unfinished")
       .using("btree", table.changeId.asc().nullsLast())
       .where(
-        sql`(state <> ALL (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state]))`,
+        sql`(${table.state} <> ALL (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state]))`,
       ),
     foreignKey({
       columns: [table.changeId],
@@ -521,22 +533,25 @@ export const mergeOperation = factorySchema.table(
     }),
     unique("merge_operation_delivery_approval_id_key").on(table.deliveryApprovalId),
     unique("merge_operation_idempotency_key_key").on(table.idempotencyKey),
-    check("merge_operation_base_sha_check", sql`base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`),
+    check(
+      "merge_operation_base_sha_check",
+      sql`${table.baseSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+    ),
     check(
       "merge_operation_check",
-      sql`(state = ANY (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "merge_operation_check1",
-      sql`(state <> 'succeeded'::merge_operation_state) OR (observed_default_sha = commit_sha)`,
+      sql`(${table.state} <> 'succeeded'::merge_operation_state) OR (${table.observedDefaultSha} = ${table.commitSha})`,
     ),
     check(
       "merge_operation_commit_sha_check",
-      sql`commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "merge_operation_observed_default_sha_check",
-      sql`(observed_default_sha IS NULL) OR (observed_default_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
+      sql`(${table.observedDefaultSha} IS NULL) OR (${table.observedDefaultSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
     ),
   ],
 );
@@ -562,7 +577,10 @@ export const stagingPreview = factorySchema.table(
       name: "staging_preview_runtime_attempt_id_project_id_fkey",
     }),
     unique("staging_preview_runtime_attempt_id_key").on(table.runtimeAttemptId),
-    check("staging_preview_revision_check", sql`revision ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`),
+    check(
+      "staging_preview_revision_check",
+      sql`${table.revision} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+    ),
   ],
 );
 
@@ -595,7 +613,7 @@ export const verification = factorySchema.table(
     uniqueIndex("verification_one_active_per_change")
       .using("btree", table.changeId.asc().nullsLast())
       .where(
-        sql`(state = ANY (ARRAY['pending'::verification_state, 'runner-starting'::verification_state, 'running'::verification_state]))`,
+        sql`(${table.state} = ANY (ARRAY['pending'::verification_state, 'runner-starting'::verification_state, 'running'::verification_state]))`,
       ),
     foreignKey({
       columns: [table.changeId],
@@ -621,23 +639,32 @@ export const verification = factorySchema.table(
     unique("verification_runtime_attempt_id_key").on(table.runtimeAttemptId),
     check(
       "verification_check",
-      sql`(state = ANY (ARRAY['succeeded'::verification_state, 'failed'::verification_state, 'cancelled'::verification_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::verification_state, 'failed'::verification_state, 'cancelled'::verification_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "verification_check1",
-      sql`(state <> ALL (ARRAY['runner-starting'::verification_state, 'running'::verification_state, 'succeeded'::verification_state, 'failed'::verification_state])) OR (action_run_id IS NOT NULL)`,
+      sql`(${table.state} <> ALL (ARRAY['runner-starting'::verification_state, 'running'::verification_state, 'succeeded'::verification_state, 'failed'::verification_state])) OR (${table.actionRunId} IS NOT NULL)`,
     ),
-    check("verification_check2", sql`(runtime_attempt_id IS NULL) OR (runner_token IS NOT NULL)`),
+    check(
+      "verification_check2",
+      sql`(${table.runtimeAttemptId} IS NULL) OR (${table.runnerToken} IS NOT NULL)`,
+    ),
     check(
       "verification_check3",
-      sql`(runner_job_handle IS NULL) OR ((action_run_id IS NOT NULL) AND (runner_job_handle ~ '^[A-Za-z0-9_-]{1,200}$'::text))`,
+      sql`(${table.runnerJobHandle} IS NULL) OR ((${table.actionRunId} IS NOT NULL) AND (${table.runnerJobHandle} ~ '^[A-Za-z0-9_-]{1,200}$'::text))`,
     ),
-    check("verification_commit_sha_check", sql`commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`),
+    check(
+      "verification_commit_sha_check",
+      sql`${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+    ),
     check(
       "verification_diagnosis_check",
-      sql`(diagnosis IS NULL) OR ((jsonb_typeof(diagnosis) = 'object'::text) AND (octet_length((diagnosis)::text) <= 24000))`,
+      sql`(${table.diagnosis} IS NULL) OR ((jsonb_typeof(${table.diagnosis}) = 'object'::text) AND (octet_length((${table.diagnosis})::text) <= 24000))`,
     ),
-    check("verification_summary_check", sql`(summary IS NULL) OR (length(summary) <= 2000)`),
+    check(
+      "verification_summary_check",
+      sql`(${table.summary} IS NULL) OR (length(${table.summary}) <= 2000)`,
+    ),
   ],
 );
 
@@ -656,7 +683,7 @@ export const stagingConfiguration = factorySchema.table(
     }),
     check(
       "staging_configuration_declaration_check",
-      sql`jsonb_typeof(declaration) = 'object'::text`,
+      sql`jsonb_typeof(${table.declaration}) = 'object'::text`,
     ),
   ],
 );

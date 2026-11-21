@@ -883,12 +883,6 @@ END; $$;
 -- Native 18-usage-functions.sql.
 -- Usage routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.guard_usage_entry() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN RAISE EXCEPTION 'Usage observations are immutable'; END;
-$$;
-
 CREATE FUNCTION factory.guard_usage_operation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -923,22 +917,18 @@ CREATE FUNCTION factory.protect_developer_ide_intent() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF NEW.user_id IS DISTINCT FROM OLD.user_id OR NEW.service_epoch < OLD.service_epoch THEN
+  IF NEW.user_id IS DISTINCT FROM OLD.user_id OR NEW.resource_id IS DISTINCT FROM OLD.resource_id
+    OR NEW.service_epoch < OLD.service_epoch THEN
     RAISE EXCEPTION 'Developer IDE identity is immutable' USING ERRCODE = '23514';
   END IF;
   IF NEW.service_epoch = OLD.service_epoch AND (
-    NEW.resource_id IS DISTINCT FROM OLD.resource_id OR
     NEW.image IS DISTINCT FROM OLD.image OR
     (OLD.namespace_uid IS NOT NULL AND NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid) OR
     (OLD.pod_uid IS NOT NULL AND NEW.pod_uid IS DISTINCT FROM OLD.pod_uid)
   ) THEN RAISE EXCEPTION 'Developer IDE intent outcome is immutable' USING ERRCODE = '23514'; END IF;
   IF NEW.service_epoch <> OLD.service_epoch AND (
     NEW.service_epoch <> OLD.service_epoch + 1 OR OLD.state <> 'stopped' OR NEW.state <> 'create-intended' OR
-    NEW.pod_uid IS NOT NULL OR
-    CASE WHEN NEW.resource_id = OLD.resource_id
-      THEN NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid
-      ELSE OLD.resource_id <> OLD.user_id OR NEW.resource_id = NEW.user_id OR NEW.namespace_uid IS NOT NULL
-    END
+    NEW.pod_uid IS NOT NULL OR NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid
   ) THEN RAISE EXCEPTION 'Stop the Developer IDE before issuing a new epoch' USING ERRCODE = '23514'; END IF;
   RETURN NEW;
 END;
@@ -1977,7 +1967,7 @@ CREATE TABLE "factory"."access_revocation" (
 	"version" bigint DEFAULT 1 NOT NULL,
 	"processed_version" bigint DEFAULT 0 NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "access_revocation_check" CHECK ((processed_version >= 0) AND (processed_version <= version))
+	CONSTRAINT "access_revocation_check" CHECK (("factory"."access_revocation"."processed_version" >= 0) AND ("factory"."access_revocation"."processed_version" <= "factory"."access_revocation"."version"))
 );
 
 CREATE TABLE "factory"."account_access" (
@@ -2013,16 +2003,16 @@ CREATE TABLE "factory"."agent_turn" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "agent_turn_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "agent_turn_authority_check" CHECK ((jsonb_typeof(authority) = 'object'::text) AND (authority ? 'mode'::text) AND (octet_length((authority)::text) <= 2000)),
-	CONSTRAINT "agent_turn_check" CHECK ((owner_token IS NULL) = (owner_expires_at IS NULL)),
-	CONSTRAINT "agent_turn_check1" CHECK ((((input ->> 'kind'::text) = ANY (ARRAY['project-message'::text, 'project-answer'::text])) AND (conversation_id IS NOT NULL) AND (change_id IS NULL) AND ((authority ->> 'mode'::text) = ANY (ARRAY['investigate'::text, 'plan'::text]))) OR (((input ->> 'kind'::text) = ANY (ARRAY['change-start'::text, 'change-prompt'::text, 'change-repair'::text, 'change-review'::text])) AND (change_id IS NOT NULL) AND (ticket_id IS NOT NULL) AND ((authority ->> 'mode'::text) = 'build'::text))),
-	CONSTRAINT "agent_turn_check2" CHECK (((input ->> 'kind'::text) <> 'project-answer'::text) OR ((authority ->> 'mode'::text) = 'plan'::text)),
-	CONSTRAINT "agent_turn_check3" CHECK ((state <> ALL (ARRAY['dispatching'::agent_turn_state, 'running'::agent_turn_state])) OR (owner_token IS NOT NULL)),
-	CONSTRAINT "agent_turn_check4" CHECK ((state <> ALL (ARRAY['completed'::agent_turn_state, 'failed'::agent_turn_state, 'stopped'::agent_turn_state, 'uncertain'::agent_turn_state])) OR (owner_token IS NULL)),
-	CONSTRAINT "agent_turn_input_check" CHECK ((jsonb_typeof(input) = 'object'::text) AND (input ? 'kind'::text) AND (octet_length((input)::text) <= 100000)),
-	CONSTRAINT "agent_turn_input_digest_check" CHECK (input_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "agent_turn_outcome_summary_check" CHECK (length(outcome_summary) <= 2000),
-	CONSTRAINT "agent_turn_review_authority" CHECK (((input ->> 'kind'::text) = 'change-review'::text) = (authority ? 'review'::text))
+	CONSTRAINT "agent_turn_authority_check" CHECK ((jsonb_typeof("factory"."agent_turn"."authority") = 'object'::text) AND ("factory"."agent_turn"."authority" ? 'mode'::text) AND (octet_length(("factory"."agent_turn"."authority")::text) <= 2000)),
+	CONSTRAINT "agent_turn_check" CHECK (("factory"."agent_turn"."owner_token" IS NULL) = ("factory"."agent_turn"."owner_expires_at" IS NULL)),
+	CONSTRAINT "agent_turn_check1" CHECK (((("factory"."agent_turn"."input" ->> 'kind'::text) = ANY (ARRAY['project-message'::text, 'project-answer'::text])) AND ("factory"."agent_turn"."conversation_id" IS NOT NULL) AND ("factory"."agent_turn"."change_id" IS NULL) AND (("factory"."agent_turn"."authority" ->> 'mode'::text) = ANY (ARRAY['investigate'::text, 'plan'::text]))) OR ((("factory"."agent_turn"."input" ->> 'kind'::text) = ANY (ARRAY['change-start'::text, 'change-prompt'::text, 'change-repair'::text, 'change-review'::text])) AND ("factory"."agent_turn"."change_id" IS NOT NULL) AND ("factory"."agent_turn"."ticket_id" IS NOT NULL) AND (("factory"."agent_turn"."authority" ->> 'mode'::text) = 'build'::text))),
+	CONSTRAINT "agent_turn_check2" CHECK ((("factory"."agent_turn"."input" ->> 'kind'::text) <> 'project-answer'::text) OR (("factory"."agent_turn"."authority" ->> 'mode'::text) = 'plan'::text)),
+	CONSTRAINT "agent_turn_check3" CHECK (("factory"."agent_turn"."state" <> ALL (ARRAY['dispatching'::agent_turn_state, 'running'::agent_turn_state])) OR ("factory"."agent_turn"."owner_token" IS NOT NULL)),
+	CONSTRAINT "agent_turn_check4" CHECK (("factory"."agent_turn"."state" <> ALL (ARRAY['completed'::agent_turn_state, 'failed'::agent_turn_state, 'stopped'::agent_turn_state, 'uncertain'::agent_turn_state])) OR ("factory"."agent_turn"."owner_token" IS NULL)),
+	CONSTRAINT "agent_turn_input_check" CHECK ((jsonb_typeof("factory"."agent_turn"."input") = 'object'::text) AND ("factory"."agent_turn"."input" ? 'kind'::text) AND (octet_length(("factory"."agent_turn"."input")::text) <= 100000)),
+	CONSTRAINT "agent_turn_input_digest_check" CHECK ("factory"."agent_turn"."input_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "agent_turn_outcome_summary_check" CHECK (length("factory"."agent_turn"."outcome_summary") <= 2000),
+	CONSTRAINT "agent_turn_review_authority" CHECK ((("factory"."agent_turn"."input" ->> 'kind'::text) = 'change-review'::text) = ("factory"."agent_turn"."authority" ? 'review'::text))
 );
 
 CREATE TABLE "factory"."agent_turn_mcp" (
@@ -2062,12 +2052,12 @@ CREATE TABLE "factory"."attachment" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
 	"deleted_at" timestamp with time zone,
-	CONSTRAINT "attachment_byte_length_check" CHECK (byte_length > 0),
-	CONSTRAINT "attachment_check" CHECK (reserved_bytes >= byte_length),
-	CONSTRAINT "attachment_name_check" CHECK ((length(name) >= 1) AND (length(name) <= 240)),
-	CONSTRAINT "attachment_objects_check" CHECK (jsonb_typeof(objects) = 'array'::text),
-	CONSTRAINT "attachment_sha256_check" CHECK (sha256 ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "attachment_state_check" CHECK (state = ANY (ARRAY['uploading'::text, 'ready'::text, 'failed'::text, 'deleting'::text, 'deleted'::text]))
+	CONSTRAINT "attachment_byte_length_check" CHECK ("factory"."attachment"."byte_length" > 0),
+	CONSTRAINT "attachment_check" CHECK ("factory"."attachment"."reserved_bytes" >= "factory"."attachment"."byte_length"),
+	CONSTRAINT "attachment_name_check" CHECK ((length("factory"."attachment"."name") >= 1) AND (length("factory"."attachment"."name") <= 240)),
+	CONSTRAINT "attachment_objects_check" CHECK (jsonb_typeof("factory"."attachment"."objects") = 'array'::text),
+	CONSTRAINT "attachment_sha256_check" CHECK ("factory"."attachment"."sha256" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "attachment_state_check" CHECK ("factory"."attachment"."state" = ANY (ARRAY['uploading'::text, 'ready'::text, 'failed'::text, 'deleting'::text, 'deleted'::text]))
 );
 
 CREATE TABLE "factory"."attachment_draft" (
@@ -2077,7 +2067,7 @@ CREATE TABLE "factory"."attachment_draft" (
 	"sequence" bigint NOT NULL,
 	"attachment_ids" uuid[] NOT NULL,
 	CONSTRAINT "attachment_draft_pkey" PRIMARY KEY("id","owner_id"),
-	CONSTRAINT "attachment_draft_sequence_check" CHECK (sequence >= 0)
+	CONSTRAINT "attachment_draft_sequence_check" CHECK ("factory"."attachment_draft"."sequence" >= 0)
 );
 
 CREATE TABLE "factory"."attachment_reference" (
@@ -2087,14 +2077,14 @@ CREATE TABLE "factory"."attachment_reference" (
 	"shared" boolean NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "attachment_reference_pkey" PRIMARY KEY("attachment_id","kind","reference_id"),
-	CONSTRAINT "attachment_reference_kind_check" CHECK (kind = ANY (ARRAY['ticket'::text, 'requirement'::text, 'knowledge'::text, 'conversation'::text, 'feedback'::text, 'turn'::text]))
+	CONSTRAINT "attachment_reference_kind_check" CHECK ("factory"."attachment_reference"."kind" = ANY (ARRAY['ticket'::text, 'requirement'::text, 'knowledge'::text, 'conversation'::text, 'feedback'::text, 'turn'::text]))
 );
 
 CREATE TABLE "factory"."attachment_storage" (
 	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
 	"id" uuid NOT NULL,
 	CONSTRAINT "attachment_storage_id_key" UNIQUE("id"),
-	CONSTRAINT "attachment_storage_singleton_check" CHECK ((singleton))
+	CONSTRAINT "attachment_storage_singleton_check" CHECK (("factory"."attachment_storage"."singleton"))
 );
 
 CREATE TABLE "factory"."attachment_turn_context" (
@@ -2133,7 +2123,7 @@ CREATE TABLE "auth"."session" (
 	"authenticated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"login_method" text DEFAULT 'password' NOT NULL,
 	CONSTRAINT "session_token_key" UNIQUE("token"),
-	CONSTRAINT "session_login_method_check" CHECK (login_method = ANY (ARRAY['password'::text, 'sso'::text, 'emergency'::text, 'identity-test'::text]))
+	CONSTRAINT "session_login_method_check" CHECK ("auth"."session"."login_method" = ANY (ARRAY['password'::text, 'sso'::text, 'emergency'::text, 'identity-test'::text]))
 );
 
 CREATE TABLE "auth"."user" (
@@ -2178,15 +2168,15 @@ CREATE TABLE "factory"."branch_create_operation" (
 	CONSTRAINT "branch_create_operation_change_id_key" UNIQUE("change_id"),
 	CONSTRAINT "branch_create_operation_repository_owner_repository_name_br_key" UNIQUE("repository_owner","repository_name","branch_name"),
 	CONSTRAINT "branch_create_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "branch_create_operation_lease_generation_check" CHECK (lease_generation >= 0),
-	CONSTRAINT "branch_create_operation_attempt_count_check" CHECK (attempt_count >= 0),
-	CONSTRAINT "branch_create_operation_check" CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
-	CONSTRAINT "branch_create_operation_check1" CHECK ((state = ANY (ARRAY['succeeded'::branch_operation_state, 'failed'::branch_operation_state, 'cancelled'::branch_operation_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "branch_create_operation_check2" CHECK ((state <> 'succeeded'::branch_operation_state) OR (observed_head_sha = start_sha)),
-	CONSTRAINT "branch_create_operation_observed_head_sha_check" CHECK ((observed_head_sha IS NULL) OR (observed_head_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-	CONSTRAINT "branch_create_operation_repository_name_check" CHECK (length(btrim(repository_name)) > 0),
-	CONSTRAINT "branch_create_operation_repository_owner_check" CHECK (length(btrim(repository_owner)) > 0),
-	CONSTRAINT "branch_create_operation_start_sha_check" CHECK (start_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
+	CONSTRAINT "branch_create_operation_lease_generation_check" CHECK ("factory"."branch_create_operation"."lease_generation" >= 0),
+	CONSTRAINT "branch_create_operation_attempt_count_check" CHECK ("factory"."branch_create_operation"."attempt_count" >= 0),
+	CONSTRAINT "branch_create_operation_check" CHECK (("factory"."branch_create_operation"."lease_owner" IS NULL) = ("factory"."branch_create_operation"."lease_expires_at" IS NULL)),
+	CONSTRAINT "branch_create_operation_check1" CHECK (("factory"."branch_create_operation"."state" = ANY (ARRAY['succeeded'::branch_operation_state, 'failed'::branch_operation_state, 'cancelled'::branch_operation_state])) = ("factory"."branch_create_operation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "branch_create_operation_check2" CHECK (("factory"."branch_create_operation"."state" <> 'succeeded'::branch_operation_state) OR ("factory"."branch_create_operation"."observed_head_sha" = "factory"."branch_create_operation"."start_sha")),
+	CONSTRAINT "branch_create_operation_observed_head_sha_check" CHECK (("factory"."branch_create_operation"."observed_head_sha" IS NULL) OR ("factory"."branch_create_operation"."observed_head_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
+	CONSTRAINT "branch_create_operation_repository_name_check" CHECK (length(btrim("factory"."branch_create_operation"."repository_name")) > 0),
+	CONSTRAINT "branch_create_operation_repository_owner_check" CHECK (length(btrim("factory"."branch_create_operation"."repository_owner")) > 0),
+	CONSTRAINT "branch_create_operation_start_sha_check" CHECK ("factory"."branch_create_operation"."start_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
 );
 
 CREATE TABLE "factory"."build_browser_session" (
@@ -2207,17 +2197,17 @@ CREATE TABLE "factory"."build_browser_session" (
 	"ordinal" integer DEFAULT 1 NOT NULL,
 	"reopen_allowed" boolean DEFAULT false NOT NULL,
 	CONSTRAINT "build_browser_session_owner_ordinal_key" UNIQUE("turn_id","owner_id","ordinal"),
-	CONSTRAINT "build_browser_session_agent_session_id_check" CHECK ((agent_session_id ~~ 'ses%'::text) AND (length(agent_session_id) <= 200)),
-	CONSTRAINT "build_browser_session_check" CHECK ((inspection_context IS NULL) OR (((jsonb_typeof(inspection_context) = 'object'::text) AND (octet_length((inspection_context)::text) <= 2048) AND ((inspection_context ->> 'sessionId'::text) = (id)::text) AND ((inspection_context ->> 'turnId'::text) = (turn_id)::text) AND ((inspection_context ->> 'changeId'::text) = (change_id)::text) AND ((inspection_context ->> 'runtimeAttemptId'::text) = (runtime_attempt_id)::text) AND (((inspection_context ->> 'generation'::text))::bigint = generation) AND ((inspection_context ->> 'headCommit'::text) ~ '^[a-f0-9]{40}$'::text) AND ((inspection_context ->> 'app'::text) ~ '^[a-z][a-z0-9-]{0,31}$'::text) AND (jsonb_typeof((inspection_context -> 'workingTreeModified'::text)) = 'boolean'::text)) IS TRUE)),
-	CONSTRAINT "build_browser_session_check1" CHECK ((state <> 'active'::text) OR (create_confirmed_at IS NOT NULL)),
-	CONSTRAINT "build_browser_session_check2" CHECK ((state <> 'active'::text) OR (inspection_context IS NOT NULL)),
-	CONSTRAINT "build_browser_session_check3" CHECK ((state = ANY (ARRAY['closing'::text, 'closed'::text])) = (cleanup_intended_at IS NOT NULL)),
-	CONSTRAINT "build_browser_session_check4" CHECK ((state = 'closed'::text) = (cleanup_confirmed_at IS NOT NULL)),
-	CONSTRAINT "build_browser_session_generation_check" CHECK (generation > 0),
-	CONSTRAINT "build_browser_session_ordinal_check" CHECK (ordinal > 0),
-	CONSTRAINT "build_browser_session_outcome_summary_check" CHECK (octet_length(outcome_summary) <= 512),
-	CONSTRAINT "build_browser_session_owner_id_check" CHECK (owner_id ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "build_browser_session_state_check" CHECK (state = ANY (ARRAY['intended'::text, 'active'::text, 'closing'::text, 'closed'::text]))
+	CONSTRAINT "build_browser_session_agent_session_id_check" CHECK (("factory"."build_browser_session"."agent_session_id" ~~ 'ses%'::text) AND (length("factory"."build_browser_session"."agent_session_id") <= 200)),
+	CONSTRAINT "build_browser_session_check" CHECK (("factory"."build_browser_session"."inspection_context" IS NULL) OR (((jsonb_typeof("factory"."build_browser_session"."inspection_context") = 'object'::text) AND (octet_length(("factory"."build_browser_session"."inspection_context")::text) <= 2048) AND (("factory"."build_browser_session"."inspection_context" ->> 'sessionId'::text) = ("factory"."build_browser_session"."id")::text) AND (("factory"."build_browser_session"."inspection_context" ->> 'turnId'::text) = ("factory"."build_browser_session"."turn_id")::text) AND (("factory"."build_browser_session"."inspection_context" ->> 'changeId'::text) = ("factory"."build_browser_session"."change_id")::text) AND (("factory"."build_browser_session"."inspection_context" ->> 'runtimeAttemptId'::text) = ("factory"."build_browser_session"."runtime_attempt_id")::text) AND ((("factory"."build_browser_session"."inspection_context" ->> 'generation'::text))::bigint = "factory"."build_browser_session"."generation") AND (("factory"."build_browser_session"."inspection_context" ->> 'headCommit'::text) ~ '^[a-f0-9]{40}$'::text) AND (("factory"."build_browser_session"."inspection_context" ->> 'app'::text) ~ '^[a-z][a-z0-9-]{0,31}$'::text) AND (jsonb_typeof(("factory"."build_browser_session"."inspection_context" -> 'workingTreeModified'::text)) = 'boolean'::text)) IS TRUE)),
+	CONSTRAINT "build_browser_session_check1" CHECK (("factory"."build_browser_session"."state" <> 'active'::text) OR ("factory"."build_browser_session"."create_confirmed_at" IS NOT NULL)),
+	CONSTRAINT "build_browser_session_check2" CHECK (("factory"."build_browser_session"."state" <> 'active'::text) OR ("factory"."build_browser_session"."inspection_context" IS NOT NULL)),
+	CONSTRAINT "build_browser_session_check3" CHECK (("factory"."build_browser_session"."state" = ANY (ARRAY['closing'::text, 'closed'::text])) = ("factory"."build_browser_session"."cleanup_intended_at" IS NOT NULL)),
+	CONSTRAINT "build_browser_session_check4" CHECK (("factory"."build_browser_session"."state" = 'closed'::text) = ("factory"."build_browser_session"."cleanup_confirmed_at" IS NOT NULL)),
+	CONSTRAINT "build_browser_session_generation_check" CHECK ("factory"."build_browser_session"."generation" > 0),
+	CONSTRAINT "build_browser_session_ordinal_check" CHECK ("factory"."build_browser_session"."ordinal" > 0),
+	CONSTRAINT "build_browser_session_outcome_summary_check" CHECK (octet_length("factory"."build_browser_session"."outcome_summary") <= 512),
+	CONSTRAINT "build_browser_session_owner_id_check" CHECK ("factory"."build_browser_session"."owner_id" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "build_browser_session_state_check" CHECK ("factory"."build_browser_session"."state" = ANY (ARRAY['intended'::text, 'active'::text, 'closing'::text, 'closed'::text]))
 );
 
 CREATE TABLE "factory"."candidate_review" (
@@ -2247,14 +2237,14 @@ CREATE TABLE "factory"."candidate_review" (
 	CONSTRAINT "candidate_review_supersedes_id_key" UNIQUE("supersedes_id"),
 	CONSTRAINT "candidate_review_turn_id_key" UNIQUE("turn_id"),
 	CONSTRAINT "candidate_review_repair_command_id_key" UNIQUE("repair_command_id"),
-	CONSTRAINT "candidate_review_commit_sha_check" CHECK (commit_sha ~ '^[a-f0-9]{40}$'::text),
-	CONSTRAINT "candidate_review_base_sha_check" CHECK (base_sha ~ '^[a-f0-9]{40}$'::text),
-	CONSTRAINT "candidate_review_check" CHECK ((state <> ALL (ARRAY['passed'::text, 'changes-requested'::text])) OR (result IS NOT NULL)),
-	CONSTRAINT "candidate_review_evidence_check" CHECK ((jsonb_typeof(evidence) = 'array'::text) AND (jsonb_array_length(evidence) <= 256)),
-	CONSTRAINT "candidate_review_finding_checks_check" CHECK ((finding_checks IS NULL) OR ((finding_source_id IS NOT NULL) AND (jsonb_typeof(finding_checks) = 'object'::text) AND (octet_length((finding_checks)::text) <= 32768))),
-	CONSTRAINT "candidate_review_ordinal_check" CHECK (ordinal > 0),
-	CONSTRAINT "candidate_review_result_check" CHECK ((result IS NULL) OR ((jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 32768))),
-	CONSTRAINT "candidate_review_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'running'::text, 'passed'::text, 'changes-requested'::text, 'incomplete'::text]))
+	CONSTRAINT "candidate_review_commit_sha_check" CHECK ("factory"."candidate_review"."commit_sha" ~ '^[a-f0-9]{40}$'::text),
+	CONSTRAINT "candidate_review_base_sha_check" CHECK ("factory"."candidate_review"."base_sha" ~ '^[a-f0-9]{40}$'::text),
+	CONSTRAINT "candidate_review_check" CHECK (("factory"."candidate_review"."state" <> ALL (ARRAY['passed'::text, 'changes-requested'::text])) OR ("factory"."candidate_review"."result" IS NOT NULL)),
+	CONSTRAINT "candidate_review_evidence_check" CHECK ((jsonb_typeof("factory"."candidate_review"."evidence") = 'array'::text) AND (jsonb_array_length("factory"."candidate_review"."evidence") <= 256)),
+	CONSTRAINT "candidate_review_finding_checks_check" CHECK (("factory"."candidate_review"."finding_checks" IS NULL) OR (("factory"."candidate_review"."finding_source_id" IS NOT NULL) AND (jsonb_typeof("factory"."candidate_review"."finding_checks") = 'object'::text) AND (octet_length(("factory"."candidate_review"."finding_checks")::text) <= 32768))),
+	CONSTRAINT "candidate_review_ordinal_check" CHECK ("factory"."candidate_review"."ordinal" > 0),
+	CONSTRAINT "candidate_review_result_check" CHECK (("factory"."candidate_review"."result" IS NULL) OR ((jsonb_typeof("factory"."candidate_review"."result") = 'object'::text) AND (octet_length(("factory"."candidate_review"."result")::text) <= 32768))),
+	CONSTRAINT "candidate_review_state_check" CHECK ("factory"."candidate_review"."state" = ANY (ARRAY['pending'::text, 'running'::text, 'passed'::text, 'changes-requested'::text, 'incomplete'::text]))
 );
 
 CREATE TABLE "factory"."change" (
@@ -2281,10 +2271,10 @@ CREATE TABLE "factory"."change" (
 	CONSTRAINT "change_project_id_branch_name_key" UNIQUE("project_id","branch_name"),
 	CONSTRAINT "change_requirement_approval_id_key" UNIQUE("requirement_approval_id"),
 	CONSTRAINT "change_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "change_base_sha_check" CHECK (base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "change_branch_name_check" CHECK (branch_name ~ '^factory/change-[0-9a-f]{12}$'::text),
-	CONSTRAINT "change_check" CHECK ((state = 'cancelled'::change_state) = (cancelled_at IS NOT NULL)),
-	CONSTRAINT "change_version_check" CHECK (version > 0)
+	CONSTRAINT "change_base_sha_check" CHECK ("factory"."change"."base_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "change_branch_name_check" CHECK ("factory"."change"."branch_name" ~ '^factory/change-[0-9a-f]{12}$'::text),
+	CONSTRAINT "change_check" CHECK (("factory"."change"."state" = 'cancelled'::change_state) = ("factory"."change"."cancelled_at" IS NOT NULL)),
+	CONSTRAINT "change_version_check" CHECK ("factory"."change"."version" > 0)
 );
 
 CREATE TABLE "factory"."change_agent_session" (
@@ -2305,13 +2295,13 @@ CREATE TABLE "factory"."change_agent_session" (
 	"native_session_confirmed_at" timestamp with time zone,
 	"implementation_session_id" text,
 	"implementation_session_confirmed_at" timestamp with time zone,
-	CONSTRAINT "change_agent_implementation_confirmation" CHECK ((implementation_session_confirmed_at IS NULL) OR (implementation_session_id IS NOT NULL)),
-	CONSTRAINT "change_agent_native_session_confirmation" CHECK ((native_session_confirmed_at IS NULL) OR (opencode_session_id IS NOT NULL)),
-	CONSTRAINT "change_agent_session_active_inbox_id_check" CHECK (length(COALESCE(active_inbox_id, ''::text)) <= 200),
-	CONSTRAINT "change_agent_session_check" CHECK ((state <> 'starting'::change_agent_state) OR (opencode_session_id IS NULL) OR (length(opencode_session_id) > 0)),
-	CONSTRAINT "change_agent_session_opencode_session_id_check" CHECK (length(COALESCE(opencode_session_id, ''::text)) <= 200),
-	CONSTRAINT "change_agent_stop_dispatch_state" CHECK ((NOT stop_dispatched) OR stop_pending),
-	CONSTRAINT "change_agent_stop_pending_state" CHECK ((NOT stop_pending) OR (state = 'stopped'::change_agent_state))
+	CONSTRAINT "change_agent_implementation_confirmation" CHECK (("factory"."change_agent_session"."implementation_session_confirmed_at" IS NULL) OR ("factory"."change_agent_session"."implementation_session_id" IS NOT NULL)),
+	CONSTRAINT "change_agent_native_session_confirmation" CHECK (("factory"."change_agent_session"."native_session_confirmed_at" IS NULL) OR ("factory"."change_agent_session"."opencode_session_id" IS NOT NULL)),
+	CONSTRAINT "change_agent_session_active_inbox_id_check" CHECK (length(COALESCE("factory"."change_agent_session"."active_inbox_id", ''::text)) <= 200),
+	CONSTRAINT "change_agent_session_check" CHECK (("factory"."change_agent_session"."state" <> 'starting'::change_agent_state) OR ("factory"."change_agent_session"."opencode_session_id" IS NULL) OR (length("factory"."change_agent_session"."opencode_session_id") > 0)),
+	CONSTRAINT "change_agent_session_opencode_session_id_check" CHECK (length(COALESCE("factory"."change_agent_session"."opencode_session_id", ''::text)) <= 200),
+	CONSTRAINT "change_agent_stop_dispatch_state" CHECK ((NOT "factory"."change_agent_session"."stop_dispatched") OR "factory"."change_agent_session"."stop_pending"),
+	CONSTRAINT "change_agent_stop_pending_state" CHECK ((NOT "factory"."change_agent_session"."stop_pending") OR ("factory"."change_agent_session"."state" = 'stopped'::change_agent_state))
 );
 
 CREATE TABLE "factory"."change_agent_turn_intent" (
@@ -2330,13 +2320,13 @@ CREATE TABLE "factory"."change_agent_turn_intent" (
 	"model_request_epoch" bigint DEFAULT 0 NOT NULL,
 	"terminal_outcome" jsonb,
 	CONSTRAINT "change_agent_turn_intent_prompt_id_key" UNIQUE("prompt_id"),
-	CONSTRAINT "change_agent_turn_intent_model_epoch_check" CHECK (model_request_epoch >= 0),
-	CONSTRAINT "change_agent_turn_intent_terminal_check" CHECK ((terminal_outcome IS NULL) OR ((jsonb_typeof(terminal_outcome) = 'object'::text) AND (octet_length((terminal_outcome)::text) <= 8192) AND (terminal_outcome ?& ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) AND ((terminal_outcome - ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) = '{}'::jsonb) AND ((terminal_outcome ->> 'version'::text) = '1'::text) AND (jsonb_typeof((terminal_outcome -> 'version'::text)) = 'number'::text) AND (jsonb_typeof((terminal_outcome -> 'turnID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'attemptID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'sessionID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'promptID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'promptDigest'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'assistantID'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'assistantDigest'::text)) = 'string'::text) AND (jsonb_typeof((terminal_outcome -> 'modelRequestEpoch'::text)) = 'string'::text) AND ((terminal_outcome ->> 'turnID'::text) = (turn_id)::text) AND (runtime_attempt_id IS NOT NULL) AND ((terminal_outcome ->> 'attemptID'::text) = (runtime_attempt_id)::text) AND ((terminal_outcome ->> 'sessionID'::text) = session_id) AND ((terminal_outcome ->> 'promptID'::text) = prompt_id) AND ((terminal_outcome ->> 'modelRequestEpoch'::text) = (model_request_epoch)::text) AND ((terminal_outcome ->> 'promptDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND ((terminal_outcome ->> 'assistantDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND ((terminal_outcome ->> 'assistantID'::text) ~~ 'msg_%'::text) AND (length((terminal_outcome ->> 'assistantID'::text)) <= 200) AND (jsonb_typeof((terminal_outcome -> 'completed'::text)) = 'number'::text) AND ((((terminal_outcome ->> 'completed'::text))::numeric >= (1)::numeric) AND (((terminal_outcome ->> 'completed'::text))::numeric <= ('9007199254740991'::bigint)::numeric)) AND (jsonb_typeof((terminal_outcome -> 'shells'::text)) = 'array'::text) AND (jsonb_typeof((terminal_outcome -> 'outcome'::text)) = 'object'::text) AND (jsonb_typeof(((terminal_outcome -> 'outcome'::text) -> 'state'::text)) = 'string'::text) AND ((terminal_outcome -> 'outcome'::text) ? 'state'::text) AND (((terminal_outcome -> 'outcome'::text) - ARRAY['state'::text, 'summary'::text, 'error'::text]) = '{}'::jsonb) AND (((((terminal_outcome -> 'outcome'::text) ->> 'state'::text) = 'succeeded'::text) AND (NOT ((terminal_outcome -> 'outcome'::text) ? 'error'::text)) AND ((NOT ((terminal_outcome -> 'outcome'::text) ? 'summary'::text)) OR ((jsonb_typeof(((terminal_outcome -> 'outcome'::text) -> 'summary'::text)) = 'string'::text) AND (length(((terminal_outcome -> 'outcome'::text) ->> 'summary'::text)) <= 2000)))) OR ((((terminal_outcome -> 'outcome'::text) ->> 'state'::text) = 'failed'::text) AND ((terminal_outcome -> 'outcome'::text) ? 'error'::text) AND (NOT ((terminal_outcome -> 'outcome'::text) ? 'summary'::text)) AND (jsonb_typeof(((terminal_outcome -> 'outcome'::text) -> 'error'::text)) = 'string'::text) AND (length(((terminal_outcome -> 'outcome'::text) ->> 'error'::text)) <= 2000))))),
-	CONSTRAINT "change_agent_turn_intent_prompt_id_check" CHECK ((prompt_id ~~ 'msg_%'::text) AND (length(prompt_id) <= 200)),
-	CONSTRAINT "change_agent_turn_intent_prompt_text_check" CHECK ((length(btrim(prompt_text)) > 0) AND (octet_length(prompt_text) <= 4000000)),
-	CONSTRAINT "change_agent_turn_intent_session_id_check" CHECK ((session_id ~~ 'ses%'::text) AND (length(session_id) <= 200)),
-	CONSTRAINT "change_agent_turn_intent_session_title_check" CHECK ((length(session_title) >= 1) AND (length(session_title) <= 200)),
-	CONSTRAINT "change_agent_turn_intent_skill_loading_check" CHECK (skill_loading = ANY (ARRAY['eager'::text, 'native'::text]))
+	CONSTRAINT "change_agent_turn_intent_model_epoch_check" CHECK ("factory"."change_agent_turn_intent"."model_request_epoch" >= 0),
+	CONSTRAINT "change_agent_turn_intent_terminal_check" CHECK (("factory"."change_agent_turn_intent"."terminal_outcome" IS NULL) OR ((jsonb_typeof("factory"."change_agent_turn_intent"."terminal_outcome") = 'object'::text) AND (octet_length(("factory"."change_agent_turn_intent"."terminal_outcome")::text) <= 8192) AND ("factory"."change_agent_turn_intent"."terminal_outcome" ?& ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) AND (("factory"."change_agent_turn_intent"."terminal_outcome" - ARRAY['version'::text, 'turnID'::text, 'attemptID'::text, 'sessionID'::text, 'promptID'::text, 'promptDigest'::text, 'assistantID'::text, 'assistantDigest'::text, 'completed'::text, 'modelRequestEpoch'::text, 'shells'::text, 'outcome'::text]) = '{}'::jsonb) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'version'::text) = '1'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'version'::text)) = 'number'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'turnID'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'attemptID'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'sessionID'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'promptID'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'promptDigest'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'assistantID'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'assistantDigest'::text)) = 'string'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'modelRequestEpoch'::text)) = 'string'::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'turnID'::text) = ("factory"."change_agent_turn_intent"."turn_id")::text) AND ("factory"."change_agent_turn_intent"."runtime_attempt_id" IS NOT NULL) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'attemptID'::text) = ("factory"."change_agent_turn_intent"."runtime_attempt_id")::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'sessionID'::text) = "factory"."change_agent_turn_intent"."session_id") AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'promptID'::text) = "factory"."change_agent_turn_intent"."prompt_id") AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'modelRequestEpoch'::text) = ("factory"."change_agent_turn_intent"."model_request_epoch")::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'promptDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'assistantDigest'::text) ~ '^[a-f0-9]{64}$'::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'assistantID'::text) ~~ 'msg_%'::text) AND (length(("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'assistantID'::text)) <= 200) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'completed'::text)) = 'number'::text) AND (((("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'completed'::text))::numeric >= (1)::numeric) AND ((("factory"."change_agent_turn_intent"."terminal_outcome" ->> 'completed'::text))::numeric <= ('9007199254740991'::bigint)::numeric)) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'shells'::text)) = 'array'::text) AND (jsonb_typeof(("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text)) = 'object'::text) AND (jsonb_typeof((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) -> 'state'::text)) = 'string'::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ? 'state'::text) AND ((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) - ARRAY['state'::text, 'summary'::text, 'error'::text]) = '{}'::jsonb) AND ((((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ->> 'state'::text) = 'succeeded'::text) AND (NOT (("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ? 'error'::text)) AND ((NOT (("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ? 'summary'::text)) OR ((jsonb_typeof((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) -> 'summary'::text)) = 'string'::text) AND (length((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ->> 'summary'::text)) <= 2000)))) OR (((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ->> 'state'::text) = 'failed'::text) AND (("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ? 'error'::text) AND (NOT (("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ? 'summary'::text)) AND (jsonb_typeof((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) -> 'error'::text)) = 'string'::text) AND (length((("factory"."change_agent_turn_intent"."terminal_outcome" -> 'outcome'::text) ->> 'error'::text)) <= 2000))))),
+	CONSTRAINT "change_agent_turn_intent_prompt_id_check" CHECK (("factory"."change_agent_turn_intent"."prompt_id" ~~ 'msg_%'::text) AND (length("factory"."change_agent_turn_intent"."prompt_id") <= 200)),
+	CONSTRAINT "change_agent_turn_intent_prompt_text_check" CHECK ((length(btrim("factory"."change_agent_turn_intent"."prompt_text")) > 0) AND (octet_length("factory"."change_agent_turn_intent"."prompt_text") <= 4000000)),
+	CONSTRAINT "change_agent_turn_intent_session_id_check" CHECK (("factory"."change_agent_turn_intent"."session_id" ~~ 'ses%'::text) AND (length("factory"."change_agent_turn_intent"."session_id") <= 200)),
+	CONSTRAINT "change_agent_turn_intent_session_title_check" CHECK ((length("factory"."change_agent_turn_intent"."session_title") >= 1) AND (length("factory"."change_agent_turn_intent"."session_title") <= 200)),
+	CONSTRAINT "change_agent_turn_intent_skill_loading_check" CHECK ("factory"."change_agent_turn_intent"."skill_loading" = ANY (ARRAY['eager'::text, 'native'::text]))
 );
 
 CREATE TABLE "factory"."change_commit_operation" (
@@ -2365,17 +2355,17 @@ CREATE TABLE "factory"."change_commit_operation" (
 	"content_digest" text,
 	CONSTRAINT "change_commit_operation_change_id_sequence_key" UNIQUE("change_id","sequence"),
 	CONSTRAINT "change_commit_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "change_commit_operation_expected_parent_sha_check" CHECK (expected_parent_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "change_commit_integration_base" CHECK ((integration_base_sha IS NULL) OR (integration_base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-	CONSTRAINT "change_commit_merge_parent" CHECK ((merge_parent_sha IS NULL) OR ((merge_parent_sha = integration_base_sha) AND (merge_parent_sha <> expected_parent_sha))),
-	CONSTRAINT "change_commit_operation_check" CHECK ((state = ANY (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "change_commit_operation_check2" CHECK ((state <> 'succeeded'::change_commit_state) OR (observed_remote_sha = commit_sha)),
-	CONSTRAINT "change_commit_operation_commit_message_check" CHECK ((length(btrim(commit_message)) >= 1) AND (length(btrim(commit_message)) <= 240)),
-	CONSTRAINT "change_commit_operation_commit_presence_check" CHECK ((state <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR (commit_sha IS NOT NULL) OR ((source = 'repository-document'::change_commit_source) AND (state = 'push-intended'::change_commit_state))),
-	CONSTRAINT "change_commit_operation_commit_sha_check" CHECK ((commit_sha IS NULL) OR (commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-	CONSTRAINT "change_commit_operation_observed_remote_sha_check" CHECK ((observed_remote_sha IS NULL) OR (observed_remote_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-	CONSTRAINT "change_commit_operation_sequence_check" CHECK (sequence > 0),
-	CONSTRAINT "change_commit_operation_source_check" CHECK ((((source)::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND (runtime_attempt_id IS NOT NULL) AND (repository_path IS NULL) AND (repository_blob_sha IS NULL) AND (repository_content IS NULL) AND (content_digest IS NULL)) OR (((source)::text = 'repository-document'::text) AND (runtime_attempt_id IS NULL) AND (repository_path IS NOT NULL) AND (repository_blob_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND (repository_content IS NOT NULL) AND (content_digest ~ '^[0-9a-f]{64}$'::text)))
+	CONSTRAINT "change_commit_operation_expected_parent_sha_check" CHECK ("factory"."change_commit_operation"."expected_parent_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "change_commit_integration_base" CHECK (("factory"."change_commit_operation"."integration_base_sha" IS NULL) OR ("factory"."change_commit_operation"."integration_base_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
+	CONSTRAINT "change_commit_merge_parent" CHECK (("factory"."change_commit_operation"."merge_parent_sha" IS NULL) OR (("factory"."change_commit_operation"."merge_parent_sha" = "factory"."change_commit_operation"."integration_base_sha") AND ("factory"."change_commit_operation"."merge_parent_sha" <> "factory"."change_commit_operation"."expected_parent_sha"))),
+	CONSTRAINT "change_commit_operation_check" CHECK (("factory"."change_commit_operation"."state" = ANY (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state])) = ("factory"."change_commit_operation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "change_commit_operation_check2" CHECK (("factory"."change_commit_operation"."state" <> 'succeeded'::change_commit_state) OR ("factory"."change_commit_operation"."observed_remote_sha" = "factory"."change_commit_operation"."commit_sha")),
+	CONSTRAINT "change_commit_operation_commit_message_check" CHECK ((length(btrim("factory"."change_commit_operation"."commit_message")) >= 1) AND (length(btrim("factory"."change_commit_operation"."commit_message")) <= 240)),
+	CONSTRAINT "change_commit_operation_commit_presence_check" CHECK (("factory"."change_commit_operation"."state" <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR ("factory"."change_commit_operation"."commit_sha" IS NOT NULL) OR (("factory"."change_commit_operation"."source" = 'repository-document'::change_commit_source) AND ("factory"."change_commit_operation"."state" = 'push-intended'::change_commit_state))),
+	CONSTRAINT "change_commit_operation_commit_sha_check" CHECK (("factory"."change_commit_operation"."commit_sha" IS NULL) OR ("factory"."change_commit_operation"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
+	CONSTRAINT "change_commit_operation_observed_remote_sha_check" CHECK (("factory"."change_commit_operation"."observed_remote_sha" IS NULL) OR ("factory"."change_commit_operation"."observed_remote_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
+	CONSTRAINT "change_commit_operation_sequence_check" CHECK ("factory"."change_commit_operation"."sequence" > 0),
+	CONSTRAINT "change_commit_operation_source_check" CHECK (((("factory"."change_commit_operation"."source")::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND ("factory"."change_commit_operation"."runtime_attempt_id" IS NOT NULL) AND ("factory"."change_commit_operation"."repository_path" IS NULL) AND ("factory"."change_commit_operation"."repository_blob_sha" IS NULL) AND ("factory"."change_commit_operation"."repository_content" IS NULL) AND ("factory"."change_commit_operation"."content_digest" IS NULL)) OR ((("factory"."change_commit_operation"."source")::text = 'repository-document'::text) AND ("factory"."change_commit_operation"."runtime_attempt_id" IS NULL) AND ("factory"."change_commit_operation"."repository_path" IS NOT NULL) AND ("factory"."change_commit_operation"."repository_blob_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND ("factory"."change_commit_operation"."repository_content" IS NOT NULL) AND ("factory"."change_commit_operation"."content_digest" ~ '^[0-9a-f]{64}$'::text)))
 );
 
 CREATE TABLE "factory"."change_editing_decision" (
@@ -2387,7 +2377,7 @@ CREATE TABLE "factory"."change_editing_decision" (
 	"writer_epoch" bigint NOT NULL,
 	"kind" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "change_editing_decision_kind_check" CHECK (kind = ANY (ARRAY['takeover'::text, 'idle-takeover'::text, 'approve'::text, 'release'::text]))
+	CONSTRAINT "change_editing_decision_kind_check" CHECK ("factory"."change_editing_decision"."kind" = ANY (ARRAY['takeover'::text, 'idle-takeover'::text, 'approve'::text, 'release'::text]))
 );
 
 CREATE TABLE "factory"."change_editing_request" (
@@ -2400,7 +2390,7 @@ CREATE TABLE "factory"."change_editing_request" (
 	"decided_by" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"decided_at" timestamp with time zone,
-	CONSTRAINT "change_editing_request_state_check" CHECK (state = ANY (ARRAY['requested'::text, 'accepted'::text, 'superseded'::text]))
+	CONSTRAINT "change_editing_request_state_check" CHECK ("factory"."change_editing_request"."state" = ANY (ARRAY['requested'::text, 'accepted'::text, 'superseded'::text]))
 );
 
 CREATE TABLE "factory"."change_writer" (
@@ -2415,12 +2405,12 @@ CREATE TABLE "factory"."change_writer" (
 	"request_id" uuid,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"handoff_kind" text DEFAULT 'takeover' NOT NULL,
-	CONSTRAINT "change_writer_check" CHECK ((state = 'human'::text) = (user_id IS NOT NULL)),
-	CONSTRAINT "change_writer_check1" CHECK ((state = ANY (ARRAY['agent-preparing'::text, 'agent'::text])) = (turn_id IS NOT NULL)),
-	CONSTRAINT "change_writer_check2" CHECK ((state = 'handoff'::text) = ((requested_by IS NOT NULL) AND (request_id IS NOT NULL))),
-	CONSTRAINT "change_writer_epoch_check" CHECK (epoch > 0),
-	CONSTRAINT "change_writer_handoff_kind_check" CHECK (handoff_kind = ANY (ARRAY['takeover'::text, 'release'::text])),
-	CONSTRAINT "change_writer_state_check" CHECK (state = ANY (ARRAY['unassigned'::text, 'agent-preparing'::text, 'agent'::text, 'handoff'::text, 'human'::text]))
+	CONSTRAINT "change_writer_check" CHECK (("factory"."change_writer"."state" = 'human'::text) = ("factory"."change_writer"."user_id" IS NOT NULL)),
+	CONSTRAINT "change_writer_check1" CHECK (("factory"."change_writer"."state" = ANY (ARRAY['agent-preparing'::text, 'agent'::text])) = ("factory"."change_writer"."turn_id" IS NOT NULL)),
+	CONSTRAINT "change_writer_check2" CHECK (("factory"."change_writer"."state" = 'handoff'::text) = (("factory"."change_writer"."requested_by" IS NOT NULL) AND ("factory"."change_writer"."request_id" IS NOT NULL))),
+	CONSTRAINT "change_writer_epoch_check" CHECK ("factory"."change_writer"."epoch" > 0),
+	CONSTRAINT "change_writer_handoff_kind_check" CHECK ("factory"."change_writer"."handoff_kind" = ANY (ARRAY['takeover'::text, 'release'::text])),
+	CONSTRAINT "change_writer_state_check" CHECK ("factory"."change_writer"."state" = ANY (ARRAY['unassigned'::text, 'agent-preparing'::text, 'agent'::text, 'handoff'::text, 'human'::text]))
 );
 
 CREATE TABLE "factory"."coding_pause" (
@@ -2428,7 +2418,7 @@ CREATE TABLE "factory"."coding_pause" (
 	"reason" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"resumed_by_turn_id" uuid,
-	CONSTRAINT "coding_pause_reason_check" CHECK (reason = ANY (ARRAY['accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text]))
+	CONSTRAINT "coding_pause_reason_check" CHECK ("factory"."coding_pause"."reason" = ANY (ARRAY['accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text]))
 );
 
 CREATE TABLE "factory"."conversation_context" (
@@ -2449,12 +2439,12 @@ CREATE TABLE "factory"."conversation_context" (
 	"transcript" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	CONSTRAINT "conversation_context_conversation_id_ordinal_key" UNIQUE("conversation_id","ordinal"),
 	CONSTRAINT "conversation_context_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "conversation_context_check" CHECK ((kind = 'coding'::text) = (change_id IS NOT NULL)),
-	CONSTRAINT "conversation_context_check1" CHECK ((kind = 'coding'::text) = (mode = 'build'::conversation_mode)),
-	CONSTRAINT "conversation_context_check2" CHECK ((kind = 'coding'::text) OR ((native_session_id IS NULL) AND (archived_session IS NULL) AND (NOT original))),
-	CONSTRAINT "conversation_context_kind_check" CHECK (kind = ANY (ARRAY['research'::text, 'coding'::text])),
-	CONSTRAINT "conversation_context_ordinal_check" CHECK (ordinal > 0),
-	CONSTRAINT "conversation_context_title_check" CHECK ((length(title) >= 1) AND (length(title) <= 200))
+	CONSTRAINT "conversation_context_check" CHECK (("factory"."conversation_context"."kind" = 'coding'::text) = ("factory"."conversation_context"."change_id" IS NOT NULL)),
+	CONSTRAINT "conversation_context_check1" CHECK (("factory"."conversation_context"."kind" = 'coding'::text) = ("factory"."conversation_context"."mode" = 'build'::conversation_mode)),
+	CONSTRAINT "conversation_context_check2" CHECK (("factory"."conversation_context"."kind" = 'coding'::text) OR (("factory"."conversation_context"."native_session_id" IS NULL) AND ("factory"."conversation_context"."archived_session" IS NULL) AND (NOT "factory"."conversation_context"."original"))),
+	CONSTRAINT "conversation_context_kind_check" CHECK ("factory"."conversation_context"."kind" = ANY (ARRAY['research'::text, 'coding'::text])),
+	CONSTRAINT "conversation_context_ordinal_check" CHECK ("factory"."conversation_context"."ordinal" > 0),
+	CONSTRAINT "conversation_context_title_check" CHECK ((length("factory"."conversation_context"."title") >= 1) AND (length("factory"."conversation_context"."title") <= 200))
 );
 
 CREATE TABLE "factory"."conversation_entry" (
@@ -2472,8 +2462,8 @@ CREATE TABLE "factory"."conversation_entry" (
 	"created_by" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "conversation_entry_conversation_id_ordinal_key" UNIQUE("conversation_id","ordinal"),
-	CONSTRAINT "conversation_entry_body_check" CHECK (length(body) <= 12000),
-	CONSTRAINT "conversation_entry_ordinal_check" CHECK (ordinal > 0)
+	CONSTRAINT "conversation_entry_body_check" CHECK (length("factory"."conversation_entry"."body") <= 12000),
+	CONSTRAINT "conversation_entry_ordinal_check" CHECK ("factory"."conversation_entry"."ordinal" > 0)
 );
 
 CREATE TABLE "factory"."delivery_approval" (
@@ -2488,9 +2478,9 @@ CREATE TABLE "factory"."delivery_approval" (
 	"monitoring_policy_id" uuid,
 	"delivery_policy_id" uuid,
 	CONSTRAINT "delivery_approval_exact_basis_key" UNIQUE NULLS NOT DISTINCT("verification_id","candidate_review_id","approved_by","monitoring_policy_id","delivery_policy_id"),
-	CONSTRAINT "delivery_approval_commit_sha_check" CHECK (commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "delivery_monitoring_basis" CHECK ((monitoring_incident_id IS NULL) = (monitoring_policy_id IS NULL)),
-	CONSTRAINT "delivery_one_delegation" CHECK ((delivery_policy_id IS NULL) OR (monitoring_policy_id IS NULL))
+	CONSTRAINT "delivery_approval_commit_sha_check" CHECK ("factory"."delivery_approval"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "delivery_monitoring_basis" CHECK (("factory"."delivery_approval"."monitoring_incident_id" IS NULL) = ("factory"."delivery_approval"."monitoring_policy_id" IS NULL)),
+	CONSTRAINT "delivery_one_delegation" CHECK (("factory"."delivery_approval"."delivery_policy_id" IS NULL) OR ("factory"."delivery_approval"."monitoring_policy_id" IS NULL))
 );
 
 CREATE TABLE "factory"."developer_ide" (
@@ -2509,9 +2499,9 @@ CREATE TABLE "factory"."developer_ide" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"resource_id" uuid DEFAULT gen_random_uuid() NOT NULL,
 	CONSTRAINT "developer_ide_resource_id_unique" UNIQUE("resource_id"),
-	CONSTRAINT "developer_ide_image_check" CHECK (image ~ '@sha256:[0-9a-f]{64}$'::text),
-	CONSTRAINT "developer_ide_service_epoch_check" CHECK (service_epoch > 0),
-	CONSTRAINT "developer_ide_state_check" CHECK (state = ANY (ARRAY['create-intended'::text, 'preparing'::text, 'ready'::text, 'failed'::text, 'stop-intended'::text, 'stopped'::text]))
+	CONSTRAINT "developer_ide_image_check" CHECK ("factory"."developer_ide"."image" ~ '@sha256:[0-9a-f]{64}$'::text),
+	CONSTRAINT "developer_ide_service_epoch_check" CHECK ("factory"."developer_ide"."service_epoch" > 0),
+	CONSTRAINT "developer_ide_state_check" CHECK ("factory"."developer_ide"."state" = ANY (ARRAY['create-intended'::text, 'preparing'::text, 'ready'::text, 'failed'::text, 'stop-intended'::text, 'stopped'::text]))
 );
 
 CREATE TABLE "factory"."development_workspace" (
@@ -2529,9 +2519,9 @@ CREATE TABLE "factory"."development_workspace" (
 	"collaboration_enabled" boolean DEFAULT false NOT NULL,
 	CONSTRAINT "development_workspace_id_change_id_key" UNIQUE("id","change_id"),
 	CONSTRAINT "development_workspace_id_project_id_key" UNIQUE("id","project_id"),
-	CONSTRAINT "development_workspace_check" CHECK (((kind = 'personal'::development_workspace_kind) AND (owner_user_id IS NOT NULL) AND (ticket_id IS NULL) AND (change_id IS NULL)) OR ((kind = 'ticket'::development_workspace_kind) AND (owner_user_id IS NULL) AND (ticket_id IS NOT NULL) AND (change_id IS NOT NULL))),
-	CONSTRAINT "development_workspace_source_branch_check" CHECK ((length(source_branch) >= 1) AND (length(source_branch) <= 200)),
-	CONSTRAINT "development_workspace_source_revision_check" CHECK (source_revision ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
+	CONSTRAINT "development_workspace_check" CHECK ((("factory"."development_workspace"."kind" = 'personal'::development_workspace_kind) AND ("factory"."development_workspace"."owner_user_id" IS NOT NULL) AND ("factory"."development_workspace"."ticket_id" IS NULL) AND ("factory"."development_workspace"."change_id" IS NULL)) OR (("factory"."development_workspace"."kind" = 'ticket'::development_workspace_kind) AND ("factory"."development_workspace"."owner_user_id" IS NULL) AND ("factory"."development_workspace"."ticket_id" IS NOT NULL) AND ("factory"."development_workspace"."change_id" IS NOT NULL))),
+	CONSTRAINT "development_workspace_source_branch_check" CHECK ((length("factory"."development_workspace"."source_branch") >= 1) AND (length("factory"."development_workspace"."source_branch") <= 200)),
+	CONSTRAINT "development_workspace_source_revision_check" CHECK ("factory"."development_workspace"."source_revision" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
 );
 
 CREATE TABLE "factory"."environment_write" (
@@ -2547,10 +2537,10 @@ CREATE TABLE "factory"."environment_write" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"committed_at" timestamp with time zone,
 	CONSTRAINT "environment_write_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "environment_write_base_version_check" CHECK (base_version >= 0),
-	CONSTRAINT "environment_write_environment_check" CHECK (environment = ANY (ARRAY['development'::text, 'main-preview'::text])),
-	CONSTRAINT "environment_write_fingerprint_check" CHECK (fingerprint ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "environment_write_state_check" CHECK (state = ANY (ARRAY['write-intended'::text, 'committed'::text, 'discarded'::text]))
+	CONSTRAINT "environment_write_base_version_check" CHECK ("factory"."environment_write"."base_version" >= 0),
+	CONSTRAINT "environment_write_environment_check" CHECK ("factory"."environment_write"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text])),
+	CONSTRAINT "environment_write_fingerprint_check" CHECK ("factory"."environment_write"."fingerprint" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "environment_write_state_check" CHECK ("factory"."environment_write"."state" = ANY (ARRAY['write-intended'::text, 'committed'::text, 'discarded'::text]))
 );
 
 CREATE TABLE "factory"."epic" (
@@ -2564,10 +2554,10 @@ CREATE TABLE "factory"."epic" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "epic_id_project_id_key" UNIQUE("id","project_id"),
-	CONSTRAINT "epic_check" CHECK (parent_id IS DISTINCT FROM id),
-	CONSTRAINT "epic_description_check" CHECK (length(description) <= 10000),
-	CONSTRAINT "epic_title_check" CHECK ((length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)),
-	CONSTRAINT "epic_version_check" CHECK (version > 0)
+	CONSTRAINT "epic_check" CHECK ("factory"."epic"."parent_id" IS DISTINCT FROM "factory"."epic"."id"),
+	CONSTRAINT "epic_description_check" CHECK (length("factory"."epic"."description") <= 10000),
+	CONSTRAINT "epic_title_check" CHECK ((length(btrim("factory"."epic"."title")) >= 1) AND (length(btrim("factory"."epic"."title")) <= 200)),
+	CONSTRAINT "epic_version_check" CHECK ("factory"."epic"."version" > 0)
 );
 
 CREATE TABLE "factory"."epic_confirmation" (
@@ -2582,7 +2572,7 @@ CREATE TABLE "factory"."epic_confirmation" (
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "epic_confirmation_proposal_entry_id_key" UNIQUE("proposal_entry_id"),
-	CONSTRAINT "epic_confirmation_input_digest_check" CHECK (input_digest ~ '^[0-9a-f]{64}$'::text)
+	CONSTRAINT "epic_confirmation_input_digest_check" CHECK ("factory"."epic_confirmation"."input_digest" ~ '^[0-9a-f]{64}$'::text)
 );
 
 CREATE TABLE "factory"."execution_policy" (
@@ -2592,10 +2582,10 @@ CREATE TABLE "factory"."execution_policy" (
 	"timezone" text,
 	"updated_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "execution_policy_check" CHECK ((scope = 'factory'::text) OR (timezone IS NULL)),
-	CONSTRAINT "execution_policy_policy_check" CHECK (jsonb_typeof(policy) = 'object'::text),
-	CONSTRAINT "execution_policy_scope_check" CHECK ((scope = 'factory'::text) OR (scope ~ '^[0-9a-f-]{36}$'::text)),
-	CONSTRAINT "execution_policy_version_check" CHECK (version >= 1)
+	CONSTRAINT "execution_policy_check" CHECK (("factory"."execution_policy"."scope" = 'factory'::text) OR ("factory"."execution_policy"."timezone" IS NULL)),
+	CONSTRAINT "execution_policy_policy_check" CHECK (jsonb_typeof("factory"."execution_policy"."policy") = 'object'::text),
+	CONSTRAINT "execution_policy_scope_check" CHECK (("factory"."execution_policy"."scope" = 'factory'::text) OR ("factory"."execution_policy"."scope" ~ '^[0-9a-f-]{36}$'::text)),
+	CONSTRAINT "execution_policy_version_check" CHECK ("factory"."execution_policy"."version" >= 1)
 );
 
 CREATE TABLE "factory"."execution_policy_command" (
@@ -2626,7 +2616,7 @@ CREATE TABLE "factory"."forge_account_intent" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"observed_at" timestamp with time zone,
 	CONSTRAINT "forge_account_intent_username_key" UNIQUE("username"),
-	CONSTRAINT "forge_account_intent_state_check" CHECK (state = ANY (ARRAY['create-intended'::text, 'ready'::text, 'disabled'::text]))
+	CONSTRAINT "forge_account_intent_state_check" CHECK ("factory"."forge_account_intent"."state" = ANY (ARRAY['create-intended'::text, 'ready'::text, 'disabled'::text]))
 );
 
 CREATE TABLE "factory"."forge_branch_intent" (
@@ -2649,9 +2639,9 @@ CREATE TABLE "factory"."forge_connection" (
 	"intended_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"observed_at" timestamp with time zone,
-	CONSTRAINT "forge_connection_id_check" CHECK ((id)),
-	CONSTRAINT "forge_connection_source_name_check" CHECK (source_name = 'Factory'::text),
-	CONSTRAINT "forge_connection_state_check" CHECK (state = ANY (ARRAY['create-intended'::text, 'ready'::text]))
+	CONSTRAINT "forge_connection_id_check" CHECK (("factory"."forge_connection"."id")),
+	CONSTRAINT "forge_connection_source_name_check" CHECK ("factory"."forge_connection"."source_name" = 'Factory'::text),
+	CONSTRAINT "forge_connection_state_check" CHECK ("factory"."forge_connection"."state" = ANY (ARRAY['create-intended'::text, 'ready'::text]))
 );
 
 CREATE TABLE "factory"."forge_grant_intent" (
@@ -2670,7 +2660,7 @@ CREATE TABLE "factory"."forge_identity_intent" (
 	"state" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"observed_at" timestamp with time zone,
-	CONSTRAINT "forge_identity_intent_state_check" CHECK (state = ANY (ARRAY['create-intended'::text, 'ready'::text]))
+	CONSTRAINT "forge_identity_intent_state_check" CHECK ("factory"."forge_identity_intent"."state" = ANY (ARRAY['create-intended'::text, 'ready'::text]))
 );
 
 CREATE TABLE "factory"."identity_configuration" (
@@ -2679,7 +2669,7 @@ CREATE TABLE "factory"."identity_configuration" (
 	"setup_id" uuid NOT NULL,
 	"activated_by" uuid NOT NULL,
 	"activated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "identity_configuration_singleton_check" CHECK ((singleton))
+	CONSTRAINT "identity_configuration_singleton_check" CHECK (("factory"."identity_configuration"."singleton"))
 );
 
 CREATE TABLE "factory"."identity_setup" (
@@ -2694,8 +2684,8 @@ CREATE TABLE "factory"."identity_setup" (
 	"tested_user_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "identity_setup_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "identity_setup_base_version_check" CHECK (base_version >= 0),
-	CONSTRAINT "identity_setup_state_check" CHECK (state = ANY (ARRAY['write-intended'::text, 'saved'::text, 'active'::text, 'superseded'::text]))
+	CONSTRAINT "identity_setup_base_version_check" CHECK ("factory"."identity_setup"."base_version" >= 0),
+	CONSTRAINT "identity_setup_state_check" CHECK ("factory"."identity_setup"."state" = ANY (ARRAY['write-intended'::text, 'saved'::text, 'active'::text, 'superseded'::text]))
 );
 
 CREATE TABLE "factory"."implementation_order" (
@@ -2714,8 +2704,8 @@ CREATE TABLE "factory"."implementation_order" (
 	"last_error" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "implementation_order_source_sha_check" CHECK (source_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "implementation_order_state_check" CHECK (state = ANY (ARRAY['waiting'::text, 'started'::text, 'blocked'::text, 'cancelled'::text]))
+	CONSTRAINT "implementation_order_source_sha_check" CHECK ("factory"."implementation_order"."source_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "implementation_order_state_check" CHECK ("factory"."implementation_order"."state" = ANY (ARRAY['waiting'::text, 'started'::text, 'blocked'::text, 'cancelled'::text]))
 );
 
 CREATE TABLE "factory"."inbox_receipt" (
@@ -2730,7 +2720,7 @@ CREATE TABLE "factory"."installation_maintenance" (
 	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
 	"enabled" boolean DEFAULT false NOT NULL,
 	"requested_at" timestamp with time zone,
-	CONSTRAINT "installation_maintenance_singleton_check" CHECK ((singleton))
+	CONSTRAINT "installation_maintenance_singleton_check" CHECK (("factory"."installation_maintenance"."singleton"))
 );
 
 CREATE TABLE "auth"."jwks" (
@@ -2760,14 +2750,14 @@ CREATE TABLE "factory"."knowledge_generation" (
 	"model_connection_id" uuid,
 	"model_connection_version" bigint,
 	"progress" jsonb,
-	CONSTRAINT "knowledge_generation_check" CHECK ((state = ANY (ARRAY['succeeded'::knowledge_generation_state, 'failed'::knowledge_generation_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "knowledge_generation_conflict_count_check" CHECK ((conflict_count IS NULL) OR (conflict_count >= 0)),
-	CONSTRAINT "knowledge_generation_failure_check" CHECK ((failure IS NULL) OR (length(failure) <= 4000)),
-	CONSTRAINT "knowledge_generation_model_id_check" CHECK ((model_id IS NULL) OR ((length(model_id) >= 1) AND (length(model_id) <= 200))),
-	CONSTRAINT "knowledge_generation_page_count_check" CHECK ((page_count IS NULL) OR (page_count >= 0)),
-	CONSTRAINT "knowledge_generation_progress_shape" CHECK ((progress IS NULL) OR ((jsonb_typeof(progress) = 'object'::text) AND ((progress ->> 'phase'::text) = ANY (ARRAY['planning'::text, 'writing'::text, 'publishing'::text, 'done'::text])) AND (jsonb_typeof((progress -> 'topicsTotal'::text)) = 'number'::text) AND (jsonb_typeof((progress -> 'topicsDone'::text)) = 'number'::text) AND ((((progress ->> 'topicsTotal'::text))::numeric >= (0)::numeric) AND (((progress ->> 'topicsTotal'::text))::numeric <= (100)::numeric)) AND ((((progress ->> 'topicsDone'::text))::numeric >= (0)::numeric) AND (((progress ->> 'topicsDone'::text))::numeric <= (100)::numeric)) AND (jsonb_typeof((progress -> 'currentTopic'::text)) = ANY (ARRAY['string'::text, 'null'::text])) AND (octet_length((progress)::text) <= 1000))),
-	CONSTRAINT "knowledge_generation_source_commit_sha_check" CHECK (source_commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "knowledge_model_connection_pair" CHECK ((model_connection_id IS NULL) = (model_connection_version IS NULL))
+	CONSTRAINT "knowledge_generation_check" CHECK (("factory"."knowledge_generation"."state" = ANY (ARRAY['succeeded'::knowledge_generation_state, 'failed'::knowledge_generation_state])) = ("factory"."knowledge_generation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "knowledge_generation_conflict_count_check" CHECK (("factory"."knowledge_generation"."conflict_count" IS NULL) OR ("factory"."knowledge_generation"."conflict_count" >= 0)),
+	CONSTRAINT "knowledge_generation_failure_check" CHECK (("factory"."knowledge_generation"."failure" IS NULL) OR (length("factory"."knowledge_generation"."failure") <= 4000)),
+	CONSTRAINT "knowledge_generation_model_id_check" CHECK (("factory"."knowledge_generation"."model_id" IS NULL) OR ((length("factory"."knowledge_generation"."model_id") >= 1) AND (length("factory"."knowledge_generation"."model_id") <= 200))),
+	CONSTRAINT "knowledge_generation_page_count_check" CHECK (("factory"."knowledge_generation"."page_count" IS NULL) OR ("factory"."knowledge_generation"."page_count" >= 0)),
+	CONSTRAINT "knowledge_generation_progress_shape" CHECK (("factory"."knowledge_generation"."progress" IS NULL) OR ((jsonb_typeof("factory"."knowledge_generation"."progress") = 'object'::text) AND (("factory"."knowledge_generation"."progress" ->> 'phase'::text) = ANY (ARRAY['planning'::text, 'writing'::text, 'publishing'::text, 'done'::text])) AND (jsonb_typeof(("factory"."knowledge_generation"."progress" -> 'topicsTotal'::text)) = 'number'::text) AND (jsonb_typeof(("factory"."knowledge_generation"."progress" -> 'topicsDone'::text)) = 'number'::text) AND (((("factory"."knowledge_generation"."progress" ->> 'topicsTotal'::text))::numeric >= (0)::numeric) AND ((("factory"."knowledge_generation"."progress" ->> 'topicsTotal'::text))::numeric <= (100)::numeric)) AND (((("factory"."knowledge_generation"."progress" ->> 'topicsDone'::text))::numeric >= (0)::numeric) AND ((("factory"."knowledge_generation"."progress" ->> 'topicsDone'::text))::numeric <= (100)::numeric)) AND (jsonb_typeof(("factory"."knowledge_generation"."progress" -> 'currentTopic'::text)) = ANY (ARRAY['string'::text, 'null'::text])) AND (octet_length(("factory"."knowledge_generation"."progress")::text) <= 1000))),
+	CONSTRAINT "knowledge_generation_source_commit_sha_check" CHECK ("factory"."knowledge_generation"."source_commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "knowledge_model_connection_pair" CHECK (("factory"."knowledge_generation"."model_connection_id" IS NULL) = ("factory"."knowledge_generation"."model_connection_version" IS NULL))
 );
 
 CREATE TABLE "factory"."knowledge_page" (
@@ -2792,17 +2782,17 @@ CREATE TABLE "factory"."knowledge_page" (
 	CONSTRAINT "knowledge_page_id_project_id_key" UNIQUE("id","project_id"),
 	CONSTRAINT "knowledge_page_project_identity" UNIQUE("project_id","id"),
 	CONSTRAINT "knowledge_page_project_id_slug_key" UNIQUE("project_id","slug"),
-	CONSTRAINT "knowledge_page_generated_body_check" CHECK ((length(generated_body) >= 1) AND (length(generated_body) <= 120000)),
-	CONSTRAINT "knowledge_page_citations_check" CHECK (jsonb_typeof(citations) = 'array'::text),
-	CONSTRAINT "knowledge_page_current_body_check" CHECK ((length(current_body) >= 1) AND (length(current_body) <= 120000)),
-	CONSTRAINT "knowledge_page_icon_check" CHECK (icon = ANY (ARRAY['knowledge'::text, 'home'::text, 'ticket'::text, 'ide'::text, 'preview'::text, 'settings'::text])),
-	CONSTRAINT "knowledge_page_metadata_version_check" CHECK (metadata_version > 0),
-	CONSTRAINT "knowledge_page_not_own_parent" CHECK (parent_id IS DISTINCT FROM id),
-	CONSTRAINT "knowledge_page_slug_check" CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text),
-	CONSTRAINT "knowledge_page_sort_order_check" CHECK (sort_order >= 0),
-	CONSTRAINT "knowledge_page_source_commit_sha_check" CHECK (source_commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "knowledge_page_title_check" CHECK ((length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)),
-	CONSTRAINT "knowledge_page_version_check" CHECK (version > 0)
+	CONSTRAINT "knowledge_page_generated_body_check" CHECK ((length("factory"."knowledge_page"."generated_body") >= 1) AND (length("factory"."knowledge_page"."generated_body") <= 120000)),
+	CONSTRAINT "knowledge_page_citations_check" CHECK (jsonb_typeof("factory"."knowledge_page"."citations") = 'array'::text),
+	CONSTRAINT "knowledge_page_current_body_check" CHECK ((length("factory"."knowledge_page"."current_body") >= 1) AND (length("factory"."knowledge_page"."current_body") <= 120000)),
+	CONSTRAINT "knowledge_page_icon_check" CHECK ("factory"."knowledge_page"."icon" = ANY (ARRAY['knowledge'::text, 'home'::text, 'ticket'::text, 'ide'::text, 'preview'::text, 'settings'::text])),
+	CONSTRAINT "knowledge_page_metadata_version_check" CHECK ("factory"."knowledge_page"."metadata_version" > 0),
+	CONSTRAINT "knowledge_page_not_own_parent" CHECK ("factory"."knowledge_page"."parent_id" IS DISTINCT FROM "factory"."knowledge_page"."id"),
+	CONSTRAINT "knowledge_page_slug_check" CHECK ("factory"."knowledge_page"."slug" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text),
+	CONSTRAINT "knowledge_page_sort_order_check" CHECK ("factory"."knowledge_page"."sort_order" >= 0),
+	CONSTRAINT "knowledge_page_source_commit_sha_check" CHECK ("factory"."knowledge_page"."source_commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "knowledge_page_title_check" CHECK ((length(btrim("factory"."knowledge_page"."title")) >= 1) AND (length(btrim("factory"."knowledge_page"."title")) <= 200)),
+	CONSTRAINT "knowledge_page_version_check" CHECK ("factory"."knowledge_page"."version" > 0)
 );
 
 CREATE TABLE "factory"."knowledge_page_alias" (
@@ -2811,7 +2801,7 @@ CREATE TABLE "factory"."knowledge_page_alias" (
 	"page_id" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "knowledge_page_alias_pkey" PRIMARY KEY("project_id","slug"),
-	CONSTRAINT "knowledge_page_alias_slug_check" CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)
+	CONSTRAINT "knowledge_page_alias_slug_check" CHECK ("factory"."knowledge_page_alias"."slug" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)
 );
 
 CREATE TABLE "factory"."knowledge_page_outline" (
@@ -2845,12 +2835,12 @@ CREATE TABLE "factory"."knowledge_revision" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "knowledge_revision_id_page_id_key" UNIQUE("id","page_id"),
 	CONSTRAINT "knowledge_revision_page_id_ordinal_key" UNIQUE("page_id","ordinal"),
-	CONSTRAINT "knowledge_revision_body_check" CHECK ((length(body) >= 1) AND (length(body) <= 120000)),
-	CONSTRAINT "knowledge_revision_citations_check" CHECK (jsonb_typeof(citations) = 'array'::text),
-	CONSTRAINT "knowledge_revision_generated_body_check" CHECK ((length(generated_body) >= 1) AND (length(generated_body) <= 120000)),
-	CONSTRAINT "knowledge_revision_ordinal_check" CHECK (ordinal > 0),
-	CONSTRAINT "knowledge_revision_source_commit_sha_check" CHECK (source_commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "knowledge_revision_title_check" CHECK ((length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200))
+	CONSTRAINT "knowledge_revision_body_check" CHECK ((length("factory"."knowledge_revision"."body") >= 1) AND (length("factory"."knowledge_revision"."body") <= 120000)),
+	CONSTRAINT "knowledge_revision_citations_check" CHECK (jsonb_typeof("factory"."knowledge_revision"."citations") = 'array'::text),
+	CONSTRAINT "knowledge_revision_generated_body_check" CHECK ((length("factory"."knowledge_revision"."generated_body") >= 1) AND (length("factory"."knowledge_revision"."generated_body") <= 120000)),
+	CONSTRAINT "knowledge_revision_ordinal_check" CHECK ("factory"."knowledge_revision"."ordinal" > 0),
+	CONSTRAINT "knowledge_revision_source_commit_sha_check" CHECK ("factory"."knowledge_revision"."source_commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "knowledge_revision_title_check" CHECK ((length(btrim("factory"."knowledge_revision"."title")) >= 1) AND (length(btrim("factory"."knowledge_revision"."title")) <= 200))
 );
 
 CREATE TABLE "factory"."learning_application" (
@@ -2871,11 +2861,11 @@ CREATE TABLE "factory"."learning_application" (
 	"reverted_comparison_id" uuid,
 	"reverted_at" timestamp with time zone,
 	CONSTRAINT "learning_application_proposal_id_key" UNIQUE("proposal_id"),
-	CONSTRAINT "learning_application_applied_version_check" CHECK (applied_version > 0),
-	CONSTRAINT "learning_application_activation_check" CHECK ((jsonb_typeof(activation) = 'array'::text) AND (jsonb_array_length(activation) <= 2)),
-	CONSTRAINT "learning_application_check" CHECK (((state = 'applied'::text) AND (reverted_revision_id IS NULL) AND (reverted_version IS NULL) AND (reverted_by IS NULL) AND (reverted_at IS NULL) AND (reverted_comparison_id IS NULL)) OR ((state = 'reverted'::text) AND (reverted_revision_id IS NOT NULL) AND (reverted_version = (applied_version + 1)) AND (reverted_by IS NOT NULL) AND (reverted_at IS NOT NULL))),
-	CONSTRAINT "learning_application_edit_digest_check" CHECK (edit_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_application_state_check" CHECK (state = ANY (ARRAY['applied'::text, 'reverted'::text]))
+	CONSTRAINT "learning_application_applied_version_check" CHECK ("factory"."learning_application"."applied_version" > 0),
+	CONSTRAINT "learning_application_activation_check" CHECK ((jsonb_typeof("factory"."learning_application"."activation") = 'array'::text) AND (jsonb_array_length("factory"."learning_application"."activation") <= 2)),
+	CONSTRAINT "learning_application_check" CHECK ((("factory"."learning_application"."state" = 'applied'::text) AND ("factory"."learning_application"."reverted_revision_id" IS NULL) AND ("factory"."learning_application"."reverted_version" IS NULL) AND ("factory"."learning_application"."reverted_by" IS NULL) AND ("factory"."learning_application"."reverted_at" IS NULL) AND ("factory"."learning_application"."reverted_comparison_id" IS NULL)) OR (("factory"."learning_application"."state" = 'reverted'::text) AND ("factory"."learning_application"."reverted_revision_id" IS NOT NULL) AND ("factory"."learning_application"."reverted_version" = ("factory"."learning_application"."applied_version" + 1)) AND ("factory"."learning_application"."reverted_by" IS NOT NULL) AND ("factory"."learning_application"."reverted_at" IS NOT NULL))),
+	CONSTRAINT "learning_application_edit_digest_check" CHECK ("factory"."learning_application"."edit_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "learning_application_state_check" CHECK ("factory"."learning_application"."state" = ANY (ARRAY['applied'::text, 'reverted'::text]))
 );
 
 CREATE TABLE "factory"."learning_case" (
@@ -2891,8 +2881,8 @@ CREATE TABLE "factory"."learning_case" (
 	"selected" boolean NOT NULL,
 	"batch_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "learning_case_outcome_check" CHECK (outcome = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])),
-	CONSTRAINT "learning_case_snapshot_check" CHECK (octet_length((snapshot)::text) <= 65536)
+	CONSTRAINT "learning_case_outcome_check" CHECK ("factory"."learning_case"."outcome" = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])),
+	CONSTRAINT "learning_case_snapshot_check" CHECK (octet_length(("factory"."learning_case"."snapshot")::text) <= 65536)
 );
 
 CREATE TABLE "factory"."learning_command" (
@@ -2912,8 +2902,8 @@ CREATE TABLE "factory"."learning_policy" (
 	"version" integer NOT NULL,
 	"updated_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "learning_policy_check" CHECK (scope_key = (((project_id)::text || ':'::text) || COALESCE((owner_id)::text, 'project'::text))),
-	CONSTRAINT "learning_policy_version_check" CHECK (version > 0)
+	CONSTRAINT "learning_policy_check" CHECK ("factory"."learning_policy"."scope_key" = ((("factory"."learning_policy"."project_id")::text || ':'::text) || COALESCE(("factory"."learning_policy"."owner_id")::text, 'project'::text))),
+	CONSTRAINT "learning_policy_version_check" CHECK ("factory"."learning_policy"."version" > 0)
 );
 
 CREATE TABLE "factory"."learning_proposal" (
@@ -2928,9 +2918,9 @@ CREATE TABLE "factory"."learning_proposal" (
 	"ticket_id" uuid,
 	CONSTRAINT "learning_proposal_review_id_ordinal_key" UNIQUE("review_id","ordinal"),
 	CONSTRAINT "learning_proposal_decision_id_key" UNIQUE("decision_id"),
-	CONSTRAINT "learning_proposal_content_check" CHECK (octet_length((content)::text) <= 32000),
-	CONSTRAINT "learning_proposal_ordinal_check" CHECK (ordinal >= 0),
-	CONSTRAINT "learning_proposal_state_check" CHECK (state = ANY (ARRAY['proposed'::text, 'dismissed'::text, 'ticket-created'::text, 'applied'::text]))
+	CONSTRAINT "learning_proposal_content_check" CHECK (octet_length(("factory"."learning_proposal"."content")::text) <= 32000),
+	CONSTRAINT "learning_proposal_ordinal_check" CHECK ("factory"."learning_proposal"."ordinal" >= 0),
+	CONSTRAINT "learning_proposal_state_check" CHECK ("factory"."learning_proposal"."state" = ANY (ARRAY['proposed'::text, 'dismissed'::text, 'ticket-created'::text, 'applied'::text]))
 );
 
 CREATE TABLE "factory"."learning_review" (
@@ -2954,11 +2944,11 @@ CREATE TABLE "factory"."learning_review" (
 	"owner_expires_at" timestamp with time zone NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
-	CONSTRAINT "learning_review_input_check" CHECK (octet_length((input)::text) <= 262144),
-	CONSTRAINT "learning_review_input_digest_check" CHECK (input_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_review_kind_check" CHECK (kind = ANY (ARRAY['calibration'::text, 'work'::text])),
-	CONSTRAINT "learning_review_result_check" CHECK (octet_length((result)::text) <= 65536),
-	CONSTRAINT "learning_review_state_check" CHECK (state = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
+	CONSTRAINT "learning_review_input_check" CHECK (octet_length(("factory"."learning_review"."input")::text) <= 262144),
+	CONSTRAINT "learning_review_input_digest_check" CHECK ("factory"."learning_review"."input_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "learning_review_kind_check" CHECK ("factory"."learning_review"."kind" = ANY (ARRAY['calibration'::text, 'work'::text])),
+	CONSTRAINT "learning_review_result_check" CHECK (octet_length(("factory"."learning_review"."result")::text) <= 65536),
+	CONSTRAINT "learning_review_state_check" CHECK ("factory"."learning_review"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."learning_source_artifact" (
@@ -2968,9 +2958,9 @@ CREATE TABLE "factory"."learning_source_artifact" (
 	"body" text NOT NULL,
 	"truncated" boolean NOT NULL,
 	CONSTRAINT "learning_source_artifact_pkey" PRIMARY KEY("turn_id","ordinal"),
-	CONSTRAINT "learning_source_artifact_body_check" CHECK ((length(body) >= 1) AND (length(body) <= 2000)),
-	CONSTRAINT "learning_source_artifact_ordinal_check" CHECK ((ordinal >= 0) AND (ordinal <= 2)),
-	CONSTRAINT "learning_source_artifact_reference_check" CHECK ((length(reference) >= 1) AND (length(reference) <= 400))
+	CONSTRAINT "learning_source_artifact_body_check" CHECK ((length("factory"."learning_source_artifact"."body") >= 1) AND (length("factory"."learning_source_artifact"."body") <= 2000)),
+	CONSTRAINT "learning_source_artifact_ordinal_check" CHECK (("factory"."learning_source_artifact"."ordinal" >= 0) AND ("factory"."learning_source_artifact"."ordinal" <= 2)),
+	CONSTRAINT "learning_source_artifact_reference_check" CHECK ((length("factory"."learning_source_artifact"."reference") >= 1) AND (length("factory"."learning_source_artifact"."reference") <= 400))
 );
 
 CREATE TABLE "factory"."learning_trial" (
@@ -2993,12 +2983,12 @@ CREATE TABLE "factory"."learning_trial" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
 	CONSTRAINT "learning_trial_proposal_id_phase_key" UNIQUE("proposal_id","phase"),
-	CONSTRAINT "learning_trial_input_check" CHECK (octet_length((input)::text) <= 196608),
-	CONSTRAINT "learning_trial_input_digest_check" CHECK (input_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_trial_phase_check" CHECK (phase = ANY (ARRAY['adopt'::text, 'recover'::text])),
-	CONSTRAINT "learning_trial_policy_version_check" CHECK (policy_version > 0),
-	CONSTRAINT "learning_trial_result_check" CHECK (octet_length((result)::text) <= 65536),
-	CONSTRAINT "learning_trial_state_check" CHECK (state = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
+	CONSTRAINT "learning_trial_input_check" CHECK (octet_length(("factory"."learning_trial"."input")::text) <= 196608),
+	CONSTRAINT "learning_trial_input_digest_check" CHECK ("factory"."learning_trial"."input_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "learning_trial_phase_check" CHECK ("factory"."learning_trial"."phase" = ANY (ARRAY['adopt'::text, 'recover'::text])),
+	CONSTRAINT "learning_trial_policy_version_check" CHECK ("factory"."learning_trial"."policy_version" > 0),
+	CONSTRAINT "learning_trial_result_check" CHECK (octet_length(("factory"."learning_trial"."result")::text) <= 65536),
+	CONSTRAINT "learning_trial_state_check" CHECK ("factory"."learning_trial"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."learning_trial_step" (
@@ -3011,11 +3001,11 @@ CREATE TABLE "factory"."learning_trial_step" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
 	CONSTRAINT "learning_trial_step_pkey" PRIMARY KEY("trial_id","stage"),
-	CONSTRAINT "learning_trial_step_input_check" CHECK (octet_length((input)::text) <= 196608),
-	CONSTRAINT "learning_trial_step_input_digest_check" CHECK (input_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_trial_step_result_check" CHECK (octet_length((result)::text) <= 65536),
-	CONSTRAINT "learning_trial_step_stage_check" CHECK ((stage >= 0) AND (stage <= 2)),
-	CONSTRAINT "learning_trial_step_state_check" CHECK (state = ANY (ARRAY['running'::text, 'completed'::text, 'uncertain'::text]))
+	CONSTRAINT "learning_trial_step_input_check" CHECK (octet_length(("factory"."learning_trial_step"."input")::text) <= 196608),
+	CONSTRAINT "learning_trial_step_input_digest_check" CHECK ("factory"."learning_trial_step"."input_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "learning_trial_step_result_check" CHECK (octet_length(("factory"."learning_trial_step"."result")::text) <= 65536),
+	CONSTRAINT "learning_trial_step_stage_check" CHECK (("factory"."learning_trial_step"."stage" >= 0) AND ("factory"."learning_trial_step"."stage" <= 2)),
+	CONSTRAINT "learning_trial_step_state_check" CHECK ("factory"."learning_trial_step"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."mcp_access_decision" (
@@ -3026,7 +3016,7 @@ CREATE TABLE "factory"."mcp_access_decision" (
 	"action" text NOT NULL,
 	"decided_by" uuid NOT NULL,
 	"decided_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_access_decision_action_check" CHECK (action = ANY (ARRAY['grant'::text, 'revoke'::text, 'disconnect'::text]))
+	CONSTRAINT "mcp_access_decision_action_check" CHECK ("factory"."mcp_access_decision"."action" = ANY (ARRAY['grant'::text, 'revoke'::text, 'disconnect'::text]))
 );
 
 CREATE TABLE "factory"."mcp_choice" (
@@ -3039,11 +3029,11 @@ CREATE TABLE "factory"."mcp_choice" (
 	"revision_id" uuid NOT NULL,
 	"version" bigint NOT NULL,
 	CONSTRAINT "mcp_choice_pkey" PRIMARY KEY("library_id","scope","context_id","user_id","role"),
-	CONSTRAINT "mcp_choice_check" CHECK ((scope <> 'personal'::text) OR (state <> 'required'::text)),
-	CONSTRAINT "mcp_choice_role_check" CHECK (role = ANY (ARRAY['planning'::text, 'build'::text])),
-	CONSTRAINT "mcp_choice_scope_check" CHECK (scope = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])),
-	CONSTRAINT "mcp_choice_state_check" CHECK (state = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])),
-	CONSTRAINT "mcp_choice_version_check" CHECK (version > 0)
+	CONSTRAINT "mcp_choice_check" CHECK (("factory"."mcp_choice"."scope" <> 'personal'::text) OR ("factory"."mcp_choice"."state" <> 'required'::text)),
+	CONSTRAINT "mcp_choice_role_check" CHECK ("factory"."mcp_choice"."role" = ANY (ARRAY['planning'::text, 'build'::text])),
+	CONSTRAINT "mcp_choice_scope_check" CHECK ("factory"."mcp_choice"."scope" = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])),
+	CONSTRAINT "mcp_choice_state_check" CHECK ("factory"."mcp_choice"."state" = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])),
+	CONSTRAINT "mcp_choice_version_check" CHECK ("factory"."mcp_choice"."version" > 0)
 );
 
 CREATE TABLE "factory"."mcp_connect_intent" (
@@ -3055,7 +3045,7 @@ CREATE TABLE "factory"."mcp_connect_intent" (
 	"state" text NOT NULL,
 	"authorization_url" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_connect_intent_state_check" CHECK (state = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
+	CONSTRAINT "mcp_connect_intent_state_check" CHECK ("factory"."mcp_connect_intent"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."mcp_connection" (
@@ -3069,8 +3059,8 @@ CREATE TABLE "factory"."mcp_connection" (
 	"allowed_tools" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"authorized_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_connection_state_check" CHECK (state = ANY (ARRAY['disconnected'::text, 'authorizing'::text, 'review'::text, 'ready'::text, 'reconnect'::text, 'revoked'::text])),
-	CONSTRAINT "mcp_connection_tools_check" CHECK ((jsonb_typeof(tools) = 'array'::text) AND (octet_length((tools)::text) <= 1000000))
+	CONSTRAINT "mcp_connection_state_check" CHECK ("factory"."mcp_connection"."state" = ANY (ARRAY['disconnected'::text, 'authorizing'::text, 'review'::text, 'ready'::text, 'reconnect'::text, 'revoked'::text])),
+	CONSTRAINT "mcp_connection_tools_check" CHECK ((jsonb_typeof("factory"."mcp_connection"."tools") = 'array'::text) AND (octet_length(("factory"."mcp_connection"."tools")::text) <= 1000000))
 );
 
 CREATE TABLE "factory"."mcp_library" (
@@ -3078,8 +3068,8 @@ CREATE TABLE "factory"."mcp_library" (
 	"scope" text NOT NULL,
 	"owner_id" uuid,
 	"project_id" uuid,
-	CONSTRAINT "mcp_library_check" CHECK (((scope = 'personal'::text) AND (owner_id IS NOT NULL) AND (project_id IS NULL)) OR ((scope = 'project'::text) AND (owner_id IS NULL) AND (project_id IS NOT NULL)) OR ((scope = 'system'::text) AND (owner_id IS NULL) AND (project_id IS NULL))),
-	CONSTRAINT "mcp_library_scope_check" CHECK (scope = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text]))
+	CONSTRAINT "mcp_library_check" CHECK ((("factory"."mcp_library"."scope" = 'personal'::text) AND ("factory"."mcp_library"."owner_id" IS NOT NULL) AND ("factory"."mcp_library"."project_id" IS NULL)) OR (("factory"."mcp_library"."scope" = 'project'::text) AND ("factory"."mcp_library"."owner_id" IS NULL) AND ("factory"."mcp_library"."project_id" IS NOT NULL)) OR (("factory"."mcp_library"."scope" = 'system'::text) AND ("factory"."mcp_library"."owner_id" IS NULL) AND ("factory"."mcp_library"."project_id" IS NULL))),
+	CONSTRAINT "mcp_library_scope_check" CHECK ("factory"."mcp_library"."scope" = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text]))
 );
 
 CREATE TABLE "factory"."mcp_library_cover" (
@@ -3087,8 +3077,8 @@ CREATE TABLE "factory"."mcp_library_cover" (
 	"cover_key" text NOT NULL,
 	"version" bigint NOT NULL,
 	"updated_by" uuid NOT NULL,
-	CONSTRAINT "mcp_library_cover_cover_key_check" CHECK (cover_key ~ '^[a-z][a-z-]{1,63}$'::text),
-	CONSTRAINT "mcp_library_cover_version_check" CHECK (version > 0)
+	CONSTRAINT "mcp_library_cover_cover_key_check" CHECK ("factory"."mcp_library_cover"."cover_key" ~ '^[a-z][a-z-]{1,63}$'::text),
+	CONSTRAINT "mcp_library_cover_version_check" CHECK ("factory"."mcp_library_cover"."version" > 0)
 );
 
 CREATE TABLE "factory"."mcp_oauth_flow" (
@@ -3100,7 +3090,7 @@ CREATE TABLE "factory"."mcp_oauth_flow" (
 	"expires_at" timestamp with time zone NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "mcp_oauth_flow_state_digest_key" UNIQUE("state_digest"),
-	CONSTRAINT "mcp_oauth_flow_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'exchanging'::text, 'completed'::text, 'failed'::text]))
+	CONSTRAINT "mcp_oauth_flow_state_check" CHECK ("factory"."mcp_oauth_flow"."state" = ANY (ARRAY['pending'::text, 'exchanging'::text, 'completed'::text, 'failed'::text]))
 );
 
 CREATE TABLE "factory"."mcp_observation" (
@@ -3144,9 +3134,9 @@ CREATE TABLE "factory"."mcp_revision" (
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "mcp_revision_library_id_revision_key" UNIQUE("library_id","revision"),
-	CONSTRAINT "mcp_revision_content_check" CHECK ((jsonb_typeof(content) = 'object'::text) AND (octet_length((content)::text) < 16000)),
-	CONSTRAINT "mcp_revision_digest_check" CHECK (digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "mcp_revision_revision_check" CHECK (revision > 0)
+	CONSTRAINT "mcp_revision_content_check" CHECK ((jsonb_typeof("factory"."mcp_revision"."content") = 'object'::text) AND (octet_length(("factory"."mcp_revision"."content")::text) < 16000)),
+	CONSTRAINT "mcp_revision_digest_check" CHECK ("factory"."mcp_revision"."digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "mcp_revision_revision_check" CHECK ("factory"."mcp_revision"."revision" > 0)
 );
 
 CREATE TABLE "factory"."mcp_secret_write" (
@@ -3159,7 +3149,7 @@ CREATE TABLE "factory"."mcp_secret_write" (
 	"state" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "mcp_secret_write_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "mcp_secret_write_state_check" CHECK (state = ANY (ARRAY['intended'::text, 'committed'::text, 'superseded'::text]))
+	CONSTRAINT "mcp_secret_write_state_check" CHECK ("factory"."mcp_secret_write"."state" = ANY (ARRAY['intended'::text, 'committed'::text, 'superseded'::text]))
 );
 
 CREATE TABLE "factory"."mcp_share_proposal" (
@@ -3171,8 +3161,8 @@ CREATE TABLE "factory"."mcp_share_proposal" (
 	"accepted_library_id" uuid,
 	"accepted_by" uuid,
 	"accepted_at" timestamp with time zone,
-	CONSTRAINT "mcp_share_proposal_check" CHECK ((target = 'project'::text) = (project_id IS NOT NULL)),
-	CONSTRAINT "mcp_share_proposal_target_check" CHECK (target = ANY (ARRAY['project'::text, 'system'::text]))
+	CONSTRAINT "mcp_share_proposal_check" CHECK (("factory"."mcp_share_proposal"."target" = 'project'::text) = ("factory"."mcp_share_proposal"."project_id" IS NOT NULL)),
+	CONSTRAINT "mcp_share_proposal_target_check" CHECK ("factory"."mcp_share_proposal"."target" = ANY (ARRAY['project'::text, 'system'::text]))
 );
 
 CREATE TABLE "factory"."mcp_token_refresh" (
@@ -3181,7 +3171,7 @@ CREATE TABLE "factory"."mcp_token_refresh" (
 	"credential_epoch" uuid NOT NULL,
 	"state" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_token_refresh_state_check" CHECK (state = ANY (ARRAY['intended'::text, 'committed'::text, 'uncertain'::text]))
+	CONSTRAINT "mcp_token_refresh_state_check" CHECK ("factory"."mcp_token_refresh"."state" = ANY (ARRAY['intended'::text, 'committed'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."merge_operation" (
@@ -3200,11 +3190,11 @@ CREATE TABLE "factory"."merge_operation" (
 	"completed_at" timestamp with time zone,
 	CONSTRAINT "merge_operation_delivery_approval_id_key" UNIQUE("delivery_approval_id"),
 	CONSTRAINT "merge_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "merge_operation_base_sha_check" CHECK (base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "merge_operation_check" CHECK ((state = ANY (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "merge_operation_check1" CHECK ((state <> 'succeeded'::merge_operation_state) OR (observed_default_sha = commit_sha)),
-	CONSTRAINT "merge_operation_commit_sha_check" CHECK (commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "merge_operation_observed_default_sha_check" CHECK ((observed_default_sha IS NULL) OR (observed_default_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text))
+	CONSTRAINT "merge_operation_base_sha_check" CHECK ("factory"."merge_operation"."base_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "merge_operation_check" CHECK (("factory"."merge_operation"."state" = ANY (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state])) = ("factory"."merge_operation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "merge_operation_check1" CHECK (("factory"."merge_operation"."state" <> 'succeeded'::merge_operation_state) OR ("factory"."merge_operation"."observed_default_sha" = "factory"."merge_operation"."commit_sha")),
+	CONSTRAINT "merge_operation_commit_sha_check" CHECK ("factory"."merge_operation"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "merge_operation_observed_default_sha_check" CHECK (("factory"."merge_operation"."observed_default_sha" IS NULL) OR ("factory"."merge_operation"."observed_default_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text))
 );
 
 CREATE TABLE "factory"."model_connection_version" (
@@ -3217,8 +3207,8 @@ CREATE TABLE "factory"."model_connection_version" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "model_connection_version_pkey" PRIMARY KEY("connection_id","version"),
 	CONSTRAINT "model_connection_version_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "model_connection_version_provider_check" CHECK (provider = ANY (ARRAY['openai'::text, 'anthropic'::text, 'deepseek'::text])),
-	CONSTRAINT "model_connection_version_version_check" CHECK (version > 0)
+	CONSTRAINT "model_connection_version_provider_check" CHECK ("factory"."model_connection_version"."provider" = ANY (ARRAY['openai'::text, 'anthropic'::text, 'deepseek'::text])),
+	CONSTRAINT "model_connection_version_version_check" CHECK ("factory"."model_connection_version"."version" > 0)
 );
 
 CREATE TABLE "factory"."model_connection_write" (
@@ -3234,10 +3224,10 @@ CREATE TABLE "factory"."model_connection_write" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"committed_at" timestamp with time zone,
 	CONSTRAINT "model_connection_write_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "model_connection_write_fingerprint_check" CHECK (fingerprint ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "model_connection_write_base_version_check" CHECK (base_version >= 0),
-	CONSTRAINT "model_connection_write_provider_check" CHECK (provider = ANY (ARRAY['openai'::text, 'anthropic'::text, 'deepseek'::text])),
-	CONSTRAINT "model_connection_write_state_check" CHECK (state = ANY (ARRAY['write-intended'::text, 'committed'::text]))
+	CONSTRAINT "model_connection_write_fingerprint_check" CHECK ("factory"."model_connection_write"."fingerprint" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "model_connection_write_base_version_check" CHECK ("factory"."model_connection_write"."base_version" >= 0),
+	CONSTRAINT "model_connection_write_provider_check" CHECK ("factory"."model_connection_write"."provider" = ANY (ARRAY['openai'::text, 'anthropic'::text, 'deepseek'::text])),
+	CONSTRAINT "model_connection_write_state_check" CHECK ("factory"."model_connection_write"."state" = ANY (ARRAY['write-intended'::text, 'committed'::text]))
 );
 
 CREATE TABLE "factory"."model_defaults" (
@@ -3248,11 +3238,11 @@ CREATE TABLE "factory"."model_defaults" (
 	"updated_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"role_rules" jsonb,
-	CONSTRAINT "model_defaults_build_model_id_check" CHECK ((length(build_model_id) >= 1) AND (length(build_model_id) <= 200)),
-	CONSTRAINT "model_defaults_planning_model_id_check" CHECK ((length(planning_model_id) >= 1) AND (length(planning_model_id) <= 200)),
-	CONSTRAINT "model_defaults_singleton_check" CHECK ((singleton)),
-	CONSTRAINT "model_defaults_version_check" CHECK (version > 0),
-	CONSTRAINT "model_role_rules_object" CHECK ((role_rules IS NULL) OR (jsonb_typeof(role_rules) = 'object'::text))
+	CONSTRAINT "model_defaults_build_model_id_check" CHECK ((length("factory"."model_defaults"."build_model_id") >= 1) AND (length("factory"."model_defaults"."build_model_id") <= 200)),
+	CONSTRAINT "model_defaults_planning_model_id_check" CHECK ((length("factory"."model_defaults"."planning_model_id") >= 1) AND (length("factory"."model_defaults"."planning_model_id") <= 200)),
+	CONSTRAINT "model_defaults_singleton_check" CHECK (("factory"."model_defaults"."singleton")),
+	CONSTRAINT "model_defaults_version_check" CHECK ("factory"."model_defaults"."version" > 0),
+	CONSTRAINT "model_role_rules_object" CHECK (("factory"."model_defaults"."role_rules" IS NULL) OR (jsonb_typeof("factory"."model_defaults"."role_rules") = 'object'::text))
 );
 
 CREATE TABLE "factory"."model_role_connection" (
@@ -3262,7 +3252,7 @@ CREATE TABLE "factory"."model_role_connection" (
 	"model_id" text NOT NULL,
 	"updated_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "model_role_connection_role_check" CHECK (role = ANY (ARRAY['planning'::text, 'build'::text]))
+	CONSTRAINT "model_role_connection_role_check" CHECK ("factory"."model_role_connection"."role" = ANY (ARRAY['planning'::text, 'build'::text]))
 );
 
 CREATE TABLE "factory"."model_role_probe" (
@@ -3278,12 +3268,12 @@ CREATE TABLE "factory"."model_role_probe" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"finished_at" timestamp with time zone,
 	"reasoning_effort" text,
-	CONSTRAINT "model_role_probe_check" CHECK ((state = 'probing'::text) = (result IS NULL)),
-	CONSTRAINT "model_role_probe_reasoning_check" CHECK ((reasoning_effort IS NULL) OR ((role = 'build'::text) AND (reasoning_effort = ANY (ARRAY['medium'::text, 'high'::text, 'xhigh'::text, 'max'::text])))),
-	CONSTRAINT "model_role_probe_result_check" CHECK ((result IS NULL) OR (jsonb_typeof(result) = 'object'::text)),
-	CONSTRAINT "model_role_probe_role_check" CHECK (role = ANY (ARRAY['planning'::text, 'build'::text])),
-	CONSTRAINT "model_role_probe_settings_version_check" CHECK (settings_version >= 0),
-	CONSTRAINT "model_role_probe_state_check" CHECK (state = ANY (ARRAY['probing'::text, 'finished'::text, 'uncertain'::text]))
+	CONSTRAINT "model_role_probe_check" CHECK (("factory"."model_role_probe"."state" = 'probing'::text) = ("factory"."model_role_probe"."result" IS NULL)),
+	CONSTRAINT "model_role_probe_reasoning_check" CHECK (("factory"."model_role_probe"."reasoning_effort" IS NULL) OR (("factory"."model_role_probe"."role" = 'build'::text) AND ("factory"."model_role_probe"."reasoning_effort" = ANY (ARRAY['medium'::text, 'high'::text, 'xhigh'::text, 'max'::text])))),
+	CONSTRAINT "model_role_probe_result_check" CHECK (("factory"."model_role_probe"."result" IS NULL) OR (jsonb_typeof("factory"."model_role_probe"."result") = 'object'::text)),
+	CONSTRAINT "model_role_probe_role_check" CHECK ("factory"."model_role_probe"."role" = ANY (ARRAY['planning'::text, 'build'::text])),
+	CONSTRAINT "model_role_probe_settings_version_check" CHECK ("factory"."model_role_probe"."settings_version" >= 0),
+	CONSTRAINT "model_role_probe_state_check" CHECK ("factory"."model_role_probe"."state" = ANY (ARRAY['probing'::text, 'finished'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."monitoring_command" (
@@ -3294,7 +3284,7 @@ CREATE TABLE "factory"."monitoring_command" (
 	"input_digest" text NOT NULL,
 	"action" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "monitoring_command_action_check" CHECK (action = ANY (ARRAY['save'::text, 'disable'::text, 'rotate'::text]))
+	CONSTRAINT "monitoring_command_action_check" CHECK ("factory"."monitoring_command"."action" = ANY (ARRAY['save'::text, 'disable'::text, 'rotate'::text]))
 );
 
 CREATE TABLE "factory"."monitoring_evidence" (
@@ -3305,7 +3295,7 @@ CREATE TABLE "factory"."monitoring_evidence" (
 	"path" text,
 	"commit_sha" text,
 	"observed_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "monitoring_evidence_digest_check" CHECK (digest ~ '^[a-f0-9]{64}$'::text)
+	CONSTRAINT "monitoring_evidence_digest_check" CHECK ("factory"."monitoring_evidence"."digest" ~ '^[a-f0-9]{64}$'::text)
 );
 
 CREATE TABLE "factory"."monitoring_hook" (
@@ -3318,9 +3308,9 @@ CREATE TABLE "factory"."monitoring_hook" (
 	"policy_id" uuid NOT NULL,
 	"received_window" timestamp with time zone DEFAULT now() NOT NULL,
 	"received_count" integer DEFAULT 0 NOT NULL,
-	CONSTRAINT "monitoring_hook_name_check" CHECK ((length(name) >= 1) AND (length(name) <= 100)),
-	CONSTRAINT "monitoring_hook_secret_digest_check" CHECK (secret_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "monitoring_hook_version_check" CHECK (version > 0)
+	CONSTRAINT "monitoring_hook_name_check" CHECK ((length("factory"."monitoring_hook"."name") >= 1) AND (length("factory"."monitoring_hook"."name") <= 100)),
+	CONSTRAINT "monitoring_hook_secret_digest_check" CHECK ("factory"."monitoring_hook"."secret_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "monitoring_hook_version_check" CHECK ("factory"."monitoring_hook"."version" > 0)
 );
 
 CREATE TABLE "factory"."monitoring_incident" (
@@ -3349,11 +3339,11 @@ CREATE TABLE "factory"."monitoring_incident" (
 	"settled_at" timestamp with time zone,
 	"skill_assignment" jsonb,
 	CONSTRAINT "monitoring_incident_hook_id_fingerprint_key" UNIQUE("hook_id","fingerprint"),
-	CONSTRAINT "monitoring_incident_context_check" CHECK (octet_length(context) <= 64000),
-	CONSTRAINT "monitoring_incident_fingerprint_check" CHECK (fingerprint ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "monitoring_incident_occurrences_check" CHECK (occurrences > 0),
-	CONSTRAINT "monitoring_incident_payload_digest_check" CHECK (payload_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "monitoring_incident_state_check" CHECK (state = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'insufficient-context'::text, 'not-application-defect'::text, 'prepared'::text, 'implementing'::text, 'delivered'::text, 'blocked'::text, 'uncertain'::text]))
+	CONSTRAINT "monitoring_incident_context_check" CHECK (octet_length("factory"."monitoring_incident"."context") <= 64000),
+	CONSTRAINT "monitoring_incident_fingerprint_check" CHECK ("factory"."monitoring_incident"."fingerprint" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "monitoring_incident_occurrences_check" CHECK ("factory"."monitoring_incident"."occurrences" > 0),
+	CONSTRAINT "monitoring_incident_payload_digest_check" CHECK ("factory"."monitoring_incident"."payload_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "monitoring_incident_state_check" CHECK ("factory"."monitoring_incident"."state" = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'insufficient-context'::text, 'not-application-defect'::text, 'prepared'::text, 'implementing'::text, 'delivered'::text, 'blocked'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."monitoring_policy" (
@@ -3367,8 +3357,8 @@ CREATE TABLE "factory"."monitoring_policy" (
 	"instructions" text,
 	"source_ids" uuid[] DEFAULT '{}' NOT NULL,
 	"source_assignments" jsonb,
-	CONSTRAINT "monitoring_policy_delegation_check" CHECK (delegation = ANY (ARRAY['prepare-ticket'::text, 'application-fix-and-delivery'::text])),
-	CONSTRAINT "monitoring_policy_instructions_check" CHECK ((length(instructions) >= 1) AND (length(instructions) <= 6000))
+	CONSTRAINT "monitoring_policy_delegation_check" CHECK ("factory"."monitoring_policy"."delegation" = ANY (ARRAY['prepare-ticket'::text, 'application-fix-and-delivery'::text])),
+	CONSTRAINT "monitoring_policy_instructions_check" CHECK ((length("factory"."monitoring_policy"."instructions") >= 1) AND (length("factory"."monitoring_policy"."instructions") <= 6000))
 );
 
 CREATE TABLE "auth"."oauthAccessToken" (
@@ -3511,13 +3501,13 @@ CREATE TABLE "factory"."personal_git_operation" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"attempted_at" timestamp with time zone,
 	"completed_at" timestamp with time zone,
-	CONSTRAINT "personal_git_operation_action_check" CHECK (action = ANY (ARRAY['commit'::text, 'fetch'::text, 'pull'::text])),
-	CONSTRAINT "personal_git_operation_branch_check" CHECK ((length(branch) >= 1) AND (length(branch) <= 200)),
-	CONSTRAINT "personal_git_operation_check" CHECK ((state = ANY (ARRAY['succeeded'::text, 'failed'::text])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "personal_git_operation_check1" CHECK ((state <> 'succeeded'::text) OR ((result IS NOT NULL) AND (jsonb_typeof(result) = 'object'::text))),
-	CONSTRAINT "personal_git_operation_expected_head_check" CHECK (expected_head ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text),
-	CONSTRAINT "personal_git_operation_message_check" CHECK (length(message) <= 240),
-	CONSTRAINT "personal_git_operation_state_check" CHECK (state = ANY (ARRAY['intended'::text, 'attempted'::text, 'succeeded'::text, 'failed'::text, 'uncertain'::text]))
+	CONSTRAINT "personal_git_operation_action_check" CHECK ("factory"."personal_git_operation"."action" = ANY (ARRAY['commit'::text, 'fetch'::text, 'pull'::text])),
+	CONSTRAINT "personal_git_operation_branch_check" CHECK ((length("factory"."personal_git_operation"."branch") >= 1) AND (length("factory"."personal_git_operation"."branch") <= 200)),
+	CONSTRAINT "personal_git_operation_check" CHECK (("factory"."personal_git_operation"."state" = ANY (ARRAY['succeeded'::text, 'failed'::text])) = ("factory"."personal_git_operation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "personal_git_operation_check1" CHECK (("factory"."personal_git_operation"."state" <> 'succeeded'::text) OR (("factory"."personal_git_operation"."result" IS NOT NULL) AND (jsonb_typeof("factory"."personal_git_operation"."result") = 'object'::text))),
+	CONSTRAINT "personal_git_operation_expected_head_check" CHECK ("factory"."personal_git_operation"."expected_head" ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text),
+	CONSTRAINT "personal_git_operation_message_check" CHECK (length("factory"."personal_git_operation"."message") <= 240),
+	CONSTRAINT "personal_git_operation_state_check" CHECK ("factory"."personal_git_operation"."state" = ANY (ARRAY['intended'::text, 'attempted'::text, 'succeeded'::text, 'failed'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."personal_model_settings" (
@@ -3528,9 +3518,9 @@ CREATE TABLE "factory"."personal_model_settings" (
 	"build_model_id" text,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "personal_model_settings_pkey" PRIMARY KEY("project_id","user_id"),
-	CONSTRAINT "personal_model_settings_build_model_id_check" CHECK ((length(build_model_id) >= 1) AND (length(build_model_id) <= 200)),
-	CONSTRAINT "personal_model_settings_planning_model_id_check" CHECK ((length(planning_model_id) >= 1) AND (length(planning_model_id) <= 200)),
-	CONSTRAINT "personal_model_settings_version_check" CHECK (version > 0)
+	CONSTRAINT "personal_model_settings_build_model_id_check" CHECK ((length("factory"."personal_model_settings"."build_model_id") >= 1) AND (length("factory"."personal_model_settings"."build_model_id") <= 200)),
+	CONSTRAINT "personal_model_settings_planning_model_id_check" CHECK ((length("factory"."personal_model_settings"."planning_model_id") >= 1) AND (length("factory"."personal_model_settings"."planning_model_id") <= 200)),
+	CONSTRAINT "personal_model_settings_version_check" CHECK ("factory"."personal_model_settings"."version" > 0)
 );
 
 CREATE TABLE "factory"."project" (
@@ -3545,11 +3535,11 @@ CREATE TABLE "factory"."project" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"desktop_background_key" text DEFAULT 'river-landscape' NOT NULL,
 	CONSTRAINT "project_slug_key" UNIQUE("slug"),
-	CONSTRAINT "project_default_branch_check" CHECK ((length(default_branch) >= 1) AND (length(default_branch) <= 200)),
-	CONSTRAINT "project_desktop_background_key_check" CHECK (desktop_background_key = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text, 'gulf-of-marseille'::text, 'scene-on-the-ice'::text, 'moonlit-landscape'::text])),
-	CONSTRAINT "project_devcontainer_path_check" CHECK ((devcontainer_path <> ''::text) AND (devcontainer_path !~ '(^/|(^|/)\.\.(/|$))'::text)),
-	CONSTRAINT "project_name_check" CHECK ((length(name) >= 1) AND (length(name) <= 200)),
-	CONSTRAINT "project_slug_check" CHECK (slug ~ '^[a-z][a-z0-9-]{1,62}$'::text)
+	CONSTRAINT "project_default_branch_check" CHECK ((length("factory"."project"."default_branch") >= 1) AND (length("factory"."project"."default_branch") <= 200)),
+	CONSTRAINT "project_desktop_background_key_check" CHECK ("factory"."project"."desktop_background_key" = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text, 'gulf-of-marseille'::text, 'scene-on-the-ice'::text, 'moonlit-landscape'::text])),
+	CONSTRAINT "project_devcontainer_path_check" CHECK (("factory"."project"."devcontainer_path" <> ''::text) AND ("factory"."project"."devcontainer_path" !~ '(^/|(^|/)\.\.(/|$))'::text)),
+	CONSTRAINT "project_name_check" CHECK ((length("factory"."project"."name") >= 1) AND (length("factory"."project"."name") <= 200)),
+	CONSTRAINT "project_slug_check" CHECK ("factory"."project"."slug" ~ '^[a-z][a-z0-9-]{1,62}$'::text)
 );
 
 CREATE TABLE "factory"."project_delivery_policy" (
@@ -3577,8 +3567,8 @@ CREATE TABLE "factory"."project_environment" (
 	"secret_key" text,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "project_environment_pkey" PRIMARY KEY("project_id","environment"),
-	CONSTRAINT "project_environment_environment_check" CHECK (environment = ANY (ARRAY['development'::text, 'main-preview'::text])),
-	CONSTRAINT "project_environment_version_check" CHECK (version >= 0)
+	CONSTRAINT "project_environment_environment_check" CHECK ("factory"."project_environment"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text])),
+	CONSTRAINT "project_environment_version_check" CHECK ("factory"."project_environment"."version" >= 0)
 );
 
 CREATE TABLE "factory"."project_image_preparation" (
@@ -3596,13 +3586,13 @@ CREATE TABLE "factory"."project_image_preparation" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "project_image_preparation_project_id_environment_revision_e_key" UNIQUE("project_id","environment","revision","environment_version"),
 	CONSTRAINT "project_image_preparation_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "project_image_preparation_check" CHECK ((state = 'succeeded'::text) = ((identity IS NOT NULL) AND (image IS NOT NULL))),
-	CONSTRAINT "project_image_preparation_environment_check" CHECK (environment = ANY (ARRAY['development'::text, 'main-preview'::text])),
-	CONSTRAINT "project_image_preparation_environment_version_check" CHECK (environment_version >= 0),
-	CONSTRAINT "project_image_preparation_identity_check" CHECK (identity ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "project_image_preparation_image_check" CHECK (image ~ '^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$'::text),
-	CONSTRAINT "project_image_preparation_revision_check" CHECK (revision ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'::text),
-	CONSTRAINT "project_image_preparation_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'running'::text, 'succeeded'::text, 'unsupported'::text, 'failed'::text]))
+	CONSTRAINT "project_image_preparation_check" CHECK (("factory"."project_image_preparation"."state" = 'succeeded'::text) = (("factory"."project_image_preparation"."identity" IS NOT NULL) AND ("factory"."project_image_preparation"."image" IS NOT NULL))),
+	CONSTRAINT "project_image_preparation_environment_check" CHECK ("factory"."project_image_preparation"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text])),
+	CONSTRAINT "project_image_preparation_environment_version_check" CHECK ("factory"."project_image_preparation"."environment_version" >= 0),
+	CONSTRAINT "project_image_preparation_identity_check" CHECK ("factory"."project_image_preparation"."identity" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "project_image_preparation_image_check" CHECK ("factory"."project_image_preparation"."image" ~ '^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$'::text),
+	CONSTRAINT "project_image_preparation_revision_check" CHECK ("factory"."project_image_preparation"."revision" ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'::text),
+	CONSTRAINT "project_image_preparation_state_check" CHECK ("factory"."project_image_preparation"."state" = ANY (ARRAY['pending'::text, 'running'::text, 'succeeded'::text, 'unsupported'::text, 'failed'::text]))
 );
 
 CREATE TABLE "factory"."project_membership" (
@@ -3613,7 +3603,7 @@ CREATE TABLE "factory"."project_membership" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"manage_project" boolean DEFAULT false NOT NULL,
 	CONSTRAINT "project_membership_pkey" PRIMARY KEY("project_id","user_id"),
-	CONSTRAINT "project_membership_role_check" CHECK (role = ANY (ARRAY['product-contributor'::text, 'developer'::text]))
+	CONSTRAINT "project_membership_role_check" CHECK ("factory"."project_membership"."role" = ANY (ARRAY['product-contributor'::text, 'developer'::text]))
 );
 
 CREATE TABLE "factory"."project_model_settings" (
@@ -3623,9 +3613,9 @@ CREATE TABLE "factory"."project_model_settings" (
 	"build" jsonb NOT NULL,
 	"updated_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_model_settings_planning_check" CHECK (jsonb_typeof(planning) = 'object'::text),
-	CONSTRAINT "project_model_settings_build_check" CHECK (jsonb_typeof(build) = 'object'::text),
-	CONSTRAINT "project_model_settings_version_check" CHECK (version > 0)
+	CONSTRAINT "project_model_settings_planning_check" CHECK (jsonb_typeof("factory"."project_model_settings"."planning") = 'object'::text),
+	CONSTRAINT "project_model_settings_build_check" CHECK (jsonb_typeof("factory"."project_model_settings"."build") = 'object'::text),
+	CONSTRAINT "project_model_settings_version_check" CHECK ("factory"."project_model_settings"."version" > 0)
 );
 
 CREATE TABLE "factory"."project_release" (
@@ -3649,11 +3639,11 @@ CREATE TABLE "factory"."project_release" (
 	"failure" text,
 	CONSTRAINT "project_release_project_id_version_key" UNIQUE("project_id","version"),
 	CONSTRAINT "project_release_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "project_release_artifacts_check" CHECK (jsonb_typeof(artifacts) = 'array'::text),
-	CONSTRAINT "project_release_commit_sha_check" CHECK (commit_sha ~ '^[a-f0-9]{40}$'::text),
-	CONSTRAINT "project_release_contract_check" CHECK ((contract IS NULL) OR (jsonb_typeof(contract) = 'object'::text)),
-	CONSTRAINT "project_release_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'published'::text, 'failed'::text, 'uncertain'::text])),
-	CONSTRAINT "project_release_version_check" CHECK (version ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'::text)
+	CONSTRAINT "project_release_artifacts_check" CHECK (jsonb_typeof("factory"."project_release"."artifacts") = 'array'::text),
+	CONSTRAINT "project_release_commit_sha_check" CHECK ("factory"."project_release"."commit_sha" ~ '^[a-f0-9]{40}$'::text),
+	CONSTRAINT "project_release_contract_check" CHECK (("factory"."project_release"."contract" IS NULL) OR (jsonb_typeof("factory"."project_release"."contract") = 'object'::text)),
+	CONSTRAINT "project_release_state_check" CHECK ("factory"."project_release"."state" = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'published'::text, 'failed'::text, 'uncertain'::text])),
+	CONSTRAINT "project_release_version_check" CHECK ("factory"."project_release"."version" ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'::text)
 );
 
 CREATE TABLE "factory"."project_repository_intent" (
@@ -3677,9 +3667,9 @@ CREATE TABLE "factory"."project_repository_intent" (
 	CONSTRAINT "project_repository_intent_project_id_key" UNIQUE("project_id"),
 	CONSTRAINT "project_repository_intent_slug_key" UNIQUE("slug"),
 	CONSTRAINT "project_repository_intent_credential_key_key" UNIQUE("credential_key"),
-	CONSTRAINT "project_repository_intent_fingerprint_check" CHECK (fingerprint ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "project_repository_intent_kind_check" CHECK (kind = ANY (ARRAY['starter'::text, 'import'::text])),
-	CONSTRAINT "project_repository_intent_state_check" CHECK (state = ANY (ARRAY['credential-intended'::text, 'create-intended'::text, 'repository-ready'::text, 'committed'::text, 'uncertain'::text, 'failed'::text]))
+	CONSTRAINT "project_repository_intent_fingerprint_check" CHECK ("factory"."project_repository_intent"."fingerprint" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "project_repository_intent_kind_check" CHECK ("factory"."project_repository_intent"."kind" = ANY (ARRAY['starter'::text, 'import'::text])),
+	CONSTRAINT "project_repository_intent_state_check" CHECK ("factory"."project_repository_intent"."state" = ANY (ARRAY['credential-intended'::text, 'create-intended'::text, 'repository-ready'::text, 'committed'::text, 'uncertain'::text, 'failed'::text]))
 );
 
 CREATE TABLE "factory"."project_setup_confirmation" (
@@ -3703,12 +3693,12 @@ CREATE TABLE "factory"."project_setup_draft" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "project_setup_draft_user_id_key" UNIQUE("user_id"),
 	CONSTRAINT "project_setup_draft_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "project_setup_draft_kind_check" CHECK (kind = ANY (ARRAY['starter'::text, 'import'::text])),
-	CONSTRAINT "project_setup_draft_name_check" CHECK (length(name) <= 200),
-	CONSTRAINT "project_setup_draft_slug_check" CHECK ((slug = ''::text) OR (slug ~ '^[a-z][a-z0-9-]{1,62}$'::text)),
-	CONSTRAINT "project_setup_draft_source_url_check" CHECK (length(source_url) <= 2000),
-	CONSTRAINT "project_setup_draft_state_check" CHECK (state = ANY (ARRAY['draft'::text, 'creating'::text, 'checking'::text, 'created'::text, 'failed'::text])),
-	CONSTRAINT "project_setup_draft_version_check" CHECK (version > 0)
+	CONSTRAINT "project_setup_draft_kind_check" CHECK ("factory"."project_setup_draft"."kind" = ANY (ARRAY['starter'::text, 'import'::text])),
+	CONSTRAINT "project_setup_draft_name_check" CHECK (length("factory"."project_setup_draft"."name") <= 200),
+	CONSTRAINT "project_setup_draft_slug_check" CHECK (("factory"."project_setup_draft"."slug" = ''::text) OR ("factory"."project_setup_draft"."slug" ~ '^[a-z][a-z0-9-]{1,62}$'::text)),
+	CONSTRAINT "project_setup_draft_source_url_check" CHECK (length("factory"."project_setup_draft"."source_url") <= 2000),
+	CONSTRAINT "project_setup_draft_state_check" CHECK ("factory"."project_setup_draft"."state" = ANY (ARRAY['draft'::text, 'creating'::text, 'checking'::text, 'created'::text, 'failed'::text])),
+	CONSTRAINT "project_setup_draft_version_check" CHECK ("factory"."project_setup_draft"."version" > 0)
 );
 
 CREATE TABLE "factory"."project_setup_inspection" (
@@ -3726,9 +3716,9 @@ CREATE TABLE "factory"."project_setup_inspection" (
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_setup_inspection_source_commit_check" CHECK (source_commit ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'::text),
-	CONSTRAINT "project_setup_inspection_check" CHECK ((connection_id IS NULL) = (connection_version IS NULL)),
-	CONSTRAINT "project_setup_inspection_state_check" CHECK (state = ANY (ARRAY['inspecting'::text, 'complete'::text, 'proposal'::text, 'failed'::text, 'confirming'::text, 'confirmed'::text, 'superseded'::text]))
+	CONSTRAINT "project_setup_inspection_source_commit_check" CHECK ("factory"."project_setup_inspection"."source_commit" ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'::text),
+	CONSTRAINT "project_setup_inspection_check" CHECK (("factory"."project_setup_inspection"."connection_id" IS NULL) = ("factory"."project_setup_inspection"."connection_version" IS NULL)),
+	CONSTRAINT "project_setup_inspection_state_check" CHECK ("factory"."project_setup_inspection"."state" = ANY (ARRAY['inspecting'::text, 'complete'::text, 'proposal'::text, 'failed'::text, 'confirming'::text, 'confirmed'::text, 'superseded'::text]))
 );
 
 CREATE TABLE "factory"."project_setup_readiness" (
@@ -3741,8 +3731,8 @@ CREATE TABLE "factory"."project_setup_readiness" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "project_setup_readiness_pkey" PRIMARY KEY("project_id","task"),
 	CONSTRAINT "project_setup_readiness_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "project_setup_readiness_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text])),
-	CONSTRAINT "project_setup_readiness_task_check" CHECK (task = ANY (ARRAY['configuration'::text, 'development-secrets'::text, 'preview-secrets'::text, 'protection'::text, 'hook'::text, 'wiki'::text, 'development'::text, 'preview-image'::text, 'main-preview'::text]))
+	CONSTRAINT "project_setup_readiness_state_check" CHECK ("factory"."project_setup_readiness"."state" = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text])),
+	CONSTRAINT "project_setup_readiness_task_check" CHECK ("factory"."project_setup_readiness"."task" = ANY (ARRAY['configuration'::text, 'development-secrets'::text, 'preview-secrets'::text, 'protection'::text, 'hook'::text, 'wiki'::text, 'development'::text, 'preview-image'::text, 'main-preview'::text]))
 );
 
 CREATE TABLE "factory"."promotion_operation" (
@@ -3764,10 +3754,10 @@ CREATE TABLE "factory"."promotion_operation" (
 	CONSTRAINT "promotion_operation_replacement_runtime_attempt_id_key" UNIQUE("replacement_runtime_attempt_id"),
 	CONSTRAINT "promotion_operation_supersedes_id_key" UNIQUE("supersedes_id"),
 	CONSTRAINT "promotion_operation_retry_command_id_key" UNIQUE("retry_command_id"),
-	CONSTRAINT "promotion_operation_retry_identity" CHECK (((ordinal = 1) AND (supersedes_id IS NULL) AND (retry_command_id IS NULL)) OR ((ordinal > 1) AND (supersedes_id IS NOT NULL) AND (retry_command_id = id))),
-	CONSTRAINT "promotion_operation_check" CHECK ((state = ANY (ARRAY['succeeded'::promotion_operation_state, 'failed'::promotion_operation_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "promotion_operation_commit_sha_check" CHECK (commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "promotion_operation_ordinal_check" CHECK (ordinal > 0)
+	CONSTRAINT "promotion_operation_retry_identity" CHECK ((("factory"."promotion_operation"."ordinal" = 1) AND ("factory"."promotion_operation"."supersedes_id" IS NULL) AND ("factory"."promotion_operation"."retry_command_id" IS NULL)) OR (("factory"."promotion_operation"."ordinal" > 1) AND ("factory"."promotion_operation"."supersedes_id" IS NOT NULL) AND ("factory"."promotion_operation"."retry_command_id" = "factory"."promotion_operation"."id"))),
+	CONSTRAINT "promotion_operation_check" CHECK (("factory"."promotion_operation"."state" = ANY (ARRAY['succeeded'::promotion_operation_state, 'failed'::promotion_operation_state])) = ("factory"."promotion_operation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "promotion_operation_commit_sha_check" CHECK ("factory"."promotion_operation"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "promotion_operation_ordinal_check" CHECK ("factory"."promotion_operation"."ordinal" > 0)
 );
 
 CREATE TABLE "factory"."pull_request_operation" (
@@ -3790,11 +3780,11 @@ CREATE TABLE "factory"."pull_request_operation" (
 	"completed_at" timestamp with time zone,
 	CONSTRAINT "pull_request_operation_change_id_key" UNIQUE("change_id"),
 	CONSTRAINT "pull_request_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "pull_request_operation_body_check" CHECK (length(body) <= 10000),
-	CONSTRAINT "pull_request_operation_check" CHECK ((state = ANY (ARRAY['succeeded'::pull_request_operation_state, 'failed'::pull_request_operation_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "pull_request_operation_check1" CHECK ((state <> 'succeeded'::pull_request_operation_state) OR ((pull_request_number IS NOT NULL) AND (pull_request_url IS NOT NULL))),
-	CONSTRAINT "pull_request_operation_first_head_sha_check" CHECK (first_head_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "pull_request_operation_title_check" CHECK ((length(btrim(title)) >= 1) AND (length(btrim(title)) <= 240))
+	CONSTRAINT "pull_request_operation_body_check" CHECK (length("factory"."pull_request_operation"."body") <= 10000),
+	CONSTRAINT "pull_request_operation_check" CHECK (("factory"."pull_request_operation"."state" = ANY (ARRAY['succeeded'::pull_request_operation_state, 'failed'::pull_request_operation_state])) = ("factory"."pull_request_operation"."completed_at" IS NOT NULL)),
+	CONSTRAINT "pull_request_operation_check1" CHECK (("factory"."pull_request_operation"."state" <> 'succeeded'::pull_request_operation_state) OR (("factory"."pull_request_operation"."pull_request_number" IS NOT NULL) AND ("factory"."pull_request_operation"."pull_request_url" IS NOT NULL))),
+	CONSTRAINT "pull_request_operation_first_head_sha_check" CHECK ("factory"."pull_request_operation"."first_head_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "pull_request_operation_title_check" CHECK ((length(btrim("factory"."pull_request_operation"."title")) >= 1) AND (length(btrim("factory"."pull_request_operation"."title")) <= 240))
 );
 
 CREATE TABLE "factory"."read_version" (
@@ -3804,8 +3794,8 @@ CREATE TABLE "factory"."read_version" (
 	"resource_id" uuid NOT NULL,
 	"revision" uuid DEFAULT gen_random_uuid() NOT NULL,
 	CONSTRAINT "read_version_pkey" PRIMARY KEY("project_id","audience","scope","resource_id"),
-	CONSTRAINT "read_version_audience_check" CHECK ((audience = ANY (ARRAY['shared'::text, 'developer'::text])) OR (audience ~ '^[0-9a-f-]{36}$'::text)),
-	CONSTRAINT "read_version_scope_check" CHECK (scope = ANY (ARRAY['lifecycle'::text, 'ticket'::text, 'conversation'::text, 'review'::text, 'inbox'::text, 'knowledge'::text, 'inputs'::text, 'sources'::text, 'releases'::text]))
+	CONSTRAINT "read_version_audience_check" CHECK (("factory"."read_version"."audience" = ANY (ARRAY['shared'::text, 'developer'::text])) OR ("factory"."read_version"."audience" ~ '^[0-9a-f-]{36}$'::text)),
+	CONSTRAINT "read_version_scope_check" CHECK ("factory"."read_version"."scope" = ANY (ARRAY['lifecycle'::text, 'ticket'::text, 'conversation'::text, 'review'::text, 'inbox'::text, 'knowledge'::text, 'inputs'::text, 'sources'::text, 'releases'::text]))
 );
 
 CREATE TABLE "factory"."release_access" (
@@ -3825,8 +3815,8 @@ CREATE TABLE "factory"."release_access" (
 	"replaces_id" uuid,
 	CONSTRAINT "release_access_command_id_key" UNIQUE("command_id"),
 	CONSTRAINT "release_access_username_key" UNIQUE("username"),
-	CONSTRAINT "release_access_scope_check" CHECK (scope = ANY (ARRAY['git'::text, 'packages'::text, 'publish'::text])),
-	CONSTRAINT "release_access_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'active'::text, 'revoking'::text, 'revoked'::text, 'uncertain'::text]))
+	CONSTRAINT "release_access_scope_check" CHECK ("factory"."release_access"."scope" = ANY (ARRAY['git'::text, 'packages'::text, 'publish'::text])),
+	CONSTRAINT "release_access_state_check" CHECK ("factory"."release_access"."state" = ANY (ARRAY['pending'::text, 'active'::text, 'revoking'::text, 'revoked'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."release_attempt" (
@@ -3846,8 +3836,8 @@ CREATE TABLE "factory"."release_attempt" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "release_attempt_release_id_ordinal_key" UNIQUE("release_id","ordinal"),
 	CONSTRAINT "release_attempt_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "release_attempt_check" CHECK ((run_id IS NULL) OR (dispatch_intended_at IS NOT NULL)),
-	CONSTRAINT "release_attempt_ordinal_check" CHECK (ordinal > 0)
+	CONSTRAINT "release_attempt_check" CHECK (("factory"."release_attempt"."run_id" IS NULL) OR ("factory"."release_attempt"."dispatch_intended_at" IS NOT NULL)),
+	CONSTRAINT "release_attempt_ordinal_check" CHECK ("factory"."release_attempt"."ordinal" > 0)
 );
 
 CREATE TABLE "factory"."repository_mirror_command" (
@@ -3862,8 +3852,8 @@ CREATE TABLE "factory"."repository_mirror_command" (
 	"state" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
-	CONSTRAINT "repository_mirror_command_action_check" CHECK (action = ANY (ARRAY['create'::text, 'remove'::text, 'sync'::text])),
-	CONSTRAINT "repository_mirror_command_state_check" CHECK (state = ANY (ARRAY['executing'::text, 'completed'::text, 'failed'::text, 'uncertain'::text, 'acknowledged'::text]))
+	CONSTRAINT "repository_mirror_command_action_check" CHECK ("factory"."repository_mirror_command"."action" = ANY (ARRAY['create'::text, 'remove'::text, 'sync'::text])),
+	CONSTRAINT "repository_mirror_command_state_check" CHECK ("factory"."repository_mirror_command"."state" = ANY (ARRAY['executing'::text, 'completed'::text, 'failed'::text, 'uncertain'::text, 'acknowledged'::text]))
 );
 
 CREATE TABLE "factory"."requirement_approval" (
@@ -3878,7 +3868,7 @@ CREATE TABLE "factory"."requirement_approval" (
 	CONSTRAINT "requirement_approval_id_ticket_id_key" UNIQUE("id","ticket_id"),
 	CONSTRAINT "requirement_approval_ticket_id_key" UNIQUE("ticket_id"),
 	CONSTRAINT "requirement_approval_requirement_revision_id_key" UNIQUE("requirement_revision_id"),
-	CONSTRAINT "requirement_monitoring_basis" CHECK ((monitoring_incident_id IS NULL) = (monitoring_policy_id IS NULL))
+	CONSTRAINT "requirement_monitoring_basis" CHECK (("factory"."requirement_approval"."monitoring_incident_id" IS NULL) = ("factory"."requirement_approval"."monitoring_policy_id" IS NULL))
 );
 
 CREATE TABLE "factory"."requirement_revision" (
@@ -3891,10 +3881,10 @@ CREATE TABLE "factory"."requirement_revision" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "requirement_revision_id_ticket_id_key" UNIQUE("id","ticket_id"),
 	CONSTRAINT "requirement_revision_ticket_id_ordinal_key" UNIQUE("ticket_id","ordinal"),
-	CONSTRAINT "requirement_revision_canonical_content_check" CHECK (length(canonical_content) > 0),
-	CONSTRAINT "requirement_revision_check" CHECK (content_digest = encode(digest(convert_to(canonical_content, 'UTF8'::name), 'sha256'::text), 'hex'::text)),
-	CONSTRAINT "requirement_revision_content_digest_check" CHECK (content_digest ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "requirement_revision_ordinal_check" CHECK (ordinal > 0)
+	CONSTRAINT "requirement_revision_canonical_content_check" CHECK (length("factory"."requirement_revision"."canonical_content") > 0),
+	CONSTRAINT "requirement_revision_check" CHECK ("factory"."requirement_revision"."content_digest" = encode(digest(convert_to("factory"."requirement_revision"."canonical_content", 'UTF8'::name), 'sha256'::text), 'hex'::text)),
+	CONSTRAINT "requirement_revision_content_digest_check" CHECK ("factory"."requirement_revision"."content_digest" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "requirement_revision_ordinal_check" CHECK ("factory"."requirement_revision"."ordinal" > 0)
 );
 
 CREATE TABLE "factory"."requirements_entry_intent" (
@@ -3919,11 +3909,11 @@ CREATE TABLE "factory"."review_feedback" (
 	"media_id" uuid,
 	"resolved_by" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "review_feedback_annotation_media" CHECK ((media_id IS NULL) OR (annotation IS NOT NULL)),
-	CONSTRAINT "review_feedback_check" CHECK ((kind <> 'comment'::text) OR (state = 'open'::text)),
-	CONSTRAINT "review_feedback_commit_sha_check" CHECK (commit_sha ~ '^[a-f0-9]{40}$'::text),
-	CONSTRAINT "review_feedback_kind_check" CHECK (kind = ANY (ARRAY['comment'::text, 'thread'::text])),
-	CONSTRAINT "review_feedback_state_check" CHECK (state = ANY (ARRAY['open'::text, 'implemented'::text, 'resolved'::text]))
+	CONSTRAINT "review_feedback_annotation_media" CHECK (("factory"."review_feedback"."media_id" IS NULL) OR ("factory"."review_feedback"."annotation" IS NOT NULL)),
+	CONSTRAINT "review_feedback_check" CHECK (("factory"."review_feedback"."kind" <> 'comment'::text) OR ("factory"."review_feedback"."state" = 'open'::text)),
+	CONSTRAINT "review_feedback_commit_sha_check" CHECK ("factory"."review_feedback"."commit_sha" ~ '^[a-f0-9]{40}$'::text),
+	CONSTRAINT "review_feedback_kind_check" CHECK ("factory"."review_feedback"."kind" = ANY (ARRAY['comment'::text, 'thread'::text])),
+	CONSTRAINT "review_feedback_state_check" CHECK ("factory"."review_feedback"."state" = ANY (ARRAY['open'::text, 'implemented'::text, 'resolved'::text]))
 );
 
 CREATE TABLE "factory"."review_feedback_command" (
@@ -3943,7 +3933,7 @@ CREATE TABLE "factory"."review_feedback_message" (
 	"author_id" uuid NOT NULL,
 	"body" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "review_feedback_message_body_check" CHECK ((length(body) >= 1) AND (length(body) <= 2000))
+	CONSTRAINT "review_feedback_message_body_check" CHECK ((length("factory"."review_feedback_message"."body") >= 1) AND (length("factory"."review_feedback_message"."body") <= 2000))
 );
 
 CREATE TABLE "factory"."review_media" (
@@ -3965,14 +3955,14 @@ CREATE TABLE "factory"."review_media" (
 	"completed_at" timestamp with time zone,
 	"deleted_at" timestamp with time zone,
 	CONSTRAINT "review_media_browser_session_id_kind_key" UNIQUE("browser_session_id","kind"),
-	CONSTRAINT "review_media_byte_length_check" CHECK ((byte_length >= 1) AND (byte_length <= 100663296)),
-	CONSTRAINT "review_media_check" CHECK ((state <> 'complete'::text) OR ((byte_length IS NOT NULL) AND (sha256 IS NOT NULL))),
-	CONSTRAINT "review_media_check1" CHECK ((kind <> 'recording'::text) OR (review_id IS NOT NULL)),
-	CONSTRAINT "review_media_commit_sha_check" CHECK (commit_sha ~ '^[a-f0-9]{40}$'::text),
-	CONSTRAINT "review_media_duration_ms_check" CHECK (duration_ms >= 0),
-	CONSTRAINT "review_media_kind_check" CHECK (kind = ANY (ARRAY['recording'::text, 'still'::text])),
-	CONSTRAINT "review_media_sha256_check" CHECK (sha256 ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "review_media_state_check" CHECK (state = ANY (ARRAY['intended'::text, 'recording'::text, 'complete'::text, 'unavailable'::text, 'deleted'::text]))
+	CONSTRAINT "review_media_byte_length_check" CHECK (("factory"."review_media"."byte_length" >= 1) AND ("factory"."review_media"."byte_length" <= 100663296)),
+	CONSTRAINT "review_media_check" CHECK (("factory"."review_media"."state" <> 'complete'::text) OR (("factory"."review_media"."byte_length" IS NOT NULL) AND ("factory"."review_media"."sha256" IS NOT NULL))),
+	CONSTRAINT "review_media_check1" CHECK (("factory"."review_media"."kind" <> 'recording'::text) OR ("factory"."review_media"."review_id" IS NOT NULL)),
+	CONSTRAINT "review_media_commit_sha_check" CHECK ("factory"."review_media"."commit_sha" ~ '^[a-f0-9]{40}$'::text),
+	CONSTRAINT "review_media_duration_ms_check" CHECK ("factory"."review_media"."duration_ms" >= 0),
+	CONSTRAINT "review_media_kind_check" CHECK ("factory"."review_media"."kind" = ANY (ARRAY['recording'::text, 'still'::text])),
+	CONSTRAINT "review_media_sha256_check" CHECK ("factory"."review_media"."sha256" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "review_media_state_check" CHECK ("factory"."review_media"."state" = ANY (ARRAY['intended'::text, 'recording'::text, 'complete'::text, 'unavailable'::text, 'deleted'::text]))
 );
 
 CREATE TABLE "factory"."review_scenario" (
@@ -3990,15 +3980,15 @@ CREATE TABLE "factory"."review_scenario" (
 	"status" text,
 	"observation_kind" text,
 	CONSTRAINT "review_scenario_pkey" PRIMARY KEY("review_id","id"),
-	CONSTRAINT "review_scenario_category_check" CHECK (category = ANY (ARRAY['normal'::text, 'error'::text, 'boundary'::text])),
-	CONSTRAINT "review_scenario_criterion_check" CHECK (criterion > 0),
-	CONSTRAINT "review_scenario_expected_check" CHECK ((length(expected) >= 1) AND (length(expected) <= 1000)),
-	CONSTRAINT "review_scenario_id_check" CHECK (id ~ '^[a-z0-9-]{1,64}$'::text),
-	CONSTRAINT "review_scenario_media_started_ms_check" CHECK (media_started_ms >= 0),
-	CONSTRAINT "review_scenario_observation_kind_check" CHECK (observation_kind = ANY (ARRAY['app'::text, 'source'::text])),
-	CONSTRAINT "review_scenario_observed_check" CHECK ((length(observed) >= 1) AND (length(observed) <= 2000)),
-	CONSTRAINT "review_scenario_status_check" CHECK (status = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text])),
-	CONSTRAINT "review_scenario_title_check" CHECK ((length(title) >= 1) AND (length(title) <= 200))
+	CONSTRAINT "review_scenario_category_check" CHECK ("factory"."review_scenario"."category" = ANY (ARRAY['normal'::text, 'error'::text, 'boundary'::text])),
+	CONSTRAINT "review_scenario_criterion_check" CHECK ("factory"."review_scenario"."criterion" > 0),
+	CONSTRAINT "review_scenario_expected_check" CHECK ((length("factory"."review_scenario"."expected") >= 1) AND (length("factory"."review_scenario"."expected") <= 1000)),
+	CONSTRAINT "review_scenario_id_check" CHECK ("factory"."review_scenario"."id" ~ '^[a-z0-9-]{1,64}$'::text),
+	CONSTRAINT "review_scenario_media_started_ms_check" CHECK ("factory"."review_scenario"."media_started_ms" >= 0),
+	CONSTRAINT "review_scenario_observation_kind_check" CHECK ("factory"."review_scenario"."observation_kind" = ANY (ARRAY['app'::text, 'source'::text])),
+	CONSTRAINT "review_scenario_observed_check" CHECK ((length("factory"."review_scenario"."observed") >= 1) AND (length("factory"."review_scenario"."observed") <= 2000)),
+	CONSTRAINT "review_scenario_status_check" CHECK ("factory"."review_scenario"."status" = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text])),
+	CONSTRAINT "review_scenario_title_check" CHECK ((length("factory"."review_scenario"."title") >= 1) AND (length("factory"."review_scenario"."title") <= 200))
 );
 
 CREATE TABLE "factory"."runtime_attempt" (
@@ -4029,19 +4019,23 @@ CREATE TABLE "factory"."runtime_attempt" (
 	CONSTRAINT "runtime_attempt_id_project_id_key" UNIQUE("id","project_id"),
 	CONSTRAINT "runtime_attempt_id_workspace_id_key" UNIQUE("id","workspace_id"),
 	CONSTRAINT "runtime_attempt_verification_identity_unique" UNIQUE("id","verification_id"),
-	CONSTRAINT "runtime_attempt_app_ready_shape" CHECK ((jsonb_typeof(app_ready_at) = 'object'::text) AND (octet_length((app_ready_at)::text) <= 4096)),
-	CONSTRAINT "runtime_attempt_declared_apps_check" CHECK (jsonb_typeof(declared_apps) = 'array'::text),
-	CONSTRAINT "runtime_attempt_generation_check" CHECK (generation > 0),
-	CONSTRAINT "runtime_attempt_native_owner" CHECK (((workspace_id IS NOT NULL) AND (isolated_kind IS NULL) AND (verification_id IS NULL)) OR ((workspace_id IS NULL) AND (change_id IS NULL) AND (isolated_kind = 'verification'::isolated_runtime_kind) AND (verification_id IS NOT NULL)) OR ((workspace_id IS NULL) AND (change_id IS NULL) AND (isolated_kind = ANY (ARRAY['prebuild'::isolated_runtime_kind, 'staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind])) AND (verification_id IS NULL))),
-	CONSTRAINT "runtime_attempt_owner_shape_check" CHECK (((workspace_id IS NOT NULL) AND (isolated_kind IS NULL)) OR ((change_id IS NOT NULL) AND (workspace_id IS NOT NULL) AND (isolated_kind IS NULL)) OR ((change_id IS NULL) AND (workspace_id IS NULL) AND (isolated_kind IS NOT NULL))),
-	CONSTRAINT "runtime_attempt_verification_shape_check" CHECK ((isolated_kind = 'verification'::isolated_runtime_kind) = (verification_id IS NOT NULL))
+	CONSTRAINT "runtime_attempt_app_ready_shape" CHECK ((jsonb_typeof("factory"."runtime_attempt"."app_ready_at") = 'object'::text) AND (octet_length(("factory"."runtime_attempt"."app_ready_at")::text) <= 4096)),
+	CONSTRAINT "runtime_attempt_declared_apps_check" CHECK (jsonb_typeof("factory"."runtime_attempt"."declared_apps") = 'array'::text),
+	CONSTRAINT "runtime_attempt_generation_check" CHECK ("factory"."runtime_attempt"."generation" > 0),
+	CONSTRAINT "runtime_attempt_native_owner" CHECK ((
+        ("factory"."runtime_attempt"."workspace_id" IS NOT NULL AND "factory"."runtime_attempt"."isolated_kind" IS NULL AND "factory"."runtime_attempt"."verification_id" IS NULL)
+        OR ("factory"."runtime_attempt"."workspace_id" IS NULL AND "factory"."runtime_attempt"."change_id" IS NULL AND (
+          ("factory"."runtime_attempt"."isolated_kind" = 'verification'::isolated_runtime_kind AND "factory"."runtime_attempt"."verification_id" IS NOT NULL)
+          OR ("factory"."runtime_attempt"."isolated_kind" = ANY (ARRAY['prebuild'::isolated_runtime_kind, 'staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind]) AND "factory"."runtime_attempt"."verification_id" IS NULL)
+        ))
+      ) IS TRUE)
 );
 
 CREATE TABLE "factory"."runtime_compute_wait" (
 	"attempt_id" uuid PRIMARY KEY NOT NULL,
 	"reason" text DEFAULT 'compute-capacity' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "runtime_compute_wait_reason_check" CHECK (reason = ANY (ARRAY['compute-capacity'::text, 'accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text]))
+	CONSTRAINT "runtime_compute_wait_reason_check" CHECK ("factory"."runtime_compute_wait"."reason" = ANY (ARRAY['compute-capacity'::text, 'accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text]))
 );
 
 CREATE TABLE "factory"."runtime_environment_intent" (
@@ -4050,16 +4044,16 @@ CREATE TABLE "factory"."runtime_environment_intent" (
 	"version" bigint NOT NULL,
 	"secret_key" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "runtime_environment_intent_version_check" CHECK (version >= 0),
-	CONSTRAINT "runtime_environment_intent_environment_check" CHECK (environment = ANY (ARRAY['development'::text, 'main-preview'::text]))
+	CONSTRAINT "runtime_environment_intent_version_check" CHECK ("factory"."runtime_environment_intent"."version" >= 0),
+	CONSTRAINT "runtime_environment_intent_environment_check" CHECK ("factory"."runtime_environment_intent"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text]))
 );
 
 CREATE TABLE "factory"."schema_migration" (
 	"version" integer PRIMARY KEY NOT NULL,
 	"applied_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"source_digest" text NOT NULL,
-	CONSTRAINT "schema_migration_version_check" CHECK (version = 1),
-	CONSTRAINT "schema_migration_source_digest_check" CHECK (source_digest ~ '^[a-f0-9]{64}$'::text)
+	CONSTRAINT "schema_migration_version_check" CHECK ("factory"."schema_migration"."version" = 1),
+	CONSTRAINT "schema_migration_source_digest_check" CHECK ("factory"."schema_migration"."source_digest" ~ '^[a-f0-9]{64}$'::text)
 );
 
 CREATE TABLE "auth"."scimConnectionBinding" (
@@ -4191,16 +4185,16 @@ CREATE TABLE "factory"."session_archive" (
 	"retry_after" timestamp with time zone DEFAULT now() NOT NULL,
 	"saved_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "session_archive_attempts_check" CHECK (attempts >= 0),
-	CONSTRAINT "session_archive_check" CHECK ((state = 'saved'::text) = (saved_at IS NOT NULL)),
-	CONSTRAINT "session_archive_check1" CHECK ((state <> 'saved'::text) OR ((manifest_key IS NOT NULL) AND (manifest_sha256 IS NOT NULL) AND (through_message_id IS NOT NULL) AND (producer_version IS NOT NULL) AND (summary IS NOT NULL))),
-	CONSTRAINT "session_archive_last_error_check" CHECK (length(last_error) <= 2000),
-	CONSTRAINT "session_archive_manifest_sha256_check" CHECK (manifest_sha256 ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "session_archive_prompt_id_check" CHECK ((length(prompt_id) >= 1) AND (length(prompt_id) <= 200)),
-	CONSTRAINT "session_archive_session_id_check" CHECK ((length(session_id) >= 1) AND (length(session_id) <= 200)),
-	CONSTRAINT "session_archive_source_refs_check" CHECK ((jsonb_typeof(source_refs) = 'object'::text) AND (octet_length((source_refs)::text) <= 16384)),
-	CONSTRAINT "session_archive_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'failed'::text, 'saved'::text])),
-	CONSTRAINT "session_archive_summary_check" CHECK ((jsonb_typeof(summary) = 'object'::text) AND (octet_length((summary)::text) <= 16384))
+	CONSTRAINT "session_archive_attempts_check" CHECK ("factory"."session_archive"."attempts" >= 0),
+	CONSTRAINT "session_archive_check" CHECK (("factory"."session_archive"."state" = 'saved'::text) = ("factory"."session_archive"."saved_at" IS NOT NULL)),
+	CONSTRAINT "session_archive_check1" CHECK (("factory"."session_archive"."state" <> 'saved'::text) OR (("factory"."session_archive"."manifest_key" IS NOT NULL) AND ("factory"."session_archive"."manifest_sha256" IS NOT NULL) AND ("factory"."session_archive"."through_message_id" IS NOT NULL) AND ("factory"."session_archive"."producer_version" IS NOT NULL) AND ("factory"."session_archive"."summary" IS NOT NULL))),
+	CONSTRAINT "session_archive_last_error_check" CHECK (length("factory"."session_archive"."last_error") <= 2000),
+	CONSTRAINT "session_archive_manifest_sha256_check" CHECK ("factory"."session_archive"."manifest_sha256" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "session_archive_prompt_id_check" CHECK ((length("factory"."session_archive"."prompt_id") >= 1) AND (length("factory"."session_archive"."prompt_id") <= 200)),
+	CONSTRAINT "session_archive_session_id_check" CHECK ((length("factory"."session_archive"."session_id") >= 1) AND (length("factory"."session_archive"."session_id") <= 200)),
+	CONSTRAINT "session_archive_source_refs_check" CHECK ((jsonb_typeof("factory"."session_archive"."source_refs") = 'object'::text) AND (octet_length(("factory"."session_archive"."source_refs")::text) <= 16384)),
+	CONSTRAINT "session_archive_state_check" CHECK ("factory"."session_archive"."state" = ANY (ARRAY['pending'::text, 'failed'::text, 'saved'::text])),
+	CONSTRAINT "session_archive_summary_check" CHECK ((jsonb_typeof("factory"."session_archive"."summary") = 'object'::text) AND (octet_length(("factory"."session_archive"."summary")::text) <= 16384))
 );
 
 CREATE TABLE "factory"."shared_document_resolution" (
@@ -4213,7 +4207,7 @@ CREATE TABLE "factory"."shared_document_resolution" (
 	"disk_version" text NOT NULL,
 	"result" jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "shared_document_resolution_choice_check" CHECK (choice = ANY (ARRAY['keep-shared'::text, 'use-saved'::text]))
+	CONSTRAINT "shared_document_resolution_choice_check" CHECK ("factory"."shared_document_resolution"."choice" = ANY (ARRAY['keep-shared'::text, 'use-saved'::text]))
 );
 
 CREATE TABLE "factory"."skill_library" (
@@ -4223,8 +4217,8 @@ CREATE TABLE "factory"."skill_library" (
 	"owner_id" uuid,
 	"project_id" uuid,
 	CONSTRAINT "skill_library_storage_key_key" UNIQUE("storage_key"),
-	CONSTRAINT "skill_library_check" CHECK (((scope = 'personal'::text) AND (owner_id IS NOT NULL) AND (project_id IS NULL)) OR ((scope = 'project'::text) AND (owner_id IS NULL) AND (project_id IS NOT NULL)) OR ((scope = 'system'::text) AND (owner_id IS NULL) AND (project_id IS NULL))),
-	CONSTRAINT "skill_library_scope_check" CHECK (scope = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text]))
+	CONSTRAINT "skill_library_check" CHECK ((("factory"."skill_library"."scope" = 'personal'::text) AND ("factory"."skill_library"."owner_id" IS NOT NULL) AND ("factory"."skill_library"."project_id" IS NULL)) OR (("factory"."skill_library"."scope" = 'project'::text) AND ("factory"."skill_library"."owner_id" IS NULL) AND ("factory"."skill_library"."project_id" IS NOT NULL)) OR (("factory"."skill_library"."scope" = 'system'::text) AND ("factory"."skill_library"."owner_id" IS NULL) AND ("factory"."skill_library"."project_id" IS NULL))),
+	CONSTRAINT "skill_library_scope_check" CHECK ("factory"."skill_library"."scope" = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text]))
 );
 
 CREATE TABLE "factory"."skill_library_choice" (
@@ -4237,11 +4231,11 @@ CREATE TABLE "factory"."skill_library_choice" (
 	"revision_id" uuid NOT NULL,
 	"version" bigint NOT NULL,
 	CONSTRAINT "skill_library_choice_pkey" PRIMARY KEY("library_id","scope","context_id","user_id","role"),
-	CONSTRAINT "skill_library_choice_check" CHECK ((state <> 'required'::text) OR (scope <> 'personal'::text)),
-	CONSTRAINT "skill_library_choice_role_check" CHECK (role = ANY (ARRAY['planning'::text, 'build'::text])),
-	CONSTRAINT "skill_library_choice_scope_check" CHECK (scope = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text])),
-	CONSTRAINT "skill_library_choice_state_check" CHECK (state = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])),
-	CONSTRAINT "skill_library_choice_version_check" CHECK (version > 0)
+	CONSTRAINT "skill_library_choice_check" CHECK (("factory"."skill_library_choice"."state" <> 'required'::text) OR ("factory"."skill_library_choice"."scope" <> 'personal'::text)),
+	CONSTRAINT "skill_library_choice_role_check" CHECK ("factory"."skill_library_choice"."role" = ANY (ARRAY['planning'::text, 'build'::text])),
+	CONSTRAINT "skill_library_choice_scope_check" CHECK ("factory"."skill_library_choice"."scope" = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text])),
+	CONSTRAINT "skill_library_choice_state_check" CHECK ("factory"."skill_library_choice"."state" = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])),
+	CONSTRAINT "skill_library_choice_version_check" CHECK ("factory"."skill_library_choice"."version" > 0)
 );
 
 CREATE TABLE "factory"."skill_library_cover" (
@@ -4249,8 +4243,8 @@ CREATE TABLE "factory"."skill_library_cover" (
 	"cover_key" text NOT NULL,
 	"version" bigint NOT NULL,
 	"updated_by" uuid NOT NULL,
-	CONSTRAINT "skill_library_cover_cover_key_check" CHECK (cover_key ~ '^[a-z][a-z-]{1,63}$'::text),
-	CONSTRAINT "skill_library_cover_version_check" CHECK (version > 0)
+	CONSTRAINT "skill_library_cover_cover_key_check" CHECK ("factory"."skill_library_cover"."cover_key" ~ '^[a-z][a-z-]{1,63}$'::text),
+	CONSTRAINT "skill_library_cover_version_check" CHECK ("factory"."skill_library_cover"."version" > 0)
 );
 
 CREATE TABLE "factory"."skill_library_revision" (
@@ -4275,10 +4269,10 @@ CREATE TABLE "factory"."skill_revision" (
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "skill_revision_skill_key_revision_key" UNIQUE("skill_key","revision"),
-	CONSTRAINT "skill_revision_skill_key_check" CHECK (skill_key ~ '^[a-z][a-z0-9-]{1,63}$'::text),
-	CONSTRAINT "skill_revision_content_check" CHECK ((jsonb_typeof(content) = 'object'::text) AND (octet_length((content)::text) <= 2100000)),
-	CONSTRAINT "skill_revision_content_digest_check" CHECK (content_digest ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "skill_revision_revision_check" CHECK (revision > 0)
+	CONSTRAINT "skill_revision_skill_key_check" CHECK ("factory"."skill_revision"."skill_key" ~ '^[a-z][a-z0-9-]{1,63}$'::text),
+	CONSTRAINT "skill_revision_content_check" CHECK ((jsonb_typeof("factory"."skill_revision"."content") = 'object'::text) AND (octet_length(("factory"."skill_revision"."content")::text) <= 2100000)),
+	CONSTRAINT "skill_revision_content_digest_check" CHECK ("factory"."skill_revision"."content_digest" ~ '^[a-f0-9]{64}$'::text),
+	CONSTRAINT "skill_revision_revision_check" CHECK ("factory"."skill_revision"."revision" > 0)
 );
 
 CREATE TABLE "factory"."skill_share_proposal" (
@@ -4288,8 +4282,8 @@ CREATE TABLE "factory"."skill_share_proposal" (
 	"target" text NOT NULL,
 	"project_id" uuid,
 	"accepted_library_id" uuid,
-	CONSTRAINT "skill_share_proposal_check" CHECK ((target = 'project'::text) = (project_id IS NOT NULL)),
-	CONSTRAINT "skill_share_proposal_target_check" CHECK (target = ANY (ARRAY['system'::text, 'project'::text]))
+	CONSTRAINT "skill_share_proposal_check" CHECK (("factory"."skill_share_proposal"."target" = 'project'::text) = ("factory"."skill_share_proposal"."project_id" IS NOT NULL)),
+	CONSTRAINT "skill_share_proposal_target_check" CHECK ("factory"."skill_share_proposal"."target" = ANY (ARRAY['system'::text, 'project'::text]))
 );
 
 CREATE TABLE "auth"."ssoProvider" (
@@ -4308,7 +4302,7 @@ CREATE TABLE "factory"."staging_configuration" (
 	"runtime_attempt_id" uuid PRIMARY KEY NOT NULL,
 	"declaration" jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "staging_configuration_declaration_check" CHECK (jsonb_typeof(declaration) = 'object'::text)
+	CONSTRAINT "staging_configuration_declaration_check" CHECK (jsonb_typeof("factory"."staging_configuration"."declaration") = 'object'::text)
 );
 
 CREATE TABLE "factory"."staging_preview" (
@@ -4318,7 +4312,7 @@ CREATE TABLE "factory"."staging_preview" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "staging_preview_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "staging_preview_revision_check" CHECK (revision ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
+	CONSTRAINT "staging_preview_revision_check" CHECK ("factory"."staging_preview"."revision" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
 );
 
 CREATE TABLE "factory"."substrate_actor_rpc" (
@@ -4334,13 +4328,13 @@ CREATE TABLE "factory"."substrate_actor_rpc" (
 	"outcome" jsonb,
 	"outcome_recorded_at" timestamp with time zone,
 	CONSTRAINT "substrate_actor_rpc_pkey" PRIMARY KEY("runtime_attempt_id","action","origin_key"),
-	CONSTRAINT "substrate_actor_rpc_action_check" CHECK (action = ANY (ARRAY['resume'::text, 'suspend'::text])),
-	CONSTRAINT "substrate_actor_rpc_native_version_check" CHECK (native_version ~ '^[1-9][0-9]*$'::text),
-	CONSTRAINT "substrate_actor_rpc_origin_checkpoint_check" CHECK (jsonb_typeof(origin_checkpoint) = 'object'::text),
-	CONSTRAINT "substrate_actor_rpc_outcome_check" CHECK ((jsonb_typeof(outcome) = 'object'::text) AND (octet_length((outcome)::text) <= 65536)),
-	CONSTRAINT "substrate_actor_rpc_check" CHECK (origin_key = COALESCE((origin_checkpoint ->> 'uuid'::text), 'initial'::text)),
-	CONSTRAINT "substrate_actor_rpc_check1" CHECK ((outcome IS NULL) = (outcome_recorded_at IS NULL)),
-	CONSTRAINT "substrate_actor_rpc_check2" CHECK ((outcome IS NULL) OR (attempted_at IS NOT NULL))
+	CONSTRAINT "substrate_actor_rpc_action_check" CHECK ("factory"."substrate_actor_rpc"."action" = ANY (ARRAY['resume'::text, 'suspend'::text])),
+	CONSTRAINT "substrate_actor_rpc_native_version_check" CHECK ("factory"."substrate_actor_rpc"."native_version" ~ '^[1-9][0-9]*$'::text),
+	CONSTRAINT "substrate_actor_rpc_origin_checkpoint_check" CHECK (jsonb_typeof("factory"."substrate_actor_rpc"."origin_checkpoint") = 'object'::text),
+	CONSTRAINT "substrate_actor_rpc_outcome_check" CHECK ((jsonb_typeof("factory"."substrate_actor_rpc"."outcome") = 'object'::text) AND (octet_length(("factory"."substrate_actor_rpc"."outcome")::text) <= 65536)),
+	CONSTRAINT "substrate_actor_rpc_check" CHECK ("factory"."substrate_actor_rpc"."origin_key" = COALESCE(("factory"."substrate_actor_rpc"."origin_checkpoint" ->> 'uuid'::text), 'initial'::text)),
+	CONSTRAINT "substrate_actor_rpc_check1" CHECK (("factory"."substrate_actor_rpc"."outcome" IS NULL) = ("factory"."substrate_actor_rpc"."outcome_recorded_at" IS NULL)),
+	CONSTRAINT "substrate_actor_rpc_check2" CHECK (("factory"."substrate_actor_rpc"."outcome" IS NULL) OR ("factory"."substrate_actor_rpc"."attempted_at" IS NOT NULL))
 );
 
 CREATE TABLE "factory"."substrate_binding" (
@@ -4358,16 +4352,16 @@ CREATE TABLE "factory"."substrate_binding" (
 	CONSTRAINT "substrate_binding_atespace_actor_name_key" UNIQUE("atespace","actor_name"),
 	CONSTRAINT "substrate_binding_atespace_key" UNIQUE("atespace"),
 	CONSTRAINT "substrate_binding_actor_uid_key" UNIQUE("actor_uid"),
-	CONSTRAINT "substrate_binding_check" CHECK ((actor_uid IS NULL) OR (create_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_binding_check1" CHECK ((deleted_at IS NULL) OR (delete_intended_at IS NOT NULL)),
-	CONSTRAINT "substrate_binding_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text)
+	CONSTRAINT "substrate_binding_check" CHECK (("factory"."substrate_binding"."actor_uid" IS NULL) OR ("factory"."substrate_binding"."create_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_binding_check1" CHECK (("factory"."substrate_binding"."deleted_at" IS NULL) OR ("factory"."substrate_binding"."delete_intended_at" IS NOT NULL)),
+	CONSTRAINT "substrate_binding_intent_check" CHECK (jsonb_typeof("factory"."substrate_binding"."intent") = 'object'::text)
 );
 
 CREATE TABLE "factory"."substrate_capacity_installation" (
 	"owner" text PRIMARY KEY NOT NULL,
 	"intent" jsonb NOT NULL,
-	CONSTRAINT "substrate_capacity_installation_owner_check" CHECK (owner ~ '^[a-f0-9]{32}$'::text),
-	CONSTRAINT "substrate_capacity_installation_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text)
+	CONSTRAINT "substrate_capacity_installation_owner_check" CHECK ("factory"."substrate_capacity_installation"."owner" ~ '^[a-f0-9]{32}$'::text),
+	CONSTRAINT "substrate_capacity_installation_intent_check" CHECK (jsonb_typeof("factory"."substrate_capacity_installation"."intent") = 'object'::text)
 );
 
 CREATE TABLE "factory"."substrate_input_stop" (
@@ -4387,15 +4381,15 @@ CREATE TABLE "factory"."substrate_input_stop" (
 	"completed_source_checkpoint_id" uuid,
 	"completed_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "substrate_input_stop_assignment_check" CHECK ((jsonb_typeof(assignment) = 'object'::text) AND (octet_length((assignment)::text) <= 8192)),
-	CONSTRAINT "substrate_input_stop_checkpoint_check" CHECK (jsonb_typeof(checkpoint) = 'object'::text),
-	CONSTRAINT "substrate_input_stop_source_writer_epoch_check" CHECK (source_writer_epoch > 0),
-	CONSTRAINT "substrate_input_stop_result_check" CHECK ((jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 8192)),
-	CONSTRAINT "substrate_input_stop_check" CHECK ((source_checkpoint_id IS NULL) = (source_writer_epoch IS NULL)),
-	CONSTRAINT "substrate_input_stop_check1" CHECK ((resume_attempted_at IS NULL) OR (source_checkpoint_id IS NOT NULL)),
-	CONSTRAINT "substrate_input_stop_check2" CHECK ((result IS NULL) OR (resume_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_input_stop_check3" CHECK ((snapshot_attempted_at IS NULL) OR (resume_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_input_stop_check4" CHECK ((completed_at IS NULL) OR ((result IS NOT NULL) AND ((result -> 'confirmed'::text) = 'true'::jsonb) AND (completed_checkpoint IS NOT NULL) AND (completed_source_checkpoint_id IS NOT NULL)))
+	CONSTRAINT "substrate_input_stop_assignment_check" CHECK ((jsonb_typeof("factory"."substrate_input_stop"."assignment") = 'object'::text) AND (octet_length(("factory"."substrate_input_stop"."assignment")::text) <= 8192)),
+	CONSTRAINT "substrate_input_stop_checkpoint_check" CHECK (jsonb_typeof("factory"."substrate_input_stop"."checkpoint") = 'object'::text),
+	CONSTRAINT "substrate_input_stop_source_writer_epoch_check" CHECK ("factory"."substrate_input_stop"."source_writer_epoch" > 0),
+	CONSTRAINT "substrate_input_stop_result_check" CHECK ((jsonb_typeof("factory"."substrate_input_stop"."result") = 'object'::text) AND (octet_length(("factory"."substrate_input_stop"."result")::text) <= 8192)),
+	CONSTRAINT "substrate_input_stop_check" CHECK (("factory"."substrate_input_stop"."source_checkpoint_id" IS NULL) = ("factory"."substrate_input_stop"."source_writer_epoch" IS NULL)),
+	CONSTRAINT "substrate_input_stop_check1" CHECK (("factory"."substrate_input_stop"."resume_attempted_at" IS NULL) OR ("factory"."substrate_input_stop"."source_checkpoint_id" IS NOT NULL)),
+	CONSTRAINT "substrate_input_stop_check2" CHECK (("factory"."substrate_input_stop"."result" IS NULL) OR ("factory"."substrate_input_stop"."resume_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_input_stop_check3" CHECK (("factory"."substrate_input_stop"."snapshot_attempted_at" IS NULL) OR ("factory"."substrate_input_stop"."resume_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_input_stop_check4" CHECK (("factory"."substrate_input_stop"."completed_at" IS NULL) OR (("factory"."substrate_input_stop"."result" IS NOT NULL) AND (("factory"."substrate_input_stop"."result" -> 'confirmed'::text) = 'true'::jsonb) AND ("factory"."substrate_input_stop"."completed_checkpoint" IS NOT NULL) AND ("factory"."substrate_input_stop"."completed_source_checkpoint_id" IS NOT NULL)))
 );
 
 CREATE TABLE "factory"."substrate_isolated" (
@@ -4416,15 +4410,15 @@ CREATE TABLE "factory"."substrate_isolated" (
 	"template" jsonb,
 	CONSTRAINT "substrate_isolated_pkey" PRIMARY KEY("owner_id","kind","generation"),
 	CONSTRAINT "substrate_isolated_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "substrate_isolated_check" CHECK ((atespace IS NULL) OR ((atespace_attempted_at IS NOT NULL) AND (jsonb_typeof(atespace) = 'object'::text))),
-	CONSTRAINT "substrate_isolated_check1" CHECK ((policy IS NULL) OR ((policy_attempted_at IS NOT NULL) AND (jsonb_typeof(policy) = 'object'::text))),
-	CONSTRAINT "substrate_isolated_check2" CHECK ((template IS NULL) OR ((template_attempted_at IS NOT NULL) AND (jsonb_typeof(template) = 'object'::text))),
-	CONSTRAINT "substrate_isolated_check3" CHECK ((kind = 'staging'::text) OR (generation = 1)),
-	CONSTRAINT "substrate_isolated_check4" CHECK (((intent ->> 'promotionID'::text) IS NULL) OR ((kind = 'staging'::text) AND (generation = 1))),
-	CONSTRAINT "substrate_isolated_check5" CHECK ((kind = 'staging'::text) = (jsonb_typeof((intent -> 'declaration'::text)) = 'object'::text)),
-	CONSTRAINT "substrate_isolated_generation_check" CHECK (generation > 0),
-	CONSTRAINT "substrate_isolated_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text),
-	CONSTRAINT "substrate_isolated_kind_check" CHECK (kind = ANY (ARRAY['staging'::text, 'publication'::text]))
+	CONSTRAINT "substrate_isolated_check" CHECK (("factory"."substrate_isolated"."atespace" IS NULL) OR (("factory"."substrate_isolated"."atespace_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_isolated"."atespace") = 'object'::text))),
+	CONSTRAINT "substrate_isolated_check1" CHECK (("factory"."substrate_isolated"."policy" IS NULL) OR (("factory"."substrate_isolated"."policy_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_isolated"."policy") = 'object'::text))),
+	CONSTRAINT "substrate_isolated_check2" CHECK (("factory"."substrate_isolated"."template" IS NULL) OR (("factory"."substrate_isolated"."template_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_isolated"."template") = 'object'::text))),
+	CONSTRAINT "substrate_isolated_check3" CHECK (("factory"."substrate_isolated"."kind" = 'staging'::text) OR ("factory"."substrate_isolated"."generation" = 1)),
+	CONSTRAINT "substrate_isolated_check4" CHECK ((("factory"."substrate_isolated"."intent" ->> 'promotionID'::text) IS NULL) OR (("factory"."substrate_isolated"."kind" = 'staging'::text) AND ("factory"."substrate_isolated"."generation" = 1))),
+	CONSTRAINT "substrate_isolated_check5" CHECK (("factory"."substrate_isolated"."kind" = 'staging'::text) = (jsonb_typeof(("factory"."substrate_isolated"."intent" -> 'declaration'::text)) = 'object'::text)),
+	CONSTRAINT "substrate_isolated_generation_check" CHECK ("factory"."substrate_isolated"."generation" > 0),
+	CONSTRAINT "substrate_isolated_intent_check" CHECK (jsonb_typeof("factory"."substrate_isolated"."intent") = 'object'::text),
+	CONSTRAINT "substrate_isolated_kind_check" CHECK ("factory"."substrate_isolated"."kind" = ANY (ARRAY['staging'::text, 'publication'::text]))
 );
 
 CREATE TABLE "factory"."substrate_prebuild" (
@@ -4442,11 +4436,11 @@ CREATE TABLE "factory"."substrate_prebuild" (
 	"template_rejected" boolean DEFAULT false NOT NULL,
 	"template" jsonb,
 	CONSTRAINT "substrate_prebuild_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "substrate_prebuild_check" CHECK ((atespace IS NULL) OR ((atespace_attempted_at IS NOT NULL) AND (jsonb_typeof(atespace) = 'object'::text))),
-	CONSTRAINT "substrate_prebuild_check1" CHECK ((policy IS NULL) OR ((policy_attempted_at IS NOT NULL) AND (jsonb_typeof(policy) = 'object'::text))),
-	CONSTRAINT "substrate_prebuild_check2" CHECK ((template IS NULL) OR ((template_attempted_at IS NOT NULL) AND (jsonb_typeof(template) = 'object'::text))),
-	CONSTRAINT "substrate_prebuild_generation_check" CHECK (generation = 1),
-	CONSTRAINT "substrate_prebuild_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text)
+	CONSTRAINT "substrate_prebuild_check" CHECK (("factory"."substrate_prebuild"."atespace" IS NULL) OR (("factory"."substrate_prebuild"."atespace_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_prebuild"."atespace") = 'object'::text))),
+	CONSTRAINT "substrate_prebuild_check1" CHECK (("factory"."substrate_prebuild"."policy" IS NULL) OR (("factory"."substrate_prebuild"."policy_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_prebuild"."policy") = 'object'::text))),
+	CONSTRAINT "substrate_prebuild_check2" CHECK (("factory"."substrate_prebuild"."template" IS NULL) OR (("factory"."substrate_prebuild"."template_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_prebuild"."template") = 'object'::text))),
+	CONSTRAINT "substrate_prebuild_generation_check" CHECK ("factory"."substrate_prebuild"."generation" = 1),
+	CONSTRAINT "substrate_prebuild_intent_check" CHECK (jsonb_typeof("factory"."substrate_prebuild"."intent") = 'object'::text)
 );
 
 CREATE TABLE "factory"."substrate_source" (
@@ -4459,12 +4453,12 @@ CREATE TABLE "factory"."substrate_source" (
 	"checkpoint_id" uuid,
 	"checkpoint" jsonb,
 	"service_base" uuid,
-	CONSTRAINT "substrate_source_check" CHECK ((generation = 0) = (checkpoint IS NULL)),
-	CONSTRAINT "substrate_source_check1" CHECK (writable = (checkpoint_id IS NULL)),
-	CONSTRAINT "substrate_source_check2" CHECK ((owner <> 'service'::text) OR (service_base IS NOT NULL)),
-	CONSTRAINT "substrate_source_generation_check" CHECK (generation >= 0),
-	CONSTRAINT "substrate_source_owner_check" CHECK (owner = ANY (ARRAY['actor'::text, 'service'::text])),
-	CONSTRAINT "substrate_source_writer_epoch_check" CHECK (writer_epoch > 0)
+	CONSTRAINT "substrate_source_check" CHECK (("factory"."substrate_source"."generation" = 0) = ("factory"."substrate_source"."checkpoint" IS NULL)),
+	CONSTRAINT "substrate_source_check1" CHECK ("factory"."substrate_source"."writable" = ("factory"."substrate_source"."checkpoint_id" IS NULL)),
+	CONSTRAINT "substrate_source_check2" CHECK (("factory"."substrate_source"."owner" <> 'service'::text) OR ("factory"."substrate_source"."service_base" IS NOT NULL)),
+	CONSTRAINT "substrate_source_generation_check" CHECK ("factory"."substrate_source"."generation" >= 0),
+	CONSTRAINT "substrate_source_owner_check" CHECK ("factory"."substrate_source"."owner" = ANY (ARRAY['actor'::text, 'service'::text])),
+	CONSTRAINT "substrate_source_writer_epoch_check" CHECK ("factory"."substrate_source"."writer_epoch" > 0)
 );
 
 CREATE TABLE "factory"."substrate_verification" (
@@ -4483,14 +4477,14 @@ CREATE TABLE "factory"."substrate_verification" (
 	"template" jsonb,
 	CONSTRAINT "substrate_verification_pkey" PRIMARY KEY("runtime_attempt_id"),
 	CONSTRAINT "substrate_verification_verification_id_generation_key" UNIQUE("verification_id","generation"),
-	CONSTRAINT "substrate_verification_atespace_check" CHECK ((atespace IS NULL) OR (jsonb_typeof(atespace) = 'object'::text)),
-	CONSTRAINT "substrate_verification_check" CHECK ((atespace IS NULL) OR (atespace_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_verification_check1" CHECK ((policy IS NULL) OR (policy_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_verification_check2" CHECK ((template IS NULL) OR (template_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_verification_generation_check" CHECK (generation > 0),
-	CONSTRAINT "substrate_verification_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text),
-	CONSTRAINT "substrate_verification_policy_check" CHECK ((policy IS NULL) OR (jsonb_typeof(policy) = 'object'::text)),
-	CONSTRAINT "substrate_verification_template_check" CHECK ((template IS NULL) OR (jsonb_typeof(template) = 'object'::text))
+	CONSTRAINT "substrate_verification_atespace_check" CHECK (("factory"."substrate_verification"."atespace" IS NULL) OR (jsonb_typeof("factory"."substrate_verification"."atespace") = 'object'::text)),
+	CONSTRAINT "substrate_verification_check" CHECK (("factory"."substrate_verification"."atespace" IS NULL) OR ("factory"."substrate_verification"."atespace_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_verification_check1" CHECK (("factory"."substrate_verification"."policy" IS NULL) OR ("factory"."substrate_verification"."policy_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_verification_check2" CHECK (("factory"."substrate_verification"."template" IS NULL) OR ("factory"."substrate_verification"."template_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_verification_generation_check" CHECK ("factory"."substrate_verification"."generation" > 0),
+	CONSTRAINT "substrate_verification_intent_check" CHECK (jsonb_typeof("factory"."substrate_verification"."intent") = 'object'::text),
+	CONSTRAINT "substrate_verification_policy_check" CHECK (("factory"."substrate_verification"."policy" IS NULL) OR (jsonb_typeof("factory"."substrate_verification"."policy") = 'object'::text)),
+	CONSTRAINT "substrate_verification_template_check" CHECK (("factory"."substrate_verification"."template" IS NULL) OR (jsonb_typeof("factory"."substrate_verification"."template") = 'object'::text))
 );
 
 CREATE TABLE "factory"."substrate_worker_capacity" (
@@ -4501,10 +4495,10 @@ CREATE TABLE "factory"."substrate_worker_capacity" (
 	"rejected" boolean DEFAULT false NOT NULL,
 	"pool" jsonb,
 	CONSTRAINT "substrate_worker_capacity_pkey" PRIMARY KEY("owner","node_uid"),
-	CONSTRAINT "substrate_worker_capacity_check" CHECK ((pool IS NULL) OR (attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_worker_capacity_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text),
-	CONSTRAINT "substrate_worker_capacity_owner_check" CHECK (owner ~ '^[a-f0-9]{32}$'::text),
-	CONSTRAINT "substrate_worker_capacity_pool_check" CHECK ((pool IS NULL) OR (jsonb_typeof(pool) = 'object'::text))
+	CONSTRAINT "substrate_worker_capacity_check" CHECK (("factory"."substrate_worker_capacity"."pool" IS NULL) OR ("factory"."substrate_worker_capacity"."attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_worker_capacity_intent_check" CHECK (jsonb_typeof("factory"."substrate_worker_capacity"."intent") = 'object'::text),
+	CONSTRAINT "substrate_worker_capacity_owner_check" CHECK ("factory"."substrate_worker_capacity"."owner" ~ '^[a-f0-9]{32}$'::text),
+	CONSTRAINT "substrate_worker_capacity_pool_check" CHECK (("factory"."substrate_worker_capacity"."pool" IS NULL) OR (jsonb_typeof("factory"."substrate_worker_capacity"."pool") = 'object'::text))
 );
 
 CREATE TABLE "factory"."substrate_workspace" (
@@ -4521,11 +4515,11 @@ CREATE TABLE "factory"."substrate_workspace" (
 	"template_rejected" boolean DEFAULT false NOT NULL,
 	"template" jsonb,
 	CONSTRAINT "substrate_workspace_pkey" PRIMARY KEY("workspace_id","generation"),
-	CONSTRAINT "substrate_workspace_check" CHECK ((atespace IS NULL) OR (atespace_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_workspace_check1" CHECK ((policy IS NULL) OR (policy_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_workspace_check2" CHECK ((template IS NULL) OR (template_attempted_at IS NOT NULL)),
-	CONSTRAINT "substrate_workspace_generation_check" CHECK ((generation > 0) AND (generation <= '9007199254740991'::bigint)),
-	CONSTRAINT "substrate_workspace_intent_check" CHECK (jsonb_typeof(intent) = 'object'::text)
+	CONSTRAINT "substrate_workspace_check" CHECK (("factory"."substrate_workspace"."atespace" IS NULL) OR ("factory"."substrate_workspace"."atespace_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_workspace_check1" CHECK (("factory"."substrate_workspace"."policy" IS NULL) OR ("factory"."substrate_workspace"."policy_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_workspace_check2" CHECK (("factory"."substrate_workspace"."template" IS NULL) OR ("factory"."substrate_workspace"."template_attempted_at" IS NOT NULL)),
+	CONSTRAINT "substrate_workspace_generation_check" CHECK (("factory"."substrate_workspace"."generation" > 0) AND ("factory"."substrate_workspace"."generation" <= '9007199254740991'::bigint)),
+	CONSTRAINT "substrate_workspace_intent_check" CHECK (jsonb_typeof("factory"."substrate_workspace"."intent") = 'object'::text)
 );
 
 CREATE TABLE "factory"."technical_design_revision" (
@@ -4548,13 +4542,13 @@ CREATE TABLE "factory"."technical_design_revision" (
 	CONSTRAINT "technical_design_revision_id_ticket_id_requirement_revision_key" UNIQUE("id","ticket_id","requirement_revision_id"),
 	CONSTRAINT "technical_design_revision_ticket_id_ordinal_key" UNIQUE("ticket_id","ordinal"),
 	CONSTRAINT "technical_design_revision_turn_id_key" UNIQUE("turn_id"),
-	CONSTRAINT "technical_design_revision_author_kind_check" CHECK (author_kind = ANY (ARRAY['human'::text, 'ai'::text])),
-	CONSTRAINT "technical_design_revision_canonical_content_check" CHECK ((length(canonical_content) >= 1) AND (length(canonical_content) <= 100000)),
-	CONSTRAINT "technical_design_revision_check" CHECK (content_digest = encode(digest(convert_to(canonical_content, 'UTF8'::name), 'sha256'::text), 'hex'::text)),
-	CONSTRAINT "technical_design_revision_citations_check" CHECK (jsonb_typeof(citations) = 'array'::text),
-	CONSTRAINT "technical_design_revision_diagram_renders_check" CHECK (jsonb_typeof(diagram_renders) = 'array'::text),
-	CONSTRAINT "technical_design_revision_ordinal_check" CHECK (ordinal > 0),
-	CONSTRAINT "technical_design_revision_source_commit_check" CHECK (source_commit ~ '^[a-f0-9]{40}$'::text)
+	CONSTRAINT "technical_design_revision_author_kind_check" CHECK ("factory"."technical_design_revision"."author_kind" = ANY (ARRAY['human'::text, 'ai'::text])),
+	CONSTRAINT "technical_design_revision_canonical_content_check" CHECK ((length("factory"."technical_design_revision"."canonical_content") >= 1) AND (length("factory"."technical_design_revision"."canonical_content") <= 100000)),
+	CONSTRAINT "technical_design_revision_check" CHECK ("factory"."technical_design_revision"."content_digest" = encode(digest(convert_to("factory"."technical_design_revision"."canonical_content", 'UTF8'::name), 'sha256'::text), 'hex'::text)),
+	CONSTRAINT "technical_design_revision_citations_check" CHECK (jsonb_typeof("factory"."technical_design_revision"."citations") = 'array'::text),
+	CONSTRAINT "technical_design_revision_diagram_renders_check" CHECK (jsonb_typeof("factory"."technical_design_revision"."diagram_renders") = 'array'::text),
+	CONSTRAINT "technical_design_revision_ordinal_check" CHECK ("factory"."technical_design_revision"."ordinal" > 0),
+	CONSTRAINT "technical_design_revision_source_commit_check" CHECK ("factory"."technical_design_revision"."source_commit" ~ '^[a-f0-9]{40}$'::text)
 );
 
 CREATE TABLE "factory"."ticket" (
@@ -4574,9 +4568,9 @@ CREATE TABLE "factory"."ticket" (
 	"trash_error" text,
 	"converted_to_epic_id" uuid,
 	CONSTRAINT "ticket_id_project_id_key" UNIQUE("id","project_id"),
-	CONSTRAINT "ticket_description_check" CHECK (length(description) <= 10000),
-	CONSTRAINT "ticket_title_check" CHECK ((length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)),
-	CONSTRAINT "ticket_version_check" CHECK (version > 0)
+	CONSTRAINT "ticket_description_check" CHECK (length("factory"."ticket"."description") <= 10000),
+	CONSTRAINT "ticket_title_check" CHECK ((length(btrim("factory"."ticket"."title")) >= 1) AND (length(btrim("factory"."ticket"."title")) <= 200)),
+	CONSTRAINT "ticket_version_check" CHECK ("factory"."ticket"."version" > 0)
 );
 
 CREATE TABLE "factory"."ticket_conversation" (
@@ -4589,7 +4583,7 @@ CREATE TABLE "factory"."ticket_conversation" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"active_coding_context_id" uuid,
-	CONSTRAINT "ticket_conversation_version_check" CHECK (version > 0)
+	CONSTRAINT "ticket_conversation_version_check" CHECK ("factory"."ticket_conversation"."version" > 0)
 );
 
 CREATE TABLE "factory"."ticket_dependency" (
@@ -4599,7 +4593,7 @@ CREATE TABLE "factory"."ticket_dependency" (
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "ticket_dependency_pkey" PRIMARY KEY("project_id","ticket_id","prerequisite_id"),
-	CONSTRAINT "ticket_dependency_check" CHECK (ticket_id <> prerequisite_id)
+	CONSTRAINT "ticket_dependency_check" CHECK ("factory"."ticket_dependency"."ticket_id" <> "factory"."ticket_dependency"."prerequisite_id")
 );
 
 CREATE TABLE "factory"."ticket_document_revision" (
@@ -4618,12 +4612,12 @@ CREATE TABLE "factory"."ticket_document_revision" (
 	"proposal_entry_id" uuid,
 	CONSTRAINT "ticket_document_revision_ticket_id_ordinal_key" UNIQUE("ticket_id","ordinal"),
 	CONSTRAINT "ticket_document_revision_proposal_entry_id_key" UNIQUE("proposal_entry_id"),
-	CONSTRAINT "ticket_document_revision_author_kind_check" CHECK (author_kind = ANY (ARRAY['human'::text, 'ai'::text])),
-	CONSTRAINT "ticket_document_revision_check" CHECK (content_digest = encode(digest(convert_to(canonical_content, 'UTF8'::name), 'sha256'::text), 'hex'::text)),
-	CONSTRAINT "ticket_document_revision_content_digest_check" CHECK (content_digest ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "ticket_document_revision_input_digest_check" CHECK (input_digest ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "ticket_document_revision_ordinal_check" CHECK (ordinal > 0),
-	CONSTRAINT "ticket_document_revision_title_check" CHECK (length(title) > 0)
+	CONSTRAINT "ticket_document_revision_author_kind_check" CHECK ("factory"."ticket_document_revision"."author_kind" = ANY (ARRAY['human'::text, 'ai'::text])),
+	CONSTRAINT "ticket_document_revision_check" CHECK ("factory"."ticket_document_revision"."content_digest" = encode(digest(convert_to("factory"."ticket_document_revision"."canonical_content", 'UTF8'::name), 'sha256'::text), 'hex'::text)),
+	CONSTRAINT "ticket_document_revision_content_digest_check" CHECK ("factory"."ticket_document_revision"."content_digest" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "ticket_document_revision_input_digest_check" CHECK ("factory"."ticket_document_revision"."input_digest" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "ticket_document_revision_ordinal_check" CHECK ("factory"."ticket_document_revision"."ordinal" > 0),
+	CONSTRAINT "ticket_document_revision_title_check" CHECK (length("factory"."ticket_document_revision"."title") > 0)
 );
 
 CREATE TABLE "factory"."ticket_follow" (
@@ -4638,14 +4632,14 @@ CREATE TABLE "factory"."ticket_follow_up" (
 	"source_ticket_id" uuid NOT NULL,
 	"source_document_id" uuid,
 	"source_revision_id" uuid NOT NULL,
-	CONSTRAINT "ticket_follow_up_check" CHECK (ticket_id <> source_ticket_id)
+	CONSTRAINT "ticket_follow_up_check" CHECK ("factory"."ticket_follow_up"."ticket_id" <> "factory"."ticket_follow_up"."source_ticket_id")
 );
 
 CREATE TABLE "factory"."ticket_responsibility" (
 	"ticket_id" uuid PRIMARY KEY NOT NULL,
 	"user_id" uuid,
 	"version" integer DEFAULT 1 NOT NULL,
-	CONSTRAINT "ticket_responsibility_version_check" CHECK (version > 0)
+	CONSTRAINT "ticket_responsibility_version_check" CHECK ("factory"."ticket_responsibility"."version" > 0)
 );
 
 CREATE TABLE "factory"."ticket_responsibility_event" (
@@ -4667,11 +4661,11 @@ CREATE TABLE "factory"."usage_entry" (
 	"known_nano_usd" bigint NOT NULL,
 	"occurred_at" timestamp with time zone NOT NULL,
 	CONSTRAINT "usage_entry_pkey" PRIMARY KEY("operation_id","event_id"),
-	CONSTRAINT "usage_entry_event_id_check" CHECK ((length(event_id) >= 1) AND (length(event_id) <= 400)),
-	CONSTRAINT "usage_entry_known_nano_usd_check" CHECK (known_nano_usd >= 0),
-	CONSTRAINT "usage_entry_nano_usd_check" CHECK (nano_usd >= 0),
-	CONSTRAINT "usage_entry_outcome_check" CHECK (outcome = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])),
-	CONSTRAINT "usage_entry_source_check" CHECK (source = ANY (ARRAY['step'::text, 'title'::text, 'compaction'::text, 'unobserved'::text]))
+	CONSTRAINT "usage_entry_event_id_check" CHECK ((length("factory"."usage_entry"."event_id") >= 1) AND (length("factory"."usage_entry"."event_id") <= 400)),
+	CONSTRAINT "usage_entry_known_nano_usd_check" CHECK ("factory"."usage_entry"."known_nano_usd" >= 0),
+	CONSTRAINT "usage_entry_nano_usd_check" CHECK ("factory"."usage_entry"."nano_usd" >= 0),
+	CONSTRAINT "usage_entry_outcome_check" CHECK ("factory"."usage_entry"."outcome" = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])),
+	CONSTRAINT "usage_entry_source_check" CHECK ("factory"."usage_entry"."source" = ANY (ARRAY['step'::text, 'title'::text, 'compaction'::text, 'unobserved'::text]))
 );
 
 CREATE TABLE "factory"."usage_operation" (
@@ -4686,11 +4680,11 @@ CREATE TABLE "factory"."usage_operation" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"settled_at" timestamp with time zone,
 	"outcome" text,
-	CONSTRAINT "usage_operation_check" CHECK ((settled_at IS NULL) = (outcome IS NULL)),
-	CONSTRAINT "usage_operation_engine_check" CHECK (engine = ANY (ARRAY['opencode'::text, 'mastra'::text])),
-	CONSTRAINT "usage_operation_id_check" CHECK ((length(id) >= 1) AND (length(id) <= 400)),
-	CONSTRAINT "usage_operation_outcome_check" CHECK (outcome = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])),
-	CONSTRAINT "usage_operation_purpose_check" CHECK (purpose = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text, 'learning'::text]))
+	CONSTRAINT "usage_operation_check" CHECK (("factory"."usage_operation"."settled_at" IS NULL) = ("factory"."usage_operation"."outcome" IS NULL)),
+	CONSTRAINT "usage_operation_engine_check" CHECK ("factory"."usage_operation"."engine" = ANY (ARRAY['opencode'::text, 'mastra'::text])),
+	CONSTRAINT "usage_operation_id_check" CHECK ((length("factory"."usage_operation"."id") >= 1) AND (length("factory"."usage_operation"."id") <= 400)),
+	CONSTRAINT "usage_operation_outcome_check" CHECK ("factory"."usage_operation"."outcome" = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text])),
+	CONSTRAINT "usage_operation_purpose_check" CHECK ("factory"."usage_operation"."purpose" = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text, 'learning'::text]))
 );
 
 CREATE TABLE "factory"."usage_rate_override" (
@@ -4701,7 +4695,7 @@ CREATE TABLE "factory"."usage_rate_override" (
 	"updated_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "usage_rate_override_pkey" PRIMARY KEY("provider","model"),
-	CONSTRAINT "usage_rate_override_version_check" CHECK (version > 0)
+	CONSTRAINT "usage_rate_override_version_check" CHECK ("factory"."usage_rate_override"."version" > 0)
 );
 
 CREATE TABLE "factory"."usage_replay_cursor" (
@@ -4710,15 +4704,15 @@ CREATE TABLE "factory"."usage_replay_cursor" (
 	"sequence" bigint NOT NULL,
 	"start_sequence" bigint DEFAULT 0 NOT NULL,
 	CONSTRAINT "usage_replay_cursor_pkey" PRIMARY KEY("operation_id","session_id"),
-	CONSTRAINT "usage_replay_cursor_sequence_check" CHECK (sequence >= 0),
-	CONSTRAINT "usage_replay_cursor_start_sequence_check" CHECK (start_sequence >= 0)
+	CONSTRAINT "usage_replay_cursor_sequence_check" CHECK ("factory"."usage_replay_cursor"."sequence" >= 0),
+	CONSTRAINT "usage_replay_cursor_start_sequence_check" CHECK ("factory"."usage_replay_cursor"."start_sequence" >= 0)
 );
 
 CREATE TABLE "factory"."user_ui_preference" (
 	"user_id" uuid PRIMARY KEY NOT NULL,
 	"desktop_background_key" text DEFAULT 'river-landscape' NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "user_ui_preference_desktop_background_key_check" CHECK (desktop_background_key = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text]))
+	CONSTRAINT "user_ui_preference_desktop_background_key_check" CHECK ("factory"."user_ui_preference"."desktop_background_key" = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text, 'gulf-of-marseille'::text, 'scene-on-the-ice'::text, 'moonlit-landscape'::text]))
 );
 
 CREATE TABLE "factory"."verification" (
@@ -4746,13 +4740,13 @@ CREATE TABLE "factory"."verification" (
 	CONSTRAINT "verification_id_change_id_commit_sha_key" UNIQUE("id","change_id","commit_sha"),
 	CONSTRAINT "verification_change_id_commit_sha_key" UNIQUE("change_id","commit_sha"),
 	CONSTRAINT "verification_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "verification_check" CHECK ((state = ANY (ARRAY['succeeded'::verification_state, 'failed'::verification_state, 'cancelled'::verification_state])) = (completed_at IS NOT NULL)),
-	CONSTRAINT "verification_check1" CHECK ((state <> ALL (ARRAY['runner-starting'::verification_state, 'running'::verification_state, 'succeeded'::verification_state, 'failed'::verification_state])) OR (action_run_id IS NOT NULL)),
-	CONSTRAINT "verification_check2" CHECK ((runtime_attempt_id IS NULL) OR (runner_token IS NOT NULL)),
-	CONSTRAINT "verification_check3" CHECK ((runner_job_handle IS NULL) OR ((action_run_id IS NOT NULL) AND (runner_job_handle ~ '^[A-Za-z0-9_-]{1,200}$'::text))),
-	CONSTRAINT "verification_commit_sha_check" CHECK (commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "verification_diagnosis_check" CHECK ((diagnosis IS NULL) OR ((jsonb_typeof(diagnosis) = 'object'::text) AND (octet_length((diagnosis)::text) <= 24000))),
-	CONSTRAINT "verification_summary_check" CHECK ((summary IS NULL) OR (length(summary) <= 2000))
+	CONSTRAINT "verification_check" CHECK (("factory"."verification"."state" = ANY (ARRAY['succeeded'::verification_state, 'failed'::verification_state, 'cancelled'::verification_state])) = ("factory"."verification"."completed_at" IS NOT NULL)),
+	CONSTRAINT "verification_check1" CHECK (("factory"."verification"."state" <> ALL (ARRAY['runner-starting'::verification_state, 'running'::verification_state, 'succeeded'::verification_state, 'failed'::verification_state])) OR ("factory"."verification"."action_run_id" IS NOT NULL)),
+	CONSTRAINT "verification_check2" CHECK (("factory"."verification"."runtime_attempt_id" IS NULL) OR ("factory"."verification"."runner_token" IS NOT NULL)),
+	CONSTRAINT "verification_check3" CHECK (("factory"."verification"."runner_job_handle" IS NULL) OR (("factory"."verification"."action_run_id" IS NOT NULL) AND ("factory"."verification"."runner_job_handle" ~ '^[A-Za-z0-9_-]{1,200}$'::text))),
+	CONSTRAINT "verification_commit_sha_check" CHECK ("factory"."verification"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
+	CONSTRAINT "verification_diagnosis_check" CHECK (("factory"."verification"."diagnosis" IS NULL) OR ((jsonb_typeof("factory"."verification"."diagnosis") = 'object'::text) AND (octet_length(("factory"."verification"."diagnosis")::text) <= 24000))),
+	CONSTRAINT "verification_summary_check" CHECK (("factory"."verification"."summary" IS NULL) OR (length("factory"."verification"."summary") <= 2000))
 );
 
 CREATE TABLE "factory"."wiki_source_update" (
@@ -4768,9 +4762,9 @@ CREATE TABLE "factory"."wiki_source_update" (
 	"failure" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "wiki_source_update_check" CHECK ((handled_version >= 0) AND (handled_version <= event_version)),
-	CONSTRAINT "wiki_source_update_event_version_check" CHECK (event_version >= 0),
-	CONSTRAINT "wiki_source_update_hook_state_check" CHECK (hook_state = ANY (ARRAY['create-intended'::text, 'ready'::text, 'failed'::text]))
+	CONSTRAINT "wiki_source_update_check" CHECK (("factory"."wiki_source_update"."handled_version" >= 0) AND ("factory"."wiki_source_update"."handled_version" <= "factory"."wiki_source_update"."event_version")),
+	CONSTRAINT "wiki_source_update_event_version_check" CHECK ("factory"."wiki_source_update"."event_version" >= 0),
+	CONSTRAINT "wiki_source_update_hook_state_check" CHECK ("factory"."wiki_source_update"."hook_state" = ANY (ARRAY['create-intended'::text, 'ready'::text, 'failed'::text]))
 );
 
 CREATE TABLE "factory"."workspace_collaboration_decision" (
@@ -4792,9 +4786,9 @@ CREATE TABLE "factory"."workspace_command" (
 	"result" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "workspace_command_input_digest_check" CHECK (input_digest ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "workspace_command_kind_check" CHECK (kind = ANY (ARRAY['shell'::text, 'terminal'::text])),
-	CONSTRAINT "workspace_command_state_check" CHECK (state = ANY (ARRAY['start-intended'::text, 'dispatching'::text, 'starting'::text, 'running'::text, 'exited'::text, 'cancelled'::text, 'failed'::text, 'uncertain'::text, 'interrupted'::text]))
+	CONSTRAINT "workspace_command_input_digest_check" CHECK ("factory"."workspace_command"."input_digest" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "workspace_command_kind_check" CHECK ("factory"."workspace_command"."kind" = ANY (ARRAY['shell'::text, 'terminal'::text])),
+	CONSTRAINT "workspace_command_state_check" CHECK ("factory"."workspace_command"."state" = ANY (ARRAY['start-intended'::text, 'dispatching'::text, 'starting'::text, 'running'::text, 'exited'::text, 'cancelled'::text, 'failed'::text, 'uncertain'::text, 'interrupted'::text]))
 );
 
 CREATE TABLE "factory"."workspace_file_operation" (
@@ -4807,8 +4801,8 @@ CREATE TABLE "factory"."workspace_file_operation" (
 	"result" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
-	CONSTRAINT "workspace_file_operation_action_check" CHECK (action = ANY (ARRAY['mkdir'::text, 'delete'::text, 'rename'::text])),
-	CONSTRAINT "workspace_file_operation_input_digest_check" CHECK (input_digest ~ '^[0-9a-f]{64}$'::text)
+	CONSTRAINT "workspace_file_operation_action_check" CHECK ("factory"."workspace_file_operation"."action" = ANY (ARRAY['mkdir'::text, 'delete'::text, 'rename'::text])),
+	CONSTRAINT "workspace_file_operation_input_digest_check" CHECK ("factory"."workspace_file_operation"."input_digest" ~ '^[0-9a-f]{64}$'::text)
 );
 
 CREATE TABLE "factory"."workspace_file_transfer" (
@@ -4825,9 +4819,9 @@ CREATE TABLE "factory"."workspace_file_transfer" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"expires_at" timestamp with time zone DEFAULT (now() + '00:30:00'::interval) NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "workspace_file_transfer_direction_check" CHECK (direction = ANY (ARRAY['upload'::text, 'download'::text])),
-	CONSTRAINT "workspace_file_transfer_input_digest_check" CHECK (input_digest ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "workspace_file_transfer_state_check" CHECK (state = ANY (ARRAY['preparing'::text, 'active'::text, 'committing'::text, 'committed'::text, 'releasing'::text, 'released'::text, 'uncertain'::text]))
+	CONSTRAINT "workspace_file_transfer_direction_check" CHECK ("factory"."workspace_file_transfer"."direction" = ANY (ARRAY['upload'::text, 'download'::text])),
+	CONSTRAINT "workspace_file_transfer_input_digest_check" CHECK ("factory"."workspace_file_transfer"."input_digest" ~ '^[0-9a-f]{64}$'::text),
+	CONSTRAINT "workspace_file_transfer_state_check" CHECK ("factory"."workspace_file_transfer"."state" = ANY (ARRAY['preparing'::text, 'active'::text, 'committing'::text, 'committed'::text, 'releasing'::text, 'released'::text, 'uncertain'::text]))
 );
 
 CREATE TABLE "factory"."workspace_lifecycle_command" (
@@ -4840,7 +4834,7 @@ CREATE TABLE "factory"."workspace_lifecycle_command" (
 	"result" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
-	CONSTRAINT "workspace_lifecycle_command_action_check" CHECK (action = ANY (ARRAY['start'::text, 'pause'::text, 'stop'::text]))
+	CONSTRAINT "workspace_lifecycle_command_action_check" CHECK ("factory"."workspace_lifecycle_command"."action" = ANY (ARRAY['start'::text, 'pause'::text, 'stop'::text]))
 );
 
 CREATE TABLE "factory"."workspace_share" (
@@ -4852,8 +4846,8 @@ CREATE TABLE "factory"."workspace_share" (
 	"granted_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"revoked_at" timestamp with time zone,
 	CONSTRAINT "workspace_share_pkey" PRIMARY KEY("workspace_id","user_id"),
-	CONSTRAINT "workspace_share_permission_check" CHECK (permission = ANY (ARRAY['observe'::text, 'collaborate'::text])),
-	CONSTRAINT "workspace_share_version_check" CHECK (version > 0)
+	CONSTRAINT "workspace_share_permission_check" CHECK ("factory"."workspace_share"."permission" = ANY (ARRAY['observe'::text, 'collaborate'::text])),
+	CONSTRAINT "workspace_share_version_check" CHECK ("factory"."workspace_share"."version" > 0)
 );
 
 CREATE TABLE "factory"."workspace_share_decision" (
@@ -4866,8 +4860,8 @@ CREATE TABLE "factory"."workspace_share_decision" (
 	"result" jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"access_reconciled_at" timestamp with time zone,
-	CONSTRAINT "workspace_share_decision_expected_version_check" CHECK (expected_version >= 0),
-	CONSTRAINT "workspace_share_decision_permission_check" CHECK (permission = ANY (ARRAY['observe'::text, 'collaborate'::text]))
+	CONSTRAINT "workspace_share_decision_expected_version_check" CHECK ("factory"."workspace_share_decision"."expected_version" >= 0),
+	CONSTRAINT "workspace_share_decision_permission_check" CHECK ("factory"."workspace_share_decision"."permission" = ANY (ARRAY['observe'::text, 'collaborate'::text]))
 );
 
 CREATE TABLE "factory"."workspace_shared_document" (
@@ -4879,7 +4873,7 @@ CREATE TABLE "factory"."workspace_shared_document" (
 	"conflict" boolean DEFAULT false NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "workspace_shared_document_pkey" PRIMARY KEY("workspace_id","path"),
-	CONSTRAINT "workspace_shared_document_y_state_check" CHECK (octet_length(y_state) <= 8388608)
+	CONSTRAINT "workspace_shared_document_y_state_check" CHECK (octet_length("factory"."workspace_shared_document"."y_state") <= 8388608)
 );
 
 CREATE TABLE "factory"."workspace_submission" (
@@ -4891,9 +4885,9 @@ CREATE TABLE "factory"."workspace_submission" (
 	"repository_url" text NOT NULL,
 	"prepare_attempted_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "workspace_submission_repository_url_check" CHECK (repository_url ~ '^https://[^/@?#]+/[^/?#]+/[^/?#]+$'::text),
-	CONSTRAINT "workspace_submission_remote_head_check" CHECK (remote_head ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text),
-	CONSTRAINT "workspace_submission_writer_epoch_check" CHECK (writer_epoch > 0)
+	CONSTRAINT "workspace_submission_repository_url_check" CHECK ("factory"."workspace_submission"."repository_url" ~ '^https://[^/@?#]+/[^/?#]+/[^/?#]+$'::text),
+	CONSTRAINT "workspace_submission_remote_head_check" CHECK ("factory"."workspace_submission"."remote_head" ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text),
+	CONSTRAINT "workspace_submission_writer_epoch_check" CHECK ("factory"."workspace_submission"."writer_epoch" > 0)
 );
 
 CREATE TABLE "factory"."workspace_terminal_operation" (
@@ -4905,8 +4899,8 @@ CREATE TABLE "factory"."workspace_terminal_operation" (
 	"result" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
-	CONSTRAINT "workspace_terminal_operation_action_check" CHECK (action = ANY (ARRAY['input'::text, 'resize'::text])),
-	CONSTRAINT "workspace_terminal_operation_input_digest_check" CHECK (input_digest ~ '^[0-9a-f]{64}$'::text)
+	CONSTRAINT "workspace_terminal_operation_action_check" CHECK ("factory"."workspace_terminal_operation"."action" = ANY (ARRAY['input'::text, 'resize'::text])),
+	CONSTRAINT "workspace_terminal_operation_input_digest_check" CHECK ("factory"."workspace_terminal_operation"."input_digest" ~ '^[0-9a-f]{64}$'::text)
 );
 
 ALTER TABLE "factory"."access_revocation" ADD CONSTRAINT "access_revocation_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
@@ -5336,53 +5330,53 @@ ALTER TABLE "factory"."workspace_terminal_operation" ADD CONSTRAINT "workspace_t
 ALTER TABLE "factory"."workspace_terminal_operation" ADD CONSTRAINT "workspace_terminal_operation_command_id_fkey" FOREIGN KEY ("command_id") REFERENCES "factory"."workspace_command"("id") ON DELETE no action ON UPDATE no action;
 CREATE UNIQUE INDEX "agent_turn_active_boundary_uidx" ON "factory"."agent_turn" USING btree ("project_id",(
 CASE
-    WHEN change_id IS NULL AND (input ->> 'contextId'::text) IS NOT NULL THEN 'context:'::text || (input ->> 'contextId'::text)
-    ELSE COALESCE(ticket_id::text, 'draft:'::text || created_by::text)
-END) text_ops) WHERE (state = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state]));
-CREATE INDEX "agent_turn_recovery_idx" ON "factory"."agent_turn" USING btree ("state","owner_expires_at") WHERE (state = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state]));
-CREATE UNIQUE INDEX "agent_turn_unresolved_change_boundary_uidx" ON "factory"."agent_turn" USING btree ("project_id","ticket_id") WHERE ((change_id IS NOT NULL) AND (state = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state])));
+    WHEN "change_id" IS NULL AND ("input" ->> 'contextId'::text) IS NOT NULL THEN 'context:'::text || ("input" ->> 'contextId'::text)
+    ELSE COALESCE("ticket_id"::text, 'draft:'::text || "created_by"::text)
+END) text_ops) WHERE ("factory"."agent_turn"."state" = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state]));
+CREATE INDEX "agent_turn_recovery_idx" ON "factory"."agent_turn" USING btree ("state","owner_expires_at") WHERE ("factory"."agent_turn"."state" = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state]));
+CREATE UNIQUE INDEX "agent_turn_unresolved_change_boundary_uidx" ON "factory"."agent_turn" USING btree ("project_id","ticket_id") WHERE (("factory"."agent_turn"."change_id" IS NOT NULL) AND ("factory"."agent_turn"."state" = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state])));
 CREATE INDEX "attachment_project_storage" ON "factory"."attachment" USING btree ("project_id","state");
 CREATE INDEX "attachment_reference_target" ON "factory"."attachment_reference" USING btree ("kind","reference_id");
 CREATE INDEX "auth_account_user_idx" ON "auth"."account" USING btree ("user_id");
 CREATE INDEX "auth_session_user_idx" ON "auth"."session" USING btree ("user_id");
 CREATE INDEX "auth_verification_identifier_idx" ON "auth"."verification" USING btree ("identifier");
 CREATE INDEX "branch_create_operation_due_idx" ON "factory"."branch_create_operation" USING btree ("state","reconcile_after","lease_expires_at");
-CREATE UNIQUE INDEX "build_browser_one_unclosed_session" ON "factory"."build_browser_session" USING btree ("turn_id","owner_id") WHERE (state <> 'closed'::text);
-CREATE INDEX "build_browser_session_cleanup_idx" ON "factory"."build_browser_session" USING btree ("runtime_attempt_id") WHERE (state <> 'closed'::text);
+CREATE UNIQUE INDEX "build_browser_one_unclosed_session" ON "factory"."build_browser_session" USING btree ("turn_id","owner_id") WHERE ("factory"."build_browser_session"."state" <> 'closed'::text);
+CREATE INDEX "build_browser_session_cleanup_idx" ON "factory"."build_browser_session" USING btree ("runtime_attempt_id") WHERE ("factory"."build_browser_session"."state" <> 'closed'::text);
 CREATE INDEX "candidate_review_change_idx" ON "factory"."candidate_review" USING btree ("change_id");
-CREATE UNIQUE INDEX "candidate_review_finding_source_idx" ON "factory"."candidate_review" USING btree ("finding_source_id") WHERE ((finding_source_id IS NOT NULL) AND (supersedes_id IS NULL));
-CREATE UNIQUE INDEX "change_one_active_per_ticket" ON "factory"."change" USING btree ("ticket_id") WHERE (state = ANY (ARRAY['branch-pending'::change_state, 'starting'::change_state, 'active'::change_state, 'cancelling'::change_state]));
-CREATE UNIQUE INDEX "change_agent_opencode_session_uidx" ON "factory"."change_agent_session" USING btree ("opencode_session_id") WHERE (opencode_session_id IS NOT NULL);
-CREATE UNIQUE INDEX "change_commit_one_active_uidx" ON "factory"."change_commit_operation" USING btree ("change_id") WHERE (state <> ALL (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state]));
-CREATE UNIQUE INDEX "change_editing_request_pending" ON "factory"."change_editing_request" USING btree ("change_id","requester_id","writer_epoch") WHERE (state = 'requested'::text);
-CREATE UNIQUE INDEX "conversation_context_original" ON "factory"."conversation_context" USING btree ("conversation_id") WHERE original;
-CREATE UNIQUE INDEX "conversation_entry_question_answer_uidx" ON "factory"."conversation_entry" USING btree ("in_reply_to_entry_id") WHERE ((kind = 'answer'::conversation_entry_kind) AND (in_reply_to_entry_id IS NOT NULL));
-CREATE UNIQUE INDEX "conversation_entry_requirement_uidx" ON "factory"."conversation_entry" USING btree ("requirement_revision_id") WHERE (requirement_revision_id IS NOT NULL);
-CREATE UNIQUE INDEX "development_workspace_one_per_ticket" ON "factory"."development_workspace" USING btree ("ticket_id") WHERE (kind = 'ticket'::development_workspace_kind);
-CREATE UNIQUE INDEX "development_workspace_one_personal_per_user_project" ON "factory"."development_workspace" USING btree ("project_id","owner_user_id") WHERE (kind = 'personal'::development_workspace_kind);
-CREATE UNIQUE INDEX "environment_one_pending" ON "factory"."environment_write" USING btree ("project_id","environment") WHERE (state = 'write-intended'::text);
+CREATE UNIQUE INDEX "candidate_review_finding_source_idx" ON "factory"."candidate_review" USING btree ("finding_source_id") WHERE (("factory"."candidate_review"."finding_source_id" IS NOT NULL) AND ("factory"."candidate_review"."supersedes_id" IS NULL));
+CREATE UNIQUE INDEX "change_one_active_per_ticket" ON "factory"."change" USING btree ("ticket_id") WHERE ("factory"."change"."state" = ANY (ARRAY['branch-pending'::change_state, 'starting'::change_state, 'active'::change_state, 'cancelling'::change_state]));
+CREATE UNIQUE INDEX "change_agent_opencode_session_uidx" ON "factory"."change_agent_session" USING btree ("opencode_session_id") WHERE ("factory"."change_agent_session"."opencode_session_id" IS NOT NULL);
+CREATE UNIQUE INDEX "change_commit_one_active_uidx" ON "factory"."change_commit_operation" USING btree ("change_id") WHERE ("factory"."change_commit_operation"."state" <> ALL (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state]));
+CREATE UNIQUE INDEX "change_editing_request_pending" ON "factory"."change_editing_request" USING btree ("change_id","requester_id","writer_epoch") WHERE ("factory"."change_editing_request"."state" = 'requested'::text);
+CREATE UNIQUE INDEX "conversation_context_original" ON "factory"."conversation_context" USING btree ("conversation_id") WHERE "factory"."conversation_context"."original";
+CREATE UNIQUE INDEX "conversation_entry_question_answer_uidx" ON "factory"."conversation_entry" USING btree ("in_reply_to_entry_id") WHERE (("factory"."conversation_entry"."kind" = 'answer'::conversation_entry_kind) AND ("factory"."conversation_entry"."in_reply_to_entry_id" IS NOT NULL));
+CREATE UNIQUE INDEX "conversation_entry_requirement_uidx" ON "factory"."conversation_entry" USING btree ("requirement_revision_id") WHERE ("factory"."conversation_entry"."requirement_revision_id" IS NOT NULL);
+CREATE UNIQUE INDEX "development_workspace_one_per_ticket" ON "factory"."development_workspace" USING btree ("ticket_id") WHERE ("factory"."development_workspace"."kind" = 'ticket'::development_workspace_kind);
+CREATE UNIQUE INDEX "development_workspace_one_personal_per_user_project" ON "factory"."development_workspace" USING btree ("project_id","owner_user_id") WHERE ("factory"."development_workspace"."kind" = 'personal'::development_workspace_kind);
+CREATE UNIQUE INDEX "environment_one_pending" ON "factory"."environment_write" USING btree ("project_id","environment") WHERE ("factory"."environment_write"."state" = 'write-intended'::text);
 CREATE INDEX "epic_project_parent_idx" ON "factory"."epic" USING btree ("project_id","parent_id");
 CREATE INDEX "epic_research_idx" ON "factory"."epic" USING gin (research_vector(title, description) tsvector_ops);
 CREATE INDEX "epic_title_trgm_idx" ON "factory"."epic" USING gin (lower(title) gin_trgm_ops);
-CREATE UNIQUE INDEX "implementation_order_one_waiting" ON "factory"."implementation_order" USING btree ("ticket_id") WHERE (state = 'waiting'::text);
-CREATE UNIQUE INDEX "knowledge_generation_one_active_per_project" ON "factory"."knowledge_generation" USING btree ("project_id") WHERE (state = ANY (ARRAY['pending'::knowledge_generation_state, 'running'::knowledge_generation_state]));
+CREATE UNIQUE INDEX "implementation_order_one_waiting" ON "factory"."implementation_order" USING btree ("ticket_id") WHERE ("factory"."implementation_order"."state" = 'waiting'::text);
+CREATE UNIQUE INDEX "knowledge_generation_one_active_per_project" ON "factory"."knowledge_generation" USING btree ("project_id") WHERE ("factory"."knowledge_generation"."state" = ANY (ARRAY['pending'::knowledge_generation_state, 'running'::knowledge_generation_state]));
 CREATE INDEX "knowledge_page_parent_order" ON "factory"."knowledge_page" USING btree ("project_id","parent_id","sort_order","id");
 CREATE INDEX "knowledge_page_search_idx" ON "factory"."knowledge_page" USING gin (to_tsvector('simple'::regconfig, (title || ' '::text) || current_body) tsvector_ops);
 CREATE INDEX "knowledge_research_idx" ON "factory"."knowledge_page" USING gin (research_vector(title, current_body) tsvector_ops);
 CREATE INDEX "knowledge_title_trgm_idx" ON "factory"."knowledge_page" USING gin (lower(title) gin_trgm_ops);
 CREATE INDEX "knowledge_page_outline_project" ON "factory"."knowledge_page_outline" USING btree ("project_id","state");
-CREATE INDEX "learning_case_observed" ON "factory"."learning_case" USING btree ("project_id","owner_id","developer_only","settled_at") WHERE selected;
-CREATE INDEX "learning_case_pending" ON "factory"."learning_case" USING btree ("project_id","owner_id","developer_only","settled_at") WHERE (selected AND (batch_id IS NULL));
+CREATE INDEX "learning_case_observed" ON "factory"."learning_case" USING btree ("project_id","owner_id","developer_only","settled_at") WHERE "factory"."learning_case"."selected";
+CREATE INDEX "learning_case_pending" ON "factory"."learning_case" USING btree ("project_id","owner_id","developer_only","settled_at") WHERE ("factory"."learning_case"."selected" AND ("factory"."learning_case"."batch_id" IS NULL));
 CREATE INDEX "learning_review_judge" ON "factory"."learning_review" USING btree ("judge_key","kind","state");
-CREATE INDEX "learning_trial_running" ON "factory"."learning_trial" USING btree ("owner_expires_at") WHERE (state = 'running'::text);
-CREATE UNIQUE INDEX "mcp_connect_running" ON "factory"."mcp_connect_intent" USING btree ("connection_id") WHERE (state = 'running'::text);
-CREATE UNIQUE INDEX "mcp_secret_pending" ON "factory"."mcp_secret_write" USING btree ("connection_id") WHERE (state = 'intended'::text);
-CREATE UNIQUE INDEX "mcp_refresh_pending" ON "factory"."mcp_token_refresh" USING btree ("connection_id") WHERE (state = 'intended'::text);
-CREATE UNIQUE INDEX "merge_operation_one_success" ON "factory"."merge_operation" USING btree ("change_id") WHERE (state = 'succeeded'::merge_operation_state);
-CREATE UNIQUE INDEX "merge_operation_one_unfinished" ON "factory"."merge_operation" USING btree ("change_id") WHERE (state <> ALL (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state]));
-CREATE UNIQUE INDEX "model_connection_pending" ON "factory"."model_connection_write" USING btree ("connection_id") WHERE (state = 'write-intended'::text);
-CREATE INDEX "monitoring_pending" ON "factory"."monitoring_incident" USING btree ("project_id","received_at","id") WHERE (state = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'implementing'::text]));
-CREATE UNIQUE INDEX "monitoring_ticket" ON "factory"."monitoring_incident" USING btree ("ticket_id") WHERE (ticket_id IS NOT NULL);
+CREATE INDEX "learning_trial_running" ON "factory"."learning_trial" USING btree ("owner_expires_at") WHERE ("factory"."learning_trial"."state" = 'running'::text);
+CREATE UNIQUE INDEX "mcp_connect_running" ON "factory"."mcp_connect_intent" USING btree ("connection_id") WHERE ("factory"."mcp_connect_intent"."state" = 'running'::text);
+CREATE UNIQUE INDEX "mcp_secret_pending" ON "factory"."mcp_secret_write" USING btree ("connection_id") WHERE ("factory"."mcp_secret_write"."state" = 'intended'::text);
+CREATE UNIQUE INDEX "mcp_refresh_pending" ON "factory"."mcp_token_refresh" USING btree ("connection_id") WHERE ("factory"."mcp_token_refresh"."state" = 'intended'::text);
+CREATE UNIQUE INDEX "merge_operation_one_success" ON "factory"."merge_operation" USING btree ("change_id") WHERE ("factory"."merge_operation"."state" = 'succeeded'::merge_operation_state);
+CREATE UNIQUE INDEX "merge_operation_one_unfinished" ON "factory"."merge_operation" USING btree ("change_id") WHERE ("factory"."merge_operation"."state" <> ALL (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state]));
+CREATE UNIQUE INDEX "model_connection_pending" ON "factory"."model_connection_write" USING btree ("connection_id") WHERE ("factory"."model_connection_write"."state" = 'write-intended'::text);
+CREATE INDEX "monitoring_pending" ON "factory"."monitoring_incident" USING btree ("project_id","received_at","id") WHERE ("factory"."monitoring_incident"."state" = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'implementing'::text]));
+CREATE UNIQUE INDEX "monitoring_ticket" ON "factory"."monitoring_incident" USING btree ("ticket_id") WHERE ("factory"."monitoring_incident"."ticket_id" IS NOT NULL);
 CREATE INDEX "oauthAccessToken_authorizationCodeId_idx" ON "auth"."oauthAccessToken" USING btree ("authorizationCodeId");
 CREATE INDEX "oauthAccessToken_clientId_idx" ON "auth"."oauthAccessToken" USING btree ("clientId");
 CREATE INDEX "oauthAccessToken_refreshId_idx" ON "auth"."oauthAccessToken" USING btree ("refreshId");
@@ -5399,21 +5393,21 @@ CREATE INDEX "oauthRefreshToken_clientId_idx" ON "auth"."oauthRefreshToken" USIN
 CREATE INDEX "oauthRefreshToken_sessionId_idx" ON "auth"."oauthRefreshToken" USING btree ("sessionId");
 CREATE INDEX "oauthRefreshToken_userId_idx" ON "auth"."oauthRefreshToken" USING btree ("userId");
 CREATE INDEX "personal_git_operation_workspace" ON "factory"."personal_git_operation" USING btree ("workspace_id","created_at");
-CREATE UNIQUE INDEX "project_delivery_one_active_policy" ON "factory"."project_delivery_policy" USING btree ("project_id") WHERE (revoked_at IS NULL);
+CREATE UNIQUE INDEX "project_delivery_one_active_policy" ON "factory"."project_delivery_policy" USING btree ("project_id") WHERE ("factory"."project_delivery_policy"."revoked_at" IS NULL);
 CREATE INDEX "project_membership_user_idx" ON "factory"."project_membership" USING btree ("user_id","project_id");
-CREATE UNIQUE INDEX "project_release_one_active" ON "factory"."project_release" USING btree ("project_id") WHERE ((state = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'uncertain'::text])) AND (ended_at IS NULL));
-CREATE UNIQUE INDEX "project_setup_one_inspection" ON "factory"."project_setup_inspection" USING btree ("project_id") WHERE (state = ANY (ARRAY['inspecting'::text, 'proposal'::text, 'confirming'::text]));
+CREATE UNIQUE INDEX "project_release_one_active" ON "factory"."project_release" USING btree ("project_id") WHERE (("factory"."project_release"."state" = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'uncertain'::text])) AND ("factory"."project_release"."ended_at" IS NULL));
+CREATE UNIQUE INDEX "project_setup_one_inspection" ON "factory"."project_setup_inspection" USING btree ("project_id") WHERE ("factory"."project_setup_inspection"."state" = ANY (ARRAY['inspecting'::text, 'proposal'::text, 'confirming'::text]));
 CREATE INDEX "read_version_scope" ON "factory"."read_version" USING btree ("scope","project_id");
-CREATE UNIQUE INDEX "release_access_publish_attempt" ON "factory"."release_access" USING btree ("release_id") WHERE ((scope = 'publish'::text) AND (state = ANY (ARRAY['pending'::text, 'active'::text, 'uncertain'::text])));
-CREATE INDEX "repository_mirror_unconfirmed" ON "factory"."repository_mirror_command" USING btree ("project_id") WHERE (state = ANY (ARRAY['executing'::text, 'uncertain'::text]));
+CREATE UNIQUE INDEX "release_access_publish_attempt" ON "factory"."release_access" USING btree ("release_id") WHERE (("factory"."release_access"."scope" = 'publish'::text) AND ("factory"."release_access"."state" = ANY (ARRAY['pending'::text, 'active'::text, 'uncertain'::text])));
+CREATE INDEX "repository_mirror_unconfirmed" ON "factory"."repository_mirror_command" USING btree ("project_id") WHERE ("factory"."repository_mirror_command"."state" = ANY (ARRAY['executing'::text, 'uncertain'::text]));
 CREATE INDEX "requirement_research_idx" ON "factory"."requirement_revision" USING gin (research_vector(''::text, canonical_content) tsvector_ops);
-CREATE INDEX "review_feedback_delivery" ON "factory"."review_feedback" USING btree ("change_id") WHERE ((kind = 'thread'::text) AND (state <> 'resolved'::text));
+CREATE INDEX "review_feedback_delivery" ON "factory"."review_feedback" USING btree ("change_id") WHERE (("factory"."review_feedback"."kind" = 'thread'::text) AND ("factory"."review_feedback"."state" <> 'resolved'::text));
 CREATE INDEX "review_media_retention" ON "factory"."review_media" USING btree ("change_id","kind","state");
-CREATE INDEX "runtime_attempt_active_isolated_idx" ON "factory"."runtime_attempt" USING btree ("project_id","isolated_kind","state") WHERE ((isolated_kind IS NOT NULL) AND (state = ANY (ARRAY['create-intended'::runtime_attempt_state, 'starting'::runtime_attempt_state, 'ready'::runtime_attempt_state, 'stop-intended'::runtime_attempt_state, 'stopping'::runtime_attempt_state, 'cleanup-failed'::runtime_attempt_state])));
-CREATE UNIQUE INDEX "runtime_attempt_change_generation_uidx" ON "factory"."runtime_attempt" USING btree ("change_id","generation") WHERE (change_id IS NOT NULL);
-CREATE UNIQUE INDEX "runtime_attempt_one_active_per_change" ON "factory"."runtime_attempt" USING btree ("change_id") WHERE ((change_id IS NOT NULL) AND (state <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])));
-CREATE UNIQUE INDEX "runtime_attempt_one_active_per_workspace" ON "factory"."runtime_attempt" USING btree ("workspace_id") WHERE ((workspace_id IS NOT NULL) AND (state <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])));
-CREATE UNIQUE INDEX "runtime_attempt_workspace_generation_uidx" ON "factory"."runtime_attempt" USING btree ("workspace_id","generation") WHERE (workspace_id IS NOT NULL);
+CREATE INDEX "runtime_attempt_active_isolated_idx" ON "factory"."runtime_attempt" USING btree ("project_id","isolated_kind","state") WHERE (("factory"."runtime_attempt"."isolated_kind" IS NOT NULL) AND ("factory"."runtime_attempt"."state" = ANY (ARRAY['create-intended'::runtime_attempt_state, 'starting'::runtime_attempt_state, 'ready'::runtime_attempt_state, 'stop-intended'::runtime_attempt_state, 'stopping'::runtime_attempt_state, 'cleanup-failed'::runtime_attempt_state])));
+CREATE UNIQUE INDEX "runtime_attempt_change_generation_uidx" ON "factory"."runtime_attempt" USING btree ("change_id","generation") WHERE ("factory"."runtime_attempt"."change_id" IS NOT NULL);
+CREATE UNIQUE INDEX "runtime_attempt_one_active_per_change" ON "factory"."runtime_attempt" USING btree ("change_id") WHERE (("factory"."runtime_attempt"."change_id" IS NOT NULL) AND ("factory"."runtime_attempt"."state" <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])));
+CREATE UNIQUE INDEX "runtime_attempt_one_active_per_workspace" ON "factory"."runtime_attempt" USING btree ("workspace_id") WHERE (("factory"."runtime_attempt"."workspace_id" IS NOT NULL) AND ("factory"."runtime_attempt"."state" <> ALL (ARRAY['stopped'::runtime_attempt_state, 'failed'::runtime_attempt_state])));
+CREATE UNIQUE INDEX "runtime_attempt_workspace_generation_uidx" ON "factory"."runtime_attempt" USING btree ("workspace_id","generation") WHERE ("factory"."runtime_attempt"."workspace_id" IS NOT NULL);
 CREATE INDEX "scimConnectionBinding_connectionId_idx" ON "auth"."scimConnectionBinding" USING btree ("connectionId");
 CREATE INDEX "scimGroup_connectionId_idx" ON "auth"."scimGroup" USING btree ("connectionId");
 CREATE INDEX "scimGroup_provisioningDomainId_idx" ON "auth"."scimGroup" USING btree ("provisioningDomainId");
@@ -5431,19 +5425,19 @@ CREATE INDEX "scimSubject_profileSourceId_idx" ON "auth"."scimSubject" USING btr
 CREATE INDEX "scimUser_connectionId_idx" ON "auth"."scimUser" USING btree ("connectionId");
 CREATE INDEX "scimUser_provisioningDomainId_idx" ON "auth"."scimUser" USING btree ("provisioningDomainId");
 CREATE INDEX "scimUser_userId_idx" ON "auth"."scimUser" USING btree ("userId");
-CREATE INDEX "session_archive_pending" ON "factory"."session_archive" USING btree ("retry_after") WHERE (state <> 'saved'::text);
+CREATE INDEX "session_archive_pending" ON "factory"."session_archive" USING btree ("retry_after") WHERE ("factory"."session_archive"."state" <> 'saved'::text);
 CREATE INDEX "ticket_epic_idx" ON "factory"."ticket" USING btree ("project_id","epic_id");
 CREATE INDEX "ticket_project_updated_idx" ON "factory"."ticket" USING btree ("project_id","updated_at" DESC NULLS FIRST,"id" DESC NULLS FIRST);
 CREATE INDEX "ticket_research_idx" ON "factory"."ticket" USING gin (research_vector(title, description) tsvector_ops);
 CREATE INDEX "ticket_title_trgm_idx" ON "factory"."ticket" USING gin (lower(title) gin_trgm_ops);
-CREATE UNIQUE INDEX "ticket_conversation_project_draft_uidx" ON "factory"."ticket_conversation" USING btree ("project_id","created_by") WHERE (ticket_id IS NULL);
-CREATE UNIQUE INDEX "ticket_conversation_ticket_uidx" ON "factory"."ticket_conversation" USING btree ("ticket_id") WHERE (ticket_id IS NOT NULL);
+CREATE UNIQUE INDEX "ticket_conversation_project_draft_uidx" ON "factory"."ticket_conversation" USING btree ("project_id","created_by") WHERE ("factory"."ticket_conversation"."ticket_id" IS NULL);
+CREATE UNIQUE INDEX "ticket_conversation_ticket_uidx" ON "factory"."ticket_conversation" USING btree ("ticket_id") WHERE ("factory"."ticket_conversation"."ticket_id" IS NOT NULL);
 CREATE INDEX "ticket_dependency_prerequisite_idx" ON "factory"."ticket_dependency" USING btree ("project_id","prerequisite_id");
 CREATE INDEX "ticket_document_research_idx" ON "factory"."ticket_document_revision" USING gin (research_vector(title, canonical_content) tsvector_ops);
 CREATE INDEX "ticket_responsibility_event_recipient" ON "factory"."ticket_responsibility_event" USING btree ("user_id","created_at");
 CREATE INDEX "usage_entry_time_idx" ON "factory"."usage_entry" USING btree ("occurred_at");
 CREATE INDEX "usage_operation_scope_time_idx" ON "factory"."usage_operation" USING btree ("project_id","created_at");
-CREATE UNIQUE INDEX "verification_one_active_per_change" ON "factory"."verification" USING btree ("change_id") WHERE (state = ANY (ARRAY['pending'::verification_state, 'runner-starting'::verification_state, 'running'::verification_state]));
+CREATE UNIQUE INDEX "verification_one_active_per_change" ON "factory"."verification" USING btree ("change_id") WHERE ("factory"."verification"."state" = ANY (ARRAY['pending'::verification_state, 'runner-starting'::verification_state, 'running'::verification_state]));
 CREATE INDEX "workspace_command_runtime_idx" ON "factory"."workspace_command" USING btree ("runtime_attempt_id","state");
 CREATE INDEX "workspace_file_transfer_runtime_idx" ON "factory"."workspace_file_transfer" USING btree ("runtime_attempt_id");
 -- Native 40-deferred-foreign-keys.sql.
@@ -5636,9 +5630,9 @@ CREATE TRIGGER learning_trial_step_guard BEFORE UPDATE ON factory.learning_trial
 -- Native 58-usage-triggers.sql.
 -- Usage triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER execution_policy_command_immutable BEFORE UPDATE ON factory.execution_policy_command FOR EACH ROW EXECUTE FUNCTION factory.guard_usage_entry();
+CREATE TRIGGER execution_policy_command_immutable BEFORE UPDATE ON factory.execution_policy_command FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
-CREATE TRIGGER guard_usage_entry BEFORE UPDATE ON factory.usage_entry FOR EACH ROW EXECUTE FUNCTION factory.guard_usage_entry();
+CREATE TRIGGER guard_usage_entry BEFORE UPDATE ON factory.usage_entry FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
 CREATE TRIGGER guard_usage_operation BEFORE UPDATE ON factory.usage_operation FOR EACH ROW EXECUTE FUNCTION factory.guard_usage_operation();
 
@@ -5881,5 +5875,5 @@ INSERT INTO factory.installation_maintenance(singleton) VALUES(true);
 INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid());
 
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'78b12848b03193723796e33faf117391b6d21a999b87b1db14d43c6bff00f547');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'6ebf5d76193e6a9476d4339a8d8d2a68df974490e8af60779267afb326262f4f');
 COMMIT;

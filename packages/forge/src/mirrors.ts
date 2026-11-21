@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RepositoryMirror } from "../../project-domain/src/repository-mirror";
-import type { ForgeRepository } from "./forge";
+import type { ForgeRepository } from "./contracts";
 
 const mirror = z.object({
   remote_name: z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/),

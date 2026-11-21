@@ -36,7 +36,10 @@ export const candidateReview = factorySchema.table(
     baseSha: text("base_sha").notNull(),
     createdBy: uuid("created_by").notNull(),
     turnId: uuid("turn_id"),
-    state: text("state").default("pending").notNull(),
+    state: text("state")
+      .$type<"pending" | "running" | "passed" | "changes-requested" | "incomplete">()
+      .default("pending")
+      .notNull(),
     uiRequired: boolean("ui_required").default(false).notNull(),
     result: jsonb("result"),
     evidence: jsonb("evidence").default([]).notNull(),
@@ -50,7 +53,7 @@ export const candidateReview = factorySchema.table(
     index("candidate_review_change_idx").using("btree", table.changeId.asc().nullsLast()),
     uniqueIndex("candidate_review_finding_source_idx")
       .using("btree", table.findingSourceId.asc().nullsLast())
-      .where(sql`((finding_source_id IS NOT NULL) AND (supersedes_id IS NULL))`),
+      .where(sql`((${table.findingSourceId} IS NOT NULL) AND (${table.supersedesId} IS NULL))`),
     foreignKey({
       columns: [table.changeId],
       foreignColumns: [change.id],
@@ -106,28 +109,28 @@ export const candidateReview = factorySchema.table(
     unique("candidate_review_supersedes_id_key").on(table.supersedesId),
     unique("candidate_review_turn_id_key").on(table.turnId),
     unique("candidate_review_repair_command_id_key").on(table.repairCommandId),
-    check("candidate_review_commit_sha_check", sql`commit_sha ~ '^[a-f0-9]{40}$'::text`),
-    check("candidate_review_base_sha_check", sql`base_sha ~ '^[a-f0-9]{40}$'::text`),
+    check("candidate_review_commit_sha_check", sql`${table.commitSha} ~ '^[a-f0-9]{40}$'::text`),
+    check("candidate_review_base_sha_check", sql`${table.baseSha} ~ '^[a-f0-9]{40}$'::text`),
     check(
       "candidate_review_check",
-      sql`(state <> ALL (ARRAY['passed'::text, 'changes-requested'::text])) OR (result IS NOT NULL)`,
+      sql`(${table.state} <> ALL (ARRAY['passed'::text, 'changes-requested'::text])) OR (${table.result} IS NOT NULL)`,
     ),
     check(
       "candidate_review_evidence_check",
-      sql`(jsonb_typeof(evidence) = 'array'::text) AND (jsonb_array_length(evidence) <= 256)`,
+      sql`(jsonb_typeof(${table.evidence}) = 'array'::text) AND (jsonb_array_length(${table.evidence}) <= 256)`,
     ),
     check(
       "candidate_review_finding_checks_check",
-      sql`(finding_checks IS NULL) OR ((finding_source_id IS NOT NULL) AND (jsonb_typeof(finding_checks) = 'object'::text) AND (octet_length((finding_checks)::text) <= 32768))`,
+      sql`(${table.findingChecks} IS NULL) OR ((${table.findingSourceId} IS NOT NULL) AND (jsonb_typeof(${table.findingChecks}) = 'object'::text) AND (octet_length((${table.findingChecks})::text) <= 32768))`,
     ),
-    check("candidate_review_ordinal_check", sql`ordinal > 0`),
+    check("candidate_review_ordinal_check", sql`${table.ordinal} > 0`),
     check(
       "candidate_review_result_check",
-      sql`(result IS NULL) OR ((jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 32768))`,
+      sql`(${table.result} IS NULL) OR ((jsonb_typeof(${table.result}) = 'object'::text) AND (octet_length((${table.result})::text) <= 32768))`,
     ),
     check(
       "candidate_review_state_check",
-      sql`state = ANY (ARRAY['pending'::text, 'running'::text, 'passed'::text, 'changes-requested'::text, 'incomplete'::text])`,
+      sql`${table.state} = ANY (ARRAY['pending'::text, 'running'::text, 'passed'::text, 'changes-requested'::text, 'incomplete'::text])`,
     ),
   ],
 );
@@ -154,7 +157,7 @@ export const reviewFeedbackMessage = factorySchema.table(
     }),
     check(
       "review_feedback_message_body_check",
-      sql`(length(body) >= 1) AND (length(body) <= 2000)`,
+      sql`(length(${table.body}) >= 1) AND (length(${table.body}) <= 2000)`,
     ),
   ],
 );
@@ -165,8 +168,8 @@ export const reviewFeedback = factorySchema.table(
     id: uuid("id").primaryKey().notNull(),
     changeId: uuid("change_id").notNull(),
     authorId: uuid("author_id").notNull(),
-    kind: text("kind").notNull(),
-    state: text("state").default("open").notNull(),
+    kind: text("kind").$type<"comment" | "thread">().notNull(),
+    state: text("state").$type<"open" | "implemented" | "resolved">().default("open").notNull(),
     version: integer("version").default(1).notNull(),
     commitSha: text("commit_sha").notNull(),
     annotation: jsonb("annotation"),
@@ -177,7 +180,7 @@ export const reviewFeedback = factorySchema.table(
   (table): PgTableExtraConfigValue[] => [
     index("review_feedback_delivery")
       .using("btree", table.changeId.asc().nullsLast())
-      .where(sql`((kind = 'thread'::text) AND (state <> 'resolved'::text))`),
+      .where(sql`((${table.kind} = 'thread'::text) AND (${table.state} <> 'resolved'::text))`),
     foreignKey({
       columns: [table.authorId],
       foreignColumns: [authUser.id],
@@ -198,13 +201,22 @@ export const reviewFeedback = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "review_feedback_resolved_by_fkey",
     }),
-    check("review_feedback_annotation_media", sql`(media_id IS NULL) OR (annotation IS NOT NULL)`),
-    check("review_feedback_check", sql`(kind <> 'comment'::text) OR (state = 'open'::text)`),
-    check("review_feedback_commit_sha_check", sql`commit_sha ~ '^[a-f0-9]{40}$'::text`),
-    check("review_feedback_kind_check", sql`kind = ANY (ARRAY['comment'::text, 'thread'::text])`),
+    check(
+      "review_feedback_annotation_media",
+      sql`(${table.mediaId} IS NULL) OR (${table.annotation} IS NOT NULL)`,
+    ),
+    check(
+      "review_feedback_check",
+      sql`(${table.kind} <> 'comment'::text) OR (${table.state} = 'open'::text)`,
+    ),
+    check("review_feedback_commit_sha_check", sql`${table.commitSha} ~ '^[a-f0-9]{40}$'::text`),
+    check(
+      "review_feedback_kind_check",
+      sql`${table.kind} = ANY (ARRAY['comment'::text, 'thread'::text])`,
+    ),
     check(
       "review_feedback_state_check",
-      sql`state = ANY (ARRAY['open'::text, 'implemented'::text, 'resolved'::text])`,
+      sql`${table.state} = ANY (ARRAY['open'::text, 'implemented'::text, 'resolved'::text])`,
     ),
   ],
 );
@@ -217,11 +229,13 @@ export const reviewMedia = factorySchema.table(
     reviewId: uuid("review_id"),
     browserSessionId: uuid("browser_session_id"),
     createdBy: uuid("created_by"),
-    kind: text("kind").notNull(),
+    kind: text("kind").$type<"recording" | "still">().notNull(),
     commitSha: text("commit_sha").notNull(),
     runtimeAttemptId: uuid("runtime_attempt_id"),
     sourceContext: jsonb("source_context"),
-    state: text("state").notNull(),
+    state: text("state")
+      .$type<"intended" | "recording" | "complete" | "unavailable" | "deleted">()
+      .notNull(),
     byteLength: integer("byte_length"),
     sha256: text("sha256"),
     durationMs: integer("duration_ms"),
@@ -265,19 +279,28 @@ export const reviewMedia = factorySchema.table(
       name: "review_media_runtime_attempt_id_fkey",
     }),
     unique("review_media_browser_session_id_kind_key").on(table.browserSessionId, table.kind),
-    check("review_media_byte_length_check", sql`(byte_length >= 1) AND (byte_length <= 100663296)`),
+    check(
+      "review_media_byte_length_check",
+      sql`(${table.byteLength} >= 1) AND (${table.byteLength} <= 100663296)`,
+    ),
     check(
       "review_media_check",
-      sql`(state <> 'complete'::text) OR ((byte_length IS NOT NULL) AND (sha256 IS NOT NULL))`,
+      sql`(${table.state} <> 'complete'::text) OR ((${table.byteLength} IS NOT NULL) AND (${table.sha256} IS NOT NULL))`,
     ),
-    check("review_media_check1", sql`(kind <> 'recording'::text) OR (review_id IS NOT NULL)`),
-    check("review_media_commit_sha_check", sql`commit_sha ~ '^[a-f0-9]{40}$'::text`),
-    check("review_media_duration_ms_check", sql`duration_ms >= 0`),
-    check("review_media_kind_check", sql`kind = ANY (ARRAY['recording'::text, 'still'::text])`),
-    check("review_media_sha256_check", sql`sha256 ~ '^[a-f0-9]{64}$'::text`),
+    check(
+      "review_media_check1",
+      sql`(${table.kind} <> 'recording'::text) OR (${table.reviewId} IS NOT NULL)`,
+    ),
+    check("review_media_commit_sha_check", sql`${table.commitSha} ~ '^[a-f0-9]{40}$'::text`),
+    check("review_media_duration_ms_check", sql`${table.durationMs} >= 0`),
+    check(
+      "review_media_kind_check",
+      sql`${table.kind} = ANY (ARRAY['recording'::text, 'still'::text])`,
+    ),
+    check("review_media_sha256_check", sql`${table.sha256} ~ '^[a-f0-9]{64}$'::text`),
     check(
       "review_media_state_check",
-      sql`state = ANY (ARRAY['intended'::text, 'recording'::text, 'complete'::text, 'unavailable'::text, 'deleted'::text])`,
+      sql`${table.state} = ANY (ARRAY['intended'::text, 'recording'::text, 'complete'::text, 'unavailable'::text, 'deleted'::text])`,
     ),
   ],
 );
@@ -324,7 +347,7 @@ export const reviewScenario = factorySchema.table(
     reviewId: uuid("review_id").notNull(),
     id: text("id").notNull(),
     title: text("title").notNull(),
-    category: text("category").notNull(),
+    category: text("category").$type<"normal" | "error" | "boundary">().notNull(),
     criterion: integer("criterion").notNull(),
     expected: text("expected").notNull(),
     startedAt: timestamp("started_at", { withTimezone: true })
@@ -334,8 +357,8 @@ export const reviewScenario = factorySchema.table(
     observed: text("observed"),
     mediaStartedMs: bigint("media_started_ms", { mode: "number" }),
     mediaSessionId: uuid("media_session_id"),
-    status: text("status"),
-    observationKind: text("observation_kind"),
+    status: text("status").$type<"passed" | "failed" | "unverified">(),
+    observationKind: text("observation_kind").$type<"app" | "source">(),
   },
   (table): PgTableExtraConfigValue[] => [
     foreignKey({
@@ -351,27 +374,30 @@ export const reviewScenario = factorySchema.table(
     primaryKey({ columns: [table.reviewId, table.id], name: "review_scenario_pkey" }),
     check(
       "review_scenario_category_check",
-      sql`category = ANY (ARRAY['normal'::text, 'error'::text, 'boundary'::text])`,
+      sql`${table.category} = ANY (ARRAY['normal'::text, 'error'::text, 'boundary'::text])`,
     ),
-    check("review_scenario_criterion_check", sql`criterion > 0`),
+    check("review_scenario_criterion_check", sql`${table.criterion} > 0`),
     check(
       "review_scenario_expected_check",
-      sql`(length(expected) >= 1) AND (length(expected) <= 1000)`,
+      sql`(length(${table.expected}) >= 1) AND (length(${table.expected}) <= 1000)`,
     ),
-    check("review_scenario_id_check", sql`id ~ '^[a-z0-9-]{1,64}$'::text`),
-    check("review_scenario_media_started_ms_check", sql`media_started_ms >= 0`),
+    check("review_scenario_id_check", sql`${table.id} ~ '^[a-z0-9-]{1,64}$'::text`),
+    check("review_scenario_media_started_ms_check", sql`${table.mediaStartedMs} >= 0`),
     check(
       "review_scenario_observation_kind_check",
-      sql`observation_kind = ANY (ARRAY['app'::text, 'source'::text])`,
+      sql`${table.observationKind} = ANY (ARRAY['app'::text, 'source'::text])`,
     ),
     check(
       "review_scenario_observed_check",
-      sql`(length(observed) >= 1) AND (length(observed) <= 2000)`,
+      sql`(length(${table.observed}) >= 1) AND (length(${table.observed}) <= 2000)`,
     ),
     check(
       "review_scenario_status_check",
-      sql`status = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text])`,
+      sql`${table.status} = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text])`,
     ),
-    check("review_scenario_title_check", sql`(length(title) >= 1) AND (length(title) <= 200)`),
+    check(
+      "review_scenario_title_check",
+      sql`(length(${table.title}) >= 1) AND (length(${table.title}) <= 200)`,
+    ),
   ],
 );

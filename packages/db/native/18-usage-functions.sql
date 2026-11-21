@@ -1,11 +1,5 @@
 -- Usage routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.guard_usage_entry() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN RAISE EXCEPTION 'Usage observations are immutable'; END;
-$$;
-
 CREATE FUNCTION factory.guard_usage_operation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$

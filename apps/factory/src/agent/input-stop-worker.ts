@@ -6,7 +6,7 @@ import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   interruptOpenCodeSession,
-} from "./opencode-client";
+} from "./opencode-adapter";
 
 // Fixed native-Actor paths. This process has no Project checkout at the
 // Session's recorded location, no Factory capability and no provider config.

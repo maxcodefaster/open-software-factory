@@ -19,9 +19,9 @@ import {
   executionPolicy as policyTable,
   usageOperation,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
-import { computeAllocationIn } from "./compute";
+import { computeAllocationIn } from "./allocation";
 
 function fingerprint(value: unknown) {
   const normalize = (input: unknown): unknown =>

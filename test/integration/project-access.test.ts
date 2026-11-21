@@ -2,10 +2,8 @@ import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import {
-  createAccessController,
-  projectDevelopmentAuthorityIn,
-} from "../../apps/factory/src/access/controller";
+import { projectDevelopmentAuthorityIn } from "../../apps/factory/src/access/authority";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import {
   searchProjectKnowledge,
   searchProjectTickets,

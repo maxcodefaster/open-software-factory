@@ -3,12 +3,12 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { usageRate } from "../../../../packages/conversation-domain/src/usage";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import { executionPolicyCommand, usageRateOverride } from "../../../../packages/db/src/schema";
-import { requireSystemManagerIn } from "../access/controller";
+import { requireSystemManagerIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { lockUsageIn } from "./policy";
 import { usageCatalogue } from "./rates";

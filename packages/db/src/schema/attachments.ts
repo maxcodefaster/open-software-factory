@@ -30,7 +30,9 @@ export const attachment = factorySchema.table(
     sha256: text("sha256").notNull(),
     byteLength: bigint("byte_length", { mode: "number" }).notNull(),
     reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull(),
-    state: text("state").notNull(),
+    state: text("state")
+      .$type<"uploading" | "ready" | "failed" | "deleting" | "deleted">()
+      .notNull(),
     textContent: text("text_content").default("").notNull(),
     objects: jsonb("objects")
       .$type<{ key: string; sha256: string; bytes: number; mediaType: string; name: string }[]>()
@@ -59,14 +61,17 @@ export const attachment = factorySchema.table(
       foreignColumns: [project.id],
       name: "attachment_project_id_fkey",
     }),
-    check("attachment_byte_length_check", sql`byte_length > 0`),
-    check("attachment_check", sql`reserved_bytes >= byte_length`),
-    check("attachment_name_check", sql`(length(name) >= 1) AND (length(name) <= 240)`),
-    check("attachment_objects_check", sql`jsonb_typeof(objects) = 'array'::text`),
-    check("attachment_sha256_check", sql`sha256 ~ '^[a-f0-9]{64}$'::text`),
+    check("attachment_byte_length_check", sql`${table.byteLength} > 0`),
+    check("attachment_check", sql`${table.reservedBytes} >= ${table.byteLength}`),
+    check(
+      "attachment_name_check",
+      sql`(length(${table.name}) >= 1) AND (length(${table.name}) <= 240)`,
+    ),
+    check("attachment_objects_check", sql`jsonb_typeof(${table.objects}) = 'array'::text`),
+    check("attachment_sha256_check", sql`${table.sha256} ~ '^[a-f0-9]{64}$'::text`),
     check(
       "attachment_state_check",
-      sql`state = ANY (ARRAY['uploading'::text, 'ready'::text, 'failed'::text, 'deleting'::text, 'deleted'::text])`,
+      sql`${table.state} = ANY (ARRAY['uploading'::text, 'ready'::text, 'failed'::text, 'deleting'::text, 'deleted'::text])`,
     ),
   ],
 );
@@ -79,7 +84,7 @@ export const attachmentStorage = factorySchema.table(
   },
   (table): PgTableExtraConfigValue[] => [
     unique("attachment_storage_id_key").on(table.id),
-    check("attachment_storage_singleton_check", sql`(singleton)`),
+    check("attachment_storage_singleton_check", sql`(${table.singleton})`),
   ],
 );
 
@@ -104,7 +109,9 @@ export const attachmentReference = factorySchema.table(
   "attachment_reference",
   {
     attachmentId: uuid("attachment_id").notNull(),
-    kind: text("kind").notNull(),
+    kind: text("kind")
+      .$type<"ticket" | "requirement" | "knowledge" | "conversation" | "feedback" | "turn">()
+      .notNull(),
     referenceId: uuid("reference_id").notNull(),
     shared: boolean("shared").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -126,7 +133,7 @@ export const attachmentReference = factorySchema.table(
     }),
     check(
       "attachment_reference_kind_check",
-      sql`kind = ANY (ARRAY['ticket'::text, 'requirement'::text, 'knowledge'::text, 'conversation'::text, 'feedback'::text, 'turn'::text])`,
+      sql`${table.kind} = ANY (ARRAY['ticket'::text, 'requirement'::text, 'knowledge'::text, 'conversation'::text, 'feedback'::text, 'turn'::text])`,
     ),
   ],
 );
@@ -152,6 +159,6 @@ export const attachmentDraft = factorySchema.table(
       name: "attachment_draft_project_id_fkey",
     }),
     primaryKey({ columns: [table.id, table.ownerId], name: "attachment_draft_pkey" }),
-    check("attachment_draft_sequence_check", sql`sequence >= 0`),
+    check("attachment_draft_sequence_check", sql`${table.sequence} >= 0`),
   ],
 );

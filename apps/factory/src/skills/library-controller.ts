@@ -4,12 +4,12 @@ import {
   desc,
   eq,
   exists,
+  sql as expression,
   inArray,
   isNotNull,
   isNull,
   ne,
   or,
-  sql as expression,
 } from "drizzle-orm";
 import {
   defaultLibraryCover,
@@ -31,8 +31,8 @@ import {
   skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -45,13 +45,13 @@ import {
   skillRevision,
   skillShareProposal,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import {
   initializeLibraryCoverIn,
   libraryCoversIn,
   saveLibraryCoverIn,
-} from "../library-covers/store";
+} from "../library-covers/api";
 import { checkSkillSourceUpdate, previewRepositorySkill, previewSkillImport } from "./import";
 import { starterSkills } from "./starters";
 

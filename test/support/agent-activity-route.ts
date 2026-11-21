@@ -1,6 +1,6 @@
-import type { AgentView } from "../../apps/factory/src/api-contracts";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { agentActivityStream } from "../../apps/factory/src/agent/activity-stream";
+import { type AgentView } from "../../apps/factory/src/agent/contracts";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 
 // A controlled native observation source. The browser still goes through the
 // real compiled function, its wire codec and an actual HTTP stream.

@@ -19,7 +19,7 @@ import {
   monitoringIncident,
   monitoringPolicy,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import {
   inputAssignmentsIn,
@@ -90,7 +90,7 @@ export function createMonitoringController(
     projectId: string,
     hookId: string,
     commandId: string,
-    action: string,
+    action: "save" | "rotate" | "disable",
     input: unknown,
   ) {
     await drizzleTransaction(sql)

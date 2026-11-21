@@ -22,7 +22,8 @@ import {
   runtimeAttempt,
   stagingPreview,
 } from "../../../../packages/db/src/schema";
-import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
+import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
+import { type createForgejoClient } from "../../../../packages/forge/src/forge";
 import type { createForgejoReleases } from "../../../../packages/forge/src/releases";
 import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import {
@@ -36,11 +37,8 @@ import {
   versionSuggestions,
 } from "../../../../packages/project-domain/src/release";
 import { runtimePublicationToken } from "../../../../packages/runtime-domain/src/identity";
-import {
-  createAccessController,
-  projectAuthorityIn,
-  projectDevelopmentAuthorityIn,
-} from "../access/controller";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import type { ReleaseSecrets } from "./secrets";
@@ -201,7 +199,11 @@ export function createReleaseController(options: {
       .where(eq(projectRelease.id, id));
     return row;
   }
-  async function state(row: ReleaseRow, next: string, failure: string | null = null) {
+  async function state(
+    row: ReleaseRow,
+    next: (typeof projectRelease.$inferSelect)["state"],
+    failure: string | null = null,
+  ) {
     await database.client.begin(async (sql) => {
       const db = drizzleTransaction(sql);
       await db
@@ -260,7 +262,7 @@ export function createReleaseController(options: {
     userID: string,
     id: string,
     name: string,
-    scope: string,
+    scope: "git" | "packages" | "publish",
     releaseID?: string,
     replacesID?: string,
   ) {

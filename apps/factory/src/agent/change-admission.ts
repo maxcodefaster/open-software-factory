@@ -30,23 +30,23 @@ import {
   requirementRevision,
   runtimeAttempt,
 } from "../../../../packages/db/src/schema";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { claimAgentWriterIn } from "../access/change-writer";
-import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
-import { attachmentContextIn } from "../attachments/store";
-import { requireDeliveredPrerequisites } from "../change/dependencies";
+import { attachmentContextIn } from "../attachments/api";
+import { requireDeliveredPrerequisites } from "../change/api";
 import { CommandError } from "../command-error";
-import { ensureConversationIn } from "../conversations/store";
-import { codingReasoningIn } from "../models/controller";
+import { ensureConversationIn } from "../conversations/api";
+import { codingReasoningIn } from "../models/api";
 import { monitoringChangeAuthorityIn } from "../monitoring/authority";
-import { createSkillController } from "../skills/controller";
 import {
+  createSkillController,
   nativeInputSkills,
   nativeSkillManifest,
   nativeSkillManifestInput,
   skillAdvertisement,
-} from "../skills/native";
-import { createContractRates } from "../usage/contract-rates";
-import { codingBudgetIn } from "../usage/policy";
+} from "../skills/api";
+import { codingBudgetIn } from "../usage/api";
+import { createContractRates } from "../usage/journal-api";
 import { buildGoalInstructions } from "./build-completion";
 import { buildKnowledgeContext } from "./knowledge-context";
 import { readTerminalOutcome, type TerminalInput, type TerminalOutcome } from "./terminal-outcome";

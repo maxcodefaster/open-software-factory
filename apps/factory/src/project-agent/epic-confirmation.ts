@@ -20,9 +20,9 @@ import {
 } from "../../../../packages/db/src/schema";
 import { canonicalRequirementContent } from "../../../../packages/requirement-domain/src/requirement";
 import { insertInitialTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
-import { lockConversation } from "../conversations/store";
+import { lockConversation } from "../conversations/api";
 
 export function proposalIdentity(entryID: string, key: string) {
   const hex = createHash("sha256").update(`epic-proposal:${entryID}:${key}`).digest("hex");
@@ -112,7 +112,7 @@ export function createEpicConfirmation(database: ReturnType<typeof createDatabas
       const original = epicProposalInput.safeParse(entry.payload["epicProposal"]);
       if (!original.success) throw new CommandError("conflict", "This is not an Epic proposal");
       if (entry.payload["visibility"] === "developer") {
-        const { projectDevelopmentAuthorityIn } = await import("../access/controller");
+        const { projectDevelopmentAuthorityIn } = await import("../access/authority");
         await projectDevelopmentAuthorityIn(sql, userID, projectID);
       }
       const [newer] = await db

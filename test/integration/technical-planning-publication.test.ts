@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
-import { codeReadInput } from "../../apps/factory/src/knowledge/code-read";
+import { codeReadInput } from "../../apps/factory/src/knowledge/contracts";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { technicalPlanningOutstandingIn } from "../../apps/factory/src/technical-design/store";
 import { fixture } from "../fixtures/change-agent-turns";

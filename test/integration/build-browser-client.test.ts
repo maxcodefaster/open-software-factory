@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtemp, realpath, rmdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
 import { projectMessages } from "../../apps/factory/src/agent/message-projection";
+import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-adapter";
+import { ownedBrowserJPEG as jpeg } from "../fixtures/browser-image";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
-import { ownedBrowserJPEG as jpeg } from "../fixtures/browser-image";
 
 test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actual image read tool", async () => {
   const directory = await realpath(

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, inArray, sql as expression } from "drizzle-orm";
+import { and, asc, eq, sql as expression, inArray } from "drizzle-orm";
 import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import {
   librarySkillAssignments,
@@ -13,8 +13,8 @@ import {
   skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
@@ -23,7 +23,7 @@ import {
   skillPublication,
   skillRevision,
 } from "../../../../packages/db/src/schema";
-import { projectAuthorityIn, requireSystemManagerIn } from "../access/controller";
+import { projectAuthorityIn, requireSystemManagerIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { createSkillLibraryController } from "./library-controller";
 

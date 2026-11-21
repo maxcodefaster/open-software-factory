@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
+import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-adapter";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";

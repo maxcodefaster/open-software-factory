@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type { RuntimeDockTarget } from "./api-contracts";
 import { Icon, type IconName } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
+import { type RuntimeDockTarget } from "./runtime/contracts";
 
 type DockIcon = Extract<IconName, "home" | "knowledge" | "ticket" | "ide" | "preview" | "inbox">;
 

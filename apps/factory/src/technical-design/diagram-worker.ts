@@ -1,14 +1,12 @@
 // Load the pinned upstream engine only in an owned, terminated worker. Never
 // install resource loaders or pass Factory credentials to the renderer.
-const enginePath = "@plantuml/mcp-js/engine.js";
-const vizPath = "@viz-js/viz";
 const ready = (async () => {
-  const viz = await import(vizPath);
+  const viz = await import("@viz-js/viz");
   Object.assign(globalThis, {
     Viz: { instance: () => viz.instance() },
     fetch: () => Promise.reject(new Error("Diagram network access is disabled.")),
   });
-  return import(enginePath);
+  return import("@plantuml/mcp-js/engine.js");
 })();
 
 self.onmessage = async (event: MessageEvent<{ source: string }>) => {

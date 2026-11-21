@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import {
   ensureOpenCodeMessageBoundary,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
+import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 

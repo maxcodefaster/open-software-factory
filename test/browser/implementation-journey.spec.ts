@@ -4,17 +4,19 @@ import { expect } from "@playwright/test";
 import {
   type AgentView,
   agentViewSchema,
-  changesResponseSchema,
-  conversationViewSchema,
-  deliveryViewSchema,
-  developerIDEViewSchema,
-  runtimeAttemptSchema,
-  sourceWorkspaceViewSchema,
   writerViewSchema,
-} from "../../apps/factory/src/api-contracts";
+} from "../../apps/factory/src/agent/contracts";
+import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
+import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import {
+  developerIDEViewSchema,
+  sourceWorkspaceViewSchema,
+} from "../../apps/factory/src/workspace/contracts";
 import {
   type ReviewFeedback,
   visualReviewSchema,

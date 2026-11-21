@@ -11,8 +11,9 @@ import {
   runtimeAttempt,
 } from "../../../../packages/db/src/schema";
 import { type SetupTask, setupTask } from "../../../../packages/project-domain/src/setup";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
-import type { createEnvironmentController } from "../environments/controller";
+import { createAccessController } from "../access/api";
+import { projectAuthorityIn } from "../access/authority";
+import { type createEnvironmentController } from "../environments/api";
 
 export function createSetupReadiness(input: {
   database: ReturnType<typeof createDatabase>;

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { sanitizeVerificationOutput } from "./diagnostics";
+import { sanitizeVerificationOutput } from "./diagnostic-output";
 import { createForgejoClient } from "./forge";
 
 const repository = { owner: "owned", name: "app" };

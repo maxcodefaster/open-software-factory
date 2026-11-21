@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
-import { nativeInputSkills, nativeSkillManifest } from "../../apps/factory/src/skills/native";
-import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import {
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
   syncOpenCodeInputGuidance,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
+import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
+import { nativeInputSkills, nativeSkillManifest } from "../../apps/factory/src/skills/native";
+import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 

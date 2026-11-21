@@ -25,7 +25,7 @@ export const mcpAccessDecision = factorySchema.table(
     connectionId: uuid("connection_id").notNull(),
     credentialEpoch: uuid("credential_epoch").notNull(),
     projectId: uuid("project_id"),
-    action: text("action").notNull(),
+    action: text("action").$type<"grant" | "revoke" | "disconnect">().notNull(),
     decidedBy: uuid("decided_by").notNull(),
     decidedAt: timestamp("decided_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -47,7 +47,7 @@ export const mcpAccessDecision = factorySchema.table(
     }),
     check(
       "mcp_access_decision_action_check",
-      sql`action = ANY (ARRAY['grant'::text, 'revoke'::text, 'disconnect'::text])`,
+      sql`${table.action} = ANY (ARRAY['grant'::text, 'revoke'::text, 'disconnect'::text])`,
     ),
   ],
 );
@@ -56,7 +56,7 @@ export const mcpLibrary = factorySchema.table(
   "mcp_library",
   {
     id: uuid("id").primaryKey().notNull(),
-    scope: text("scope").notNull(),
+    scope: text("scope").$type<"personal" | "project" | "system">().notNull(),
     ownerId: uuid("owner_id"),
     projectId: uuid("project_id"),
   },
@@ -73,11 +73,11 @@ export const mcpLibrary = factorySchema.table(
     }),
     check(
       "mcp_library_check",
-      sql`((scope = 'personal'::text) AND (owner_id IS NOT NULL) AND (project_id IS NULL)) OR ((scope = 'project'::text) AND (owner_id IS NULL) AND (project_id IS NOT NULL)) OR ((scope = 'system'::text) AND (owner_id IS NULL) AND (project_id IS NULL))`,
+      sql`((${table.scope} = 'personal'::text) AND (${table.ownerId} IS NOT NULL) AND (${table.projectId} IS NULL)) OR ((${table.scope} = 'project'::text) AND (${table.ownerId} IS NULL) AND (${table.projectId} IS NOT NULL)) OR ((${table.scope} = 'system'::text) AND (${table.ownerId} IS NULL) AND (${table.projectId} IS NULL))`,
     ),
     check(
       "mcp_library_scope_check",
-      sql`scope = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])`,
+      sql`${table.scope} = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])`,
     ),
   ],
 );
@@ -165,10 +165,10 @@ export const mcpRevision = factorySchema.table(
     unique("mcp_revision_library_id_revision_key").on(table.libraryId, table.revision),
     check(
       "mcp_revision_content_check",
-      sql`(jsonb_typeof(content) = 'object'::text) AND (octet_length((content)::text) < 16000)`,
+      sql`(jsonb_typeof(${table.content}) = 'object'::text) AND (octet_length((${table.content})::text) < 16000)`,
     ),
-    check("mcp_revision_digest_check", sql`digest ~ '^[a-f0-9]{64}$'::text`),
-    check("mcp_revision_revision_check", sql`revision > 0`),
+    check("mcp_revision_digest_check", sql`${table.digest} ~ '^[a-f0-9]{64}$'::text`),
+    check("mcp_revision_revision_check", sql`${table.revision} > 0`),
   ],
 );
 
@@ -177,7 +177,9 @@ export const mcpConnection = factorySchema.table(
   {
     id: uuid("id").primaryKey().notNull(),
     revisionId: uuid("revision_id").notNull(),
-    state: text("state").notNull(),
+    state: text("state")
+      .$type<"disconnected" | "authorizing" | "review" | "ready" | "reconnect" | "revoked">()
+      .notNull(),
     version: bigint("version", { mode: "number" }).default(0).notNull(),
     secretKey: text("secret_key"),
     credentialEpoch: uuid("credential_epoch").notNull(),
@@ -204,11 +206,11 @@ export const mcpConnection = factorySchema.table(
     }),
     check(
       "mcp_connection_state_check",
-      sql`state = ANY (ARRAY['disconnected'::text, 'authorizing'::text, 'review'::text, 'ready'::text, 'reconnect'::text, 'revoked'::text])`,
+      sql`${table.state} = ANY (ARRAY['disconnected'::text, 'authorizing'::text, 'review'::text, 'ready'::text, 'reconnect'::text, 'revoked'::text])`,
     ),
     check(
       "mcp_connection_tools_check",
-      sql`(jsonb_typeof(tools) = 'array'::text) AND (octet_length((tools)::text) <= 1000000)`,
+      sql`(jsonb_typeof(${table.tools}) = 'array'::text) AND (octet_length((${table.tools})::text) <= 1000000)`,
     ),
   ],
 );
@@ -232,8 +234,11 @@ export const mcpLibraryCover = factorySchema.table(
       foreignColumns: [authUser.id],
       name: "mcp_library_cover_updated_by_fkey",
     }),
-    check("mcp_library_cover_cover_key_check", sql`cover_key ~ '^[a-z][a-z-]{1,63}$'::text`),
-    check("mcp_library_cover_version_check", sql`version > 0`),
+    check(
+      "mcp_library_cover_cover_key_check",
+      sql`${table.coverKey} ~ '^[a-z][a-z-]{1,63}$'::text`,
+    ),
+    check("mcp_library_cover_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -245,14 +250,14 @@ export const mcpConnectIntent = factorySchema.table(
     revisionId: uuid("revision_id").notNull(),
     createdBy: uuid("created_by").notNull(),
     fingerprint: text("fingerprint").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<"running" | "completed" | "failed" | "uncertain">().notNull(),
     authorizationUrl: text("authorization_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("mcp_connect_running")
       .using("btree", table.connectionId.asc().nullsLast())
-      .where(sql`(state = 'running'::text)`),
+      .where(sql`(${table.state} = 'running'::text)`),
     foreignKey({
       columns: [table.connectionId],
       foreignColumns: [mcpConnection.id],
@@ -270,7 +275,7 @@ export const mcpConnectIntent = factorySchema.table(
     }),
     check(
       "mcp_connect_intent_state_check",
-      sql`state = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text])`,
+      sql`${table.state} = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text])`,
     ),
   ],
 );
@@ -282,7 +287,7 @@ export const mcpOauthFlow = factorySchema.table(
     connectionId: uuid("connection_id").notNull(),
     createdBy: uuid("created_by").notNull(),
     stateDigest: text("state_digest").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<"pending" | "exchanging" | "completed" | "failed">().notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -300,7 +305,7 @@ export const mcpOauthFlow = factorySchema.table(
     unique("mcp_oauth_flow_state_digest_key").on(table.stateDigest),
     check(
       "mcp_oauth_flow_state_check",
-      sql`state = ANY (ARRAY['pending'::text, 'exchanging'::text, 'completed'::text, 'failed'::text])`,
+      sql`${table.state} = ANY (ARRAY['pending'::text, 'exchanging'::text, 'completed'::text, 'failed'::text])`,
     ),
   ],
 );
@@ -314,13 +319,13 @@ export const mcpSecretWrite = factorySchema.table(
     credentialEpoch: uuid("credential_epoch").notNull(),
     secretKey: text("secret_key").notNull(),
     digest: text("digest").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<"intended" | "committed" | "superseded">().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("mcp_secret_pending")
       .using("btree", table.connectionId.asc().nullsLast())
-      .where(sql`(state = 'intended'::text)`),
+      .where(sql`(${table.state} = 'intended'::text)`),
     foreignKey({
       columns: [table.connectionId],
       foreignColumns: [mcpConnection.id],
@@ -329,7 +334,7 @@ export const mcpSecretWrite = factorySchema.table(
     unique("mcp_secret_write_secret_key_key").on(table.secretKey),
     check(
       "mcp_secret_write_state_check",
-      sql`state = ANY (ARRAY['intended'::text, 'committed'::text, 'superseded'::text])`,
+      sql`${table.state} = ANY (ARRAY['intended'::text, 'committed'::text, 'superseded'::text])`,
     ),
   ],
 );
@@ -340,7 +345,7 @@ export const mcpShareProposal = factorySchema.table(
     id: uuid("id").primaryKey().notNull(),
     revisionId: uuid("revision_id").notNull(),
     proposedBy: uuid("proposed_by").notNull(),
-    target: text("target").notNull(),
+    target: text("target").$type<"project" | "system">().notNull(),
     projectId: uuid("project_id"),
     acceptedLibraryId: uuid("accepted_library_id"),
     acceptedBy: uuid("accepted_by"),
@@ -372,10 +377,13 @@ export const mcpShareProposal = factorySchema.table(
       foreignColumns: [mcpRevision.id],
       name: "mcp_share_proposal_revision_id_fkey",
     }),
-    check("mcp_share_proposal_check", sql`(target = 'project'::text) = (project_id IS NOT NULL)`),
+    check(
+      "mcp_share_proposal_check",
+      sql`(${table.target} = 'project'::text) = (${table.projectId} IS NOT NULL)`,
+    ),
     check(
       "mcp_share_proposal_target_check",
-      sql`target = ANY (ARRAY['project'::text, 'system'::text])`,
+      sql`${table.target} = ANY (ARRAY['project'::text, 'system'::text])`,
     ),
   ],
 );
@@ -386,13 +394,13 @@ export const mcpTokenRefresh = factorySchema.table(
     id: uuid("id").primaryKey().notNull(),
     connectionId: uuid("connection_id").notNull(),
     credentialEpoch: uuid("credential_epoch").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<"intended" | "committed" | "uncertain">().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("mcp_refresh_pending")
       .using("btree", table.connectionId.asc().nullsLast())
-      .where(sql`(state = 'intended'::text)`),
+      .where(sql`(${table.state} = 'intended'::text)`),
     foreignKey({
       columns: [table.connectionId],
       foreignColumns: [mcpConnection.id],
@@ -400,7 +408,7 @@ export const mcpTokenRefresh = factorySchema.table(
     }),
     check(
       "mcp_token_refresh_state_check",
-      sql`state = ANY (ARRAY['intended'::text, 'committed'::text, 'uncertain'::text])`,
+      sql`${table.state} = ANY (ARRAY['intended'::text, 'committed'::text, 'uncertain'::text])`,
     ),
   ],
 );
@@ -438,11 +446,11 @@ export const mcpChoice = factorySchema.table(
   "mcp_choice",
   {
     libraryId: uuid("library_id").notNull(),
-    scope: text("scope").notNull(),
+    scope: text("scope").$type<"personal" | "project" | "system">().notNull(),
     contextId: uuid("context_id").notNull(),
     userId: uuid("user_id").notNull(),
-    role: text("role").notNull(),
-    state: text("state").notNull(),
+    role: text("role").$type<"planning" | "build">().notNull(),
+    state: text("state").$type<"inherit" | "enable" | "disable" | "required">().notNull(),
     revisionId: uuid("revision_id").notNull(),
     version: bigint("version", { mode: "number" }).notNull(),
   },
@@ -461,16 +469,22 @@ export const mcpChoice = factorySchema.table(
       columns: [table.libraryId, table.scope, table.contextId, table.userId, table.role],
       name: "mcp_choice_pkey",
     }),
-    check("mcp_choice_check", sql`(scope <> 'personal'::text) OR (state <> 'required'::text)`),
-    check("mcp_choice_role_check", sql`role = ANY (ARRAY['planning'::text, 'build'::text])`),
+    check(
+      "mcp_choice_check",
+      sql`(${table.scope} <> 'personal'::text) OR (${table.state} <> 'required'::text)`,
+    ),
+    check(
+      "mcp_choice_role_check",
+      sql`${table.role} = ANY (ARRAY['planning'::text, 'build'::text])`,
+    ),
     check(
       "mcp_choice_scope_check",
-      sql`scope = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])`,
+      sql`${table.scope} = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])`,
     ),
     check(
       "mcp_choice_state_check",
-      sql`state = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])`,
+      sql`${table.state} = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])`,
     ),
-    check("mcp_choice_version_check", sql`version > 0`),
+    check("mcp_choice_version_check", sql`${table.version} > 0`),
   ],
 );

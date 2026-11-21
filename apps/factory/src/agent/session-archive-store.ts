@@ -17,7 +17,7 @@ import {
 } from "../../../../packages/db/src/schema";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { projectMessages } from "./message-projection";
-import type { createOpenCodeClient } from "./opencode-client";
+import type { createOpenCodeClient } from "./opencode-adapter";
 import { readNativeSessionArchive, saveNativeSessionArchive } from "./session-archive";
 
 type Database = ReturnType<typeof createDatabase>;

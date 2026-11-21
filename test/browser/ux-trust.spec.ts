@@ -3,22 +3,26 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import ts from "typescript";
+import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import {
-  agentViewSchema,
-  attemptsResponseSchema,
-  conversationViewSchema,
-  deliveryViewSchema,
-  developerIDEViewSchema,
   knowledgeGenerationSchema,
   repositoryDocumentsSchema,
+} from "../../apps/factory/src/knowledge/contracts";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
+import {
+  attemptsResponseSchema,
   runtimeAttemptSchema,
-  sourceWorkspaceViewSchema,
-  ticketDetailSchema,
-} from "../../apps/factory/src/api-contracts";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+} from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import {
+  developerIDEViewSchema,
+  sourceWorkspaceViewSchema,
+} from "../../apps/factory/src/workspace/contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";

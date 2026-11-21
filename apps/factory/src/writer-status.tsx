@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
+import { type WriterView } from "./agent/contracts";
 import { APIRequestError } from "./api-client";
-import type { WriterView } from "./api-contracts";
 import { plainErrorMessage } from "./command-error";
 import { serverCall } from "./server-functions/result";
 import {

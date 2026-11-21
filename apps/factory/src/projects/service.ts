@@ -11,11 +11,11 @@ import {
   createRegisterProjectInput,
   type RegisterProjectInput,
 } from "../../../../packages/project-domain/src/project";
-import { requireActiveAccountIn, requireSystemManagerIn } from "../access/controller";
-import { projectSchema } from "../api-contracts";
+import { requireActiveAccountIn, requireSystemManagerIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { factoryForgeSource } from "../knowledge/forge-source";
+import { projectSchema } from "./contracts";
 import { createProjectIn, projectFields } from "./creation";
 
 type Database = ReturnType<typeof createDatabase>;

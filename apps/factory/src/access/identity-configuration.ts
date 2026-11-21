@@ -23,7 +23,7 @@ import {
 } from "../../../../packages/identity-domain/src/configuration";
 import { CommandError } from "../command-error";
 import { createOpenBaoKV } from "../secrets/openbao";
-import { requireActiveAccountIn } from "./controller";
+import { requireActiveAccountIn } from "./authority";
 
 const storedIdentity = z
   .object({ commandID: z.uuid(), fingerprint: z.string(), configuration: identityConfiguration })

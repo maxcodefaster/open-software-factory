@@ -1,15 +1,14 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import {
-  attemptsResponseSchema,
-  appPreviewsSchema,
-  deliveryViewSchema,
-} from "../../apps/factory/src/api-contracts";
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
+import {
+  appPreviewsSchema,
+  attemptsResponseSchema,
+} from "../../apps/factory/src/runtime/contracts";
 import {
   previewBridgeResponse,
   previewRendererResponse,
@@ -17,10 +16,11 @@ import {
 } from "../../apps/factory/src/runtime/embedding";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 // Real Factory entry, auth, planning cache, Ticket and review commands. Only the

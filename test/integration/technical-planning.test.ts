@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
+import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createTicketService } from "../../apps/factory/src/change/service";

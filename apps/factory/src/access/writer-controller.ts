@@ -28,13 +28,13 @@ import {
   runtimeAttempt,
 } from "../../../../packages/db/src/schema";
 import { forgeUsername } from "../../../../packages/forge/src/access";
-import type { PendingWriterHandoff } from "../agent/stop";
-import { createAgentTurnStore } from "../agent/turn-store";
+import { type PendingWriterHandoff } from "../agent/runtime-api";
+import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
 import type { RuntimeAttemptView } from "../runtime/types";
 import type { SourceRoleFence } from "../workspace/source-role-fence";
+import { projectDevelopmentAuthorityIn } from "./authority";
 import { lockChangeWriterIn } from "./change-writer";
-import { projectDevelopmentAuthorityIn } from "./controller";
 import { type WriterActivity, writerActivity } from "./writer-activity";
 
 type Database = ReturnType<typeof createDatabase>;

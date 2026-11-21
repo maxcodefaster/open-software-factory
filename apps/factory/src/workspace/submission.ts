@@ -30,10 +30,10 @@ import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
-import { recordWorkspaceCandidateIn, submitWorkspaceCandidate } from "../agent/candidate";
+import { recordWorkspaceCandidateIn, submitWorkspaceCandidate } from "../agent/candidate-api";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
-import type { RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub } from "../runtime/transport-api";
 import type { createWorkspaceCollaboration } from "./collaboration";
 import { personalGitStatus } from "./personal-git";
 

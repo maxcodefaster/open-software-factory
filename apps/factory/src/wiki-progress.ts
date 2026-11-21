@@ -1,4 +1,4 @@
-import type { KnowledgeGeneration } from "./api-contracts";
+import { type KnowledgeGeneration } from "./knowledge/contracts";
 
 function plural(count: number, noun: string) {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;

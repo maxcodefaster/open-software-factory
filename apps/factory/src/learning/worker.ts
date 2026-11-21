@@ -31,17 +31,20 @@ import {
   projectMembership,
 } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
-import { createModelConnections } from "../models/connections";
-import { createModelSettingsController } from "../models/controller";
+import {
+  createModelConnections,
+  createModelSettingsController,
+  createOpenBaoModelSecrets,
+} from "../models/api";
 import { knownModelRejection } from "../models/execution-policy";
 import { installationPlanningConnection } from "../models/resolver";
-import { createOpenBaoModelSecrets } from "../models/secrets";
-import { createUsageJournal } from "../usage/journal";
+import { createUsageJournal } from "../usage/journal-api";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { createLearningAutomation } from "./automation";
 import { calibrationCases, calibrationPassed } from "./calibration";
-import { reviewWork, workReviewInstructions } from "./judge";
+import { reviewWork } from "./judge";
+import { workReviewInstructions } from "./judge-contract";
 import {
   type PriorProposal,
   priorProposalEvidence,

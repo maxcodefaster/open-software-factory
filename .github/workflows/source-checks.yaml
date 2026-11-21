@@ -1,0 +1,35 @@
+name: Check Factory source
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: source-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
+        with:
+          version: 2026.10.3
+      - name: Install locked dependencies
+        run: mise exec -- bun install --frozen-lockfile
+      - name: Check database and planning schema drift
+        run: |
+          mise exec -- bun run db:check
+          mise exec -- bun run zero:check
+      - name: Check formatting
+        run: mise exec -- bun run format:check
+      - name: Check lint and architecture
+        run: mise exec -- bun run lint
+      # The existing typecheck owner installs locked Starter dependencies and compiles
+      # only the Theia extension needed by support tests. No browser bundle or image.
+      - name: Prepare development adapters and check types
+        run: mise exec -- bun run typecheck
+      - name: Check architecture diagnostics
+        run: mise exec -- bun run test:unit architecture-boundaries

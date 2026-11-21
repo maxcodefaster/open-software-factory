@@ -10,13 +10,16 @@ import {
   runtimeAttempt,
   substrateBinding,
 } from "../../../../packages/db/src/schema";
+import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 import { substrateFactoryURL } from "../runtime/endpoints";
-import { runtimeSourceCapability } from "../runtime/git-http";
-import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
+import {
+  type RuntimeHub,
+  RuntimeParentOperationError,
+  runtimeSourceCapability,
+} from "../runtime/transport-api";
 
 const sha = z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/);
 export const personalGitStatus = z.strictObject({

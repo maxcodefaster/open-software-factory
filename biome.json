@@ -53,6 +53,17 @@
   "yaml": { "formatter": { "enabled": false } },
   "overrides": [
     {
+      "includes": [
+        "apps/factory/src/**/*.{ts,tsx,mts,cts}",
+        "packages/*/src/**/*.{ts,tsx,mts,cts}"
+      ],
+      "linter": {
+        "rules": {
+          "style": { "noCommonJs": "error" }
+        }
+      }
+    },
+    {
       "includes": ["test/browser/**/*.spec.ts"],
       "linter": {
         "rules": {

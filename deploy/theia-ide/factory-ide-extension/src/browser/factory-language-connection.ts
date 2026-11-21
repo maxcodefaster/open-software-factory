@@ -7,7 +7,7 @@ import {
   type Disposable,
   type MessageConnection,
   type CancellationToken,
-} from "vscode-jsonrpc/browser";
+} from "#factory-jsonrpc";
 
 const maxMessageBytes = 1 << 20;
 

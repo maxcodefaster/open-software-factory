@@ -9,7 +9,7 @@ import {
   type SkillRole,
   skillInvocationViewInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import type { createAccessController } from "../access/controller";
+import { type createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { repositorySkillImportInput, skillImportInput, skillShareInput } from "./commands";
 import type { createSkillController } from "./controller";

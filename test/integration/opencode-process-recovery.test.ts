@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import {
   createOpenCodeClient,
   decodeOpenCodeAdmission,
   promptRecordedOpenCodeInput,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
+import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import upstream from "../../upstream.json";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";

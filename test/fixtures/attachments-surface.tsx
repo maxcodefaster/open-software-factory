@@ -2,14 +2,12 @@ import { render } from "@solidjs/web";
 import { createSignal, For, Show } from "solid-js";
 import { attachmentText, readAttachmentContent } from "../../apps/factory/src/attachments/composer";
 import { AttachmentProvider, TextareaAttachments } from "../../apps/factory/src/attachments/ui";
+import { readPersonalTicketDraft } from "../../apps/factory/src/change/drafts";
 import { ConversationEntryCard } from "../../apps/factory/src/conversation-components";
 import { markdownHTML } from "../../apps/factory/src/markdown";
 import { MarkdownEditor } from "../../apps/factory/src/markdown-editor";
 import { type ReviewActions, ReviewPanel } from "../../apps/factory/src/review/panel";
-import {
-  readPersonalTicketDraft,
-  TicketDraftWorkspace,
-} from "../../apps/factory/src/ticket-draft-workspace";
+import { TicketDraftWorkspace } from "../../apps/factory/src/ticket-draft-workspace";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/review/review.css";

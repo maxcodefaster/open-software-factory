@@ -27,30 +27,24 @@ import {
   zeroSchema,
 } from "../../../packages/zero-schema/src";
 import { useZero, useZeroQuery, ZeroProvider } from "../../../packages/zero-solid/src";
+import { type Session } from "./access/contracts";
 import { takeSettingsReturn } from "./access/settings-return";
+import { type AgentView, type WriterView } from "./agent/contracts";
 import { createAgentFollower } from "./agent/follow-agent";
 import { createAgentCommandIds } from "./agent-command-ids";
 import { type AgentSnapshot, createAgentReadFence, retainAgentActivity } from "./agent-view-state";
-import type {
-  AgentView,
-  AppPreview,
-  Bootstrap,
-  Change,
-  ConversationView,
-  DeliveryView,
-  RuntimeAttempt,
-  RuntimeDockTarget,
-  Session,
-  WriterView,
-} from "./api-contracts";
 import { orderedDesktopBackgrounds } from "./artworks";
 import type { followConversation } from "./assistant-interaction";
 import { AttachmentProvider } from "./attachments/ui";
+import { type Bootstrap } from "./bootstrap/contracts";
+import { type Change, type PersonalTicketDraft, type TicketDraft } from "./change/contracts";
 import { plainErrorMessage } from "./command-error";
+import { type DeliveryView } from "./delivery/contracts";
 import { AssistantPanel, type AssistantPanelModel } from "./desktop/assistant-panel";
 import { createAssistantPresentation } from "./desktop/assistant-presentation";
 import { createBoardProjection } from "./desktop/board-projection";
 import { createCodingCommands } from "./desktop/coding-commands";
+import { createDesktopCommandState } from "./desktop/command-state";
 import { createComposerState } from "./desktop/composer-state";
 import type { FactoryDesktopProps, TicketDetail } from "./desktop/contracts";
 import { createConversationCommands } from "./desktop/conversation-commands";
@@ -74,15 +68,15 @@ import { createDesktopNavigation, unavailableLink } from "./navigation/desktop";
 import { type FactoryLocation, factoryPath } from "./navigation/location";
 import { useFactoryNavigation } from "./navigation/router";
 import { bindPopoverKeyboard } from "./popover-keyboard";
+import { type ConversationView } from "./project-agent/contracts";
 import { createConversationSelection } from "./project-agent/selection";
 import { createProjectPlanning } from "./projects/planning";
 import { ticketReference } from "./projects/ticket-content";
+import { type AppPreview, type RuntimeAttempt, type RuntimeDockTarget } from "./runtime/contracts";
 import { runtimeStateLabel } from "./runtime-workspace-state";
 import { getModelAvailability } from "./server-functions/bootstrap";
 import { serverCall } from "./server-functions/result";
 import { createProjectSetupInteraction } from "./setup/panel";
-import type { PersonalTicketDraft } from "./ticket-draft-workspace";
-import type { TicketDraft } from "./ticket-workspace";
 import { createWindowPresence } from "./window-presence";
 import { createWorkspaceState } from "./workspace/state";
 import { workspacePanelID, workspaceTabElementID } from "./workspace-tabbar";
@@ -207,9 +201,8 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   const [attempts, setAttempts] = createSignal<RuntimeAttempt[]>([]);
   const [appPreviews, setAppPreviews] = createSignal<AppPreview[]>([]);
   const [lifecycleProjectID, setLifecycleProjectID] = createSignal<string>();
-  const [error, setError] = createSignal("");
-  const [pendingContexts, setPendingContexts] = createSignal<Record<string, number>>({});
   const contextKey = () => `${selectedProjectID() ?? "none"}:${selectedTicketID() ?? "none"}`;
+  const { error, setError, pendingContexts, mutate } = createDesktopCommandState(contextKey);
   const pending = () => (pendingContexts()[contextKey()] ?? 0) > 0;
   const [syncError, setSyncError] = createSignal("");
   const ticketDrafts = new Map<string, TicketDraft>();
@@ -1005,7 +998,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     codingWriter,
     agentCommandScope,
     messageDrafts,
-    props,
+    userID: initialSession.user.id,
     agentCommandIds,
   });
 
@@ -1053,31 +1046,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       setError,
       publishConversation,
     });
-
-  async function mutate<T>(
-    operation: () => Promise<T>,
-    contextIsCurrent?: () => boolean,
-    key = contextKey(),
-  ) {
-    const isCurrent = contextIsCurrent ?? (() => contextKey() === key);
-    setPendingContexts((contexts) => ({ ...contexts, [key]: (contexts[key] ?? 0) + 1 }));
-    setError("");
-    try {
-      return { ok: true as const, value: await operation() };
-    } catch (cause) {
-      if (isCurrent()) {
-        setError(
-          cause instanceof Error ? plainErrorMessage(cause.message) : "Factory command failed",
-        );
-      }
-      return { ok: false as const };
-    } finally {
-      setPendingContexts((contexts) => ({
-        ...contexts,
-        [key]: Math.max(0, (contexts[key] ?? 1) - 1),
-      }));
-    }
-  }
 
   async function chooseDesktopBackground(key: DesktopBackgroundKey) {
     const project = selectedProject();
@@ -1134,8 +1102,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     moveTicket,
   } = createProjectCommands({
     mutate,
-    setSelectedProjectID,
-    setProjectMenuOpen,
     zero,
     selectedProjectID,
     commitZeroMutation,
@@ -1149,7 +1115,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     setSelectedTicketID,
     setDetail,
     openWorkspaceTab,
-    props,
+    userID: initialSession.user.id,
     workspaces,
     workspaceVisible,
     selectTicket,

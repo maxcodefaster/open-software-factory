@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { deliveryViewSchema } from "./api-contracts";
+import { deliveryViewSchema } from "./contracts";
 
 test.each([28, "28"])("Delivery reads PR number %j from the PostgreSQL projection", (value) => {
   expect(deliveryViewSchema.parse({ pullRequestNumber: value }).pullRequestNumber).toBe(28);

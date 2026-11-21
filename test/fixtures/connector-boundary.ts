@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { observe, type pinnedOpenCode } from "./pinned-opencode";
 

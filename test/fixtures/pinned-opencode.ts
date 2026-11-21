@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import upstream from "../../upstream.json";
 import { buildModelID } from "./change-agent-turns";

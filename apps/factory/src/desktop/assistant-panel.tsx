@@ -10,6 +10,7 @@ import { requirementContentInput } from "../../../../packages/requirement-domain
 import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
 import { BuildModelControls } from "../agent/build-model-controls";
 import { AgentBlockers } from "../agent/configuration";
+import { type AgentMessage, type AgentView, type WriterView } from "../agent/contracts";
 import {
   buildAgentActivityNotice,
   buildAgentActivityStopped,
@@ -17,16 +18,9 @@ import {
   buildAgentHint,
   buildAgentStatus,
 } from "../agent-view-state";
-import type {
-  AgentMessage,
-  AgentView,
-  Change,
-  ConversationView,
-  Ticket,
-  WriterView,
-} from "../api-contracts";
 import { composerKeyDown, followConversation, resizeComposer } from "../assistant-interaction";
 import { TextareaAttachments } from "../attachments/ui";
+import { type Change, type PersonalTicketDraft, type Ticket } from "../change/contracts";
 import { plainFailureMessage } from "../command-error";
 import type { ConversationDisplayItem } from "../conversation-activity";
 import {
@@ -41,10 +35,10 @@ import { InboxSourceNavigation } from "../inbox/source-navigation";
 import { repositoryLink } from "../knowledge/source-link";
 import type { createKnowledgeState } from "../knowledge/state";
 import { markdownHTML } from "../markdown";
+import { type ConversationView } from "../project-agent/contracts";
 import type { createProjectPlanning } from "../projects/planning";
 import { type createProjectSetupInteraction, ProjectSetupPanel } from "../setup/panel";
 import { ChatSkillPicker } from "../skills/chat-picker";
-import type { PersonalTicketDraft } from "../ticket-draft-workspace";
 import { CopyButton } from "../ui/feedback";
 import type { createWindowPresence } from "../window-presence";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";

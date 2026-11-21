@@ -17,7 +17,7 @@ test("the Factory image makes packaged code readable without exposing private st
   const root = await mkdtemp(join(tmpdir(), "factory-image-permissions-"));
   const content = "owned public Factory code\n";
   const sources = [
-    "apps/factory/src/agent/opencode-client.ts",
+    "apps/factory/src/agent/opencode-adapter.ts",
     "apps/factory/public/art.txt",
     "apps/factory/dist/server/entry.js",
     "packages/db/src/client.ts",

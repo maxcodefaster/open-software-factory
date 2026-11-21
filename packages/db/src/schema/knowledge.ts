@@ -44,7 +44,7 @@ export const knowledgeGeneration = factorySchema.table(
     uniqueIndex("knowledge_generation_one_active_per_project")
       .using("btree", table.projectId.asc().nullsLast())
       .where(
-        sql`(state = ANY (ARRAY['pending'::knowledge_generation_state, 'running'::knowledge_generation_state]))`,
+        sql`(${table.state} = ANY (ARRAY['pending'::knowledge_generation_state, 'running'::knowledge_generation_state]))`,
       ),
     foreignKey({
       columns: [table.createdBy],
@@ -63,32 +63,35 @@ export const knowledgeGeneration = factorySchema.table(
     }),
     check(
       "knowledge_generation_check",
-      sql`(state = ANY (ARRAY['succeeded'::knowledge_generation_state, 'failed'::knowledge_generation_state])) = (completed_at IS NOT NULL)`,
+      sql`(${table.state} = ANY (ARRAY['succeeded'::knowledge_generation_state, 'failed'::knowledge_generation_state])) = (${table.completedAt} IS NOT NULL)`,
     ),
     check(
       "knowledge_generation_conflict_count_check",
-      sql`(conflict_count IS NULL) OR (conflict_count >= 0)`,
+      sql`(${table.conflictCount} IS NULL) OR (${table.conflictCount} >= 0)`,
     ),
     check(
       "knowledge_generation_failure_check",
-      sql`(failure IS NULL) OR (length(failure) <= 4000)`,
+      sql`(${table.failure} IS NULL) OR (length(${table.failure}) <= 4000)`,
     ),
     check(
       "knowledge_generation_model_id_check",
-      sql`(model_id IS NULL) OR ((length(model_id) >= 1) AND (length(model_id) <= 200))`,
+      sql`(${table.modelId} IS NULL) OR ((length(${table.modelId}) >= 1) AND (length(${table.modelId}) <= 200))`,
     ),
-    check("knowledge_generation_page_count_check", sql`(page_count IS NULL) OR (page_count >= 0)`),
+    check(
+      "knowledge_generation_page_count_check",
+      sql`(${table.pageCount} IS NULL) OR (${table.pageCount} >= 0)`,
+    ),
     check(
       "knowledge_generation_progress_shape",
-      sql`(progress IS NULL) OR ((jsonb_typeof(progress) = 'object'::text) AND ((progress ->> 'phase'::text) = ANY (ARRAY['planning'::text, 'writing'::text, 'publishing'::text, 'done'::text])) AND (jsonb_typeof((progress -> 'topicsTotal'::text)) = 'number'::text) AND (jsonb_typeof((progress -> 'topicsDone'::text)) = 'number'::text) AND ((((progress ->> 'topicsTotal'::text))::numeric >= (0)::numeric) AND (((progress ->> 'topicsTotal'::text))::numeric <= (100)::numeric)) AND ((((progress ->> 'topicsDone'::text))::numeric >= (0)::numeric) AND (((progress ->> 'topicsDone'::text))::numeric <= (100)::numeric)) AND (jsonb_typeof((progress -> 'currentTopic'::text)) = ANY (ARRAY['string'::text, 'null'::text])) AND (octet_length((progress)::text) <= 1000))`,
+      sql`(${table.progress} IS NULL) OR ((jsonb_typeof(${table.progress}) = 'object'::text) AND ((${table.progress} ->> 'phase'::text) = ANY (ARRAY['planning'::text, 'writing'::text, 'publishing'::text, 'done'::text])) AND (jsonb_typeof((${table.progress} -> 'topicsTotal'::text)) = 'number'::text) AND (jsonb_typeof((${table.progress} -> 'topicsDone'::text)) = 'number'::text) AND ((((${table.progress} ->> 'topicsTotal'::text))::numeric >= (0)::numeric) AND (((${table.progress} ->> 'topicsTotal'::text))::numeric <= (100)::numeric)) AND ((((${table.progress} ->> 'topicsDone'::text))::numeric >= (0)::numeric) AND (((${table.progress} ->> 'topicsDone'::text))::numeric <= (100)::numeric)) AND (jsonb_typeof((${table.progress} -> 'currentTopic'::text)) = ANY (ARRAY['string'::text, 'null'::text])) AND (octet_length((${table.progress})::text) <= 1000))`,
     ),
     check(
       "knowledge_generation_source_commit_sha_check",
-      sql`source_commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.sourceCommitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "knowledge_model_connection_pair",
-      sql`(model_connection_id IS NULL) = (model_connection_version IS NULL)`,
+      sql`(${table.modelConnectionId} IS NULL) = (${table.modelConnectionVersion} IS NULL)`,
     ),
   ],
 );
@@ -127,20 +130,26 @@ export const knowledgeRevision = factorySchema.table(
     }),
     unique("knowledge_revision_id_page_id_key").on(table.id, table.pageId),
     unique("knowledge_revision_page_id_ordinal_key").on(table.pageId, table.ordinal),
-    check("knowledge_revision_body_check", sql`(length(body) >= 1) AND (length(body) <= 120000)`),
-    check("knowledge_revision_citations_check", sql`jsonb_typeof(citations) = 'array'::text`),
+    check(
+      "knowledge_revision_body_check",
+      sql`(length(${table.body}) >= 1) AND (length(${table.body}) <= 120000)`,
+    ),
+    check(
+      "knowledge_revision_citations_check",
+      sql`jsonb_typeof(${table.citations}) = 'array'::text`,
+    ),
     check(
       "knowledge_revision_generated_body_check",
-      sql`(length(generated_body) >= 1) AND (length(generated_body) <= 120000)`,
+      sql`(length(${table.generatedBody}) >= 1) AND (length(${table.generatedBody}) <= 120000)`,
     ),
-    check("knowledge_revision_ordinal_check", sql`ordinal > 0`),
+    check("knowledge_revision_ordinal_check", sql`${table.ordinal} > 0`),
     check(
       "knowledge_revision_source_commit_sha_check",
-      sql`source_commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.sourceCommitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "knowledge_revision_title_check",
-      sql`(length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)`,
+      sql`(length(btrim(${table.title})) >= 1) AND (length(btrim(${table.title})) <= 200)`,
     ),
   ],
 );
@@ -167,7 +176,10 @@ export const knowledgePage = factorySchema.table(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     parentId: uuid("parent_id"),
     sortOrder: integer("sort_order").default(0).notNull(),
-    icon: text("icon").default("knowledge").notNull(),
+    icon: text("icon")
+      .$type<"knowledge" | "home" | "ticket" | "ide" | "preview" | "settings">()
+      .default("knowledge")
+      .notNull(),
     metadataVersion: bigint("metadata_version", { mode: "number" }).default(1).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
@@ -212,30 +224,30 @@ export const knowledgePage = factorySchema.table(
     unique("knowledge_page_project_id_slug_key").on(table.projectId, table.slug),
     check(
       "knowledge_page_generated_body_check",
-      sql`(length(generated_body) >= 1) AND (length(generated_body) <= 120000)`,
+      sql`(length(${table.generatedBody}) >= 1) AND (length(${table.generatedBody}) <= 120000)`,
     ),
-    check("knowledge_page_citations_check", sql`jsonb_typeof(citations) = 'array'::text`),
+    check("knowledge_page_citations_check", sql`jsonb_typeof(${table.citations}) = 'array'::text`),
     check(
       "knowledge_page_current_body_check",
-      sql`(length(current_body) >= 1) AND (length(current_body) <= 120000)`,
+      sql`(length(${table.currentBody}) >= 1) AND (length(${table.currentBody}) <= 120000)`,
     ),
     check(
       "knowledge_page_icon_check",
-      sql`icon = ANY (ARRAY['knowledge'::text, 'home'::text, 'ticket'::text, 'ide'::text, 'preview'::text, 'settings'::text])`,
+      sql`${table.icon} = ANY (ARRAY['knowledge'::text, 'home'::text, 'ticket'::text, 'ide'::text, 'preview'::text, 'settings'::text])`,
     ),
-    check("knowledge_page_metadata_version_check", sql`metadata_version > 0`),
-    check("knowledge_page_not_own_parent", sql`parent_id IS DISTINCT FROM id`),
-    check("knowledge_page_slug_check", sql`slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text`),
-    check("knowledge_page_sort_order_check", sql`sort_order >= 0`),
+    check("knowledge_page_metadata_version_check", sql`${table.metadataVersion} > 0`),
+    check("knowledge_page_not_own_parent", sql`${table.parentId} IS DISTINCT FROM ${table.id}`),
+    check("knowledge_page_slug_check", sql`${table.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text`),
+    check("knowledge_page_sort_order_check", sql`${table.sortOrder} >= 0`),
     check(
       "knowledge_page_source_commit_sha_check",
-      sql`source_commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`${table.sourceCommitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
     ),
     check(
       "knowledge_page_title_check",
-      sql`(length(btrim(title)) >= 1) AND (length(btrim(title)) <= 200)`,
+      sql`(length(btrim(${table.title})) >= 1) AND (length(btrim(${table.title})) <= 200)`,
     ),
-    check("knowledge_page_version_check", sql`version > 0`),
+    check("knowledge_page_version_check", sql`${table.version} > 0`),
   ],
 );
 
@@ -281,7 +293,10 @@ export const wikiSourceUpdate = factorySchema.table(
     projectId: uuid("project_id").primaryKey().notNull(),
     targetUrl: text("target_url").notNull(),
     hookId: bigint("hook_id", { mode: "number" }),
-    hookState: text("hook_state").default("create-intended").notNull(),
+    hookState: text("hook_state")
+      .$type<"create-intended" | "ready" | "failed">()
+      .default("create-intended")
+      .notNull(),
     hookLease: uuid("hook_lease"),
     hookLeaseUntil: timestamp("hook_lease_until", { withTimezone: true }),
     eventVersion: bigint("event_version", { mode: "number" }).default(0).notNull(),
@@ -299,12 +314,12 @@ export const wikiSourceUpdate = factorySchema.table(
     }),
     check(
       "wiki_source_update_check",
-      sql`(handled_version >= 0) AND (handled_version <= event_version)`,
+      sql`(${table.handledVersion} >= 0) AND (${table.handledVersion} <= ${table.eventVersion})`,
     ),
-    check("wiki_source_update_event_version_check", sql`event_version >= 0`),
+    check("wiki_source_update_event_version_check", sql`${table.eventVersion} >= 0`),
     check(
       "wiki_source_update_hook_state_check",
-      sql`hook_state = ANY (ARRAY['create-intended'::text, 'ready'::text, 'failed'::text])`,
+      sql`${table.hookState} = ANY (ARRAY['create-intended'::text, 'ready'::text, 'failed'::text])`,
     ),
   ],
 );
@@ -329,6 +344,6 @@ export const knowledgePageAlias = factorySchema.table(
       name: "knowledge_page_alias_project_id_fkey",
     }),
     primaryKey({ columns: [table.projectId, table.slug], name: "knowledge_page_alias_pkey" }),
-    check("knowledge_page_alias_slug_check", sql`slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text`),
+    check("knowledge_page_alias_slug_check", sql`${table.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text`),
   ],
 );

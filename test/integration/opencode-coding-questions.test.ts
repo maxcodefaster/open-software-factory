@@ -7,7 +7,7 @@ import {
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
   promptRecordedOpenCodeInput,
-} from "../../apps/factory/src/agent/opencode-client";
+} from "../../apps/factory/src/agent/opencode-adapter";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { docker, observe } from "../fixtures/pinned-opencode";
 

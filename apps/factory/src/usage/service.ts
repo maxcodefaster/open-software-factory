@@ -7,7 +7,7 @@ import {
 } from "../../../../packages/conversation-domain/src/usage-view";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { runtimeAttempt, substrateBinding } from "../../../../packages/db/src/schema";
-import { createAccessController } from "../access/controller";
+import { createAccessController } from "../access/api";
 import { createContractRates } from "./contract-rates";
 import { createUsagePolicy } from "./policy";
 

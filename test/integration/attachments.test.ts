@@ -1,10 +1,8 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
-import {
-  type AgentTurnRecord,
-  createAgentTurnStore,
-} from "../../apps/factory/src/agent/turn-store";
+import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import {
   type AttachmentObjects,
   attachmentDigest,

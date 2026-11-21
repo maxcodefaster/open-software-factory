@@ -101,7 +101,7 @@ export const authSession = authSchema.table(
     unique("session_token_key").on(table.token),
     check(
       "session_login_method_check",
-      sql`login_method = ANY (ARRAY['password'::text, 'sso'::text, 'emergency'::text, 'identity-test'::text])`,
+      sql`${table.loginMethod} = ANY (ARRAY['password'::text, 'sso'::text, 'emergency'::text, 'identity-test'::text])`,
     ),
   ],
 );

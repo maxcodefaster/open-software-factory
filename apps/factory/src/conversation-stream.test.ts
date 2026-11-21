@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { ConversationStreamEvent, ConversationView } from "./api-contracts";
 import { streamConversation } from "./conversation-stream";
+import { type ConversationStreamEvent, type ConversationView } from "./project-agent/contracts";
 
 const conversation: ConversationView = {
   id: "owned",

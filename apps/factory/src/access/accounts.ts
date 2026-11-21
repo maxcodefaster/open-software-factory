@@ -4,7 +4,7 @@ import { emergencyAdministratorID } from "../../../../packages/auth/src/policy";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { accountAccess, authSession, projectMembership } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
-import { requireActiveAccountIn, requireSystemManagerIn } from "./controller";
+import { requireActiveAccountIn, requireSystemManagerIn } from "./authority";
 
 export function createAccountCommands(database: ReturnType<typeof createDatabase>) {
   return {

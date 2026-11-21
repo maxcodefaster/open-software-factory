@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
+import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-adapter";
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
-import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-client";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";

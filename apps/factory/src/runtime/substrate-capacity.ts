@@ -23,7 +23,10 @@ import {
 import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
 import { CommandError } from "../command-error";
 import { installationInMaintenance } from "../installation/maintenance";
-import type { SubstrateInstallationConfiguration } from "./substrate-workspaces";
+import type {
+  SubstrateCapacityConfiguration,
+  SubstrateCapacityResources,
+} from "./substrate-capacity-contract";
 
 type Database = ReturnType<typeof createDatabase>;
 type Intent = {
@@ -53,7 +56,7 @@ type InstallationIntent = {
 // the normal Substrate allocator still places Actors and enforces their budgets.
 export function createSubstrateCapacity(
   database: Database,
-  config: SubstrateInstallationConfiguration,
+  config: SubstrateCapacityConfiguration,
   run = runNativeCapacityKubernetes,
 ) {
   const selector = config.workerSelector;
@@ -332,7 +335,7 @@ export function createSubstrateCapacity(
   }
   return {
     ensure,
-    async requireReady(resources: { cpuMilli: number; memoryMiB: number }) {
+    async requireReady(resources: SubstrateCapacityResources) {
       const observed = await ensure();
       if (
         !observed.ready.some(

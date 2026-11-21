@@ -1,8 +1,8 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { pageSiblings } from "../../../../packages/knowledge-domain/src/page-tree";
-import type { KnowledgePageOutline, RepositoryDocument } from "../api-contracts";
 import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
+import { type KnowledgePageOutline, type RepositoryDocument } from "./contracts";
 
 export type PageMove = { pageId: string; parentId: string | null; beforeId: string | null };
 type Folder = { path: string; name: string; folders: Folder[]; documents: RepositoryDocument[] };

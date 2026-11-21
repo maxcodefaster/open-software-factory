@@ -7,7 +7,7 @@ import {
 import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { attachment, attachmentReference } from "../../../../packages/db/src/schema";
-import { createAgentTurnStore } from "../agent/turn-store";
+import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
 import { attachmentContextIn, createAttachmentStore, readableAttachmentIn } from "./store";
 

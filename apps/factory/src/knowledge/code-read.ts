@@ -1,26 +1,10 @@
 import { z } from "zod";
+import type { codeReadInput } from "./contracts";
 
 // Whole blobs remain bounded in the repository adapter; model reads are still
 // paginated to 16,000 characters, including large lockfiles and source modules.
 export const maximumReadableCodeBytes = 16 * 1024 * 1024;
 
-export const codeReference = z
-  .object({
-    commitSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
-    path: z.string().min(1).max(1000),
-  })
-  .strict();
-export const codeReadInput = codeReference.extend({
-  startLine: z.number().int().min(1).max(100000).default(1),
-  lineCount: z.number().int().min(1).max(160).default(80),
-});
-export const codeReadResult = codeReadInput.extend({
-  body: z.string().max(16000),
-  truncated: z.boolean(),
-  nextStartLine: z.number().int().positive().nullable().optional(),
-  totalLines: z.number().int().nonnegative().optional(),
-  url: z.string().url(),
-});
 export function readCodePage(
   content: string,
   input: Pick<z.infer<typeof codeReadInput>, "startLine" | "lineCount">,

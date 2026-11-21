@@ -2,13 +2,10 @@ import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
 import { z } from "zod";
-import {
-  type AgentView,
-  agentViewSchema,
-  changesResponseSchema,
-  conversationViewSchema,
-  deliveryViewSchema,
-} from "../../apps/factory/src/api-contracts";
+import { type AgentView, agentViewSchema } from "../../apps/factory/src/agent/contracts";
+import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
+import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import type { releaseInstallation } from "./release-installation";
 import {

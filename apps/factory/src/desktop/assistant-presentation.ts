@@ -8,10 +8,11 @@ import type { ConversationMode } from "../../../../packages/conversation-domain/
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { assistantContext } from "../../../../packages/interface-domain/src/assistant-context";
 import { workspacePresence } from "../../../../packages/interface-domain/src/workspace-presence";
+import { type AgentView, type WriterView } from "../agent/contracts";
 import { buildAgentNeedsStart } from "../agent-view-state";
-import type { AgentView, ConversationView, WriterView } from "../api-contracts";
 import { groupConversationActivities } from "../conversation-activity";
 import { conversationTimeline } from "../conversation-timeline";
+import { type ConversationView } from "../project-agent/contracts";
 import { requirementContent } from "../projects/ticket-content";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import type { FactoryDesktopProps, TicketDetail } from "./contracts";
@@ -77,7 +78,7 @@ interface AssistantPresentationDependencies {
     projectID?: string | undefined,
   ) => string;
   messageDrafts: ReadonlyMap<string, string>;
-  props: FactoryDesktopProps;
+  userID: string;
   agentCommandIds: {
     forInput(scope: string, input: string, draft?: string): string;
     latest(
@@ -251,7 +252,7 @@ export function createAssistantPresentation(dependencies: AssistantPresentationD
     try {
       return (
         dependencies.messageDrafts.get(scope) ??
-        sessionStorage.getItem(`chat-draft:${dependencies.props.session.user.id}:${scope}`) ??
+        sessionStorage.getItem(`chat-draft:${dependencies.userID}:${scope}`) ??
         dependencies.agentCommandIds.latest(scope)?.draft ??
         ""
       );

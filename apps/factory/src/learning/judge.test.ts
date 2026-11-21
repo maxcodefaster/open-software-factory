@@ -19,7 +19,8 @@ import { calibrationCases, calibrationPassed } from "./calibration";
 
 let modelResult: LearningResult;
 mock.module("./judge-engine", () => ({ reviewWorkWithModel: async () => modelResult }));
-const { reviewWork, workReviewInstructions } = await import("./judge");
+const { reviewWork } = await import("./judge");
+const { workReviewInstructions } = await import("./judge-contract");
 
 const target = {
   kind: "skill",

@@ -1,4 +1,4 @@
-import type { createOpenCodeClient } from "./opencode-client";
+import type { createOpenCodeClient } from "./opencode-adapter";
 
 // Only Factory's restricted, turn-bound facades are registered. This is an
 // in-memory upstream override, not Project configuration or a generic registry.

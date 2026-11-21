@@ -14,19 +14,19 @@ import {
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
-  type DatabaseTransaction,
   type createDatabase,
+  type DatabaseTransaction,
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
   agentTurn,
-  change as changeTable,
   changeAgentSession,
   changeAgentTurnIntent,
+  change as changeTable,
   runtimeAttempt,
 } from "../../../../packages/db/src/schema";
 import { CommandError } from "../command-error";
-import type { RuntimeHub } from "../runtime/hub";
+import { type RuntimeHub } from "../runtime/transport-api";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import {
@@ -35,7 +35,7 @@ import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   interruptOpenCodeSession,
-} from "./opencode-client";
+} from "./opencode-adapter";
 import { createStopTransport } from "./stop-transport";
 
 type Database = ReturnType<typeof createDatabase>;
