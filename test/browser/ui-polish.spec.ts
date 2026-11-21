@@ -9,6 +9,7 @@ import {
   runtimeAttemptSchema,
 } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { environmentSettingsView } from "../../packages/project-domain/src/environment";
 import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
@@ -17,6 +18,7 @@ import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
+  browserFunction,
   factoryFunctionMatcher,
   factoryFunctionMatches,
   mockFactoryFunctions,
@@ -625,6 +627,9 @@ test("declared Preview Apps remain selectable before compute and retain their ch
   let attemptID = firstAttemptID;
   let starts = 0;
   let running = false;
+  const firstRefresh = Promise.withResolvers<void>();
+  const releaseRefresh = Promise.withResolvers<void>();
+  let heldRefresh = false;
   const apps = [
     { channel: "app", label: "Staging · Website" },
     { channel: "app-forms-web", label: "Staging · Forms editor" },
@@ -669,6 +674,16 @@ test("declared Preview Apps remain selectable before compute and retain their ch
         });
       },
     },
+    conversations: {
+      get: async (_actor, id, input) => {
+        if (starts === 1 && !heldRefresh) {
+          heldRefresh = true;
+          firstRefresh.resolve();
+          await releaseRefresh.promise;
+        }
+        return serverCall(browserFunction(page, "getConversation", [id, input]));
+      },
+    },
   });
   const paths: string[] = [];
   await page.route("**/api/runtime-access?*", async (route) => {
@@ -695,15 +710,33 @@ test("declared Preview Apps remain selectable before compute and retain their ch
   await expect(
     page.getByRole("tab", { name: "Preview · Staging · Forms editor", exact: true }),
   ).toBeVisible();
-  running = false;
-  await wakeFactoryReads(page);
-  await expect(page.getByRole("button", { name: "Retry Main Preview", exact: true })).toBeVisible();
-  expect(starts).toBe(1);
-  await chooser.click();
-  await page.getByRole("menuitem", { name: /^Staging · Forms editor/ }).click();
-  await expect
-    .poll(() => paths.at(-1))
-    .toBe(`/runtime/${replacementAttemptID}/preview/app-forms-web/`);
+  try {
+    await firstRefresh.promise;
+    running = false;
+    await wakeFactoryReads(page);
+    await expect(
+      page.getByRole("button", { name: "Retry Main Preview", exact: true }),
+    ).toBeVisible();
+    expect(starts).toBe(1);
+    await chooser.click();
+    await page.getByRole("menuitem", { name: /^Staging · Forms editor/ }).click();
+    expect(starts).toBe(1);
+    expect(paths).toEqual([`/runtime/${firstAttemptID}/preview/app-forms-web/`]);
+    // A visible frame and Retry button do not settle the first Start's
+    // post-command refresh. Reopening while it is pending must not dispatch again.
+    const findTicket = page.getByRole("button", { name: "Find Ticket", exact: true });
+    await expect(findTicket).toBeDisabled();
+    await page.screenshot({ path: `${evidence}/declared-preview-pending-refresh.png` });
+    releaseRefresh.resolve();
+    await expect(findTicket).toBeEnabled();
+    await chooser.click();
+    await page.getByRole("menuitem", { name: /^Staging · Forms editor/ }).click();
+    await expect
+      .poll(() => paths.at(-1))
+      .toBe(`/runtime/${replacementAttemptID}/preview/app-forms-web/`);
+  } finally {
+    releaseRefresh.resolve();
+  }
   expect(starts).toBe(2);
   expect(paths).toEqual([
     `/runtime/${firstAttemptID}/preview/app-forms-web/`,
@@ -712,6 +745,7 @@ test("declared Preview Apps remain selectable before compute and retain their ch
   await expect(
     page.getByRole("tab", { name: "Preview · Staging · Forms editor", exact: true }),
   ).toHaveCount(1);
+  await page.screenshot({ path: `${evidence}/declared-preview-replaced.png` });
 });
 
 for (const touch of [false, true])

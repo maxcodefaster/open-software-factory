@@ -8,8 +8,10 @@ import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserConversation,
   browserFunction,
+  factoryFunctionMatcher,
   mockFactoryFunctions,
   requestFunction,
+  wakeFactoryReads,
 } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
@@ -871,14 +873,34 @@ test("partial interview answers survive polling, reload and tab switches; queued
   if (!(await page.getByRole("complementary", { name: "Agent panel" }).isVisible()))
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(answer).toHaveValue("Product contributors and developers");
-  const started = Date.now();
-  await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.waitForFunction(
-    (prompt) => document.querySelector(".conversation-question strong")?.textContent === prompt,
-    next.prompt,
+  const conversationRead = await factoryFunctionMatcher("getConversation");
+  const answerCommand = await factoryFunctionMatcher("answerConversationQuestion");
+  const heldRead = Promise.withResolvers<void>();
+  const releaseRead = Promise.withResolvers<void>();
+  let released = false;
+  await page.route(
+    (url) => conversationRead(url),
+    async (route) => {
+      heldRead.resolve();
+      await releaseRead.promise;
+      await route.fallback();
+    },
   );
-  await expect(page.getByText(next.prompt, { exact: true })).toBeVisible();
-  expect(Date.now() - started).toBeLessThan(3000);
+  const commandReply = page.waitForResponse((response) => answerCommand(new URL(response.url())));
+  try {
+    // Hold a real background read before answering. The next question
+    // must be rendered from the command reply, not a later poll or refresh.
+    await wakeFactoryReads(page);
+    await heldRead.promise;
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    expect((await commandReply).ok()).toBe(true);
+    await expect(page.getByText(next.prompt, { exact: true })).toBeVisible();
+    await expect(answer).toHaveValue("");
+    expect(released).toBe(false);
+  } finally {
+    released = true;
+    releaseRead.resolve();
+  }
   const [turn] = await db.client<
     Array<{ state: string }>
   >`SELECT state FROM factory.agent_turn WHERE ticket_id=${ticketID}`;

@@ -51,32 +51,71 @@ func TestNativeSourceProxyAllowsCompleteCheckpointPastOrdinaryHeaderDeadline(t *
 }
 
 func TestNativeSourceProxyStillHonorsCallerCancellation(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "source.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cancelled := make(chan struct{})
-	service := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-		close(cancelled)
-	})}
-	go service.Serve(listener)
-	defer service.Close()
-	proxy, transport := nativeSourceProxy(socket, workspacefiles.Access{Token: "owned-source-capability"})
-	defer transport.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	defer cancel()
-	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/workspaces/owned/checkpoint", nil)
-	response := httptest.NewRecorder()
-	started := time.Now()
-	proxy.ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable || time.Since(started) > time.Second {
-		t.Fatalf("Source caller cancellation did not end its proxy request: %d", response.Code)
-	}
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("the abandoned Source request was not cancelled")
+	for _, admitted := range []bool{false, true} {
+		name := "before-source-admission"
+		if admitted {
+			name = "after-source-admission"
+		}
+		t.Run(name, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "source.sock")
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entered := make(chan struct{})
+			cancelled := make(chan struct{})
+			service := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(entered)
+				<-r.Context().Done()
+				close(cancelled)
+			})}
+			go service.Serve(listener)
+			defer service.Close()
+			proxy, transport := nativeSourceProxy(socket, workspacefiles.Access{Token: "owned-source-capability"})
+			defer transport.CloseIdleConnections()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if !admitted {
+				cancel()
+			}
+			request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/workspaces/owned/checkpoint", nil)
+			response := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				proxy.ServeHTTP(response, request)
+				close(done)
+			}()
+			if admitted {
+				// A caller deadline can expire before Source receives the request.
+				// Wait for admission before checking upstream cancellation.
+				select {
+				case <-entered:
+				case <-time.After(time.Second):
+					t.Fatal("Source request was not admitted")
+				}
+				cancel()
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("Source caller cancellation did not end its proxy request")
+			}
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("Source caller cancellation returned %d", response.Code)
+			}
+			if admitted {
+				select {
+				case <-cancelled:
+				case <-time.After(time.Second):
+					t.Fatal("the abandoned Source request was not cancelled")
+				}
+			} else {
+				select {
+				case <-entered:
+					t.Fatal("an already cancelled request reached Source")
+				default:
+				}
+			}
+		})
 	}
 }

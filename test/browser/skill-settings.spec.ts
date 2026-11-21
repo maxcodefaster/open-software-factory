@@ -44,6 +44,7 @@ const test = browserTest.extend<{ skillHost: z.infer<typeof skillHostSchema> }>(
       host.stderr.resume();
       const lines = createInterface({ input: host.stdout });
       lines.on("line", (line) => {
+        if (line.startsWith("Owned ")) console.info(line);
         if (line.startsWith('{"fixtureBase"')) {
           try {
             ready.resolve(skillHostSchema.parse(JSON.parse(line)));
