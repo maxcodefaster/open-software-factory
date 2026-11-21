@@ -107,7 +107,8 @@ server.on("upgrade", (request, socket, head) => {
   readFrames();
 });
 
-watch(sourceUrl, async () => {
+watch(new URL("./", sourceUrl), async (_event, filename) => {
+  if (filename !== "version.txt") return;
   const version = (await readFile(sourceUrl, "utf8")).trim();
   const frame = websocketFrame(JSON.stringify({ type: "hot-update", version }));
   for (const socket of sockets) socket.write(frame);
