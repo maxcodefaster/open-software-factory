@@ -238,9 +238,14 @@ if (import.meta.main) {
         owned = await (await import("../../test/fixtures/postgres-server")).ownedPostgresServer();
       if (owned) env["FACTORY_TEST_POSTGRES"] = JSON.stringify(owned.identity);
       else delete env["FACTORY_TEST_POSTGRES"];
+      // `bun run` can prepend a different installed Bun to PATH. Re-enter the
+      // pinned tool environment rather than inheriting that launcher binary.
       const child = Bun.spawn(
         [
-          process.execPath,
+          "mise",
+          "exec",
+          "--",
+          "bun",
           "--no-env-file",
           "test",
           ...selected.map((path) => resolve(path)),

@@ -3,16 +3,16 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { fixtureValue } from "../../test/fixtures/value";
 import {
   appendOwnedTestCA,
   needsOIDCTestCA,
-  needsTheiaTestBuild,
   needsStarterTestDependencies,
+  needsTheiaTestBuild,
   prerequisiteFingerprint,
   productionBuildEnvironment,
   verificationEnvironment,
 } from "./test-prerequisites";
-import { fixtureValue } from "../../test/fixtures/value";
 
 test("the Playwright Node host can use verification environments without initializing Bun-only build tools", async () => {
   const moduleURL = pathToFileURL(join(import.meta.dirname, "test-prerequisites.ts")).href;
@@ -111,6 +111,48 @@ test("ordinary verification strips live model access without mutating the caller
     FACTORY_LOCAL_PORT: "3000",
   });
   expect(environment.FACTORY_MODEL_API_KEY).toBe("synthetic-provider-key");
+});
+
+test("the unit lane preserves an owned credential probe while conversion workers isolate it", async () => {
+  const credential = "owned-test-credential";
+  const parent = {
+    ...process.env,
+    FACTORY_CONVERSION_TEST_CREDENTIAL: credential,
+  };
+  const environment = verificationEnvironment(parent);
+  expect(environment.FACTORY_CONVERSION_TEST_CREDENTIAL).toBe(credential);
+  expect(parent.FACTORY_CONVERSION_TEST_CREDENTIAL).toBe(credential);
+  expect(environment).not.toBe(parent);
+  const root = join(import.meta.dirname, "../..");
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "run",
+      "test:unit",
+      "apps/factory/src/attachments/process.test.ts",
+    ],
+    { cwd: root, env: environment, stdout: "pipe", stderr: "pipe" },
+  );
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(status, stderr.replaceAll(credential, "<REDACTED>")).toBe(0);
+  const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
+    engines: { bun: string };
+  };
+  expect(stdout).toContain(`bun test v${manifest.engines.bun} `);
+});
+
+test("the browser lane also re-enters the pinned runtime before creating its Factory fixture", async () => {
+  const manifest = JSON.parse(
+    await readFile(join(import.meta.dirname, "../../package.json"), "utf8"),
+  ) as { scripts: Record<string, string> };
+  expect(manifest.scripts["test:browser"]).toBe(
+    "mise exec -- bun --no-env-file scripts/testing/browser.ts",
+  );
 });
 
 test("only actual editor test imports require the separately locked Theia build", () => {
