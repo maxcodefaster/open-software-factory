@@ -1561,6 +1561,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     },
     async apply(destination, current) {
       if (destination.view === "unavailable") throw new Error(unavailableLink);
+      const initialRestoration = !restoredLocation;
       // Initial Board hydration is not a human decision to leave retained
       // setup. Explicit resource links and later history navigation are.
       if (restoredLocation || !["home", "project"].includes(destination.view))
@@ -1570,7 +1571,10 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
         if (!projects.data()?.some((project) => project.id === destination.projectID))
           throw new Error(unavailableLink);
         if (selectedProjectID() !== destination.projectID) {
-          selectProject(destination.projectID, false, false);
+          // Initial binding can finish under a user-open menu. It is not a
+          // manual switch that dismisses controls and resets local work.
+          if (initialRestoration) setSelectedProjectID(destination.projectID);
+          else selectProject(destination.projectID, false, false);
           // Solid 2 batches writes. Commit the Project before reading scoped
           // state or opening a tab, without publishing an intermediate URL.
           await Promise.resolve();
@@ -1630,7 +1634,10 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       }
     },
   });
-  publishLocation = desktopNavigation.publish;
+  publishLocation = (destination, replace = false) => {
+    restoredLocation = true;
+    desktopNavigation.publish(destination, replace);
+  };
   const missingWikiLink = () => {
     const destination = navigation?.location();
     return (

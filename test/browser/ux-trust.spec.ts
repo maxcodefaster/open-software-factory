@@ -980,6 +980,23 @@ async function selectProject(page: Page, slug = projectSlug) {
   await page.getByRole("button").filter({ hasText: slug }).click();
 }
 
+async function holdInitialPlanningSync(page: Page) {
+  let holding = true;
+  const held: Array<{ send(): void }> = [];
+  await page.routeWebSocket("**/sync/**", (route) => {
+    const upstream = route.connectToServer();
+    route.onMessage((message) => upstream.send(message));
+    upstream.onMessage((message) => {
+      if (holding) held.push({ send: () => route.send(message) });
+      else route.send(message);
+    });
+  });
+  return () => {
+    holding = false;
+    for (const message of held.splice(0)) message.send();
+  };
+}
+
 async function openConversation(page: Page) {
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
@@ -2674,15 +2691,105 @@ test("Project setup keeps rejected input and permits non-modal navigation", asyn
   await expect(panel.getByRole("textbox", { name: "Git URL", exact: true })).toHaveValue(
     "https://example.invalid/draft.git",
   );
-  await page.reload();
-  await expect(name).toHaveValue("A rejected project draft");
-  await selectProject(page);
+  const releasePlanning = await holdInitialPlanningSync(page);
+  try {
+    await page.reload();
+    await expect(name).toHaveValue("A rejected project draft");
+    await openProjectMenu(page);
+    const menu = page.getByRole("region", { name: "Projects", exact: true });
+    const choice = menu.getByRole("button").filter({ hasText: projectSlug });
+    await expect(choice).toBeVisible();
+    const sync = page.getByRole("status", { name: "Shared work sync", exact: true });
+    await expect(sync).toBeVisible();
+    releasePlanning();
+    await expect(sync).toHaveCount(0);
+    await expect(choice).toHaveAttribute("aria-current", "true");
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Home");
+    await expect(menu.getByRole("button", { name: "Continue setup", exact: true })).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(choice).toBeFocused();
+    await page.screenshot({ path: `${evidenceDirectory}/project-setup-restored-menu.png` });
+    await page.keyboard.press("Enter");
+  } finally {
+    releasePlanning();
+  }
   await expect(panel).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
   await expect(panel).toHaveCount(0);
   expect(creates).toBe(1);
 });
+
+for (const device of [
+  { name: "desktop", width: 1440, height: 900, hasTouch: false },
+  { name: "narrow", width: 390, height: 844, hasTouch: false },
+  { name: "touch", width: 390, height: 844, hasTouch: true },
+]) {
+  test.describe(`initial Project restoration on ${device.name}`, () => {
+    test.use({
+      viewport: { width: device.width, height: device.height },
+      hasTouch: device.hasTouch,
+    });
+    test("keeps a newer explicit Project selection and its reopened menu", async ({ page }) => {
+      const other = await insertOtherProjectConversation();
+      await signIn(page);
+      await selectProject(page);
+      await openProjectMenu(page);
+      await expect(page.getByRole("button").filter({ hasText: other.slug })).toBeVisible();
+      await page.keyboard.press("Escape");
+      // The cold document must have durable cached Projects before withholding
+      // its initial sync. Visible rows alone can precede IndexedDB persistence.
+      await expect
+        .poll(async () => {
+          const storage = await page.context().storageState({ indexedDB: true });
+          return JSON.stringify(
+            storage.origins.map((origin) => ("indexedDB" in origin ? origin.indexedDB : undefined)),
+          ).includes(other.slug);
+        })
+        .toBe(true);
+      const releasePlanning = await holdInitialPlanningSync(page);
+      try {
+        await page.reload();
+        await selectProject(page, other.slug);
+        await expect(page).toHaveURL(new RegExp(`/projects/${other.id}$`));
+        await openProjectMenu(page);
+        const menu = page.getByRole("region", { name: "Projects", exact: true });
+        const choice = menu.getByRole("button").filter({ hasText: other.slug });
+        await expect(choice).toHaveAttribute("aria-current", "true");
+        await expect(choice).toBeFocused();
+        const sync = page.getByRole("status", { name: "Shared work sync", exact: true });
+        await expect(sync).toBeVisible();
+        releasePlanning();
+        await expect(sync).toHaveCount(0);
+        await expect(choice).toHaveAttribute("aria-current", "true");
+        await expect(choice).toBeFocused();
+        await expect(menu).toBeVisible();
+        await expect(page).toHaveURL(new RegExp(`/projects/${other.id}$`));
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          device.width,
+        );
+        await page.screenshot({
+          path: `${evidenceDirectory}/project-selection-restored-${device.name}.png`,
+          fullPage: true,
+        });
+        await page.keyboard.press("Escape");
+        await expect(menu).toHaveCount(0);
+        await expect(
+          page.getByRole("button", {
+            name:
+              device.name === "desktop"
+                ? "Other conversation fixture, open project menu"
+                : "Settings",
+            exact: true,
+          }),
+        ).toBeFocused();
+      } finally {
+        releasePlanning();
+      }
+    });
+  });
+}
 
 test("uses readable workspace tabs with keyboard navigation and an accessible overflow chooser", async ({
   page,

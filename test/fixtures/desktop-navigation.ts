@@ -116,6 +116,51 @@ const disposedRead = fixtureValue(stop.currents.at(-1), "stop.currents.at(-1)");
 stop.dispose();
 assert.equal(disposedRead(), false);
 
+const initial = createRoot((dispose) => {
+  const [path, setPath] = createSignal(factoryPath({ view: "project", projectID }));
+  const [ready, setReady] = createSignal(false);
+  const restored: FactoryLocation[] = [];
+  const coordinator = createDesktopNavigation({
+    navigation: {
+      path,
+      location: () => factoryLocation(path()),
+      failure: () => "",
+      retry() {},
+      open(location) {
+        setPath(factoryPath(location));
+      },
+    },
+    ready,
+    accessKey: () => "allowed",
+    apply(location) {
+      restored.push(location);
+    },
+  });
+  return { dispose, setPath, setReady, restored, coordinator };
+});
+await tick();
+const otherProject = {
+  view: "project",
+  projectID: "00000000-0000-4000-8000-000000000003",
+} as const;
+initial.coordinator.publish(otherProject);
+await tick();
+initial.setReady(true);
+await tick();
+assert.equal(
+  initial.restored.length,
+  0,
+  "initial query completion cannot replay restoration over a newer explicit Project selection",
+);
+initial.setPath(factoryPath({ view: "project", projectID }));
+await tick();
+assert.deepEqual(
+  initial.restored,
+  [{ view: "project", projectID }],
+  "Back still restores the earlier Project after an explicit initial selection",
+);
+initial.dispose();
+
 createRoot((dispose) => {
   const [project, setProject] = createSignal<string | undefined>(projectID);
   const workspaces = createWorkspaceState(project);
