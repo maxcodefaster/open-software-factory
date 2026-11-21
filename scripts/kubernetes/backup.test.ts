@@ -334,22 +334,30 @@ esac
       stdin: input === undefined ? "ignore" : new Blob([input]),
     });
     let output = "";
+    const checkpoint = Promise.withResolvers<void>();
+    void checkpoint.promise.catch(() => {});
+    // Observe rclone's exact pause event without polling through the preceding steps.
+    const marker = `CONTROL blocked ${extra["FIXTURE_BLOCK"]}\n`;
     const stdout = (async () => {
-      for await (const chunk of child.stdout) output += new TextDecoder().decode(chunk);
+      const decoder = new TextDecoder();
+      for await (const chunk of child.stdout) {
+        output += decoder.decode(chunk, { stream: true });
+        if (output.includes(marker)) checkpoint.resolve();
+      }
       return output;
     })();
     const result = Promise.all([child.exited, stdout, new Response(child.stderr).text()]);
+    void result.then(
+      ([code, stdout, stderr]) =>
+        checkpoint.reject(
+          new Error(`backup exited before checkpoint: ${code}\n${stdout}\n${stderr}`),
+        ),
+      checkpoint.reject,
+    );
     const running = {
       child,
       result,
-      blocked: () =>
-        until(async () => {
-          if (child.exitCode !== null) {
-            const [code, stdout, stderr] = await result;
-            throw new Error(`backup exited before checkpoint: ${code}\n${stdout}\n${stderr}`);
-          }
-          return output.includes("CONTROL blocked");
-        }),
+      blocked: () => checkpoint.promise,
     };
     children.push(running);
     return running;
@@ -467,11 +475,22 @@ test.each(["sync", "copy"])(
   async (phase) => {
     const f = await fixture();
     try {
+      await mkdir(`${f.backup}/objects`);
+      await writeFile(`${f.backup}/objects/object`, "retained object");
       const first = f.start("first", { FIXTURE_BLOCK: phase });
       await first.blocked();
+      expect(first.child.exitCode).toBeNull();
+      const objects = await readFile(`${f.backup}/objects/object`, "utf8");
+      const calls = await readFile(`${f.root}/rclone.calls`, "utf8");
+      const sets = await readdir(f.backup);
       const second = await f.start("second").result;
-      expect(second[0]).not.toBe(0);
+      expect(first.child.exitCode).toBeNull();
       expect(await f.current()).toBe(firstSet);
+      expect(await readFile(`${f.backup}/objects/object`, "utf8")).toBe(objects);
+      expect(await readFile(`${f.root}/rclone.calls`, "utf8")).toBe(calls);
+      expect(await readdir(f.backup)).toEqual(sets);
+      expect(second[0]).not.toBe(0);
+      expect(second[2]).toContain("Another backup holds");
       expect(await f.exists(`${secondSet}/COMPLETE`)).toBe(false);
       await f.release("first");
       expect((await first.result)[0]).toBe(0);

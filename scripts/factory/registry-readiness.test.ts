@@ -32,6 +32,8 @@ test("a Registry that accepts TCP but never responds cannot hold startup past it
   const caFile = join(directory, "ca.pem");
   await writeFile(caFile, rootCertificates.join("\n"));
   const sockets = new Set<{ terminate(): void }>();
+  const clientHello = Promise.withResolvers<Uint8Array>();
+  const disconnected = Promise.withResolvers<void>();
   const listener = Bun.listen({
     hostname: "127.0.0.1",
     port: 0,
@@ -39,27 +41,70 @@ test("a Registry that accepts TCP but never responds cannot hold startup past it
       open(socket) {
         sockets.add(socket);
       },
-      data() {},
+      data(_socket, bytes) {
+        clientHello.resolve(new Uint8Array(bytes));
+      },
+      end(socket) {
+        socket.end();
+      },
+      close(socket) {
+        sockets.delete(socket);
+        disconnected.resolve();
+      },
     },
   });
   const close = () => {
     for (const socket of sockets) socket.terminate();
     listener.stop(true);
   };
-  const cleanup = setTimeout(close, 500);
-  const started = performance.now();
+  const timeoutMS = 100;
+  let now = Date.now();
+  // Keep host scheduling out of the budget calculation. The real curl still owns
+  // its 100ms timeout; its exit advances the observation clock to that deadline.
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const spawn = spyOn(Bun, "spawn");
+  let probe: ReturnType<typeof Bun.spawn> | undefined;
   try {
-    await expect(
-      waitForRegistry({
-        forward: { exitCode: null, exited: new Promise<number>(() => {}) },
-        host: `127.0.0.1:${listener.port}`,
-        caFile,
-        timeoutMS: 100,
-      }),
-    ).rejects.toThrow("Registry");
-    expect(performance.now() - started).toBeLessThan(300);
+    const forward = { exitCode: null, exited: new Promise<number>(() => {}) };
+    const readiness = waitForRegistry({
+      forward,
+      host: `127.0.0.1:${listener.port}`,
+      caFile,
+      timeoutMS,
+    });
+    void readiness.catch(() => {});
+    probe = spawn.mock.results[0]?.value as ReturnType<typeof Bun.spawn>;
+    void probe.exited.then(() => {
+      now += timeoutMS;
+    });
+    const command = spawn.mock.calls[0]?.[0];
+    expect(command).toEqual([
+      "curl",
+      "--fail",
+      "--silent",
+      "--connect-timeout",
+      "0.1",
+      "--max-time",
+      "0.1",
+      "--cacert",
+      caFile,
+      `https://127.0.0.1:${listener.port}/v2/`,
+    ]);
+    const [bytes] = await Promise.all([
+      clientHello.promise,
+      expect(readiness).rejects.toThrow("not confirmed within 0.1s"),
+    ]);
+    expect(bytes[0]).toBe(22); // TLS handshake record, deliberately unanswered.
+    expect(probe.exitCode).toBe(28); // curl's own timeout, not fixture shutdown.
+    await disconnected.promise;
+    expect(sockets.size).toBe(0);
+    expect(forward.exitCode).toBeNull();
+    expect(spawn).toHaveBeenCalledTimes(1);
   } finally {
-    clearTimeout(cleanup);
+    if (probe?.exitCode === null) probe.kill();
+    await probe?.exited;
+    spawn.mockRestore();
+    clock.mockRestore();
     close();
     await rm(directory, { recursive: true });
   }
