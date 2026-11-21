@@ -1722,6 +1722,12 @@ dt {
   min-height: 2rem;
 }
 
+/* Reserve the unassigned People control while its authenticated read is pending.
+   Otherwise the action bar can gain a row after native text selection begins. */
+.ticket-header-actions > .ticket-attention-controls {
+  min-inline-size: calc(6ch + var(--space-4) + var(--space-2));
+}
+
 .ticket-status-context {
   min-width: 0;
   flex-wrap: wrap;

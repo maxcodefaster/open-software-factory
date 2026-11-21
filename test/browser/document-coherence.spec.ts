@@ -35,6 +35,7 @@ let projectSlug = "";
 let ticketID = "";
 let pageID = "";
 let browserErrors: string[] = [];
+let releaseTicketAttention: (() => Promise<void>) | undefined;
 
 async function addRequirement(summary: string, ordinal: number) {
   if (!database) throw new Error("Fixture database unavailable");
@@ -207,6 +208,8 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(async () => {
+  await releaseTicketAttention?.();
+  releaseTicketAttention = undefined;
   if (projectID) await deleteFactoryProject(projectID);
   await database?.client.end();
   database = undefined;
@@ -541,6 +544,7 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
+  await expect(page.getByRole("status").filter({ hasText: "Opening linked view…" })).toBeHidden();
   await expect(editor).toContainText("Recovered draft.");
   const [before] = await database.client<
     Array<{ body: string; version: number }>
@@ -862,16 +866,24 @@ test("Wiki insertion targets do not reorder on hover and navigation resize is re
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
+  // Route completion can replace the visible Wiki heading after the body is available.
+  await expect(page.getByRole("status").filter({ hasText: "Opening linked view…" })).toBeHidden();
   await expect(page.locator(".knowledge-article")).toContainText("Saved human explanation");
   await expect(divider).toHaveAttribute("aria-valuenow", "184");
   await expect(page.locator(".knowledge-navigation")).toHaveCSS("width", "184px");
-  const icon = await page.locator(".knowledge-title-row .page-organization").boundingBox();
-  const heading = await page.locator(".knowledge-title-row h2").boundingBox();
-  if (!icon || !heading) throw new Error("Inline title unavailable");
+  const titleButton = page.getByRole("button", { name: /edit wiki title$/i });
+  await expect(titleButton).toBeVisible();
+  await expect(titleButton).toHaveText(title);
+  // Read both boxes from the same rendered title row, without retaining stale handles.
+  const { icon, heading } = await titleButton.evaluate((element) => {
+    const row = element.closest(".knowledge-title-row");
+    const icon = row?.querySelector(".page-organization")?.getBoundingClientRect();
+    const heading = row?.querySelector("h2")?.getBoundingClientRect();
+    if (!icon || !heading) throw new Error("Inline title unavailable");
+    return { icon: icon.toJSON(), heading: heading.toJSON() };
+  });
   expect(icon.x + icon.width).toBeLessThan(heading.x);
   expect(Math.abs(icon.y - heading.y)).toBeLessThan(12);
-  const titleButton = page.getByRole("button", { name: /edit wiki title$/i });
-  expect(await titleButton.innerText()).toBe(title);
   expect(
     await titleButton.evaluate((element) => ({
       vertical:
@@ -1188,7 +1200,7 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
   await page.screenshot({ path: `${evidenceDirectory}/spec-approved-history.png` });
 });
 
-for (const width of [1440, 900]) {
+for (const width of [1440, 900, 600]) {
   test(`keeps native selection and expanded formatting within document edges at ${width}px`, async ({
     page,
   }) => {
@@ -1200,6 +1212,26 @@ for (const width of [1440, 900]) {
     await addRequirement(original, 1);
     await page.setViewportSize({ width, height: 900 });
     await openFixture(page);
+    const attention = Promise.withResolvers<void>();
+    let heldAttention = false;
+    const attentionFinished = Promise.withResolvers<void>();
+    releaseTicketAttention = async () => {
+      attention.resolve();
+      if (heldAttention) await attentionFinished.promise;
+    };
+    await mockFactoryFunctions(page, {
+      inbox: {
+        async ticket(_actor, id) {
+          const value = await serverCall(browserFunction(page, "getTicketAttention", [id]));
+          if (id === ticketID) {
+            heldAttention = true;
+            await attention.promise;
+            attentionFinished.resolve();
+          }
+          return value;
+        },
+      },
+    });
     await openTicket(page);
     if (width > 900) await page.getByRole("button", { name: "Toggle Agent panel" }).click();
     await waitForSpecLayout(page, width);
@@ -1207,6 +1239,8 @@ for (const width of [1440, 900]) {
     const viewport = page.locator(".ticket-workspace");
     for (const edge of ["top", "bottom"]) {
       const paragraph = summary.locator("p").nth(edge === "top" ? 8 : 22);
+      await summary.focus();
+      await expect(summary).toBeFocused();
       await paragraph.scrollIntoViewIfNeeded();
       const bounds = await viewport.boundingBox();
       const textBounds = await paragraph.boundingBox();
@@ -1252,6 +1286,7 @@ for (const width of [1440, 900]) {
       ).toBe(true);
       const toolbar = page.getByRole("toolbar", { name: "Text formatting" });
       await expect(toolbar).toBeVisible();
+      await expect(toolbar).toHaveAttribute("data-positioned", "true");
       const initialToolbar = await toolbar.boundingBox();
       if (!initialToolbar) throw new Error("Missing native selection toolbar");
       expect(initialToolbar.y).toBeGreaterThanOrEqual(bounds.y);
@@ -1270,6 +1305,20 @@ for (const width of [1440, 900]) {
           ),
       );
       const scrollTop = await viewport.evaluate((element) => element.scrollTop);
+      if (edge === "bottom") {
+        // The editor is already usable when its People read finishes.
+        const header = page.locator(".ticket-document-heading");
+        const headerBefore = await header.boundingBox();
+        attention.resolve();
+        await expect(
+          page.getByRole("button", { name: "People, add person", exact: true }),
+        ).toBeVisible();
+        expect.soft(await header.boundingBox()).toEqual(headerBefore);
+        await expect
+          .poll(() => summary.evaluate(() => window.getSelection()?.toString()))
+          .toBe("Release");
+        await expect(summary).toBeFocused();
+      }
       await toolbar.getByRole("button", { name: "Link", exact: true }).click();
       const link = toolbar.getByRole("textbox", { name: "Link URL" });
       await expect(link).toBeFocused();

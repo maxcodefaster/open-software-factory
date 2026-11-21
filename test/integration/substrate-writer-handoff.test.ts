@@ -16,7 +16,7 @@ import {
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
-test.each(["complete", "stop-during-cleanup"] as const)(
+test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
   "native writer handoff preserves the new Coding retry and explicit Stop semantics: %s",
   async (action) => {
     const f = await substrateFixture("a".repeat(40), "ticket");
@@ -161,18 +161,59 @@ test.each(["complete", "stop-during-cleanup"] as const)(
       const previous = await admit(true);
       const claimed = await turns.claimPending(previous.id);
       if (!claimed?.ownerToken) throw Error("Owned previous lease missing");
-      expect(
-        await turns.failPending(previous.id, claimed.ownerToken, "Owned startup failure"),
-      ).toBe(true);
+      const writers = createChangeWriterController({
+        database: f.database,
+        runtime,
+        agentUsername: "owned-control",
+        async stopAgent() {
+          throw Error("Retry fencing is not a user Stop");
+        },
+        async protect() {},
+      });
+      if (action === "committed-stopped") {
+        expect(await writers.prepareAgent(f.changeID, previous.id)).toBe(true);
+        await turns.beginDispatch(previous.id, claimed.ownerToken);
+        await turns.settle(previous.id, claimed.ownerToken, "completed", "Owned input completed");
+      } else
+        expect(
+          await turns.failPending(previous.id, claimed.ownerToken, "Owned startup failure"),
+        ).toBe(true);
       await f.database.client`INSERT INTO factory.change_agent_session(
       change_id,runtime_attempt_id,opencode_session_id,state,created_by,active_turn_id)
-      VALUES(${f.changeID},${f.attemptID},${sessionID},'failed',${f.userID},${previous.id})`;
+      VALUES(${f.changeID},${f.attemptID},${sessionID},
+        ${action === "committed-stopped" ? "committed" : "failed"},${f.userID},${previous.id})`;
+      if (action === "committed-stopped") {
+        await f.database
+          .client`UPDATE factory.change_agent_session SET native_session_confirmed_at=now()
+          WHERE change_id=${f.changeID}`;
+        expect((await runtime.stop(f.attemptID))?.state).toBe("stopped");
+        await f.database.client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},
+          turn_id=NULL,epoch=epoch+1 WHERE change_id=${f.changeID}`;
+      }
       const retry = await admit(false);
       let pending = await turns.claimPending(retry.id);
       if (!pending?.ownerToken) throw Error("Owned retry lease missing");
       const [writer] = await f.database.client<{ epoch: string }[]>`
       SELECT epoch::text AS epoch FROM factory.change_writer WHERE change_id=${f.changeID}`;
       if (!writer) throw Error("Owned pending writer missing");
+      if (action === "committed-stopped") {
+        const before = await f.database.client`SELECT state,stop_pending,stop_id,active_turn_id,
+          opencode_session_id,native_session_confirmed_at
+          FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+        const priorEffects = [...effects];
+        expect(await writers.prepareAgent(f.changeID, retry.id)).toBe(true);
+        expect((await turns.get(retry.id))?.state).toBe("pending");
+        expect(await turns.validateExecution(retry.id, pending.ownerToken)).toBe(true);
+        expect(
+          await f.database.client`SELECT state,stop_pending,stop_id,active_turn_id,
+          opencode_session_id,native_session_confirmed_at
+          FROM factory.change_agent_session WHERE change_id=${f.changeID}`,
+        ).toEqual(before);
+        expect((await runtime.get(f.attemptID))?.state).toBe("stopped");
+        expect(effects).toEqual(priorEffects);
+        expect(effects.filter((effect) => effect === "DeleteActor")).toHaveLength(1);
+        return;
+      }
       for (const invalid of [
         { turnID: crypto.randomUUID(), epoch: writer.epoch },
         { turnID: retry.id, epoch: String(BigInt(writer.epoch) - 1n) },
@@ -222,15 +263,6 @@ test.each(["complete", "stop-during-cleanup"] as const)(
         expect(effects).toEqual([]);
         return;
       }
-      const writers = createChangeWriterController({
-        database: f.database,
-        runtime,
-        agentUsername: "owned-control",
-        async stopAgent() {
-          throw Error("Retry fencing is not a user Stop");
-        },
-        async protect() {},
-      });
       expect(await writers.prepareAgent(f.changeID, retry.id)).toBe(true);
       expect((await turns.get(retry.id))?.state).toBe("pending");
       expect(await turns.validateExecution(retry.id, pending.ownerToken)).toBe(true);

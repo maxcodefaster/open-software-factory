@@ -611,6 +611,8 @@ export function createRuntimeController(
                     and(
                       eq(agentTurn.changeId, changeModel.id),
                       inArray(agentTurn.state, ["pending", "dispatching", "running", "uncertain"]),
+                      // The validated handoff is unbound, not input of the original Actor.
+                      query`${agentTurn.id} IS DISTINCT FROM ${handoff?.turnID ?? null}::uuid`,
                     ),
                   ),
               ),
