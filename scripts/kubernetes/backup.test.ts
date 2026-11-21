@@ -102,6 +102,16 @@ async function fixture() {
   const executable = (name: string, text: string) =>
     writeFile(`${bin}/${name}`, text, { mode: 0o755 });
   await executable("date", '#!/bin/sh\nprintf "%s\\n" "$FIXTURE_SET"\n');
+  // Carry the exec phase into its watchdog without modifying the copied runner.
+  await executable(
+    "sh",
+    `#!/bin/sh
+if [ "\${1:-}" = '${scripts}/run.sh' ] && [ "\${2:-}" = exec ]; then
+  export FIXTURE_EXEC_PHASE="$3"
+fi
+exec /bin/sh "$@"
+`,
+  );
   // macOS has flock(2), but no flock CLI. This adapter calls the same native syscall on
   // the inherited descriptor. Linux and the separate pinned-image control use real flock.
   if (!Bun.which("flock"))
@@ -131,6 +141,15 @@ case "$1" in
 esac
 exec 7>"$FIXTURE/watchdog-owner"
 printf '%s\\n' "$$" >> "$FIXTURE/watchdogs.pid"
+if [ -n "\${FIXTURE_TIMEOUT_PHASE:-}" ] && [ "\${FIXTURE_EXEC_PHASE:-}" = "$FIXTURE_TIMEOUT_PHASE" ]; then
+  # Lifecycle tests advance only this exec's clock after its descendants are ready.
+  # Other execs, retry sleeps and the real-deadline tests keep native sleep.
+  printf '%s %s\\n' "$$" "$1" >> "$FIXTURE/$FIXTURE_ID.timeouts"
+  while [ ! -f "$FIXTURE/$FIXTURE_ID.timeout.$$" ] && [ ! -f "$FIXTURE/$FIXTURE_ID.release" ]; do
+    '${sleep}' 0.02
+  done
+  exit 0
+fi
 if [ "\${DETACH_WATCHDOG:-0}" = 1 ]; then
   exec setsid '${sleep}' "$@"
 fi
@@ -337,6 +356,27 @@ esac
   }
   const exists = (path: string) => Bun.file(`${backup}/${path}`).exists();
   const release = (id: string) => writeFile(`${root}/${id}.release`, "");
+  async function execTimeout(id: string, attempt: number) {
+    const timers = `${root}/${id}.timeouts`;
+    const descendants = `${root}/${id}.exec-descendant.pid`;
+    await until(async () => {
+      if (!(await Bun.file(timers).exists()) || !(await Bun.file(descendants).exists()))
+        return false;
+      return (
+        (await readFile(timers, "utf8")).trim().split("\n").length >= attempt &&
+        (await readFile(descendants, "utf8")).trim().split("\n").length >= attempt
+      );
+    });
+    const record = (await readFile(timers, "utf8")).trim().split("\n")[attempt - 1];
+    if (!record) throw new Error("Missing owned exec timeout");
+    const [pid, seconds] = record.split(" ");
+    if (!pid || !Number.isSafeInteger(Number(pid)) || Number(pid) <= 1)
+      throw new Error("Invalid owned exec timeout PID");
+    return {
+      seconds,
+      expire: () => writeFile(`${root}/${id}.timeout.${pid}`, ""),
+    };
+  }
   const unlocked = async () => {
     const probe = start("probe", {}, ["sh", "-c", `exec 9>>'${backup}/.lock'; flock 9`]);
     expect((await probe.result)[0]).toBe(0);
@@ -371,6 +411,7 @@ esac
     start,
     exists,
     release,
+    execTimeout,
     unlocked,
     current: () => readFile(`${backup}/.current`, "utf8"),
     async close() {
@@ -515,10 +556,19 @@ test.each([
     try {
       const first = f.start("first", {
         STALL_EXEC_PHASE: phase,
+        FIXTURE_TIMEOUT_PHASE: phase,
         BACKUP_EXEC_TIMEOUT_SECONDS: "1",
       });
       await until(() => Bun.file(`${f.root}/first.exec-descendant.pid`).exists());
-      const outcome = await Promise.race([first.result, Bun.sleep(8_500).then(() => null)]);
+      const completion = Promise.race([first.result, Bun.sleep(8_500).then(() => null)]);
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const timeout = await f.execTimeout("first", attempt);
+        expect(timeout.seconds).toBe("1");
+        expect(first.child.exitCode).toBeNull();
+        expect(await Bun.file(`${f.root}/first.exec-bytes-ended`).exists()).toBe(true);
+        await timeout.expire();
+      }
+      const outcome = await completion;
       expect(outcome).not.toBeNull();
       expect(outcome?.[0]).not.toBe(0);
       const descendants = (await readFile(`${f.root}/first.exec-descendant.pid`, "utf8"))
@@ -552,6 +602,36 @@ test.each([
   },
   15_000,
 );
+
+test("a real exec deadline expires closed bytes without confirmed completion", async () => {
+  const f = await fixture();
+  try {
+    const started = performance.now();
+    const first = f.start("first", { BACKUP_EXEC_TIMEOUT_SECONDS: "1" }, [
+      "sh",
+      "-c",
+      `exec 9>>'${f.backup}/.lock'
+flock -n 9
+exec sh '${f.scripts}/run.sh' exec real-deadline sh -c '
+  exec 1>&- 2>&-
+  trap "" TERM
+  echo "$$" > "$FIXTURE/first.exec-descendant.pid"
+  while [ ! -f "$FIXTURE/first.release" ]; do sleep 0.02; done
+'`,
+    ]);
+    await until(() => Bun.file(`${f.root}/first.exec-descendant.pid`).exists());
+    expect(first.child.exitCode).toBeNull();
+    const outcome = await Promise.race([first.result, Bun.sleep(8_500).then(() => null)]);
+    expect(outcome?.[0]).toBe(124);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(outcome?.[2]).toContain("Backup exec real-deadline timed out after 1s");
+    const descendant = Number(await readFile(`${f.root}/first.exec-descendant.pid`, "utf8"));
+    expect(() => process.kill(descendant, 0)).toThrow();
+    await f.unlocked();
+  } finally {
+    await f.close();
+  }
+}, 10_000);
 
 test("a larger exec deadline allows delayed confirmed completion without a success fallback", async () => {
   const f = await fixture();
