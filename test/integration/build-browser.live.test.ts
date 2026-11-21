@@ -12,8 +12,9 @@ import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifact
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
 import { callFactoryFunction } from "../fixtures/server-functions";
+import { saveTicketRequirements } from "../fixtures/ticket-requirements";
 
-const repository = { owner: "factory-mutation", name: "runtime-fixture" };
+const templateRepository = { owner: "factory-mutation", name: "runtime-fixture" };
 const userID = "01994a7d-0000-7000-8000-000000000001";
 const runtimeProbe = process.env["FACTORY_BROWSER_RUNTIME_PROBE"] === "1";
 
@@ -34,6 +35,7 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
     const projectID = crypto.randomUUID();
     const ticketID = crypto.randomUUID();
     const slug = `browser-build-${projectID.slice(0, 8)}`;
+    const repository = { owner: templateRepository.owner, name: slug };
     const directory = `.factory/test-results/browser-tools/${slug}`;
     await mkdir(directory, { recursive: true });
     const images = new Set<string>();
@@ -45,6 +47,8 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       checkout: false,
     };
     const browserDiagnostics: string[] = [];
+    const baselineInspected = Promise.withResolvers<void>();
+    let closing = false;
     const provider = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -134,6 +138,18 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
               await Promise.all(Object.values(value).map(inspect));
           }
           await inspect(body);
+          await new Promise<void>((resolve) => {
+            const abort = () => resolve();
+            if (request.signal.aborted) resolve();
+            else {
+              request.signal.addEventListener("abort", abort, { once: true });
+              void baselineInspected.promise.then(() => {
+                request.signal.removeEventListener("abort", abort);
+                resolve();
+              });
+            }
+          });
+          if (closing || request.signal.aborted) return new Response(null, { status: 499 });
           if (runtimeProbe) {
             const turn = /Current Build turn: ([a-f0-9-]{36})/.exec(text)?.[1];
             if (!turn)
@@ -232,20 +248,7 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
     let changeID = "";
     let attemptID = "";
     let baseSHA = "";
-    async function request(path: string, method = "GET", body?: unknown, auth = cookie) {
-      return fetch(`${fixture.base}${path}`, {
-        method,
-        headers: { cookie: auth, origin: fixture.base, "content-type": "application/json" },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        redirect: "manual",
-        signal: AbortSignal.timeout(90_000),
-      });
-    }
-    async function command(path: string, body: unknown = {}, method = "POST", auth = cookie) {
-      const result = await request(path, method, body, auth);
-      if (!result.ok) throw new Error(`Browser Build command ${path} failed: ${result.status}`);
-      return result;
-    }
+    let templateSHA = "";
     async function visual(label: string) {
       const accessCookie = await runtimeAccessCookie(fixture.base, cookie, attemptID, "app");
       const browser = await chromium.launch({ headless: true });
@@ -288,9 +291,52 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
           { cookie },
         ),
       );
+      templateSHA = (await forge.getDefaultBranch(templateRepository)).headSha;
+      const inventory = await forge.listFiles(templateRepository, templateSHA);
+      if (
+        !inventory.length ||
+        inventory.length >= 100 ||
+        inventory.some((file) => file.size > 1 << 20)
+      )
+        throw new Error("Browser fixture template exceeds its text-file bound");
+      const files = await Promise.all(
+        inventory.map(async (file) => ({
+          path: file.path,
+          content: await forge.getFile(templateRepository, file.path, templateSHA),
+        })),
+      );
+      const serverFile = files.find((file) => file.path === "src/server.mjs");
+      if (!serverFile?.content.includes("<h1>Runtime fixture ready</h1>"))
+        throw new Error("Expected browser fixture template was not found");
+      serverFile.content = serverFile.content.replace(
+        "<h1>Runtime fixture ready</h1>",
+        `\${await readFile(new URL("./browser-page.html", import.meta.url), "utf8")}`,
+      );
+      const pageContent =
+        '<section><h1>Delivery dashboard</h1><button style="position:absolute;top:8px;left:8px">Continue</button><p>Review this release before delivery.</p></section><script>console.log("browser-defect-fixture-ready")</script>';
+      const browserFile = files.find((file) => file.path === "src/browser-page.html");
+      if (browserFile) browserFile.content = pageContent;
+      else files.push({ path: "src/browser-page.html", content: pageContent });
+      await writeFile(
+        `${directory}/repository-intent.json`,
+        JSON.stringify({
+          projectID,
+          repository,
+          templateRepository,
+          templateSHA,
+        }),
+      );
+      if (await forge.setupRepository(repository, projectID))
+        throw new Error("Browser fixture repository already exists");
+      await forge.createSetupRepository({ repository, setupID: projectID });
+      if (!(await forge.setupRepository(repository, projectID))?.empty)
+        throw new Error("Owned browser repository creation is unconfirmed");
+      await forge.createSetupFiles({ repository, branch: "main", setupID: projectID, files });
       baseSHA = (await forge.getDefaultBranch(repository)).headSha;
+      expect(await forge.getFile(repository, "src/browser-page.html", baseSHA)).toBe(pageContent);
+      await forge.ensureDefaultBranchProtection(repository, "main");
       await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-        VALUES (${projectID}, ${slug}, 'Browser-assisted UI repair', 'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main', '.devcontainer/devcontainer.json', ${userID})`;
+        VALUES (${projectID}, ${slug}, 'Browser-assisted UI repair', ${`http://127.0.0.1:33030/${repository.owner}/${repository.name}.git`}, 'main', '.devcontainer/devcontainer.json', ${userID})`;
       const zero = zeroDrizzle(zeroSchema, database.db);
       await zero.transaction(async (tx) =>
         zeroServerMutators.tickets.create.fn({
@@ -304,50 +350,46 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
           },
         }),
       );
-      const revision = z.object({ id: z.uuid() }).parse(
+      const revision = await saveTicketRequirements(
+        fixture.base,
+        ticketID,
+        {
+          summary:
+            "Fix the Continue button overlapping Delivery dashboard in src/browser-page.html. The manual fixture template reader in src/server.mjs is intentional and must be retained.",
+          acceptanceCriteria: [
+            "Before editing, use the native Factory browser tools to open declared App app, inspect its DOM and console, capture a screenshot and inspect the returned image. Reproduce the overlap visually.",
+            "Continue is in normal document flow below Delivery dashboard, not positioned over the heading. Edit only src/browser-page.html; keep the page readable and the fixture template reader intact.",
+            "After editing, use browser_open again on App app, inspect DOM and console, capture and read a second screenshot. Describe the finding with the returned turn/App/checkout context. No scripts or arbitrary URLs in browser tools.",
+            "node --check src/server.mjs passes. Do not restart the App: the fixture reads browser-page.html on each HTTP request.",
+          ],
+          nonGoals: [
+            "Dependencies, runtime configuration, changing version.txt, other file edits, browser scripts or host tooling",
+          ],
+        },
+        { cookie, origin: fixture.base },
+      );
+      const commandID = crypto.randomUUID();
+      const implementation = Object.freeze({ commandId: commandID, revisionId: revision.id });
+      const implemented = await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "implementTicket",
+          [ticketID, implementation],
+          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
+      expect(
         await serverCall(
           callFactoryFunction(
             fixture.base,
-            "createRequirementRevision",
-            [
-              ticketID,
-              {
-                summary:
-                  "Fix the Continue button overlapping Delivery dashboard in src/browser-page.html. The manual fixture template reader in src/server.mjs is intentional and must be retained.",
-                acceptanceCriteria: [
-                  "Before editing, use the native Factory browser tools to open declared App app, inspect its DOM and console, capture a screenshot and inspect the returned image. Reproduce the overlap visually.",
-                  "Continue is in normal document flow below Delivery dashboard, not positioned over the heading. Edit only src/browser-page.html; keep the page readable and the fixture template reader intact.",
-                  "After editing, use browser_open again on App app, inspect DOM and console, capture and read a second screenshot. Describe the finding with the returned turn/App/checkout context. No scripts or arbitrary URLs in browser tools.",
-                  "node --check src/server.mjs passes. Do not restart the App: the fixture reads browser-page.html on each HTTP request.",
-                ],
-                nonGoals: [
-                  "Dependencies, runtime configuration, changing version.txt, other file edits, browser scripts or host tooling",
-                ],
-              },
-            ],
-            { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+            "implementTicket",
+            [ticketID, implementation],
+            { cookie, origin: fixture.base },
             AbortSignal.timeout(90_000),
           ),
         ),
-      );
-      await serverCall(
-        callFactoryFunction(
-          fixture.base,
-          "approveRequirementRevision",
-          [ticketID, revision.id],
-          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
-          AbortSignal.timeout(90_000),
-        ),
-      );
-      await serverCall(
-        callFactoryFunction(
-          fixture.base,
-          "startTicketChange",
-          [ticketID],
-          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
-          AbortSignal.timeout(90_000),
-        ),
-      );
+      ).toEqual(implemented);
       const change = await eventually(
         async () => {
           const [row] = await database.client<
@@ -362,15 +404,12 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       );
       if (!change) throw new Error("Owned Change missing");
       changeID = change.id;
-      await serverCall(
-        callFactoryFunction(
-          fixture.base,
-          "startTicketWorkspace",
-          [changeID],
-          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
-          AbortSignal.timeout(90_000),
-        ),
-      );
+      expect(changeID).toBe(implemented.id);
+      const admittedTurns = await database.client<{ id: string }[]>`
+        SELECT id FROM factory.agent_turn WHERE command_id=${commandID} AND change_id=${changeID}`;
+      expect(admittedTurns).toHaveLength(1);
+      const admittedTurn = admittedTurns[0];
+      if (!admittedTurn) throw new Error("Admitted browser Build turn is missing");
       const runtime = await eventually(
         async () => {
           const [row] = await database.client<
@@ -389,30 +428,10 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       if (!runtime) throw new Error("Owned runtime missing");
       attemptID = runtime.id;
       terminal = await ownedRuntimeTerminal(fixture.base, cookie, attemptID);
-      const page =
-        '<section><h1>Delivery dashboard</h1><button style="position:absolute;top:8px;left:8px">Continue</button><p>Review this release before delivery.</p></section><script>console.log("browser-defect-fixture-ready")</script>';
-      await terminal.evaluate(
-        `const fs=require("node:fs"); const file="src/server.mjs"; const source=fs.readFileSync(file,"utf8"); if(!source.includes("<h1>Runtime fixture ready</h1>"))throw new Error("Expected fixture template not found"); fs.writeFileSync(file,source.replace("<h1>Runtime fixture ready</h1>", '\${await readFile(new URL("./browser-page.html", import.meta.url), "utf8")}')); fs.writeFileSync("src/browser-page.html",${JSON.stringify(page)}); return true;`,
-      );
-      await command(
-        `/runtime/${attemptID}/ide/__factory/processes/app/restart`,
-        {},
-        "POST",
-        terminal.runtimeCookie,
-      );
       const before = await visual("before");
       expect(before.overlaps).toBe(true);
       console.info("Browser Build: real App overlap reproduced; starting configured OpenCode");
-      const commandID = crypto.randomUUID();
-      await serverCall(
-        callFactoryFunction(
-          fixture.base,
-          "startCoding",
-          [changeID, { commandId: commandID }],
-          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
-          AbortSignal.timeout(90_000),
-        ),
-      );
+      baselineInspected.resolve();
       if (runtimeProbe) {
         await eventually(
           async () => {
@@ -519,7 +538,8 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
           (session) =>
             session.context?.headCommit === baseSHA &&
             session.context.app === "app" &&
-            session.context.workingTreeModified,
+            session.context.turnId === admittedTurn.id &&
+            typeof session.context.workingTreeModified === "boolean",
         ),
       ).toBe(true);
       for (const session of sessions)
@@ -540,6 +560,8 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
             changeID,
             attemptID,
             baseSHA,
+            templateRepository,
+            templateSHA,
             verification,
             before,
             after,
@@ -578,6 +600,8 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       );
       throw cause;
     } finally {
+      closing = true;
+      baselineInspected.resolve();
       terminal?.close();
       try {
         const cleanOwnedResources = async () => {
@@ -674,14 +698,32 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
                 await forge.deleteBranch(repository, change.branch);
               }
             }
-            expect((await forge.getDefaultBranch(repository)).headSha).toBe(baseSHA);
           }
+          const ownedRepository = await forge.setupRepository(repository, projectID);
+          if (ownedRepository) {
+            if (baseSHA) expect((await forge.getDefaultBranch(repository)).headSha).toBe(baseSHA);
+            const removed = await fetch(
+              `http://127.0.0.1:33030/api/v1/repos/${repository.owner}/${repository.name}`,
+              {
+                method: "DELETE",
+                headers: { authorization: `token ${forgejoToken}` },
+                signal: AbortSignal.timeout(90_000),
+              },
+            );
+            if (!removed.ok && removed.status !== 404)
+              throw new Error("Owned browser repository cleanup was not confirmed");
+            expect(await forge.setupRepository(repository, projectID)).toBeNull();
+          }
+          if (templateSHA)
+            expect((await forge.getDefaultBranch(templateRepository)).headSha).toBe(templateSHA);
           safeToDispose = true;
           await writeFile(
             `${directory}/cleanup.json`,
             JSON.stringify({
               ownedRuntimesRemoved: true,
               ownedBranchRemoved: true,
+              ownedRepositoryRemoved: true,
+              templateRepositoryUnchanged: true,
               defaultBranchUnchanged: true,
               unrelatedRuntimesUntouched: true,
             }),

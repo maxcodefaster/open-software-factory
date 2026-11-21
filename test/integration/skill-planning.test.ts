@@ -268,7 +268,7 @@ async function fixture(live = false) {
       observations,
       command,
       skills: createSkillController(database),
-      agent: createProjectAgentController(database, { start: async () => null }),
+      agent: createProjectAgentController(database),
       async dispose() {
         for (const [key, value] of previous) {
           if (value === undefined) delete process.env[key];
@@ -377,11 +377,7 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
       cacheReadTokens: null,
       cacheWriteTokens: null,
     });
-    const restarted = createProjectAgentController(owned.database, {
-      start: async () => {
-        throw new Error("Usage reads must not create a Change");
-      },
-    });
+    const restarted = createProjectAgentController(owned.database);
     expect(
       (await restarted.get(owned.projectID, undefined, owned.userID))?.turn?.usage,
     ).toMatchObject({ source: "unavailable", inputTokens: null, outputTokens: null });

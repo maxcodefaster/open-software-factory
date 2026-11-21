@@ -16,6 +16,8 @@ import {
   change as changeTable,
   project,
   projectMembership,
+  requirementApproval,
+  requirementRevision,
   technicalDesignRevision,
   ticketConversation,
 } from "../../packages/db/src/schema";
@@ -181,13 +183,54 @@ function documentInput() {
   };
 }
 
-test("Requirement revisions serialize ordinals and retain every DTO field and timestamp", async () => {
+async function requirementFixture(id = ticketID, content = requirement) {
+  const [latest] = await database.db
+    .select({ ordinal: requirementRevision.ordinal })
+    .from(requirementRevision)
+    .where(eq(requirementRevision.ticketId, id))
+    .orderBy(query`${requirementRevision.ordinal} DESC`)
+    .limit(1);
+  const revisionID = crypto.randomUUID();
+  await appendTicketAuthoringIn(database.db, {
+    ticketId: id,
+    createdBy: userID,
+    title: "Saved Ticket",
+    description: "Saved description",
+    canonicalContent: canonicalRequirementContent(content),
+    requirement: { id: revisionID, ordinal: (latest?.ordinal ?? 0) + 1 },
+  });
+  const [revision] = await database.client<RequirementRevisionView[]>`
+    SELECT id,ticket_id AS "ticketId",ordinal,canonical_content AS "canonicalContent",
+      content_digest AS "contentDigest",created_at::text AS "createdAt"
+    FROM factory.requirement_revision WHERE id=${revisionID}`;
+  if (!revision) throw new Error("Fixture Requirement Revision is missing");
+  return revision;
+}
+
+function commission(revisionID: string) {
+  return { commandID: crypto.randomUUID(), revisionID, admitBuild: async () => {} };
+}
+
+test("document saves retain revision history and Implement serializes the exact approval", async () => {
   const changes = controller();
-  const revisions = await Promise.all([
-    changes.createRevision(ticketID, requirement, userID),
-    changes.createRevision(ticketID, { ...requirement, summary: "Second saved scope" }, userID),
-  ]);
+  const documents = createTicketDocumentController(database);
+  const first = await documents.save(ticketID, userID, documentInput());
+  if (!first.requirementRevisionId) throw new Error("Saved requirements are incomplete");
+  const second = await documents.save(ticketID, userID, {
+    ...documentInput(),
+    expectedVersion: first.ticketVersion,
+    expectedDocumentId: first.id,
+    requirementRevisionId: first.requirementRevisionId,
+    requirement: { ...requirement, summary: "Second saved scope" },
+  });
+  if (!second.requirementRevisionId) throw new Error("Second saved requirements are incomplete");
+  const detail = await ticketService().detail(userID, ticketID);
+  const revisions = detail.revisions;
   expect(revisions.map((value) => value?.ordinal).sort()).toEqual([1, 2]);
+  expect(revisions.map((revision) => revision.id)).toEqual([
+    second.requirementRevisionId,
+    first.requirementRevisionId,
+  ]);
   for (const revision of revisions) {
     if (!revision) throw new Error("Requirement Revision is missing");
     const [stored] = await database.client<RequirementRevisionView[]>`
@@ -195,34 +238,68 @@ test("Requirement revisions serialize ordinals and retain every DTO field and ti
         content_digest AS "contentDigest",created_at AS "createdAt"
       FROM factory.requirement_revision WHERE id=${revision.id}`;
     if (!stored) throw new Error("Stored Requirement Revision is missing");
-    expect(revision).toEqual(stored);
+    if (typeof stored.createdAt !== "string")
+      throw new Error("Observed Requirement Revision timestamp is missing");
+    expect(stored.ticketId).toBe(ticketID);
+    expect(stored.contentDigest).toBe(requirementDigest(stored.canonicalContent));
+    expect(revision).toEqual({
+      id: stored.id,
+      ordinal: stored.ordinal,
+      canonicalContent: stored.canonicalContent,
+      contentDigest: stored.contentDigest,
+      createdAt: new Date(stored.createdAt).toISOString(),
+      author: "Owned Change author",
+      approvalId: undefined,
+      approvedAt: undefined,
+      monitoringIncidentId: undefined,
+    });
     expect(typeof revision?.createdAt).toBe("string");
-    expect(new Date(revision?.createdAt ?? "").toISOString()).toContain("T");
+    if (typeof revision.createdAt !== "string")
+      throw new Error("Returned Requirement Revision timestamp is missing");
+    expect(new Date(revision.createdAt).toISOString()).toContain("T");
   }
   const latest = revisions.find((revision) => revision?.ordinal === 2);
   if (!latest) throw new Error("Latest revision is missing");
-  const approvals = await Promise.all([
-    changes.approve(ticketID, latest.id, userID),
-    changes.approve(ticketID, latest.id, userID),
+  const admission = commission(latest.id);
+  const started = await Promise.all([
+    changes.start(ticketID, userID, admission),
+    changes.start(ticketID, userID, admission),
   ]);
-  expect(approvals[0]).toEqual(approvals[1]);
+  expect(started[0]?.id).toBe(started[1]?.id);
+  if (!started[0]) throw new Error("Change is missing");
+  await settle(changes, started[0].id, "active");
   const [stored] = await database.client<RequirementApprovalView[]>`
     SELECT id,ticket_id AS "ticketId",requirement_revision_id AS "requirementRevisionId",
       approved_by AS "approvedBy",approved_at AS "approvedAt"
     FROM factory.requirement_approval WHERE ticket_id=${ticketID}`;
-  expect(approvals[0]).toEqual(stored);
-  await expect(changes.createRevision(ticketID, requirement, userID)).rejects.toThrow("immutable");
+  expect(stored).toMatchObject({
+    id: started[0].requirementApprovalId,
+    ticketId: ticketID,
+    requirementRevisionId: second.requirementRevisionId,
+    approvedBy: userID,
+  });
+  expect(await database.client`SELECT id FROM factory.requirement_approval`).toHaveLength(1);
   await expect(
-    changes.approve(ticketID, revisions.find((value) => value?.ordinal === 1)?.id ?? "", userID),
-  ).rejects.toThrow("latest");
+    changes.start(ticketID, userID, commission(first.requirementRevisionId)),
+  ).rejects.toThrow("current requirements");
   expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
+  await changes.cancel(started[0].id);
+  await settle(changes, started[0].id, "cancelled");
 });
 
 test("reserved Drizzle queries share the same PostgreSQL PID through manual rollback and commit", async () => {
   const changes = controller();
-  const revision = await changes.createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
-  const approval = await changes.approve(ticketID, revision.id, userID);
+  const [approval] = await database.db
+    .insert(requirementApproval)
+    .values({
+      id: crypto.randomUUID(),
+      ticketId: ticketID,
+      requirementRevisionId: revision.id,
+      approvedBy: userID,
+    })
+    .returning({ id: requirementApproval.id });
   if (!approval) throw new Error("Requirement Approval is missing");
   const identity = changeIdentity(ticketID, approval.id);
   await database.client.begin(async (sql) => {
@@ -325,12 +402,11 @@ test("reconciliation rolls back a branch result when Change persistence fails be
       externalCreates++;
     },
   });
-  const revision = await changes.createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
-  await changes.approve(ticketID, revision.id, userID);
   // A disposable constraint fails the second write of the real reserved transaction.
   await database.client`ALTER TABLE factory.change ADD CONSTRAINT owned_reconcile_failure CHECK(state<>'active')`;
-  const started = await changes.start(ticketID, userID);
+  const started = await changes.start(ticketID, userID, commission(revision.id));
   if (!started) throw new Error("Change is missing");
   for (let attempt = 0; attempt < 100; attempt++) {
     if ((await changes.get(started.id))?.branchState === "ambiguous") break;
@@ -358,10 +434,9 @@ test("reconciliation rolls back a branch result when Change persistence fails be
 
 test("Change projections retain exact verification, merge approval and timestamp representations", async () => {
   const changes = controller();
-  const revision = await changes.createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
-  await changes.approve(ticketID, revision.id, userID);
-  const started = await changes.start(ticketID, userID);
+  const started = await changes.start(ticketID, userID, commission(revision.id));
   if (!started) throw new Error("Change is missing");
   await settle(changes, started.id, "active");
   const commitSHA = "c".repeat(40);
@@ -514,10 +589,9 @@ test.each([false, true])(
   "approved scope stays pinned through human documents and follow-up with document=%s",
   async (withDocument) => {
     const changes = controller();
-    const revision = await changes.createRevision(ticketID, requirement, userID);
+    const revision = await requirementFixture();
     if (!revision) throw new Error("Requirement Revision is missing");
-    await changes.approve(ticketID, revision.id, userID);
-    const started = await changes.start(ticketID, userID);
+    const started = await changes.start(ticketID, userID, commission(revision.id));
     if (!started) throw new Error("Change is missing");
     await settle(changes, started.id, "active");
     const documents = createTicketDocumentController(database);
@@ -707,7 +781,7 @@ test("admission rolls back its intent, then persists exact branch identity befor
       expect(intent?.["state"]).toBe("executing");
     },
   });
-  const revision = await changes.createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
   const admission = {
     commandID: crypto.randomUUID(),
@@ -755,7 +829,7 @@ test("admission rolls back its intent, then persists exact branch identity befor
   // The unchanged SQL projection returns bigint text through Postgres.js.
   expect(String(active.version)).toBe("2");
   expect([...(await changes.list(projectID, userID))]).toEqual([active]);
-  expect((await changes.start(ticketID, userID))?.id).toBe(started.id);
+  expect((await changes.start(ticketID, userID, commission(revision.id)))?.id).toBe(started.id);
   expect(branchCalls).toBe(1);
   await changes.cancel(started.id);
   await settle(changes, started.id, "cancelled");
@@ -763,7 +837,7 @@ test("admission rolls back its intent, then persists exact branch identity befor
 
 test("waiting dependencies retain order identity, exact source and explicit cancellation", async () => {
   const changes = controller();
-  const revision = await changes.createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
   const prerequisiteID = crypto.randomUUID();
   await insertInitialTicketIn(database.db, {
@@ -802,7 +876,6 @@ test("waiting dependencies retain order identity, exact source and explicit canc
     state: "waiting",
   });
   expect(await database.client`SELECT id FROM factory.change`).toHaveLength(0);
-  await expect(changes.start(ticketID, userID)).rejects.toThrow("Prerequisites");
   await expect(
     changes.start(ticketID, userID, { ...admission, commandID: crypto.randomUUID() }),
   ).rejects.toThrow("different implementation order");
@@ -899,7 +972,6 @@ test("implementation rejects incomplete documents and pins the exact technical r
     createdBy: userID,
     authorKind: "human",
   });
-  await expect(changes.approve(ticketID, complete.id, userID)).rejects.toThrow("Use Implement");
   await expect(changes.start(ticketID, userID, admission)).rejects.toThrow(
     "current technical design",
   );
@@ -950,7 +1022,7 @@ test("implementation rejects incomplete documents and pins the exact technical r
 });
 
 test("contending document saves keep the winner's CAS base under an observed PostgreSQL lock", async () => {
-  const revision = await controller().createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
   const conversationID = crypto.randomUUID();
   const proposalID = crypto.randomUUID();
@@ -1026,10 +1098,9 @@ test.each(["stopped", "failed"])(
   "cancellation observes only the recorded native attempt when runtime=%s",
   async (state) => {
     const changes = controller();
-    const revision = await changes.createRevision(ticketID, requirement, userID);
+    const revision = await requirementFixture();
     if (!revision) throw new Error("Requirement Revision is missing");
-    await changes.approve(ticketID, revision.id, userID);
-    const started = await changes.start(ticketID, userID);
+    const started = await changes.start(ticketID, userID, commission(revision.id));
     if (!started) throw new Error("Change is missing");
     await settle(changes, started.id, "active");
     const workspaceID = ticketWorkspaceIdentity(started.id).workspaceID;
@@ -1078,10 +1149,9 @@ test("branch retries preserve terminal outcomes and recovery leaves recorded run
       if (++calls === 1) throw new ForgeAmbiguousWriteError("Owned lost acknowledgement");
     },
   });
-  const revision = await changes.createRevision(ticketID, requirement, userID);
+  const revision = await requirementFixture();
   if (!revision) throw new Error("Requirement Revision is missing");
-  await changes.approve(ticketID, revision.id, userID);
-  const started = await changes.start(ticketID, userID);
+  const started = await changes.start(ticketID, userID, commission(revision.id));
   if (!started) throw new Error("Change is missing");
   for (let attempt = 0; attempt < 100; attempt++) {
     if ((await changes.get(started.id))?.branchState === "ambiguous") break;
@@ -1113,10 +1183,9 @@ test("branch retries preserve terminal outcomes and recovery leaves recorded run
       throw new ForgeConflictError("Owned source moved");
     },
   });
-  const other = await conflict.createRevision(otherID, requirement, userID);
+  const other = await requirementFixture(otherID);
   if (!other) throw new Error("Requirement Revision is missing");
-  await conflict.approve(otherID, other.id, userID);
-  const failed = await conflict.start(otherID, userID);
+  const failed = await conflict.start(otherID, userID, commission(other.id));
   if (!failed) throw new Error("Change is missing");
   const result = await settle(conflict, failed.id, "failed");
   expect(result.failure).toBe("Owned source moved");

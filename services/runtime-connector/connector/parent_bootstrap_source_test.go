@@ -45,7 +45,7 @@ func TestFailedParentStartupKeepsNativePrivateLayersUntilSourceDrain(t *testing.
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if err := cleanupFailedParentStartup(assignment, failure); !errors.Is(err, failure) {
+			if err := cleanupFailedParentStartup(t.Context(), assignment, failure); !errors.Is(err, failure) {
 				t.Fatalf("original failure changed: %v", err)
 			}
 			content, err := os.ReadFile(trace)

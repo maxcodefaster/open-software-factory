@@ -29,37 +29,33 @@ test.skipIf(process.env["FACTORY_TECHNICAL_PLANNING_LIVE"] !== "1")(
       await db.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
         VALUES(${ticketID},${owned.projectID},'Add an invoice CSV export',
           'Export authorized invoices for a selected billing period.','ready',${owned.userID})`;
-      const controller = createProjectAgentController(
-        db,
-        { start: async () => null },
-        {
-          codePaths: async (_project, _query, _user, pinned) => {
-            if (pinned) expect(pinned).toBe(commitSha);
-            return { commitSha, paths: ["src/invoices.ts"], truncated: false };
-          },
-          code: async (_project, value) => {
-            reads++;
-            const input = codeReadInput.parse(value);
-            expect(input.commitSha).toBe(commitSha);
-            expect(input.path).toBe("src/invoices.ts");
-            return {
-              ...input,
-              truncated: false,
-              body: [
-                "1: export type Invoice = { number: string; issueDate: string; total: string };",
-                "2: export async function authorizedInvoices(accountId: string, period: string, actorId: string): Promise<Invoice[]> {",
-                "3:   await requireInvoiceAccess(actorId, accountId);",
-                "4:   return invoiceStore.forPeriod(accountId, period);",
-                "5: }",
-                "6: // Existing UI invokes authorizedInvoices and renders an empty state when the list is empty.",
-                "7: // No CSV formatter or export command exists yet.",
-                "8: // Local checks: bun test; browser tests: bun run test:browser.",
-              ].join("\n"),
-              url: `https://forge.test/source/${commitSha}/src/invoices.ts`,
-            };
-          },
+      const controller = createProjectAgentController(db, {
+        codePaths: async (_project, _query, _user, pinned) => {
+          if (pinned) expect(pinned).toBe(commitSha);
+          return { commitSha, paths: ["src/invoices.ts"], truncated: false };
         },
-      );
+        code: async (_project, value) => {
+          reads++;
+          const input = codeReadInput.parse(value);
+          expect(input.commitSha).toBe(commitSha);
+          expect(input.path).toBe("src/invoices.ts");
+          return {
+            ...input,
+            truncated: false,
+            body: [
+              "1: export type Invoice = { number: string; issueDate: string; total: string };",
+              "2: export async function authorizedInvoices(accountId: string, period: string, actorId: string): Promise<Invoice[]> {",
+              "3:   await requireInvoiceAccess(actorId, accountId);",
+              "4:   return invoiceStore.forPeriod(accountId, period);",
+              "5: }",
+              "6: // Existing UI invokes authorizedInvoices and renders an empty state when the list is empty.",
+              "7: // No CSV formatter or export command exists yet.",
+              "8: // Local checks: bun test; browser tests: bun run test:browser.",
+            ].join("\n"),
+            url: `https://forge.test/source/${commitSha}/src/invoices.ts`,
+          };
+        },
+      });
       await controller.setMode(owned.projectID, ticketID, "plan", owned.userID);
       const product = await controller.message(
         owned.projectID,

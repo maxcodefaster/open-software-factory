@@ -87,8 +87,13 @@ test("Change admission accepts the configured public Forge behind a private API 
           VALUES(${crypto.randomUUID()},${ticketID},${revisionID},${userID})`;
       });
       const before = forgeCalls;
+      const admission = {
+        commandID: crypto.randomUUID(),
+        revisionID,
+        admitBuild: async () => {},
+      };
       if (allowed) {
-        const change = await changes.start(ticketID, userID);
+        const change = await changes.start(ticketID, userID, admission);
         if (!change) throw Error("Configured Forge origin was not admitted");
         await eventually(
           () => changes.get(change.id),
@@ -97,7 +102,7 @@ test("Change admission accepts the configured public Forge behind a private API 
         );
         expect(forgeCalls).toBeGreaterThan(before);
       } else {
-        await expect(changes.start(ticketID, userID)).rejects.toThrow();
+        await expect(changes.start(ticketID, userID, admission)).rejects.toThrow();
         expect(forgeCalls).toBe(before);
         expect(
           await database.client`SELECT id FROM factory.change WHERE ticket_id=${ticketID}`,

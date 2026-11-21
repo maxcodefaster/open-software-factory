@@ -36,6 +36,7 @@ function forwardingFixture() {
   const opened: Array<{
     ready: ReturnType<typeof Promise.withResolvers<string>>;
     exit: ReturnType<typeof Promise.withResolvers<number>>;
+    stopping: ReturnType<typeof Promise.withResolvers<void>>;
     cancel: AbortController;
     kills: number;
   }> = [];
@@ -47,10 +48,12 @@ function forwardingFixture() {
   let deferInventory = true;
   let readyAutomatically = false;
   let absent = false;
+  let namespaceUID = input.namespaceUID;
+  let podUID = input.podUID;
   const kubernetes = createDeveloperIDEKubernetesClient(async () => ({
     stdout: JSON.stringify({
       ...namespace,
-      metadata: { ...namespace.metadata, uid: input.namespaceUID },
+      metadata: { ...namespace.metadata, uid: namespaceUID },
     }),
     stderr: "",
     exitCode: 0,
@@ -62,12 +65,18 @@ function forwardingFixture() {
       reads++;
       validating.resolve();
       if (absent) return null;
-      return deferInventory ? inventory.promise : observation;
+      return deferInventory
+        ? inventory.promise
+        : JSON.stringify({
+            ...JSON.parse(observation),
+            metadata: { ...pod.metadata, uid: podUID },
+          });
     },
     () => {
       const connection = {
         ready: Promise.withResolvers<string>(),
         exit: Promise.withResolvers<number>(),
+        stopping: Promise.withResolvers<void>(),
         cancel: new AbortController(),
         kills: 0,
       };
@@ -81,6 +90,7 @@ function forwardingFixture() {
           exited: connection.exit.promise,
           kill() {
             connection.kills++;
+            connection.stopping.resolve();
           },
         },
       };
@@ -96,6 +106,10 @@ function forwardingFixture() {
     },
     recordPresence() {
       absent = false;
+    },
+    replace(field: "namespaceUID" | "podUID") {
+      if (field === "namespaceUID") namespaceUID = "replacement";
+      else podUID = "replacement";
     },
     waitForForward(index: number) {
       const connection = opened[index];
@@ -117,6 +131,37 @@ function forwardingFixture() {
   };
 }
 
+test.each(["namespaceUID", "podUID", "unrecorded-namespace"] as const)(
+  "editor replacement during forward opening is closed and joined before rejection: %s",
+  async (scenario) => {
+    const f = forwardingFixture();
+    f.releaseInventory();
+    let settled = false;
+    const request = scenario === "unrecorded-namespace" ? { ...input, namespaceUID: null } : input;
+    const pending = f.client.endpoint(request).finally(() => {
+      settled = true;
+    });
+    void pending.catch(() => {});
+    try {
+      const connection = await f.waitForForward(0);
+      f.replace(scenario === "unrecorded-namespace" ? "namespaceUID" : scenario);
+      connection.ready.resolve("http://127.0.0.1:4400");
+      await Promise.race([connection.stopping.promise, pending]);
+      expect(connection.kills).toBe(1);
+      expect(connection.cancel.signal.aborted).toBe(true);
+      expect(settled).toBe(false);
+      connection.exit.resolve(0);
+      await expect(pending).rejects.toThrow("differs");
+      expect(f.reads()).toBe(2);
+      expect(f.opened).toHaveLength(1);
+    } finally {
+      f.client.close();
+      for (const connection of f.opened) connection.exit.resolve(0);
+      await pending.catch(() => {});
+    }
+  },
+);
+
 test("concurrent editor endpoints share validation and one opening forward", async () => {
   const f = forwardingFixture();
   const first = f.client.endpoint(input);
@@ -130,7 +175,7 @@ test("concurrent editor endpoints share validation and one opening forward", asy
       "http://127.0.0.1:4400",
       "http://127.0.0.1:4400",
     ]);
-    expect(f.reads()).toBe(1);
+    expect(f.reads()).toBe(2);
     expect(f.opened).toHaveLength(1);
   } finally {
     f.client.close();
@@ -207,6 +252,7 @@ test("editor readiness failure cleans its own forward and allows a fresh validat
   try {
     const old = await f.waitForForward(0);
     old.ready.reject(new Error("Developer IDE connection exceeded its deadline"));
+    old.exit.resolve(0);
     await expect(pending).rejects.toThrow("Developer IDE connection exceeded its deadline");
     expect(old.kills).toBe(1);
     expect(old.cancel.signal.aborted).toBe(true);
@@ -214,7 +260,7 @@ test("editor readiness failure cleans its own forward and allows a fresh validat
     const current = await f.waitForForward(1);
     current.ready.resolve("http://127.0.0.1:4400");
     await retry;
-    expect(f.reads()).toBe(2);
+    expect(f.reads()).toBe(3);
   } finally {
     f.client.close();
   }
@@ -236,7 +282,7 @@ test("editor child exit reconnects through a new validated forward", async () =>
     const current = await f.waitForForward(1);
     current.ready.resolve("http://127.0.0.1:4400");
     await retry;
-    expect(f.reads()).toBe(2);
+    expect(f.reads()).toBe(4);
     expect(current.kills).toBe(0);
   } finally {
     f.client.close();
@@ -256,11 +302,11 @@ test.each(["namespaceUID", "podUID", "image"] as const)(
       const changed =
         field === "image" ? `registry.invalid/ide@sha256:${"2".repeat(64)}` : "changed";
       await expect(f.client.endpoint({ ...input, [field]: changed })).rejects.toThrow("differs");
-      expect(f.reads()).toBe(2);
+      expect(f.reads()).toBe(3);
       expect(f.opened).toHaveLength(1);
       expect(current.kills).toBe(0);
       await f.client.endpoint(input);
-      expect(f.reads()).toBe(2);
+      expect(f.reads()).toBe(3);
     } finally {
       f.client.close();
     }

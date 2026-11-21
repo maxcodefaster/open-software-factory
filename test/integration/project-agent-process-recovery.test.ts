@@ -94,7 +94,7 @@ test("actual Factory startup recovers Project input and never replays dispatched
       id, slug, name, repository_url, default_branch, devcontainer_path, created_by
     ) VALUES (${projectID}, ${`owned-${id}`}, 'Owned process Project',
       'https://example.invalid/owned-process.git', 'main', '.devcontainer/devcontainer.json', ${actor.id})`;
-    controller = createProjectAgentController(ownedDatabase, { start: async () => null });
+    controller = createProjectAgentController(ownedDatabase);
     const conversation = await controller.setMode(projectID, undefined, "investigate", actor.id);
     if (!conversation) throw new Error("Owned process Conversation missing");
     await kill(initial);

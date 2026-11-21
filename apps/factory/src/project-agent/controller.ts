@@ -9,7 +9,6 @@ import {
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 import {
-  assertModeAuthority,
   type ConversationMode,
   type InterviewAnswer,
   interviewQuestionInput,
@@ -34,7 +33,6 @@ import {
   knowledgePage,
   mcpObservation,
   requirementApproval,
-  requirementRevision,
   technicalDesignRevision,
   ticket,
   ticketConversation,
@@ -50,7 +48,6 @@ import { type AgentTurnRecord, createAgentTurnStore } from "../agent/turn-store"
 import { createUsageObservations } from "../agent/usage-observations";
 import { attachmentContextIn, readableAttachmentIn } from "../attachments/store";
 import { createAttachmentTools } from "../attachments/tools";
-import type { ChangeView } from "../change/types";
 import { CommandError } from "../command-error";
 import {
   contextCommandIn,
@@ -104,9 +101,6 @@ import { admittedProjectContext, admittedTicketContext } from "./ticket-context"
 export { projectAgentStructuredOutput, projectAgentStructuredOutputFor } from "./adapter";
 
 type Database = ReturnType<typeof createDatabase>;
-type ChangeController = {
-  start(ticketID: string, userID: string): Promise<ChangeView | null>;
-};
 export type ProjectResponseObserver = {
   admitted(turnId: string): void;
   answerText(turnId: string, text: string): void;
@@ -151,7 +145,6 @@ export async function searchProjectTickets(
 
 export function createProjectAgentController(
   database: Database,
-  changes: ChangeController,
   knowledge?: Pick<ReturnType<typeof createKnowledgeController>, "codePaths" | "code">,
   mcp?: ReturnType<typeof createMCPConnections>,
   retainedMessages?: (
@@ -196,27 +189,8 @@ export function createProjectAgentController(
     return readConversation(database, conversationID, contextID);
   }
 
-  async function ensureConversation(
-    projectID: string,
-    ticketID: string | undefined,
-    userID: string,
-  ) {
-    return database.client.begin((transaction) =>
-      ensureConversationIn(transaction, projectID, ticketID, userID),
-    );
-  }
-
   async function entries(conversationID: string, contextID?: string) {
     return readConversationEntries(database, conversationID, contextID);
-  }
-
-  async function appendEntry(
-    conversationID: string,
-    entry: Omit<ConversationEntry, "id" | "ordinal" | "createdAt"> & { createdBy?: string },
-  ) {
-    return database.client.begin((transaction) =>
-      appendConversationEntry(transaction, conversationID, entry),
-    );
   }
 
   async function validatedCitations(
@@ -1283,91 +1257,50 @@ export function createProjectAgentController(
       nextMode: ConversationMode,
       userID: string,
     ) {
-      if (nextMode !== "build") {
-        const id = await database.client.begin(async (transaction) => {
-          const scope = await ensureConversationIn(transaction, projectID, ticketID, userID);
-          const current = await lockConversation(transaction, scope.id);
-          if (!current) throw new CommandError("not-found", "Conversation not found");
-          const db = drizzleTransaction(transaction);
-          const [coding] = current.ticketId
-            ? await db
-                .select({ id: change.id })
-                .from(change)
-                .where(eq(change.ticketId, current.ticketId))
-            : [];
-          if (coding)
-            throw new CommandError(
-              "conflict",
-              "This Ticket keeps its Coding conversation. Use Ask about this Project for separate research.",
-            );
-          if (current.mode !== nextMode) {
-            await db
-              .update(ticketConversation)
-              .set({
-                mode: nextMode,
-                version: sql<number>`${ticketConversation.version}+1`,
-                updatedAt: sql<Date>`now()`,
-              })
-              .where(eq(ticketConversation.id, current.id));
-            await appendConversationEntry(transaction, current.id, {
-              kind: "mode-change",
-              actor: "system",
+      if (nextMode === "build")
+        throw new CommandError(
+          "conflict",
+          "Use Implement to approve the exact saved requirements and start Coding.",
+        );
+      const id = await database.client.begin(async (transaction) => {
+        const scope = await ensureConversationIn(transaction, projectID, ticketID, userID);
+        const current = await lockConversation(transaction, scope.id);
+        if (!current) throw new CommandError("not-found", "Conversation not found");
+        const db = drizzleTransaction(transaction);
+        const [coding] = current.ticketId
+          ? await db
+              .select({ id: change.id })
+              .from(change)
+              .where(eq(change.ticketId, current.ticketId))
+          : [];
+        if (coding)
+          throw new CommandError(
+            "conflict",
+            "This Ticket keeps its Coding conversation. Use Ask about this Project for separate research.",
+          );
+        if (current.mode !== nextMode) {
+          await db
+            .update(ticketConversation)
+            .set({
               mode: nextMode,
-              body: `Switched to ${nextMode}.`,
-              payload: { from: current.mode, to: nextMode },
-              citations: [],
-              inReplyToEntryId: null,
-              requirementRevisionId: null,
-            });
-          }
-          return current.id;
-        });
-        return view(await conversationByID(id), userID);
-      }
-      const current = await ensureConversation(projectID, ticketID, userID);
-      const requirements = current.ticketId
-        ? await database.db
-            .select({
-              latestId: requirementRevision.id,
-              approvedId: requirementApproval.requirementRevisionId,
+              version: sql<number>`${ticketConversation.version}+1`,
+              updatedAt: sql<Date>`now()`,
             })
-            .from(requirementRevision)
-            .leftJoin(requirementApproval, eq(requirementApproval.ticketId, current.ticketId))
-            .where(eq(requirementRevision.ticketId, current.ticketId))
-            .orderBy(desc(requirementRevision.ordinal))
-            .limit(1)
-        : [];
-      assertModeAuthority({
-        nextMode,
-        ticketId: current.ticketId,
-        latestRequirementId: requirements[0]?.latestId ?? null,
-        approvedRequirementId: requirements[0]?.approvedId ?? null,
-      });
-      if (nextMode === "build" && current.ticketId) await changes.start(current.ticketId, userID);
-      if (current.mode !== nextMode) {
-        await database.db
-          .update(ticketConversation)
-          .set({
+            .where(eq(ticketConversation.id, current.id));
+          await appendConversationEntry(transaction, current.id, {
+            kind: "mode-change",
+            actor: "system",
             mode: nextMode,
-            version: sql<number>`${ticketConversation.version}+1`,
-            updatedAt: sql<Date>`now()`,
-          })
-          .where(eq(ticketConversation.id, current.id));
-        await appendEntry(current.id, {
-          kind: "mode-change",
-          actor: "system",
-          mode: nextMode,
-          body:
-            nextMode === "build"
-              ? "Build is ready from the approved Requirement Revision."
-              : `Switched to ${nextMode}.`,
-          payload: { from: current.mode, to: nextMode },
-          citations: [],
-          inReplyToEntryId: null,
-          requirementRevisionId: null,
-        });
-      }
-      return view(await conversationByID(current.id), userID);
+            body: `Switched to ${nextMode}.`,
+            payload: { from: current.mode, to: nextMode },
+            citations: [],
+            inReplyToEntryId: null,
+            requirementRevisionId: null,
+          });
+        }
+        return current.id;
+      });
+      return view(await conversationByID(id), userID);
     },
   };
 }

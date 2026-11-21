@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 )
 
 // Only the trusted native transport crosses into the injected child. Its CA is
@@ -25,10 +24,10 @@ func nativeChildTransport(ctx context.Context, containerID string, generation ui
 		return nil, err
 	}
 	destination := fmt.Sprintf("/tmp/factory-native-trust-%d.pem", generation)
-	if err := exec.CommandContext(ctx, "docker", "cp", ca, containerID+":"+destination).Run(); err != nil {
+	if err := ownedCommand(ctx, "docker", "cp", ca, containerID+":"+destination).Run(); err != nil {
 		return nil, errors.New("native child trust copy failed")
 	}
-	if err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0444", destination).Run(); err != nil {
+	if err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0444", destination).Run(); err != nil {
 		return nil, errors.New("native child trust permissions failed")
 	}
 	var flags []string

@@ -8,6 +8,7 @@ import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually } from "./factory-process";
 import { callFactoryFunction } from "./server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { saveTicketRequirements } from "./ticket-requirements";
 
 export async function starterDelivery(input: {
   database: ReturnType<typeof createDatabase>;
@@ -47,26 +48,21 @@ export async function starterDelivery(input: {
     SELECT id FROM factory.requirement_revision WHERE ticket_id=${ticketID} ORDER BY ordinal DESC LIMIT 1`;
   const revision =
     savedRevision ??
-    (await serverCall(
-      callFactoryFunction(
-        base,
-        "createRequirementRevision",
-        [
-          ticketID,
-          {
-            summary: description,
-            acceptanceCriteria: [
-              "Authenticated home displays Welcome home.",
-              "Signup, login, logout and database auth checks pass",
-              "npm run check passes",
-            ],
-            nonGoals: [
-              "Runtime configuration, new dependencies, unrelated UI or authentication changes",
-            ],
-          },
+    (await saveTicketRequirements(
+      base,
+      ticketID,
+      {
+        summary: description,
+        acceptanceCriteria: [
+          "Authenticated home displays Welcome home.",
+          "Signup, login, logout and database auth checks pass",
+          "npm run check passes",
         ],
-        { cookie },
-      ),
+        nonGoals: [
+          "Runtime configuration, new dependencies, unrelated UI or authentication changes",
+        ],
+      },
+      { cookie },
     ));
   if (previous?.changeID && !previous.commandID)
     throw new Error("Starter proof has a Change without its admitted Build command");

@@ -73,7 +73,7 @@ test.skipIf(process.env["FACTORY_ATTACHMENT_MODEL_LIVE"] !== "1")(
         await store.begin(f.userID, input);
         manifest.push(await store.upload(f.userID, input.id, file.data));
       }
-      const controller = createProjectAgentController(f.database, { start: async () => null });
+      const controller = createProjectAgentController(f.database);
       const view = await controller.message(
         f.projectID,
         undefined,

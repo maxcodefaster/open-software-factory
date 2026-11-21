@@ -16,11 +16,13 @@ import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
+  controlledBrowserFunction,
   factoryFunctionMatches,
   mockFactoryFunctions,
   requestFunction,
 } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
+import { queuedTicketImplementation } from "../fixtures/ticket-requirements";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
@@ -1279,11 +1281,47 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
   if (!first || !second) throw new Error("Expected immutable revisions");
   expect(JSON.parse(first.canonicalContent).summary).toBe(original);
   expect(JSON.parse(second.canonicalContent).acceptanceCriteria).toContain("Review remains human.");
-  const approved = await requestFunction(page.request, "approveRequirementRevision", [
+  const prerequisiteID = crypto.randomUUID();
+  await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
+    VALUES(${prerequisiteID},${projectID},'Hold document-history execution','ready',${userID})`;
+  await database.client`
+    INSERT INTO factory.ticket_dependency(project_id,ticket_id,prerequisite_id,created_by)
+    VALUES(${projectID},${ticketID},${prerequisiteID},${userID})`;
+  await mockFactoryFunctions(page, {
+    tickets: await queuedTicketImplementation(database, userID, projectID),
+  });
+  const implementation = Object.freeze({ commandId: crypto.randomUUID(), revisionId: second.id });
+  const approved = await controlledBrowserFunction(page, "implementTicket", [
     ticketID,
-    second.id,
+    implementation,
   ]);
-  expect(approved.ok).toBe(true);
+  expect(await serverCall(Promise.resolve(approved))).toEqual({ id: implementation.commandId });
+  expect(
+    await serverCall(
+      controlledBrowserFunction(page, "implementTicket", [ticketID, implementation]),
+    ),
+  ).toEqual({ id: implementation.commandId });
+  const [waiting] = await database.client`
+    SELECT requirement_revision_id AS revision,created_by AS author,state,source_sha AS source
+    FROM factory.implementation_order WHERE command_id=${implementation.commandId}`;
+  expect(waiting).toEqual({
+    revision: second.id,
+    author: userID,
+    state: "waiting",
+    source: commit,
+  });
+  for (const table of ["change", "agent_turn", "runtime_attempt"])
+    expect(
+      await database.client.unsafe(`SELECT id FROM factory.${table} WHERE project_id=$1`, [
+        projectID,
+      ]),
+    ).toHaveLength(0);
+  await serverCall(
+    requestFunction(page.request, "cancelTicketImplementation", [
+      ticketID,
+      implementation.commandId,
+    ]),
+  );
   const detail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
   const approvedDocument = ticketDetailSchema
     .parse(detail)

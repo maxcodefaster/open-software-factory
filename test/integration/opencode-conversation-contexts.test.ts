@@ -97,7 +97,7 @@ test("a fresh native Coding context keeps its original Session and canonical sou
     expect(await Bun.file(marker).text()).toBe(
       "Retained source belongs to the Ticket, not its conversation.\n",
     );
-    const project = createProjectAgentController(owned.database, { start: async () => null });
+    const project = createProjectAgentController(owned.database);
     const history = await project.get(owned.projectID, owned.ticketID, owned.userID, "original");
     expect(history?.codingHistory).toMatchObject({ messagesAvailable: true });
     const [count] = await owned.database.client<{ count: number }[]>`

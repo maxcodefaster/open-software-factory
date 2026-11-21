@@ -146,13 +146,10 @@ func (manager *commandManager) start(input CommandRequest) (CommandView, error) 
 	if !filepath.IsAbs(shell) {
 		shell = "/bin/sh"
 	}
-	process := exec.CommandContext(manager.ctx, shell, "-lc", input.Command)
+	process := ownedCommand(manager.ctx, shell, "-lc", input.Command)
 	process.Dir = input.Cwd
 	environment := assignedEnvironment(os.Environ(), manager.assignment.RuntimeEnvironment)
 	process.Env = assignedEnvironment(environment, input.Env)
-	PrepareAssignedProcess(process)
-	process.Cancel = func() error { StopAssignedProcess(process); return nil }
-	process.WaitDelay = 2 * time.Second
 	command := &workspaceCommand{
 		view:       CommandView{ID: input.ID, Digest: input.Digest, State: "starting"},
 		definition: fingerprint, process: process, done: make(chan struct{}),

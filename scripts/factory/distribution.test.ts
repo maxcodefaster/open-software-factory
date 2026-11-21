@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import upstream from "../../upstream.json";
+import { gateSteps } from "../release/beta-gate";
 
 test("source-development Compose does not offer a second product installation", async () => {
   const compose = parse(
@@ -183,15 +184,7 @@ test("local gate reuse rejects another commit, incomplete checks and failed rece
       "clean-tree",
       "forbidden-terms",
       "secrets",
-      "docs",
-      "format",
-      "lint",
-      "typecheck",
-      "unit",
-      "connector",
-      "substrate",
-      "controllers",
-      "browser",
+      ...gateSteps().map((step) => step.name),
     ].map((name) => ({ name, passed: true })),
   };
   const incomplete = structuredClone(complete);

@@ -362,7 +362,7 @@ esac
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FACTORY_DOCKER_LOG", logPath)
 
-	err := cleanupAttempt(Assignment{
+	err := cleanupAttempt(t.Context(), Assignment{
 		RuntimeAttemptID:   "attempt-one",
 		Generation:         1,
 		ComposeProjectName: "attempt-one_devcontainer",
@@ -409,9 +409,9 @@ esac
 			assignment := Assignment{RuntimeAttemptID: "owned-attempt", Generation: 1, ComposeProjectName: "project_devcontainer", PreserveWorkspace: true}
 			var err error
 			if failedStart {
-				err = cleanupAttempt(assignment)
+				err = cleanupAttempt(t.Context(), assignment)
 			} else {
-				err = cleanupProject(parentState{ComposeProjectName: assignment.ComposeProjectName, PreserveWorkspace: assignment.PreserveWorkspace})
+				err = cleanupProject(t.Context(), parentState{ComposeProjectName: assignment.ComposeProjectName, PreserveWorkspace: assignment.PreserveWorkspace})
 			}
 			if err != nil {
 				t.Fatal(err)

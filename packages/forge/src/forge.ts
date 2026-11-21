@@ -52,6 +52,8 @@ class ForgeHttpError extends Error {
   }
 }
 
+class ForgeTransportError extends Error {}
+
 const sha = z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/);
 const hookResponse = z
   .object({
@@ -159,10 +161,24 @@ function repositoryPath(repository: ForgeRepository) {
 
 function ambiguous(error: unknown) {
   return (
+    error instanceof ForgeTransportError ||
     error instanceof DOMException ||
     (error instanceof ForgeHttpError && [408, 429].includes(error.status)) ||
     (error instanceof ForgeHttpError && error.status >= 500)
   );
+}
+
+async function readAfterWrite<T>(
+  error: unknown,
+  read: () => Promise<T>,
+  message: string,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (cause) {
+    if (ambiguous(error)) throw new ForgeAmbiguousWriteError(message, { cause });
+    throw cause;
+  }
 }
 
 export function createForgejoClient(options: {
@@ -175,7 +191,8 @@ export function createForgejoClient(options: {
   const baseURL = new URL(options.apiURL.endsWith("/") ? options.apiURL : `${options.apiURL}/`);
 
   async function send(path: string, init: RequestInit = {}) {
-    return request(new URL(path, baseURL), {
+    const url = new URL(path, baseURL);
+    const requestInit: RequestInit = {
       ...init,
       redirect: "error",
       signal: init.signal ?? AbortSignal.timeout(options.timeoutMs ?? 10_000),
@@ -185,7 +202,14 @@ export function createForgejoClient(options: {
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
       },
-    });
+    };
+    try {
+      return await request(url, requestInit);
+    } catch (cause) {
+      if (cause instanceof TypeError)
+        throw new ForgeTransportError("Forge request reply is unavailable", { cause });
+      throw cause;
+    }
   }
 
   async function response(path: string, init: RequestInit = {}) {
@@ -428,7 +452,11 @@ export function createForgejoClient(options: {
           }),
         });
       } catch (error) {
-        const observed = await getBranch(input.repository, input.branch);
+        const observed = await readAfterWrite(
+          error,
+          () => getBranch(input.repository, input.branch),
+          "Confirmed setup commit needs another source check",
+        );
         if (observed && observed.headSha !== input.baseCommit) return verify(observed.headSha);
         if (ambiguous(error))
           throw new ForgeAmbiguousWriteError("Confirmed setup commit needs another source check");
@@ -477,7 +505,7 @@ export function createForgejoClient(options: {
           }),
         ).id;
       } catch (cause) {
-        if (ambiguous(cause) || cause instanceof TypeError)
+        if (ambiguous(cause))
           throw new ForgeAmbiguousWriteError("Push hook create outcome is unknown");
         throw cause;
       }
@@ -540,7 +568,11 @@ export function createForgejoClient(options: {
         ) {
           throw error;
         }
-        const recovered = await getBranch(repository, branch);
+        const recovered = await readAfterWrite(
+          error,
+          () => getBranch(repository, branch),
+          `Branch creation outcome for ${branch} is unknown`,
+        );
         if (recovered?.headSha === startSha) return recovered;
         if (recovered) {
           throw new ForgeConflictError(
@@ -595,10 +627,10 @@ export function createForgejoClient(options: {
         ) {
           throw error;
         }
-        const recovered = await getPullRequest(
-          input.repository,
-          input.baseBranch,
-          input.headBranch,
+        const recovered = await readAfterWrite(
+          error,
+          () => getPullRequest(input.repository, input.baseBranch, input.headBranch),
+          "Pull request creation outcome is unknown",
         );
         if (recovered?.headSha === input.expectedHeadSha) return recovered;
         if (recovered) {
@@ -615,21 +647,38 @@ export function createForgejoClient(options: {
       branch: string,
       protectWorkflow = true,
     ) {
+      const path = `${repositoryPath(repository)}/branch_protections`;
+      const endpoint = `${path}/${segment(branch)}`;
+      const workflow = ".forgejo/workflows/factory-verification.yml";
+      const protection = z.object({
+        rule_name: z.literal(branch),
+        enable_push: z.literal(false),
+        protected_file_patterns: z.string().optional(),
+      });
+      const confirm = (value: unknown) => {
+        const observed = protection.safeParse(value);
+        if (
+          !observed.success ||
+          (protectWorkflow &&
+            !(observed.data.protected_file_patterns ?? "").split(";").includes(workflow))
+        )
+          throw new ForgeConflictError("Default branch protection was not confirmed");
+        return value;
+      };
       try {
-        return await json(`${repositoryPath(repository)}/branch_protections/${segment(branch)}`);
+        return confirm(await json(endpoint));
       } catch (error) {
         if (!(error instanceof ForgeHttpError && error.status === 404)) throw error;
       }
+      let created: unknown;
       try {
-        return await json(`${repositoryPath(repository)}/branch_protections`, {
+        created = await json(path, {
           method: "POST",
           body: JSON.stringify({
             rule_name: branch,
             enable_push: false,
             enable_status_check: false,
-            protected_file_patterns: protectWorkflow
-              ? ".forgejo/workflows/factory-verification.yml"
-              : "",
+            protected_file_patterns: protectWorkflow ? workflow : "",
           }),
         });
       } catch (error) {
@@ -637,24 +686,7 @@ export function createForgejoClient(options: {
         // 422. Observe once before classifying the failed response. This is
         // not another write and must prove the exact protected outcome.
         try {
-          const recovered = await json(
-            `${repositoryPath(repository)}/branch_protections/${segment(branch)}`,
-          );
-          const observed = z
-            .object({
-              rule_name: z.literal(branch),
-              enable_push: z.literal(false),
-              protected_file_patterns: z.string().optional(),
-            })
-            .safeParse(recovered);
-          if (
-            observed.success &&
-            (!protectWorkflow ||
-              (observed.data.protected_file_patterns ?? "")
-                .split(";")
-                .includes(".forgejo/workflows/factory-verification.yml"))
-          )
-            return recovered;
+          return confirm(await json(endpoint));
         } catch {
           // Missing, denied or lost readback cannot confirm the intended write.
         }
@@ -662,6 +694,7 @@ export function createForgejoClient(options: {
           throw new ForgeAmbiguousWriteError("Branch protection outcome is unknown");
         throw error;
       }
+      return confirm(created);
     },
     async protectSetupWorkflow(repository: ForgeRepository, branch: string) {
       const value = z
@@ -797,8 +830,15 @@ export function createForgejoClient(options: {
         return { commitSha: updated.commit.sha, blobSha: updated.content.sha };
       } catch (error) {
         if (!ambiguous(error)) throw error;
-        const observedBranch = await getBranch(input.repository, input.branch);
-        const observedFile = await getFileInfo(input.repository, input.path, input.branch);
+        const [observedBranch, observedFile] = await readAfterWrite(
+          error,
+          async () =>
+            [
+              await getBranch(input.repository, input.branch),
+              await getFileInfo(input.repository, input.path, input.branch),
+            ] as const,
+          "Repository Document update outcome is unknown",
+        );
         if (
           observedBranch &&
           observedBranch.headSha !== input.expectedBranchSha &&
@@ -878,10 +918,15 @@ export function createForgejoClient(options: {
         return await register();
       } catch (error) {
         if (!ambiguous(error)) throw error;
-        const existing = z
-          .array(runnerResponse)
-          .parse(await json(`${repositoryPath(repository)}/actions/runners?limit=100`))
-          .filter((runner) => runner.name === name);
+        const existing = await readAfterWrite(
+          error,
+          async () =>
+            z
+              .array(runnerResponse)
+              .parse(await json(`${repositoryPath(repository)}/actions/runners?limit=100`))
+              .filter((runner) => runner.name === name),
+          "Runner registration outcome is unknown",
+        );
         for (const runner of existing) {
           await response(`${repositoryPath(repository)}/actions/runners/${runner.id}`, {
             method: "DELETE",
@@ -987,7 +1032,11 @@ export function createForgejoClient(options: {
           }
         }
       } catch (error) {
-        const observed = await getBranch(repository, defaultBranch);
+        const observed = await readAfterWrite(
+          error,
+          () => getBranch(repository, defaultBranch),
+          "Pull request merge outcome is unknown",
+        );
         if (observed?.headSha === expectedHeadSha) return observed;
         if (ambiguous(error)) {
           throw new ForgeAmbiguousWriteError("Pull request merge outcome is unknown");

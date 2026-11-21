@@ -274,7 +274,7 @@ test("Build resolves the initiating human's model once; other viewers and settin
     const previous = Object.keys(controlled).map((key) => [key, process.env[key]] as const);
     try {
       for (const [key, value] of Object.entries(controlled)) process.env[key] = value;
-      const projectAgent = createProjectAgentController(database, { start: async () => null });
+      const projectAgent = createProjectAgentController(database);
       const commandId = crypto.randomUUID();
       await projectAgent.message(
         owned.projectID,
@@ -351,7 +351,7 @@ test("Build resolves the initiating human's model once; other viewers and settin
       }),
     ).rejects.toMatchObject({ code: "not-found" });
     await expect(
-      createProjectAgentController(database, { start: async () => null }).message(
+      createProjectAgentController(database).message(
         owned.projectID,
         undefined,
         "No revoked planning",

@@ -168,7 +168,7 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	})
 	finishDevcontainer()
 	if err != nil {
-		err = cleanupFailedParentStartup(assignment, err)
+		err = cleanupFailedParentStartup(ctx, assignment, err)
 		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
 	// The CLI's standalone image path has no Compose label. Preserve that
@@ -193,13 +193,7 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		if retainingFailure && keepsParentStartupSource(assignment) {
 			return
 		}
-		if err := cleanupProject(state); err != nil && returnError == nil {
-			returnError = err
-			control.write(Message{Type: "status", Phase: "cleanup-failed", Error: err.Error()})
-			return
-		}
-		_ = trimPrivateBuildCache(ctx)
-		control.write(Message{Type: "status", Phase: "stopped"})
+		returnError = finishParentCleanup(ctx, state, control.write, returnError)
 	}()
 	if err := writeParentState(assignment, state); err != nil {
 		retainingFailure = true
@@ -546,7 +540,7 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 		// Stop, do not delete, every container in this Actor-private daemon.
 		// Parent operations are already serialized with Git; stopped container
 		// identities, filesystems, hooks and volumes remain in native ROOTFS.
-		output, err := exec.CommandContext(ctx, "docker", "ps", "--quiet", "--no-trunc").Output()
+		output, err := ownedCommand(ctx, "docker", "ps", "--quiet", "--no-trunc").Output()
 		if err == nil {
 			ids := strings.Fields(string(output))
 			for _, id := range ids {
@@ -556,10 +550,10 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 				}
 			}
 			if err == nil && len(ids) != 0 {
-				err = exec.CommandContext(ctx, "docker", append([]string{"stop", "--time", "10"}, ids...)...).Run()
+				err = ownedCommand(ctx, "docker", append([]string{"stop", "--time", "10"}, ids...)...).Run()
 			}
 			if err == nil {
-				output, err = exec.CommandContext(ctx, "docker", "ps", "--quiet", "--no-trunc").Output()
+				output, err = ownedCommand(ctx, "docker", "ps", "--quiet", "--no-trunc").Output()
 				if err == nil && strings.TrimSpace(string(output)) != "" {
 					err = errors.New("private container writers remain running")
 				}
@@ -679,7 +673,7 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 	if merged {
 		arguments = append(arguments, "--include-merged-configuration")
 	}
-	command := exec.CommandContext(ctx, "devcontainer", arguments...)
+	command := ownedCommand(ctx, "devcontainer", arguments...)
 	command.Env = devcontainerEnvironment(assignment)
 	var diagnostic devcontainerFailureOutput
 	command.Stderr = &diagnostic
@@ -1083,8 +1077,8 @@ func pathWithin(root string, candidate string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func cleanupAttempt(assignment Assignment) error {
-	output, err := exec.Command(
+func cleanupAttempt(ctx context.Context, assignment Assignment) error {
+	output, err := ownedCommand(ctx,
 		"docker", "ps", "-aq",
 		"--filter", "label="+attemptLabel+"="+assignment.RuntimeAttemptID,
 		"--filter", "label="+generationLabel+"="+strconv.FormatUint(assignment.Generation, 10),
@@ -1094,7 +1088,7 @@ func cleanupAttempt(assignment Assignment) error {
 	}
 	projects := map[string]struct{}{assignment.ComposeProjectName: {}}
 	for _, containerID := range strings.Fields(string(output)) {
-		container, inspectErr := inspectContainer(containerID)
+		container, inspectErr := inspectContainer(ctx, containerID)
 		if inspectErr != nil {
 			return inspectErr
 		}
@@ -1104,7 +1098,7 @@ func cleanupAttempt(assignment Assignment) error {
 		}
 	}
 	for project := range projects {
-		if err := cleanupProject(parentState{ComposeProjectName: project, PreserveWorkspace: assignment.PreserveWorkspace}); err != nil {
+		if err := cleanupProject(ctx, parentState{ComposeProjectName: project, PreserveWorkspace: assignment.PreserveWorkspace}); err != nil {
 			return err
 		}
 	}
@@ -1115,7 +1109,7 @@ func waitForDocker(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, dockerReadyTimeout)
 	defer cancel()
 	for attempt := 0; attempt < dockerReadyAttempts; attempt++ {
-		command := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+		command := ownedCommand(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
 		if err := command.Run(); err == nil {
 			return nil
 		}
@@ -1164,7 +1158,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 	}
 	retryDelay := 250 * time.Millisecond
 	for {
-		command := exec.CommandContext(ctx, "docker", "pull", reference)
+		command := ownedCommand(ctx, "docker", "pull", reference)
 		var diagnostic browserDockerOutput
 		// Keep only bounded, ephemeral diagnostics for failure classification.
 		// No Registry text, progress or credentials reach the model or Evidence.
@@ -1206,7 +1200,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 // interrupted Stop can therefore return an old primary. Remove only a proven
 // older primary before up; never rebind it or force-recreate this attempt.
 func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
-	output, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--no-trunc",
+	output, err := ownedCommand(ctx, "docker", "ps", "-aq", "--no-trunc",
 		"--filter", "label=com.docker.compose.project="+assignment.ComposeProjectName,
 		"--filter", "label="+attemptLabel,
 	).Output()
@@ -1216,7 +1210,7 @@ func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
 	var previous []string
 	current := false
 	for _, id := range strings.Fields(string(output)) {
-		container, err := inspectContainer(id)
+		container, err := inspectContainer(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -1240,7 +1234,7 @@ func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
 	if len(previous) == 0 {
 		return nil
 	}
-	if err := exec.CommandContext(ctx, "docker", append([]string{"rm", "-f"}, previous...)...).Run(); err != nil {
+	if err := ownedCommand(ctx, "docker", append([]string{"rm", "-f"}, previous...)...).Run(); err != nil {
 		return errors.New("could not remove the previous Dev Container; retry Workspace start")
 	}
 	return nil
@@ -1285,7 +1279,7 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 	// --cache-from would ask the CLI to build again; for an image-only Compose
 	// service CLI 0.89.0 even emits an invalid service-level cache_from field.
 	// If consumer preparation was unavailable, preserve normal startup instead.
-	command := exec.CommandContext(ctx, "devcontainer", arguments...)
+	command := ownedCommand(ctx, "devcontainer", arguments...)
 	command.Env = devcontainerEnvironment(assignment)
 	var stdout bytes.Buffer
 	var diagnostic devcontainerFailureOutput
@@ -1337,7 +1331,7 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 	if result.RemoteWorkspaceFolder != assignment.RemoteWorkspaceFolder {
 		return devcontainerResult{}, errors.New("Dev Containers CLI returned an unexpected remote workspace")
 	}
-	container, err := inspectContainer(result.ContainerID)
+	container, err := inspectContainer(ctx, result.ContainerID)
 	if err != nil {
 		return devcontainerResult{}, err
 	}
@@ -1403,7 +1397,7 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 		return err
 	}
 	finishAssignment := startupPhase("child-assignment-copy")
-	err = exec.CommandContext(ctx, "docker", "cp", temporaryName, result.ContainerID+":"+assignmentPath).Run()
+	err = ownedCommand(ctx, "docker", "cp", temporaryName, result.ContainerID+":"+assignmentPath).Run()
 	finishAssignment()
 	if err != nil {
 		return fmt.Errorf("copy Connector child assignment: %w", err)
@@ -1422,7 +1416,7 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	}
 	arguments := append([]string{"exec", "--interactive", "--user", result.RemoteUser}, transport...)
 	arguments = append(arguments, result.ContainerID, connectorPath, "child", "--assignment", assignmentPath, "--token-stdin")
-	command := exec.CommandContext(ctx, "docker", arguments...)
+	command := ownedCommand(ctx, "docker", arguments...)
 	credentials, _ := json.Marshal(map[string]any{"token": token, "environment": assignment.RuntimeEnvironment})
 	command.Stdin = strings.NewReader(string(credentials))
 	command.Stdout = os.Stdout
@@ -1468,7 +1462,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 	if needsLanguages {
 		tool := "/opt/factory/language-tools/musl"
 		finishProbe := startupPhase("language-tools-probe")
-		output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
+		output, err := ownedCommand(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
 		finishProbe()
 		if !strings.Contains(strings.ToLower(string(output)), "musl") {
 			if err != nil {
@@ -1477,19 +1471,19 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 			tool = "/opt/factory/language-tools/glibc"
 		}
 		finishSetup := startupPhase("language-tools-setup")
-		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput()
 		finishSetup()
 		if err != nil {
 			return fmt.Errorf("create language tools destination: %w: %s", err, output)
 		}
 		finishTree := startupPhase("language-tools-tree-copy")
-		output, err = exec.CommandContext(ctx, "docker", "cp", "/opt/factory/language-tools/node_modules", containerID+":/opt/factory/language-tools/node_modules").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "cp", "/opt/factory/language-tools/node_modules", containerID+":/opt/factory/language-tools/node_modules").CombinedOutput()
 		finishTree()
 		if err != nil {
 			return fmt.Errorf("inject language tools: %w: %s", err, output)
 		}
 		finishRuntime := startupPhase("language-tools-runtime-copy")
-		output, err = exec.CommandContext(ctx, "docker", "cp", tool+"/.", containerID+":/opt/factory/language-tools/runtime").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "cp", tool+"/.", containerID+":/opt/factory/language-tools/runtime").CombinedOutput()
 		finishRuntime()
 		if err != nil {
 			return fmt.Errorf("inject language tools: %w: %s", err, output)
@@ -1500,7 +1494,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		// unmodified; no injected loader or compatibility package is required.
 		tool := "/opt/factory/opencode/musl/bun"
 		finishProbe := startupPhase("opencode-probe")
-		output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
+		output, err := ownedCommand(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
 		finishProbe()
 		if !strings.Contains(strings.ToLower(string(output)), "musl") {
 			if err != nil {
@@ -1509,13 +1503,13 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 			tool = "/opt/factory/opencode/glibc/bun"
 		}
 		finishSetup := startupPhase("opencode-setup")
-		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput()
 		finishSetup()
 		if err != nil {
 			return fmt.Errorf("create OpenCode destination: %w: %s", err, output)
 		}
 		finishServer := startupPhase("opencode-server-copy")
-		output, err = exec.CommandContext(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput()
 		finishServer()
 		if err != nil {
 			return fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
@@ -1527,7 +1521,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 			return fmt.Errorf("inject OpenCode: %w", err)
 		}
 		finishPermissions := startupPhase("opencode-permissions")
-		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput()
 		finishPermissions()
 		if err != nil {
 			return fmt.Errorf("prepare OpenCode: %w: %s", err, output)
@@ -1535,7 +1529,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 	}
 	if needsVerification {
 		finishSetup := startupPhase("verification-runner-setup")
-		output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput()
+		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput()
 		finishSetup()
 		if err != nil {
 			return fmt.Errorf("create Forgejo Runner destination: %w: %s", err, output)
@@ -1547,7 +1541,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 			return fmt.Errorf("inject Forgejo Runner: %w", err)
 		}
 		finishPermissions := startupPhase("verification-runner-permissions")
-		output, err = exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput()
 		finishPermissions()
 		if err != nil {
 			return fmt.Errorf("prepare Forgejo Runner: %w: %s", err, output)
@@ -1556,8 +1550,8 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 	return nil
 }
 
-func inspectContainer(containerID string) (inspectedContainer, error) {
-	output, err := exec.Command("docker", "inspect", containerID).Output()
+func inspectContainer(ctx context.Context, containerID string) (inspectedContainer, error) {
+	output, err := ownedCommand(ctx, "docker", "inspect", containerID).Output()
 	if err != nil {
 		return inspectedContainer{}, fmt.Errorf("inspect primary container: %w", err)
 	}
@@ -1568,19 +1562,35 @@ func inspectContainer(containerID string) (inspectedContainer, error) {
 	return containers[0], nil
 }
 
-func cleanupProject(state parentState) error {
+func cleanupProject(ctx context.Context, state parentState) error {
 	owner := containerOrigin{state.RuntimeAttemptID, state.Generation, state.ComposeProjectName}
 	if state.ContainerOrigin != nil {
 		owner = *state.ContainerOrigin
 	}
 	if state.ContainerID != "" {
-		container, err := inspectContainer(state.ContainerID)
-		if err == nil && container.Config.Labels["com.docker.compose.project"] == "" {
+		container, err := inspectContainer(ctx, state.ContainerID)
+		if err != nil {
+			var missing *exec.ExitError
+			if !regexpIdentity(state.ContainerID) || owner.AttemptID == "" || len(owner.AttemptID) > 64 || owner.Generation == 0 ||
+				!errors.As(err, &missing) || !strings.EqualFold(strings.TrimSpace(string(missing.Stderr)), "error: no such object: "+state.ContainerID) {
+				return err
+			}
+			// Confirm only this full immutable ID is absent. Owner-label filters
+			// could hide an existing primary whose labels changed.
+			output, readErr := ownedCommand(ctx, "docker", "ps", "-aq", "--no-trunc",
+				"--filter", "id="+state.ContainerID).Output()
+			if readErr != nil {
+				return errors.Join(err, fmt.Errorf("confirm primary container absence: %w", readErr))
+			}
+			if strings.TrimSpace(string(output)) != "" {
+				return err
+			}
+		} else if container.Config.Labels["com.docker.compose.project"] == "" {
 			if container.ID != state.ContainerID || container.Config.Labels[attemptLabel] != owner.AttemptID || container.Config.Labels[generationLabel] != strconv.FormatUint(owner.Generation, 10) {
 				return errors.New("Standalone cleanup identity changed")
 			}
-			if exec.Command("docker", "rm", "-f", state.ContainerID).Run() != nil {
-				return errors.New("standalone runtime cleanup failed")
+			if err := ownedCommand(ctx, "docker", "rm", "-f", state.ContainerID).Run(); err != nil {
+				return fmt.Errorf("standalone runtime cleanup failed: %w", err)
 			}
 		}
 	}
@@ -1600,7 +1610,7 @@ func cleanupProject(state parentState) error {
 		if state.PreserveWorkspace && resource.list[0] == "volume" {
 			continue
 		}
-		output, err := exec.Command("docker", resource.list...).Output()
+		output, err := ownedCommand(ctx, "docker", resource.list...).Output()
 		if err != nil {
 			return fmt.Errorf("list inner runtime resources: %w", err)
 		}
@@ -1609,11 +1619,25 @@ func cleanupProject(state parentState) error {
 			continue
 		}
 		arguments := append(append([]string{}, resource.remove...), ids...)
-		if output, err := exec.Command("docker", arguments...).CombinedOutput(); err != nil {
+		if output, err := ownedCommand(ctx, "docker", arguments...).CombinedOutput(); err != nil {
 			return fmt.Errorf("remove inner runtime resources: %w: %s", err, output)
 		}
 	}
 	return nil
+}
+
+func finishParentCleanup(ctx context.Context, state parentState, report func(Message) error, failure error) error {
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeCleanupTimeout)
+	defer cancel()
+	cleanupErr := cleanupProject(cleanupContext, state)
+	failure = errors.Join(failure, cleanupErr)
+	if cleanupErr == nil {
+		_ = trimPrivateBuildCache(ctx)
+	}
+	if failure != nil {
+		return errors.Join(failure, report(Message{Type: "status", Phase: "cleanup-failed", Error: failure.Error()}))
+	}
+	return report(Message{Type: "status", Phase: "stopped"})
 }
 
 func writeParentState(assignment Assignment, state parentState) error {

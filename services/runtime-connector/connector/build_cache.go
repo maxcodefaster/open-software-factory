@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"time"
 )
 
@@ -11,7 +10,7 @@ import (
 // Checkout, installed dependencies, images and named volumes are not deletion targets.
 func trimPrivateBuildCache(parent context.Context) error {
 	return trimPrivateBuildCacheWith(parent, func(ctx context.Context, args []string) error {
-		return exec.CommandContext(ctx, "docker", args...).Run()
+		return ownedCommand(ctx, "docker", args...).Run()
 	})
 }
 

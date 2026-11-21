@@ -742,7 +742,7 @@ test("a queued first Build shows preparation after reconnect, not active impleme
   let working = false;
   let executionWrites = 0;
   const executionCommands = await Promise.all(
-    ["implementTicket", "startTicketChange", "startCoding", "sendCodingPrompt", "resumeCoding"].map(
+    ["implementTicket", "startCoding", "sendCodingPrompt", "resumeCoding"].map(
       factoryFunctionMatcher,
     ),
   );
@@ -875,7 +875,6 @@ test.describe("retained Coding successor", () => {
     const executionCommands = await Promise.all(
       [
         "implementTicket",
-        "startTicketChange",
         "startCoding",
         "sendCodingPrompt",
         "resumeCoding",

@@ -136,16 +136,24 @@ interface TicketCommandsDependencies {
 }
 
 export function createTicketCommands(dependencies: TicketCommandsDependencies) {
-  async function saveTicketDocument(input: TicketDraft) {
+  async function saveTicketDocument(input: TicketDraft, ticketID: string) {
     const current = dependencies.detail();
     const revision = dependencies.latestRevision();
-    if (!current) return undefined;
-    const scope = `document:${current.ticket.id}`;
+    const owned = current?.ticket.id === ticketID ? current : undefined;
+    const expectedVersion = input.expectedVersion ?? owned?.ticket.version;
+    // A disposed editor can never borrow the selected Ticket's revision base.
+    if (
+      expectedVersion === undefined ||
+      (!owned &&
+        (input.expectedDocumentId === undefined || input.requirementRevisionId === undefined))
+    )
+      return undefined;
+    const scope = `document:${ticketID}`;
     const payload = {
-      expectedVersion: input.expectedVersion ?? current.ticket.version,
+      expectedVersion,
       expectedDocumentId:
         input.expectedDocumentId === undefined
-          ? (current.documentRevisions[0]?.id ?? null)
+          ? (owned?.documentRevisions[0]?.id ?? null)
           : input.expectedDocumentId,
       requirementRevisionId:
         input.requirementRevisionId === undefined
@@ -157,22 +165,20 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
     };
     const result = await dependencies.mutate(async () => {
       const commandId = dependencies.agentCommandIds.forInput(scope, JSON.stringify(payload));
-      const saved = await serverCall(
-        saveTicket({ data: [current.ticket.id, { commandId, ...payload }] }),
-      );
+      const saved = await serverCall(saveTicket({ data: [ticketID, { commandId, ...payload }] }));
       dependencies.acknowledgeCommand(scope, commandId);
       // A competing read may supersede this refresh. The write's exact base
       // comes from its acknowledgement, never whichever projection arrives first.
-      await dependencies.refreshTicketDetail(current.ticket.id).catch(() => undefined);
+      await dependencies.refreshTicketDetail(ticketID).catch(() => undefined);
       return saved;
     });
     return result.ok ? result.value : undefined;
   }
 
-  async function confirmRequirements(draft: TicketDraft) {
+  async function confirmRequirements(draft: TicketDraft, ticketID: string) {
     const current = dependencies.detail();
     const proposal = current?.proposal;
-    if (!current || !proposal) return undefined;
+    if (current?.ticket.id !== ticketID || !proposal) return undefined;
     const result = await dependencies.mutate(async () => {
       const payload = {
         expectedVersion: proposal.base.version,

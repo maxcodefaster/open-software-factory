@@ -54,12 +54,6 @@ test("native Ticket document writes preserve CAS, exact retries, retained histor
         documents: createTicketDocumentController(database),
         trash,
         changes: {
-          async createRevision() {
-            throw new Error("Not used by this document proof");
-          },
-          async approve() {
-            throw new Error("Not used by this document proof");
-          },
           async start() {
             inference++;
             throw new Error("Saving must not commission implementation");

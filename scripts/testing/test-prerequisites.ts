@@ -10,6 +10,8 @@ function scanImports(source: string) {
 
 export function verificationEnvironment(environment: Record<string, string | undefined>) {
   const env = { ...environment };
+  delete env["FACTORY_WRITER_MODEL_CHECK"];
+  delete env["FACTORY_WRITER_MODEL_EVIDENCE"];
   for (const key of Object.keys(env))
     if (
       key.startsWith("FACTORY_") &&
@@ -81,33 +83,43 @@ async function fingerprint(directory: string, paths: string[]) {
   );
 }
 
-async function command(args: string[], directory: string, env: Record<string, string | undefined>) {
-  const child = Bun.spawn(args, {
+async function command(
+  args: string[],
+  directory: string,
+  env: Record<string, string | undefined>,
+  signal?: AbortSignal,
+) {
+  const { runProcess } = await import("../owned-client-process");
+  const child = await runProcess(args, {
     cwd: directory,
     env,
-    stdout: "inherit",
-    stderr: "inherit",
+    signal,
+    output: "inherit",
+    allowFailure: true,
   });
-  if ((await child.exited) !== 0)
-    throw new Error(`Test prerequisite ${args[0]} failed in ${directory}`);
+  if (child.code !== 0) throw new Error(`Test prerequisite ${args[0]} failed in ${directory}`);
 }
 
 export async function prepareTestPrerequisites(
   selected: string[],
   env: Record<string, string | undefined>,
+  signal?: AbortSignal,
 ) {
+  signal?.throwIfAborted();
   const sources = await Promise.all(selected.map((path) => readFile(resolve(root, path), "utf8")));
+  signal?.throwIfAborted();
   const theia = sources.some(needsTheiaTestBuild);
   const starter = needsStarterTestDependencies(selected);
   const cache = resolve(root, ".factory/cache/test-prerequisites");
   if (sources.some(needsOIDCTestCA)) {
-    const mkcert = Bun.spawn(["mise", "exec", "--", "mkcert", "-CAROOT"], {
+    const { runProcess } = await import("../owned-client-process");
+    const mkcert = await runProcess(["mise", "exec", "--", "mkcert", "-CAROOT"], {
       env,
-      stdout: "pipe",
-      stderr: "pipe",
+      signal,
+      allowFailure: true,
     });
-    const caRoot = (await new Response(mkcert.stdout).text()).trim();
-    if ((await mkcert.exited) !== 0 || !caRoot) throw new Error("Owned OIDC test CA unavailable");
+    const caRoot = mkcert.stdout.trim();
+    if (mkcert.code !== 0 || !caRoot) throw new Error("Owned OIDC test CA unavailable");
     await appendOwnedTestCA(env, await readFile(resolve(caRoot, "rootCA.pem"), "utf8"), cache);
   }
   if (!theia && !starter) return;
@@ -116,6 +128,7 @@ export async function prepareTestPrerequisites(
     ...(theia ? [{ name: "theia", directory: "deploy/theia-ide" }] : []),
     ...(starter ? [{ name: "starter", directory: "templates/starter-app" }] : []),
   ]) {
+    signal?.throwIfAborted();
     const directory = resolve(root, target.directory);
     const manifest = resolve(cache, `${target.name}.json`);
     const previous = await readFile(manifest, "utf8")
@@ -141,10 +154,15 @@ export async function prepareTestPrerequisites(
       ).exists());
     if (!installed) {
       console.log(`Preparing locked ${target.name} dependencies for the selected tests`);
-      await command(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], directory, env);
+      await command(
+        ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        directory,
+        env,
+        signal,
+      );
     }
     if (target.name === "starter")
-      await command(["node", ".factory/repair-framework-export.mjs"], directory, env);
+      await command(["node", ".factory/repair-framework-export.mjs"], directory, env, signal);
     let build = dependencies;
     if (target.name === "theia") {
       const sources: string[] = [];
@@ -170,9 +188,11 @@ export async function prepareTestPrerequisites(
           ["npm", "run", "build", "--workspace", "factory-ide-extension"],
           directory,
           env,
+          signal,
         );
       }
     }
+    signal?.throwIfAborted();
     await writeFile(manifest, JSON.stringify({ dependencies, build }));
   }
 }

@@ -17,29 +17,25 @@ test.skipIf(process.env["FACTORY_CODE_RESEARCH_LIVE"] !== "1")(
       const sha = "d".repeat(40);
       let discoveries = 0,
         reads = 0;
-      const controller = createProjectAgentController(
-        db,
-        { start: async () => null },
-        {
-          codePaths: async () => {
-            discoveries++;
-            return { commitSha: sha, paths: ["src/server.ts"], truncated: false };
-          },
-          code: async (_projectID, value) => {
-            reads++;
-            const { codeReadInput } = await import("../../apps/factory/src/knowledge/code-read");
-            const input = codeReadInput.parse(value);
-            expect(input.path).toBe("src/server.ts");
-            expect(input.commitSha).toBe(sha);
-            return {
-              ...input,
-              body: "1: export function health() { return { status: 'ok', version: 7 }; }",
-              truncated: false,
-              url: `https://forge.test/source/${sha}/src/server.ts`,
-            };
-          },
+      const controller = createProjectAgentController(db, {
+        codePaths: async () => {
+          discoveries++;
+          return { commitSha: sha, paths: ["src/server.ts"], truncated: false };
         },
-      );
+        code: async (_projectID, value) => {
+          reads++;
+          const { codeReadInput } = await import("../../apps/factory/src/knowledge/code-read");
+          const input = codeReadInput.parse(value);
+          expect(input.path).toBe("src/server.ts");
+          expect(input.commitSha).toBe(sha);
+          return {
+            ...input,
+            body: "1: export function health() { return { status: 'ok', version: 7 }; }",
+            truncated: false,
+            url: `https://forge.test/source/${sha}/src/server.ts`,
+          };
+        },
+      });
       const result = await controller.message(
         owned.projectID,
         undefined,

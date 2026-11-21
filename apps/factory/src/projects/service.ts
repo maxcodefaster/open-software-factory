@@ -11,7 +11,7 @@ import {
   createRegisterProjectInput,
   type RegisterProjectInput,
 } from "../../../../packages/project-domain/src/project";
-import { createAccessController, requireActiveAccountIn } from "../access/controller";
+import { requireActiveAccountIn, requireSystemManagerIn } from "../access/controller";
 import { projectSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
@@ -36,7 +36,6 @@ function isUniqueViolation(cause: unknown): boolean {
 }
 
 export function createProjectService(dependencies: ProjectServiceDependencies) {
-  const access = createAccessController(dependencies.database);
   const registerProjectInput = createRegisterProjectInput(dependencies.localRepositoryOrigin);
   const dto = (row: ProjectRow) =>
     projectSchema.parse({
@@ -101,25 +100,25 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
       return { projects: rows.map(dto) };
     },
     async register(userID: string, value: RegisterProjectInput) {
-      await access.requireSystemManager(userID);
-      const input = registerProjectInput.parse(value);
-      try {
-        factoryForgeSource(
-          input.repositoryUrl,
-          dependencies.localRepositoryOrigin,
-          dependencies.forgeOwner,
-          dependencies.publicRepositoryOrigin,
-        );
-      } catch {
-        throw new CommandError(
-          "invalid",
-          "Project source must belong to the configured Factory Forgejo.",
-        );
-      }
       try {
         const id = crypto.randomUUID();
         const rows = await dependencies.database.client.begin(async (client) => {
           await client`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
+          await requireSystemManagerIn(client, userID);
+          const input = registerProjectInput.parse(value);
+          try {
+            factoryForgeSource(
+              input.repositoryUrl,
+              dependencies.localRepositoryOrigin,
+              dependencies.forgeOwner,
+              dependencies.publicRepositoryOrigin,
+            );
+          } catch {
+            throw new CommandError(
+              "invalid",
+              "Project source must belong to the configured Factory Forgejo.",
+            );
+          }
           const db = drizzleTransaction(client);
           const created = await createProjectIn(client, {
             id,

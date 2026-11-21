@@ -28,17 +28,29 @@ export function createOwnedServiceForwards<Owner>(label: "Source" | "Developer I
     connection: NonNullable<ReturnType<typeof connections.get>>,
     cause: unknown = new Error(`${label} connection closed`),
     kill = true,
+    join = false,
   ) {
     if (connection.state.phase === "closed") return;
     const forward = connection.state.forward;
     connection.state = { phase: "closed" };
     // A delayed exit or validation failure owns this entry, never its replacement.
     if (connections.get(key) === connection) connections.delete(key);
-    connection.ready.reject(cause);
     if (forward) {
       forward.cancel.abort();
       if (kill) forward.child.kill();
+      if (join)
+        return forward.child.exited.then(
+          () => {
+            connection.ready.reject(cause);
+          },
+          (exitCause: unknown) => {
+            connection.ready.reject(
+              new AggregateError([cause, exitCause], `${label} cleanup failed`),
+            );
+          },
+        );
     }
+    connection.ready.reject(cause);
   }
 
   return {
@@ -68,10 +80,14 @@ export function createOwnedServiceForwards<Owner>(label: "Source" | "Developer I
           });
           const origin = await forward.endpoint;
           if (connections.get(key) !== connection) return;
+          // kubectl resolves names while opening. Recheck the original native
+          // identity after readiness before publishing a usable connection.
+          await validate();
+          if (connections.get(key) !== connection) return;
           connection.state = { phase: "connected", forward };
           connection.ready.resolve({ origin, cancel: forward.cancel });
         } catch (cause) {
-          close(key, connection, cause);
+          await close(key, connection, cause, true, true);
         }
       })();
       return connection.ready.promise;

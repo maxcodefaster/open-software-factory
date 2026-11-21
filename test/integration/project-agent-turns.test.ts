@@ -186,7 +186,7 @@ async function fixture(
     projectID,
     userID,
     controller() {
-      const controller = createProjectAgentController(database, { start: async () => null });
+      const controller = createProjectAgentController(database);
       controllers.add(controller);
       return controller;
     },

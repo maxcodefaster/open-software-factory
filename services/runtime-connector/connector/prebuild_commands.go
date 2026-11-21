@@ -17,7 +17,7 @@ func prebuildEnvironment(home string) []string {
 }
 
 func prebuildCommand(ctx context.Context, home, name string, arguments ...string) *exec.Cmd {
-	command := exec.CommandContext(ctx, name, arguments...)
+	command := ownedCommand(ctx, name, arguments...)
 	command.Env = prebuildEnvironment(home)
 	if native, _ := ctx.Value(nativePrebuildTransportKey{}).(bool); native {
 		command.Env = assignedEnvironment(command.Env, map[string]string{

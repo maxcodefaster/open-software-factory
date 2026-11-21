@@ -16,7 +16,6 @@ import {
   ticketDocumentRevision,
   ticketFollowUp,
 } from "../../../../packages/db/src/schema";
-import type { RequirementContent } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
   TicketFollowUpInput,
@@ -25,7 +24,7 @@ import type { saveTechnicalDesignInput } from "../../../../packages/requirement-
 import type { createAccessController } from "../access/controller";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
-import { changeSchema, requirementRevisionSchema, ticketDetailSchema } from "../api-contracts";
+import { ticketDetailSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import type { createProjectAgentController } from "../project-agent/controller";
@@ -43,7 +42,7 @@ export function createTicketService(options: {
   >;
   documents: Pick<ReturnType<typeof createTicketDocumentController>, "save" | "followUp">;
   trash: Pick<ReturnType<typeof createTicketTrashController>, "trash" | "restore">;
-  changes: Pick<ReturnType<typeof createChangeController>, "start" | "createRevision" | "approve">;
+  changes: Pick<ReturnType<typeof createChangeController>, "start">;
   agent: Pick<ReturnType<typeof createAgentController>, "admitStartIn">;
   planning?: Pick<ReturnType<typeof createProjectAgentController>, "recover">;
 }) {
@@ -57,31 +56,6 @@ export function createTicketService(options: {
       row["approvedAt"] instanceof Date ? row["approvedAt"].toISOString() : row["approvedAt"],
   });
   return {
-    async createRevision(userID: string, ticketID: string, input: RequirementContent) {
-      await access.requireTicket(userID, ticketID);
-      const value = await options.changes.createRevision(ticketID, input, userID);
-      if (!value)
-        throw new CommandError(
-          "unavailable",
-          "Requirement response is unconfirmed. Refresh the saved Ticket.",
-        );
-      return requirementRevisionSchema.parse(revisionDTO(value));
-    },
-    async approveRevision(userID: string, ticketID: string, revisionID: string) {
-      await access.requireTicket(userID, ticketID);
-      const value = await options.changes.approve(ticketID, revisionID, userID);
-      if (!value)
-        throw new CommandError(
-          "unavailable",
-          "Approval response is unconfirmed. Refresh the saved Ticket.",
-        );
-      const at: unknown = value.approvedAt;
-      return at instanceof Date ? { ...value, approvedAt: at.toISOString() } : value;
-    },
-    async startChange(userID: string, ticketID: string) {
-      await access.requireTicket(userID, ticketID);
-      return changeSchema.parse(await options.changes.start(ticketID, userID));
-    },
     async detail(userID: string, ticketID: string) {
       await access.requireTicket(userID, ticketID);
       const db = database.db;

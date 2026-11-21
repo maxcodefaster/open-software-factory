@@ -97,9 +97,6 @@ const serviceFunctions = {
   },
   tickets: {
     cancelTicketImplementation: "cancelImplementation",
-    createRequirementRevision: "createRevision",
-    approveRequirementRevision: "approveRevision",
-    startTicketChange: "startChange",
     getTicketDetail: "detail",
     saveTicketDocument: "save",
     saveTicketTechnicalDesign: "saveTechnicalDesign",
@@ -638,6 +635,39 @@ export function browserFunction<N extends BufferedFunctionName>(
   args: NonNullable<Parameters<Functions[N]>[0]>["data"],
 ): Promise<FunctionResult<N>> {
   return requestFunction(page.request, name, args, new URL(page.url()).origin);
+}
+
+// APIRequestContext bypasses page routes. Controlled service doubles must use
+// an actual browser request with the same compiled arguments and response wire.
+export async function controlledBrowserFunction<N extends BufferedFunctionName>(
+  page: Page,
+  name: N,
+  args: NonNullable<Parameters<Functions[N]>[0]>["data"],
+): Promise<FunctionResult<N>> {
+  const request = await factoryFunctionRequest(new URL(page.url()).origin, name, args);
+  const result = await page.evaluate(
+    async ({ url, headers, body }) => {
+      const response = await fetch(url, { method: "POST", headers, body });
+      return {
+        status: response.status,
+        headers: Object.fromEntries(response.headers),
+        body: Array.from(new Uint8Array(await response.arrayBuffer())),
+      };
+    },
+    {
+      url: request.url,
+      headers: Object.fromEntries(request.headers),
+      body: await request.text(),
+    },
+  );
+  const decoded = await decodeFactoryResponse<FunctionResult<N>>(
+    new Response(new Uint8Array(result.body).buffer, {
+      status: result.status,
+      headers: result.headers,
+    }),
+  );
+  if (decoded === undefined) throw new Error("Factory function returned no result");
+  return decoded;
 }
 
 export async function requestFunction<N extends BufferedFunctionName>(

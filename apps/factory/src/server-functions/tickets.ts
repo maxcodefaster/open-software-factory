@@ -1,7 +1,6 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import { implementationInput } from "../../../../packages/change-domain/src/implementation";
-import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import {
   ticketDocumentInput,
   ticketFollowUpInput,
@@ -33,39 +32,6 @@ export const saveTicketTechnicalDesign = createServerFn({ method: "POST" })
         context = factoryFunctionContext();
       await context.beforeWrite(false);
       return context.tickets.saveTechnicalDesign(context.actorID, id, value);
-    });
-  });
-
-export const createRequirementRevision = createServerFn({ method: "POST" })
-  .validator((args: [ticketID: string, input: z.input<typeof requirementContentInput>]) => args)
-  .handler(async ({ data: [ticketID, input] }) => {
-    return factoryFunction(async () => {
-      const id = z.uuid().parse(ticketID),
-        value = requirementContentInput.parse(input),
-        context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.tickets.createRevision(context.actorID, id, value);
-    });
-  });
-export const approveRequirementRevision = createServerFn({ method: "POST" })
-  .validator((args: [ticketID: string, revisionID: string]) => args)
-  .handler(async ({ data: [ticketID, revisionID] }) => {
-    return factoryFunction(async () => {
-      const id = z.uuid().parse(ticketID),
-        revision = z.uuid().parse(revisionID),
-        context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.tickets.approveRevision(context.actorID, id, revision);
-    });
-  });
-export const startTicketChange = createServerFn({ method: "POST" })
-  .validator((args: [ticketID: string]) => args)
-  .handler(async ({ data: [ticketID] }) => {
-    return factoryFunction(async () => {
-      const id = z.uuid().parse(ticketID),
-        context = factoryFunctionContext();
-      await context.beforeWrite(false);
-      return context.tickets.startChange(context.actorID, id);
     });
   });
 

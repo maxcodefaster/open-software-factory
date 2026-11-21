@@ -10,6 +10,7 @@ import {
   factoryFunctionRequestMatcher,
   mockFactoryFunctions,
 } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 import { serveChatAssets } from "../support/chat-assets";
 import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { rgb } from "../support/visual-contrast";
@@ -23,7 +24,6 @@ let projectID = "";
 let otherID = "";
 const commissioningFunctions = [
   "implementTicket",
-  "startTicketChange",
   "startCoding",
   "resumeCoding",
   "sendCodingPrompt",
@@ -37,11 +37,34 @@ const commissioningFunctions = [
   "generateKnowledge",
 ] as const;
 let commissioned: string[] = [];
+let createAck: { hold(): void; release(): void } | undefined;
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, info) => {
   await mkdir(evidence, { recursive: true });
   await mkdir(materialsEvidence, { recursive: true });
   commissioned = [];
+  createAck = undefined;
+  if (info.title.startsWith("held create ACK")) {
+    let holding = false;
+    const held: Array<() => void> = [];
+    await page.routeWebSocket("**/sync/**", (route) => {
+      const upstream = route.connectToServer();
+      route.onMessage((message) => upstream.send(message));
+      upstream.onMessage((message) => {
+        if (holding) held.push(() => route.send(message));
+        else route.send(message);
+      });
+    });
+    createAck = {
+      hold: () => {
+        holding = true;
+      },
+      release: () => {
+        holding = false;
+        for (const send of held.splice(0)) send();
+      },
+    };
+  }
   const commissionedRequest = await factoryFunctionRequestMatcher(commissioningFunctions);
   page.on("request", (request) => {
     const name = commissionedRequest(request);
@@ -98,10 +121,163 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(async () => {
+  createAck?.release();
   for (const id of [projectID, otherID]) if (id) await deleteFactoryProject(id, database);
   await database?.client.end();
   projectID = "";
   otherID = "";
+});
+
+for (const state of ["inbox", "ready"] as const)
+  test(`held create ACK for ${state} stays in Project A after opening Project B`, async ({
+    page,
+  }) => {
+    const ack = fixtureValue(createAck, "held Zero acknowledgement");
+    const { session } = await browserBootstrap(page);
+    const otherTicketID = crypto.randomUUID();
+    const title = `Created in A as ${state}`;
+    await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
+      VALUES(${otherTicketID},${otherID},'Keep B selected','B stays unchanged','ready',${session.user.id})`;
+    // Hydrate B before holding the real Zero stream, so navigation is not waiting on the ACK.
+    await openProjectMenu(page);
+    await page
+      .getByRole("button")
+      .filter({ hasText: `navigation-${otherID}` })
+      .click();
+    await page.locator(".ticket-card-body").filter({ hasText: "Keep B selected" }).click();
+    await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+      "Keep B selected",
+    );
+    await openProjectMenu(page);
+    await page
+      .getByRole("button")
+      .filter({ hasText: `navigation-${projectID}` })
+      .click();
+    await page.getByRole("button", { name: "New Ticket", exact: true }).click();
+    await page.getByRole("textbox", { name: "Ticket title", exact: true }).fill(title);
+    ack.hold();
+    try {
+      await page
+        .getByRole("button", {
+          name: state === "inbox" ? "Create as idea" : "Write requirements",
+          exact: true,
+        })
+        .click();
+      await expect
+        .poll(
+          async () =>
+            (
+              await database.client`SELECT id FROM factory.ticket WHERE project_id=${projectID} AND title=${title}`
+            ).length,
+        )
+        .toBe(1);
+      const [created] = await database.client<{ id: string }[]>`
+        SELECT id FROM factory.ticket WHERE project_id=${projectID} AND title=${title}`;
+      const createdID = fixtureValue(created, "created A Ticket").id;
+      await expect(
+        page.getByRole("region", { name: "New ticket draft", exact: true }),
+      ).toBeVisible();
+      await openProjectMenu(page);
+      await page
+        .getByRole("button")
+        .filter({ hasText: `navigation-${otherID}` })
+        .click();
+      await page.locator(".ticket-card-body").filter({ hasText: "Keep B selected" }).click();
+      await expect(page).toHaveURL(new RegExp(`/projects/${otherID}/tickets/${otherTicketID}$`));
+      ack.release();
+      // Browser storage is cleared by create completion, not by the optimistic projection.
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (key) => localStorage.getItem(key),
+            `ticket-draft:${session.user.id}:${projectID}`,
+          ),
+        )
+        .toBeNull();
+      await expect(page).toHaveURL(new RegExp(`/projects/${otherID}/tickets/${otherTicketID}$`));
+      await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+        "Keep B selected",
+      );
+      await expect(page.getByRole("tab", { name: title, exact: true })).toHaveCount(0);
+      await page.screenshot({ path: `${evidence}/held-create-${state}-project-b.png` });
+      await openProjectMenu(page);
+      await page
+        .getByRole("button")
+        .filter({ hasText: `navigation-${projectID}` })
+        .click();
+      await page.locator(".ticket-card-body").filter({ hasText: title }).click();
+      await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${createdID}$`));
+      await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+        title,
+      );
+      await expect(page.getByRole("tab", { name: title, exact: true })).toHaveCount(1);
+      expect(commissioned).toEqual([]);
+      await page.screenshot({ path: `${evidence}/held-create-${state}-returned-a.png` });
+    } finally {
+      ack.release();
+    }
+  });
+
+test("held create ACK retains later title edits on the created Ticket, never as another create", async ({
+  page,
+}) => {
+  const ack = fixtureValue(createAck, "held Zero acknowledgement");
+  const { session } = await browserBootstrap(page);
+  const title = "Submitted Ticket title";
+  const laterTitle = "Keep the title I edited while creation was pending";
+  await page.getByRole("button", { name: "New Ticket", exact: true }).click();
+  await page.getByRole("textbox", { name: "Ticket title", exact: true }).fill(title);
+  ack.hold();
+  try {
+    await page.getByRole("button", { name: "Write requirements", exact: true }).click();
+    await expect
+      .poll(
+        async () =>
+          (
+            await database.client`SELECT id FROM factory.ticket WHERE project_id=${projectID} AND title=${title}`
+          ).length,
+      )
+      .toBe(1);
+    const [created] = await database.client<{ id: string }[]>`
+      SELECT id FROM factory.ticket WHERE project_id=${projectID} AND title=${title}`;
+    const createdID = fixtureValue(created, "created Ticket").id;
+    await page.getByRole("textbox", { name: "Ticket title", exact: true }).fill(laterTitle);
+    ack.release();
+    await expect(page.getByRole("region", { name: "New ticket draft", exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${createdID}$`));
+    await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+      laterTitle,
+    );
+    await expect
+      .poll(async () => {
+        const [ticket] = await database.client<{ title: string }[]>`
+          SELECT title FROM factory.ticket WHERE id=${createdID}`;
+        return ticket?.title;
+      })
+      .toBe(laterTitle);
+    expect(
+      await page.evaluate(
+        (key) => localStorage.getItem(key),
+        `ticket-draft:${session.user.id}:${projectID}`,
+      ),
+    ).toBeNull();
+    expect(
+      await database.client`SELECT id FROM factory.ticket WHERE project_id=${projectID}
+        AND title IN (${title},${laterTitle})`,
+    ).toHaveLength(1);
+    expect(commissioned).toEqual([]);
+    await page.screenshot({ path: `${evidence}/held-create-later-title-desktop.png` });
+    await page.setViewportSize({ width: 430, height: 900 });
+    await page.screenshot({ path: `${evidence}/held-create-later-title-narrow.png` });
+    await page.reload();
+    await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+      laterTitle,
+    );
+  } finally {
+    ack.release();
+  }
 });
 
 test("navigation observer detects intercepted compiled commands and permits POST reads", async ({

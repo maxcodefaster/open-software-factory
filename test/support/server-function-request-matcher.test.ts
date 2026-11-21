@@ -5,7 +5,6 @@ import { factoryFunctionRequestMatcher } from "../fixtures/server-functions";
 
 const commands = [
   "implementTicket",
-  "startTicketChange",
   "startCoding",
   "resumeCoding",
   "sendCodingPrompt",
@@ -109,7 +108,13 @@ test("POST reads and unrelated or unknown requests are not commissioned work", a
 });
 
 test("a missing named function fails observation setup instead of silently passing", async () => {
-  await expect(factoryFunctionRequestMatcher(["retiredStart"])).rejects.toThrow(
-    "Compiled Factory function is missing: retiredStart",
-  );
+  for (const name of [
+    "retiredStart",
+    "createRequirementRevision",
+    "approveRequirementRevision",
+    "startTicketChange",
+  ])
+    await expect(factoryFunctionRequestMatcher([name])).rejects.toThrow(
+      `Compiled Factory function is missing: ${name}`,
+    );
 });

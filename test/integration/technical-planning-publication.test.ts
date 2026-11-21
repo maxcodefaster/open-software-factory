@@ -132,29 +132,21 @@ test("the real planning controller publishes a source-grounded design when its o
   const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
   const controllers = new Set<ReturnType<typeof createProjectAgentController>>();
   function controller() {
-    const value = createProjectAgentController(
-      database,
-      {
-        start: async () => {
-          throw new Error("Planning must not start Build.");
-        },
+    const value = createProjectAgentController(database, {
+      codePaths: async () => ({ commitSha, paths: ["tools/setup.mjs"], truncated: false }),
+      code: async (_project, value) => {
+        reads++;
+        const input = codeReadInput.parse(value);
+        expect(input.commitSha).toBe(commitSha);
+        expect(input.path).toBe("tools/setup.mjs");
+        return {
+          ...input,
+          body: "1: export async function setup() { await installDependencies(); await fetchPrivateReferences(); }",
+          truncated: false,
+          url: `https://forge.test/source/${commitSha}/tools/setup.mjs`,
+        };
       },
-      {
-        codePaths: async () => ({ commitSha, paths: ["tools/setup.mjs"], truncated: false }),
-        code: async (_project, value) => {
-          reads++;
-          const input = codeReadInput.parse(value);
-          expect(input.commitSha).toBe(commitSha);
-          expect(input.path).toBe("tools/setup.mjs");
-          return {
-            ...input,
-            body: "1: export async function setup() { await installDependencies(); await fetchPrivateReferences(); }",
-            truncated: false,
-            url: `https://forge.test/source/${commitSha}/tools/setup.mjs`,
-          };
-        },
-      },
-    );
+    });
     controllers.add(value);
     return value;
   }

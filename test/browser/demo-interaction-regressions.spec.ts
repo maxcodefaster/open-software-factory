@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import {
@@ -160,15 +161,27 @@ test("an empty scope chapter does not appear and disappear around autosave", asy
 test("original request details are available in overflow without moving the specification", async ({
   page,
 }) => {
-  const saved = await browserFunction(page, "createRequirementRevision", [
+  const detail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
+  const saved = await browserFunction(page, "saveTicketDocument", [
     ticketID,
     {
-      summary: "A separately clarified product specification.",
-      acceptanceCriteria: ["The original request remains available without taking document space."],
-      nonGoals: [],
+      commandId: crypto.randomUUID(),
+      expectedVersion: detail.ticket.version,
+      expectedDocumentId: detail.documentRevisions[0]?.id ?? null,
+      requirementRevisionId: detail.revisions[0]?.id ?? null,
+      title: detail.ticket.title,
+      description: detail.ticket.description,
+      requirement: {
+        summary: "A separately clarified product specification.",
+        acceptanceCriteria: [
+          "The original request remains available without taking document space.",
+        ],
+        nonGoals: [],
+      },
     },
   ]);
   expect(saved.ok).toBe(true);
+  expect((await serverCall(Promise.resolve(saved))).requirementRevisionId).toBeTruthy();
   await page.reload();
   const editor = page.getByRole("textbox", { name: "Specification summary", exact: true });
   await expect(editor).toBeVisible();

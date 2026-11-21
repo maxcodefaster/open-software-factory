@@ -554,7 +554,6 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
       "sendCodingPrompt",
       "requestCodingChanges",
       "implementTicket",
-      "startTicketChange",
     ].map(factoryFunctionMatcher),
   );
   page.on("request", (request) => {

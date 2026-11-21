@@ -7,6 +7,7 @@ export async function runServiceForward(args: readonly string[]) {
   const podPattern = /^editor-[1-9][0-9]*$/;
   if (
     !process.send ||
+    !process.connected ||
     !namespace ||
     !podName ||
     !namespacePattern.test(namespace) ||
@@ -43,14 +44,17 @@ export async function runServiceForward(args: readonly string[]) {
   const deadline = setTimeout(stop, serviceForwardTimeoutMS);
   let output = "";
   const reader = forward.stdout.getReader();
+  if (!process.connected) stop();
   for (;;) {
     const chunk = await reader.read();
     if (chunk.done) break;
     output = (output + new TextDecoder().decode(chunk.value)).slice(-4096);
     const match = output.match(/Forwarding from 127\.0\.0\.1:(\d+)/);
-    if (match) {
+    if (match && !stopping && process.connected) {
       clearTimeout(deadline);
-      process.send?.({ port: Number(match[1]) });
+      process.send?.({ port: Number(match[1]) }, (error: Error | null) => {
+        if (error) stop();
+      });
       output = "";
     }
   }

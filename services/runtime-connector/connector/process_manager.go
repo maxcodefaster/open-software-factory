@@ -209,14 +209,12 @@ func (manager *processManager) startProcess(name string, kind processStartKind, 
 	manager.mutex.Unlock()
 	manager.emitState(name)
 
-	command := exec.CommandContext(manager.ctx, spec.Command[0], spec.Command[1:]...)
+	command := ownedCommand(manager.ctx, spec.Command[0], spec.Command[1:]...)
 	command.Dir = manager.workspace
 	command.Env = assignedEnvironment(os.Environ(), manager.environment)
 	for key, value := range spec.Env {
 		command.Env = append(command.Env, key+"="+value)
 	}
-	PrepareAssignedProcess(command)
-	command.Cancel = func() error { StopAssignedProcess(command); return nil }
 	command.WaitDelay = 3 * time.Second
 	output := managedProcessWriter{name: name, manager: manager}
 	command.Stdout = output

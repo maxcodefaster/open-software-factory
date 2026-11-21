@@ -26,7 +26,7 @@ func TestChildArtifactsInNativeCapabilityDroppedPrimary(t *testing.T) {
 		t.Fatal("native Actor identity projection is required")
 	}
 	t.Setenv("FACTORY_SUBSTRATE_ACTOR_UID", strings.TrimSpace(string(uid)))
-	container, err := inspectContainer(containerID)
+	container, err := inspectContainer(t.Context(), containerID)
 	if err != nil || container.ID != containerID || container.Config.Labels[attemptLabel] != attemptID || container.HostConfig.Privileged || len(container.HostConfig.CapAdd) != 0 || len(container.HostConfig.CapDrop) != 1 || container.HostConfig.CapDrop[0] != "ALL" {
 		t.Fatal("native primary identity or capability isolation differs")
 	}

@@ -3,6 +3,30 @@ import type postgres from "postgres";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import { createProjectAgentController } from "./controller";
 
+test("conversation mode cannot commission Coding without exact Implement admission", async () => {
+  let transactions = 0;
+  const database = {
+    client: {
+      async begin() {
+        transactions++;
+        throw new Error("Build mode cannot write a conversation or admit work");
+      },
+    },
+  } as unknown as ReturnType<typeof createDatabase>;
+  const controller = createProjectAgentController(database);
+  try {
+    await expect(
+      controller.setMode(crypto.randomUUID(), crypto.randomUUID(), "build", crypto.randomUUID()),
+    ).rejects.toMatchObject({
+      code: "conflict",
+      message: "Use Implement to approve the exact saved requirements and start Coding.",
+    });
+    expect(transactions).toBe(0);
+  } finally {
+    await controller.shutdown();
+  }
+});
+
 test("Project recovery joins its outstanding database observation without dispatching replacement work", async () => {
   const entered = Promise.withResolvers<void>();
   const finish = Promise.withResolvers<void>();
@@ -29,11 +53,7 @@ test("Project recovery joins its outstanding database observation without dispat
     client,
     db: drizzleTransaction(client),
   } as unknown as ReturnType<typeof createDatabase>;
-  const controller = createProjectAgentController(database, {
-    start: async () => {
-      throw new Error("Shutdown cannot commission implementation");
-    },
-  });
+  const controller = createProjectAgentController(database);
   await controller.recover();
   await entered.promise;
   let drained = false;

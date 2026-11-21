@@ -48,7 +48,7 @@ printf '{"outcome":"success","containerId":"%s","remoteUser":"node","remoteWorks
 	origin := containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, result.ComposeProjectName}
 	assignment.containerOrigin = &origin
 	manager := newBrowserRuntimeManager(context.Background(), assignment, result.ContainerID, result.RemoteUser)
-	primary, err := inspectContainer(id)
+	primary, err := inspectContainer(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ printf '{"outcome":"success","containerId":"%s","remoteUser":"node","remoteWorks
 	if err := os.WriteFile(logPath, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanupProject(parentState{
+	if err := cleanupProject(t.Context(), parentState{
 		RuntimeAttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation,
 		ContainerID: id, ComposeProjectName: assignment.ComposeProjectName, ContainerOrigin: &origin,
 	}); err != nil {

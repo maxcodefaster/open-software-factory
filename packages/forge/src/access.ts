@@ -24,6 +24,7 @@ const protection = z
     merge_whitelist_usernames: z.array(z.string()).nullable(),
     merge_whitelist_teams: z.array(z.string()).nullable(),
     apply_to_admins: z.boolean(),
+    protected_file_patterns: z.string().optional(),
   })
   .loose();
 
@@ -290,7 +291,9 @@ export function createForgejoAccess(options: {
         !observed.enable_merge_whitelist ||
         JSON.stringify(observed.merge_whitelist_usernames) !== JSON.stringify([input.merger]) ||
         (observed.merge_whitelist_teams?.length ?? 0) ||
-        !observed.apply_to_admins
+        !observed.apply_to_admins ||
+        (input.protectedFiles !== undefined &&
+          observed.protected_file_patterns !== input.protectedFiles)
       )
         throw new Error("Forge branch writer protection was not confirmed");
     },

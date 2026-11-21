@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,14 +36,14 @@ func installAdmittedSkills(ctx context.Context, assignment Assignment, data stri
 	if json.Unmarshal(saved, &state) != nil || state.RuntimeAttemptID != assignment.RuntimeAttemptID || state.Generation != assignment.Generation || state.ContainerID == "" {
 		return errors.New("assigned primary identity does not match")
 	}
-	container, err := inspectContainer(state.ContainerID)
+	container, err := inspectContainer(ctx, state.ContainerID)
 	if err != nil {
 		return err
 	}
 	if container.Config.Labels[attemptLabel] != assignment.RuntimeAttemptID || container.Config.Labels[generationLabel] != strconv.FormatUint(assignment.Generation, 10) || !container.State.Running {
 		return errors.New("skill installation primary ownership changed")
 	}
-	command := exec.CommandContext(ctx, "docker", "exec", "--interactive", "--user", "0:0", state.ContainerID, "/opt/factory/opencode/bun", "/opt/factory/opencode/server/install-skills.mjs")
+	command := ownedCommand(ctx, "docker", "exec", "--interactive", "--user", "0:0", state.ContainerID, "/opt/factory/opencode/bun", "/opt/factory/opencode/server/install-skills.mjs")
 	command.Stdin = strings.NewReader(data)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("install admitted skill packages: %w: %.2000s", err, output)

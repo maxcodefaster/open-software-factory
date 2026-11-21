@@ -158,13 +158,18 @@ export interface DocumentWindowModel {
     }
   >;
   selectedProjectID: SourceAccessor<string | undefined>;
-  publishTicketDraft: (draft: PersonalTicketDraft, state: "inbox" | "ready") => Promise<boolean>;
+  publishTicketDraft: (
+    draft: PersonalTicketDraft,
+    state: "inbox" | "ready",
+    projectID: string,
+  ) => Promise<boolean>;
   updateWorkspaceTab: (tab: WorkspaceTab, key?: string | undefined) => void;
   detail: Accessor<TicketDetail | undefined>;
   inboxFeedbackID: SourceAccessor<string | undefined>;
   ticketDrafts: Map<string, TicketDraft>;
   confirmRequirements: (
     draft: TicketDraft,
+    ticketID: string,
   ) => Promise<
     { id: string; ticketVersion: number; requirementRevisionId: string | null } | undefined
   >;
@@ -212,6 +217,7 @@ export interface DocumentWindowModel {
   moveTicket: (ticket: Ticket, state: "inbox" | "ready") => Promise<boolean>;
   saveTicketDocument: (
     input: TicketDraft,
+    ticketID: string,
   ) => Promise<
     { id: string; ticketVersion: number; requirementRevisionId: string | null } | undefined
   >;
@@ -420,24 +426,32 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
               </Show>
             </Match>
             <Match when={model.workspaceView() === "ticket-draft"}>
-              <TicketDraftWorkspace
-                storageKey={model.personalDraftKey()}
-                initial={
-                  model.personalDrafts.get(model.selectedProjectID() ?? "") ??
-                  readPersonalTicketDraft(model.personalDraftKey())
-                }
-                pending={model.pending()}
-                onCreate={model.publishTicketDraft}
-                onChange={(draft) => {
-                  const projectID = model.selectedProjectID();
-                  if (projectID) model.personalDrafts.set(projectID, draft);
-                  model.updateWorkspaceTab({
-                    id: `ticket-draft:${projectID}`,
-                    view: "ticket-draft",
-                    label: draft.title || "New ticket",
-                  });
-                }}
-              />
+              <Show when={model.selectedProjectID()} keyed>
+                {(projectID) => (
+                  <TicketDraftWorkspace
+                    storageKey={`ticket-draft:${model.bootstrap.session.user.id}:${projectID}`}
+                    initial={
+                      model.personalDrafts.get(projectID) ??
+                      readPersonalTicketDraft(
+                        `ticket-draft:${model.bootstrap.session.user.id}:${projectID}`,
+                      )
+                    }
+                    pending={model.pending()}
+                    onCreate={(draft, state) => model.publishTicketDraft(draft, state, projectID)}
+                    onChange={(draft) => {
+                      model.personalDrafts.set(projectID, draft);
+                      model.updateWorkspaceTab(
+                        {
+                          id: `ticket-draft:${projectID}`,
+                          view: "ticket-draft",
+                          label: draft.title || "New ticket",
+                        },
+                        projectID,
+                      );
+                    }}
+                  />
+                )}
+              </Show>
             </Match>
             <Match when={model.workspaceView() === "ticket" && model.detail()}>
               <Show when={model.detail()}>

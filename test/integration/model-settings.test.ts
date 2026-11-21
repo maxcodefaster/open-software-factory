@@ -275,7 +275,7 @@ test("admission freezes models across changed defaults and command replay", asyn
     const restoreCatalogue = processEnv("FACTORY_MODEL_IDS", models.join(","));
     const restoreProvider = processEnv("FACTORY_MODEL_BASE_URL", "http://127.0.0.1:9/v1");
     try {
-      const project = createProjectAgentController(database, { start: async () => null });
+      const project = createProjectAgentController(database);
       const id = crypto.randomUUID();
       await project
         .message(owned.projectID, undefined, "Investigate only", owned.userID, id)

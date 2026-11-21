@@ -29,7 +29,7 @@ export class PasswordChangeError extends Error {
   }
 }
 
-/** Checks everything about a password change that does not need the stored hash. */
+/** Public password rules do not depend on the authentication adapter or stored hash. */
 export function checkPasswordChange(input: {
   currentPassword: string;
   newPassword: string;

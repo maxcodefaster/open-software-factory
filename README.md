@@ -267,6 +267,38 @@ Each invocation owns its build and PostgreSQL fixture. Both shards must pass.
 The browser lane accepts the same Playwright shard arguments and owns a separate installation
 per invocation. Reserve host capacity before running multiple lanes.
 
+### Feature checks
+
+Use the existing lane with an exact file or feature filter. This index connects user actions
+to their code owner and regression entrypoint; it does not turn controlled fixtures into native
+product acceptance. Browser navigation and authenticated commands reuse `test/fixtures/`.
+
+| User action | Code owner | Focused check |
+| --- | --- | --- |
+| Manage access or register a Project | [Access](apps/factory/src/access/controller.ts), [Projects](apps/factory/src/projects/service.ts) | `bun run test:controllers project-registration-authority project-access` |
+| Save requirements and Implement the exact revision | [Ticket documents](apps/factory/src/change/document.ts), [Change admission](apps/factory/src/change/controller.ts) | `bun run test:controllers change-document-drizzle implementation-admission technical-planning` |
+| Create a Ticket, switch Projects, or retain an unsaved edit | [Desktop commands](apps/factory/src/desktop/project-commands.ts), [Ticket editor](apps/factory/src/ticket-workspace.tsx) | `bun run test:browser requirements-entry.spec.ts ticket-autosave-ack.spec.ts board-navigation.spec.ts` |
+| Open Source, IDE, or a shared Workspace | [Workspace](apps/factory/src/workspace/service.ts) | `bun run test:controllers developer-ide workspace-sharing workspace-commands`; native checks use the configured fixtures in [scripts/runtime](scripts/runtime/README.md) |
+| Start Coding or Stop admitted work | [Coding](apps/factory/src/agent/controller.ts) | `bun run test:controllers implementation-admission`; `bun run test:native substrate-coding-stop` requires its native fixture |
+| Verify, review and deliver a candidate | [Delivery](apps/factory/src/delivery/controller.ts), [Review](apps/factory/src/agent/candidate-review.ts) | `bun run test:controllers candidate-review-delivery delivery-controller-drizzle parallel-delivery` |
+| Generate or update the Wiki | [Knowledge](apps/factory/src/knowledge/generation-workflow.ts) | `bun run test:unit plan-coverage generation-speed`; `bun run test:controllers wiki-generation wiki-human-edits wiki-resume` |
+| Review completed work and adopt Learning proposals | [Learning](apps/factory/src/learning/service.ts) | `bun run test:unit apps/factory/src/learning/`; `bun run test:browser learning.spec.ts` |
+| Qualify installation, backup and native isolation | [Chart](deploy/helm/factory/README.md), [Substrate](deploy/substrate/README.md) | `bun run release:clean-room` with its explicitly owned installation inputs; `bun run connector:check` |
+
+`bun run lint` includes architecture checks for domain modules and browser owners. They inspect
+imports, re-exports, dynamic imports and import types, including normalized relative paths.
+Domain rules stay independent of application, database and runtime adapters. Browser code uses
+domain contracts and authenticated server functions instead of importing server implementations.
+Keep each correction in its owning API or regression check rather than adding a repeated prose rule.
+
+The optional `bun run test:formal` Writer safety pilot requires a deliberate stale-epoch
+counterexample before checking the healthy bounded TLA+ model. It also sends generated event
+orders through the existing Writer/Stop controllers and an owned PostgreSQL fixture. The current
+tool checksums qualify macOS arm64; developer-only Temurin and official TLC must match their pins.
+Missing tooling fails explicitly. Default unit tests and Factory installations need no Java.
+Receipts and source hashes live under `.factory/test-results/blueprint-formal/`. External
+acknowledgements in this pilot are controlled fixtures; live runtime checks use their separate lane.
+
 Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode and Forgejo.
 [AGENTS.md](AGENTS.md) holds contributor rules. Report bugs in GitHub Issues and vulnerabilities
 through [SECURITY.md](SECURITY.md). [Apache-2.0](LICENSE); bundled assets keep their own notices.

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fixtureValue } from "../../test/fixtures/value";
+import { runProcess } from "../owned-client-process";
 import {
   appendOwnedTestCA,
   needsOIDCTestCA,
@@ -13,6 +14,26 @@ import {
   productionBuildEnvironment,
   verificationEnvironment,
 } from "./test-prerequisites";
+
+test("the reused process owner retains output and failures and refuses cancelled admissions", async () => {
+  const command = [
+    "node",
+    "--eval",
+    "console.log('owned output'); console.error('owned diagnostic'); process.exit(7)",
+  ];
+  expect(await runProcess(command, { allowFailure: true })).toEqual({
+    stdout: "owned output\n",
+    stderr: "owned diagnostic\n",
+    code: 7,
+  });
+  await expect(runProcess(command)).rejects.toThrow("failed (7)");
+  await expect(runProcess([`missing-owned-command-${crypto.randomUUID()}`])).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  const cancellation = new AbortController();
+  cancellation.abort("SIGINT");
+  await expect(runProcess(command, { signal: cancellation.signal })).rejects.toBe("SIGINT");
+});
 
 test("the Playwright Node host can use verification environments without initializing Bun-only build tools", async () => {
   const moduleURL = pathToFileURL(join(import.meta.dirname, "test-prerequisites.ts")).href;
@@ -54,6 +75,16 @@ test("owned frontend builds cannot inherit development transport from Bun's test
     });
     expect(parent.NODE_ENV).toBe(nodeEnvironment);
   }
+});
+
+test("ordinary test lanes do not inherit the explicit formal fixture admission", () => {
+  const environment = {
+    FACTORY_WRITER_MODEL_CHECK: "1",
+    FACTORY_WRITER_MODEL_EVIDENCE: "/owned/model-evidence.json",
+    PATH: "/pinned-tools",
+  };
+  expect(verificationEnvironment(environment)).toEqual({ PATH: "/pinned-tools" });
+  expect(environment.FACTORY_WRITER_MODEL_CHECK).toBe("1");
 });
 
 test("only the real local TLS IdP fixture adds its CA to the child process", async () => {

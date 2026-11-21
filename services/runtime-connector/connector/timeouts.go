@@ -19,6 +19,10 @@ const (
 	dockerReadyPollInterval = 250 * time.Millisecond
 	dockerReadyAttempts     = int(dockerReadyTimeout / dockerReadyPollInterval)
 
+	// Cleanup gets an independent window after Parent cancellation. A lost Docker
+	// reply still fails cleanup; stopping the local client is not daemon proof.
+	runtimeCleanupTimeout = 30 * time.Second
+
 	// browserImagePullTimeout bounds acquisition of the pinned browser tools image.
 	browserImagePullTimeout = 180 * time.Second
 	// projectImagePullTimeout includes cold downloads and VFS extraction, which

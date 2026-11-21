@@ -72,9 +72,9 @@ jobs:
           jq -e --arg revision "$revision" '
             .schema == 1 and .commit == $revision and .passed == true and
             .scope == "source-controller-ui" and .nativeProductAcceptance == false and
-            (.steps | length) == 12 and
+            (.steps | length) == 14 and
             ([.steps[] | select(.passed == true) | .name] | sort) ==
-            (["clean-tree", "forbidden-terms", "secrets", "docs", "format", "lint",
+            (["clean-tree", "forbidden-terms", "secrets", "docs", "db-schema", "zero-schema", "format", "lint",
               "typecheck", "unit", "connector", "substrate", "controllers", "browser"] | sort)
           ' "$RUNNER_TEMP/local-gate.json"
           printf 'passed=true\n' >> "$GITHUB_OUTPUT"

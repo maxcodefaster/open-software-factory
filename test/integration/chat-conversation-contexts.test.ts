@@ -55,7 +55,7 @@ test("fresh Coding retains history on the same Workspace and rejects old or unre
       SELECT (SELECT count(*)::integer FROM factory.development_workspace WHERE change_id=${owned.changeID}) AS count,
         runtime_attempt_id AS "attemptID" FROM factory.change WHERE id=${owned.changeID}`;
     expect(workspace).toEqual({ count: 1, attemptID: owned.attemptID });
-    const project = createProjectAgentController(owned.database, { start: async () => null });
+    const project = createProjectAgentController(owned.database);
     const active = await project.get(owned.projectID, owned.ticketID, owned.userID);
     expect(active && { ...active, entries: [...active.entries] }).toMatchObject({
       contextId: contextID,
@@ -172,7 +172,7 @@ test("personal Project conversations cannot be selected through another person's
     await owned.database
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${owned.projectID},${other},'developer',${owned.userID})`;
-    const project = createProjectAgentController(owned.database, { start: async () => null });
+    const project = createProjectAgentController(owned.database);
     const commandID = crypto.randomUUID();
     const personal = await project.newConversation(
       owned.projectID,
@@ -221,7 +221,7 @@ test("the first Build creates its shared conversation before parallel research c
     const coding = await store.claimPending(build.turn.id);
     if (!coding?.ownerToken) throw new Error("Owned Coding lease missing");
     await owned.writers.prepareAgent(owned.changeID, coding.id);
-    const project = createProjectAgentController(owned.database, { start: async () => null });
+    const project = createProjectAgentController(owned.database);
     const context = await project.newConversation(
       owned.projectID,
       owned.ticketID,
@@ -283,7 +283,7 @@ test("adding conversations cannot invalidate an already admitted unversioned Cod
     );
     const owner = await store.claimPending(admitted.turn.id);
     if (!owner?.ownerToken) throw new Error("Owned retained lease missing");
-    const project = createProjectAgentController(owned.database, { start: async () => null });
+    const project = createProjectAgentController(owned.database);
     await expect(
       project.newConversation(owned.projectID, owned.ticketID, owned.userID, crypto.randomUUID()),
     ).rejects.toThrow("must settle");

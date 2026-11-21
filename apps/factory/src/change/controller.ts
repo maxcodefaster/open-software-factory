@@ -11,7 +11,6 @@ import {
   isNull,
   lt,
   lte,
-  max,
   ne,
   notExists,
   notInArray,
@@ -57,11 +56,6 @@ import {
   ForgeConflictError,
 } from "../../../../packages/forge/src/forge";
 import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
-import {
-  createRequirementRevision,
-  type RequirementContent,
-} from "../../../../packages/requirement-domain/src/requirement";
-import { appendTicketAuthoringIn } from "../../../../packages/ticket-authoring/src/authoring";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
@@ -69,7 +63,7 @@ import type { RuntimeAttemptView } from "../runtime/types";
 import { technicalPlanningOutstandingIn } from "../technical-design/store";
 import { codingBudgetIn } from "../usage/policy";
 import { requireDeliveredPrerequisites } from "./dependencies";
-import type { ChangeView, RequirementApprovalView, RequirementRevisionView } from "./types";
+import type { ChangeView } from "./types";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -658,139 +652,14 @@ export function createChangeController(
         }
       }
     },
-    async createRevision(ticketID: string, content: RequirementContent, userID: string) {
-      return database.client.begin(async (sql) => {
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${ticketID}`}))`;
-        const db = drizzleTransaction(sql);
-        const tickets = await db
-          .select({
-            id: ticketTable.id,
-            title: ticketTable.title,
-            description: ticketTable.description,
-            locked: query<boolean>`${or(
-              isNotNull(ticketTable.trashedAt),
-              inArray(ticketTable.state, ["cancelled", "done"]),
-              exists(
-                db
-                  .select({ id: requirementApproval.id })
-                  .from(requirementApproval)
-                  .where(eq(requirementApproval.ticketId, ticketTable.id)),
-              ),
-              exists(
-                db
-                  .select({ id: changeTable.id })
-                  .from(changeTable)
-                  .where(eq(changeTable.ticketId, ticketTable.id)),
-              ),
-            )}`,
-          })
-          .from(ticketTable)
-          .where(eq(ticketTable.id, ticketID));
-        if (!tickets[0]) throw new CommandError("not-found", "Ticket not found");
-        if (tickets[0].locked)
-          throw new CommandError(
-            "conflict",
-            "The approved or completed Ticket specification is immutable",
-          );
-        const [latest] = await db
-          .select({ ordinal: max(requirementRevision.ordinal) })
-          .from(requirementRevision)
-          .where(eq(requirementRevision.ticketId, ticketID));
-        const revision = createRequirementRevision({
-          id: crypto.randomUUID(),
-          ticketId: ticketID,
-          ordinal: Number(latest?.ordinal ?? 0) + 1,
-          content,
-        });
-        await appendTicketAuthoringIn(db, {
-          ticketId: ticketID,
-          createdBy: userID,
-          title: tickets[0].title,
-          description: tickets[0].description,
-          canonicalContent: revision.canonicalContent,
-          requirement: { id: revision.id, ordinal: revision.ordinal },
-        });
-        const rows: RequirementRevisionView[] = await db
-          .select({
-            id: requirementRevision.id,
-            ticketId: requirementRevision.ticketId,
-            ordinal: requirementRevision.ordinal,
-            canonicalContent: requirementRevision.canonicalContent,
-            contentDigest: requirementRevision.contentDigest,
-            createdAt: query<string>`${requirementRevision.createdAt}::text`,
-          })
-          .from(requirementRevision)
-          .where(eq(requirementRevision.id, revision.id));
-        return rows[0];
-      });
-    },
-    async approve(ticketID: string, revisionID: string, userID: string) {
-      return database.client.begin(async (sql) => {
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${ticketID}`}))`;
-        const db = drizzleTransaction(sql);
-        const [technical] = await db
-          .select({ id: technicalDesignRevision.id })
-          .from(technicalDesignRevision)
-          .where(eq(technicalDesignRevision.ticketId, ticketID))
-          .unionAll(
-            db
-              .select({ id: agentTurn.id })
-              .from(agentTurn)
-              .where(
-                and(
-                  eq(agentTurn.ticketId, ticketID),
-                  eq(query<string>`${agentTurn.input}->>'intent'`, "technical-planning"),
-                ),
-              ),
-          )
-          .limit(1);
-        if (technical)
-          throw new CommandError(
-            "conflict",
-            "Use Implement to approve the exact product and technical design together.",
-          );
-        const latest = await db
-          .select({ id: requirementRevision.id })
-          .from(requirementRevision)
-          .where(eq(requirementRevision.ticketId, ticketID))
-          .orderBy(desc(requirementRevision.ordinal))
-          .limit(1);
-        if (latest[0]?.id !== revisionID) {
-          throw new Error("Only the latest Requirement Revision can be approved");
-        }
-        const approvalFields = {
-          id: requirementApproval.id,
-          ticketId: requirementApproval.ticketId,
-          requirementRevisionId: requirementApproval.requirementRevisionId,
-          approvedBy: requirementApproval.approvedBy,
-          approvedAt: query<string>`${requirementApproval.approvedAt}::text`,
-        };
-        const existing: RequirementApprovalView[] = await db
-          .select(approvalFields)
-          .from(requirementApproval)
-          .where(eq(requirementApproval.ticketId, ticketID));
-        if (existing[0]) {
-          if (existing[0].requirementRevisionId !== revisionID) {
-            throw new Error("Ticket already has a different Requirement Approval");
-          }
-          return existing[0];
-        }
-        const rows: RequirementApprovalView[] = await db
-          .insert(requirementApproval)
-          .values({
-            id: crypto.randomUUID(),
-            ticketId: ticketID,
-            requirementRevisionId: revisionID,
-            approvedBy: userID,
-          })
-          .returning(approvalFields);
-        return rows[0];
-      });
-    },
-    async start(ticketID: string, userID: string, implementation?: ImplementationAdmission) {
+    async start(ticketID: string, userID: string, implementation: ImplementationAdmission) {
+      if (!implementation)
+        throw new CommandError(
+          "invalid",
+          "Use Implement with an exact saved Requirement Revision and command identity.",
+        );
       const changeID = await database.client.begin(async (sql) => {
-        if (implementation)
-          await sql`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${implementation.commandID}`}))`;
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${implementation.commandID}`}))`;
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${ticketID}`}))`;
         const db = drizzleTransaction(sql);
         const [ticket] = await db
@@ -810,7 +679,7 @@ export function createChangeController(
             "conflict",
             "Completed or trashed Tickets cannot start implementation",
           );
-        if (implementation) {
+        {
           const [command] = await db
             .select({
               ticketID: agentTurn.ticketId,
@@ -930,7 +799,6 @@ export function createChangeController(
             );
         }
         async function admitBuild(change: string) {
-          if (!implementation) return;
           const [bootstrap] = await db
             .select({
               commandID: agentTurn.commandId,
@@ -965,21 +833,20 @@ export function createChangeController(
           );
         if (existing[0]) {
           await admitBuild(existing[0].id);
-          if (implementation)
-            await db
-              .update(implementationOrder)
-              .set({
-                state: "started",
-                changeId: existing[0].id,
-                lastError: null,
-                updatedAt: query`now()`,
-              })
-              .where(
-                and(
-                  eq(implementationOrder.commandId, implementation.commandID),
-                  eq(implementationOrder.state, "waiting"),
-                ),
-              );
+          await db
+            .update(implementationOrder)
+            .set({
+              state: "started",
+              changeId: existing[0].id,
+              lastError: null,
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                eq(implementationOrder.commandId, implementation.commandID),
+                eq(implementationOrder.state, "waiting"),
+              ),
+            );
           return existing[0].id;
         }
         const budget = await codingBudgetIn(sql, ticket.projectID, false);
@@ -990,7 +857,6 @@ export function createChangeController(
               ? "Coding accounting is incomplete. Check Usage & limits before commissioning work."
               : "The monthly Coding allowance is used. New work waits for a reset or allowance increase.",
           );
-        if (!implementation) await requireDeliveredPrerequisites(sql, ticket.projectID, ticketID);
         const latestRevision = db
           .select({ id: requirementRevision.id })
           .from(requirementRevision)
@@ -1042,33 +908,30 @@ export function createChangeController(
             eq(technicalDesignRevision.id, requirementApproval.technicalDesignRevisionId),
           )
           .where(eq(requirementApproval.id, input.approvalID));
-        const [order] = implementation
-          ? await db
-              .select({
-                commandID: implementationOrder.commandId,
-                ticketID: implementationOrder.ticketId,
-                userID: implementationOrder.createdBy,
-                revisionID: implementationOrder.requirementRevisionId,
-                technicalID: implementationOrder.technicalDesignRevisionId,
-                reasoning: implementationOrder.codingReasoning,
-                sourceSHA: implementationOrder.sourceSha,
-                state: implementationOrder.state,
-              })
-              .from(implementationOrder)
-              .where(
-                or(
-                  eq(implementationOrder.commandId, implementation.commandID),
-                  and(
-                    eq(implementationOrder.ticketId, ticketID),
-                    eq(implementationOrder.state, "waiting"),
-                  ),
-                ),
-              )
-              .for("update")
-          : [];
+        const [order] = await db
+          .select({
+            commandID: implementationOrder.commandId,
+            ticketID: implementationOrder.ticketId,
+            userID: implementationOrder.createdBy,
+            revisionID: implementationOrder.requirementRevisionId,
+            technicalID: implementationOrder.technicalDesignRevisionId,
+            reasoning: implementationOrder.codingReasoning,
+            sourceSHA: implementationOrder.sourceSha,
+            state: implementationOrder.state,
+          })
+          .from(implementationOrder)
+          .where(
+            or(
+              eq(implementationOrder.commandId, implementation.commandID),
+              and(
+                eq(implementationOrder.ticketId, ticketID),
+                eq(implementationOrder.state, "waiting"),
+              ),
+            ),
+          )
+          .for("update");
         if (
           order &&
-          implementation &&
           (order.commandID !== implementation.commandID ||
             order.ticketID !== ticketID ||
             order.userID !== userID ||
@@ -1094,12 +957,12 @@ export function createChangeController(
             "conflict",
             "The source changed since Technical Planning. Review a new design before implementing.",
           );
-        if (implementation?.expectedBaseSHA && base.headSha !== implementation.expectedBaseSHA)
+        if (implementation.expectedBaseSHA && base.headSha !== implementation.expectedBaseSHA)
           throw new CommandError(
             "conflict",
             "The default branch changed after monitoring diagnosis. Review the incident against the current source.",
           );
-        if (implementation) {
+        {
           const [blocked] =
             await sql`SELECT prerequisite_id FROM factory.ticket_prerequisites(${ticket.projectID}::uuid,${ticketID}::uuid)
             WHERE NOT delivered LIMIT 1`;
@@ -1155,21 +1018,20 @@ export function createChangeController(
             ),
           );
         await admitBuild(identity.changeID);
-        if (implementation)
-          await db
-            .update(implementationOrder)
-            .set({
-              state: "started",
-              changeId: identity.changeID,
-              lastError: null,
-              updatedAt: query`now()`,
-            })
-            .where(
-              and(
-                eq(implementationOrder.commandId, implementation.commandID),
-                eq(implementationOrder.state, "waiting"),
-              ),
-            );
+        await db
+          .update(implementationOrder)
+          .set({
+            state: "started",
+            changeId: identity.changeID,
+            lastError: null,
+            updatedAt: query`now()`,
+          })
+          .where(
+            and(
+              eq(implementationOrder.commandId, implementation.commandID),
+              eq(implementationOrder.state, "waiting"),
+            ),
+          );
         return identity.changeID;
       });
       if (!changeID) return null;

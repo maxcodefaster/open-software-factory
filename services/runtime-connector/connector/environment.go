@@ -65,7 +65,7 @@ func registryCertificateDirectory(assignment Assignment, host string) (string, e
 }
 
 func runtimeDockerCommand(ctx context.Context, arguments ...string) *exec.Cmd {
-	command := exec.CommandContext(ctx, "docker", arguments...)
+	command := ownedCommand(ctx, "docker", arguments...)
 	if values, ok := ctx.Value(runtimeVariablesContextKey{}).(map[string]string); ok {
 		command.Env = assignedEnvironment(os.Environ(), values)
 	}

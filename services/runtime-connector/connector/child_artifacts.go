@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 )
 
 // Image-layer files can appear as overflow UID 65534 inside the native
@@ -51,7 +50,7 @@ func copyChildExecutable(ctx context.Context, containerID, source, destination s
 		path = staged
 	}
 	defer startupPhase("child-executable-copy")()
-	if err := exec.CommandContext(ctx, "docker", "cp", path, containerID+":"+destination).Run(); err != nil {
+	if err := ownedCommand(ctx, "docker", "cp", path, containerID+":"+destination).Run(); err != nil {
 		return fmt.Errorf("copy Connector tool: %w", err)
 	}
 	return nil
@@ -61,7 +60,7 @@ func prepareChildPermissions(ctx context.Context, containerID, connectorPath, as
 	defer startupPhase("child-permissions")()
 	// docker cp creates root-owned files even for an image with a non-root
 	// USER. Only artifact setup uses root; the child keeps the CLI's user.
-	command := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID,
+	command := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID,
 		"sh", "-c", `chmod 0555 "$1" && chmod 0444 "$2"`,
 		"factory-connector-setup", connectorPath, assignmentPath)
 	if err := command.Run(); err != nil {

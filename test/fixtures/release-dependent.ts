@@ -19,7 +19,7 @@ export async function releaseDependent(fixture: Fixture) {
     !deliveredSHA ||
     !state.completed.includes("dependent-blocked")
   )
-    throw new Error("Delivered prerequisite and prior denied admission required");
+    throw new Error("Delivered prerequisite and prior waiting dependency order required");
   const developer = await fixture.login("developer");
   const admin = await fixture.login("admin");
   const started = performance.now();

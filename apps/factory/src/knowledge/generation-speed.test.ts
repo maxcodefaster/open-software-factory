@@ -5,10 +5,10 @@ import type {
   WikiGenerationProgress,
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
-import { generateWiki } from "./generation-workflow";
+import { generateWiki, maximumTopicConcurrency } from "./generation-workflow";
 import { prepareWikiPublication } from "./publication";
 
-type Role = "planner" | "coverage" | "additional" | "investigator" | "writer" | "checker";
+type Role = "planner" | "coverage" | "repair" | "investigator" | "writer" | "checker";
 type Seen = {
   role: Role;
   system: string;
@@ -48,6 +48,7 @@ async function scenario(options: {
   coverage?(seen: Seen): Reply | Promise<Reply>;
   files?: number;
   pages?: WikiPageSnapshot[];
+  completedPageIDs?: readonly string[];
   changedPaths?: string[];
   commit?: string;
   sources?: Array<{ path: string; content: string }>;
@@ -90,8 +91,8 @@ async function scenario(options: {
       );
       const role: Role = system.includes("Review the whole proposed Wiki topic plan")
         ? "coverage"
-        : system.includes("Return only the additional topics")
-          ? "additional"
+        : system.includes("Return the complete corrected topic plan")
+          ? "repair"
           : system.includes("Research manifests")
             ? "planner"
             : system.includes("Follow relationships")
@@ -169,6 +170,7 @@ async function scenario(options: {
         apiKey: "owned-test-not-a-secret",
       },
       pages,
+      ...(options.completedPageIDs ? { completedPageIDs: options.completedPageIDs } : {}),
       inventory: files,
       changedPaths: options.changedPaths ?? files.map((file) => file.path),
       sources: options.sources ?? [],
@@ -241,7 +243,6 @@ test("the checker reviews the human-merged material overview before publication"
     citations: [{ path: "README.md", commitSha: "b".repeat(40) }],
   };
   const source = { path: "README.md", content: `# Final flight\n\n${introduction}` };
-  const publication = Promise.withResolvers<void>();
   const checked: string[] = [];
   let generatedBody = base;
   let publishedBody = current.body;
@@ -253,10 +254,6 @@ test("the checker reviews the human-merged material overview before publication"
     sources: [source],
     readFiles: async () => [source],
     preparePublication: (output) => prepareWikiPublication([{ ...current, generatedBody }], output),
-    coverage: async () => {
-      await publication.promise;
-      return { output: { findings: [] } };
-    },
     reply: ({ role, prompt, index }) => {
       if (role === "planner")
         return {
@@ -312,7 +309,6 @@ test("the checker reviews the human-merged material overview before publication"
       generatedBody = merged.generatedBody;
       publishedBody = merged.body;
       next.body = merged.body;
-      publication.resolve();
     },
   });
   expect(result.published).toHaveLength(1);
@@ -322,7 +318,7 @@ test("the checker reviews the human-merged material overview before publication"
   expect(checked.at(-1)).toBe(publishedBody);
   expect(count(result.seen, "planner")).toBe(1);
   expect(count(result.seen, "coverage")).toBe(1);
-  expect(count(result.seen, "additional")).toBe(0);
+  expect(count(result.seen, "repair")).toBe(0);
   expect(count(result.seen, "writer")).toBe(2);
   expect(count(result.seen, "checker")).toBe(2);
   expect(result.seen).toHaveLength(6);
@@ -883,31 +879,38 @@ test("the writer and checker run exactly three times for a draft that never pass
   expect([count(seen, "writer"), count(seen, "checker")]).toEqual([3, 3]);
 });
 
-test("the first topic starts while the coverage review runs and its extra guides follow", async () => {
+test("coverage repair finishes before topics start and its new guide follows the checked parent", async () => {
   const paths = ["src/file-0.ts"];
+  const overview = topic("overview", paths, null);
+  const setup = topic("setup", paths, "overview");
   let coverageAnswered = 0;
   let writerStarted = 0;
   const result = await scenario({
     sources: [{ path: "src/file-0.ts", content: "Setup guidance." }],
-    coverage: async () => {
-      await Bun.sleep(400);
+    coverage: async ({ prompt }) => {
+      await Bun.sleep(50);
       coverageAnswered = performance.now();
       return {
         output: {
-          findings: [
-            {
-              kind: "actionable",
-              readerTask: "Setup",
-              requiredChange: "Add missing setup guidance.",
-              sourcePaths: paths,
-            },
-          ],
+          findings: prompt["previousFindings"]
+            ? []
+            : [
+                {
+                  kind: "actionable",
+                  readerTask: "Setup",
+                  requiredChange: "Add missing setup guidance.",
+                  sourcePaths: paths,
+                },
+              ],
         },
       };
     },
     reply: async ({ role, prompt }) => {
-      if (role === "planner") return { output: { topics: [topic("overview", paths, null)] } };
-      if (role === "additional") return { output: { topics: [topic("setup", paths, "overview")] } };
+      if (role === "planner") return { output: { topics: [overview] } };
+      if (role === "repair") {
+        expect(prompt["plannedTopics"]).toEqual([overview]);
+        return { output: { topics: [overview, setup] } };
+      }
       if (role === "investigator")
         return { output: { findings: [{ claim: "Verified", paths }], uncertainties: [] } };
       if (role === "writer") {
@@ -920,13 +923,15 @@ test("the first topic starts while the coverage review runs and its extra guides
     },
   });
   expect(writerStarted).toBeGreaterThan(0);
-  expect(writerStarted).toBeLessThan(coverageAnswered);
+  expect(writerStarted).toBeGreaterThan(coverageAnswered);
+  expect(count(result.seen, "repair")).toBe(1);
+  expect(count(result.seen, "coverage")).toBe(2);
   expect(result.published.map((entry) => entry.slug)).toEqual(["overview", "setup"]);
   expect(result.progress.at(-1)).toMatchObject({ topicsTotal: 2, topicsDone: 2 });
 });
 
-test.each(["valid root update", "repeated duplicate"] as const)(
-  "coverage planning refreshes its existing repair after progressive publication: %s",
+test.each(["valid root update", "unresolved duplicate", "dropped useful task"] as const)(
+  "coverage can correct a full plan before any topic claims its pages: %s",
   async (repair) => {
     const paths: [string] = ["src/file-0.ts"];
     const human = "Human release-team handover note.";
@@ -952,53 +957,76 @@ test.each(["valid root update", "repeated duplicate"] as const)(
       })),
     ];
     const topics = [
-      topic("account-walkthrough", paths, root.slug),
-      topic("pre-demo-checklist", paths, root.slug),
-    ] as const;
-    const deltaStarted = Promise.withResolvers<void>();
-    const twoPublished = Promise.withResolvers<void>();
-    const deltaInputs: WikiPageSnapshot[][] = [];
+      topic(root.slug, paths, null, [root.id]),
+      topic("orientation-copy", paths, root.slug),
+      ...["account-walkthrough", "pre-demo-checklist", "demo-accounts", "session-workflow"].map(
+        (slug) => topic(slug, paths, root.slug),
+      ),
+    ];
+    const repairInputs: WikiPageSnapshot[][] = [];
     let publications = 0;
+    let writing = 0;
+    let maximumWriting = 0;
     let currentPages: readonly WikiPageSnapshot[] = pages;
     const run = scenario({
       pages,
       sources: [{ path: paths[0], content: "Current project orientation and demo guidance." }],
-      coverage: () => ({
-        output: {
-          findings: [
-            {
-              kind: "actionable",
-              readerTask: "Project orientation",
-              requiredChange: "Update the old orientation while preserving the human handover.",
-              sourcePaths: paths,
-            },
-          ],
-        },
-      }),
-      reply: async ({ role, prompt, index }) => {
+      coverage: ({ prompt }) => {
+        if (prompt["previousFindings"]) {
+          expect(prompt["previousTopics"]).toEqual(topics);
+          expect(publications).toBe(0);
+        }
+        return {
+          output: {
+            findings:
+              prompt["previousFindings"] && repair === "valid root update"
+                ? []
+                : [
+                    {
+                      kind: "actionable",
+                      readerTask:
+                        prompt["previousFindings"] && repair === "dropped useful task"
+                          ? "Account walkthrough"
+                          : "Project orientation",
+                      requiredChange:
+                        prompt["previousFindings"] && repair === "dropped useful task"
+                          ? "Restore the account-walkthrough task lost by this repair."
+                          : "Remove orientation-copy and correct the planned overview update, preserving its human handover.",
+                      sourcePaths: paths,
+                    },
+                  ],
+          },
+        };
+      },
+      reply: async ({ role, prompt }) => {
         if (role === "planner") return { output: { topics } };
-        if (role === "additional") {
-          const input = prompt.input ?? prompt;
-          const current = input["currentPages"] as WikiPageSnapshot[];
-          deltaInputs.push(current);
-          if (index === 0) {
-            deltaStarted.resolve();
-            await twoPublished.promise;
-          } else {
-            expect(prompt.correction).toContain("Repeated topic slug: account-walkthrough");
-            expect(prompt["rejectedResult"]).toEqual({ topics: [topics[0]] });
-          }
+        if (role === "repair") {
+          expect(publications).toBe(0);
+          expect(prompt["plannedTopics"]).toEqual(topics);
+          repairInputs.push(prompt["currentPages"] as WikiPageSnapshot[]);
           return {
             output: {
               topics:
-                index === 1 && repair === "valid root update" && current.length === 5
-                  ? [topic(root.slug, paths, null, [root.id])]
-                  : [topics[0]],
+                repair === "valid root update"
+                  ? topics
+                      .filter((topic) => topic.slug !== "orientation-copy")
+                      .map((topic) =>
+                        topic.slug === root.slug
+                          ? { ...topic, purpose: "Correct project orientation; preserve handover." }
+                          : topic,
+                      )
+                  : repair === "dropped useful task"
+                    ? [topics[0]]
+                    : topics,
             },
           };
         }
+        if (role === "investigator")
+          return { output: { findings: [{ claim: "Demo guidance.", paths }], uncertainties: [] } };
         if (role === "writer") {
-          await deltaStarted.promise;
+          maximumWriting = Math.max(maximumWriting, ++writing);
+          await Bun.sleep(20);
+          writing--;
           const current = prompt["topic"] as ReturnType<typeof topic>;
           return {
             output:
@@ -1020,30 +1048,36 @@ test.each(["valid root update", "repeated duplicate"] as const)(
       },
       onPublish: (_output, pages) => {
         currentPages = pages;
-        if (++publications === 2) twoPublished.resolve();
+        publications++;
       },
     });
-    if (repair === "repeated duplicate") {
-      await expect(run).rejects.toThrow("Repeated topic slug: account-walkthrough");
-      expect(publications).toBe(2);
+    if (repair !== "valid root update") {
+      await expect(run).rejects.toThrow("Wiki topic plan omits essential reader coverage");
+      expect(publications).toBe(0);
       expect(currentPages).toContainEqual(root);
     } else {
       const result = await run;
-      expect(result.published.map((entry) => entry.slug)).toEqual([
-        topics[0].slug,
-        topics[1].slug,
-        root.slug,
-      ]);
+      expect(result.published.map((entry) => entry.slug).sort()).toEqual(
+        topics
+          .filter((topic) => topic.slug !== "orientation-copy")
+          .map((topic) => topic.slug)
+          .sort(),
+      );
       expect(result.pages.find((page) => page.id === root.id)?.body).toBe(
         `Current project orientation.\n\n${human}`,
       );
-      expect(deltaInputs.map((pages) => pages.length)).toEqual([3, 5]);
       expect(count(result.seen, "planner")).toBe(1);
-      expect(count(result.seen, "coverage")).toBe(1);
-      expect(result.progress.at(-1)).toMatchObject({ topicsTotal: 3, topicsDone: 3 });
+      expect(count(result.seen, "coverage")).toBe(2);
+      expect(count(result.seen, "repair")).toBe(1);
+      expect(maximumWriting).toBeGreaterThan(1);
+      expect(maximumWriting).toBeLessThanOrEqual(maximumTopicConcurrency);
+      expect(result.pages.filter((page) => page.id !== root.id)).toEqual(
+        expect.arrayContaining(pages.slice(1)),
+      );
+      expect(result.progress.at(-1)).toMatchObject({ topicsTotal: 5, topicsDone: 5 });
     }
-    expect(deltaInputs).toHaveLength(2);
-    expect(currentPages).toHaveLength(5);
+    expect(repairInputs).toEqual([pages]);
+    expect(currentPages).toHaveLength(repair === "valid root update" ? 7 : 3);
     expect(pages.every((page) => currentPages.some((current) => current.id === page.id))).toBe(
       true,
     );
@@ -1054,8 +1088,22 @@ test.each(["valid root update", "repeated duplicate"] as const)(
 test("an empty coverage repair fails even when another topic is already planned", async () => {
   const paths = ["src/file-0.ts"];
   let repairs = 0;
+  let publications = 0;
   await expect(
     scenario({
+      pages: [
+        {
+          id: crypto.randomUUID(),
+          slug: "overview",
+          title: "Project",
+          body: "Short orientation.",
+          version: 1,
+          revisionId: crypto.randomUUID(),
+          parentId: null,
+          state: "active",
+          citations: [],
+        },
+      ],
       sources: [{ path: "src/file-0.ts", content: "Run the local verification checks." }],
       coverage: () => ({
         output: {
@@ -1070,68 +1118,265 @@ test("an empty coverage repair fails even when another topic is already planned"
         },
       }),
       reply: ({ role }) => {
-        if (role === "planner") return { output: { topics: [topic("overview", paths, null)] } };
-        if (role === "additional") {
+        if (role === "planner")
+          return { output: { topics: [topic("local-workflow", paths, "overview")] } };
+        if (role === "repair") {
           repairs++;
           return { output: { topics: [] } };
         }
         if (role === "writer") return { output: page("Short orientation.", paths) };
         return { output: { issues: [] } };
       },
+      onPublish: () => {
+        publications++;
+      },
     }),
   ).rejects.toThrow("Wiki topic plan omits essential reader coverage");
   expect(repairs).toBe(1);
+  expect(publications).toBe(0);
 });
 
-test("a new Wiki with several documented areas and a single topic gets one more planning request", async () => {
-  const readme = {
-    path: "README.md",
-    content: [
-      "# Product",
-      "## Installation",
-      "## Usage",
-      "## Architecture",
-      "## Verification",
-    ].join("\n\nText.\n\n"),
-  };
-  const inventory = [...fileList(4), { path: "README.md", sha: "b".repeat(40), size: 100 }];
-  const result = await scenario({
-    inventory,
-    sources: [readme],
-    reply: ({ role, prompt }) => {
-      if (role === "planner")
-        return { output: { topics: [topic("overview", ["README.md"], null)] } };
-      if (role === "additional") {
-        expect(JSON.stringify(prompt)).toContain("documents 4 reader areas");
-        return { output: { topics: [topic("usage", ["README.md"], "overview")] } };
-      }
-      if (role === "investigator")
+test.each(["no findings", "checked nonissue"] as const)(
+  "a sufficient single guide needs no extra planning despite several README headings: %s",
+  async (review) => {
+    const body =
+      "Install with npm ci. Start the Forms editor with npm run dev. " +
+      "The editor stores local drafts. Verify changes with npm test.";
+    const readme = {
+      path: "README.md",
+      content: [
+        "# Forms",
+        "## Installation\nInstall with npm ci.",
+        "## Usage\nStart the Forms editor with npm run dev.",
+        "## Architecture\nThe editor stores local drafts.",
+        "## Verification\nVerify changes with npm test.",
+      ].join("\n\n"),
+    };
+    const result = await scenario({
+      inventory: [{ path: readme.path, sha: "b".repeat(40), size: readme.content.length }],
+      sources: [readme],
+      readFiles: async () => [readme],
+      coverage: () => ({
+        output: {
+          findings:
+            review === "no findings"
+              ? []
+              : [
+                  {
+                    kind: "nonissue",
+                    reason: "One Forms guide covers the supported setup, editor and checks.",
+                  },
+                ],
+        },
+      }),
+      reply: ({ role }) => {
+        if (role === "planner")
+          return { output: { topics: [topic("overview", [readme.path], null)] } };
+        if (role === "writer") return { output: page(body, [readme.path]) };
+        return { output: { topics: [], issues: [] } };
+      },
+    });
+    expect(count(result.seen, "repair")).toBe(0);
+    expect(count(result.seen, "coverage")).toBe(1);
+    expect(result.published.map((entry) => entry.slug)).toEqual(["overview"]);
+    expect(result.published[0]?.body).toBe(body);
+    expect(result.seen).toHaveLength(4);
+    expect(result.requests.remaining).toBe(56);
+  },
+);
+
+test.each(["reject duplicate", "reject completed duplicate", "update owner"] as const)(
+  "coverage resolves a redundant unstarted topic before publication: %s",
+  async (repair) => {
+    const human = "Human handover: arrange the demo with the release team.";
+    const owner: WikiPageSnapshot = {
+      id: crypto.randomUUID(),
+      slug: "forms-development",
+      title: "Forms development",
+      body: `Run npm run dev. Verify with npm test.\n\n${human}`,
+      version: 3,
+      revisionId: crypto.randomUUID(),
+      parentId: null,
+      state: "active",
+      citations: [],
+    };
+    const source = {
+      path: "docs/forms.md",
+      content:
+        repair === "update owner"
+          ? "Run npm run dev. Verify with npm run check."
+          : "Run npm run dev. Verify with npm test.",
+    };
+    const duplicate = topic("local-setup-copy", [source.path], null);
+    let coverageAnswered = false;
+    const writing: Array<{ reviewed: boolean; topic: unknown; pages: unknown }> = [];
+    const preparePublication = (output: WikiGenerationOutput) =>
+      prepareWikiPublication(
+        [{ ...owner, generatedBody: "Run npm run dev. Verify with npm test." }],
+        output,
+      );
+    const result = await scenario({
+      pages: [owner],
+      ...(repair === "reject completed duplicate" ? { completedPageIDs: [owner.id] } : {}),
+      inventory: [{ path: source.path, sha: "b".repeat(40), size: source.content.length }],
+      sources: [source],
+      readFiles: async () => [source],
+      preparePublication,
+      coverage: async ({ prompt }) => {
+        await Bun.sleep(50);
+        coverageAnswered = true;
+        if (prompt["previousFindings"]) return { output: { findings: [] } };
         return {
-          output: { findings: [{ claim: "Verified", paths: ["README.md"] }], uncertainties: [] },
+          output: {
+            findings: [
+              {
+                kind: "actionable",
+                readerTask: "Local setup and verification",
+                requiredChange:
+                  repair === "update owner"
+                    ? `Replace local-setup-copy with an update to ${owner.slug}, which owns this task. Correct npm test to npm run check and preserve the human handover.`
+                    : `Reject local-setup-copy because ${owner.slug} already covers its task. No current page needs changing.`,
+                sourcePaths: [source.path],
+              },
+            ],
+          },
         };
-      if (role === "writer") return { output: page("Body.", ["README.md"]) };
-      return { output: { issues: [] } };
-    },
-  });
-  expect(count(result.seen, "additional")).toBe(1);
-  expect(result.published.map((entry) => entry.slug)).toEqual(["overview", "usage"]);
-});
+      },
+      reply: ({ role, prompt }) => {
+        if (role === "planner") return { output: { topics: [duplicate] } };
+        if (role === "repair")
+          return {
+            output: {
+              topics:
+                repair === "update owner"
+                  ? [topic(owner.slug, [source.path], null, [owner.id])]
+                  : [],
+            },
+          };
+        if (role === "writer") {
+          writing.push({
+            reviewed: coverageAnswered,
+            topic: prompt["topic"],
+            pages: prompt["currentPages"],
+          });
+          if (!(prompt["topic"] as ReturnType<typeof topic>).pageIDs.length)
+            return { output: page(source.content, [source.path]) };
+          return {
+            output: {
+              pages: [
+                { id: owner.id, title: owner.title, body: source.content, sources: [source.path] },
+              ],
+            },
+          };
+        }
+        if (
+          role === "checker" &&
+          (prompt["draft"] as WikiGenerationOutput).pages[0]?.id === owner.id
+        )
+          expect((prompt["draft"] as WikiGenerationOutput).pages[0]?.body).toContain(human);
+        return { output: { issues: [] } };
+      },
+      onPublish: (output, pages) => {
+        const published = preparePublication(output).pages[0];
+        const current = pages.find((page) => page.id === owner.id);
+        if (published?.id === owner.id && current) current.body = published.body;
+      },
+    });
+    expect(count(result.seen, "repair")).toBe(1);
+    expect(count(result.seen, "coverage")).toBe(2);
+    expect(writing).toEqual(
+      repair === "update owner"
+        ? [
+            {
+              reviewed: true,
+              topic: topic(owner.slug, [source.path], null, [owner.id]),
+              pages: [owner],
+            },
+          ]
+        : [],
+    );
+    expect(result.published.map((entry) => entry.slug)).toEqual(
+      repair === "update owner" ? [owner.slug] : [],
+    );
+    expect(result.pages).toHaveLength(1);
+    expect(result.pages[0]?.id).toBe(owner.id);
+    if (repair === "update owner")
+      expect(result.pages[0]?.body).toBe(`${source.content}\n\n${human}`);
+    else expect(result.pages[0]).toEqual(owner);
+    expect(owner.body).toBe(`Run npm run dev. Verify with npm test.\n\n${human}`);
+  },
+);
 
-test("a single topic is accepted when the documentation names fewer than three areas", async () => {
-  const readme = { path: "README.md", content: "# Product\n\n## Usage\n\nText.\n" };
-  const result = await scenario({
-    inventory: [...fileList(2), { path: "README.md", sha: "b".repeat(40), size: 30 }],
-    sources: [readme],
-    reply: ({ role }) => {
-      if (role === "planner")
-        return { output: { topics: [topic("overview", ["README.md"], null)] } };
-      if (role === "writer") return { output: page("Body.", ["README.md"]) };
-      return { output: { issues: [] } };
-    },
-  });
-  expect(count(result.seen, "additional")).toBe(0);
-  expect(result.published).toHaveLength(1);
-});
+test.each(["repeated owner", "completed owner", "removed parent"] as const)(
+  "a repaired plan cannot claim a %s before any writer starts",
+  async (fault) => {
+    const owner: WikiPageSnapshot = {
+      id: crypto.randomUUID(),
+      slug: "overview",
+      title: "Forms",
+      body: "Forms development guidance.\n\nHuman release-team handover.",
+      version: 3,
+      revisionId: crypto.randomUUID(),
+      parentId: null,
+      state: "active",
+      citations: [],
+    };
+    const source = { path: "docs/forms.md", content: "Current Forms development guidance." };
+    const paths = [source.path];
+    const duplicate = topic("forms-copy", paths, owner.slug);
+    const update = topic(owner.slug, paths, null, [owner.id]);
+    const badTopics =
+      fault === "repeated owner"
+        ? [update, topic("second-owner", paths, null, [owner.id])]
+        : fault === "completed owner"
+          ? [update]
+          : [topic("child", paths, duplicate.slug)];
+    const seen: Seen[] = [];
+    let publications = 0;
+    await expect(
+      scenario({
+        pages: [owner],
+        ...(fault === "completed owner" ? { completedPageIDs: [owner.id] } : {}),
+        inventory: [{ path: source.path, sha: "b".repeat(40), size: source.content.length }],
+        sources: [source],
+        coverage: () => ({
+          output: {
+            findings: [
+              {
+                kind: "actionable",
+                readerTask: "Forms development",
+                requiredChange: "Remove forms-copy, which repeats the existing overview task.",
+                sourcePaths: paths,
+              },
+            ],
+          },
+        }),
+        reply: (entry) => {
+          seen.push(entry);
+          if (entry.role === "planner") return { output: { topics: [duplicate] } };
+          if (entry.role === "repair") return { output: { topics: badTopics } };
+          return { output: { issues: [] } };
+        },
+        onPublish: () => {
+          publications++;
+        },
+      }),
+    ).rejects.toThrow(
+      fault === "removed parent"
+        ? "Every parent must name an earlier planned topic"
+        : "Unavailable or repeated pageIDs",
+    );
+    expect(count(seen, "planner")).toBe(1);
+    expect(count(seen, "repair")).toBe(2);
+    expect(count(seen, "writer")).toBe(0);
+    expect(count(seen, "investigator")).toBe(0);
+    expect(publications).toBe(0);
+    expect(owner).toMatchObject({
+      body: "Forms development guidance.\n\nHuman release-team handover.",
+      version: 3,
+    });
+  },
+);
 
 test("a write that ends before its JSON is retried with a larger budget and a request for less", async () => {
   const writers: Seen[] = [];

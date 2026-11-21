@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { checkPasswordChange, passwordChangeMessage, passwordPolicy } from "./password-policy";
+import {
+  checkPasswordChange,
+  passwordChangeMessage,
+  passwordPolicy,
+} from "../../identity-domain/src/password-policy";
 import * as policy from "./policy";
 
 const valid = {

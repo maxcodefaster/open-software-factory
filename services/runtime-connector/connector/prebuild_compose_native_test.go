@@ -361,7 +361,7 @@ exec %q "$@"
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := cleanupProject(parentState{
+		if err := cleanupProject(t.Context(), parentState{
 			RuntimeAttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation,
 			ContainerID: container.ContainerID, ComposeProjectName: container.ComposeProjectName,
 		}); err != nil {

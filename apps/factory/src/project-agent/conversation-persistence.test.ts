@@ -12,7 +12,6 @@ test("research delegates locked command receipts and context inserts without cha
     let insertedID: string | undefined;
     let receipt: { id: string; conversationID: string; userID: string; kind: string } | undefined;
     let member = true;
-    let engineCalls = 0;
     const fixture = conversationDatabase(
       ({ text }) => {
         throw new Error(`Unexpected raw research persistence query: ${text}`);
@@ -57,12 +56,7 @@ test("research delegates locked command receipts and context inserts without cha
         throw new Error(`Unexpected research authority: ${text}`);
       },
     );
-    const controller = createProjectAgentController(fixture.database, {
-      async start() {
-        engineCalls++;
-        throw new Error("Research persistence cannot start Coding");
-      },
-    });
+    const controller = createProjectAgentController(fixture.database);
     const get = spyOn(controller, "get").mockResolvedValue(null);
     try {
       await controller.newConversation(projectID, ticketID, userID, commandID);
@@ -82,7 +76,6 @@ test("research delegates locked command receipts and context inserts without cha
       await expect(
         controller.newConversation(projectID, ticketID, userID, crypto.randomUUID()),
       ).rejects.toMatchObject({ code: "not-found" });
-      expect(engineCalls).toBe(0);
       expect(fixture.statements.some(({ text }) => text.startsWith("update"))).toBe(false);
       const inserts = fixture.statements.filter(({ text }) => text.startsWith("insert"));
       expect(inserts).toHaveLength(1);

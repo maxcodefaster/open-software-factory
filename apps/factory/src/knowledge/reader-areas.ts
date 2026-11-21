@@ -20,10 +20,7 @@ const readme = /(^|\/)readme(?:(?:\.[a-z]+)?\.mdx?)?$/i;
 const documentation = /^(?:docs?|documentation|dokumentation)\/.+\.mdx?$/i;
 const skipped = /(^|\/)(?:readme|index|changelog|license|licence|contributing|security)\.mdx?$/i;
 
-/**
- * Reader areas the repository's own documentation names: README sections and one area per
- * documentation file. A deterministic floor for the plan, independent of the planner's judgment.
- */
+/** README sections and documentation paths to investigate, not required Wiki pages. */
 export function documentedReaderAreas(
   inventory: ReadonlyArray<{ path: string }>,
   sources: ReadonlyArray<{ path: string; content: string }>,
@@ -49,6 +46,3 @@ export function documentedReaderAreas(
   }
   return [...areas.values()];
 }
-
-/** Below this many documented areas, one topic can be a complete plan. */
-export const minimumDocumentedAreas = 3;

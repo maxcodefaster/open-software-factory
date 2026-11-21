@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { resolve } from "node:path";
 import { startServiceForward } from "./service-forward";
 
-async function fixture() {
+async function fixture(hold = true) {
   const parent = resolve(".factory/test-results/service-forward");
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(`${parent}/owned-`);
@@ -11,7 +11,7 @@ async function fixture() {
   const binary = resolve(directory, "kubectl");
   await writeFile(
     binary,
-    `#!/bin/sh\nprintf '%s\\n' "$@" > '${calls}'\nprintf 'Forwarding from 127.0.0.1:32123 -> service\\n'\nexec /bin/sleep 60\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$@" > '${calls}'\nprintf 'Forwarding from 127.0.0.1:32123 -> service\\n'\nexec /bin/sleep ${hold ? 60 : 0}\n`,
     { flag: "wx" },
   );
   await chmod(binary, 0o700);
@@ -27,6 +27,28 @@ async function fixture() {
         else process.env["PATH"] = previous;
       }
     },
+    startDisconnected(namespace: string, pod: string) {
+      const worker = resolve(import.meta.dir, "service-forward-process.ts");
+      return Bun.spawn(
+        [
+          process.execPath,
+          "--eval",
+          `const { runServiceForward } = await import(${JSON.stringify(worker)});
+await new Promise(resolve => {
+  process.once("disconnect", resolve);
+  process.disconnect();
+});
+await runServiceForward(${JSON.stringify([namespace, pod])});`,
+        ],
+        {
+          env: { ...process.env, PATH: `${directory}:${previous ?? ""}` },
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          ipc() {},
+        },
+      );
+    },
     async close(connection?: ReturnType<typeof startServiceForward>) {
       if (connection?.child.exitCode === null) connection.child.kill("SIGTERM");
       if (connection) await connection.child.exited;
@@ -34,6 +56,19 @@ async function fixture() {
     },
   };
 }
+
+test("a disconnected editor forwarding child cannot start a late kubectl", async () => {
+  const f = await fixture(false);
+  const child = f.startDisconnected(`factory-editor-${"a".repeat(32)}`, "editor-2");
+  try {
+    await child.exited;
+    await expect(f.calls()).rejects.toThrow();
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await f.close();
+  }
+});
 
 test("the editor forwarding child retains its existing independent editor boundary", async () => {
   const f = await fixture();

@@ -60,7 +60,7 @@ func hardenedGitCommand(ctx context.Context, workspace string, config []string, 
 	if workspace != "" {
 		base = append(base, "-C", workspace)
 	}
-	command := exec.CommandContext(ctx, "git", append(base, arguments...)...)
+	command := ownedCommand(ctx, "git", append(base, arguments...)...)
 	command.Env = hardenedGitEnvironment()
 	return command
 }
@@ -76,7 +76,10 @@ func workspaceGitCommand(ctx context.Context, workspace string, arguments ...str
 		// or inherit network credentials. This fact is set only by native Parent.
 		command := hardenedGitCommand(ctx, workspace, nil, arguments...)
 		if os.Geteuid() == 0 {
-			command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{}}}
+			if command.SysProcAttr == nil {
+				command.SysProcAttr = &syscall.SysProcAttr{}
+			}
+			command.SysProcAttr.Credential = &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{}}
 		}
 		return command
 	}
@@ -380,7 +383,7 @@ func checkoutProject(ctx context.Context, assignment Assignment) error {
 	).CombinedOutput(); err != nil {
 		return fmt.Errorf("record workspace repository identity: %w: %s", err, output)
 	}
-	if output, err := exec.CommandContext(ctx, "chown", "-R", "1000:1000", assignment.WorkspaceFolder).CombinedOutput(); err != nil {
+	if output, err := ownedCommand(ctx, "chown", "-R", "1000:1000", assignment.WorkspaceFolder).CombinedOutput(); err != nil {
 		return fmt.Errorf("assign Project checkout ownership: %w: %s", err, output)
 	}
 	return nil

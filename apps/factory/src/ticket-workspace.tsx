@@ -152,8 +152,11 @@ export type TicketWorkspaceProps = {
   onTechnicalPlanning?(): void;
   onSaveTechnicalDesign?(revisionID: string, content: TechnicalDesignContent): Promise<boolean>;
   planningBusy?: boolean;
-  onSaveDocument(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
-  onConfirmRequirements(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
+  onSaveDocument(input: TicketDraft, ticketID: string): Promise<TicketDocumentSave | undefined>;
+  onConfirmRequirements(
+    input: TicketDraft,
+    ticketID: string,
+  ): Promise<TicketDocumentSave | undefined>;
   clarificationAction: { label: string; status: boolean };
   awaitingAnswer?: boolean;
   onFollowUp(): void;
@@ -329,6 +332,11 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
 }
 
 function TicketDocument(props: TicketWorkspaceProps) {
+  const ownerTicketID = untrack(() => props.current.ticket.id);
+  const ownerDrafts = untrack(() => props.drafts);
+  let disposed = false;
+  let retainedOnDispose: TicketDraft | undefined;
+  const ownsEditor = () => !disposed && props.current.ticket.id === ownerTicketID;
   const [chapterRoot, setChapterRoot] = createSignal<HTMLElement>();
   const [technicalEditing, setTechnicalEditing] = createSignal<() => boolean>();
   const technicalDirty = () => technicalEditing()?.() ?? false;
@@ -479,8 +487,10 @@ function TicketDocument(props: TicketWorkspaceProps) {
     }
   }
   onCleanup(() => {
+    disposed = true;
     clearTimeout(autosaveTimer);
     retainDraft();
+    retainedOnDispose = ownerDrafts.get(ownerTicketID);
   });
 
   const canEditSpecification = () =>
@@ -674,6 +684,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
   );
 
   function scheduleAutosave() {
+    if (!ownsEditor()) return;
     retainDraft();
     clearTimeout(autosaveTimer);
     if (proposal() || conflict()) return;
@@ -969,6 +980,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
     return {
       onFocus: () => beginEditing(),
       onInput: (value: string, element: HTMLElement) => {
+        if (!ownsEditor()) return;
         // Autosave can acknowledge the previous draft while the field stays focused.
         // Every new edit must regain draft protection before a server revision arrives.
         beginEditing();
@@ -976,6 +988,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
         // Solid 2 commits signal writes at the microtask boundary. Persist the new
         // draft after that commit rather than reading the previous keystroke.
         onSettled(() => {
+          if (!ownsEditor()) return;
           scheduleAutosave();
           if (options.slash) updateSlashMenu(element);
         });
@@ -987,7 +1000,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
   }
 
   async function saveChanges() {
-    if (saving() || proposal() || !hasChanges()) return;
+    if (!ownsEditor() || saving() || proposal() || conflict() || !hasChanges()) return;
     const key = draftKey;
     const ticketID = props.current.ticket.id;
     setEditorError("");
@@ -998,19 +1011,59 @@ function TicketDocument(props: TicketWorkspaceProps) {
     }
     const requirement = currentRequirement();
     const snapshot = { title, description: draftDescription().trim(), requirement };
+    const storageKey = draftStorageKey;
+    const input = {
+      ...snapshot,
+      expectedVersion: baseVersion,
+      expectedDocumentId: baseDocumentID,
+      requirementRevisionId: baseRequirementRevisionID,
+    };
     setSaving(true);
     let saved: TicketDocumentSave | undefined;
     try {
-      saved = await props.onSaveDocument({
-        ...snapshot,
-        expectedVersion: baseVersion,
-        expectedDocumentId: baseDocumentID,
-        requirementRevisionId: baseRequirementRevisionID,
-      });
+      saved = await props.onSaveDocument(input, ticketID);
     } finally {
       setSaving(false);
     }
-    if (props.current.ticket.id !== ticketID) return;
+    if (!ownsEditor()) {
+      // Admitted saves may settle into their retained draft. Never reschedule a
+      // disposed editor or replace a reopened editor's draft.
+      const retained = ownerDrafts.get(ticketID);
+      if (
+        saved &&
+        retained === retainedOnDispose &&
+        retained?.expectedVersion === input.expectedVersion &&
+        retained.expectedDocumentId === input.expectedDocumentId &&
+        retained.requirementRevisionId === input.requirementRevisionId
+      ) {
+        const unchanged =
+          JSON.stringify(snapshot) ===
+          JSON.stringify({
+            title: retained.title.trim(),
+            description: retained.description.trim(),
+            requirement: normalizedRequirement(retained.requirement),
+          });
+        const next = unchanged
+          ? undefined
+          : {
+              ...retained,
+              expectedVersion: saved.ticketVersion,
+              expectedDocumentId: saved.id,
+              requirementRevisionId: saved.requirementRevisionId,
+            };
+        if (next) ownerDrafts.set(ticketID, next);
+        else ownerDrafts.delete(ticketID);
+        try {
+          if (storageKey) {
+            if (next) localStorage.setItem(storageKey, JSON.stringify(next));
+            else localStorage.removeItem(storageKey);
+          }
+        } catch {
+          /* The original Ticket's draft remains retained in memory. */
+        }
+      }
+      return;
+    }
     if (!saved) {
       const stale =
         baseVersion !== props.current.ticket.version ||
@@ -1047,6 +1100,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
   }
 
   async function confirmProposal() {
+    if (!ownsEditor()) return;
     clearTimeout(autosaveTimer);
     const ticketID = props.current.ticket.id;
     const parsed = ticketDocumentInput.safeParse({
@@ -1069,11 +1123,14 @@ function TicketDocument(props: TicketWorkspaceProps) {
       requirement: parsed.data.requirement,
     };
     try {
-      const saved = await props.onConfirmRequirements({
-        title: parsed.data.title,
-        description: parsed.data.description,
-        requirement: currentRequirement(),
-      });
+      const saved = await props.onConfirmRequirements(
+        {
+          title: parsed.data.title,
+          description: parsed.data.description,
+          requirement: currentRequirement(),
+        },
+        ticketID,
+      );
       if (saved && props.current.ticket.id === ticketID) {
         baseVersion = saved.ticketVersion;
         baseDocumentID = saved.id;

@@ -40,6 +40,7 @@ export async function signIn(page: Page) {
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
 }
 
 async function projectAttempts(request: APIRequestContext, projectID: string) {

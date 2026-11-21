@@ -84,7 +84,7 @@ test("technical revisions are exact, immutable, retry-safe and developer-only", 
       access: createAccessController(db),
       documents,
       trash: { trash: unused, restore: unused },
-      changes: { start: unused, approve: unused, createRevision: unused },
+      changes: { start: unused },
       agent: { admitStartIn: unused },
     });
     const detail = await service.detail(owned.userID, ticketID);
@@ -237,7 +237,7 @@ test("full Planning confirmation durably admits exactly one technical task again
       { id: string; payload: { ticket: { title: string; description: string } } }[]
     >`SELECT id,payload FROM factory.conversation_entry WHERE conversation_id=${conversationID} AND kind='requirement'`;
     expect(proposal?.payload.ticket.description).toBe(requestDetails);
-    const controller = createProjectAgentController(db, { start: async () => null });
+    const controller = createProjectAgentController(db);
     const documents = createTicketDocumentController(db, (sql, input) =>
       controller.admitTechnicalIn(sql, input),
     );
@@ -303,7 +303,7 @@ test("full Planning confirmation durably admits exactly one technical task again
       access: createAccessController(db),
       documents,
       trash: { trash: unused, restore: unused },
-      changes: { start: unused, approve: unused, createRevision: unused },
+      changes: { start: unused },
       agent: { admitStartIn: unused },
     });
     const manualID = crypto.randomUUID();

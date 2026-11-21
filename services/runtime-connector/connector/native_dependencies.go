@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -38,7 +37,7 @@ func prepareNativeDependencies(ctx context.Context, assignment *Assignment) (str
 		return "", "", noop, err
 	}
 	configPath := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
-	command := exec.CommandContext(ctx, "devcontainer", "read-configuration", "--workspace-folder", assignment.WorkspaceFolder, "--config", configPath, "--log-format", "json")
+	command := ownedCommand(ctx, "devcontainer", "read-configuration", "--workspace-folder", assignment.WorkspaceFolder, "--config", configPath, "--log-format", "json")
 	command.Env = devcontainerEnvironment(*assignment)
 	output, err := command.Output()
 	var source json.RawMessage

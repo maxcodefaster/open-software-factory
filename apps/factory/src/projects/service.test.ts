@@ -24,17 +24,23 @@ const projectRow = [
   createdAt,
 ];
 
-function fixture(projectRows: unknown[][] = [projectRow], failure?: Error) {
+function fixture(
+  projectRows: unknown[][] = [projectRow],
+  failure?: Error,
+  revoke?: "manager" | "account" | "directory",
+) {
   const queries: Array<{ query: string; parameters: unknown[]; transaction: number }> = [];
   const callbacks: Array<{ projectID: string; userID: string; recovering: boolean }> = [];
   const transactions: string[] = [];
   let transaction = 0;
+  let revoked = false;
   function connection(id: number) {
     return Object.assign(
       async (parts: TemplateStringsArray) => {
         const query = parts.join("?");
         queries.push({ query, parameters: [], transaction: id });
         if (!query.includes("pg_advisory_xact_lock")) throw new Error(`Unexpected SQL: ${query}`);
+        if (query.includes("factory-account-policy")) revoked = Boolean(revoke);
         return [];
       },
       {
@@ -42,7 +48,13 @@ function fixture(projectRows: unknown[][] = [projectRow], failure?: Error) {
           queries.push({ query, parameters, transaction: id });
           let rows: unknown[][] = [];
           if (query.includes('from "auth"."user"')) rows = [[userID]];
-          else if (query.includes('from "factory"."account_access"')) rows = [[null, null]];
+          else if (query.includes('from "factory"."account_access"'))
+            rows = [
+              [
+                revoked && revoke === "account" ? new Date(createdAt) : null,
+                revoked && revoke === "directory" ? new Date(createdAt) : null,
+              ],
+            ];
           else if (query.includes('from "factory"."project"'))
             rows = query.includes("count(")
               ? [
@@ -55,7 +67,8 @@ function fixture(projectRows: unknown[][] = [projectRow], failure?: Error) {
               : query.includes('"project_setup_readiness"')
                 ? [[projectID, userID]]
                 : projectRows;
-          else if (query.includes('from "factory"."administrator"')) rows = [[userID]];
+          else if (query.includes('from "factory"."administrator"'))
+            rows = revoked && revoke === "manager" ? [] : [[userID]];
           else if (query.startsWith('insert into "factory"."project"')) {
             if (failure) throw failure;
             rows = projectRows;
@@ -116,6 +129,12 @@ test("project registration uses one locked transaction and preserves database de
   expect(lock).toBeGreaterThanOrEqual(0);
   expect(f.queries[lock]?.transaction).toBe(transaction);
   expect(f.queries.indexOf(firstWrite)).toBeGreaterThan(lock);
+  const authority = f.queries.findIndex(
+    ({ query, transaction: id }) =>
+      id === transaction && query.startsWith('select "user_id" from "factory"."administrator"'),
+  );
+  expect(authority).toBeGreaterThan(lock);
+  expect(authority).toBeLessThan(f.queries.indexOf(firstWrite));
   expect(writes[0]?.query).toContain("default");
   expect(writes[0]?.parameters).toContain("moonlit-landscape");
   expect(writes[0]?.parameters).not.toContain(createdAt);
@@ -143,6 +162,21 @@ test("project registration uses one locked transaction and preserves database de
   expect(writes[2]?.parameters).toContain("configuration");
   expect(f.callbacks).toEqual([{ projectID, userID, recovering: false }]);
 });
+
+test.each(["manager", "account", "directory"] as const)(
+  "project registration rejects %s revocation while waiting for the account-policy lock",
+  async (revoke) => {
+    const f = fixture(undefined, undefined, revoke);
+    await expect(f.service.register(userID, input)).rejects.toMatchObject({
+      code: "forbidden",
+      message:
+        revoke === "manager" ? "System Manager access required" : "Account access is disabled",
+    });
+    expect(f.queries.filter(({ query }) => query.startsWith("insert into"))).toHaveLength(0);
+    expect(f.callbacks).toHaveLength(0);
+    expect(f.transactions.at(-1)).toMatch(/^rollback:/);
+  },
+);
 
 test("project registration preserves slug conflicts through Drizzle's query error", async () => {
   const f = fixture(undefined, Object.assign(new Error("duplicate slug"), { code: "23505" }));

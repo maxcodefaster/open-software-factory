@@ -6,6 +6,7 @@ import { expect as visible } from "@playwright/test";
 import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { z } from "zod";
 import type { releaseInstallation } from "./release-installation";
+import { saveTicketRequirements } from "./ticket-requirements";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 
@@ -62,45 +63,44 @@ export async function releaseDelivery(fixture: Fixture) {
     const revision =
       existing ??
       z.object({ id: z.uuid() }).parse(
-        await serverCall(
-          callFactoryFunction(
-            fixture.base,
-            "createRequirementRevision",
-            [
-              state.dependentTicketID,
-              {
-                summary: `Set src/version.txt to exactly ${fixture.slug}-follow-on followed by a newline. Run node --check src/server.mjs. Preserve the welcome dashboard.`,
-                acceptanceCriteria: [
-                  `src/version.txt contains exactly ${fixture.slug}-follow-on followed by a newline`,
-                  "node --check src/server.mjs passes",
-                ],
-                nonGoals: ["Dependencies, runtime configuration and other file changes"],
-              },
+        await saveTicketRequirements(
+          fixture.base,
+          state.dependentTicketID,
+          {
+            summary: `Set src/version.txt to exactly ${fixture.slug}-follow-on followed by a newline. Run node --check src/server.mjs. Preserve the welcome dashboard.`,
+            acceptanceCriteria: [
+              `src/version.txt contains exactly ${fixture.slug}-follow-on followed by a newline`,
+              "node --check src/server.mjs passes",
             ],
-            { cookie: cookie },
-          ),
+            nonGoals: ["Dependencies, runtime configuration and other file changes"],
+          },
+          { cookie: cookie },
         ),
       );
-    await serverCall(
+    const commandID = crypto.randomUUID();
+    const blocked = await serverCall(
       callFactoryFunction(
         fixture.base,
-        "approveRequirementRevision",
-        [state.dependentTicketID, revision.id],
-        { cookie: cookie },
+        "implementTicket",
+        [state.dependentTicketID, { commandId: commandID, revisionId: revision.id }],
+        { cookie },
       ),
     );
-    const blocked = await callFactoryFunction(
-      fixture.base,
-      "startTicketChange",
-      [state.dependentTicketID],
-      { cookie },
-    );
-    expect(blocked).toMatchObject({ ok: false, status: 409 });
-    if (blocked.ok) throw new Error("Dependent Ticket was unexpectedly admitted");
-    expect(blocked.message).toContain("Prerequisites must be delivered");
+    expect(blocked).toEqual({ id: commandID });
+    const [waiting] = await database.client`
+      SELECT state FROM factory.implementation_order WHERE command_id=${commandID}`;
+    expect(waiting?.["state"]).toBe("waiting");
     expect(
       await database.client`SELECT id FROM factory.change WHERE ticket_id = ${state.dependentTicketID}`,
     ).toHaveLength(0);
+    await serverCall(
+      callFactoryFunction(
+        fixture.base,
+        "cancelTicketImplementation",
+        [state.dependentTicketID, commandID],
+        { cookie },
+      ),
+    );
     await fixture.save("dependent-blocked", 0);
   }
   const started = performance.now();

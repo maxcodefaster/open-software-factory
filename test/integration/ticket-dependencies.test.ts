@@ -9,6 +9,7 @@ import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { substrateFixture } from "../fixtures/substrate";
+import type { createForgejoClient } from "../../packages/forge/src/forge";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 
@@ -106,9 +107,20 @@ function changeController(
   );
   try {
     Object.assign(process.env, configuration);
-    return createChangeController(database, {
-      stop: async () => null,
-    });
+    return createChangeController(
+      database,
+      { stop: async () => null },
+      undefined,
+      undefined,
+      apiURL === "http://127.0.0.1:9/api/v1/"
+        ? ({
+            getDefaultBranch: async () => ({ name: "main", headSha: "a".repeat(40) }),
+            ensureBranch: async () => {
+              throw new Error("Undelivered dependency proof cannot create a branch");
+            },
+          } as unknown as ReturnType<typeof createForgejoClient>)
+        : undefined,
+    );
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -129,7 +141,7 @@ async function fixture() {
       VALUES (${userId}, 'Owned Dependency Developer', ${`dependency-${userId}@factory.local`}, true)`;
     for (const id of [projectId, otherProjectId]) {
       await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-        VALUES (${id}, ${`dependency-${id}`}, 'Owned Dependency Project', 'https://example.invalid/dependencies.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+        VALUES (${id}, ${`dependency-${id}`}, 'Owned Dependency Project', 'http://127.0.0.1:9/owned-process-fixture/dependencies.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
     }
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
       VALUES (${projectId}, ${userId}, 'developer', ${administrator})`;
@@ -176,7 +188,17 @@ async function fixture() {
           VALUES (${revisionId}, ${ticketId}, 1, ${content}, ${createHash("sha256").update(content).digest("hex")}, ${userId})`;
         await database.client`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
           VALUES (${approvalId}, ${ticketId}, ${revisionId}, ${userId})`;
-        return { ticketId, approvalId, ...changeIdentity(ticketId, approvalId) };
+        return {
+          ticketId,
+          revisionId,
+          approvalId,
+          commission: {
+            commandID: crypto.randomUUID(),
+            revisionID: revisionId,
+            admitBuild: async () => {},
+          },
+          ...changeIdentity(ticketId, approvalId),
+        };
       },
       async change(approved: {
         ticketId: string;
@@ -280,31 +302,35 @@ test("Change and Build commands require exact delivered prerequisites, not cance
     const approvedFirst = await owned.approved(first);
     const approvedSecond = await owned.approved(second);
     await owned.edge("add", second, first);
-    await expect(controller.start(second, ctx.userId)).rejects.toThrow("First delivery");
+    expect(await controller.start(second, ctx.userId, approvedSecond.commission)).toBeNull();
     const outsider = crypto.randomUUID();
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${outsider},'Owned non-member',${`${outsider}@dependencies.test`},true)`;
-    await expect(controller.start(second, outsider)).rejects.toMatchObject({
+    await expect(
+      controller.start(second, outsider, approvedSecond.commission),
+    ).rejects.toMatchObject({
       code: "not-found",
     });
-    await expect(controller.start(second, crypto.randomUUID())).rejects.toThrow(
-      "Account access is disabled",
-    );
+    await expect(
+      controller.start(second, crypto.randomUUID(), approvedSecond.commission),
+    ).rejects.toThrow("Account access is disabled");
     await expect(owned.change(approvedSecond)).rejects.toThrow("Prerequisites must be delivered");
     await database.client`UPDATE factory.ticket SET state = 'cancelled' WHERE id = ${first}`;
-    await expect(controller.start(second, ctx.userId)).rejects.toThrow(
-      "Prerequisites must be delivered",
-    );
+    expect(await controller.start(second, ctx.userId, approvedSecond.commission)).toBeNull();
     expect(await owned.edges()).toHaveLength(1);
     await database.client`UPDATE factory.ticket SET state = 'done' WHERE id = ${first}`;
-    await expect(controller.start(second, ctx.userId)).rejects.toThrow(
-      "Prerequisites must be delivered",
-    );
+    expect(await controller.start(second, ctx.userId, approvedSecond.commission)).toBeNull();
     const changeId = await owned.change(approvedFirst);
     const verificationId = await owned.green(changeId);
-    await expect(controller.start(second, ctx.userId)).rejects.toThrow(
-      "Prerequisites must be delivered",
-    );
+    expect(await controller.start(second, ctx.userId, approvedSecond.commission)).toBeNull();
+    const [waiting] = await database.client`
+      SELECT state,source_sha AS source,requirement_revision_id AS revision
+      FROM factory.implementation_order WHERE command_id=${approvedSecond.commission.commandID}`;
+    expect(waiting).toEqual({
+      state: "waiting",
+      source: "a".repeat(40),
+      revision: approvedSecond.revisionId,
+    });
     await expect(owned.change(approvedSecond)).rejects.toThrow("Prerequisites must be delivered");
     expect(
       await database.client`SELECT id FROM factory.change WHERE ticket_id = ${second}`,
@@ -368,7 +394,7 @@ test("dependency admission rereads after a planning write and late edges lose to
       await release.promise;
     });
     await held.promise;
-    starting = controller.start(second, ctx.userId);
+    starting = controller.start(second, ctx.userId, approved.commission);
     void starting.catch(() => {});
     directStarting =
       database.client`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
@@ -383,7 +409,11 @@ test("dependency admission rereads after a planning write and late edges lose to
     );
     release.resolve();
     await writer;
-    await expect(starting).rejects.toThrow("Waiting delivery");
+    expect(await starting).toBeNull();
+    const [waiting] = await database.client`
+      SELECT state,requirement_revision_id AS revision FROM factory.implementation_order
+      WHERE command_id=${approved.commission.commandID}`;
+    expect(waiting).toEqual({ state: "waiting", revision: approved.revisionId });
     await expect(directStarting).rejects.toThrow("Waiting delivery");
     await expect(owned.change(approved)).rejects.toThrow("Waiting delivery");
     expect(
@@ -532,7 +562,7 @@ test("a dependent Change resolves the current delivered default after waiting fo
     const first = await owned.ticket("Delivered first");
     const second = await owned.ticket("Build on first");
     const approvedFirst = await owned.approved(first);
-    await owned.approved(second);
+    const approvedSecond = await owned.approved(second);
     await owned.edge("add", second, first);
     const changeId = await owned.change(approvedFirst);
     await owned.delivered(first, changeId, await owned.green(changeId));
@@ -546,7 +576,7 @@ test("a dependent Change resolves the current delivered default after waiting fo
     });
     const pid = await held.promise;
     const controller = changeController(owned.database, `http://127.0.0.1:${forge.port}/api/v1/`);
-    starting = controller.start(second, owned.ctx.userId);
+    starting = controller.start(second, owned.ctx.userId, approvedSecond.commission);
     void starting.catch(() => {});
     await eventually(
       async () =>
@@ -572,7 +602,9 @@ test("a dependent Change resolves the current delivered default after waiting fo
       Array<{ startSha: string }>
     >`SELECT start_sha AS "startSha" FROM factory.branch_create_operation WHERE change_id = ${change?.id ?? ""}`;
     expect(intent?.startSha).toBe(defaultSHA);
-    expect((await controller.start(second, owned.ctx.userId))?.id).toBe(change?.id);
+    expect((await controller.start(second, owned.ctx.userId, approvedSecond.commission))?.id).toBe(
+      change?.id,
+    );
   } finally {
     release.resolve();
     await writer?.catch(() => {});

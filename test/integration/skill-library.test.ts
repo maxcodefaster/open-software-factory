@@ -97,9 +97,12 @@ test("product authors keep a private cross-Project library; managers share exact
         skills.resolve("planning", sql, { projectID: secondProject, userID: author }),
       ),
     ).not.toContain(revisionId);
-    const conversation = await createProjectAgentController(database, {
-      start: async () => null,
-    }).setMode(project, undefined, "plan", author);
+    const conversation = await createProjectAgentController(database).setMode(
+      project,
+      undefined,
+      "plan",
+      author,
+    );
     if (!conversation) throw new Error("Owned conversation missing");
     const turns = createAgentTurnStore(database);
     await database.client.begin((sql) =>
@@ -132,9 +135,12 @@ test("product authors keep a private cross-Project library; managers share exact
     const ticketId = crypto.randomUUID();
     await database.client`INSERT INTO factory.ticket(id,project_id,title,description,created_by)
       VALUES (${ticketId},${project},'Shared Skill proof','Inspect exact shared guidance.',${author})`;
-    const sharedConversation = await createProjectAgentController(database, {
-      start: async () => null,
-    }).setMode(project, ticketId, "plan", author);
+    const sharedConversation = await createProjectAgentController(database).setMode(
+      project,
+      ticketId,
+      "plan",
+      author,
+    );
     if (!sharedConversation) throw new Error("Owned shared conversation missing");
     await database.client.begin((sql) =>
       turns.admitIn(

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { createConversationService } from "../../apps/factory/src/project-agent/service";
+import type { createDatabase } from "../../packages/db/src/client";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import {
   compiledFactoryEndpoint,
@@ -7,6 +10,58 @@ import {
   factoryFunctionRequest,
 } from "../fixtures/server-functions";
 import { planningDesign } from "../fixtures/technical-planning";
+
+test("compiled Code mode returns the Implement action without changing a conversation or admitting work", async () => {
+  const origin = "https://owned-code-mode.test";
+  const actor = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  const ticketID = crypto.randomUUID();
+  let writes = 0;
+  const database = {
+    client: {
+      async begin() {
+        writes++;
+        throw new Error("Code mode cannot persist implementation intent");
+      },
+    },
+  } as unknown as ReturnType<typeof createDatabase>;
+  const controller = createProjectAgentController(database);
+  const endpoint = await compiledFactoryEndpoint({
+    origin,
+    session: async () => ({ user: { id: actor } }),
+    maintenance: async () => false,
+    requireFresh: async () => {},
+    services: {
+      conversations: createConversationService({
+        access: {
+          requireProject: async (user, project) => {
+            expect(user).toBe(actor);
+            expect(project).toBe(projectID);
+          },
+        },
+        controller,
+      }),
+    } as FactoryServices,
+  });
+  try {
+    const result = await decodeResponse(
+      await endpoint(
+        await factoryFunctionRequest(origin, "setConversationMode", [
+          projectID,
+          { ticketId: ticketID, mode: "build" },
+        ]),
+      ),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      message: "Use Implement to approve the exact saved requirements and start Coding.",
+    });
+    expect(writes).toBe(0);
+  } finally {
+    await controller.shutdown();
+  }
+});
 
 test("compiled Ticket and Project commands validate exact input, bind the actor and detach cancellation without replay", async () => {
   const origin = "https://owned-tickets.test",
@@ -59,21 +114,6 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     },
     services: {
       tickets: {
-        async createRevision(...args: Parameters<FactoryServices["tickets"]["createRevision"]>) {
-          authority();
-          effects.push(["revision", ...args]);
-          return { id: revision };
-        },
-        async approveRevision(...args: Parameters<FactoryServices["tickets"]["approveRevision"]>) {
-          authority();
-          effects.push(["approve-revision", ...args]);
-          return { id: crypto.randomUUID(), requirementRevisionId: revision };
-        },
-        async startChange(...args: Parameters<FactoryServices["tickets"]["startChange"]>) {
-          authority();
-          effects.push(["start-change", ...args]);
-          return { id: change };
-        },
         async detail(...args: Parameters<FactoryServices["tickets"]["detail"]>) {
           authority();
           effects.push(["detail", ...args]);
@@ -127,15 +167,6 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
   const call = async (name: string, args: unknown[]) =>
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));
   const writes: Array<[string, unknown[]]> = [
-    [
-      "createRequirementRevision",
-      [
-        ticket,
-        { summary: "Approved work", acceptanceCriteria: ["One exact result"], nonGoals: [] },
-      ],
-    ],
-    ["approveRequirementRevision", [ticket, revision]],
-    ["startTicketChange", [ticket]],
     ["saveTicketDocument", [ticket, input]],
     ["saveTicketTechnicalDesign", [ticket, technicalInput]],
     [
@@ -160,9 +191,6 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
   maintenance = false;
   for (const [name, args] of [
     ["getTicketDetail", ["bad-id"]],
-    ["createRequirementRevision", [ticket, { summary: "", acceptanceCriteria: [] }]],
-    ["approveRequirementRevision", [ticket, "bad-id"]],
-    ["startTicketChange", ["bad-id"]],
     ["saveTicketDocument", [ticket, { ...input, expectedVersion: 0 }]],
     ["saveTicketDocument", [ticket, { ...input, createdBy: crypto.randomUUID() }]],
     [
@@ -198,17 +226,6 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     ok: false,
     status: 404,
   });
-  expect(
-    await call("createRequirementRevision", [
-      ticket,
-      { summary: "Denied", acceptanceCriteria: ["No cross-Project effects"] },
-    ]),
-  ).toMatchObject({ ok: false, status: 404 });
-  expect(await call("approveRequirementRevision", [ticket, revision])).toMatchObject({
-    ok: false,
-    status: 404,
-  });
-  expect(await call("startTicketChange", [ticket])).toMatchObject({ ok: false, status: 404 });
   expect(await call("saveTicketTechnicalDesign", [ticket, technicalInput])).toMatchObject({
     ok: false,
     status: 404,
@@ -222,14 +239,14 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
   expect(effects).toContainEqual(["save-technical-design", actor, ticket, technicalInput]);
   expect(effects).toContainEqual(["restore", actor, ticket, 2]);
   expect(effects).toContainEqual(["register", actor, project]);
-  expect(effects).toContainEqual([
-    "revision",
-    actor,
-    ticket,
-    { summary: "Approved work", acceptanceCriteria: ["One exact result"], nonGoals: [] },
-  ]);
-  expect(effects).toContainEqual(["approve-revision", actor, ticket, revision]);
-  expect(effects).toContainEqual(["start-change", actor, ticket]);
+  for (const removed of [
+    "createRequirementRevision",
+    "approveRequirementRevision",
+    "startTicketChange",
+  ])
+    await expect(factoryFunctionRequest(origin, removed, [])).rejects.toThrow(
+      `Compiled Factory function is missing: ${removed}`,
+    );
   const cancellation = new AbortController();
   const pending = endpoint(
     await factoryFunctionRequest(

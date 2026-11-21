@@ -32,7 +32,7 @@ async function fixture() {
     await host.dispose();
     throw cause;
   }
-  const controller = createProjectAgentController(database, { start: async () => null });
+  const controller = createProjectAgentController(database);
   const store = createAgentTurnStore(database);
   async function admitted(mode: "plan" | "investigate" = "plan", intent?: "project-research") {
     const conversation = await controller.setMode(projectID, undefined, mode, userID);
@@ -346,7 +346,7 @@ test("the Project Chat uses MCP tools through the real Mastra loop and does not 
   const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
   for (const [key, value] of Object.entries(environment)) process.env[key] = value;
   try {
-    const controller = createProjectAgentController(f.database, { start: async () => null });
+    const controller = createProjectAgentController(f.database);
     await controller.setMode(f.projectID, undefined, "plan", f.userID);
     const command = crypto.randomUUID();
     const response = await controller.message(

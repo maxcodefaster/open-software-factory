@@ -105,3 +105,82 @@ test("an invalid inherited browser build fails without deleting or replacing it"
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("browser build cancellation keeps a zero-exit compilation interrupted and removes its output", async () => {
+  const cancellation = new AbortController();
+  const environment: Record<string, string | undefined> = {};
+  let directory = "";
+  await expect(
+    prepareBrowserBuild(
+      environment,
+      async (input, signal) => {
+        expect(signal).toBe(cancellation.signal);
+        directory = input["FACTORY_BUILD_DIRECTORY"] ?? "";
+        await artifacts(directory);
+        cancellation.abort("SIGTERM");
+      },
+      cancellation.signal,
+    ),
+  ).rejects.toBe("SIGTERM");
+  expect(environment["FACTORY_BUILD_DIRECTORY"]).toBeUndefined();
+  await expect(access(directory)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("cancelled borrowing leaves the caller's verified build and selection unchanged", async () => {
+  const environment: Record<string, string | undefined> = {};
+  const dispose = await prepareBrowserBuild(environment, async (input) => {
+    await artifacts(input["FACTORY_BUILD_DIRECTORY"] ?? "");
+  });
+  const directory = environment["FACTORY_BUILD_DIRECTORY"] ?? "";
+  try {
+    const cancellation = new AbortController();
+    const borrowing = prepareBrowserBuild(
+      environment,
+      async () => {
+        throw new Error("Borrowing must not compile");
+      },
+      cancellation.signal,
+    );
+    cancellation.abort("SIGINT");
+    await expect(borrowing).rejects.toBe("SIGINT");
+    expect(environment["FACTORY_BUILD_DIRECTORY"]).toBe(directory);
+    expect(await readFile(resolve(directory, "server/entry.js"), "utf8")).toBe("owned build");
+    const beforeAdmission = new AbortController();
+    beforeAdmission.abort("SIGTERM");
+    await expect(
+      prepareBrowserBuild(
+        {},
+        async () => {
+          throw new Error("Cancelled build must not be admitted");
+        },
+        beforeAdmission.signal,
+      ),
+    ).rejects.toBe("SIGTERM");
+  } finally {
+    await dispose();
+  }
+});
+
+test("a selected owned build directory cannot overwrite an existing artifact", async () => {
+  const parent = resolve(".factory/test-results/application-builds");
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(resolve(parent, "browser-collision-"));
+  const environment: Record<string, string | undefined> = {};
+  try {
+    await writeFile(resolve(directory, "retained"), "other owner's build");
+    await expect(
+      prepareBrowserBuild(
+        environment,
+        async () => {
+          throw new Error("Colliding build must not be admitted");
+        },
+        undefined,
+        directory,
+      ),
+    ).rejects.toMatchObject({ code: "EEXIST" });
+    expect(environment["FACTORY_BUILD_DIRECTORY"]).toBeUndefined();
+    expect(await readFile(resolve(directory, "retained"), "utf8")).toBe("other owner's build");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

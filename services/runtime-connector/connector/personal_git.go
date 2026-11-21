@@ -66,12 +66,15 @@ func personalGitCommand(ctx context.Context, workspace string, args ...string) (
 		"-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "commit.gpgSign=false",
 		"-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
 		"--git-dir=" + metadata, "--work-tree=" + workspace, "-C", workspace}
-	command := exec.CommandContext(ctx, "git", append(base, args...)...)
+	command := ownedCommand(ctx, "git", append(base, args...)...)
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/tmp",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
 		"GIT_REFLOG_ACTION=factory-personal-git"}
 	if os.Geteuid() == 0 {
-		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000}}
+		if command.SysProcAttr == nil {
+			command.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		command.SysProcAttr.Credential = &syscall.Credential{Uid: 1000, Gid: 1000}
 	}
 	var output gitOutputBuffer
 	command.Stdout, command.Stderr = &output, &output

@@ -8,11 +8,17 @@ import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
+  browserFunction,
+  controlledBrowserFunction,
   mockBootstrap,
   mockFactoryFunctions,
   requestFunction,
 } from "../fixtures/server-functions";
 import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
+import {
+  queuedTicketImplementation,
+  ticketRequirementsInput,
+} from "../fixtures/ticket-requirements";
 
 test.use({ viewport: { width: 1440, height: 960 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(90_000);
@@ -25,8 +31,8 @@ test("named prerequisites block Build and remain linked after cancellation until
   const slug = `dependency-qa-${projectId.slice(0, 8)}`;
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  // Isolate prerequisite presentation from model connection readiness. Native
-  // admission below still runs on the real authenticated Factory service.
+  // Isolate prerequisite presentation from model connection readiness.
+  // Implement below runs actual admission with a read-only Forge fixture.
   await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
   await mockFactoryFunctions(page, {
     workspaces: {
@@ -114,21 +120,44 @@ test("named prerequisites block Build and remain linked after cancellation until
     ).toBeVisible();
     await expect(prerequisites.getByText("Awaiting delivery", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Add dependency", exact: true })).toBeHidden();
-    const revisionResponse = await requestFunction(page.request, "createRequirementRevision", [
-      second,
+    // The visible Zero projection is optimistic. Capture the document base only
+    // after this planning mutation committed its Ticket version.
+    await expect
+      .poll(
+        async () =>
+          (
+            await database.client`SELECT prerequisite_id FROM factory.ticket_dependency
+              WHERE project_id=${projectId} AND ticket_id=${second} AND prerequisite_id=${first}`
+          ).length,
+      )
+      .toBe(1);
+    const detail = await serverCall(browserFunction(page, "getTicketDetail", [second]));
+    const savedInput = ticketRequirementsInput(
+      detail,
       {
         summary: "Build onboarding on the delivered contract",
         acceptanceCriteria: ["Use the delivered sign-in contract"],
         nonGoals: [],
       },
+      crypto.randomUUID(),
+    );
+    const revisionResponse = await requestFunction(page.request, "saveTicketDocument", [
+      second,
+      savedInput,
     ]);
-    expect(revisionResponse).toMatchObject({ ok: true });
     const revision = z
-      .object({ id: z.uuid() })
+      .object({ requirementRevisionId: z.uuid() })
       .parse(await serverCall(Promise.resolve(revisionResponse)));
     expect(
-      await requestFunction(page.request, "approveRequirementRevision", [second, revision.id]),
-    ).toMatchObject({ ok: true });
+      await serverCall(requestFunction(page.request, "saveTicketDocument", [second, savedInput])),
+    ).toEqual(await serverCall(Promise.resolve(revisionResponse)));
+    await mockFactoryFunctions(page, {
+      tickets: await queuedTicketImplementation(database, administrator, projectId),
+    });
+    const implementation = Object.freeze({
+      commandId: crypto.randomUUID(),
+      revisionId: revision.requirementRevisionId,
+    });
     await page.reload();
     await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/tickets/${second}(?:[/?#]|$)`));
     await expect(page.getByLabel("Ticket title", { exact: true })).toHaveText(
@@ -150,14 +179,33 @@ test("named prerequisites block Build and remain linked after cancellation until
     await expect(
       page.getByRole("button", { name: "Queue implementation", exact: true }),
     ).toBeEnabled();
-    const denied = await requestFunction(page.request, "startTicketChange", [second]);
-    expect(denied).toMatchObject({ ok: false, status: 409 });
-    if (denied.ok) throw new Error("Dependent Ticket was unexpectedly admitted");
-    expect(denied.message).toContain("Publish the sign-in contract");
+    expect(
+      await serverCall(
+        controlledBrowserFunction(page, "implementTicket", [second, implementation]),
+      ),
+    ).toEqual({ id: implementation.commandId });
+    const [waiting] = await database.client`
+      SELECT state,requirement_revision_id AS revision,source_sha AS source,created_by AS author
+      FROM factory.implementation_order WHERE command_id=${implementation.commandId}`;
+    expect(waiting).toEqual({
+      state: "waiting",
+      revision: implementation.revisionId,
+      source: "a".repeat(40),
+      author: administrator,
+    });
+    expect(
+      await database.client`SELECT id FROM factory.change WHERE ticket_id=${second}`,
+    ).toHaveLength(0);
     await mkdir(".factory/test-results/epic-folders", { recursive: true });
     await page.screenshot({
       path: ".factory/test-results/epic-folders/dependencies-ticket-wide.png",
     });
+    await serverCall(
+      requestFunction(page.request, "cancelTicketImplementation", [
+        second,
+        implementation.commandId,
+      ]),
+    );
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     await board
       .getByRole("button", { name: /^Open Epic Release(?: |$)/ })
@@ -204,10 +252,16 @@ test("named prerequisites block Build and remain linked after cancellation until
     await expect(
       page.getByRole("button", { name: "Queue implementation", exact: true }),
     ).toBeEnabled();
-    const stillDenied = await requestFunction(page.request, "startTicketChange", [second]);
-    expect(stillDenied).toMatchObject({ ok: false, status: 409 });
-    if (stillDenied.ok) throw new Error("Cancelled prerequisite was treated as delivered");
-    expect(stillDenied.message).toContain("Publish the sign-in contract");
+    const secondImplementation = Object.freeze({
+      ...implementation,
+      commandId: crypto.randomUUID(),
+    });
+    for (let replay = 0; replay < 2; replay++)
+      expect(
+        await serverCall(
+          controlledBrowserFunction(page, "implementTicket", [second, secondImplementation]),
+        ),
+      ).toEqual({ id: secondImplementation.commandId });
     const [work] = await database.client<
       Array<{ changes: number; orders: number; turns: number; runtimes: number }>
     >`SELECT
@@ -215,7 +269,10 @@ test("named prerequisites block Build and remain linked after cancellation until
       (SELECT count(*)::integer FROM factory.implementation_order WHERE project_id=${projectId}) AS orders,
       (SELECT count(*)::integer FROM factory.agent_turn WHERE project_id=${projectId}) AS turns,
       (SELECT count(*)::integer FROM factory.runtime_attempt WHERE project_id=${projectId}) AS runtimes`;
-    expect(work).toEqual({ changes: 0, orders: 0, turns: 0, runtimes: 0 });
+    expect(work).toEqual({ changes: 0, orders: 2, turns: 0, runtimes: 0 });
+    const [stillWaiting] = await database.client`
+      SELECT state FROM factory.implementation_order WHERE command_id=${secondImplementation.commandId}`;
+    expect(stillWaiting?.["state"]).toBe("waiting");
     await page.setViewportSize({ width: 430, height: 860 });
     await page.screenshot({
       path: ".factory/test-results/epic-folders/dependencies-ticket-narrow.png",
@@ -225,6 +282,16 @@ test("named prerequisites block Build and remain linked after cancellation until
         .locator(".ticket-document")
         .evaluate((element) => element.scrollWidth <= element.clientWidth),
     ).toBe(true);
+    await serverCall(
+      requestFunction(page.request, "cancelTicketImplementation", [
+        second,
+        secondImplementation.commandId,
+      ]),
+    );
+    const [cancelled] = await database.client`
+      SELECT state,cancelled_by AS author FROM factory.implementation_order
+      WHERE command_id=${secondImplementation.commandId}`;
+    expect(cancelled).toEqual({ state: "cancelled", author: administrator });
     await prerequisites
       .getByRole("button", {
         name: "Remove prerequisite Publish the sign-in contract",

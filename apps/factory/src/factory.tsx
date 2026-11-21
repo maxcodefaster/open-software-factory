@@ -1145,11 +1145,13 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     refreshTicketDetail,
     personalDrafts,
     personalDraftKey,
+    ticketDrafts,
     setSelectedTicketID,
     setDetail,
     openWorkspaceTab,
     props,
     workspaces,
+    workspaceVisible,
     selectTicket,
   });
 
@@ -1335,6 +1337,10 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     }
     setInboxFeedbackID(undefined);
     const ticket = ticketList().find((candidate) => candidate.id === ticketID);
+    const retained = workspaceTabs().find(
+      (tab) => tab.view === "ticket" && tab.ticketID === ticketID,
+    );
+    if (retained && retained.id !== `ticket:${ticketID}`) workspaces.close(retained.id);
     loadTicketContext(ticketID, read);
     openWorkspaceTab(
       {

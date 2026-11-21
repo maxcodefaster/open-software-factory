@@ -394,12 +394,21 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     expect(
       await callFactoryFunction(
         process.base,
-        "createRequirementRevision",
+        "saveTicketDocument",
         [
           second.ticketID,
           {
-            summary: "Denied requirements",
-            acceptanceCriteria: ["Keep Project isolation"],
+            commandId: crypto.randomUUID(),
+            expectedVersion: 1,
+            expectedDocumentId: null,
+            requirementRevisionId: second.revisionID,
+            title: "Denied requirements",
+            description: "",
+            requirement: {
+              summary: "Denied requirements",
+              acceptanceCriteria: ["Keep Project isolation"],
+              nonGoals: [],
+            },
           },
         ],
         { cookie },
@@ -408,13 +417,10 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     expect(
       await callFactoryFunction(
         process.base,
-        "approveRequirementRevision",
-        [second.ticketID, second.revisionID],
+        "implementTicket",
+        [second.ticketID, { commandId: crypto.randomUUID(), revisionId: second.revisionID }],
         { cookie },
       ),
-    ).toMatchObject({ ok: false, status: 404 });
-    expect(
-      await callFactoryFunction(process.base, "startTicketChange", [second.ticketID], { cookie }),
     ).toMatchObject({ ok: false, status: 404 });
     expect(
       await callFactoryFunction(process.base, "cancelChange", [second.changeID], { cookie }),

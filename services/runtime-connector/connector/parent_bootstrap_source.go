@@ -11,15 +11,17 @@ func keepsParentStartupSource(assignment Assignment) bool {
 	return assignment.nativeActorUID != "" && assignment.nativeRetainedSource && assignment.nativeSource != nil && assignment.PreserveWorkspace
 }
 
-func cleanupFailedParentStartup(assignment Assignment, failure error) error {
+func cleanupFailedParentStartup(ctx context.Context, assignment Assignment, failure error) error {
 	// Retained native containers include private writable layers, not just named
 	// volumes. Source drain will stop them before the original ROOTFS checkpoint;
 	// deleting partial bootstrap containers here would silently discard their data.
 	if keepsParentStartupSource(assignment) || errors.Is(failure, errDevcontainerNotStarted) {
 		return failure
 	}
-	if err := cleanupAttempt(assignment); err != nil {
-		return fmt.Errorf("%w; cleanup failed: %v", failure, err)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeCleanupTimeout)
+	defer cancel()
+	if err := cleanupAttempt(ctx, assignment); err != nil {
+		return errors.Join(failure, fmt.Errorf("cleanup failed: %w", err))
 	}
 	return failure
 }

@@ -77,7 +77,7 @@ test.each([
             "A push is a reason to check relevance, not a reason to publish",
           );
           expect(system).toContain("Prefer updating an existing page by pageIDs");
-          expect(system).not.toContain("Small app needs 1-3 topics");
+          expect(system).toContain("documentedAreas are source exploration hints");
           plans++;
           if (plans > 1) {
             const correction = messages.find(
@@ -87,7 +87,9 @@ test.each([
             expect(correction).toContain("rejectedResult");
           }
           output = { topics: [] };
-        } else if (system.includes("additional topics")) {
+        } else if (system.includes("Return the complete corrected topic plan")) {
+          expect(system).toContain("remove redundant topics");
+          expect(system).toContain("updates to the existing owner");
           const user = messages.find((message) => message.role === "user")?.content ?? "";
           expect(user).toContain(
             scenario === "actionable-live-finding"
@@ -121,7 +123,8 @@ test.each([
               ? { findings: [], issues: [selfNegatingLiveFinding] }
               : {
                   findings:
-                    scenario === "genuine-no-op"
+                    scenario === "genuine-no-op" ||
+                    (scenario === "missing-guide" && coverageChecks === 2)
                       ? []
                       : scenario === "self-negating-live-finding"
                         ? [nonissue]
@@ -204,7 +207,7 @@ test.each([
       });
       if (["rejected-plan", "actionable-live-finding", "mixed-findings"].includes(scenario)) {
         await expect(run).rejects.toThrow("Wiki topic plan omits essential reader coverage");
-        expect([plans, coverageChecks, publications]).toEqual([2, 1, 0]);
+        expect([plans, coverageChecks, publications]).toEqual([2, 2, 0]);
       } else if (scenario === "malformed-coverage") {
         await expect(run).rejects.toThrow("Structured output validation failed");
         expect([plans, coverageChecks, publications]).toEqual([1, 3, 0]);
@@ -217,7 +220,7 @@ test.each([
       } else {
         expect(await run).toEqual({ pages: [] });
         expect([plans, coverageChecks, publications]).toEqual(
-          scenario === "missing-guide" ? [2, 1, 1] : [1, 1, 0],
+          scenario === "missing-guide" ? [2, 2, 1] : [1, 1, 0],
         );
         expect(pages[0]).toBe(overview);
       }

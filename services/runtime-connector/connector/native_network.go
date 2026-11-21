@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -89,7 +88,7 @@ func runNativeLifecycle(ctx context.Context, assignment Assignment, result devco
 		args = append(args, "--secrets-file", assignment.EnvironmentSecretsFile, "--oci-auth-hardening")
 	}
 	args = append(args, nativeDependencyRemoteEnvironment(assignment, proxy)...)
-	command := exec.CommandContext(ctx, "devcontainer", args...)
+	command := ownedCommand(ctx, "devcontainer", args...)
 	command.Env = devcontainerEnvironment(assignment)
 	var stdout, diagnostic devcontainerFailureOutput
 	command.Stdout, command.Stderr = &stdout, &diagnostic

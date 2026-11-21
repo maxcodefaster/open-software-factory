@@ -59,6 +59,91 @@ export function requiredEnvironmentVariables(contents: readonly string[]) {
   return [...names].sort();
 }
 
+export async function readRequiredEnvironmentVariables(
+  configuration: string,
+  read: (path: string) => Promise<string>,
+) {
+  const selected = posix.normalize(configuration);
+  if (
+    posix.isAbsolute(selected) ||
+    selected === ".." ||
+    selected.startsWith("../") ||
+    /[$\\]/.test(configuration)
+  )
+    throw new Error(
+      "Required environment discovery needs a fixed repository-relative configuration",
+    );
+  const contents: string[] = [];
+  const pending = [selected];
+  const seen = new Set<string>();
+  function reference(from: string, value: string) {
+    const path = posix.normalize(posix.join(posix.dirname(from), value));
+    if (posix.isAbsolute(value) || path === ".." || path.startsWith("../") || value.includes("$"))
+      throw new Error(
+        "Required environment discovery needs a fixed repository-relative configuration",
+      );
+    pending.push(path);
+  }
+  while (pending.length) {
+    const path = pending.shift();
+    if (!path || seen.has(path)) continue;
+    if (seen.size >= 32)
+      throw new Error("Required environment configuration exceeds its read bound");
+    seen.add(path);
+    const content = await read(path);
+    if (Buffer.byteLength(content) > 64_000)
+      throw new Error("Required environment configuration exceeds its size bound");
+    contents.push(content);
+    if (path === selected) {
+      const errors: ParseError[] = [];
+      const value: unknown = parseJSONC(content, errors, { allowTrailingComma: true });
+      if (errors.length || !value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("Dev Container configuration is invalid JSONC");
+      const compose = Reflect.get(value, "dockerComposeFile") as unknown;
+      if (compose !== undefined && typeof compose !== "string" && !Array.isArray(compose))
+        throw new Error("Dev Container Compose reference is invalid");
+      for (const item of typeof compose === "string"
+        ? [compose]
+        : Array.isArray(compose)
+          ? compose
+          : []) {
+        if (typeof item !== "string") throw new Error("Dev Container Compose reference is invalid");
+        reference(path, item);
+      }
+    } else {
+      const value: unknown = yaml(content);
+      if (!value || typeof value !== "object") throw new Error("Compose configuration is invalid");
+      const includes: unknown = Reflect.get(value, "include");
+      for (const item of Array.isArray(includes) ? includes : includes ? [includes] : []) {
+        const paths: unknown =
+          typeof item === "string"
+            ? item
+            : item && typeof item === "object"
+              ? Reflect.get(item, "path")
+              : undefined;
+        for (const included of typeof paths === "string"
+          ? [paths]
+          : Array.isArray(paths)
+            ? paths
+            : []) {
+          if (typeof included !== "string") throw new Error("Compose include reference is invalid");
+          reference(path, included);
+        }
+      }
+      const services: unknown = Reflect.get(value, "services");
+      if (services && typeof services === "object")
+        for (const service of Object.values(services)) {
+          const extended: unknown =
+            service && typeof service === "object" ? Reflect.get(service, "extends") : undefined;
+          const file: unknown =
+            extended && typeof extended === "object" ? Reflect.get(extended, "file") : undefined;
+          if (typeof file === "string") reference(path, file);
+        }
+    }
+  }
+  return requiredEnvironmentVariables(contents);
+}
+
 function yaml(content: string) {
   const value = parseDocument(content, { uniqueKeys: true });
   if (value.errors.length) throw new Error("Configuration is invalid YAML");

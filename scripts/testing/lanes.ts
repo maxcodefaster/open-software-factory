@@ -1,5 +1,6 @@
-import { rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import { runProcess } from "../owned-client-process";
 
 const nativeNames = new Set([
   "backup-runner.native",
@@ -103,6 +104,7 @@ export function integrationNeedsApplicationBuild(path: string) {
     "conversation-persistence.test.ts",
     "review-media.test.ts",
     "project-release-store.test.ts",
+    "project-registration-authority.test.ts",
     "mcp-library.test.ts",
     "mcp-oauth.test.ts",
     "mcp-cancellation.test.ts",
@@ -210,37 +212,62 @@ if (import.meta.main) {
     const prerequisites = await import("./test-prerequisites");
     const env =
       lane === "live" ? { ...process.env } : prerequisites.verificationEnvironment(process.env);
-    if (lane !== "live") await prerequisites.prepareTestPrerequisites(selected, env);
-    const buildDirectory =
-      lane === "unit" || !selected.some(integrationNeedsApplicationBuild)
-        ? undefined
-        : resolve(".factory/test-results/application-builds", crypto.randomUUID());
+    const cancellation = new AbortController();
+    let interrupted: number | undefined;
+    const interrupt = (signal: "SIGINT" | "SIGTERM") => {
+      interrupted ??= signal === "SIGINT" ? 130 : 143;
+      process.exitCode = interrupted;
+      if (!cancellation.signal.aborted) cancellation.abort(signal);
+    };
+    const onInterrupt = () => interrupt("SIGINT");
+    const onTerminate = () => interrupt("SIGTERM");
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+    let buildDirectory: string | undefined;
     let owned:
       | Awaited<
           ReturnType<typeof import("../../test/fixtures/postgres-server").ownedPostgresServer>
         >
       | undefined;
     try {
+      if (lane !== "live")
+        await prerequisites.prepareTestPrerequisites(selected, env, cancellation.signal);
+      cancellation.signal.throwIfAborted();
       // Client and compiled Start handler belong to this invocation. Never rebuild
       // the artifacts a retained Factory or another proof is currently serving.
-      if (buildDirectory) {
+      if (lane !== "unit" && selected.some(integrationNeedsApplicationBuild)) {
+        const parent = resolve(".factory/test-results/application-builds");
+        await mkdir(parent, { recursive: true });
+        cancellation.signal.throwIfAborted();
+        buildDirectory = await mkdtemp(resolve(parent, "lane-"));
         env["FACTORY_BUILD_DIRECTORY"] = buildDirectory;
-        const build = Bun.spawn([process.execPath, "run", "factory:build"], {
-          env: prerequisites.productionBuildEnvironment(env),
-          stdout: "inherit",
-          stderr: "inherit",
-        });
-        if ((await build.exited) !== 0) throw new Error("Factory test application build failed");
+        const build = await runProcess(
+          [process.execPath, "--no-env-file", "run", "factory:build"],
+          {
+            env: prerequisites.productionBuildEnvironment(env),
+            signal: cancellation.signal,
+            output: "inherit",
+            allowFailure: true,
+          },
+        );
+        if (build.code !== 0) throw new Error("Factory test application build failed");
       }
       // All fixtures retain separate databases. Only daemon startup and the empty
       // migrated baseline are shared by this invocation, never product state.
-      if (lane !== "unit" && lane !== "live" && selected.some(controllerNeedsDatabase))
-        owned = await (await import("../../test/fixtures/postgres-server")).ownedPostgresServer();
+      cancellation.signal.throwIfAborted();
+      if (lane !== "unit" && lane !== "live" && selected.some(controllerNeedsDatabase)) {
+        const postgres = await import("../../test/fixtures/postgres-server");
+        cancellation.signal.throwIfAborted();
+        owned = await postgres.ownedPostgresServer();
+      }
+      // Let an in-flight external create return its confirmed identity before
+      // disposing it. Cancellation does not invent ownership after a lost reply.
+      cancellation.signal.throwIfAborted();
       if (owned) env["FACTORY_TEST_POSTGRES"] = JSON.stringify(owned.identity);
       else delete env["FACTORY_TEST_POSTGRES"];
       // `bun run` can prepend a different installed Bun to PATH. Re-enter the
       // pinned tool environment rather than inheriting that launcher binary.
-      const child = Bun.spawn(
+      const child = await runProcess(
         [
           "mise",
           "exec",
@@ -256,14 +283,22 @@ if (import.meta.main) {
             ? ["--retry", env["FACTORY_CONTROLLER_RETRIES"]]
             : []),
         ],
-        { env, stdout: "inherit", stderr: "inherit" },
+        { env, signal: cancellation.signal, output: "inherit", allowFailure: true },
       );
-      process.exitCode = await child.exited;
+      process.exitCode = child.code;
+    } catch (cause) {
+      if (!cancellation.signal.aborted || cause !== cancellation.signal.reason) throw cause;
     } finally {
       try {
-        await owned?.dispose();
+        try {
+          await owned?.dispose();
+        } finally {
+          if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
+        }
       } finally {
-        if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
+        if (interrupted !== undefined) process.exitCode = interrupted;
+        process.off("SIGINT", onInterrupt);
+        process.off("SIGTERM", onTerminate);
       }
     }
   }

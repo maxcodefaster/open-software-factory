@@ -54,7 +54,7 @@ test.each([false, true])(
       await database.client`UPDATE factory.project_membership SET role='product-contributor'
       WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
       await database.client`UPDATE factory.project SET repository_url=${`http://127.0.0.1:${forge.port}/owned/manual.git`} WHERE id=${owned.projectID}`;
-      const planning = createProjectAgentController(database, { start: async () => null });
+      const planning = createProjectAgentController(database);
       const zero = zeroDrizzle(zeroSchema, database.db);
       const ticketID = crypto.randomUUID();
       const args = {
@@ -237,7 +237,7 @@ test("an unadmitted Requirements entry cannot commission work or alter an explic
       failure: null,
     });
     // Reads cannot convert unadmitted intent into a conversation or model request.
-    const planning = createProjectAgentController(database, { start: async () => null });
+    const planning = createProjectAgentController(database);
     expect(await planning.get(owned.projectID, tickets[0], owned.userID)).toBeNull();
     expect(
       await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${fixtureValue(tickets[0], "tickets[0]")}`,

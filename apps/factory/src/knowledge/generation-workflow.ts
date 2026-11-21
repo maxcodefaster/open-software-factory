@@ -32,7 +32,7 @@ import { createWikiMetrics } from "./generation-metrics";
 import { documentationLanguage } from "./language";
 import { stripSourcesFooter, unlinkUnavailableGuides } from "./page-tidy";
 import { type RateLimitState, retryRateLimited } from "./provider-retry";
-import { documentedReaderAreas, minimumDocumentedAreas } from "./reader-areas";
+import { documentedReaderAreas } from "./reader-areas";
 import { listDirectory, repositoryMap } from "./repository-map";
 import { pageExcerpt, promptSources, sourceExcerpt } from "./source-excerpt";
 import { wikiLinkIssues } from "./wiki-links";
@@ -367,7 +367,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   async function ask<T extends z.ZodType>(
     id: string,
     schema: T,
-    prompt: Record<string, unknown> | (() => Record<string, unknown>),
+    prompt: Record<string, unknown>,
     sources: ReturnType<typeof sourceScope>,
     task: string,
     validate?: (value: z.output<T>) => void | Promise<void>,
@@ -411,14 +411,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         authorize: input.authorize,
       });
       try {
-        // A coverage repair may follow checked publications accepted during the previous attempt.
-        const currentPrompt = typeof prompt === "function" ? prompt() : prompt;
         const result = await mastra
           .getAgent("wiki")
           .generate(
-            JSON.stringify(
-              correction ? { input: currentPrompt, rejectedResult, correction } : currentPrompt,
-            ),
+            JSON.stringify(correction ? { input: prompt, rejectedResult, correction } : prompt),
             {
               maxSteps: Infinity,
               abortSignal: activeSignal,
@@ -565,11 +561,14 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           `Repeated topic slug: ${topic.slug}. Keep topic slugs unique.`,
         );
       const invalidIDs = topic.pageIDs.filter(
-        (id) => !pages.some((page) => page.id === id && page.state === "active") || ids.has(id),
+        (id) =>
+          !pages.some((page) => page.id === id && page.state === "active") ||
+          completedPageIDs.has(id) ||
+          ids.has(id),
       );
       if (invalidIDs.length)
         throw new WikiTopicPlanError(
-          `Unavailable or repeated pageIDs: ${invalidIDs.slice(0, 12).join(", ")}. Use each active currentPage in only one topic.`,
+          `Unavailable or repeated pageIDs: ${invalidIDs.slice(0, 12).join(", ")}. Use each active currentPage in only one topic; completedPageIDs are read-only.`,
         );
       if (
         topic.parentSlug &&
@@ -593,14 +592,18 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     };
   }
   const plannerTask =
-    "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add a child guide for each distinct reader task the Project's own documentation names, such as setup and verification, architecture, or a main workflow. When documentedAreas lists three or more areas, a single overview page is not a complete plan: plan a guide for each distinct area that is a reader task (merge near-duplicates, at most five guides). There is no target page count and no padding. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.";
+    "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add a child guide only when a distinct useful reader task cannot fit coherently there. documentedAreas are source exploration hints, not required pages. One guide can be sufficient regardless of the number of README headings or documentation files. There is no target page count and no padding. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.";
   const documentedAreas = documentedReaderAreas(input.inventory, input.sources);
   const emptyWiki = !pages.some((page) => page.state === "active");
-  // The coverage review never removes a topic, so topics start while it runs and its gaps are
-  // added afterwards. Only an empty plan has to wait for it.
-  let coverageReview: Promise<Topic[]> | undefined;
-  async function reviewCoverage(remaining: z.infer<typeof planSchema>): Promise<Topic[]> {
-    const coverage = await ask(
+  type CoverageFinding = Extract<
+    z.infer<typeof wikiPlanReviewSchema>["findings"][number],
+    { kind: "actionable" }
+  >;
+  async function checkCoverage(
+    plan: z.infer<typeof planSchema>,
+    previous?: { topics: Topic[]; findings: CoverageFinding[] },
+  ) {
+    const review = await ask(
       "topic-plan-checker",
       wikiPlanReviewSchema,
       {
@@ -609,11 +612,16 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         changedPaths: input.changedPaths,
         currentPages: pages,
         completedPageIDs: [...completedPageIDs],
-        proposedTopics: remaining.topics,
+        proposedTopics: plan.topics,
         sources: promptSources(planSources.read.values(), planCheckSources),
+        ...(previous
+          ? { previousTopics: previous.topics, previousFindings: previous.findings }
+          : {}),
       },
       planSources,
-      wikiPlanReviewTask,
+      previous
+        ? `${wikiPlanReviewTask} This is the final check after one plan repair. Check whether previousFindings are resolved by the corrected plan and current pages. A removed redundant topic is resolved; an update assigned to its existing page identity is resolved when its purpose addresses the required correction. Keep useful unaffected tasks in previousTopics covered by the corrected plan or current pages. Report only unresolved prior findings or coverage gaps introduced by the repair, including missing guidance that an empty plan still omits. Do not introduce unrelated reader tasks, scope or wording preferences.`
+        : wikiPlanReviewTask,
       (review) => {
         const unread = review.findings
           .flatMap((finding) => (finding.kind === "actionable" ? finding.sourcePaths : []))
@@ -621,53 +629,46 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         if (unread.length) throw new WikiSourceEvidenceError([...new Set(unread)]);
       },
     );
-    const issues = coverage.findings.flatMap((finding) =>
-      finding.kind === "actionable"
-        ? [
-            `${finding.readerTask}: ${finding.requiredChange} Sources: ${finding.sourcePaths.join(", ")}`,
-          ]
-        : [],
+    return review.findings.filter(
+      (finding): finding is CoverageFinding => finding.kind === "actionable",
     );
-    // A new Wiki with several documented reader areas is not complete as one overview page.
-    if (
-      !issues.length &&
-      emptyWiki &&
-      remaining.topics.length === 1 &&
-      documentedAreas.length >= minimumDocumentedAreas
-    )
-      issues.push(
-        `The repository documents ${documentedAreas.length} reader areas (${documentedAreas
-          .slice(0, 8)
-          .join(
-            "; ",
-          )}) but the plan holds one topic. Plan a child guide for each distinct reader task among them.`,
+  }
+  async function reviewCoverage(plan: z.infer<typeof planSchema>) {
+    const findings = await checkCoverage(plan);
+    if (!findings.length) return plan;
+    // All topics are still unstarted. One replacement can remove duplicates or correct ownership.
+    const repaired = await ask(
+      "topic-planner",
+      planSchema,
+      {
+        project: input.name,
+        repository,
+        changedPaths: input.changedPaths,
+        currentPages: pages,
+        completedPageIDs: [...completedPageIDs],
+        plannedTopics: plan.topics,
+        documentedAreas: documentedAreas.slice(0, 12),
+        findings,
+        sources: promptSources(planSources.read.values(), planCheckSources),
+      },
+      planSources,
+      "Return the complete corrected topic plan that resolves findings, not an additions-only list. All plannedTopics are unstarted: keep useful topics, correct their purpose or pageIDs, replace unnecessary new guides with updates to the existing owner, and remove redundant topics. Add a topic only for a source-supported missing task. An empty plan is valid when removing redundant work leaves no useful change. Preserve human pages, their identities and hierarchy; never delete or archive pages or rewrite completedPageIDs. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic. Every parent must be an earlier retained topic or an active current page.",
+      validatePlan,
+    );
+    repaired.topics = underOverview(repaired.topics);
+    const unresolved = await checkCoverage(repaired, { topics: plan.topics, findings });
+    if (unresolved.length)
+      throw new WikiTopicCoverageError(
+        unresolved.map(
+          (finding) =>
+            `${finding.readerTask}: ${finding.requiredChange} Sources: ${finding.sourcePaths.join(", ")}`,
+        ),
       );
-    if (!issues.length) return [];
-    // A gap is closed by adding the missing guides, never by silently publishing less.
-    const room = maximumTopics - remaining.topics.length;
-    const additional = room
-      ? await ask(
-          "topic-planner",
-          z.object({ topics: z.array(topicSchema).max(room) }),
-          () => ({
-            project: input.name,
-            repository,
-            currentPages: pages,
-            completedPageIDs: [...completedPageIDs],
-            plannedTopics: remaining.topics,
-            documentedAreas: documentedAreas.slice(0, 12),
-            missingCoverage: issues,
-          }),
-          planSources,
-          "Return only the additional topics that close the missing coverage, as a coverage repair of plannedTopics. Do not repeat or change plannedTopics. Plan no topic when a missing item is already covered by plannedTopics or current pages. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic.",
-          (extra) => validatePlan({ topics: [...remaining.topics, ...extra.topics] }),
-        )
-      : { topics: [] };
-    if (!additional.topics.length) throw new WikiTopicCoverageError(issues);
-    return additional.topics;
+    return repaired;
   }
   // A new Wiki is one overview with guides beneath it, whatever parent the planner left empty.
-  function underOverview(list: Topic[], overview: Topic | undefined = list[0]) {
+  function underOverview(list: Topic[]) {
+    const overview = list[0];
     if (!emptyWiki || !overview || overview.parentSlug !== null) return list;
     return list.map((topic) =>
       topic === overview || topic.parentSlug !== null
@@ -701,11 +702,8 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         metrics.stage("plan", "planner", performance.now() - started);
         const remaining = remainingPlan(plan);
         remaining.topics = underOverview(remaining.topics);
-        const review = reviewCoverage(remaining);
-        if (!remaining.topics.length) return { topics: await review };
-        review.catch(() => undefined);
-        coverageReview = review;
-        return remaining;
+        // Review and repair ownership before workers can research, write or publish any topic.
+        return reviewCoverage(remaining);
       }),
   });
   const activeTopics: Topic[] = [];
@@ -735,11 +733,9 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       const topics = [...inputData.topics];
       const failed = new Map<string, unknown>();
       let fatal: { cause: unknown } | undefined;
-      const outcomes = new Map<string, ReturnType<typeof deferred>>();
-      const track = (list: Topic[]) => {
-        for (const topic of list) outcomes.set(topic.slug, deferred());
-      };
-      track(topics);
+      const outcomes = new Map<string, ReturnType<typeof deferred>>(
+        topics.map((topic) => [topic.slug, deferred()]),
+      );
       let settled = 0;
       report({
         phase: "writing",
@@ -758,31 +754,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         fatal = { cause };
         stop.abort(cause);
       };
-      // Guides the coverage review adds join the queue once it finishes; a plan or format
-      // failure there lets running topics finish and is reported last.
-      let coverageFailure: unknown;
-      let coverageDone = !coverageReview;
-      const coverageSettled = (coverageReview ?? Promise.resolve([] as Topic[])).then(
-        (extra) => {
-          coverageDone = true;
-          if (!extra.length) return;
-          const added = underOverview(extra, topics[0]);
-          topics.push(...added);
-          track(added);
-          report({ topicsTotal: topics.length });
-        },
-        (cause: unknown) => {
-          coverageDone = true;
-          if (
-            !activeSignal.aborted &&
-            (cause instanceof WikiTopicPlanError ||
-              cause instanceof WikiStructuredResultError ||
-              isStructuredOutputFailure(cause))
-          )
-            coverageFailure = cause;
-          else noteFatal(cause);
-        },
-      );
       async function settle(topic: Topic) {
         const outcome = outcomes.get(topic.slug);
         if (!outcome) throw new Error("Wiki topic outcome is missing");
@@ -826,21 +797,17 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           if (topic) {
             next++;
             await settle(topic);
-          } else if (coverageDone) return;
-          else await coverageSettled;
+          } else return;
         }
       }
       await Promise.all(
         Array.from(
           {
-            length: coverageDone
-              ? Math.min(maximumTopicConcurrency, topics.length)
-              : maximumTopicConcurrency,
+            length: Math.min(maximumTopicConcurrency, topics.length),
           },
           worker,
         ),
       );
-      await coverageSettled;
       const [firstFailure] = failed.values();
       if (fatal) {
         // A provider or budget failure after an earlier topic failed reports that first failure.
@@ -849,10 +816,9 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
         generationFailure.set(reported);
         throw reported;
       }
-      const incomplete = firstFailure !== undefined ? firstFailure : coverageFailure;
-      if (incomplete !== undefined) {
-        generationFailure.set(incomplete);
-        throw incomplete;
+      if (failed.size) {
+        generationFailure.set(firstFailure);
+        throw firstFailure;
       }
       report({ phase: "publishing", topicsDone: topics.length, currentTopic: null });
       return { pages: [] };

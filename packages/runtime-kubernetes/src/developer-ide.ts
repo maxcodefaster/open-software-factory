@@ -164,11 +164,18 @@ export function createDeveloperIDEClient(
         input.podUID,
         input.image,
       ]);
+      let openingInput = input;
       const connection = await forwards.open(
         key,
         input,
         async () => {
-          if (!(await observe(input))?.ready) throw new Error("Developer IDE is not ready");
+          const observed = await observe(openingInput);
+          if (!observed?.ready) throw new Error("Developer IDE is not ready");
+          openingInput = {
+            ...input,
+            namespaceUID: observed.namespaceUID,
+            podUID: observed.podUID,
+          };
         },
         () => forward(input.identity.namespace, input.identity.podName),
       );

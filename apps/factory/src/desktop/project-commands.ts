@@ -9,6 +9,7 @@ import type { Epic, Ticket } from "../api-contracts";
 import type { EpicEdit } from "../epic-controls";
 import type { createProjectPlanning } from "../projects/planning";
 import { type PersonalTicketDraft, readPersonalTicketDraft } from "../ticket-draft-workspace";
+import type { TicketDraft } from "../ticket-workspace";
 import type { createWorkspaceState } from "../workspace/state";
 import type { WorkspaceTab } from "../workspace-tabs";
 import type {
@@ -40,11 +41,13 @@ interface ProjectCommandsDependencies {
     }
   >;
   personalDraftKey: () => string;
+  ticketDrafts: Map<string, TicketDraft>;
   setSelectedTicketID: Setter<string | undefined>;
   setDetail: Setter<TicketDetail | undefined>;
   openWorkspaceTab: (tab: WorkspaceTab, publish?: boolean) => void;
   props: FactoryDesktopProps;
   workspaces: ReturnType<typeof createWorkspaceState>;
+  workspaceVisible: SourceAccessor<boolean>;
   selectTicket: (ticketID: string, fromInbox?: boolean, read?: boolean, publish?: boolean) => void;
 }
 
@@ -142,10 +145,16 @@ export function createProjectCommands(dependencies: ProjectCommandsDependencies)
     });
   }
 
-  async function publishTicketDraft(draft: PersonalTicketDraft, state: "inbox" | "ready") {
-    const projectID = dependencies.selectedProjectID();
+  async function publishTicketDraft(
+    draft: PersonalTicketDraft,
+    state: "inbox" | "ready",
+    projectID: string,
+  ) {
     const client = dependencies.zero();
     if (!projectID || !client) return false;
+    const ownedDraft = dependencies.personalDrafts.get(projectID);
+    if (!ownedDraft || ownedDraft.id !== draft.id) return false;
+    const draftTabID = `ticket-draft:${projectID}`;
     const result = await dependencies.mutate(async () => {
       await dependencies.commitZeroMutation(
         client.mutate(
@@ -158,13 +167,54 @@ export function createProjectCommands(dependencies: ProjectCommandsDependencies)
           }),
         ).server,
       );
+      // Completion belongs to the submitting Project, even after navigation.
+      // A replacement stays personal. Later edits to this same Ticket become
+      // an ordinary saved-Ticket draft, never a second create with its ID.
+      const retained = dependencies.personalDrafts.get(projectID);
+      if (!retained || retained.id !== draft.id) return;
+      if (
+        (retained.title.trim() !== draft.title || retained.description !== draft.description) &&
+        !dependencies.ticketDrafts.has(draft.id)
+      ) {
+        const editing: TicketDraft = {
+          title: retained.title,
+          description: retained.description,
+          requirement: {
+            summary: retained.description,
+            acceptanceCriteria: [],
+            nonGoals: [],
+          },
+          expectedVersion: 1,
+          expectedDocumentId: null,
+          requirementRevisionId: null,
+        };
+        dependencies.ticketDrafts.set(draft.id, editing);
+        try {
+          localStorage.setItem(
+            `ticket-edit:${dependencies.props.session.user.id}:${draft.id}`,
+            JSON.stringify(editing),
+          );
+        } catch {
+          /* Memory retains later edits for the created Ticket. */
+        }
+      }
+      const activate =
+        dependencies.selectedProjectID() === projectID &&
+        dependencies.workspaceVisible() &&
+        dependencies.workspaces.current()?.activeTabID === draftTabID;
       dependencies.personalDrafts.delete(projectID);
       try {
         localStorage.removeItem(`ticket-draft:${dependencies.props.session.user.id}:${projectID}`);
       } catch {
         /* Created work is authoritative even without browser storage. */
       }
-      dependencies.workspaces.close(`ticket-draft:${projectID}`);
+      // Keep the original tab identity while converting the retained result.
+      dependencies.workspaces.update(
+        { id: draftTabID, view: "ticket", ticketID: draft.id, label: draft.title },
+        projectID,
+      );
+      if (!activate) return;
+      dependencies.workspaces.close(draftTabID);
       dependencies.selectTicket(draft.id);
       await dependencies.refreshTicketDetail(draft.id);
     });

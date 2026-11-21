@@ -107,7 +107,7 @@ test("Requirements entry is planning only; explicit Interview and round advancem
         }),
       ),
     ).rejects.toThrow("different content");
-    const controller = createProjectAgentController(db, { start: async () => null });
+    const controller = createProjectAgentController(db);
     await controller.recover();
     expect(requests).toBe(0);
     expect(await controller.get(owned.projectID, ticketID, owned.userID)).toBeNull();
@@ -196,7 +196,7 @@ test("Requirements entry is planning only; explicit Interview and round advancem
       ),
     ).rejects.toThrow("direction changed");
     expect(requests).toBe(2);
-    const restarted = createProjectAgentController(db, { start: async () => null });
+    const restarted = createProjectAgentController(db);
     await restarted.recover();
     expect(requests).toBe(2);
     const retainedID = crypto.randomUUID();

@@ -150,6 +150,8 @@ export async function createFactoryApplication() {
       "FACTORY_AUTH_SECRET and FACTORY_ADMIN_PASSWORD are required outside a loopback listener",
     );
   }
+  const nativeSetup = configuredSubstrateInstallation();
+  if (!nativeSetup) throw new Error("Factory requires its Substrate installation configuration");
   const database = createDatabase();
   void usageCatalogue.refresh();
   const ticketDocuments = createTicketDocumentController(database, (sql, input) =>
@@ -288,10 +290,8 @@ export async function createFactoryApplication() {
     await runtimeAccess.revokeWorkspaceMember(workspaceID, userID);
   });
   await workspaceSharing.recover().catch(reportFailure("Workspace access recovery is unavailable"));
-  const nativeSetup = configuredSubstrateInstallation();
-  if (!nativeSetup) throw new Error("Factory requires its Substrate installation configuration");
   const nativeCapacity =
-    nativeSetup?.deployment === "fresh-workspaces"
+    nativeSetup.deployment === "fresh-workspaces"
       ? createSubstrateCapacity(database, nativeSetup)
       : undefined;
   runtimeController = createRuntimeController(database, runtimeHub, runtimeSecret, {
@@ -489,7 +489,6 @@ export async function createFactoryApplication() {
   await knowledgeController.recover();
   projectAgentController = createProjectAgentController(
     database,
-    changeController,
     knowledgeController,
     mcpConnections,
     (conversationID, contextID) => agentController.retainedMessages(conversationID, contextID),
@@ -598,25 +597,15 @@ export async function createFactoryApplication() {
     signingKey: runtimeSecret,
     requiredVariables: async (projectID) => {
       const [project] = await database.db
-        .select({ slug: projectTable.slug })
+        .select({ slug: projectTable.slug, configuration: projectTable.devcontainerPath })
         .from(projectTable)
         .where(eq(projectTable.id, projectID));
       if (!project) throw new Error("Project not found");
       const repository = { owner: forgeOwner, name: project.slug };
       const head = await preparationForge.getDefaultBranch(repository);
-      const inventory = await preparationForge.listFiles(repository, head.headSha);
-      const configurations = inventory
-        .filter(
-          (file) => /^\.devcontainer\/.*(?:\.json|\.ya?ml)$/.test(file.path) && file.size <= 64000,
-        )
-        .slice(0, 32);
-      const { requiredEnvironmentVariables } = await import("../setup/configuration");
-      return requiredEnvironmentVariables(
-        await Promise.all(
-          configurations.map((file) =>
-            preparationForge.getFile(repository, file.path, head.headSha),
-          ),
-        ),
+      const { readRequiredEnvironmentVariables } = await import("../setup/configuration");
+      return readRequiredEnvironmentVariables(project.configuration, (path) =>
+        preparationForge.getFile(repository, path, head.headSha),
       );
     },
     protection: async (projectID) => {

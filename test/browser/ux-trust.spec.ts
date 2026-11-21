@@ -3112,7 +3112,6 @@ test("keeps Board materials and text readable on every artwork at desktop and ph
   if (!database) throw new Error("Database is not ready");
   const execution = await watchCommands(page, [
     "implementTicket",
-    "startTicketChange",
     "startCoding",
     "resumeCoding",
     "sendCodingPrompt",
@@ -3397,17 +3396,36 @@ test("keeps Knowledge drafts with their page across navigation and minimize", as
   await expect(page.locator(".knowledge-article")).toContainText("Unsaved first-page draft");
 });
 
-test("rejects specification rewrites after approval on the server", async ({ page }) => {
+test("rejects saves that bypass approved implementation scope on the server", async ({ page }) => {
   const ticketID = await insertChangedTicket("Immutable approval fixture", "active");
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  const response = await requestFunction(page.request, "createRequirementRevision", [
+  const before = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
+  expect(before.revisions.some((revision) => revision.approvalId)).toBe(true);
+  const response = await requestFunction(page.request, "saveTicketDocument", [
     ticketID,
-    { summary: "Unauthorized rewrite", acceptanceCriteria: ["Should reject"], nonGoals: [] },
+    {
+      commandId: crypto.randomUUID(),
+      expectedVersion: before.ticket.version,
+      expectedDocumentId: before.documentRevisions[0]?.id ?? null,
+      // The authoring command cannot clear or replace an approved implementation scope.
+      requirementRevisionId: null,
+      title: before.ticket.title,
+      description: before.ticket.description,
+      requirement: {
+        summary: "Unauthorized rewrite",
+        acceptanceCriteria: ["Should reject"],
+        nonGoals: [],
+      },
+    },
   ]);
   expect(response).toMatchObject({ ok: false, status: 409 });
   if (response.ok) throw new Error("Approved specification was unexpectedly rewritten");
-  expect(response.message).toContain("approved");
+  expect(response.message).toContain("implementation scope");
+  const after = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
+  expect(after.revisions).toEqual(before.revisions);
+  expect(after.documentRevisions).toEqual(before.documentRevisions);
+  expect(after.ticket.version).toBe(before.ticket.version);
 });
 
 test("Knowledge History preserves exact bodies and new saves advance immutable ordinals", async ({
