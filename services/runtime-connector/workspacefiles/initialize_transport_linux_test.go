@@ -91,6 +91,7 @@ func TestSourceInitializationRetriesResetTransport(t *testing.T) {
 		{"openssl-read-reset", "fatal: unable to access 'https://forge.factory.invalid/project.git/': OpenSSL SSL_read: SSL_ERROR_SYSCALL, errno 104"},
 		{"curl-recv-reset", "error: RPC failed; curl 56 Recv failure: Connection reset by peer\nfatal: expected flush after ref listing"},
 		{"existing-connect-retry", "fatal: unable to access 'https://forge.factory.invalid/project.git/': Failed to connect to forge.factory.invalid port 443: Connection refused"},
+		{"native-proxy-connect", "fatal: unable to access 'https://forge.factory.invalid/project.git/': CONNECT tunnel failed, response 500"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			parent, intent, calls := checkoutTransportGit(t, fixture.message, 1)
@@ -140,6 +141,8 @@ func TestSourceInitializationDoesNotRetryPermanentSSLOrDenial(t *testing.T) {
 		{"certificate-reset", "fatal: SSL certificate problem: Connection reset by peer"},
 		{"auth-reset", "fatal: Authentication failed\nRecv failure: Connection reset by peer"},
 		{"proxy-denial-reset", "fatal: CONNECT tunnel failed, response 403\nRecv failure: Connection reset by peer"},
+		{"proxy-connect-policy", "CONNECT tunnel failed, response 500\nPermission denied"},
+		{"proxy-connect-trust", "CONNECT tunnel failed, response 500\nSSL certificate problem"},
 		{"protocol-reset", "OpenSSL SSL_read: SSL_ERROR_SSL\nRecv failure: Connection reset by peer"},
 		{"connect-certificate", "Failed to connect: SSL certificate problem"},
 	} {
@@ -182,6 +185,7 @@ func TestSourceInitializationReportsCredentialFreeTransportCategories(t *testing
 		{"trust", "OpenSSL SSL_connect: tlsv1 alert unknown ca", "TLS verification", false},
 		{"ca-file", "error setting certificate verify locations: CAfile: /private/ca.pem", "TLS verification", false},
 		{"reset", "OpenSSL SSL_read: SSL_ERROR_SYSCALL, errno 104", "connection reset", true},
+		{"proxy-connect", "CONNECT tunnel failed, response 500", "proxy connection unavailable", true},
 		{"unknown-ssl", "SSL connection error", "SSL", false},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {

@@ -96,6 +96,11 @@ func sourceConnectionFailure(message string) string {
 			return category
 		}
 	}
+	// The native loopback proxy reports failed DNS/connect with CONNECT 500.
+	// Retrying this unchanged clone read cannot bypass its egress/TLS authority.
+	if strings.Contains(lower, "connect tunnel failed, response 500") {
+		return "proxy connection unavailable"
+	}
 	// Linux ECONNRESET from libcurl/OpenSSL. Do not retry generic SSL errors,
 	// SSL_ERROR_SSL or SSL_ERROR_SYSCALL with an unspecified/zero errno.
 	if strings.Contains(lower, "connection reset by peer") ||
