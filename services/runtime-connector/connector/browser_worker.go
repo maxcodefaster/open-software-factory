@@ -1,9 +1,12 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image/jpeg"
 	"io"
 	"net"
 	"net/http"
@@ -54,7 +57,8 @@ func RunBrowserWorker(ctx context.Context) error {
 		"XDG_CONFIG_HOME=/tmp/config", "XDG_CACHE_HOME=/tmp/cache", "CI=1",
 		"CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1", "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1",
 	}
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	output := &browserScreenshotOutput{writer: os.Stdout, cancel: cancel}
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, output, os.Stderr
 	PrepareAssignedProcess(command)
 	if err := command.Start(); err != nil {
 		return errors.New("pinned browser tools failed to start")
@@ -64,7 +68,7 @@ func RunBrowserWorker(ctx context.Context) error {
 	go func() { finished <- command.Wait() }()
 	select {
 	case err := <-finished:
-		if err != nil {
+		if err != nil || len(output.pending) != 0 {
 			return errors.New("pinned browser tools exited unexpectedly")
 		}
 		return nil
@@ -79,6 +83,103 @@ func RunBrowserWorker(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// Chromium's fast JPEG encoder emits separate baseline component scans. Some
+// model image readers render those otherwise valid JPEGs as green stripes.
+// Re-encode only inline screenshots with Go's interleaved baseline encoder.
+// Keep the existing JPEG quality, dimensions, media type and MCP envelope.
+func normalizeBrowserScreenshot(line []byte) ([]byte, error) {
+	var reply map[string]json.RawMessage
+	if json.Unmarshal(line, &reply) != nil {
+		return line, nil
+	}
+	var result map[string]json.RawMessage
+	if json.Unmarshal(reply["result"], &result) != nil {
+		return line, nil
+	}
+	var content []map[string]json.RawMessage
+	if json.Unmarshal(result["content"], &content) != nil {
+		return line, nil
+	}
+	changed := false
+	for _, item := range content {
+		var kind, mediaType, data string
+		_ = json.Unmarshal(item["type"], &kind)
+		_ = json.Unmarshal(item["mimeType"], &mediaType)
+		if kind != "image" || mediaType != "image/jpeg" {
+			continue
+		}
+		if changed || json.Unmarshal(item["data"], &data) != nil || len(data) > base64.StdEncoding.EncodedLen(1<<20) {
+			return nil, errors.New("browser screenshot exceeds its image bound")
+		}
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err != nil || len(decoded) > 1<<20 {
+			return nil, errors.New("browser screenshot encoding is invalid")
+		}
+		config, err := jpeg.DecodeConfig(bytes.NewReader(decoded))
+		if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > 1280 || config.Height > 720 {
+			return nil, errors.New("browser screenshot dimensions are invalid")
+		}
+		image, err := jpeg.Decode(bytes.NewReader(decoded))
+		if err != nil {
+			return nil, errors.New("browser screenshot JPEG is invalid")
+		}
+		var encoded bytes.Buffer
+		if jpeg.Encode(&encoded, image, &jpeg.Options{Quality: 75}) != nil || encoded.Len() > 1<<20 {
+			return nil, errors.New("browser screenshot could not be normalized within its bound")
+		}
+		item["data"], _ = json.Marshal(base64.StdEncoding.EncodeToString(encoded.Bytes()))
+		changed = true
+	}
+	if !changed {
+		return line, nil
+	}
+	result["content"], _ = json.Marshal(content)
+	reply["result"], _ = json.Marshal(result)
+	return json.Marshal(reply)
+}
+
+type browserScreenshotOutput struct {
+	writer  io.Writer
+	cancel  context.CancelFunc
+	pending []byte
+}
+
+func (output *browserScreenshotOutput) Write(data []byte) (size int, err error) {
+	defer func() {
+		if err != nil && output.cancel != nil {
+			output.cancel()
+		}
+	}()
+	size = len(data)
+	for len(data) > 0 {
+		end := bytes.IndexByte(data, '\n')
+		part := data
+		if end >= 0 {
+			part = data[:end]
+		}
+		if len(output.pending)+len(part) > 3<<20 {
+			return 0, errors.New("browser MCP output exceeds its bound")
+		}
+		output.pending = append(output.pending, part...)
+		if end < 0 {
+			break
+		}
+		line, err := normalizeBrowserScreenshot(output.pending)
+		if err != nil {
+			return 0, err
+		}
+		framed := append(line, '\n')
+		if written, err := output.writer.Write(framed); err != nil {
+			return 0, err
+		} else if written != len(framed) {
+			return 0, io.ErrShortWrite
+		}
+		output.pending = output.pending[:0]
+		data = data[end+1:]
+	}
+	return size, nil
 }
 
 func readBrowserApps() ([]Channel, error) {
