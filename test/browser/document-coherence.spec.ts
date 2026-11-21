@@ -509,6 +509,65 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   page,
 }) => {
   if (!database) throw new Error("Fixture database unavailable");
+  let holdEviction = false;
+  let blocked = false;
+  let pageQueryHash = "";
+  const held: Array<{
+    send: (message: string | Buffer) => void;
+    messages: Array<string | Buffer>;
+  }> = [];
+  const release = () => {
+    holdEviction = false;
+    blocked = false;
+    for (const poke of held.splice(0)) for (const message of poke.messages) poke.send(message);
+  };
+  await page.routeWebSocket("**/sync/**", (route) => {
+    const upstream = route.connectToServer();
+    route.onMessage((message) => {
+      if (typeof message === "string") {
+        const [kind, body] = JSON.parse(message);
+        if (kind === "changeDesiredQueries") {
+          const selected = body.desiredQueriesPatch.find(
+            (query: { name?: string; args?: Array<{ pageId?: string }> }) =>
+              query.name === "knowledge.page" && query.args?.[0]?.pageId === pageID,
+          );
+          if (selected) pageQueryHash = selected.hash;
+        }
+      }
+      upstream.send(message);
+    });
+    let messages: Array<string | Buffer> = [];
+    let chunks: Buffer[] = [];
+    upstream.onMessage((message) => {
+      if (typeof message !== "string") {
+        messages.push(message);
+        chunks.push(message.subarray(1));
+        return;
+      }
+      const [kind] = JSON.parse(message);
+      if (kind === "pokeStart") {
+        messages = [message];
+        chunks = [];
+        return;
+      }
+      if (kind === "pokeEnd") {
+        messages.push(message);
+        const parts = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : [];
+        const evicts = parts.some(
+          (part: { gotQueriesPatch?: Array<{ op: string; hash: string }> }) =>
+            part.gotQueriesPatch?.some(
+              (query) => query.op === "del" && query.hash === pageQueryHash,
+            ),
+        );
+        blocked ||= holdEviction && evicts;
+        if (blocked) held.push({ send: (value) => route.send(value), messages });
+        else for (const value of messages) route.send(value);
+        messages = [];
+        return;
+      }
+      route.send(message);
+    });
+  });
   await openFixture(page);
   await openKnowledge(page);
   await page.getByLabel("Edit Wiki body", { exact: true }).click();
@@ -541,6 +600,7 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await expect(editor).toBeHidden();
   await page.getByRole("button", { name: "Wiki", exact: true }).click();
   await expect(editor).toContainText("Recovered draft.");
+  holdEviction = true;
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
@@ -556,6 +616,44 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
     const selection = window.getSelection();
     return { text: selection?.anchorNode?.textContent, offset: selection?.anchorOffset };
   });
+  // Reload evicts the old client's zero-TTL query before the restored route
+  // subscribes again. Release that real poke after focus, but hold rehydration.
+  try {
+    await expect.poll(() => held.length > 0).toBe(true);
+    const eviction = held.shift();
+    if (!eviction) throw new Error("Native Wiki eviction was not captured");
+    for (const message of eviction.messages) eviction.send(message);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async ({ id, hash }) => {
+            const client = Reflect.get(globalThis, "__zero") as {
+              inspector: { client: { map(): Promise<Map<string, unknown>> } };
+            };
+            const cache = await client.inspector.client.map();
+            return {
+              got: cache.has(`g/${hash}`),
+              row: cache.has(`e/knowledgePage/${id}`),
+            };
+          },
+          { id: pageID, hash: pageQueryHash },
+        ),
+      )
+      .toEqual({ got: false, row: false });
+    await expect(editor).toBeFocused();
+    await expect(editor).toContainText("Recovered draft.");
+    expect(
+      await editor.evaluate(() => {
+        const selection = window.getSelection();
+        return { text: selection?.anchorNode?.textContent, offset: selection?.anchorOffset };
+      }),
+    ).toEqual(cursorBefore);
+    await page.screenshot({
+      path: `${evidenceDirectory}/wiki-incomplete-query-${process.env["FACTORY_BROWSER_RUN_ID"]}.png`,
+    });
+  } finally {
+    release();
+  }
   await database.client`UPDATE factory.knowledge_page SET current_body=${before.body.replace("Saved human", "Remote human")},version=version+1 WHERE id=${pageID}`;
   await expect(editor).toContainText("Remote human");
   await expect(editor).toContainText("Recovered draft.");
@@ -571,6 +669,11 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await database.client`UPDATE factory.knowledge_page SET current_body='Remote conflicting version.',version=version+1 WHERE id=${pageID}`;
   await expect(page.getByRole("button", { name: "Compare changes", exact: true })).toBeVisible();
   await expect(editor).toContainText("Local conflicting version.");
+  await database.client`UPDATE factory.knowledge_page SET state='archived',version=version+1 WHERE id=${pageID}`;
+  await expect(editor).toHaveCount(0);
+  await expect(
+    page.getByRole("alert").filter({ hasText: "This link is unavailable" }),
+  ).toBeVisible();
 });
 
 test("Wiki typing and deletion survive delayed autosave acknowledgement and reload", async ({

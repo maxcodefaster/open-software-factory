@@ -24,7 +24,6 @@ import {
   createSignal,
   onCleanup,
   type ParentProps,
-  untrack,
   useContext,
 } from "solid-js";
 import {
@@ -121,10 +120,12 @@ export function useZeroQuery<
       key: `${internals.hash()}:${JSON.stringify(internals.format)}`,
     };
   });
+  let previous: ReturnType<typeof selected>;
   createEffect(
     () => ({ selected: selected(), retry: retry() }),
     ({ selected: current }) => {
-      clear();
+      if (current?.client !== previous?.client || current?.key !== previous?.key) clear();
+      previous = current;
       setCompleteness("unknown");
       setError(undefined);
       if (!current) return;
@@ -132,13 +133,36 @@ export function useZeroQuery<
         current.client.schema.tables[asQueryInternals(current.query).ast.table]?.primaryKey;
       if (!primaryKey) throw new Error("Zero query table is missing from the client schema");
       const view = current.client.materialize(current.query, options);
+      let populated = false;
+      let confirmation: ReturnType<typeof setTimeout> | undefined;
       const dispose = listenToMaterializedView(view, (next) => {
-        publish(next.data, primaryKey);
+        if (next.completeness === "error" || next.error) {
+          clearTimeout(confirmation);
+          confirmation = undefined;
+          clear();
+        } else if (next.data === undefined && next.completeness === "complete" && populated) {
+          // A native view's complete flag survives query eviction. Re-materialize
+          // after Zero has applied the transaction's got-query invalidation.
+          setCompleteness("unknown");
+          confirmation ??= setTimeout(() => {
+            confirmation = undefined;
+            setRetry((value) => value + 1);
+          }, 0);
+          return;
+        } else {
+          clearTimeout(confirmation);
+          confirmation = undefined;
+          populated ||= next.data !== undefined;
+          if (next.data !== undefined || next.completeness === "complete")
+            publish(next.data, primaryKey);
+        }
         setCompleteness(next.completeness);
         setError(next.error);
       });
-      if (untrack(data) === undefined) publish(view.data, primaryKey);
-      return dispose;
+      return () => {
+        clearTimeout(confirmation);
+        dispose();
+      };
     },
   );
   return { data, completeness, error, retry: () => setRetry((value) => value + 1) };

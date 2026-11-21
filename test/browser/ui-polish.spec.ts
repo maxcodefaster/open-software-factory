@@ -697,6 +697,7 @@ test("declared Preview Apps remain selectable before compute and retain their ch
   ).toBeVisible();
   running = false;
   await wakeFactoryReads(page);
+  await expect(page.getByRole("button", { name: "Retry Main Preview", exact: true })).toBeVisible();
   expect(starts).toBe(1);
   await chooser.click();
   await page.getByRole("menuitem", { name: /^Staging · Forms editor/ }).click();

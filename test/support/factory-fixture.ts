@@ -1,8 +1,9 @@
 import { type APIRequestContext, expect, type Page } from "@playwright/test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { createDatabase } from "../../packages/db/src/client";
+import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { eventually } from "../fixtures/factory-process";
 import { requestFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 
@@ -76,26 +77,30 @@ export async function deleteFactoryProject(
 ) {
   const database = ownedDatabase ?? createDatabase(1);
   try {
-    await database.client.begin(async (transaction) => {
+    let acquiringLocks = false;
+    const deleteOnce = async (transaction: DatabaseTransaction) => {
       const [scope] = await transaction<{ name: string }[]>`SELECT current_database() AS name`;
       if (!scope || !/^owned_[a-f0-9]{32}$/.test(scope.name))
         throw Error(
           "UI fixture deletion requires its explicitly owned disposable database; retained data was not changed",
         );
-      // Browser autosave can still own a Ticket when teardown begins. Keep the
-      // same Change/Ticket-before-Project order as editing and admission instead
-      // of locking the parent and later deadlocking on a child/FK check.
+      // Attention and autosave use opposite membership/Ticket orders. Never wait
+      // while holding a partial set of their locks; roll back before trying again.
+      acquiringLocks = true;
+      await transaction`SELECT user_id FROM factory.project_membership WHERE project_id=${projectID}
+        ORDER BY user_id FOR UPDATE NOWAIT`;
       await transaction`SELECT id FROM factory.change WHERE project_id=${projectID}
-        ORDER BY id FOR UPDATE`;
+        ORDER BY id FOR UPDATE NOWAIT`;
       await transaction`SELECT id FROM factory.ticket WHERE project_id=${projectID}
-        ORDER BY id FOR UPDATE`;
-      await transaction`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE`;
+        ORDER BY id FOR UPDATE NOWAIT`;
+      await transaction`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE NOWAIT`;
       await transaction`SELECT binding.runtime_attempt_id FROM factory.substrate_binding binding
         JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id
-        WHERE attempt.project_id=${projectID} FOR UPDATE OF binding`;
+        WHERE attempt.project_id=${projectID} FOR UPDATE OF binding NOWAIT`;
       await transaction`SELECT provision.workspace_id FROM factory.substrate_workspace provision
         JOIN factory.development_workspace workspace ON workspace.id=provision.workspace_id
-        WHERE workspace.project_id=${projectID} FOR UPDATE OF provision`;
+        WHERE workspace.project_id=${projectID} FOR UPDATE OF provision NOWAIT`;
+      acquiringLocks = false;
       const [external] = await transaction`
         SELECT attempt.id FROM factory.runtime_attempt attempt
           JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
@@ -232,7 +237,22 @@ export async function deleteFactoryProject(
       await transaction`DELETE FROM factory.skill_library_choice WHERE context_id = ${projectID}`;
       await transaction`DELETE FROM factory.project_membership WHERE project_id = ${projectID}`;
       await transaction`DELETE FROM factory.project WHERE id = ${projectID}`;
-    });
+    };
+    await eventually(
+      async () => {
+        acquiringLocks = false;
+        try {
+          await database.client.begin(deleteOnce);
+          return true;
+        } catch (cause) {
+          if (acquiringLocks && cause instanceof Error && "code" in cause && cause.code === "55P03")
+            return false;
+          throw cause;
+        }
+      },
+      Boolean,
+      "Owned Project cleanup is still blocked by in-flight reads or writes",
+    );
   } finally {
     if (!ownedDatabase) await database.client.end({ timeout: 3 });
   }
