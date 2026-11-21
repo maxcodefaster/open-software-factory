@@ -520,7 +520,24 @@ test("running Build observation waits for native activity rather than polling hi
   const request = owned.hub.request.bind(owned.hub);
   let reads = 0;
   let running = true;
+  const connected = Promise.withResolvers<void>();
   owned.hub.request = async (attempt, channel, input, path) => {
+    if (new URL(input.url).pathname === "/api/event") {
+      const response = await request(attempt, channel, input, path);
+      // Deliver the actual connection event after the first snapshot, as a
+      // delayed stream can do on a busy host.
+      return new Response(
+        response.body?.pipeThrough(
+          new TransformStream<Uint8Array, Uint8Array>({
+            async transform(frame, stream) {
+              await connected.promise;
+              stream.enqueue(frame);
+            },
+          }),
+        ),
+        { headers: response.headers },
+      );
+    }
     if (new URL(input.url).pathname.endsWith("/active")) {
       reads++;
       return Response.json({ data: running ? { [owned.sessionID]: { type: "running" } } : {} });
@@ -533,7 +550,10 @@ test("running Build observation waits for native activity rather than polling hi
     await owned.requested;
     owned.release();
     await until(async () => reads > 0, 300);
-    await Bun.sleep(200);
+    connected.resolve();
+    // The connection event invalidates the first snapshot. Observe its fresh
+    // read before checking the unchanged idle interval.
+    await until(async () => reads === 2, 300);
     const initial = reads;
     await Bun.sleep(1_200);
     expect(reads).toBe(initial);
@@ -544,6 +564,7 @@ test("running Build observation waits for native activity rather than polling hi
     expect(owned.requests()).toBe(1);
     expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
   } finally {
+    connected.resolve();
     await owned.dispose();
   }
 }, 20_000);

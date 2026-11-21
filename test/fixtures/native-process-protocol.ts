@@ -28,7 +28,11 @@ const ConnectorSocket = WebSocket as typeof WebSocket & {
 // persists and provisions its normal owners. Its running process observes them
 // through the unchanged bridge boundary. Only the RPC peer is controlled; no
 // Actor or external write exists.
-export async function nativeProcessProtocol(host: Host, database: Database) {
+export async function nativeProcessProtocol(
+  host: Host,
+  database: Database,
+  beforeCall?: (method: string) => Promise<void>,
+) {
   const expected = resolve(".factory/test-results/factory-process", host.id, "substrate.json");
   if (
     host.nativeConfiguration !== expected ||
@@ -146,6 +150,7 @@ export async function nativeProcessProtocol(host: Host, database: Database) {
         return new Response(null, { status: 403 });
       try {
         const input = (await request.json()) as { method: string; request: unknown };
+        await beforeCall?.(input.method);
         return Response.json(await call(input.method, input.request));
       } catch (cause) {
         return Response.json({
@@ -264,6 +269,7 @@ process.stdout.write(await response.text());
         // Process readiness precedes its asynchronous native recovery. Like a
         // real Connector, retry only this transport upgrade until the original
         // binding is admitted. No native lifecycle operation or input is replayed.
+        const deadline = Date.now() + 10_000;
         const connected = await eventually(
           async () => {
             const socket = new ConnectorSocket(
@@ -275,13 +281,22 @@ process.stdout.write(await response.text());
             socket.addEventListener("close", () => sockets.delete(socket), { once: true });
             receive(socket);
             const opened = await new Promise<boolean>((resolve) => {
-              const timeout = setTimeout(() => resolve(false), 1000);
+              const opened = () => finish(true);
+              const failed = () => finish(false);
               const finish = (value: boolean) => {
                 clearTimeout(timeout);
+                socket.removeEventListener("open", opened);
+                socket.removeEventListener("error", failed);
+                socket.removeEventListener("close", failed);
                 resolve(value);
               };
-              socket.addEventListener("open", () => finish(true), { once: true });
-              socket.addEventListener("error", () => finish(false), { once: true });
+              // Native authorization may still be reading the original Actor.
+              // Keep this upgrade until it settles or the existing overall
+              // connection deadline expires, rather than guessing one second.
+              const timeout = setTimeout(failed, Math.max(0, deadline - Date.now()));
+              socket.addEventListener("open", opened, { once: true });
+              socket.addEventListener("error", failed, { once: true });
+              socket.addEventListener("close", failed, { once: true });
             });
             if (opened) return socket;
             socket.close();

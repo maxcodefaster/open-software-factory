@@ -22,8 +22,17 @@ test.each(["Build", "Staging"] as const)(
     const sockets: WebSocket[] = [];
     let native: Awaited<ReturnType<typeof nativeProcessProtocol>> | undefined;
     let ownedFixture: Awaited<ReturnType<typeof nativeBuildProcessFixture>> | undefined;
+    let slowIdentityReads = false;
+    let delayedIdentityReads = 0;
     try {
-      native = await nativeProcessProtocol(process, database);
+      native = await nativeProcessProtocol(process, database, async (method) => {
+        if (slowIdentityReads && method === "GetActor") {
+          // Exercise a valid identity read slower than the old per-socket
+          // cutoff, still inside the unchanged overall connection deadline.
+          delayedIdentityReads++;
+          await Bun.sleep(1_200);
+        }
+      });
       const peer = native;
       const initialized = await process.start();
       await process.kill(initialized);
@@ -279,6 +288,7 @@ test.each(["Build", "Staging"] as const)(
       ).toBe(true);
       const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
       const beforeConnection = await state();
+      slowIdentityReads = target === "Staging";
       let parent = await connect("parent");
       let child = await connect("child");
       // Prior work retained a ready row. Wait for this process to observe the
@@ -404,6 +414,7 @@ test.each(["Build", "Staging"] as const)(
       expect(mutationCalls).toBe(beforeMutations);
       expect(peer.sourceFences).toEqual(beforeFences);
       expect(peer.calls.filter((call) => !call.method.startsWith("Get"))).toEqual(lifecycleBefore);
+      if (target === "Staging") expect(delayedIdentityReads).toBeGreaterThan(0);
     } finally {
       await process.shutdown();
       for (const socket of sockets) socket.close();
