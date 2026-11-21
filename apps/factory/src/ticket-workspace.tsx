@@ -694,7 +694,9 @@ function TicketDocument(props: TicketWorkspaceProps) {
 
   function keepMyDraft() {
     rebaseOnSaved();
-    void saveChanges();
+    // Solid 2 commits the conflict reset after this event. Let the save guard
+    // observe that reset before saving the retained draft against its new base.
+    onSettled(() => void saveChanges());
   }
 
   function useSavedVersion() {

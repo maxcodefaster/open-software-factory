@@ -1209,7 +1209,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     refreshLifecycleState,
     delivery,
     retryReview,
-    selectedTicketID,
     get conversationMode() {
       return conversationMode;
     },

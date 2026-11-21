@@ -53,7 +53,6 @@ interface CodingCommandsDependencies {
   refreshLifecycleState: () => Promise<void>;
   delivery: Accessor<DeliveryView | undefined>;
   retryReview: (changeID: string) => Promise<void>;
-  selectedTicketID: SourceAccessor<string | undefined>;
   conversationMode: () => ConversationMode;
   agentReadFence: {
     beginRead: () => { revision: number; read: number };
@@ -131,6 +130,15 @@ export function createCodingCommands(dependencies: CodingCommandsDependencies) {
     });
   }
 
+  function buildTargetCurrent(changeID: string, contextKey: string) {
+    return (
+      dependencies.selectedChange()?.id === changeID &&
+      dependencies.assistantKey() === contextKey &&
+      dependencies.conversationMode() === "build" &&
+      !dependencies.historicalCoding()
+    );
+  }
+
   async function startAgent() {
     if (dependencies.assistantContextLoading()) return;
     const change = dependencies.selectedChange();
@@ -142,8 +150,9 @@ export function createCodingCommands(dependencies: CodingCommandsDependencies) {
       return;
     }
     const scope = dependencies.agentCommandScope("change-start", change.id);
+    const targetKey = dependencies.assistantKey();
     await dependencies.mutate(async () => {
-      if (!(await prepareBuildConversation(change.id))) return;
+      if (!buildTargetCurrent(change.id, targetKey)) return;
       const codingReasoning = dependencies.agent().turn
         ? undefined
         : dependencies.chosenCodingReasoning();
@@ -239,13 +248,7 @@ export function createCodingCommands(dependencies: CodingCommandsDependencies) {
     const contextId = dependencies.conversation()?.contextId ?? undefined;
     const targetKey = dependencies.assistantKey();
     await dependencies.mutate(async () => {
-      if (
-        dependencies.selectedChange()?.id !== change.id ||
-        dependencies.assistantKey() !== targetKey ||
-        dependencies.conversationMode() !== "build" ||
-        dependencies.historicalCoding()
-      )
-        return;
+      if (!buildTargetCurrent(change.id, targetKey)) return;
       const commandId = dependencies.agentCommandIds.forInput(
         scope,
         JSON.stringify({ changeID: change.id, text }),
