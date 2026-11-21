@@ -7,6 +7,7 @@ import {
   gt,
   inArray,
   isNotNull,
+  isNull,
   notInArray,
   or,
 } from "drizzle-orm";
@@ -18,6 +19,7 @@ import {
   changeAgentSession,
   changeCommitOperation,
   runtimeAttempt,
+  runtimeComputeWait,
   ticket,
   verification,
 } from "../../../../packages/db/src/schema";
@@ -67,6 +69,7 @@ export function createIdleCompute(
   quietMS = Math.min(executionQuietMS(process.env), idleMS),
   reviewMS = executionReviewMS(process.env),
 ) {
+  const verificationRuntime = alias(runtimeAttempt, "verification_runtime");
   let running: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
@@ -166,6 +169,28 @@ export function createIdleCompute(
                     ),
                 ),
               )}`,
+              verificationWaiting: expression<boolean>`${exists(
+                db
+                  .select({ id: verification.id })
+                  .from(verification)
+                  .innerJoin(
+                    verificationRuntime,
+                    eq(verificationRuntime.id, verification.runtimeAttemptId),
+                  )
+                  .innerJoin(
+                    runtimeComputeWait,
+                    eq(runtimeComputeWait.attemptId, verificationRuntime.id),
+                  )
+                  .where(
+                    and(
+                      eq(verification.changeId, runtimeAttempt.changeId),
+                      inArray(verification.state, ["pending", "runner-starting"]),
+                      eq(verificationRuntime.state, "starting"),
+                      isNull(verificationRuntime.stopIntendedAt),
+                      eq(runtimeComputeWait.reason, "compute-capacity"),
+                    ),
+                  ),
+              )}`,
               reviewing: expression<boolean>`${and(
                 expression`${reviewMS} > 0`,
                 or(
@@ -206,9 +231,13 @@ export function createIdleCompute(
             })
             .from(runtimeAttempt)
             .where(eq(runtimeAttempt.id, attempt.id));
-          // A submitted Change stays warm while Verification runs and for the
-          // review window after its last commit or verdict. Fences are unchanged.
-          if (work?.active || work?.reviewing || !hub.claimIdle(attempt.id, idleMS, quietMS))
+          // Keep submitted work warm unless its own Verification is waiting for
+          // capacity. Ordinary idle/activity fences still protect attended work.
+          if (
+            work?.active ||
+            (work?.reviewing && !work.verificationWaiting) ||
+            !hub.claimIdle(attempt.id, idleMS, quietMS)
+          )
             return false;
           claimed = true;
           // Idle is Pause, never an implicit destructive Stop. Official

@@ -6,6 +6,7 @@ import {
   executionQuietMS,
   executionReviewMS,
 } from "../../apps/factory/src/runtime/idle";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -210,28 +211,76 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
   }
 }, 30_000);
 
-test.each(["pending", "recent-verdict", "old-verdict"] as const)(
-  "idle review demand keeps the exact submitted Change warm only for active or recent Verification: %s",
+test.each([
+  "pending",
+  "capacity-wait",
+  "accounting-wait",
+  "recent-verdict",
+  "old-verdict",
+] as const)(
+  "idle review demand preserves active/recent Verification without starving capacity: %s",
   async (kind) => {
     const host = await factoryProcess();
     const database = host.connect();
     let idle: ReturnType<typeof createIdleCompute> | undefined;
     try {
       const owned = await fixture(undefined, undefined, database);
+      const verificationID = crypto.randomUUID();
+      const runnerUUID = crypto.randomUUID();
+      const jobHandle = `owned-idle-${verificationID}`;
+      const pending = ["pending", "capacity-wait", "accounting-wait"].includes(kind);
       await database.client`INSERT INTO factory.verification
-        (id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,state,updated_at,completed_at,created_by)
-        VALUES(${crypto.randomUUID()},${owned.changeID},${"a".repeat(40)},1,'owned-idle-review',1,
-          ${kind === "pending" ? "pending" : "failed"},
+        (id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,runner_uuid,runner_token,runner_job_handle,
+          state,updated_at,completed_at,created_by)
+        VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,'owned-idle-review',1,
+          ${runnerUUID},'owned-runner-token',${jobHandle},
+          ${pending ? "pending" : "failed"},
           CASE WHEN ${kind === "recent-verdict"} THEN now() ELSE now()-interval '2 hours' END,
-          CASE WHEN ${kind === "pending"} THEN NULL ELSE now() END,${owned.userID})`;
+          CASE WHEN ${pending} THEN NULL ELSE now() END,${owned.userID})`;
+      if (kind === "capacity-wait" || kind === "accounting-wait") {
+        const attemptID = runtimeIdentity(verificationID, 1).attemptID;
+        const atespaceUID = crypto.randomUUID();
+        const templateUID = crypto.randomUUID();
+        await database.client.begin(async (sql) => {
+          await sql`INSERT INTO factory.substrate_verification(verification_id,runtime_attempt_id,generation,intent,
+            atespace_attempted_at,atespace,policy_attempted_at,policy,template_attempted_at,template)
+            VALUES(${verificationID},${attemptID},1,jsonb_build_object(
+              'configuration',jsonb_build_object('projectID',${owned.projectID}::text,'database',current_database()),
+              'revision',${"a".repeat(40)}::text,'runnerUUID',${runnerUUID}::text,'jobHandle',${jobHandle}::text,
+              'templateSHA256',${"d".repeat(64)}::text),
+              now(),${JSON.stringify({ metadata: { uid: atespaceUID } })},
+              now(),'{}',now(),${JSON.stringify({ metadata: { uid: templateUID, version: "1" } })})`;
+          await sql`INSERT INTO factory.runtime_attempt(
+            id,project_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
+            create_intended_at,created_by,isolated_kind,verification_id)
+            VALUES(${attemptID},${owned.projectID},1,${"a".repeat(40)},'create-intended',
+              ${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},'verification',${verificationID})`;
+          await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+            VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},
+              ${JSON.stringify({
+                projectID: owned.projectID,
+                generation: 1,
+                verificationID,
+                atespaceUID,
+                templateUID,
+                templateVersion: "1",
+                templateSHA256: "d".repeat(64),
+              })})`;
+          await sql`UPDATE factory.verification SET runtime_attempt_id=${attemptID} WHERE id=${verificationID}`;
+          await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${attemptID}`;
+          await sql`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
+            VALUES(${attemptID},${kind === "capacity-wait" ? "compute-capacity" : "accounting-incomplete"})`;
+        });
+      }
       let claims = 0;
       let pauses = 0;
+      let canClaim = true;
       idle = createIdleCompute(
         database,
         {
           claimIdle: () => {
             claims++;
-            return true;
+            return canClaim;
           },
           releaseIdle: () => {},
         },
@@ -248,9 +297,22 @@ test.each(["pending", "recent-verdict", "old-verdict"] as const)(
         1,
         60_000,
       );
+      if (kind === "capacity-wait") {
+        await database.client`UPDATE factory.change_agent_session SET state='working' WHERE change_id=${owned.changeID}`;
+        await idle.sweep();
+        expect(claims).toBe(0);
+        await database.client`UPDATE factory.change_agent_session SET state='committed' WHERE change_id=${owned.changeID}`;
+        canClaim = false;
+        await idle.sweep();
+        expect(claims).toBe(1);
+        expect(pauses).toBe(0);
+        canClaim = true;
+        claims = 0;
+      }
       await idle.sweep();
-      expect(claims).toBe(kind === "old-verdict" ? 1 : 0);
-      expect(pauses).toBe(kind === "old-verdict" ? 1 : 0);
+      const pausesWhenIdle = kind === "old-verdict" || kind === "capacity-wait";
+      expect(claims).toBe(pausesWhenIdle ? 1 : 0);
+      expect(pauses).toBe(pausesWhenIdle ? 1 : 0);
     } finally {
       await idle?.close();
       await database.client.end({ timeout: 2 });
