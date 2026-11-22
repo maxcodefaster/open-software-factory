@@ -7,6 +7,7 @@ export const sourceWorkspaceViewSchema = z.object({
   state: z.enum(["create-intended", "preparing", "ready", "failed", "stop-intended", "stopped"]),
   failure: z.string().nullable(),
 });
+export type WorkspaceSourceView = z.infer<typeof sourceWorkspaceViewSchema>;
 
 export const developerIDEViewSchema = z.object({
   serviceID: z.string(),

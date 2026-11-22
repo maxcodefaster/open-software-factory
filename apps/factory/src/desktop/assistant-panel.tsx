@@ -259,6 +259,10 @@ export interface AssistantPanelModel {
 export function AssistantPanel(props: { model: AssistantPanelModel }) {
   // The model identity is stable; its accessors retain live state.
   const model = untrack(() => props.model);
+  const ticketImplementationSelected = () =>
+    Boolean(
+      model.assistantTicketID() && model.assistantTicketID() === model.selectedChange()?.ticketId,
+    );
   return (
     <Show when={model.agentPresence.present()}>
       <section
@@ -733,14 +737,21 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
               </div>
             </Show>
           </div>
-          <Show when={model.canDevelopProject()}>
-            <ChangeWriterStatus
-              changeID={model.assistantTicketID() ? model.selectedChange()?.id : undefined}
-              active={model.agentOpen()}
-              onStatus={(changeID, view) => {
-                model.setCodingWriter({ changeID, view });
-              }}
-            />
+          <Show when={model.canDevelopProject() && ticketImplementationSelected()}>
+            <section aria-label="Ticket Workspace editing">
+              <Show when={model.conversationMode() !== "build"}>
+                <p class="agent-activity-notice">
+                  Ticket Workspace editing. Shared across this Ticket's conversations.
+                </p>
+              </Show>
+              <ChangeWriterStatus
+                changeID={model.selectedChange()?.id}
+                active={model.agentOpen()}
+                onStatus={(changeID, view) => {
+                  model.setCodingWriter({ changeID, view });
+                }}
+              />
+            </section>
           </Show>
           <div class={`agent-input-shell${model.pendingInterview() ? " interview-active" : ""}`}>
             <Show when={model.historicalCoding()}>
@@ -805,16 +816,30 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
                   }
                 />
               </div>
-              <Show when={model.conversationMode() !== "build" && model.agentTurnBusy()}>
-                <div class="agent-activity-notice" role="status">
-                  <span>Implementation continues in its Workspace.</span>
+              <Show
+                when={
+                  model.conversationMode() !== "build" &&
+                  ticketImplementationSelected() &&
+                  model.conversation()
+                }
+              >
+                <div class="agent-activity-notice" role="status" aria-label="Ticket implementation">
+                  <span>
+                    Implementation in another conversation ·{" "}
+                    {model.agentViewLoaded() ? buildAgentStatus(model.agent()) : "Loading status…"}
+                  </span>
                   <button
                     type="button"
-                    class="agent-control"
-                    aria-label="Stop OpenCode"
-                    onClick={() => void model.stopAgent()}
+                    class="quiet-button"
+                    onClick={() =>
+                      model.setConversationSelections((previous) => ({
+                        ...previous,
+                        [model.conversationScope()]:
+                          model.conversation()?.activeCodingContextId ?? "original",
+                      }))
+                    }
                   >
-                    <Icon name="stop" /> Stop
+                    Open active Coding
                   </button>
                 </div>
               </Show>

@@ -3,6 +3,70 @@ import { createWorkspaceSourceController } from "../../apps/factory/src/workspac
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
+test("a connected cold-start Source is readable before Dev Container readiness, without admitting a new writer", async () => {
+  const f = await substrateFixture("a".repeat(40), "ticket");
+  const source = createSubstrateSources(f.database, f.hub);
+  const controller = createWorkspaceSourceController(f.database, f.hub, source);
+  let reads = 0;
+  try {
+    const uid = crypto.randomUUID();
+    await f.database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
+        VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${uid},now())`;
+      await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${f.attemptID}`;
+      await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
+    });
+    await source.attach(f.workspaceID, uid, f.database.client);
+    f.hub.sourceConnected = () => false;
+    expect(await controller.get(f.workspaceID, f.userID)).toMatchObject({
+      state: "preparing",
+      failure: null,
+    });
+    f.hub.sourceConnected = () => true;
+    f.hub.request = async (_attempt, channel) => {
+      expect(channel).toBe("source");
+      reads++;
+      return Response.json({ content: "Y29sZC1zdGFydA==" });
+    };
+    expect(await controller.get(f.workspaceID, f.userID)).toMatchObject({
+      state: "ready",
+      failure: null,
+    });
+    expect(
+      (
+        await controller.forward(
+          f.workspaceID,
+          f.userID,
+          "read",
+          new Request("https://factory.test/read", {
+            method: "POST",
+            body: '{"path":"README.md"}',
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(reads).toBe(1);
+    await expect(
+      controller.forward(
+        f.workspaceID,
+        f.userID,
+        "write",
+        new Request("https://factory.test/write", { method: "POST", body: '{"path":"README.md"}' }),
+      ),
+    ).rejects.toThrow("observation-only");
+    expect(reads).toBe(1);
+    const [attempt] = await f.database
+      .client`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+    expect(attempt?.["state"]).toBe("starting");
+  } finally {
+    await controller.close();
+    await f.dispose();
+  }
+}, 30_000);
+
 test("native Source rechecks slow uploads, orders revocation after writes and closes retained watches", async () => {
   const f = await substrateFixture();
   const runtime = await startSubstrateFixtureWorkspace(f);

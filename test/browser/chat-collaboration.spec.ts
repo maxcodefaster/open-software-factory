@@ -4,6 +4,7 @@ import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { writerViewSchema } from "../../apps/factory/src/agent/contracts";
+import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import { test } from "../fixtures/browser-test";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
@@ -17,6 +18,125 @@ const cacheDirectory = resolve(
 );
 let server: ViteDevServer;
 let origin: string;
+const ownershipFixture = resolve("test/fixtures/assistant-ownership.tsx");
+// This local fixture renders the real panel and presentation owner, without a Factory build,
+// database, runtime, or a new on-disk fixture outside this regression's write scope.
+const ownershipSource = `
+import { render } from "@solidjs/web";
+import { createSignal, untrack } from "solid-js";
+import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
+import { AssistantPanel } from "../../apps/factory/src/desktop/assistant-panel";
+import { createAssistantPresentation } from "../../apps/factory/src/desktop/assistant-presentation";
+import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
+import "../../apps/factory/src/tokens.css";
+import "../../apps/factory/src/style.css";
+import "@fontsource-variable/inter";
+import "@fontsource/sansita/400-italic.css";
+
+function Surface() {
+  const projectID = "10000000-0000-4000-8000-000000000001";
+  const ticketID = "10000000-0000-4000-8000-000000000002";
+  const changeID = "10000000-0000-4000-8000-000000000003";
+  const researchID = "10000000-0000-4000-8000-000000000005";
+  const freshID = "10000000-0000-4000-8000-000000000006";
+  const fresh = new URLSearchParams(location.search).has("fresh");
+  const [selections, setSelections] = createSignal({ ticket: researchID });
+  const [ticketScope, setTicketScope] = createSignal(true);
+  const [stopPending, setStopPending] = createSignal(false);
+  const [working, setWorking] = createSignal(fresh);
+  const [research, setResearch] = createSignal(0);
+  const [coding, setCoding] = createSignal(0);
+  const [creates, setCreates] = createSignal(0);
+  const [stops, setStops] = createSignal(0);
+  const [reads, setReads] = createSignal(0);
+  const drafts = new Map();
+  const scope = () => ticketScope() ? "ticket" : "project";
+  const selected = () => selections()[scope()] ?? researchID;
+  const conversation = () => conversationViewSchema.parse({
+    id: "owned-conversation", projectId: projectID,
+    ticketId: ticketScope() ? ticketID : null,
+    contextId: selected() === "original" ? null : selected(),
+    activeCodingContextId: fresh ? freshID : null,
+    isActiveCoding: selected() === (fresh ? freshID : "original"),
+    mode: selected() === researchID ? "investigate" : "build",
+    version: 1, entries: [],
+    contexts: [
+      { id: researchID, kind: "research", title: "What is this app?",
+        ordinal: 2, original: false, createdAt: new Date(0).toISOString() },
+      ...(fresh ? [{ id: freshID, kind: "coding", title: "Fresh Coding",
+        ordinal: 3, original: false, createdAt: new Date(0).toISOString() }] : []),
+    ],
+  });
+  const agent = () => agentViewSchema.parse({
+    state: working() ? "working" : "starting", runtimeConnected: true, runtimeState: "ready",
+    sessionAvailable: true, messagesAvailable: true,
+    messages: [{ id: "coding-output", role: "assistant",
+      text: "Implementing the approved Ticket.", at: 1 }],
+    stopPending: stopPending(), stopId: null,
+  });
+  const change = { id: changeID, projectId: projectID, ticketId: ticketID,
+    branchName: "factory/owned", baseSha: "a".repeat(40), state: "active",
+    branchState: "succeeded" };
+  const presentation = createAssistantPresentation({
+    selectedTicketID: () => ticketID, changeFor: () => change,
+    observedAgentChangeID: () => changeID, implementationPreparation: () => undefined,
+    selectedProjectID: () => projectID,
+    assistantTicketID: () => ticketScope() ? ticketID : undefined,
+    detail: () => undefined, canDevelopProject: () => true, conversation,
+    correctionTarget: () => undefined, workspaceView: () => "ticket",
+    activeWorkspaceTab: () => undefined, pendingInterviewAnswer: () => undefined,
+    assistantKey: () => selected(), clarificationPaused: () => false,
+    assistantPending: () => false, clarificationOrigins: new Set(),
+    agentOpen: () => true, agent, codingWriter: () => undefined,
+    agentCommandScope: (kind) => kind + ":" + scope() + ":" + selected(),
+    messageDrafts: new Map(), userID: "owned-user",
+    agentCommandIds: { latest: () => undefined },
+  });
+  const dispatch = (counter) => (event) => { event?.preventDefault(); counter(v => v + 1); };
+  const model = {
+    ...presentation, conversation, agent,
+    agentPresence: { present: () => true, closing: () => false },
+    agentOpen: () => true, agentOverlay: () => false, dismissAgent: () => {},
+    inboxSourceActive: () => false, setupVisible: () => false,
+    conversationScope: scope, setConversationSelections: setSelections,
+    assistantTicketID: () => ticketScope() ? ticketID : undefined,
+    ticketList: () => [{ id: ticketID, title: "Original Ticket" }],
+    selectedProject: () => ({ id: projectID, name: "Owned Project" }),
+    selectedProjectID: () => projectID, selectedTicketID: () => ticketID,
+    canDevelopProject: () => true, assistantPending: () => false,
+    assistantContextLoading: () => false, pending: () => false,
+    detail: () => undefined, workspaceView: () => "ticket",
+    ticketWorkspaceReady: () => true, ticketWorkspaceStatus: () => "Ready",
+    newConversation: dispatch(setCreates), setCodingWriter: () => {},
+    restoredMessageScope: () => undefined,
+    agentCommandScope: (kind) => kind + ":" + scope() + ":" + selected(),
+    streamedAnswer: () => undefined, setError: () => {},
+    bootstrap: { session: { user: { id: "owned-user" } } },
+    stopAgent: dispatch(setStops), startAgent: dispatch(setCoding),
+    promptAgent: dispatch(setCoding), implementTicket: dispatch(setCoding),
+    sendConversationMessage: dispatch(setResearch),
+    restoreMessageDraft: (element, key) => {
+      const current = untrack(key);
+      element.value = drafts.get(current) ?? "";
+      element.addEventListener("input", () => drafts.set(current, element.value));
+    },
+    modelRelayConfigured: () => true, chosenCodingReasoning: () => undefined,
+    blockersFor: () => [], conversationPlaceholder: () => "Ask about this Ticket…",
+  };
+  return <main class="factory-desktop agent-is-open" data-background="river-landscape">
+    <section class="workspace-window">
+      <button onClick={() => setStopPending(true)}>Mark Stop unconfirmed</button>
+      <button onClick={() => setWorking(true)}>Observe working Coding</button>
+      <button onClick={() => setTicketScope(false)}>Open Project research</button>
+      <button onClick={() => setReads(v => v + 1)}>Refresh saved state</button>
+      <p>{"Research sends: " + research() + " · Coding sends: " + coding() +
+        " · New contexts: " + creates() + " · Stops: " + stops() + " · Reads: " + reads()}</p>
+    </section>
+    <AssistantPanel model={model} />
+  </main>;
+}
+render(() => <Surface />, document.getElementById("root"));
+`;
 test.setTimeout(45_000);
 test.beforeAll(async () => {
   server = await createServer({
@@ -25,7 +145,27 @@ test.beforeAll(async () => {
     cacheDir: cacheDirectory,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["chat-collaboration.html"] },
-    plugins: [factoryFixtureStart(), solid({ ssr: false })],
+    plugins: [
+      {
+        name: "owned-assistant-ownership-fixture",
+        resolveId: (id) => (id === "/assistant-ownership.tsx" ? ownershipFixture : undefined),
+        load: (id) => (id === ownershipFixture ? ownershipSource : undefined),
+        configureServer(server) {
+          server.middlewares.use(async (request, response, next) => {
+            if (!request.url?.startsWith("/assistant-ownership.html")) return next();
+            response.setHeader("Content-Type", "text/html");
+            response.end(
+              await server.transformIndexHtml(
+                "/assistant-ownership.html",
+                '<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="/assistant-ownership.tsx"></script></body></html>',
+              ),
+            );
+          });
+        },
+      },
+      factoryFixtureStart(),
+      solid({ ssr: false }),
+    ],
     server: { host: "127.0.0.1", port: 0 },
   });
   await server.listen();
@@ -60,6 +200,147 @@ test.beforeEach(async ({ page }) => {
     },
   });
 });
+
+for (const fresh of [false, true])
+  test.describe(`${fresh ? "touch with fresh" : "keyboard with original"} Coding ownership`, () => {
+    test.use({ hasTouch: fresh });
+    test(`research chat identifies its separate ${fresh ? "fresh" : "original"} Coding owner without dispatch`, async ({
+      page,
+    }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      const role = { modelId: "owned-model", models: ["owned-model"], allowOverride: true };
+      const rule = { models: role.models, allowOverride: role.allowOverride };
+      const effective = {
+        ...role,
+        source: "system",
+        lockedReason: null,
+        ignoredReason: null,
+        available: true,
+      };
+      await mockFactoryFunctions(page, {
+        models: {
+          inherited: async () =>
+            inheritedModelSettingsView.parse({
+              system: {
+                version: 0,
+                planningModelId: role.modelId,
+                buildModelId: role.modelId,
+                rules: { planning: rule, build: rule },
+                source: "administrator",
+                models: role.models,
+                connection: { configured: true, host: null },
+              },
+              project: { version: 0, planning: role, build: role },
+              personal: { version: 0, planningModelId: null, buildModelId: null },
+              effective: { planning: effective, build: effective },
+              projectEffective: { planning: effective, build: effective },
+              canManageProject: false,
+            }),
+        },
+        skills: {
+          library: async () => ({
+            sharedVersions: [],
+            entries: [],
+            choices: [],
+            proposals: [],
+            canManageProject: false,
+            canManageSystem: false,
+          }),
+        },
+      });
+      await page.goto(`${origin}/assistant-ownership.html${fresh ? "?fresh" : ""}`);
+      const panel = page.getByRole("complementary", { name: "Agent panel", exact: true });
+      const heading = panel.getByRole("button", { name: "Conversation", exact: true });
+      const draft = panel.getByRole("textbox", { name: "Message conversation", exact: true });
+      const notice = panel.getByRole("status", { name: "Ticket implementation", exact: true });
+      const editing = panel.getByRole("region", { name: "Ticket Workspace editing", exact: true });
+      const counts = page.getByText(
+        "Research sends: 0 · Coding sends: 0 · New contexts: 0 · Stops: 0 · Reads: 0",
+        { exact: true },
+      );
+      await expect(heading).toContainText("What is this app?");
+      await expect(notice).toContainText("Implementation in another conversation");
+      await expect(notice).toContainText(fresh ? "Working" : "Starting");
+      await expect(editing).toContainText("Shared across this Ticket's conversations");
+      await expect(editing).toContainText("Agent working · requested by Anna");
+      await expect(panel.getByRole("button", { name: "Stop OpenCode", exact: true })).toHaveCount(
+        0,
+      );
+      await expect(
+        panel.getByText("Implementing the approved Ticket.", { exact: true }),
+      ).toHaveCount(0);
+      await expect(counts).toBeVisible();
+      await expect(panel.getByRole("alert")).toHaveCount(0);
+      await draft.fill("Keep this research draft.");
+      const openCoding = notice.getByRole("button", { name: "Open active Coding", exact: true });
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({ width, height: 900 });
+        await expect(openCoding).toBeInViewport();
+        await expect(draft).toBeEnabled();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          width,
+        );
+        await page.screenshot({
+          path: `${evidence}/ownership-${fresh ? "fresh" : "original"}-${width}.png`,
+        });
+      }
+      if (fresh) {
+        expect((await openCoding.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+        await openCoding.tap();
+      } else {
+        await openCoding.focus();
+        await openCoding.press("Enter");
+      }
+      await expect(heading).toContainText(fresh ? "Fresh Coding" : "Original Ticket");
+      await expect(
+        panel.getByText("Implementing the approved Ticket.", { exact: true }),
+      ).toBeVisible();
+      await expect(panel.getByRole("button", { name: "Stop OpenCode", exact: true })).toBeVisible();
+      await expect(notice).toHaveCount(0);
+      await expect(counts).toBeVisible();
+      await chooseConversation(page, "10000000-0000-4000-8000-000000000005");
+      await expect(draft).toHaveValue("Keep this research draft.");
+      await draft.press("Enter");
+      await expect(
+        page.getByText(/Research sends: 1 · Coding sends: 0 · New contexts: 0 · Stops: 0/),
+      ).toBeVisible();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.getByRole("button", { name: "Observe working Coding", exact: true }).click();
+      await expect(notice).toContainText("Working");
+      await page.getByRole("button", { name: "Mark Stop unconfirmed", exact: true }).click();
+      await expect(notice).toContainText("Stop unconfirmed");
+      await mockFactoryFunctions(page, {
+        writer: {
+          status: async () =>
+            writerViewSchema.parse({
+              state: "agent",
+              epoch: 1,
+              canWrite: false,
+              yours: false,
+              commandID: null,
+              stopPending: true,
+              actor: null,
+              requester: null,
+            }),
+        },
+      });
+      await expect(editing).toContainText("Agent Stop unconfirmed. Check Stop in this Ticket.");
+      await page.getByRole("button", { name: "Refresh saved state", exact: true }).click();
+      await expect(
+        page.getByText(
+          /Research sends: 1 · Coding sends: 0 · New contexts: 0 · Stops: 0 · Reads: 1/,
+        ),
+      ).toBeVisible();
+      await page.getByRole("button", { name: "Open Project research", exact: true }).click();
+      await expect(notice).toHaveCount(0);
+      await expect(editing).toHaveCount(0);
+      await expect(panel.getByRole("button", { name: "Stop OpenCode", exact: true })).toHaveCount(
+        0,
+      );
+      expect(errors).toEqual([]);
+    });
+  });
 
 test("chat creation lives in history; the compact header and long menu stay keyboard-accessible", async ({
   browser,

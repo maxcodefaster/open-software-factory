@@ -15,8 +15,8 @@ import {
   getWorkspaceSource,
   stopDeveloperIDE,
 } from "./server-functions/workspaces";
-import { recoverWorkspaceSource } from "./source-recovery";
 import { createWaitElapsed, waitLabel } from "./wait-elapsed";
+import type { WorkspaceSourceView } from "./workspace/contracts";
 
 export function DeveloperIDEWorkspace(props: {
   userID: string;
@@ -41,9 +41,13 @@ export function DeveloperIDEWorkspace(props: {
   const [editorSlow, setEditorSlow] = createSignal(false);
   const [sourceError, setSourceError] = createSignal("");
   const fileError = () =>
-    availableSource() ? "" : plainErrorMessage(sourceError() || props.preparationFailure || "");
+    availableSource() === props.workspaceID && props.workspaceID
+      ? ""
+      : sourceAccessMessage(sourceError() || props.preparationFailure || "");
   const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
+  const [sourceChecks, setSourceChecks] = createSignal(0);
+  const [sourceCheckMessage, setSourceCheckMessage] = createSignal("");
   const [startingSelection, setStartingSelection] = createSignal(false);
   const [editorRecovering, setEditorRecovering] = createSignal(false);
   const [editorState, setEditorState] = createSignal<WorkspaceSourceState>();
@@ -56,6 +60,7 @@ export function DeveloperIDEWorkspace(props: {
   const [editorRetry, setEditorRetry] = createSignal(0);
   const [sourceRetry, setSourceRetry] = createSignal(0);
   let sourceRecovery: AbortController | undefined;
+  let sourceObservation: AbortController | undefined;
   let editorRecovery: AbortController | undefined;
   const preparation = selectedSourcePreparation(async (projectID) => {
     await serverCall(
@@ -70,6 +75,7 @@ export function DeveloperIDEWorkspace(props: {
   onCleanup(() => {
     preparation.close();
     sourceRecovery?.abort();
+    sourceObservation?.abort();
     editorRecovery?.abort();
   });
   createEffect(
@@ -87,6 +93,8 @@ export function DeveloperIDEWorkspace(props: {
       sourceRecovery?.abort();
       sourceRecovery = undefined;
       setSourceRecovering(false);
+      setSourceChecks(0);
+      setSourceCheckMessage("");
     },
   );
   async function retrySource() {
@@ -95,23 +103,49 @@ export function DeveloperIDEWorkspace(props: {
       props.onRetrySelection?.();
       return;
     }
-    if (!workspaceID || !props.allowed || sourceRecovering() || editorRecovering()) return;
+    if (!props.allowed || sourceRecovering() || editorRecovering()) return;
     const cancel = new AbortController();
     sourceRecovery = cancel;
+    sourceObservation?.abort();
     const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(150_000)]);
+    const check = sourceChecks() + 1;
+    setSourceChecks(check);
+    setSourceCheckMessage(`File access check ${check}: checking the current Source…`);
     setSourceRecovering(true);
     setAvailableSource(undefined);
     try {
-      await recoverWorkspaceSource(workspaceID, signal, {
-        ensure: (id, signal) => serverCall(ensureWorkspaceSource({ ...{ signal }, data: [id] })),
-      });
-      if (!cancel.signal.aborted) setSourceRetry((value) => value + 1);
+      const source = await serverCall(
+        ensureWorkspaceSource({ ...{ signal }, data: [workspaceID] }),
+      );
+      signal.throwIfAborted();
+      if (props.workspaceID !== workspaceID || !props.allowed) return;
+      if (source.workspaceID !== workspaceID)
+        throw new Error(
+          "The file access check returned a different Workspace. Nothing was selected.",
+        );
+      setSourceState(source.state);
+      setSourceError(plainErrorMessage(source.failure ?? ""));
+      if (source.state === "ready" && !source.failure) {
+        setAvailableSource(workspaceID);
+        setSourceCheckMessage("");
+      } else {
+        setSourceCheckMessage(
+          `File access check ${check}: still unavailable. No work was restarted.`,
+        );
+        if (!source.failure && ["failed", "stopped", "stop-intended"].includes(source.state))
+          setSourceError("Workspace file access is stopped or failed. Keep your editor buffer.");
+        if (!source.failure && !["failed", "stopped", "stop-intended"].includes(source.state))
+          setSourceRetry((value) => value + 1);
+      }
     } catch (cause) {
       if (!cancel.signal.aborted) {
         setSourceState(undefined);
+        setSourceCheckMessage(
+          `File access check ${check}: not confirmed. Keep your unsaved edits.`,
+        );
         setSourceError(
           signal.aborted
-            ? "File access recovery is taking longer than expected. Your files are retained; retry to check its recorded state."
+            ? "The file access check timed out. Keep your editor buffer; retry only checks the current Source."
             : cause instanceof Error
               ? plainErrorMessage(cause.message)
               : "File access could not recover.",
@@ -260,20 +294,26 @@ export function DeveloperIDEWorkspace(props: {
     ([workspaceID, allowed]) => {
       setAvailableSource(undefined);
       setSourceState(undefined);
+      setSourceError("");
       if (!workspaceID || !allowed) return;
       const cancel = new AbortController();
-      setSourceError("");
+      sourceObservation = cancel;
       void (async () => {
         while (!cancel.signal.aborted) {
-          const source = await tolerant(cancel.signal, () =>
+          const source: WorkspaceSourceView = await tolerant(cancel.signal, () =>
             serverCall(getWorkspaceSource({ ...{ signal: cancel.signal }, data: [workspaceID] })),
           );
           if (!cancel.signal.aborted) {
             setSourceState(source.state);
             setSourceError(plainErrorMessage(source.failure ?? ""));
           }
-          if (source.state === "ready") {
-            if (!cancel.signal.aborted) setAvailableSource(workspaceID);
+          if (source.workspaceID !== workspaceID)
+            throw new Error("File access returned a different Workspace. Nothing was selected.");
+          if (source.state === "ready" && !source.failure) {
+            if (!cancel.signal.aborted) {
+              setAvailableSource(workspaceID);
+              setSourceCheckMessage("");
+            }
             return;
           }
           if (["failed", "stopped", "stop-intended"].includes(source.state))
@@ -281,6 +321,9 @@ export function DeveloperIDEWorkspace(props: {
               source.failure ??
                 "Workspace files are stopped. Reopen this Workspace to prepare them.",
             );
+          // An unavailable owner needs an explicit check, not repeated polling
+          // presented as preparation or a silent attempt to change its writer.
+          if (source.failure) return;
           await pause(cancel.signal);
         }
       })().catch((cause: unknown) => {
@@ -291,7 +334,10 @@ export function DeveloperIDEWorkspace(props: {
               : "Workspace files are unavailable.",
           );
       });
-      return () => cancel.abort();
+      return () => {
+        cancel.abort();
+        if (sourceObservation === cancel) sourceObservation = undefined;
+      };
     },
   );
   createEffect(
@@ -409,7 +455,10 @@ export function DeveloperIDEWorkspace(props: {
           {(current) => (
             <div
               class="runtime-frame"
-              inert={ready() && selected() !== props.workspaceID}
+              inert={
+                ready() &&
+                (selected() !== props.workspaceID || availableSource() !== props.workspaceID)
+              }
               aria-busy={!ready() || selected() !== props.workspaceID ? "true" : "false"}
             >
               <iframe
@@ -466,10 +515,23 @@ export function DeveloperIDEWorkspace(props: {
             </Show>
           </div>
         </Show>
-        <Show when={editorError() || editorSlow() || fileError() || editorRecovering()}>
+        <Show
+          when={
+            editorError() ||
+            editorSlow() ||
+            fileError() ||
+            editorRecovering() ||
+            sourceCheckMessage()
+          }
+        >
           <div class="editor-recovery">
             <Show when={fileError()}>
               <p role="status">{fileError()}</p>
+            </Show>
+            <Show when={sourceCheckMessage()}>
+              <p role="status" aria-label="File access check">
+                {sourceCheckMessage()}
+              </p>
             </Show>
             <div class="editor-recovery-actions">
               <Show when={fileError() && !props.workspaceID && props.onStartSelection}>
@@ -524,6 +586,14 @@ export function DeveloperIDEWorkspace(props: {
       </div>
     </div>
   );
+}
+
+function sourceAccessMessage(message: string) {
+  const plain = plainErrorMessage(message);
+  return plain ===
+    "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer."
+    ? "File access is not ready. The Workspace may still be starting or reconnecting. Keep your unsaved edits."
+    : plain;
 }
 
 function pause(signal: AbortSignal) {

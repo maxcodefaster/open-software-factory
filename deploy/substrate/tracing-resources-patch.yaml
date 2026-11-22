@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: otel-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: jaeger
+          env:
+            - name: GOMEMLIMIT
+              value: 384MiB
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

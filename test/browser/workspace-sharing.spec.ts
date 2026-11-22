@@ -20,7 +20,11 @@ test.beforeAll(async () => {
         enforce: "pre",
         resolveId(source, importer) {
           if (
-            source === "./server-functions/workspaces" &&
+            [
+              "./server-functions/workspaces",
+              "./server-functions/runtime",
+              "./server-functions/writer",
+            ].includes(source) &&
             importer?.endsWith("/workspace-sharing.tsx")
           )
             return resolve("test/fixtures/workspace-sharing-commands.ts");

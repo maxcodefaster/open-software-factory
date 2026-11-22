@@ -928,6 +928,15 @@ WorkerPool budgets remain unchanged. These are scheduling reservations, not meas
 consumption or a universal minimum. Reverify live egress after the rollout and qualify
 the complete Project recipe under cold load before accepting this profile.
 
+Also apply [`tracing-resources-patch.yaml`](tracing-resources-patch.yaml) to the owned
+`otel-system/jaeger` Deployment using the same observed-object procedure. The upstream
+in-memory tracing fixture otherwise has no memory limit: accumulated traces consumed
+about 4 GiB and contributed to control-plane and Factory timeouts on the shared VM.
+This patch reserves 128 MiB, caps tracing at 512 MiB and gives Go a 384 MiB memory target.
+Only ephemeral diagnostic traces may be lost on restart; Factory history, Source and
+Actor limits are unchanged. Do not run another completed test cluster alongside a
+retained demo without budgeting both clusters' actual host usage.
+
 This shared-node profile keeps the official native API and PostgreSQL health endpoints
 and probe periods, with a five-second readiness timeout and a ten-second liveness
 timeout with six consecutive failures before restart. Apply those probe settings through

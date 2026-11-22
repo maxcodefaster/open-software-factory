@@ -66,11 +66,16 @@ export function createWorkspaceSourceController(
         kind: developmentWorkspace.kind,
         ticketTitle: ticket.title,
         attemptID: runtimeAttempt.id,
+        runtimeState: runtimeAttempt.state,
         generation: expression<string | null>`${runtimeAttempt.generation}::text`,
         ready: expression<boolean>`(${runtimeAttempt.state}='ready'
           AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${substrateBinding.actorUid} IS NOT NULL
           AND ${substrateBinding.deleteIntendedAt} IS NULL AND ${substrateBinding.deletedAt} IS NULL
           AND (${substrateSource.owner}='service' OR ${substrateSource.actorUid}=${substrateBinding.actorUid}))`,
+        readable: expression<boolean>`(${runtimeAttempt.state} IN ('starting','ready')
+          AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${substrateBinding.actorUid} IS NOT NULL
+          AND ${substrateBinding.deleteIntendedAt} IS NULL AND ${substrateBinding.deletedAt} IS NULL
+          AND ${substrateSource.actorUid}=${substrateBinding.actorUid})`,
         sourceOwner: substrateSource.owner,
         sourceWritable: substrateSource.writable,
         sourceEpoch: expression<string | null>`${substrateSource.writerEpoch}::text`,
@@ -107,8 +112,12 @@ export function createWorkspaceSourceController(
       current.sourceWritable &&
         (current.sourceOwner === "service"
           ? await sources.available(current.workspaceID)
-          : current.ready && current.attemptID && hub.sourceConnected(current.attemptID)),
+          : current.readable && current.attemptID && hub.sourceConnected(current.attemptID)),
     );
+    // An admitted cold start is still preparing, not evidence that Source was
+    // frozen. Keep the editor's observation alive until its original Parent
+    // connects; reads never await Docker/Child readiness or admit a new writer.
+    const preparing = current.runtimeState === "starting" && current.sourceWritable;
     return {
       workspaceID: current.workspaceID,
       label:
@@ -118,9 +127,10 @@ export function createWorkspaceSourceController(
       state: ready ? "ready" : "preparing",
       serviceID: `source-${current.workspaceID.replaceAll("-", "")}`,
       epoch: Number(current.sourceEpoch ?? current.generation ?? 1),
-      failure: ready
-        ? null
-        : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
+      failure:
+        ready || preparing
+          ? null
+          : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
     };
   }
   const authority = (workspaceID: string, userID: string, sql: DatabaseTransaction) =>
@@ -343,13 +353,18 @@ export function createWorkspaceSourceController(
               "unavailable",
               "Native Source is not initialized; compute was not started",
             );
-          if (current.sourceOwner !== "service" && !current.ready)
+          if (current.sourceOwner !== "service" && !current.readable)
             throw new CommandError(
               "unavailable",
               "Actor Source is not ready; compute was not started",
             );
           if (["write", "mkdir", "rename", "delete"].includes(operation)) {
             const writer = await workspaceWriteAuthorityIn(sql, workspaceID, userID);
+            if (current.sourceOwner !== "service" && !current.ready)
+              throw new CommandError(
+                "unavailable",
+                "The Workspace is still starting. Source is readable; writing authority has not changed.",
+              );
             admittedRequest.headers.set(
               "X-Factory-Writer-Epoch",
               writer.writerEpoch ?? current.sourceEpoch ?? "1",

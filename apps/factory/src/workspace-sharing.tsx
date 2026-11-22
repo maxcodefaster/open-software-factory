@@ -1,15 +1,19 @@
 import { createEffect, createSignal, For, Show, untrack } from "solid-js";
+import type { WriterView } from "./agent/contracts";
 import { plainErrorMessage } from "./command-error";
 import { serverCall } from "./server-functions/result";
+import { getRuntimeAttempts } from "./server-functions/runtime";
 import {
   enableWorkspaceCollaboration,
   getAvailableWorkspaces,
   getWorkspaceCollaboration,
   getWorkspaceSharing,
+  getWorkspaceSource,
   inspectWorkspaceSubmission,
   shareWorkspace,
   submitWorkspace,
 } from "./server-functions/workspaces";
+import { getChangeWriterStatus } from "./server-functions/writer";
 import { WorkspaceActionBar } from "./ui/workspace-actions";
 import { WindowHeading } from "./workspace-chrome";
 import "./workspace-sharing.css";
@@ -44,10 +48,42 @@ export function WorkspaceSharingBar(props: {
     participants: { participantID: string; name: string; kind: string }[];
   }>();
   const [sharing, setSharing] = createSignal<Sharing>();
+  const [source, setSource] = createSignal<{ state: string; failure: string | null }>();
+  const [writer, setWriter] = createSignal<WriterView>();
+  const [computeState, setComputeState] = createSignal<string>();
+  const [accessError, setAccessError] = createSignal("");
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [open, setOpen] = createSignal(false);
   const [submitted, setSubmitted] = createSignal("");
+  let accessGeneration = 0;
+  let accessRead = 0;
+  const actionUnavailable = () => {
+    if (!props.workspaceID) return "Choose a Workspace to check file access.";
+    if (!state()) return "Workspace access is not confirmed. Writing authority has not changed.";
+    if (state()?.kind !== "ticket") return "";
+    const current = writer();
+    if (!current) return "Editing status unavailable. Writing authority has not changed.";
+    if (current.stopPending) return "Agent Stop is unconfirmed. Check Stop in this Ticket.";
+    if (current.state === "agent" || current.state === "agent-preparing")
+      return "Coding is preparing or working. Shared editing and submission need a confirmed human writer.";
+    if (current.state === "handoff")
+      return "Editing handoff is not confirmed. Writing authority has not changed.";
+    if (current.state !== "human" || !current.canWrite)
+      return "Take over editing in this Ticket before enabling shared editing or submitting saved source.";
+    if (!source())
+      return "File access is unavailable. Keep your editor buffer and retry the file access check.";
+    if (source()?.state !== "ready" || source()?.failure)
+      return computeState() === "starting" || computeState() === "resuming"
+        ? "Compute is starting or resuming. File access is not ready; keep your editor buffer."
+        : "File access is not ready. The current Source may still be starting or unreachable; keep your editor buffer.";
+    return "";
+  };
+  const submissionUnavailable = () =>
+    actionUnavailable() ||
+    (computeState() !== "ready"
+      ? "The Ticket Workspace must be running before submitting saved source. Starting compute is a separate action."
+      : "");
   let submission:
     | {
         requestID: string;
@@ -60,21 +96,93 @@ export function WorkspaceSharingBar(props: {
   let dialog: HTMLDialogElement | undefined, opener: HTMLButtonElement | undefined;
   async function refresh() {
     const [projectID, workspaceID] = untrack(() => [props.projectID, props.workspaceID] as const);
-    if (projectID) {
-      const value = await serverCall(getAvailableWorkspaces({ data: [projectID] }));
-      if (untrack(() => props.projectID) === projectID) setAvailable(value);
-    }
+    const generation = accessGeneration;
+    const read = ++accessRead;
+    const current = () =>
+      generation === accessGeneration &&
+      read === accessRead &&
+      untrack(() => props.projectID === projectID && props.workspaceID === workspaceID);
+    const signal = AbortSignal.timeout(4_000);
+    const availableRead = projectID
+      ? serverCall(getAvailableWorkspaces({ signal, data: [projectID] }))
+          .then((value) => {
+            if (current()) setAvailable(value);
+          })
+          .catch((cause) => {
+            if (current())
+              setError(
+                cause instanceof Error
+                  ? plainErrorMessage(cause.message)
+                  : "Workspace listing is unavailable.",
+              );
+          })
+      : Promise.resolve();
     if (workspaceID) {
-      const value = await serverCall(getWorkspaceCollaboration({ data: [workspaceID] }));
-      if (untrack(() => props.workspaceID) === workspaceID) setState(value);
+      try {
+        const value = await serverCall(getWorkspaceCollaboration({ signal, data: [workspaceID] }));
+        if (value.workspaceID !== workspaceID)
+          throw new Error("Workspace access changed. Check the selected Workspace again.");
+        if (current()) setState(value);
+        if (value.kind === "ticket") {
+          if (!projectID) throw new Error("Select the Ticket Project to check writing authority.");
+          const [files, attempts] = await Promise.all([
+            serverCall(getWorkspaceSource({ signal, data: [workspaceID] })).catch((cause) => {
+              if (current())
+                setAccessError(
+                  cause instanceof Error
+                    ? plainErrorMessage(cause.message)
+                    : "File access is unavailable.",
+                );
+              return undefined;
+            }),
+            serverCall(getRuntimeAttempts({ signal, data: [projectID] })),
+          ]);
+          const attempt = attempts.attempts.find(
+            (row) => row.workspaceId === workspaceID && row.projectId === projectID,
+          );
+          if (!attempt?.changeId) throw new Error("Ticket writing authority is unavailable.");
+          const editing = await serverCall(
+            getChangeWriterStatus({ signal, data: [attempt.changeId] }),
+          );
+          if (current()) {
+            setSource(files?.workspaceID === workspaceID ? files : undefined);
+            setWriter(editing);
+            setComputeState(attempt.state);
+            if (files)
+              setAccessError(
+                files.workspaceID === workspaceID
+                  ? ""
+                  : "File access returned a different Workspace.",
+              );
+          }
+        } else if (current()) setAccessError("");
+      } catch (cause) {
+        if (current()) {
+          setSource(undefined);
+          setWriter(undefined);
+          setComputeState(undefined);
+          setAccessError(
+            cause instanceof Error
+              ? plainErrorMessage(cause.message)
+              : "Workspace access is unavailable.",
+          );
+        }
+      }
     }
+    await availableRead;
   }
   createEffect(
     () => [props.projectID, props.workspaceID] as const,
     () => {
+      accessGeneration++;
+      accessRead++;
       setOpen(false);
       setSharing(undefined);
       setState(undefined);
+      setSource(undefined);
+      setWriter(undefined);
+      setComputeState(undefined);
+      setAccessError("");
       setSubmitted("");
       setError("");
       let active = true;
@@ -93,6 +201,7 @@ export function WorkspaceSharingBar(props: {
       const timer = setInterval(read, 5000);
       return () => {
         active = false;
+        accessGeneration++;
         clearInterval(timer);
       };
     },
@@ -178,11 +287,15 @@ export function WorkspaceSharingBar(props: {
         label="Workspace collaboration"
         status={
           <span>
-            {state()?.collaborative
-              ? state()
-                  ?.participants.map((peer) => peer.name)
-                  .join(", ") || "Shared editing enabled"
-              : "Private editing"}
+            {!state()
+              ? "Checking Workspace access…"
+              : state()?.kind === "ticket" && !writer()
+                ? "Editing status unavailable"
+                : state()?.collaborative
+                  ? state()
+                      ?.participants.map((peer) => peer.name)
+                      .join(", ") || "Shared editing enabled"
+                  : "Private editing"}
           </span>
         }
       >
@@ -237,10 +350,12 @@ export function WorkspaceSharingBar(props: {
           <button
             type="button"
             class="workspace-action"
-            disabled={busy()}
+            disabled={busy() || Boolean(actionUnavailable())}
+            title={actionUnavailable() || undefined}
+            aria-describedby={actionUnavailable() ? "workspace-action-availability" : undefined}
             onClick={() => {
               const id = props.workspaceID;
-              if (!id) return;
+              if (!id || busy() || actionUnavailable()) return;
               setBusy(true);
               void serverCall(enableWorkspaceCollaboration({ data: [id, crypto.randomUUID()] }))
                 .then(refresh)
@@ -255,10 +370,12 @@ export function WorkspaceSharingBar(props: {
           <button
             type="button"
             class="workspace-action"
-            disabled={busy()}
+            disabled={busy() || Boolean(submissionUnavailable())}
+            title={submissionUnavailable() || undefined}
+            aria-describedby={submissionUnavailable() ? "workspace-action-availability" : undefined}
             onClick={() => {
               const id = props.workspaceID;
-              if (!id) return;
+              if (!id || busy() || submissionUnavailable()) return;
               setBusy(true);
               setError("");
               void (async () => {
@@ -301,6 +418,23 @@ export function WorkspaceSharingBar(props: {
           </button>
         </Show>
       </WorkspaceActionBar>
+      <Show
+        when={
+          props.workspaceID &&
+          (!state() || state()?.kind === "ticket") &&
+          (actionUnavailable() || submissionUnavailable())
+        }
+      >
+        <p
+          id="workspace-action-availability"
+          role="status"
+          aria-label="Workspace action availability"
+          class="workspace-sharing-error"
+        >
+          {actionUnavailable() || submissionUnavailable()}
+          <Show when={accessError()}> {accessError()}</Show>
+        </p>
+      </Show>
       <Show when={error() && !open()}>
         <p role="alert" class="workspace-sharing-error">
           {error()}

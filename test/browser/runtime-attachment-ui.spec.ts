@@ -1,14 +1,16 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { previewBridge } from "../../apps/factory/src/review/preview-bridge";
 import { previewAttachmentFailure } from "../../apps/factory/src/runtime/preview-attachment-failure";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { protocolFailure } from "../../apps/factory/src/server/protocols/failure";
 import { observeBrowserErrors } from "../fixtures/browser-errors";
 import { test } from "../fixtures/browser-test";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
 
@@ -28,6 +30,21 @@ test.beforeAll(async () => {
     cacheDir,
     publicDir: resolve("apps/factory/public"),
     plugins: [
+      {
+        name: "owned-source-action-availability",
+        enforce: "pre",
+        resolveId(source, importer) {
+          if (
+            importer?.endsWith("/workspace-sharing.tsx") &&
+            [
+              "./server-functions/workspaces",
+              "./server-functions/runtime",
+              "./server-functions/writer",
+            ].includes(source)
+          )
+            return resolve("test/fixtures/workspace-sharing-commands.ts");
+        },
+      },
       factoryFixtureStart(),
       solid({ ssr: false }),
       {
@@ -131,6 +148,237 @@ test.afterEach(() => {
 test.afterAll(async () => {
   await frontend?.close();
   await rm(cacheDir, { recursive: true, force: true });
+});
+
+test("Ticket source actions require confirmed file access and a human writer", async ({ page }) => {
+  for (const [query, explanation] of [
+    ["source-access=unavailable", "File access is not ready"],
+    ["source-access=unknown", "File access is unavailable"],
+    ["source-access=mismatch", "File access is unavailable"],
+    ["writer-access=unknown", "Editing status unavailable"],
+    ["writer-access=agent-preparing", "Coding is preparing or working"],
+    ["writer-access=agent", "Coding is preparing or working"],
+    ["writer-access=handoff", "Editing handoff is not confirmed"],
+    ["writer-access=unassigned", "Take over editing"],
+    ["writer-denied=1", "Take over editing"],
+    ["writer-stop-pending=1", "Agent Stop is unconfirmed"],
+    ["source-access=unavailable&compute-access=starting", "Compute is starting or resuming"],
+  ] as const) {
+    await page.goto(
+      `${origin}/workspace-sharing.html?workspace=workspace-source-access-ticket&${query}`,
+    );
+    await page.getByRole("button", { name: "Load available Workspaces" }).click();
+    await expect(
+      page.getByRole("button", { name: "Enable shared editing", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Submit saved checkout", exact: true }),
+    ).toBeDisabled();
+    await expect(page.getByRole("status", { name: "Workspace action availability" })).toContainText(
+      explanation,
+    );
+  }
+  await page.goto(`${origin}/workspace-sharing.html?workspace=workspace-source-access-ticket`);
+  await page.getByRole("button", { name: "Load available Workspaces" }).click();
+  await expect(
+    page.getByRole("button", { name: "Enable shared editing", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Submit saved checkout", exact: true }),
+  ).toBeEnabled();
+  await page.goto(
+    `${origin}/workspace-sharing.html?workspace=workspace-source-access-ticket&compute-access=starting`,
+  );
+  await page.getByRole("button", { name: "Load available Workspaces" }).click();
+  await expect(
+    page.getByRole("button", { name: "Enable shared editing", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Submit saved checkout", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("status", { name: "Workspace action availability" })).toContainText(
+    "The Ticket Workspace must be running",
+  );
+});
+
+test("a later unavailable writer read withdraws Ticket actions without changing authority", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto(`${origin}/workspace-sharing.html?workspace=workspace-source-access-ticket`);
+  await page.getByRole("button", { name: "Load available Workspaces" }).click();
+  const submit = page.getByRole("button", { name: "Submit saved checkout", exact: true });
+  await expect(submit).toBeEnabled();
+  await page.evaluate(() => {
+    const url = new URL(location.href);
+    url.searchParams.set("writer-access", "unknown");
+    history.replaceState(null, "", url);
+  });
+  await page.clock.fastForward(5000);
+  await expect(submit).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Enable shared editing", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("status", { name: "Workspace action availability" })).toContainText(
+    "Editing status unavailable",
+  );
+  await page.screenshot({
+    path: `${evidence}/source-actions-writer-unavailable.png`,
+    fullPage: true,
+  });
+});
+
+async function unavailableSourceFixture(page: Page) {
+  const workspaceID = "10000000-0000-4000-8000-000000000003";
+  let reachable = false;
+  let checks = 0;
+  const source = () => ({
+    workspaceID,
+    label: "Owned source",
+    serviceID: "owned-source",
+    epoch: 1,
+    state: reachable ? ("ready" as const) : ("preparing" as const),
+    failure: reachable
+      ? null
+      : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
+  });
+  const editor = { serviceID: "owned-editor", epoch: 1, state: "ready" as const, failure: null };
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => source(),
+      getSource: async () => source(),
+      async ensureSource() {
+        checks++;
+        return source();
+      },
+      ensureEditor: async () => editor,
+      getEditor: async () => editor,
+    },
+  });
+  const editorURL = `${developerIDEOrigin(origin, "10000000-0000-4000-8000-000000000001", 1)}/source-access-editor/`;
+  let editorLoads = 0;
+  await page.route("**/api/developer-ide/access?*", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><html></html>" }),
+  );
+  await page.route(editorURL, (route) => {
+    editorLoads++;
+    return route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><textarea aria-label="Retained editor buffer">unsaved draft</textarea><script>
+        const factoryOrigin=${JSON.stringify(origin)};
+        parent.postMessage({type:"factory:ide-ready"},factoryOrigin);
+        addEventListener("message",event=>{
+          if(event.origin===factoryOrigin&&event.source===parent&&event.data?.type==="factory:select-workspace")
+            parent.postMessage({type:"factory:workspace-selected",workspaceID:event.data.workspaceID},factoryOrigin);
+        });
+      </script>`,
+    });
+  });
+  await page.goto(`${origin}/workspace-transport.html`);
+  const frame = page.locator('iframe[title="Factory IDE"]');
+  const embedded = await (await frame.elementHandle())?.contentFrame();
+  if (!embedded) throw Error("Owned source access editor is unavailable");
+  await embedded.goto(editorURL);
+  return {
+    workspaceID,
+    checks: () => checks,
+    editorLoads: () => editorLoads,
+    makeReachable: () => {
+      reachable = true;
+    },
+  };
+}
+
+test("unavailable Source Retry reports every check without claiming a freeze or replacing the editor", async ({
+  page,
+}) => {
+  const fixture = await unavailableSourceFixture(page);
+  await expect(
+    page.getByText("The Workspace may still be starting or reconnecting", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByText("The current Source owner is frozen", { exact: false })).toHaveCount(
+    0,
+  );
+  const retry = page.getByRole("button", { name: "Retry file access", exact: true });
+  for (let check = 1; check <= 3; check++) {
+    await retry.focus();
+    await retry.press("Enter");
+    await expect.poll(fixture.checks).toBe(check);
+    await expect(page.getByRole("status", { name: "File access check" })).toContainText(
+      `File access check ${check}: still unavailable.`,
+    );
+    await expect(retry).toBeEnabled();
+    await expect(page.locator(".editor-source-status")).toHaveCount(0);
+  }
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({
+      path: `${evidence}/source-retry-unavailable-${width}.png`,
+      fullPage: true,
+    });
+  }
+  fixture.makeReachable();
+  await retry.click();
+  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
+    "data-workspace-id",
+    fixture.workspaceID,
+  );
+  await expect(
+    page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Retained editor buffer"),
+  ).toHaveValue("unsaved draft");
+  expect(fixture.editorLoads()).toBe(1);
+});
+
+test("unavailable Source actions and independent Retry remain clear on touch", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+    reducedMotion: "reduce",
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(
+      `${origin}/workspace-sharing.html?workspace=workspace-source-access-ticket&writer-access=unknown`,
+    );
+    await page.getByRole("button", { name: "Load available Workspaces" }).tap();
+    await expect(
+      page.getByRole("button", { name: "Enable shared editing", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Submit saved checkout", exact: true }),
+    ).toBeDisabled();
+    await expect(page.getByRole("status", { name: "Workspace action availability" })).toContainText(
+      "Editing status unavailable",
+    );
+    await page.screenshot({
+      path: `${evidence}/source-actions-writer-unavailable-touch.png`,
+      fullPage: true,
+    });
+    const fixture = await unavailableSourceFixture(page);
+    const retry = page.getByRole("button", { name: "Retry file access", exact: true });
+    await expect(retry).toBeEnabled();
+    expect(
+      await retry.evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
+    await retry.tap();
+    await expect.poll(fixture.checks).toBe(1);
+    await expect(page.getByRole("status", { name: "File access check" })).toContainText(
+      "File access check 1: still unavailable.",
+    );
+    await page.screenshot({
+      path: `${evidence}/source-retry-unavailable-touch.png`,
+      fullPage: true,
+    });
+    expect(fixture.editorLoads()).toBe(1);
+  } finally {
+    await context.close();
+  }
 });
 
 test("Preview accepts its parsed document, not a spoofed sender, while an image remains pending", async ({
