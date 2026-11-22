@@ -183,16 +183,20 @@ for (const scenario of [
 type Draft = import("../../apps/factory/src/change/contracts").TicketDraft;
 type Callbacks = {
   richTextHandlers: (options: { field: "description"; update: (value: string) => void }) => {
+    onFocus: () => void;
     onInput: (value: string, element: HTMLElement) => void;
   };
   updateDescription: (value: string) => void;
+  draftDescription: () => string;
+  hasChanges: () => boolean;
   saveChanges: () => Promise<void>;
   scheduleAutosave: () => void;
   conflict: () => boolean;
 };
 
-function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>) {
+function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>, restoredDraft?: Draft) {
   storage.delete("ticket-edit:user:ticket-a");
+  if (restoredDraft) storage.set("ticket-edit:user:ticket-a", JSON.stringify(restoredDraft));
   const drafts = new Map<string, Draft>();
   const timers = new Map<number, () => void>();
   let scheduled = 0;
@@ -203,6 +207,8 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>) {
     expose: [
       "richTextHandlers",
       "updateDescription",
+      "draftDescription",
+      "hasChanges",
       "saveChanges",
       "scheduleAutosave",
       "conflict",
@@ -247,10 +253,12 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>) {
     documentRevisions: [],
     revisions: [],
   };
+  const [observation, setObservation] = solid.createSignal(0);
   const owned = solid.createRoot((dispose) => ({
     dispose,
     callbacks: component({
       get current() {
+        observation();
         return current;
       },
       storageKey: "ticket-edit:user:ticket-a",
@@ -270,13 +278,133 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>) {
     scheduled: () => scheduled,
     observe: (id: string, version: number, description = "Original A") => {
       current = { ...current, ticket: { ...current.ticket, id, version, description } };
+      setObservation((value) => value + 1);
     },
+    focus: input.onFocus,
     edit: (value: string) => {
       input.onInput(value, {} as HTMLElement);
       solid.flush();
     },
   };
 }
+
+for (const restored of [false, true])
+  test(`fresh Ticket hydration does not treat an unchanged ${restored ? "restored" : "focused"} editor as a human edit`, async () => {
+    let saves = 0;
+    const owned = editor(
+      async () => {
+        saves++;
+        return undefined;
+      },
+      restored
+        ? {
+            title: "A",
+            description: "Original A",
+            expectedVersion: 1,
+            expectedDocumentId: null,
+            requirementRevisionId: null,
+            requirement: { summary: "Original A", acceptanceCriteria: [], nonGoals: [] },
+          }
+        : undefined,
+    );
+    try {
+      if (!restored) owned.focus();
+      solid.flush();
+      owned.observe("ticket-a", 2, "New saved A from another client");
+      solid.flush();
+      expect(owned.callbacks.draftDescription()).toBe("New saved A from another client");
+      expect(owned.callbacks.hasChanges()).toBe(false);
+      await owned.callbacks.saveChanges();
+      solid.flush();
+      expect(saves).toBe(0);
+      expect(owned.callbacks.conflict()).toBe(false);
+      owned.dispose();
+      expect(owned.drafts.has("ticket-a")).toBe(false);
+      expect(storage.has("ticket-edit:user:ticket-a")).toBe(false);
+    } finally {
+      owned.dispose();
+    }
+  });
+
+for (const restored of [false, true])
+  test(`fresh Ticket hydration retains genuinely unsaved ${restored ? "restored" : "new"} text and its original save base`, async () => {
+    const writes: unknown[][] = [];
+    const owned = editor(
+      async (...args) => {
+        writes.push(args);
+        return undefined;
+      },
+      restored
+        ? {
+            title: "A",
+            description: "My unsaved A",
+            expectedVersion: 1,
+            expectedDocumentId: null,
+            requirementRevisionId: null,
+            requirement: { summary: "My unsaved A", acceptanceCriteria: [], nonGoals: [] },
+          }
+        : undefined,
+    );
+    try {
+      if (!restored) owned.edit("My unsaved A");
+      owned.observe("ticket-a", 2, "Someone else's saved A");
+      solid.flush();
+      expect(owned.callbacks.draftDescription()).toBe("My unsaved A");
+      await owned.callbacks.saveChanges();
+      solid.flush();
+      expect(writes[0]?.[0]).toMatchObject({
+        description: "My unsaved A",
+        expectedVersion: 1,
+        expectedDocumentId: null,
+      });
+      expect(owned.callbacks.conflict()).toBe(true);
+      expect(owned.drafts.get("ticket-a")?.description).toBe("My unsaved A");
+    } finally {
+      owned.dispose();
+    }
+  });
+
+test("a first input and fresh hydration in the same settle retain the actual input", async () => {
+  const owned = editor(async () => undefined);
+  try {
+    owned.callbacks
+      .richTextHandlers({
+        field: "description",
+        update: owned.callbacks.updateDescription,
+      })
+      .onInput("Input ahead of hydration", {} as HTMLElement);
+    owned.observe("ticket-a", 2, "Fresh saved A");
+    solid.flush();
+    expect(owned.callbacks.draftDescription()).toBe("Input ahead of hydration");
+    expect(owned.drafts.get("ticket-a")?.expectedVersion).toBe(1);
+  } finally {
+    owned.dispose();
+  }
+});
+
+test("an exact save acknowledgement stays visible ahead of delayed Ticket hydration", async () => {
+  let saves = 0;
+  const owned = editor(async () => {
+    saves++;
+    return { id: "saved-document", ticketVersion: 2, requirementRevisionId: null };
+  });
+  try {
+    owned.edit("My acknowledged A");
+    await owned.callbacks.saveChanges();
+    solid.flush();
+    expect(owned.callbacks.draftDescription()).toBe("My acknowledged A");
+    owned.observe("ticket-a", 1, "A delayed older read");
+    solid.flush();
+    expect(owned.callbacks.draftDescription()).toBe("My acknowledged A");
+    owned.observe("ticket-a", 2, "My acknowledged A");
+    solid.flush();
+    expect(owned.callbacks.hasChanges()).toBe(false);
+    await owned.callbacks.saveChanges();
+    expect(saves).toBe(1);
+  } finally {
+    owned.dispose();
+  }
+});
 
 test("an admitted save settles A's retained newer draft without rescheduling its disposed editor", async () => {
   const ack = Promise.withResolvers<unknown>();

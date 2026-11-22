@@ -16,6 +16,7 @@ import {
 import { getChangeWriterStatus } from "./server-functions/writer";
 import { WorkspaceActionBar } from "./ui/workspace-actions";
 import { WindowHeading } from "./workspace-chrome";
+import { writerStatusText } from "./writer-status-label";
 import "./workspace-sharing.css";
 
 type Available = {
@@ -66,7 +67,7 @@ export function WorkspaceSharingBar(props: {
     if (!current) return "Editing status unavailable. Writing authority has not changed.";
     if (current.stopPending) return "Agent Stop is unconfirmed. Check Stop in this Ticket.";
     if (current.state === "agent" || current.state === "agent-preparing")
-      return "Coding is preparing or working. Shared editing and submission need a confirmed human writer.";
+      return `${writerStatusText(current)}. Shared editing and submission need a confirmed human writer.`;
     if (current.state === "handoff")
       return "Editing handoff is not confirmed. Writing authority has not changed.";
     if (current.state !== "human" || !current.canWrite)

@@ -1,5 +1,8 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { expect } from "@playwright/test";
+import solid from "@solidjs/vite-plugin";
+import { createServer, type ViteDevServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
@@ -10,8 +13,209 @@ import {
   browserFunction,
   mockFactoryFunctions,
 } from "../fixtures/server-functions";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+
+test.describe("local Ticket hydration", () => {
+  let server: ViteDevServer;
+  let origin: string;
+  const cache = resolve(".factory/test-results/vite", `ticket-hydration-${crypto.randomUUID()}`);
+  const moduleID = resolve("test/fixtures/ticket-hydration.tsx");
+  // Render the real Ticket owner with independently arriving saved revisions. Keeping the
+  // module local to this regression avoids a Factory build, database, or runtime fixture.
+  const source = `
+import { render } from "@solidjs/web";
+import { createSignal, Show } from "solid-js";
+import { TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
+import "../../apps/factory/src/tokens.css";
+import "../../apps/factory/src/style.css";
+import "@fontsource-variable/inter";
+import "@fontsource/sansita/400-italic.css";
+
+function Surface() {
+  const ticketID = "10000000-0000-4000-8000-000000000002";
+  const revisionID = "10000000-0000-4000-8000-000000000003";
+  const approvalID = "10000000-0000-4000-8000-000000000004";
+  const drafts = new Map();
+  const [open, setOpen] = createSignal(false);
+  const [version, setVersion] = createSignal(3);
+  const [writes, setWrites] = createSignal([]);
+  const [work, setWork] = createSignal(0);
+  const original = { summary: "Old manual specification. Do not implement this fixture.",
+    acceptanceCriteria: ["Keep the existing approved scope."], nonGoals: [] };
+  const fresh = { ...original, summary: "Fresh manual specification without fixture directives." };
+  const revision = { id: revisionID, ordinal: 1, canonicalContent: JSON.stringify(original),
+    contentDigest: "a".repeat(64), approvalId: approvalID, approvedAt: "2026-11-22T10:00:00Z" };
+  const document = (ordinal) => ({ id: "10000000-0000-4000-8000-" + String(ordinal).padStart(12, "0"),
+    ordinal, title: "Owned manual Ticket", description: "Original request",
+    requirementRevisionId: revisionID,
+    canonicalContent: JSON.stringify(ordinal === 4 ? fresh : original),
+    contentDigest: "b".repeat(64), createdAt: ordinal === 4 ? "2026-11-22T11:00:00Z" : "2026-11-22T09:00:00Z" });
+  const noop = () => {};
+  const commission = () => setWork(v => v + 1);
+  return <main class="factory-desktop" data-background="river-landscape">
+    <header class="factory-topbar">
+      <button onClick={() => setOpen(true)}>Open Ticket</button>
+      <button onClick={() => setOpen(false)}>Close Ticket</button>
+      <button onClick={() => setVersion(4)}>Receive authenticated v4</button>
+    </header>
+    <Show when={open()}>
+      <section class="workspace-window">
+        <TicketWorkspace
+          current={{ ticket: { id: ticketID, title: "Owned manual Ticket",
+            description: "Original request", state: "in-progress", version: version() },
+            revisions: [revision], documentRevisions: version() === 4 ? [document(4), document(3)] : [document(3)],
+            origin: null, followUps: [] }}
+          latestRevision={revision} latestRequirement={version() === 4 ? fresh : original}
+          change={{ id: "owned-change", requirementApprovalId: approvalID, state: "starting",
+            baseSha: "a".repeat(40), branchName: "factory/owned", implementationState: "starting" }}
+          storageKey={"ticket-edit:owned-user:" + ticketID} drafts={drafts}
+          ticketReference="Owned Ticket" pending={false} epics={[]}
+          dependencies={{ prerequisites: [], candidates: [], admitted: true, pending: false,
+            onOpen: noop, onAdd: noop, onRemove: noop }}
+          clarificationAction={{ label: "", status: false }}
+          codingOptionsOpen={false} implementationAvailable canDevelop={false}
+          onSaveDocument={async (input) => { setWrites(v => [...v, input]); return undefined; }}
+          onConfirmRequirements={commission} onImplement={commission} onCodingOptions={commission}
+          onInterview={commission} onAssignEpic={noop} onFollowUp={noop} onOpenTicket={noop}
+          onOpenEpic={noop} onTrash={noop} onRestore={noop} onStopImplementation={noop}
+          onOpenIDE={noop} onApproveDelivery={noop}
+        />
+      </section>
+    </Show>
+    <output class="sr-only" aria-label="Hydration writes">{JSON.stringify(writes())}</output>
+    <output class="sr-only" aria-label="Commissioned work">{work()}</output>
+  </main>;
+}
+render(() => <Surface />, document.getElementById("root"));
+`;
+  test.beforeAll(async () => {
+    server = await createServer({
+      configFile: false,
+      root: resolve("test/fixtures"),
+      cacheDir: cache,
+      publicDir: resolve("apps/factory/public"),
+      optimizeDeps: { entries: [] },
+      plugins: [
+        {
+          name: "owned-ticket-hydration-fixture",
+          resolveId: (id) => (id === "/ticket-hydration.tsx" ? moduleID : undefined),
+          load: (id) => (id === moduleID ? source : undefined),
+          configureServer(server) {
+            server.middlewares.use(async (request, response, next) => {
+              if (request.url !== "/ticket-hydration.html") return next();
+              response.setHeader("Content-Type", "text/html");
+              response.end(
+                await server.transformIndexHtml(
+                  "/ticket-hydration.html",
+                  '<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="/ticket-hydration.tsx"></script></body></html>',
+                ),
+              );
+            });
+          },
+        },
+        factoryFixtureStart(),
+        solid({ ssr: false }),
+      ],
+      server: { host: "127.0.0.1", port: 0 },
+    });
+    await server.listen();
+    origin = fixtureValue(
+      fixtureValue(server.resolvedUrls, "hydration server URLs").local[0],
+      "hydration local URL",
+    ).replace(/\/$/, "");
+  });
+  test.afterAll(async () => {
+    await server?.close();
+    await rm(cache, { recursive: true, force: true });
+  });
+  test.use({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+  test("an unchanged editor survives outer reload and stale-to-fresh hydration without autosaving", async ({
+    page,
+  }) => {
+    await page.goto(`${origin}/ticket-hydration.html`);
+    await page.getByRole("button", { name: "Open Ticket", exact: true }).click();
+    const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
+    await expect(summary).toContainText("Do not implement this fixture");
+    await summary.focus();
+    await page.getByRole("button", { name: "Close Ticket", exact: true }).click();
+    // An already-open installation can have retained this unchanged snapshot before
+    // the fix. Hydration must handle it too, not merely stop retaining on focus.
+    await page.evaluate(() =>
+      localStorage.setItem(
+        "ticket-edit:owned-user:10000000-0000-4000-8000-000000000002",
+        JSON.stringify({
+          title: "Owned manual Ticket",
+          description: "Original request",
+          expectedVersion: 3,
+          expectedDocumentId: "10000000-0000-4000-8000-000000000003",
+          requirementRevisionId: "10000000-0000-4000-8000-000000000003",
+          requirement: {
+            summary: "Old manual specification. Do not implement this fixture.",
+            acceptanceCriteria: ["Keep the existing approved scope."],
+            nonGoals: [],
+          },
+        }),
+      ),
+    );
+    await page.reload();
+    await page.getByRole("button", { name: "Open Ticket", exact: true }).click();
+    await expect(summary).toContainText("Do not implement this fixture");
+    await page.getByRole("button", { name: "Receive authenticated v4", exact: true }).click();
+    // Cross the autosave interval after the server revision and remounted rich editor settle.
+    await page.waitForTimeout(800);
+    const evidence = ".factory/test-results/ticket-hydration";
+    await mkdir(evidence, { recursive: true });
+    await page.screenshot({ path: `${evidence}/hydration-observed.png` });
+    await expect(page.getByLabel("Hydration writes", { exact: true })).toHaveText("[]");
+    await expect(summary).toHaveText("Fresh manual specification without fixture directives.");
+    await expect(page.getByLabel("Commissioned work", { exact: true })).toHaveText("0");
+    await expect(page.getByRole("button", { name: "Discard my changes", exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.getByText("Not saved.", { exact: false })).toHaveCount(0);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await summary.scrollIntoViewIfNeeded();
+      await expect(summary).toHaveText("Fresh manual specification without fixture directives.");
+      await page.screenshot({ path: `${evidence}/fresh-read-${width}.png` });
+    }
+    await page.getByRole("button", { name: "Close Ticket", exact: true }).click();
+    expect(
+      await page.evaluate(() =>
+        localStorage.getItem("ticket-edit:owned-user:10000000-0000-4000-8000-000000000002"),
+      ),
+    ).toBeNull();
+  });
+  test("fresh hydration keeps genuinely unsaved specification text and conflict recovery", async ({
+    page,
+  }) => {
+    await page.goto(`${origin}/ticket-hydration.html`);
+    await page.getByRole("button", { name: "Open Ticket", exact: true }).click();
+    const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
+    await summary.fill("My genuinely unsaved specification.");
+    await page.getByRole("button", { name: "Receive authenticated v4", exact: true }).click();
+    await expect(summary).toHaveText("My genuinely unsaved specification.");
+    await expect(
+      page.getByRole("button", { name: "Discard my changes", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Save my version as a new revision", exact: true }),
+    ).toBeVisible();
+    const writes = JSON.parse(
+      (await page.getByLabel("Hydration writes", { exact: true }).textContent()) ?? "[]",
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      expectedVersion: 3,
+      expectedDocumentId: "10000000-0000-4000-8000-000000000003",
+      requirementRevisionId: "10000000-0000-4000-8000-000000000003",
+      requirement: { summary: "My genuinely unsaved specification." },
+    });
+    await expect(page.getByLabel("Commissioned work", { exact: true })).toHaveText("0");
+  });
+});
 
 test("a newer background read cannot discard the exact autosave acknowledgement", async ({
   page,

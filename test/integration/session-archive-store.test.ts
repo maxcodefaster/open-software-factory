@@ -286,6 +286,26 @@ test("native transcript checkpoint retains pinned recovery references without co
       await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,created_by,active_turn_id,native_session_confirmed_at) VALUES(${f.changeID},${f.attemptID},${sessionID},'committed',${f.userID},${turn.id},now())`;
       return conversation.id;
     });
+    const current = {
+      changeID: f.changeID,
+      turnID: turn.id,
+      runtimeAttemptID: f.attemptID,
+      sessionID,
+    };
+    expect(await archives.retainedMessages(current)).toMatchObject({
+      messagesAvailable: true,
+      messages: [
+        expect.objectContaining({ text: "Owned completed checkpoint reply" }),
+        expect.objectContaining({ role: "tool" }),
+      ],
+    });
+    for (const mismatch of [
+      { changeID: crypto.randomUUID() },
+      { turnID: crypto.randomUUID() },
+      { runtimeAttemptID: crypto.randomUUID() },
+      { sessionID: "different-native-session" },
+    ])
+      expect(await archives.retainedMessages({ ...current, ...mismatch })).toBeUndefined();
     const next = await createCodingContexts(f.database)(
       f.changeID,
       f.userID,
@@ -306,6 +326,7 @@ test("native transcript checkpoint retains pinned recovery references without co
       }),
     ]);
     expect(await archives.retainedMessages(next)).toBeUndefined();
+    expect(await archives.retainedMessages(current)).toBeUndefined();
     expect(await archives.retainedMessages(crypto.randomUUID())).toBeUndefined();
     expect(exports).toBe(1); // Private history read sent no native request or prompt.
     const manifestBytes = objects.blobs.get(saved.key);

@@ -340,17 +340,6 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const reviewScope = createMemo(() => props.change?.id);
   createEffect(reviewScope, () => setOpenReviewThreads(undefined));
   const [editing, setEditing] = createSignal(false);
-  const [draftTitle, setDraftTitle] = createSignal(untrack(() => props.current.ticket.title));
-  const [draftDescription, setDraftDescription] = createSignal(
-    untrack(() => props.current.ticket.description),
-  );
-  const [draftSummary, setDraftSummary] = createSignal(
-    untrack(() =>
-      !props.latestRevision && !props.current.proposal ? props.current.ticket.description : "",
-    ),
-  );
-  const [draftAcceptance, setDraftAcceptance] = createSignal<DraftBlock[]>([createDraftBlock("")]);
-  const [draftNonGoals, setDraftNonGoals] = createSignal<DraftBlock[]>([createDraftBlock("")]);
   const [selectionToolbar, setSelectionToolbar] = createSignal<SelectionToolbar>();
   const [slashMenu, setSlashMenu] = createSignal<SlashMenu>();
   const [slashIndex, setSlashIndex] = createSignal(0);
@@ -548,6 +537,29 @@ function TicketDocument(props: TicketWorkspaceProps) {
     title: proposal()?.ticket.title ?? props.current.ticket.title,
     description: proposal()?.ticket.description ?? props.current.ticket.description,
   });
+  // Saved hydration is the default, not an edit. Only input or a genuinely changed
+  // restored draft freezes it; an exact save ACK can stay ahead of a delayed read.
+  function draftSignal<T>(value: (source: ReturnType<typeof draftSource>) => T) {
+    return createSignal<T>((previous) => {
+      const source = draftSource();
+      const version = props.current.ticket.version;
+      return previous !== undefined && (editing() || version < baseVersion)
+        ? previous
+        : value(source);
+    });
+  }
+  const [draftTitle, setDraftTitle] = draftSignal((source) => source.title);
+  const [draftDescription, setDraftDescription] = draftSignal((source) => source.description);
+  const [draftSummary, setDraftSummary] = draftSignal((source) => source.requirement.summary);
+  const [draftAcceptance, setDraftAcceptance] = draftSignal((source) =>
+    (source.requirement.acceptanceCriteria.length
+      ? source.requirement.acceptanceCriteria
+      : [""]
+    ).map(createDraftBlock),
+  );
+  const [draftNonGoals, setDraftNonGoals] = draftSignal((source) =>
+    (source.requirement.nonGoals.length ? source.requirement.nonGoals : [""]).map(createDraftBlock),
+  );
   function resetDrafts(source = draftSource()) {
     const requirement = source.requirement;
     setDraftTitle(source.title);
@@ -606,14 +618,21 @@ function TicketDocument(props: TicketWorkspaceProps) {
         draft?.expectedDocumentId === undefined ? documentID : draft.expectedDocumentId;
       baseRequirementRevisionID =
         draft?.requirementRevisionId === undefined ? revisionID : draft.requirementRevisionId;
-      setEditing(!!draft);
+      setEditing(
+        Boolean(
+          draft &&
+            (draft.title.trim() !== source.title ||
+              draft.description.trim() !== source.description ||
+              !sameRequirement(draft.requirement, source.requirement)),
+        ),
+      );
       if (draft) {
         setDraftTitle(draft.title);
         setDraftDescription(draft.description);
         setDraftSummary(draft.requirement.summary);
         setDraftAcceptance(draft.requirement.acceptanceCriteria.map(createDraftBlock));
         setDraftNonGoals(draft.requirement.nonGoals.map(createDraftBlock));
-      } else resetDrafts(source);
+      }
       if (draft && draft.proposalEntryId !== proposalID) {
         drafts.delete(key);
         setEditing(false);
@@ -665,12 +684,10 @@ function TicketDocument(props: TicketWorkspaceProps) {
         current.version === previous.version
       )
         return;
-      // Local dirty state is a fence on this observed server revision.
-      if (untrack(() => saving() || (editing() && hasChanges()))) return;
+      if (untrack(() => saving() || conflict() || (editing() && hasChanges()))) return;
       baseVersion = current.version;
       baseDocumentID = current.documentID;
       baseRequirementRevisionID = current.revisionID;
-      resetDrafts(current.source);
     },
   );
 
@@ -971,7 +988,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
     update(value: string): void;
   }) {
     return {
-      onFocus: () => beginEditing(),
+      onFocus: () => {},
       onInput: (value: string, element: HTMLElement) => {
         if (!ownsEditor()) return;
         // Autosave can acknowledge the previous draft while the field stays focused.

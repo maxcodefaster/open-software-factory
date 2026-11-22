@@ -106,6 +106,9 @@ export async function getChangeWriterStatus({ data }: { data: [string] }) {
       state,
       canWrite: state === "human" && !sourceAccessParams().has("writer-denied"),
       stopPending: sourceAccessParams().has("writer-stop-pending"),
+      actor: sourceAccessParams().has("writer-settled")
+        ? { kind: "agent", user: null, delegated: false, workState: "completed" }
+        : null,
     },
   };
 }

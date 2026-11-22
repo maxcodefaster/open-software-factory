@@ -1,10 +1,25 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, isNotNull, lte, ne, notExists, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  ne,
+  notExists,
+  or,
+  sql,
+} from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
   agentTurn,
   change,
+  changeAgentSession,
   changeAgentTurnIntent,
   conversationContext,
   requirementApproval,
@@ -14,6 +29,7 @@ import {
   substrateBinding,
   substrateSource,
   substrateWorkspace,
+  ticketConversation,
 } from "../../../../packages/db/src/schema";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { projectMessages } from "./message-projection";
@@ -27,6 +43,12 @@ type Pending = {
   sessionID: string;
   promptID: string;
   source: Record<string, unknown>;
+};
+type CurrentTranscript = {
+  changeID: string;
+  turnID: string;
+  runtimeAttemptID: string;
+  sessionID: string;
 };
 
 export function createSessionArchives(
@@ -200,52 +222,117 @@ export function createSessionArchives(
     }
   }
   return {
-    // Called only after the conversation owner authenticated its Project and
-    // selected this exact archived context. No wake, native request or import.
+    // The caller authorizes the Change or selects an exact archived context.
+    // Current reads require the terminal Turn still selected by that context
+    // and its original confirmed Session/runtime. No wake, native request or import.
     // A previous checkpoint cannot stand in for the captured terminal turn, and
     // separate implementation/review Sessions still require their own history.
-    async retainedMessages(contextID: string) {
-      const [saved] = await database.db
-        .select({
-          turnID: sessionArchive.turnId,
-          runtimeAttemptID: sessionArchive.runtimeAttemptId,
-          sessionID: sessionArchive.sessionId,
-          promptID: sessionArchive.promptId,
-          source: sql<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
-          // Saved archive/context invariants require these checkpoint fields.
-          key: sql<string>`${sessionArchive.manifestKey}`,
-          sha256: sql<string>`${sessionArchive.manifestSha256}`,
-          throughMessageID: sql<string>`${sessionArchive.throughMessageId}`,
-          changeID: sql<string>`${conversationContext.changeId}`,
-        })
-        .from(conversationContext)
-        .innerJoin(
-          agentTurn,
-          and(
-            sql`${agentTurn.id}=(${conversationContext.archivedSession}->>'active_turn_id')::uuid`,
-            eq(agentTurn.changeId, conversationContext.changeId),
-            eq(agentTurn.state, "completed"),
-            sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM CASE WHEN ${conversationContext.original}
-          THEN NULL ELSE ${conversationContext.id}::text END`,
-          ),
-        )
-        .innerJoin(
-          sessionArchive,
-          and(
-            eq(sessionArchive.turnId, agentTurn.id),
-            eq(sessionArchive.state, "saved"),
-            eq(sessionArchive.sessionId, conversationContext.nativeSessionId),
-            sql`${sessionArchive.sessionId}=${conversationContext.archivedSession}->>'opencode_session_id'`,
-            sql`${sessionArchive.runtimeAttemptId}=(${conversationContext.archivedSession}->>'runtime_attempt_id')::uuid`,
-          ),
-        )
-        .where(
-          and(
-            eq(conversationContext.id, contextID),
-            eq(conversationContext.kind, "coding"),
-            isNotNull(conversationContext.archivedSession),
-          ),
-        );
+    async retainedMessages(target: string | CurrentTranscript) {
+      const checkpoint = async () => {
+        const query = database.db
+          .select({
+            turnID: sessionArchive.turnId,
+            runtimeAttemptID: sessionArchive.runtimeAttemptId,
+            sessionID: sessionArchive.sessionId,
+            promptID: sessionArchive.promptId,
+            source: sql<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
+            // Saved archive/context invariants require these checkpoint fields.
+            key: sql<string>`${sessionArchive.manifestKey}`,
+            sha256: sql<string>`${sessionArchive.manifestSha256}`,
+            throughMessageID: sql<string>`${sessionArchive.throughMessageId}`,
+            changeID: sql<string>`${agentTurn.changeId}`,
+            contextID: sql<string | null>`${agentTurn.input}->>'contextId'`,
+          })
+          .from(sessionArchive)
+          .innerJoin(
+            agentTurn,
+            and(eq(agentTurn.id, sessionArchive.turnId), eq(agentTurn.state, "completed")),
+          );
+        if (typeof target === "string")
+          return (
+            await query
+              .innerJoin(
+                conversationContext,
+                and(
+                  eq(agentTurn.changeId, conversationContext.changeId),
+                  sql`${agentTurn.id}=(${conversationContext.archivedSession}->>'active_turn_id')::uuid`,
+                  sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM CASE WHEN ${conversationContext.original}
+              THEN NULL ELSE ${conversationContext.id}::text END`,
+                  eq(sessionArchive.sessionId, conversationContext.nativeSessionId),
+                  sql`${sessionArchive.sessionId}=${conversationContext.archivedSession}->>'opencode_session_id'`,
+                  sql`${sessionArchive.runtimeAttemptId}=(${conversationContext.archivedSession}->>'runtime_attempt_id')::uuid`,
+                ),
+              )
+              .where(
+                and(
+                  eq(sessionArchive.state, "saved"),
+                  eq(conversationContext.id, target),
+                  eq(conversationContext.kind, "coding"),
+                  isNotNull(conversationContext.archivedSession),
+                ),
+              )
+          )[0];
+        const newer = alias(agentTurn, "newer");
+        return (
+          await query
+            .innerJoin(change, eq(change.id, agentTurn.changeId))
+            .innerJoin(changeAgentSession, eq(changeAgentSession.changeId, change.id))
+            .innerJoin(
+              ticketConversation,
+              and(
+                eq(ticketConversation.ticketId, change.ticketId),
+                eq(ticketConversation.projectId, change.projectId),
+              ),
+            )
+            .leftJoin(
+              conversationContext,
+              eq(conversationContext.id, ticketConversation.activeCodingContextId),
+            )
+            .where(
+              and(
+                eq(change.id, target.changeID),
+                eq(agentTurn.projectId, change.projectId),
+                eq(agentTurn.id, target.turnID),
+                eq(changeAgentSession.activeTurnId, agentTurn.id),
+                inArray(changeAgentSession.state, ["waiting", "committed", "stopped", "failed"]),
+                isNotNull(changeAgentSession.nativeSessionConfirmedAt),
+                eq(sessionArchive.state, "saved"),
+                eq(sessionArchive.runtimeAttemptId, target.runtimeAttemptID),
+                eq(sessionArchive.runtimeAttemptId, changeAgentSession.runtimeAttemptId),
+                eq(sessionArchive.sessionId, target.sessionID),
+                eq(sessionArchive.sessionId, changeAgentSession.opencodeSessionId),
+                sql`${sessionArchive.sessionId}=COALESCE(${changeAgentSession.implementationSessionId},${changeAgentSession.opencodeSessionId})`,
+                sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM ${ticketConversation.activeCodingContextId}::text`,
+                or(
+                  isNull(ticketConversation.activeCodingContextId),
+                  and(
+                    eq(conversationContext.kind, "coding"),
+                    eq(conversationContext.changeId, change.id),
+                    eq(conversationContext.conversationId, ticketConversation.id),
+                    eq(conversationContext.nativeSessionId, sessionArchive.sessionId),
+                    isNull(conversationContext.archivedSession),
+                  ),
+                ),
+                notExists(
+                  database.db
+                    .select({ id: newer.id })
+                    .from(newer)
+                    .where(
+                      and(
+                        eq(newer.changeId, change.id),
+                        sql`${newer.input}->>'contextId' IS NOT DISTINCT FROM ${agentTurn.input}->>'contextId'`,
+                        or(
+                          gt(newer.createdAt, agentTurn.createdAt),
+                          and(eq(newer.createdAt, agentTurn.createdAt), gt(newer.id, agentTurn.id)),
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+            )
+        )[0];
+      };
+      const saved = await checkpoint();
       if (!saved) return;
       const { manifest, native } = await readNativeSessionArchive(objects, saved.key, saved.sha256);
       if (
@@ -271,8 +358,12 @@ export function createSessionArchives(
           and(
             eq(changeAgentTurnIntent.changeId, saved.changeID),
             eq(changeAgentTurnIntent.sessionId, saved.sessionID),
+            sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM ${saved.contextID}`,
           ),
         );
+      // Object reads release database connections. A context/Turn change during
+      // that read must not display the old checkpoint as current activity.
+      if (typeof target !== "string" && !(await checkpoint())) return;
       return {
         messages: projectMessages(
           { data: native.messages.toReversed() },

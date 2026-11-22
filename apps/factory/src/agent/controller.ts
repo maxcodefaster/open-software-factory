@@ -28,7 +28,7 @@ import {
 import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { type createChangeWriterController } from "../access/writer-api";
+import type { createChangeWriterController } from "../access/writer-api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import {
@@ -36,8 +36,8 @@ import {
   createModelSettingsController,
   createOpenBaoModelSecrets,
 } from "../models/api";
-import { type createRuntimeController } from "../runtime/api";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { createRuntimeController } from "../runtime/api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/api";
 import { codingAllowanceDenial } from "../usage/api";
@@ -74,7 +74,7 @@ import { createChangeAgentStop, type PendingWriterHandoff, type RetainedStopTarg
 import { captureTerminalOutcome, validateTerminalMessages } from "./terminal-outcome";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
-import { type AgentTurnRecord } from "./turn-record";
+import type { AgentTurnRecord } from "./turn-record";
 import { createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -2242,6 +2242,27 @@ export function createAgentController(
           messagesAvailable = true;
         } catch {
           // Unavailable live activity must not block persisted completion or Stop state.
+        }
+      }
+      if (
+        history &&
+        !messagesAvailable &&
+        turn?.state === "completed" &&
+        turn.id === session.activeTurnID &&
+        session.sessionConfirmed &&
+        session.sessionID
+      ) {
+        const retained = await archives
+          .retainedMessages({
+            changeID,
+            turnID: turn.id,
+            runtimeAttemptID: session.runtimeAttemptID,
+            sessionID: session.sessionID,
+          })
+          .catch(() => undefined);
+        if (retained) {
+          messages = retained.messages;
+          messagesAvailable = retained.messagesAvailable;
         }
       }
       const failed = turn?.state === "uncertain" || turn?.state === "failed";
