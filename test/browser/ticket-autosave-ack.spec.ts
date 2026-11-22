@@ -188,6 +188,60 @@ render(() => <Surface />, document.getElementById("root"));
       ),
     ).toBeNull();
   });
+  for (const edited of [false, true])
+    test(`a ${edited ? "genuinely edited" : "unchanged"} retained snapshot handles a fresh revision already present on reopen`, async ({
+      page,
+    }) => {
+      await page.goto(`${origin}/ticket-hydration.html`);
+      await page.evaluate(
+        (edited) =>
+          localStorage.setItem(
+            "ticket-edit:owned-user:10000000-0000-4000-8000-000000000002",
+            JSON.stringify({
+              title: "Owned manual Ticket",
+              description: "Original request",
+              expectedVersion: 3,
+              expectedDocumentId: "10000000-0000-4000-8000-000000000003",
+              requirementRevisionId: "10000000-0000-4000-8000-000000000003",
+              requirement: {
+                summary: edited
+                  ? "My genuinely unsaved specification."
+                  : "Old manual specification. Do not implement this fixture.",
+                acceptanceCriteria: ["Keep the existing approved scope."],
+                nonGoals: [],
+              },
+            }),
+          ),
+        edited,
+      );
+      await page.getByRole("button", { name: "Receive authenticated v4", exact: true }).click();
+      await page.getByRole("button", { name: "Open Ticket", exact: true }).click();
+      await expect(
+        page.getByRole("textbox", { name: "Specification summary", exact: true }),
+      ).toHaveText(
+        edited
+          ? "My genuinely unsaved specification."
+          : "Fresh manual specification without fixture directives.",
+      );
+      await page.waitForTimeout(800);
+      const writes = JSON.parse(
+        (await page.getByLabel("Hydration writes", { exact: true }).textContent()) ?? "[]",
+      );
+      expect(writes).toHaveLength(edited ? 1 : 0);
+      if (edited)
+        expect(writes[0]).toMatchObject({
+          expectedVersion: 3,
+          expectedDocumentId: "10000000-0000-4000-8000-000000000003",
+          requirement: { summary: "My genuinely unsaved specification." },
+        });
+      await expect(page.getByLabel("Commissioned work", { exact: true })).toHaveText("0");
+      await expect(
+        page.getByRole("button", { name: "Discard my changes", exact: true }),
+      ).toHaveCount(edited ? 1 : 0);
+      await page.screenshot({
+        path: `.factory/test-results/ticket-hydration/fresh-reopen-${edited ? "edited" : "unchanged"}.png`,
+      });
+    });
   test("fresh hydration keeps genuinely unsaved specification text and conflict recovery", async ({
     page,
   }) => {

@@ -581,13 +581,24 @@ function TicketDocument(props: TicketWorkspaceProps) {
       key: props.current.ticket.id,
       version: props.current.ticket.version,
       documentID: currentDocument()?.id ?? null,
+      documents: props.current.documentRevisions,
       revisionID: props.latestRevision?.id ?? null,
       storageKey: props.storageKey,
       drafts: props.drafts,
       proposalID: proposal()?.id,
       source: draftSource(),
     }),
-    ({ key, version, documentID, revisionID, storageKey, drafts, proposalID, source }) => {
+    ({
+      key,
+      version,
+      documentID,
+      documents,
+      revisionID,
+      storageKey,
+      drafts,
+      proposalID,
+      source,
+    }) => {
       if (key === draftKey) return;
       // Persist the previous local draft once, not as a keystroke subscription.
       untrack(retainDraft);
@@ -612,6 +623,26 @@ function TicketDocument(props: TicketWorkspaceProps) {
         } catch {
           /* Ignore invalid user-local draft storage without affecting saved work. */
         }
+      }
+      // Older clients retained unchanged focused text. Compare it with its exact
+      // saved base, not just today's document, before calling it a human edit.
+      const savedBase =
+        !proposalID && !draft?.proposalEntryId
+          ? documents.find((revision) => revision.id === draft?.expectedDocumentId)
+          : undefined;
+      const savedRequirement = savedBase && parseRequirement(savedBase);
+      const unchangedBase = Boolean(
+        draft &&
+          savedBase &&
+          savedRequirement &&
+          draft.title.trim() === savedBase.title &&
+          draft.description.trim() === savedBase.description &&
+          sameRequirement(draft.requirement, savedRequirement),
+      );
+      if (unchangedBase) {
+        drafts.delete(key);
+        draft = undefined;
+        onSettled(retainDraft);
       }
       baseVersion = draft?.expectedVersion ?? version;
       baseDocumentID =

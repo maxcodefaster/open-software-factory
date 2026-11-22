@@ -116,7 +116,8 @@ export function createWorkspaceSourceController(
     );
     // An admitted cold start is still preparing, not evidence that Source was
     // frozen. Keep the editor's observation alive until its original Parent
-    // connects; reads never await Docker/Child readiness or admit a new writer.
+    // connects; reads do not require Child readiness or admit a new writer.
+    // The Actor's Parent still connects only after its private Docker starts.
     const preparing = current.runtimeState === "starting" && current.sourceWritable;
     return {
       workspaceID: current.workspaceID,
