@@ -124,10 +124,11 @@ file adds trust rather than replacing that bundle.
 
 Use the profile's explicit command chain `start.sh connector.sh CONNECTOR_ENTRYPOINT`.
 The optional [connector.sh](../../deploy/substrate/rootless/connector.sh) enters the
-**existing Actor-private** RootlessKit user/mount/network namespace after private
+**existing Actor-private** RootlessKit user/mount/network namespace after verified
+bootstrap admission. Parent serves initialized Source while waiting for private
 Docker readiness. Otherwise the outer Actor's loopback cannot reach Tinyproxy
 on `127.0.0.1:8888`. No host namespace, socket, mount or credential is injected.
-This does not change the standard `start.sh` or its accepted runtime pins.
+The native sandbox identity and accepted runtime pins remain unchanged.
 
 Public ResumeActor/SuspendActor in this release accept only ObjectRef, not
 UID/version preconditions. Factory checks the original UID/template/runtime

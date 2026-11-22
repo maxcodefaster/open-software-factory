@@ -235,7 +235,9 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
         postCreateCommand: [
           "node",
           "-e",
-          "require('fs').appendFileSync('/home/node/owned-create-effects','once\\n')",
+          // Give early Source a deterministic observation window while the
+          // actual Dev Container is still completing its normal setup hook.
+          "setTimeout(()=>require('fs').appendFileSync('/home/node/owned-create-effects','once\\n'),5000)",
         ],
       }),
     );
@@ -300,6 +302,25 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
     const actor = nativeActor.parse(await editor("GetActor", { actor: ref }));
     expect(actor.status.workerAssignment?.sandboxRuntime).toEqual(live.runtime);
     const originalUID = actor.metadata.uid;
+    const source = (operation: string, input: unknown, signal?: AbortSignal) =>
+      fetch(`${base}/api/workspaces/${workspaceID}/source/${operation}`, {
+        method: operation === "events" ? "GET" : "POST",
+        headers: { cookie, origin: base, "content-type": "application/json" },
+        ...(operation === "events" ? {} : { body: JSON.stringify(input) }),
+        ...(signal ? { signal } : {}),
+      });
+    await eventually(
+      async () => app.runtimeHub.sourceConnected(started.id),
+      Boolean,
+      "Initialized native Source remained blocked behind Dev Container setup",
+      30_000,
+    );
+    expect(app.runtimeHub.ready(started.id)).toBe(false);
+    const earlyRead = await source("read", { path: "server.mjs" });
+    expect(earlyRead.status).toBe(200);
+    expect(Buffer.from((await earlyRead.json()).content, "base64").toString()).toContain(
+      "owned-native-ready",
+    );
     await eventually(
       async () => {
         const observed = await app.runtimeController.get(started.id);
@@ -313,13 +334,6 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
     );
     expect(app.runtimeHub.ready(started.id)).toBe(true);
     expect(app.runtimeHub.sourceConnected(started.id)).toBe(true);
-    const source = (operation: string, input: unknown, signal?: AbortSignal) =>
-      fetch(`${base}/api/workspaces/${workspaceID}/source/${operation}`, {
-        method: operation === "events" ? "GET" : "POST",
-        headers: { cookie, origin: base, "content-type": "application/json" },
-        ...(operation === "events" ? {} : { body: JSON.stringify(input) }),
-        ...(signal ? { signal } : {}),
-      });
     const sourceView = await app.workspaceSources.ensurePersonal(projectID, userID);
     expect(sourceView.state).toBe("ready");
     expect(sourceView.workspaceID).toBe(workspaceID);

@@ -97,15 +97,6 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	if token == "" || childToken == "" {
 		return errors.New("Factory parent and child connector tokens are required")
 	}
-	finishDocker := startupPhase("private-docker")
-	dockerErr := waitForDocker(ctx)
-	// Upstream DinD mounts /tmp during startup. Create diagnostics only after
-	// that mount is ready, so the daemon cannot hide an earlier measurement file.
-	resetStartupTimings()
-	finishDocker()
-	if dockerErr != nil {
-		return dockerErr
-	}
 	control, err := dialControl(ctx, assignment, "parent", token)
 	if err != nil && os.Getenv("FACTORY_SUBSTRATE_ACTOR_UID") == "" {
 		return err
@@ -133,6 +124,17 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	if err := control.write(Message{Type: "status", Phase: "starting"}); err != nil {
 		return fmt.Errorf("report startup: %w", err)
+	}
+	// Native Source is already initialized. Keep its authenticated transport
+	// available while Docker starts; no Project operation is dispatched here.
+	finishDocker := startupPhase("private-docker")
+	dockerErr := withParentStartupControl(ctx, assignment, token, &control, waitForDocker)
+	// Upstream DinD mounts /tmp during startup. Create diagnostics only after
+	// that mount is ready, so the daemon cannot hide an earlier measurement file.
+	resetStartupTimings()
+	finishDocker()
+	if dockerErr != nil {
+		return retainParentStartupFailure(ctx, assignment, token, &control, dockerErr)
 	}
 	finishCheckout := startupPhase("checkout")
 	checkoutErr := withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
@@ -1459,19 +1461,31 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 	if !needsAgent && !needsVerification && !needsLanguages {
 		return nil
 	}
-	if needsLanguages {
-		tool := "/opt/factory/language-tools/musl"
-		finishProbe := startupPhase("language-tools-probe")
+	libc := "musl"
+	if needsLanguages || needsAgent {
+		// Match the primary container's native libc once for the requested tools.
+		// Upstream binaries need no injected loader or compatibility package.
+		phase := "opencode-probe"
+		if needsLanguages {
+			phase = "language-tools-probe"
+		}
+		finishProbe := startupPhase(phase)
 		output, err := ownedCommand(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
 		finishProbe()
 		if !strings.Contains(strings.ToLower(string(output)), "musl") {
 			if err != nil {
-				return errors.New("Language tools require a supported glibc or musl development container")
+				if needsLanguages {
+					return errors.New("Language tools require a supported glibc or musl development container")
+				}
+				return errors.New("OpenCode requires a supported glibc or musl development container")
 			}
-			tool = "/opt/factory/language-tools/glibc"
+			libc = "glibc"
 		}
+	}
+	if needsLanguages {
+		tool := "/opt/factory/language-tools/" + libc
 		finishSetup := startupPhase("language-tools-setup")
-		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput()
+		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput()
 		finishSetup()
 		if err != nil {
 			return fmt.Errorf("create language tools destination: %w: %s", err, output)
@@ -1490,20 +1504,9 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		}
 	}
 	if needsAgent {
-		// Match the primary container's native libc. Upstream binaries stay
-		// unmodified; no injected loader or compatibility package is required.
-		tool := "/opt/factory/opencode/musl/bun"
-		finishProbe := startupPhase("opencode-probe")
-		output, err := ownedCommand(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput()
-		finishProbe()
-		if !strings.Contains(strings.ToLower(string(output)), "musl") {
-			if err != nil {
-				return errors.New("OpenCode requires a supported glibc or musl development container")
-			}
-			tool = "/opt/factory/opencode/glibc/bun"
-		}
+		tool := "/opt/factory/opencode/" + libc + "/bun"
 		finishSetup := startupPhase("opencode-setup")
-		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput()
+		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput()
 		finishSetup()
 		if err != nil {
 			return fmt.Errorf("create OpenCode destination: %w: %s", err, output)

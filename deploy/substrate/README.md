@@ -127,13 +127,24 @@ verified serving TLS and the separate native Owner/Editor credentials remain man
 The clean-room command sets this label on its new, exactly owned Factory Namespace.
 The read-only Helm preflight refuses a missing or disabled label without modifying policy.
 
-The pinned native wakeup client has a 250ms deadline for each HTTP request. The
-Actor's wakeup server therefore runs its real Docker or Stop-mode check serially
-on demand outside the HTTP handler. It starts unready, expires a successful check after one
-second, and rechecks the current process IDs on every request. Checks stop when
-the native worker no longer requests readiness. Slow or stuck CLI
-reads cannot block the HTTP response or keep an old success alive. Native wakeup
-deadlines and the later Connector, Source and App readiness checks are unchanged.
+The pinned native wakeup client has a 250ms deadline for each HTTP request.
+For Factory cold starts, the wakeup server checks the authenticated native cold
+mode and current process IDs; it does not wait for private Docker. The Parent
+starts after cold admission and serves initialized Source while its own Docker
+readiness check continues. An ordinary rootless workload without Factory bootstrap
+still requires a real Docker round trip. Native `RUNNING` means the bootstrap can
+continue, not that Source, OpenCode, the Dev Container or an App is ready.
+
+Checks run serially on demand outside the HTTP handler. The server starts unready,
+expires success after one second, and rechecks process IDs on every request.
+Checks stop when the native worker no longer requests readiness. Slow or stuck CLI
+reads cannot block HTTP responses or preserve an old success. Native wakeup
+deadlines, current Source ownership and later Agent/Project admission remain separate.
+The native ARM Workspace lane verifies authenticated Source reads before a
+deliberately held Dev Container setup hook, followed by real Parent/Child readiness,
+ROOTFS Pause/Resume and running/paused final Stop with independent Source. This
+small Node fixture does not qualify Starter, browser interaction or first LLM-tool
+latency; the historical product receipts above do not establish those new timings.
 
 The private cold-mode watcher allows the pinned worker's five-minute wakeup window,
 including verified Source import before Docker starts. It no longer cuts that import

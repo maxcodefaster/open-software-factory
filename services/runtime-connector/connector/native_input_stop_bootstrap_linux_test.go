@@ -69,6 +69,22 @@ case "$*" in *wait.py\ bootstrap*) echo input-stop ;; *ready.py\ --input-stop*) 
 		strings.Contains(string(calls), "normal-launch") || strings.Contains(string(calls), "dockerd") {
 		t.Fatalf("cold start crossed Stop boundary: %s %v", calls, err)
 	}
+	// Execute the same launcher with normal native admission. Its Parent must
+	// start before Docker readiness, while native bootstrap readiness stays
+	// distinct from actual Dev Container or OpenCode readiness.
+	write("python3", fmt.Sprintf(`printf 'python:%%s\n' "$*" >> %q
+case "$*" in *wait.py\ bootstrap*) echo docker ;; *ready.py\ --bootstrap*) exit 0 ;; *) exit 92 ;; esac`, trace))
+	write("normal-launch", fmt.Sprintf("printf 'source-parent-start\\n' >> %q", trace))
+	command = exec.CommandContext(t.Context(), "/bin/sh", "/opt/factory-rootless/start.sh", "normal-launch")
+	command.Env = env
+	if data, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("native Source launcher waited for Docker: %v %s", err, data)
+	}
+	calls, err = os.ReadFile(trace)
+	if err != nil || !strings.Contains(string(calls), "source-parent-start") ||
+		strings.Contains(string(calls), "wait.py docker") {
+		t.Fatalf("native Source startup depended on Docker readiness: %s %v", calls, err)
+	}
 	// Execute the actual inner script as well. Only its fixed infrastructure
 	// commands are substituted; no Project/Dev Container initializer is present.
 	helper := fmt.Sprintf(`#!/bin/sh
@@ -178,5 +194,45 @@ case "$1" in native-source-restore) exit 0 ;; native-bootstrap-mode) echo input-
 				t.Fatal(err)
 			}
 		})
+	}
+	// Exercise the shipped Python readiness checker, not the launcher stub.
+	// A valid native cold mode must not wait for private Docker, but a different
+	// mode or an ordinary Docker workload must not inherit that readiness.
+	python, err := exec.LookPath("/usr/bin/python3")
+	if err != nil {
+		t.Fatal("owned cold-script lane requires its Python runtime", err)
+	}
+	write("docker", "exit 95")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$FACTORY_TEST_NATIVE_MODE\"\n"), 0555); err != nil {
+		t.Fatal(err)
+	}
+	const probe = `import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location("native_wakeup", "/opt/factory-rootless/ready.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+health = module.Readiness([os.getpid()], sys.argv[1])
+health.thread.start()
+try:
+    ready = False
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        if health.ready():
+            ready = True
+            break
+        time.sleep(0.01)
+    assert ready == (sys.argv[2] == "true"), "native wakeup conflated cold mode and Docker readiness"
+finally:
+    health.close()
+`
+	for _, check := range []struct{ mode, observed, ready string }{
+		{"bootstrap", "docker", "true"}, {"bootstrap", "input-stop", "false"},
+		{"input-stop", "input-stop", "true"}, {"input-stop", "docker", "false"},
+		{"docker", "docker", "false"},
+	} {
+		command := exec.CommandContext(t.Context(), python, "-c", probe, check.mode, check.ready)
+		command.Env = append(env, "FACTORY_TEST_NATIVE_MODE="+check.observed)
+		if data, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("native wakeup mode %s/%s: %v %s", check.mode, check.observed, err, data)
+		}
 	}
 }

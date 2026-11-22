@@ -47,11 +47,18 @@ if [ "${FACTORY_SUBSTRATE_BOOTSTRAP+present}" = present ]; then
     docker) ;;
     *) echo 'Unconfirmed native cold mode' >&2; exit 1 ;;
   esac
+else
+  # Ordinary rootless workloads may need Docker at their entrypoint. Factory's
+  # native Parent instead serves initialized Source while it waits for Docker.
+  python3 /opt/factory-rootless/wait.py docker "$daemon"
 fi
-python3 /opt/factory-rootless/wait.py docker "$daemon"
 # A cold restart does not replay a fixture initializer or old command queue.
 # An adapter can pass its authenticated Connector launch as the explicit command.
 "$@" &
 application=$!
-python3 /opt/factory-rootless/ready.py "$daemon" "$application" &
+if [ "${FACTORY_SUBSTRATE_BOOTSTRAP+present}" = present ]; then
+  python3 /opt/factory-rootless/ready.py --bootstrap "$daemon" "$application" &
+else
+  python3 /opt/factory-rootless/ready.py "$daemon" "$application" &
+fi
 wait "$application"

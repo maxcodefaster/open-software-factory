@@ -1,4 +1,4 @@
-"""Native wakeupProbe: current processes plus a real private Docker round trip."""
+"""Native wakeupProbe: current processes and cold admission or private Docker."""
 import http.server
 import os
 import subprocess
@@ -8,9 +8,9 @@ import time
 
 
 class Readiness:
-    def __init__(self, pids, input_stop):
+    def __init__(self, pids, mode):
         self.pids = pids
-        self.input_stop = input_stop
+        self.mode = mode
         self.valid_until = 0
         self.lock = threading.Lock()
         self.stopped = threading.Event()
@@ -26,8 +26,10 @@ class Readiness:
             return False
 
     def check(self):
+        native = self.mode in ("input-stop", "bootstrap")
         command = (["/usr/local/bin/factory-runtime-connector", "native-bootstrap-mode"]
-                   if self.input_stop else ["docker", "info"])
+                   if native else ["docker", "info"])
+        expected = b"input-stop" if self.mode == "input-stop" else b"docker"
         while True:
             self.requested.wait()
             if self.stopped.is_set():
@@ -38,7 +40,7 @@ class Readiness:
                 if self.processes_alive():
                     result = subprocess.run(command, capture_output=True, timeout=3)
                     healthy = (result.returncode == 0 and self.processes_alive() and
-                               (not self.input_stop or result.stdout.strip() == b"input-stop"))
+                               (not native or result.stdout.strip() == expected))
             except (OSError, subprocess.TimeoutExpired):
                 pass
             with self.lock:
@@ -68,9 +70,9 @@ class Readiness:
 
 
 def main():
-    input_stop = sys.argv[1] == "--input-stop"
-    pids = [int(value) for value in (sys.argv[2:] if input_stop else sys.argv[1:])]
-    health = Readiness(pids, input_stop)
+    mode = {"--input-stop": "input-stop", "--bootstrap": "bootstrap"}.get(sys.argv[1], "docker")
+    pids = [int(value) for value in (sys.argv[2:] if mode != "docker" else sys.argv[1:])]
+    health = Readiness(pids, mode)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):

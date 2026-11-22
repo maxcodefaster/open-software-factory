@@ -47,6 +47,7 @@ case "$*" in
   *) exit 99 ;;
 esac
 printf 'command:%s\n' "$step" >> "$FACTORY_INJECTION_LOG"
+printf '%s\n' "$*" >> "$FACTORY_INJECTION_COMMAND_LOG"
 if [ "$FACTORY_INJECTION_FAIL" = "$step" ]; then
   printf 'private-tool-diagnostic\n' >&2
   exit 23
@@ -55,7 +56,10 @@ if [ "$FACTORY_INJECTION_CANCEL" = "$step" ]; then
   : > "$FACTORY_INJECTION_REACHED"
   exec /bin/sleep 30
 fi
-if [ "$step" = libc-probe ]; then printf 'musl\n'; fi
+if [ "$step" = libc-probe ]; then
+  printf '%s\n' "$FACTORY_INJECTION_LIBC"
+  exit "$FACTORY_INJECTION_LIBC_STATUS"
+fi
 if [ "$step" = child-start ]; then /bin/cat >/dev/null; fi
 if [ "$FACTORY_INJECTION_REMOVE_AT" = "$step" ]; then /bin/rm "$0"; fi
 `
@@ -64,6 +68,9 @@ if [ "$FACTORY_INJECTION_REMOVE_AT" = "$step" ]; then /bin/rm "$0"; fi
 	}
 	t.Setenv("PATH", directory)
 	t.Setenv("FACTORY_INJECTION_LOG", logPath)
+	t.Setenv("FACTORY_INJECTION_COMMAND_LOG", filepath.Join(directory, "commands"))
+	t.Setenv("FACTORY_INJECTION_LIBC", "musl")
+	t.Setenv("FACTORY_INJECTION_LIBC_STATUS", "0")
 	t.Setenv("FACTORY_INJECTION_FAIL", "")
 	t.Setenv("FACTORY_INJECTION_CANCEL", "")
 	t.Setenv("FACTORY_INJECTION_REMOVE_AT", "")
@@ -117,6 +124,145 @@ func injectionTimingAssignment() Assignment {
 	return assignment
 }
 
+func TestApprovedToolsShareOneLibcProbePerInvocation(t *testing.T) {
+	for _, libc := range []struct{ name, output, status, tool string }{
+		{"musl", "musl", "0", "musl"},
+		{"glibc", "ldd (GNU libc) 2.41", "0", "glibc"},
+		{"musl-nonzero", "MUSL libc", "1", "musl"},
+		{"empty-success", "", "0", "glibc"},
+	} {
+		t.Run(libc.name, func(t *testing.T) {
+			directory, _ := injectionTimingFixture(t)
+			t.Setenv("FACTORY_INJECTION_LIBC", libc.output)
+			t.Setenv("FACTORY_INJECTION_LIBC_STATUS", libc.status)
+			assignment := injectionTimingAssignment()
+			assignment.Channels = []Channel{{Name: "ide", Kind: "ide"}, {Name: "agent", Kind: "agent"}}
+			want := []string{
+				"exec owned-child sh -c ldd --version 2>&1",
+				"exec --user 0:0 owned-child mkdir -p /opt/factory/language-tools/runtime",
+				"cp /opt/factory/language-tools/node_modules owned-child:/opt/factory/language-tools/node_modules",
+				"cp /opt/factory/language-tools/" + libc.tool + "/. owned-child:/opt/factory/language-tools/runtime",
+				"exec --user 0:0 owned-child mkdir -p /opt/factory/opencode",
+				"cp /opt/factory/opencode/server owned-child:/opt/factory/opencode/server",
+				"cp /opt/factory/opencode/" + libc.tool + "/bun owned-child:/opt/factory/opencode/bun",
+				"exec --user 0:0 owned-child chmod 0555 /opt/factory/opencode/bun",
+			}
+			var expected []string
+			for invocation := 1; invocation <= 2; invocation++ {
+				if err := injectApprovedTools(context.Background(), assignment, "owned-child"); err != nil {
+					t.Fatal(err)
+				}
+				content, err := os.ReadFile(filepath.Join(directory, "commands"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if probes := strings.Count(string(content), "ldd --version"); probes != invocation {
+					t.Fatalf("got %d libc probes after %d invocation(s), want %d", probes, invocation, invocation)
+				}
+				expected = append(expected, want...)
+				if got := strings.Split(strings.TrimSpace(string(content)), "\n"); !reflect.DeepEqual(got, expected) {
+					t.Fatalf("tool selection, placement or command order changed:\ngot %v\nwant %v", got, expected)
+				}
+			}
+		})
+	}
+}
+
+func TestApprovedToolsLibcProbeIsCapabilityScoped(t *testing.T) {
+	for _, capabilities := range []struct {
+		name                           string
+		channels                       []Channel
+		languages, agent, verification bool
+	}{
+		{name: "none"},
+		{name: "unrelated", channels: []Channel{{Name: "app", Kind: "app"}}},
+		{name: "languages", channels: []Channel{{Name: "ide", Kind: "ide"}}, languages: true},
+		{name: "agent", channels: []Channel{{Name: "agent", Kind: "agent"}}, agent: true},
+		{name: "verification", channels: []Channel{{Name: "verification", Kind: "verification"}}, verification: true},
+		{name: "all", channels: injectionTimingAssignment().Channels, languages: true, agent: true, verification: true},
+	} {
+		t.Run(capabilities.name, func(t *testing.T) {
+			directory, timeline := injectionTimingFixture(t)
+			assignment := injectionTimingAssignment()
+			assignment.Channels = capabilities.channels
+			if err := injectApprovedTools(context.Background(), assignment, "owned-child"); err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(filepath.Join(directory, "commands"))
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			commands := string(content)
+			if strings.Contains(commands, "/language-tools/") != capabilities.languages ||
+				strings.Contains(commands, "/opencode") != capabilities.agent ||
+				strings.Contains(commands, "/forgejo-runner") != capabilities.verification {
+				t.Fatalf("injection dispatched an unrequested tool or omitted a requested tool: %s", commands)
+			}
+			wantProbes := 0
+			wantPhase := ""
+			if capabilities.languages {
+				wantProbes = 1
+				wantPhase = "phase:language-tools-probe"
+			} else if capabilities.agent {
+				wantProbes = 1
+				wantPhase = "phase:opencode-probe"
+			}
+			entries := timeline()
+			phases := 0
+			for _, entry := range entries {
+				if entry == "phase:language-tools-probe" || entry == "phase:opencode-probe" {
+					phases++
+				}
+			}
+			if strings.Count(commands, "ldd --version") != wantProbes || phases != wantProbes ||
+				(wantPhase != "" && !slices.Contains(entries, wantPhase)) {
+				t.Fatalf("libc probe or phase was not capability-scoped: %v", entries)
+			}
+		})
+	}
+}
+
+func TestApprovedToolsLibcValidationPreservesErrorsAndStopsInjection(t *testing.T) {
+	for _, capabilities := range []struct {
+		name     string
+		channels []Channel
+		phase    string
+		error    string
+	}{
+		{"languages", []Channel{{Name: "ide", Kind: "ide"}}, "language-tools-probe", "Language tools require a supported glibc or musl development container"},
+		{"agent", []Channel{{Name: "agent", Kind: "agent"}}, "opencode-probe", "OpenCode requires a supported glibc or musl development container"},
+		{"both-agent-first", []Channel{{Name: "agent", Kind: "agent"}, {Name: "ide", Kind: "ide"}}, "language-tools-probe", "Language tools require a supported glibc or musl development container"},
+		{"all", injectionTimingAssignment().Channels, "language-tools-probe", "Language tools require a supported glibc or musl development container"},
+	} {
+		t.Run(capabilities.name, func(t *testing.T) {
+			for _, canceled := range []bool{false, true} {
+				_, timeline := injectionTimingFixture(t)
+				t.Setenv("FACTORY_INJECTION_LIBC", "unsupported-private-tool-diagnostic")
+				t.Setenv("FACTORY_INJECTION_LIBC_STATUS", "23")
+				assignment := injectionTimingAssignment()
+				assignment.Channels = capabilities.channels
+				ctx, cancel := context.WithCancel(context.Background())
+				if canceled {
+					cancel()
+				}
+				err := injectApprovedTools(ctx, assignment, "owned-child")
+				cancel()
+				if err == nil || err.Error() != capabilities.error {
+					t.Fatalf("libc validation changed its error (canceled=%v): %v", canceled, err)
+				}
+				var want []string
+				if !canceled {
+					want = append(want, "command:libc-probe")
+				}
+				want = append(want, "phase:"+capabilities.phase)
+				if got := timeline(); !reflect.DeepEqual(got, want) {
+					t.Fatalf("failed probe lost timing or dispatched a later command: got %v want %v", got, want)
+				}
+			}
+		})
+	}
+}
+
 var injectionTimingCommands = []struct {
 	command string
 	phases  []string
@@ -128,7 +274,6 @@ var injectionTimingCommands = []struct {
 	{"languages-setup", []string{"language-tools-setup"}, "create language tools destination:"},
 	{"languages-tree", []string{"language-tools-tree-copy"}, "inject language tools:"},
 	{"languages-runtime", []string{"language-tools-runtime-copy"}, "inject language tools:"},
-	{"libc-probe", []string{"opencode-probe"}, "OpenCode requires"},
 	{"opencode-setup", []string{"opencode-setup"}, "create OpenCode destination:"},
 	{"opencode-server", []string{"opencode-server-copy"}, "inject native OpenCode server:"},
 	{"opencode-runtime", []string{"child-executable-copy", "opencode-runtime-injection"}, "inject OpenCode:"},
@@ -182,11 +327,6 @@ func TestInjectionTimingSuccessPreservesCommandOrderAndTotal(t *testing.T) {
 
 func TestInjectionTimingFailureEndsAtTheFailedCommand(t *testing.T) {
 	for index, failed := range injectionTimingCommands {
-		// Both libc probes have the same fake command. The first is enough
-		// here; the OpenCode-only probe is exercised separately below.
-		if index == 6 {
-			continue
-		}
 		t.Run(failed.command, func(t *testing.T) {
 			_, timeline := injectionTimingFixture(t)
 			t.Setenv("FACTORY_INJECTION_FAIL", failed.command)
@@ -210,8 +350,9 @@ func TestInjectionTimingFailureEndsAtTheFailedCommand(t *testing.T) {
 	}
 }
 
-func TestInjectionTimingCancellationFinishesPendingPayloadCopy(t *testing.T) {
+func TestInjectionTimingCancellationFinishesPendingCommand(t *testing.T) {
 	for _, step := range []struct{ command, phase string }{
+		{"libc-probe", "language-tools-probe"},
 		{"languages-tree", "language-tools-tree-copy"},
 		{"opencode-server", "opencode-server-copy"},
 	} {
@@ -234,7 +375,7 @@ func TestInjectionTimingCancellationFinishesPendingPayloadCopy(t *testing.T) {
 				if time.Now().After(deadline) {
 					cancel()
 					<-done
-					t.Fatal("stub did not enter the selected payload copy")
+					t.Fatal("stub did not enter the selected command")
 				}
 				time.Sleep(time.Millisecond)
 			}
@@ -243,15 +384,15 @@ func TestInjectionTimingCancellationFinishesPendingPayloadCopy(t *testing.T) {
 			select {
 			case err := <-done:
 				if err == nil || !errors.Is(ctx.Err(), context.Canceled) {
-					t.Fatal("payload-copy cancellation was lost")
+					t.Fatal("command cancellation was lost")
 				}
 			case <-time.After(2 * time.Second):
-				t.Fatal("canceled payload copy was not joined")
+				t.Fatal("canceled command was not joined")
 			}
 			entries := timeline()
 			if len(entries) == 0 || entries[len(entries)-1] != "phase:"+step.phase ||
 				slices.Contains(entries, "phase:child-start") || slices.Contains(entries, "command:child-start") {
-				t.Fatal("canceled copy lost its completion timing or started the child")
+				t.Fatal("canceled command lost its completion timing or started the child")
 			}
 			content, err := os.ReadFile(filepath.Join(directory, "timings"))
 			if err != nil {
@@ -268,12 +409,12 @@ func TestInjectionTimingCancellationFinishesPendingPayloadCopy(t *testing.T) {
 				started, err := time.Parse(time.RFC3339Nano, measurement.StartedAt)
 				if err != nil || started.After(observedAt) ||
 					started.Add(time.Duration(measurement.DurationMS+1)*time.Millisecond).Before(observedAt) {
-					t.Fatal("copy timing did not include its pending command before cancellation")
+					t.Fatal("timing did not include its pending command before cancellation")
 				}
 				measured = true
 			}
 			if !measured {
-				t.Fatal("pending copy did not emit its phase timing")
+				t.Fatal("pending command did not emit its phase timing")
 			}
 		})
 	}
