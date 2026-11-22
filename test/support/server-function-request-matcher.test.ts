@@ -14,7 +14,6 @@ const commands = [
   "setConversationMode",
   "startPersonalWorkspace",
   "startTicketWorkspace",
-  "startFreshRuntimeAttempt",
   "generateKnowledge",
 ] as const;
 const reads = [

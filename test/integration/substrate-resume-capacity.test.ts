@@ -235,7 +235,7 @@ test.each([
           break;
         case "stop":
           await f.database
-            .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${f.attemptID}`;
+            .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`;
           break;
         case "revoked":
           await f.database.client`DELETE FROM factory.project_membership

@@ -26,7 +26,6 @@ export const runtimeAttemptSchema = z.object({
   updatedAt: optionalString,
   readyAt: optionalString,
   appReadyAt: z.record(z.string(), z.string()).optional(),
-  restoreFailed: z.boolean().optional(),
   native: z
     .object({
       engine: z.literal("substrate"),

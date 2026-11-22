@@ -129,7 +129,7 @@ test("initial Verification continuation keeps exact-job, native identity and rev
           .client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${attemptID}`;
       if (fault === "stop-intent")
         await f.database
-          .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${attemptID}`;
+          .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${attemptID}`;
       if (fault === "deleting")
         await f.database.client`UPDATE factory.substrate_binding SET delete_intended_at=now()
           WHERE runtime_attempt_id=${attemptID}`;

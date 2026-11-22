@@ -280,7 +280,7 @@ test.each([
           break;
         case "runtime-stop":
           await f.database
-            .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${f.attemptID}`;
+            .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`;
           break;
         case "frozen-source":
           await f.database.client`UPDATE factory.substrate_source SET writable=false,

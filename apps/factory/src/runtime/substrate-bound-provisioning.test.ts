@@ -7,6 +7,8 @@ import {
   boundNativeProvisioningChecks,
   boundNativeProvisioningKinds,
   boundNativeProvisioningResource,
+  type BoundNativeProvisioningFacts,
+  provisionBoundNativeResources,
 } from "./substrate-bound-provisioning";
 import { renderSubstrateTemplate } from "./substrate-template";
 
@@ -20,6 +22,112 @@ const template = renderSubstrateTemplate(
     workerSelector: { "factory.dev/deployment": "owned" },
   },
   { runtimeAttemptId: crypto.randomUUID() },
+);
+
+test.each(["lost-create", "lost-outcome"] as const)(
+  "shared provisioning observes the original %s without repeating Create or retaining bootstrap secrets",
+  async (failure) => {
+    const facts: BoundNativeProvisioningFacts = {
+      atespace: null,
+      policy: null,
+      template: null,
+      atespaceAttemptedAt: null,
+      policyAttemptedAt: null,
+      templateAttemptedAt: null,
+      atespaceRejected: false,
+      policyRejected: false,
+      templateRejected: false,
+    };
+    const checks = boundNativeProvisioningChecks(
+      "Workspace",
+      atespace,
+      editorPrincipal,
+      template,
+      substrateTemplateSHA256(template),
+    );
+    const resources = new Map<string, unknown>();
+    const creates: string[] = [];
+    const roles: string[] = [];
+    let failing = true;
+    const call = (role: string) => async (method: string) => {
+      roles.push(`${role}:${method}`);
+      const kind = method.includes("ActorTemplate")
+        ? "template"
+        : method.includes("AccessPolicy")
+          ? "policy"
+          : "atespace";
+      if (method.startsWith("Get")) {
+        const value = resources.get(kind);
+        if (!value) throw new SubstrateRPCError("NotFound", "absent");
+        return structuredClone(value);
+      }
+      expect(facts[`${kind}AttemptedAt`]).toEqual(attempted);
+      creates.push(method);
+      const value = {
+        ...(kind === "template" ? template : {}),
+        ...(kind === "policy"
+          ? { bindings: [{ role: "editor", members: [editorPrincipal] }] }
+          : {}),
+        metadata: {
+          name: checks(kind).name,
+          uid: crypto.randomUUID(),
+          version: "1",
+          createTime: attempted.toISOString(),
+          ...(kind === "template" ? { atespace } : {}),
+        },
+      };
+      resources.set(kind, value);
+      if (failing && failure === "lost-create") {
+        failing = false;
+        throw new SubstrateRPCError("Unavailable", "lost Create reply");
+      }
+      return value;
+    };
+    const input = {
+      label: "Workspace",
+      checks,
+      owner: call("owner"),
+      editor: call("editor"),
+      read: async () => structuredClone(facts),
+      authorize: async () => {},
+      dispatch: async (kind: (typeof boundNativeProvisioningKinds)[number]) => {
+        facts[`${kind}AttemptedAt`] = attempted;
+      },
+      reject: async (kind: (typeof boundNativeProvisioningKinds)[number]) => {
+        facts[`${kind}Rejected`] = true;
+      },
+      remember: async (
+        kind: (typeof boundNativeProvisioningKinds)[number],
+        value: typeof boundNativeProvisioningResource._output,
+      ) => {
+        if (failing && failure === "lost-outcome") {
+          failing = false;
+          throw new Error("lost local outcome write");
+        }
+        facts[kind] = value;
+      },
+    };
+    await expect(provisionBoundNativeResources(input)).rejects.toThrow("lost");
+    const completed = await provisionBoundNativeResources(input);
+    expect(creates).toEqual([
+      "CreateAtespace",
+      "CreateAtespaceAccessPolicy",
+      "CreateActorTemplate",
+    ]);
+    expect(completed.template).toEqual({
+      metadata: boundNativeProvisioningResource.parse(resources.get("template")).metadata,
+    });
+    expect(roles.at(-2)).toBe("editor:CreateActorTemplate");
+    expect(roles.at(-1)).toBe("editor:GetActorTemplate");
+    const before = creates.length;
+    await provisionBoundNativeResources(input);
+    expect(creates).toHaveLength(before);
+    expect(roles.slice(-3)).toEqual([
+      "editor:GetAtespace",
+      "editor:GetAtespaceAccessPolicy",
+      "editor:GetActorTemplate",
+    ]);
+  },
 );
 
 test.each(["prebuild", "Verification", "isolated"] as const)(

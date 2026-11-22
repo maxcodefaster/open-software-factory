@@ -300,46 +300,31 @@ test("every compute state is described honestly in the Run, Git and Terminal pan
   ).toBeLessThanOrEqual(241);
 });
 
-test("a confirmed failed restore settles, explains itself and starts fresh exactly once", async () => {
+test("a native failure settles without offering an unsupported destructive recovery", async () => {
   const calls: string[] = [];
-  let state = "resuming";
-  let restoreFailed = true;
   const context = new FactoryRuntimeContext(
     () => base,
     async (input, init) => {
       const method = init?.method ?? "GET";
       calls.push(`${method} ${String(input).split("/runtime")[1] ?? ""}`);
-      if (method === "POST" && String(input).endsWith("/start-fresh")) {
-        state = "starting";
-        restoreFailed = false;
-        await Bun.sleep(10);
-        state = "ready";
-        return Response.json({ ...runtime, state, failure: null, restoreFailed }, { status: 202 });
-      }
       return Response.json({
         ...runtime,
-        state,
-        failure: restoreFailed ? "The paused Sandbox could not be restored: EAGAIN" : null,
-        restoreFailed,
+        state: "failed",
+        failure: "Native execution crashed; the original Actor was retained",
       });
     },
   );
   context.select(runtime.workspaceID);
   await Bun.sleep(30);
   // Settled: the read loop stops instead of polling until its deadline.
-  expect(context.value).toMatchObject({ state: "resuming", restoreFailed: true });
+  expect(context.value).toMatchObject({ state: "failed" });
   const reads = calls.length;
   await Bun.sleep(1100);
   expect(calls.length).toBe(reads);
-  expect(runtimePreparationCopy(context.value)).toContain("Start fresh to continue");
-  expect(runtimePreparationCopy(context.value)).toContain("Your files are unchanged");
-  // Observation-only (no writing authority) never starts anything.
-  await context.startFresh();
+  expect(runtimePreparationCopy(context.value)).toContain("original Actor was retained");
+  expect(runtimePreparationCopy(context.value)).not.toContain("Start fresh");
+  expect("startFresh" in context).toBe(false);
   expect(calls.filter((call) => call.startsWith("POST"))).toHaveLength(0);
-  context.setWritable(runtime.workspaceID, true);
-  await Promise.all([context.startFresh(), context.startFresh()]);
-  expect(calls.filter((call) => call.startsWith("POST"))).toEqual(["POST /start-fresh"]);
-  expect(context.value).toMatchObject({ state: "ready", restoreFailed: false });
 });
 
 test("an unknown restore outcome stays quarantined with no Start fresh", async () => {
@@ -358,7 +343,6 @@ test("an unknown restore outcome stays quarantined with no Start fresh", async (
   context.select(runtime.workspaceID);
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(50);
-  await context.startFresh();
   expect(calls.every((call) => call.startsWith("GET"))).toBe(true);
   expect(runtimePreparationCopy(context.value)).toContain("could not be confirmed");
   expect(runtimePreparationCopy(context.value)).not.toContain("Start fresh");

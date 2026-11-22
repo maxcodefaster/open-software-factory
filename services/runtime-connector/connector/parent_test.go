@@ -78,18 +78,12 @@ func TestPreparedImageStartsWithoutRequestingAnotherCacheBuild(t *testing.T) {
 func TestInteractiveRuntimeInjectsNoEditor(t *testing.T) {
 	for _, libc := range []string{"musl", "glibc"} {
 		t.Run(libc, func(t *testing.T) {
-			directory := t.TempDir()
+			directory, _ := injectionTimingFixture(t)
 			log := filepath.Join(directory, "commands")
-			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FACTORY_DOCKER_LOG\"\ncase \"$*\" in *'ldd --version'*) printf '%s\\n' \"$FACTORY_LIBC\";; esac\n"
-			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("FACTORY_DOCKER_LOG", log)
-			t.Setenv("FACTORY_LIBC", libc)
+			t.Setenv("FACTORY_INJECTION_LIBC", libc)
 			assignment := validAssignment()
 			assignment.Channels = []Channel{{Name: "ide", Kind: "ide"}}
-			if err := injectApprovedTools(context.Background(), assignment, "owned-container"); err != nil {
+			if err := injectTestApprovedTools(t, context.Background(), assignment, "owned-container"); err != nil {
 				t.Fatal(err)
 			}
 			commands, err := os.ReadFile(log)
@@ -98,9 +92,12 @@ func TestInteractiveRuntimeInjectsNoEditor(t *testing.T) {
 			}
 			actual := string(commands)
 			if strings.Contains(actual, "theia") || strings.Contains(actual, "opencode") || strings.Contains(actual, "forgejo") ||
-				!strings.Contains(actual, "cp /opt/factory/language-tools/node_modules owned-container:/opt/factory/language-tools/node_modules") ||
-				!strings.Contains(actual, "cp /opt/factory/language-tools/"+libc+"/. owned-container:/opt/factory/language-tools/runtime") ||
-				strings.Count(strings.TrimSpace(actual), "\n") != 3 {
+				!strings.Contains(actual, "tar -C /opt/factory/language-tools/node_modules -cf - .") ||
+				!strings.Contains(actual, "tar -C /opt/factory/language-tools/"+libc+" -cf - .") ||
+				!strings.Contains(actual, "exec --interactive --user 0:0 owned-container tar --no-same-owner -xf - -C /opt/factory/language-tools/node_modules") ||
+				!strings.Contains(actual, "exec --interactive --user 0:0 owned-container tar --no-same-owner -xf - -C /opt/factory/language-tools/.runtime-1") ||
+				!strings.Contains(actual, "mv /opt/factory/language-tools/.runtime-1 /opt/factory/language-tools/runtime") ||
+				strings.Count(strings.TrimSpace(actual), "\n") != 6 {
 				t.Fatalf("unexpected interactive injection: %s", actual)
 			}
 		})
@@ -431,7 +428,7 @@ esac
 	}
 }
 
-func TestDevcontainerStartReplacesOnlyAnOlderPrimary(t *testing.T) {
+func TestDevcontainerStartRejectsOtherGenerationsWithoutRepair(t *testing.T) {
 	for _, scenario := range []string{"older-running", "older-stopped", "current", "future", "same-generation-other-attempt", "invalid-generation", "wrong-project"} {
 		t.Run(scenario, func(t *testing.T) {
 			directory := t.TempDir()
@@ -478,7 +475,7 @@ printf '{"outcome":"success","containerId":"%s","composeProjectName":"project_de
 				RuntimeAttemptID:      "new-attempt",
 				Generation:            2,
 			})
-			wantSuccess := strings.HasPrefix(scenario, "older-") || scenario == "current"
+			wantSuccess := scenario == "current"
 			if (err == nil) != wantSuccess {
 				t.Fatalf("unexpected restart outcome: %v", err)
 			}
@@ -488,7 +485,7 @@ printf '{"outcome":"success","containerId":"%s","composeProjectName":"project_de
 			content, _ := os.ReadFile(logPath)
 			commands := string(content)
 			removed := strings.Contains(commands, "rm -f "+containerID)
-			if removed != strings.HasPrefix(scenario, "older-") {
+			if removed {
 				t.Fatalf("unexpected primary deletion: %s", commands)
 			}
 			if !wantSuccess && strings.Contains(commands, "devcontainer up") {
@@ -511,8 +508,7 @@ func TestDevcontainerRestartLive(t *testing.T) {
 	}
 	ctx := context.Background()
 	var previous string
-	var previousGeneration uint64
-	for _, generation := range []uint64{1, 1, 2, 2} {
+	for _, generation := range []uint64{1, 1, 1} {
 		assignment := Assignment{
 			WorkspaceFolder: "/workspace/project", DevcontainerPath: ".devcontainer/devcontainer.json",
 			RemoteWorkspaceFolder: "/workspace/project", ComposeProjectName: "project_devcontainer",
@@ -522,11 +518,8 @@ func TestDevcontainerRestartLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if generation == previousGeneration && result.ContainerID != previous {
+		if previous != "" && result.ContainerID != previous {
 			t.Fatal("same attempt was recreated")
-		}
-		if previous != "" && generation != previousGeneration && result.ContainerID == previous {
-			t.Fatal("old primary was rebound")
 		}
 		if previous == "" {
 			file := filepath.Join(t.TempDir(), "retained.txt")
@@ -549,6 +542,5 @@ func TestDevcontainerRestartLive(t *testing.T) {
 			}
 		}
 		previous = result.ContainerID
-		previousGeneration = generation
 	}
 }

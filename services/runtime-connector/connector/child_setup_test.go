@@ -22,6 +22,11 @@ printf '%s\n' "$*" >> "$FACTORY_DOCKER_LOG"
 case "$1" in
   cp) exit 0 ;;
   exec)
+    case "$*" in *"tar --no-same-owner -xf - -C "*)
+      test "$2" = --interactive && test "$3" = --user && test "$4" = 0:0 || exit 1
+      cat >/dev/null
+      exit 0 ;;
+    esac
     if [ "$2" = --interactive ]; then
       test "$3" = --user && test "$4" = node || exit 1
       cat >/dev/null
@@ -39,12 +44,15 @@ esac
 			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.WriteFile(filepath.Join(directory, "tar"), []byte("#!/bin/sh\nprintf 'owned archive fixture'\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
 			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("FACTORY_DOCKER_LOG", logPath)
 			t.Setenv("FACTORY_CHILD_STARTED", started)
 			assignment := validAssignment()
 			assignment.Channels = []Channel{{Name: kind, Kind: kind}}
-			err := injectChild(context.Background(), assignment, devcontainerResult{
+			err := injectTestChild(t, context.Background(), assignment, devcontainerResult{
 				ContainerID:           "owned-child",
 				RemoteUser:            "node",
 				RemoteWorkspaceFolder: "/workspace/project",

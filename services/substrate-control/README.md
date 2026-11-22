@@ -143,9 +143,11 @@ Factory requests SYNCHRONOUS Suspend, validates the returned ROOTFS snapshot,
 then independently Gets the Actor and requires the same UUID/generation,
 ActorUID in the storage URI, template UID, exact runtime and durable COMPLETED.
 Local-only, PENDING, VOLUMES, another generation, and merely SUSPENDED are rejected.
-Failures retain the previous good checkpoint. Workspace Stop confirms the
-independent editable Source owner under the same Workspace lock before UID-bound
-Actor Delete. Missing Source or its failed materialization prevents deletion.
+Failures retain the previous good checkpoint. Workspace Stop records final intent, drains its
+original Source writers and confirms the independent editable Source owner under the same Workspace
+lock before UID-bound Actor Delete. It does not take another ROOTFS snapshot for an Actor being
+retired. Missing Source or its failed materialization prevents deletion; recovery only continues
+that recorded cleanup and cannot reopen execution.
 Failed initial preservation may support Pause, but cannot masquerade as independent
 Source or a completed Stop. A lost Delete reply reconciles the original Actor's
 absence without recreating it.

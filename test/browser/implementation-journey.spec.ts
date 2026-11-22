@@ -539,6 +539,8 @@ for (const state of [
       });
       if (state.id !== "personal-draft") {
         const opener = toolbar.getByRole("button", { name: "Ticket actions", exact: true });
+        if (state.id === "revision" && width === 430)
+          await page.emulateMedia({ reducedMotion: "no-preference" });
         await opener.click();
         const menu = page.getByRole("menu", { name: "Ticket actions", exact: true });
         await expect(menu).toBeVisible();
@@ -566,20 +568,27 @@ for (const state of [
               .first()
               .evaluate((element) => getComputedStyle(element).fill),
           ).toBe("none");
-          const feedbackLabel = await menu
-            .getByRole("menuitem", { name: "Add feedback", exact: true })
-            .locator("span")
-            .boundingBox();
-          const reloadLabel = await menu
-            .getByRole("menuitem", { name: "Reload review", exact: true })
-            .locator("span")
-            .boundingBox();
-          expect(
-            Math.abs(
-              fixtureValue(feedbackLabel, "feedbackLabel").x -
-                fixtureValue(reloadLabel, "reloadLabel").x,
-            ),
-          ).toBeLessThanOrEqual(1);
+          // Measure both labels in one rendered frame. Separate browser calls can
+          // compare different positions while the same popover is animating.
+          const labels = await menu.evaluate((element) => {
+            const spans = [...element.querySelectorAll<HTMLSpanElement>("button > span")];
+            const bounds = (text: string) => {
+              const label = spans.find((span) => span.textContent === text);
+              if (!label) throw new Error(`Missing menu label: ${text}`);
+              return label.getBoundingClientRect().toJSON();
+            };
+            return { feedback: bounds("Add feedback"), reload: bounds("Reload review") };
+          });
+          expect(Math.abs(labels.feedback.x - labels.reload.x)).toBeLessThanOrEqual(1);
+          await test.info().attach("revision-menu-label-bounds", {
+            body: JSON.stringify(labels),
+            contentType: "application/json",
+          });
+          await menu.getByRole("menuitem", { name: "Add feedback", exact: true }).focus();
+          await page.keyboard.press("ArrowDown");
+          await expect(
+            menu.getByRole("menuitem", { name: "Reload review", exact: true }),
+          ).toBeFocused();
           await page.screenshot({
             path: `${evidence}/revision-menu-430.png`,
             animations: "disabled",
@@ -882,7 +891,6 @@ test.describe("retained Coding successor", () => {
         "resumeCoding",
         "stopCoding",
         "startTicketWorkspace",
-        "startFreshRuntimeAttempt",
         "stopRuntimeAttempt",
       ].map(factoryFunctionMatcher),
     );

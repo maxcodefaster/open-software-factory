@@ -49,7 +49,7 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
           await database.client`UPDATE factory.project_membership SET role='product-contributor'
             WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
         if (mode === "stopped")
-          await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now()
+          await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now()
             WHERE id=${attemptID}`;
         await beforeSend?.(() => {
           sends++;

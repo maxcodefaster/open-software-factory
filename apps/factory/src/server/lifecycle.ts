@@ -79,6 +79,11 @@ export function startFactoryLifecycle(
     () => runtimeController.admitNativeCapacity(),
     15_000,
   );
+  jobs.every(
+    "Recorded runtime Stop cleanup is unavailable",
+    () => runtimeController.reconcileStops(),
+    15_000,
+  );
   jobs.every("Delivery observation failed", () => deliveryController.sweep(), 1_000, true);
   jobs.every("Input observation failed", () => monitoringWorker.sweep(), 2_000, true);
   jobs.every("Release observation is unavailable", () => releaseController.recover(), 5_000);

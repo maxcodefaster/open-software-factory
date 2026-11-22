@@ -115,7 +115,7 @@ test("native fixture evidence reads the saved original Actor binding without wor
     await f.database
       .client`UPDATE factory.substrate_binding SET observation=${JSON.stringify(saved["observation"])}::jsonb WHERE runtime_attempt_id=${started.id}`;
     await f.database
-      .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${started.id}`;
+      .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${started.id}`;
     await expect(readNativeWorkspaceObservation(f.database, selected)).rejects.toThrow();
     expect(f.calls).toHaveLength(calls);
   } finally {

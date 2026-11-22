@@ -7,11 +7,7 @@ import { type ConversationView } from "../project-agent/contracts";
 import { type RuntimeAttempt, type RuntimeDockTarget } from "../runtime/contracts";
 import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
-import {
-  ensureStaging,
-  startFreshRuntimeAttempt,
-  startPersonalWorkspace,
-} from "../server-functions/runtime";
+import { ensureStaging, startPersonalWorkspace } from "../server-functions/runtime";
 import {
   ensureChangeSource,
   ensurePersonalSource,
@@ -246,32 +242,6 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     }
   }
 
-  // The paused Sandbox's failed restore is confirmed. Discard it and open the same
-  // Preview on the new Attempt; the recorded failure stays visible until it returns.
-  async function startFreshPreview(tab: WorkspaceTab) {
-    const projectID = dependencies.selectedProjectID();
-    if (!projectID || !tab.attemptID || preparingPreviews.has(tab.id)) return;
-    const original = dependencies
-      .attempts()
-      .find((attempt) => attempt.id === tab.attemptID && attempt.projectId === projectID);
-    if (tab.view !== "preview" || !original?.restoreFailed)
-      throw new Error("Only a Sandbox whose restore failed can be started fresh.");
-    preparingPreviews.add(tab.id);
-    try {
-      const attempt = await serverCall(startFreshRuntimeAttempt({ data: [tab.attemptID] }));
-      dependencies.updateWorkspaceTab(
-        {
-          ...tab,
-          attemptID: attempt.id,
-        },
-        projectID,
-      );
-      await dependencies.refreshServerState();
-    } finally {
-      preparingPreviews.delete(tab.id);
-    }
-  }
-
   function ticketPreviewTarget(changeID: string | undefined) {
     if (!changeID) return undefined;
     const owned = new Set(
@@ -316,7 +286,6 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     openChatActivity,
     openPreviewTarget,
     retryMainPreview,
-    startFreshPreview,
     ticketPreviewTarget,
     openDevelopmentPreview,
   };

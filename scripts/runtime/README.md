@@ -47,6 +47,15 @@ This runs the official gRPC/Connector lifecycle and authenticated Factory Worksp
 Missing fixture configuration fails the command. The operator remains responsible for the exact
 native fixture inventory it retains. There is no general Namespace cleanup or finalizer-removal command.
 
+The Workspace fixture requires Linux UID/GID 1000, its explicit `kubeconfig`, `context` and `cli`,
+and the normal `fresh-workspaces` deployment. The default `qualification: "lifecycle-and-git"`
+keeps the native Parent Git regression. Select `qualification: "lifecycle"` only for a targeted
+lifecycle receipt; it still checks paused/running Stop, new Docker generations, failed Source
+handoff, concurrent Start and lost-Delete cleanup recovery. It does not count the omitted Git
+checks as passes. Optional `directIngress` and `ingressListenPort` select an owned callback listener;
+the native TLS origin remains on port 443. Cleanup confirms original template and Atespace UIDs
+and native absence before deleting the fixture database or S3 data. Unconfirmed cleanup retains them.
+
 ## Product live fixtures
 
 The Environment and external MCP proofs use a separate Factory process and an `owned_<32 hex>`

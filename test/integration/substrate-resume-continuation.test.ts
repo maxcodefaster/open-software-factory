@@ -280,7 +280,7 @@ test.each([
     switch (fault) {
       case "stop":
         await f.database
-          .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${f.attemptID}`;
+          .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`;
         break;
       case "newer-generation": {
         const newer = runtimeIdentity(f.workspaceID, 2).attemptID;

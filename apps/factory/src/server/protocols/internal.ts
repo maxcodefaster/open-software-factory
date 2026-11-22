@@ -43,7 +43,7 @@ export function createInternalProtocol(services: InternalServices) {
     try {
       const url = factoryRequestURL(request, factoryOrigin);
       const nativeSource = url.pathname.match(/^\/internal\/substrate-source\/([0-9a-f-]{36})$/);
-      if (nativeSource?.[1]) return workspaceSources.nativeRestore(request, nativeSource[1]);
+      if (nativeSource?.[1]) return await workspaceSources.nativeRestore(request, nativeSource[1]);
       const publicationCredentials = new URL(request.url).pathname.match(
         /^\/internal\/releases\/([0-9a-f-]{36})\/credentials$/,
       );
@@ -58,9 +58,9 @@ export function createInternalProtocol(services: InternalServices) {
         /^\/internal\/runtime-environment\/([0-9a-f-]{36})$/,
       );
       if (runtimeEnvironment?.[1])
-        return runtimeEnvironmentEndpoint(request, runtimeEnvironment[1]);
+        return await runtimeEnvironmentEndpoint(request, runtimeEnvironment[1]);
       const projectImage = url.pathname.match(/^\/internal\/project-image\/([0-9a-f-]{36})$/);
-      if (projectImage?.[1]) return projectPreparation.endpoint(request, projectImage[1]);
+      if (projectImage?.[1]) return await projectPreparation.endpoint(request, projectImage[1]);
       const _sourceEvent = url.pathname.match(/^\/api\/wiki\/source-events\/([0-9a-f-]{36})$/);
       const modelRelay = url.pathname.match(
         /^\/internal\/model\/([0-9a-f-]+)\/v1\/(chat\/completions|responses|messages)$/,
@@ -69,14 +69,17 @@ export function createInternalProtocol(services: InternalServices) {
         /^\/internal\/build-browser\/([0-9a-f-]+)\/([0-9a-f-]+)$/,
       );
       if (browserTool?.[1] && browserTool[2])
-        return buildBrowserEndpoint(request, { attemptID: browserTool[1], turnID: browserTool[2] });
+        return await buildBrowserEndpoint(request, {
+          attemptID: browserTool[1],
+          turnID: browserTool[2],
+        });
       const sourceTool = url.pathname.match(/^\/internal\/mcp\/([0-9a-f-]+)\/([0-9a-f-]+)$/);
       if (sourceTool?.[1] && sourceTool[2])
-        return mcpSourceEndpoint(request, sourceTool[1], sourceTool[2]);
+        return await mcpSourceEndpoint(request, sourceTool[1], sourceTool[2]);
       if (modelRelay) {
         const [, attemptID, suffix] = modelRelay;
         if (!attemptID || !suffix) return new Response("Not found", { status: 404 });
-        return relayModel(request, attemptID, suffix);
+        return await relayModel(request, attemptID, suffix);
       }
       const personalGitSource = url.pathname.match(
         /^\/internal\/personal-git\/([a-f0-9-]{36})\/([a-f0-9]{64})(\/.*)?$/,
@@ -87,7 +90,7 @@ export function createInternalProtocol(services: InternalServices) {
           return new Response("Not found", { status: 404 });
         const repository = await personalGitRepository(database, commandID);
         if (!repository) return new Response("Not found", { status: 404 });
-        return serveRuntimeRepository(
+        return await serveRuntimeRepository(
           request,
           repository,
           `/internal/personal-git/${commandID}/${capability}`,
@@ -135,7 +138,7 @@ export function createInternalProtocol(services: InternalServices) {
           })
           .catch(() => false);
         if (!granted) return new Response("Not found", { status: 404 });
-        return serveRuntimeRepository(
+        return await serveRuntimeRepository(
           request,
           repository.repositoryUrl.startsWith("file://")
             ? `file://${runtimeSourcePath(attemptID)}`

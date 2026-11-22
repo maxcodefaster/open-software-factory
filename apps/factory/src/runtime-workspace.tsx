@@ -6,8 +6,6 @@ import {
   appResponseNotice,
   boundedCause,
   previewStatus,
-  restoreFailedDetail,
-  restoreFailedHeadline,
   restoreUnknownDetail,
   restoreUnknownHeadline,
 } from "./preview-status";
@@ -36,7 +34,6 @@ export function RuntimeWorkspaceTabs(props: {
   canDevelop: boolean;
   onOpenTicket?(changeID: string): void;
   onRetryMainPreview?: ((tab: WorkspaceTab) => Promise<void>) | undefined;
-  onStartFresh?: ((tab: WorkspaceTab) => Promise<void>) | undefined;
 }) {
   const runtimeTabs = () => props.tabs.filter((tab) => tab.view === "preview");
   return (
@@ -90,7 +87,6 @@ export function RuntimeWorkspaceTabs(props: {
           };
         });
         const status = () => {
-          if (attempt()?.restoreFailed) return restoreFailedHeadline;
           if (attempt()?.state === "resuming" && attempt()?.failure) return restoreUnknownHeadline;
           if (reconnecting()) return "Connection interrupted. Reconnecting to the same Workspace…";
           const current = attempt();
@@ -123,13 +119,11 @@ export function RuntimeWorkspaceTabs(props: {
               reconnecting={reconnecting()}
               loadingLabel={status()}
               loadingDetail={
-                attempt()?.restoreFailed
-                  ? restoreFailedDetail
-                  : attempt()?.state === "resuming" && attempt()?.failure
-                    ? restoreUnknownDetail
-                    : startingPreview() && waited() >= 5_000
-                      ? `${["starting", "create-intended"].includes(attempt()?.state ?? "") ? "Starting" : "Resuming"} for ${waitLabel(waited())}. Factory opens the Preview as soon as the App answers.`
-                      : undefined
+                attempt()?.state === "resuming" && attempt()?.failure
+                  ? restoreUnknownDetail
+                  : startingPreview() && waited() >= 5_000
+                    ? `${["starting", "create-intended"].includes(attempt()?.state ?? "") ? "Starting" : "Resuming"} for ${waitLabel(waited())}. Factory opens the Preview as soon as the App answers.`
+                    : undefined
               }
               attempt={attempt()}
               app={app()}
@@ -139,12 +133,6 @@ export function RuntimeWorkspaceTabs(props: {
                   : attempt()?.state === "resuming" && attempt()?.failure
                     ? boundedCause(attempt()?.failure ?? "")
                     : plainFailure(attempt()?.failure ?? tab().preparationFailure)
-              }
-              restoreFailed={attempt()?.restoreFailed}
-              onStartFresh={
-                props.onStartFresh && attempt()?.restoreFailed
-                  ? () => props.onStartFresh?.(tab()) ?? Promise.resolve()
-                  : undefined
               }
               onRetry={
                 props.onRetryMainPreview && retryableMainPreview(attempt(), props.projectID)
@@ -172,8 +160,6 @@ export function RuntimeWorkspace(props: {
   app?: AppPreview | undefined;
   failure?: string | null | undefined;
   onRetry?: (() => Promise<void>) | undefined;
-  onStartFresh?: (() => Promise<void>) | undefined;
-  restoreFailed?: boolean | undefined;
   reconnecting?: boolean;
   active?: boolean | undefined;
   review?:
@@ -188,24 +174,6 @@ export function RuntimeWorkspace(props: {
 }) {
   const [retrying, setRetrying] = createSignal(false);
   const [retryError, setRetryError] = createSignal("");
-  const [freshening, setFreshening] = createSignal(false);
-  const [freshError, setFreshError] = createSignal("");
-  async function startFresh() {
-    if (freshening() || !props.onStartFresh) return;
-    setFreshening(true);
-    setFreshError("");
-    try {
-      await props.onStartFresh();
-    } catch (cause) {
-      setFreshError(
-        cause instanceof Error
-          ? plainErrorMessage(cause.message)
-          : "Start fresh could not be confirmed. Try again.",
-      );
-    } finally {
-      setFreshening(false);
-    }
-  }
   async function retry() {
     if (retrying() || !props.onRetry) return;
     setRetrying(true);
@@ -230,38 +198,7 @@ export function RuntimeWorkspace(props: {
           <div class="empty-workspace runtime-start-state" role="status">
             <p>{props.loadingLabel}</p>
             <Show when={props.loadingDetail}>{(detail) => <p aria-live="off">{detail()}</p>}</Show>
-            <Show when={props.failure}>
-              {(failure) => (
-                <Show
-                  when={props.onStartFresh || props.restoreFailed}
-                  fallback={<p role="note">{failure()}</p>}
-                >
-                  <details class="runtime-cause">
-                    <summary>Technical cause</summary>
-                    <p role="note">
-                      {failure().replace(/^The paused Sandbox could not be restored:\s*/, "")}
-                    </p>
-                  </details>
-                </Show>
-              )}
-            </Show>
-            <Show when={props.onStartFresh || freshening()}>
-              <button
-                type="button"
-                class="primary-button"
-                disabled={freshening()}
-                aria-busy={freshening() ? "true" : undefined}
-                onClick={() => void startFresh()}
-              >
-                {freshening() ? "Starting fresh…" : "Start fresh"}
-              </button>
-              <Show when={freshening()}>
-                <p aria-live="polite">
-                  Discarding the paused Sandbox, then starting a new one. This can take a minute.
-                </p>
-              </Show>
-            </Show>
-            <Show when={freshError()}>{(error) => <p role="alert">{error()}</p>}</Show>
+            <Show when={props.failure}>{(failure) => <p role="note">{failure()}</p>}</Show>
             <Show when={props.onRetry}>
               <button
                 type="button"

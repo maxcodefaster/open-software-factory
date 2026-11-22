@@ -23,6 +23,7 @@ export async function runtimeAccessCookie(
   expect(location.port).toBe(new URL(base).port);
   const redeemed = await fetch(`${base}${location.pathname}${location.search}`, {
     redirect: "manual",
+    headers: { host: location.host },
   });
   expect(redeemed.status).toBe(302);
   return redeemed.headers

@@ -147,7 +147,7 @@ test.each([
         if (row?.["writable"]) await checkpoint(sql as typeof f.database.client);
         else expect(row?.["checkpoint_id"]).toBe(row?.["saved"]);
       },
-      async paused(_workspace, sql) {
+      async makeIndependent(_workspace, sql) {
         await sql`UPDATE factory.substrate_source SET owner='service',writer_epoch=writer_epoch+1,writable=true,
           service_base=checkpoint_id,checkpoint_id=NULL WHERE workspace_id=${f.workspaceID} AND owner='actor'`;
       },

@@ -40,6 +40,7 @@ import type { createProjectPlanning } from "../projects/planning";
 import { type createProjectSetupInteraction, ProjectSetupPanel } from "../setup/panel";
 import { ChatSkillPicker } from "../skills/chat-picker";
 import { CopyButton } from "../ui/feedback";
+import { WorkspaceActionBar } from "../ui/workspace-actions";
 import type { createWindowPresence } from "../window-presence";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import { ChangeWriterStatus } from "../writer-status";
@@ -263,6 +264,20 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
     Boolean(
       model.assistantTicketID() && model.assistantTicketID() === model.selectedChange()?.ticketId,
     );
+  const detachedImplementation = () => {
+    const change = model.selectedChange();
+    return change &&
+      change.projectId === model.selectedProjectID() &&
+      change.ticketId === model.selectedTicketID() &&
+      !model.assistantTicketID() &&
+      model.conversationMode() !== "build" &&
+      model.canDevelopProject() &&
+      model.agentViewLoaded() &&
+      model.agentCanRun() &&
+      (model.agentTurnBusy() || model.agentNeedsResolution() || model.agent().stopPending)
+      ? change
+      : undefined;
+  };
   return (
     <Show when={model.agentPresence.present()}>
       <section
@@ -816,6 +831,32 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
                   }
                 />
               </div>
+              <Show when={detachedImplementation()}>
+                {(change) => (
+                  <WorkspaceActionBar
+                    label="Retained Ticket implementation"
+                    status={
+                      <span>
+                        {model.ticketList().find((ticket) => ticket.id === change().ticketId)
+                          ?.title ?? "Selected Ticket"}{" "}
+                        · {buildAgentStatus(model.agent())}
+                      </span>
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="workspace-action"
+                      aria-label={
+                        model.agentNeedsResolution() ? "Stop unresolved turn" : "Stop OpenCode"
+                      }
+                      disabled={model.pending() || model.agent().stopPending}
+                      onClick={() => void model.stopAgent()}
+                    >
+                      Stop implementation
+                    </button>
+                  </WorkspaceActionBar>
+                )}
+              </Show>
               <Show
                 when={
                   model.conversationMode() !== "build" &&

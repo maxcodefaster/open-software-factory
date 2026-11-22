@@ -25,7 +25,7 @@ test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
     const sources: SubstrateSourceHandoff = {
       async attach() {},
       async freezeActor() {},
-      async paused() {},
+      async makeIndependent() {},
       async resume() {
         throw Error("Fencing cannot resume compute");
       },

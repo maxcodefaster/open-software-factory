@@ -96,7 +96,9 @@ concurrent shell, formatter or Git writes, or save another editor's unsaved buff
 
 In the IDE, **Retry file access** rechecks the same retained Source owner. It does not stop or
 replace Source, start compute or reload the editor's unsaved buffer. Workspace Stop controls
-compute separately and retains independent Source before deleting its original Actor.
+compute separately and retains independent Source before deleting its original Actor. Pause saves
+the environment for cold continuation. Final Stop saves the checkout, not a new snapshot of the
+Docker environment it is about to delete; its recorded intent blocks execution until cleanup finishes.
 
 For binary or larger files, `beginFileTransfer` binds an upload or download to one user, Workspace
 and Runtime Attempt. Transfers support files up to 128 MiB and expire after 30 minutes. Use its

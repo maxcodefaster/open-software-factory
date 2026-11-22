@@ -141,7 +141,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
       freezeActor: source.freezeActor,
       resume: source.resume,
       requireIndependent: source.requireIndependent,
-      async paused() {
+      async makeIndependent() {
         // This controller seam proves confirmation before native dispatch. Actual
         // Linux materialization/service ownership has its separate Source tests.
         expect(nativeActor.parse(actor).status.state).toBe("ACTOR_STATE_SUSPENDED");
@@ -687,7 +687,7 @@ test.each(["starting", "failed"])(
       if (initialState === "failed")
         await f.database
           .client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${f.attemptID}`;
-      await expect(controller.stop(f.attemptID)).rejects.toThrow(
+      await expect(controller.pause(f.attemptID)).rejects.toThrow(
         "No native checkpoint was dispatched",
       );
       expect(suspends).toBe(0);
@@ -730,8 +730,10 @@ test.each(["starting", "failed"])(
         "Reconcile the startup outcome",
       );
       expect(resumes).toBe(1);
+      const [beforePause] = await f.database
+        .client`SELECT stop_intended_at FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+      expect(beforePause?.["stop_intended_at"]).toBeNull();
       expect((await controller.pause(f.attemptID))?.state).toBe("paused");
-      await expect(controller.stop(f.attemptID)).rejects.toThrow("independent Source");
       expect((await controller.get(f.attemptID))?.native).toMatchObject({
         actorUID: uid,
         sourceHandoff: "pending",
@@ -793,6 +795,12 @@ test.each(["starting", "failed"])(
         FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
       expect(retainedAfterMemoryFailure?.["checkpoint"]).toEqual(savedBeforeCrash?.["checkpoint"]);
       expect(retainedAfterMemoryFailure?.["reason"]).toBe("killed for exceeding its memory limit");
+      // Final Stop is not another Pause. Its retained intent blocks all later wakes.
+      await expect(controller.stop(f.attemptID)).rejects.toThrow("independent Source");
+      expect((await controller.get(f.attemptID))?.state).toBe("stopping");
+      await expect(controller.pause(f.attemptID)).rejects.toThrow("stopping");
+      await expect(controller.start(f.projectID, f.userID)).rejects.toThrow("retired");
+      expect(suspends).toBe(0);
     } finally {
       await source.close();
       await f.dispose();
@@ -851,7 +859,9 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
         await f.database
           .client`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,checkpoint_id=${crypto.randomUUID()} WHERE workspace_id=${f.workspaceID}`;
       await expect(controller.stop(f.attemptID)).rejects.toThrow(
-        "Source drain remains unconfirmed",
+        scenario === "connected-parent"
+          ? "Source drain remains unconfirmed"
+          : "independent Source is unavailable",
       );
       expect(suspends).toBe(0);
       expect((await source.lease(f.workspaceID))?.owner).toBe("actor");

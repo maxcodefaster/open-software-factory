@@ -1,8 +1,26 @@
 import { expect, test } from "bun:test";
 import type postgres from "postgres";
 import { drizzleTransaction } from "../../../../../packages/db/src/client";
+import { CommandError } from "../../command-error";
 import { runtimeSourceCapability } from "../../runtime/git-http";
 import { createInternalProtocol } from "./internal";
+
+test("asynchronous internal Source failures return an HTTP error instead of escaping the listener", async () => {
+  const attemptID = crypto.randomUUID();
+  const protocol = createInternalProtocol({
+    factoryOrigin: "https://factory.test",
+    workspaceSources: {
+      async nativeRestore() {
+        throw new CommandError("unavailable", "Owned Source backend unavailable");
+      },
+    },
+  } as unknown as Parameters<typeof createInternalProtocol>[0]);
+  const response = await protocol(
+    new Request(`https://factory.test/internal/substrate-source/${attemptID}`),
+  );
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: "unavailable" });
+});
 
 test("native Source restore remains available but retired fixture-rescue paths are not routed", async () => {
   const attemptID = "e32ad434-607d-4aae-a5ad-e93c914125a3";

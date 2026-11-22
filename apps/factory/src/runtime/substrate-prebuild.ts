@@ -27,12 +27,9 @@ import {
   substrateTemplateSHA256,
 } from "./substrate";
 import {
-  absentBoundNativeResource,
   type BoundNativeProvisioningFacts,
-  boundNativeCreateRejected,
   boundNativeProvisioningChecks,
-  boundNativeProvisioningKinds,
-  boundNativeProvisioningResource,
+  provisionBoundNativeResources,
 } from "./substrate-bound-provisioning";
 import type { createSubstrateCapacity } from "./substrate-capacity";
 import { substratePrebuildAuthorityIn } from "./substrate-prebuild-grant";
@@ -347,58 +344,33 @@ export function createSubstratePrebuild(
           template,
           intent.templateSHA256,
         );
-        for (const kind of boundNativeProvisioningKinds) {
-          if (row[`${kind}Rejected`])
-            throw new Error(
-              "Native prebuild Create was rejected; foreign resources are never adopted",
-            );
-          const call = kind === "template" ? editor : owner;
-          const { getMethod, getRequest, createMethod, createRequest, requireOriginal } =
-            checks(kind);
-          if (!row[`${kind}AttemptedAt`]) {
-            if (await absentBoundNativeResource(call, getMethod, getRequest))
-              throw new Error("Preexisting native prebuild resource was not adopted");
-            await sql.begin((tx) =>
+        const identity = eq(substratePrebuild.preparationId, preparationID);
+        row = await provisionBoundNativeResources({
+          label: "prebuild",
+          checks,
+          editor,
+          owner,
+          read: () => saved(preparationID, sql),
+          authorize: () =>
+            sql.begin((tx) =>
               substratePrebuildAuthorityIn(tx, config.projectID, preparationID, attemptID),
-            );
-            await db
+            ),
+          dispatch: (kind) =>
+            db
               .update(substratePrebuild)
               .set({ [`${kind}AttemptedAt`]: query`now()` })
-              .where(eq(substratePrebuild.preparationId, preparationID));
-            row = await saved(preparationID, sql);
-            try {
-              const created = boundNativeProvisioningResource.parse(
-                await call(createMethod, createRequest),
-              );
-              requireOriginal(created, row[kind], row[`${kind}AttemptedAt`]);
-              const outcome = kind === "template" ? { metadata: created.metadata } : created;
-              await db
-                .update(substratePrebuild)
-                .set({ [kind]: outcome })
-                .where(eq(substratePrebuild.preparationId, preparationID));
-            } catch (error) {
-              if (boundNativeCreateRejected(error))
-                await db
-                  .update(substratePrebuild)
-                  .set({ [`${kind}Rejected`]: true })
-                  .where(eq(substratePrebuild.preparationId, preparationID));
-              throw error;
-            }
-            row = await saved(preparationID, sql);
-          }
-          const actual = boundNativeProvisioningResource.parse(
-            await (kind === "template" || row.policy ? editor : owner)(getMethod, getRequest),
-          );
-          requireOriginal(actual, row[kind], row[`${kind}AttemptedAt`]);
-          if (!row[kind]) {
-            const outcome = kind === "template" ? { metadata: actual.metadata } : actual;
-            await db
+              .where(identity),
+          reject: (kind) =>
+            db
               .update(substratePrebuild)
-              .set({ [kind]: outcome })
-              .where(eq(substratePrebuild.preparationId, preparationID));
-            row = await saved(preparationID, sql);
-          }
-        }
+              .set({ [`${kind}Rejected`]: true })
+              .where(identity),
+          remember: (kind, value) =>
+            db
+              .update(substratePrebuild)
+              .set({ [kind]: value })
+              .where(identity),
+        });
       } finally {
         try {
           await sql`SELECT pg_advisory_unlock(hashtext(${`native-prebuild:${preparationID}`}))`;

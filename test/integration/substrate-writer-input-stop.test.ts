@@ -80,7 +80,7 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
           checkpoint=${JSON.stringify(checkpoint)}::text::jsonb WHERE workspace_id=${workspaceID}`;
         effects.push("source-frozen");
       },
-      async paused(workspaceID, sql) {
+      async makeIndependent(workspaceID, sql) {
         expect(workspaceID).toBe(f.workspaceID);
         await settled();
         expect(effects).toContain("SuspendActor");

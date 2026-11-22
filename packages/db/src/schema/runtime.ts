@@ -46,7 +46,6 @@ export const runtimeAttempt = factorySchema.table(
     verificationId: uuid("verification_id"),
     readyAt: timestamp("ready_at", { withTimezone: true }),
     appReadyAt: jsonb("app_ready_at").default({}).notNull(),
-    resumeFailedAt: timestamp("resume_failed_at", { withTimezone: true }),
   },
   (table): PgTableExtraConfigValue[] => [
     index("runtime_attempt_active_isolated_idx")

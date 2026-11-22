@@ -98,7 +98,7 @@ test.each([false, true])(
           await settled();
           effects.push("source-drain");
         },
-        async paused() {
+        async makeIndependent() {
           independent = true;
           effects.push("source-independent");
         },

@@ -10,6 +10,7 @@ import { substrateTemplateSHA256 } from "./substrate";
 export const boundNativeProvisioningResource = z.object({ metadata: nativeMetadata }).passthrough();
 type Resource = z.infer<typeof boundNativeProvisioningResource>;
 export const boundNativeProvisioningKinds = ["atespace", "policy", "template"] as const;
+type Kind = (typeof boundNativeProvisioningKinds)[number];
 export type BoundNativeProvisioningFacts = {
   atespace: Resource | null;
   policy: Resource | null;
@@ -25,7 +26,7 @@ export type BoundNativeProvisioningFacts = {
 // Requests and identity checks for these three concrete native resources only.
 // The caller retains authorization, locks, durable intent and dispatch/outcome writes.
 export function boundNativeProvisioningChecks(
-  label: "prebuild" | "Verification" | "isolated",
+  label: "Workspace" | "prebuild" | "Verification" | "isolated",
   atespace: string,
   editorPrincipal: string,
   template: ReturnType<typeof import("./substrate-template").renderSubstrateTemplate>,
@@ -77,6 +78,59 @@ export function boundNativeProvisioningChecks(
         throw new Error(`Native ${label} editor grant differs from intent`);
     },
   });
+}
+
+// The purpose owner holds its existing lock and supplies its durable writes and
+// live authority. Only the mechanical sequence for these three resources is shared.
+export async function provisionBoundNativeResources<T extends BoundNativeProvisioningFacts>(input: {
+  label: string;
+  checks: ReturnType<typeof boundNativeProvisioningChecks>;
+  editor: SubstrateCall;
+  owner: SubstrateCall;
+  read(): Promise<T>;
+  authorize(): Promise<unknown>;
+  dispatch(kind: Kind): Promise<unknown>;
+  reject(kind: Kind): Promise<unknown>;
+  remember(kind: Kind, value: Resource): Promise<unknown>;
+}): Promise<T> {
+  let row = await input.read();
+  for (const kind of boundNativeProvisioningKinds) {
+    if (row[`${kind}Rejected`])
+      throw new Error(
+        `Native ${input.label} Create was rejected; foreign resources are never adopted`,
+      );
+    const call = kind === "template" ? input.editor : input.owner;
+    const check = input.checks(kind);
+    if (!row[`${kind}AttemptedAt`]) {
+      if (await absentBoundNativeResource(call, check.getMethod, check.getRequest))
+        throw new Error(`Preexisting native ${input.label} resource was not adopted`);
+      await input.authorize();
+      await input.dispatch(kind);
+      row = await input.read();
+      try {
+        const created = boundNativeProvisioningResource.parse(
+          await call(check.createMethod, check.createRequest),
+        );
+        check.requireOriginal(created, row[kind], row[`${kind}AttemptedAt`]);
+        await input.remember(kind, kind === "template" ? { metadata: created.metadata } : created);
+      } catch (error) {
+        if (boundNativeCreateRejected(error)) await input.reject(kind);
+        throw error;
+      }
+      row = await input.read();
+    }
+    // Once the grant is confirmed, even Atespace observations use the Editor.
+    const observer = kind === "template" || row.policy ? input.editor : input.owner;
+    const actual = boundNativeProvisioningResource.parse(
+      await observer(check.getMethod, check.getRequest),
+    );
+    check.requireOriginal(actual, row[kind], row[`${kind}AttemptedAt`]);
+    if (!row[kind]) {
+      await input.remember(kind, kind === "template" ? { metadata: actual.metadata } : actual);
+      row = await input.read();
+    }
+  }
+  return row;
 }
 
 export async function absentBoundNativeResource(

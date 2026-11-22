@@ -33,7 +33,6 @@ const commissioningFunctions = [
   "setConversationMode",
   "startPersonalWorkspace",
   "startTicketWorkspace",
-  "startFreshRuntimeAttempt",
   "generateKnowledge",
 ] as const;
 let commissioned: string[] = [];

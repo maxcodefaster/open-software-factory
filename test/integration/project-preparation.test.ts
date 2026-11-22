@@ -85,7 +85,7 @@ for (const producerEnvironment of ["development", "main-preview"] as const)
         expect(response.status).toBe(200);
         expect(await response.json()).toBeNull();
         await f.database
-          .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${consumer.id}`;
+          .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${consumer.id}`;
         expect((await preparation.endpoint(request(consumer.id), consumer.id)).status).toBe(401);
       } finally {
         await f.dispose();

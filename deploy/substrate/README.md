@@ -41,6 +41,14 @@ Project image preparation publishes a reusable image, not a fully initialized
 OpenCode process. Native `RUNNING`, Source availability, OpenCode readiness and
 App health are distinct observations, not interchangeable readiness claims.
 
+MEMORY is not qualified for this private-Docker profile. A separate native ARM
+component run retained an OpenCode process without Docker, but restoring the
+actual Dev Container stalled in gVisor's TCP loading barriers. The pinned
+upstream path does not restore saved child-network stacks; the matching
+[upstream proposal](https://github.com/gvisor/gvisor/pull/17026) is not merged.
+Do not enable MEMORY, promise warm Project continuity or substitute an unqualified
+runtime patch on the strength of the simpler process-only test.
+
 An owned Linux arm64 infrastructure proof has exercised the unchanged official
 worker with this nightly and the current Factory Actor image: Docker 29.9.0
 created and ran an inner container, allowed HTTPS kept certificate verification,
@@ -62,6 +70,26 @@ Unknown historical schemas or a different fingerprint are refused without modify
 their data. This is not a database upgrade or Factorybox data-transfer path.
 
 ## Qualification scope
+
+The final-Stop simplification has a separate owned Linux arm64 qualification on the unchanged
+pinned v1.0.0 worker and gVisor profile. The current Actor image and a UID/GID-1000 Factory process
+passed the targeted lifecycle proof with authenticated Workspace Start/Stop, Source and Terminal access:
+
+- ROOTFS Pause/Resume retained the original Actor, private Docker state and dirty/ignored Source.
+  Offline reads, saves, search and watches did not wake paused compute.
+- Final Stop of running and paused Actors preserved independent Source without another Suspend.
+  A deliberate successor consumed saved offline edits in a fresh Docker environment.
+- A failed independent Source process left durable Stop intent and retained the original Actor.
+  Concurrent Start remained fenced while an owned transport withheld the successful Delete reply.
+  Startup cleanup confirmed the original Actor's absence without another Delete, Resume or Create.
+
+This targeted receipt has 194 assertions and is retained under
+`.factory/test-results/lifecycle-native-qualification/`. The broader native Git-push regression
+lost its Connector connection. An interrupted initial bootstrap also exposed a pinned native
+cleanup failure for a missing gVisor filestore. Those runs remain failed; the unfinished native
+fixture is retained. This proof does not extend paused-input settlement or qualify a published release.
+
+The product receipts below predate this simplification.
 
 The Greenfield source-chart product path has been exercised on Linux arm64 with the
 unchanged pinned official worker, gVisor profile and original WorkerPool budget. This is
@@ -267,10 +295,12 @@ These paths use the Greenfield baseline's `substrate_isolated` provisioning fact
 tests prove authority, original creates, scope, readiness gating and cleanup against controlled
 native responses, not live runtime or human-approved release qualification.
 
-Workspace Stop now keeps the existing Workspace lock throughout synchronous Suspend,
-confirmed independent Source handoff and UID-bound Delete. A durable ROOTFS without a usable
-independent checkout cannot authorize deletion. Lost Delete replies retain the original intent
-until the same Actor is independently absent; concurrent Start cannot wake it.
+Workspace Stop keeps the existing Workspace lock throughout complete Source export,
+confirmed independent Source handoff and UID-bound Delete. It records final Stop intent before
+exporting and never captures a new ROOTFS merely to delete that Actor. Missing independent Source
+blocks Delete. Lost replies retain the original intent until the same Actor is independently
+absent; concurrent Start cannot wake it. Startup recovery and the bounded Stop-cleanup sweep
+continue that recorded operation without new compute, hooks or input.
 
 An explicit Workspace Start after confirmed Stop selects the next generation only after
 re-observing the original Actor's absence and independent Source. Every generation keeps its own
@@ -671,8 +701,9 @@ checkpoint/chunk traffic needed to finish that already-fenced pause. A saved fro
 personal pause can recover its original Parent connection without admitting a Child
 or replaying lifecycle work.
 
-Only an independently observed completed durable ROOTFS snapshot permits Source
-ownership to move to the independent service on Factory's retained state claim.
+For resumable Pause, only an independently observed completed durable ROOTFS snapshot permits Source
+ownership to move to the independent service on Factory's retained state claim. Final Stop instead
+requires its persisted cleanup-only intent and the same completely confirmed frozen Source export.
 The Source tree and its confirmation marker publish together. Sleeping CRUD,
 search and watch use that tree without calling ResumeActor. Concurrent startup,
 file writes and ownership transfer use the existing Workspace lock and writer epochs.
@@ -731,10 +762,10 @@ Its native receipt records `sourceHandoff: confirmed-same-node`, `coldRestart: t
 `portable: false` and `fullFactoryE2E: false`. That earlier receipt did not qualify
 a replacement Attempt. The current Workspace controller requires independent Source
 before UID-bound Delete and supports an explicit next generation after confirmed cleanup.
-Stop is not reported as successful when only Pause completed. Live ARM coverage
-is listed above. Pause preserves
-private Docker data in the Actor's ROOTFS; an explicit Stop removes that Actor and its
-compute state only after Source has an independent owner.
+Stop is not reported as successful until the original Actor's absence is confirmed. Live ARM coverage
+is listed above. Pause preserves private Docker data in the Actor's ROOTFS; an explicit Stop removes
+that Actor and its compute state only after Source has an independent owner. Final Stop does not
+create another native snapshot. Its intent cannot be cleared or converted back into execution.
 An initial personal bootstrap without its current Source checkpoint service cannot
 dispatch a new native pause: an unavailable Parent does not prove that the workload
 is still checkpointable. An original already-completed durable pause can still be

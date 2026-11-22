@@ -39,12 +39,9 @@ import {
   substrateTemplateSHA256,
 } from "./substrate";
 import {
-  absentBoundNativeResource,
   type BoundNativeProvisioningFacts,
-  boundNativeCreateRejected,
   boundNativeProvisioningChecks,
-  boundNativeProvisioningKinds,
-  boundNativeProvisioningResource,
+  provisionBoundNativeResources,
 } from "./substrate-bound-provisioning";
 import type { createSubstrateCapacity } from "./substrate-capacity";
 import {
@@ -356,56 +353,32 @@ export function createSubstrateIsolated(
       intent.templateSHA256,
     );
     const identity = eq(substrateIsolated.runtimeAttemptId, attemptID);
-    for (const kind of boundNativeProvisioningKinds) {
-      if (row[`${kind}Rejected`])
-        throw new Error("Native isolated Create was rejected; foreign resources are never adopted");
-      const call = kind === "template" ? editor : owner;
-      const { getMethod, getRequest, createMethod, createRequest, requireOriginal } = checks(kind);
-      if (!row[`${kind}AttemptedAt`]) {
-        if (await absentBoundNativeResource(call, getMethod, getRequest))
-          throw new Error("Preexisting native isolated resource was not adopted");
-        await sql.begin((tx) =>
+    row = await provisionBoundNativeResources({
+      label: "isolated",
+      checks,
+      editor,
+      owner,
+      read: () => saved(attemptID, sql),
+      authorize: () =>
+        sql.begin((tx) =>
           substrateIsolatedAuthorityIn(tx, config.projectID, purpose, userID, attemptID),
-        );
-        await db
+        ),
+      dispatch: (kind) =>
+        db
           .update(substrateIsolated)
           .set({ [`${kind}AttemptedAt`]: query`now()` })
-          .where(identity);
-        row = await saved(attemptID, sql);
-        try {
-          const created = boundNativeProvisioningResource.parse(
-            await call(createMethod, createRequest),
-          );
-          requireOriginal(created, null, row[`${kind}AttemptedAt`]);
-          await db
-            .update(substrateIsolated)
-            .set({
-              [kind]: kind === "template" ? { metadata: created.metadata } : created,
-            })
-            .where(identity);
-        } catch (error) {
-          if (boundNativeCreateRejected(error))
-            await db
-              .update(substrateIsolated)
-              .set({ [`${kind}Rejected`]: true })
-              .where(identity);
-          throw error;
-        }
-        row = await saved(attemptID, sql);
-      }
-      const observer = kind === "template" || row.policy ? editor : owner;
-      const actual = boundNativeProvisioningResource.parse(await observer(getMethod, getRequest));
-      requireOriginal(actual, row[kind], row[`${kind}AttemptedAt`]);
-      if (!row[kind]) {
-        await db
+          .where(identity),
+      reject: (kind) =>
+        db
           .update(substrateIsolated)
-          .set({
-            [kind]: kind === "template" ? { metadata: actual.metadata } : actual,
-          })
-          .where(identity);
-        row = await saved(attemptID, sql);
-      }
-    }
+          .set({ [`${kind}Rejected`]: true })
+          .where(identity),
+      remember: (kind, value) =>
+        db
+          .update(substrateIsolated)
+          .set({ [kind]: value })
+          .where(identity),
+    });
     if (scope.repository.startsWith("file://"))
       await prepareRuntimeRepository(attemptID, scope.repository, scope.revision);
     return row;

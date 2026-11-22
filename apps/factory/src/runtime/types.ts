@@ -26,7 +26,6 @@ export type RuntimeAttemptView = {
   /** First moment Factory saw each declared App healthy since `readyAt`. */
   appReadyAt?: Record<string, string>;
   /** The native record proves the paused Sandbox's Resume failed (resuming, or its discard needs another try); the owner may start fresh. */
-  restoreFailed?: boolean;
   native?: {
     engine: "substrate";
     actorUID?: string;

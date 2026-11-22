@@ -19,9 +19,6 @@ const asleep = ["pausing", "paused", "resuming"];
 export const restoreUnknownHeadline = "Restoring the paused Sandbox could not be confirmed.";
 export const restoreUnknownDetail =
   "Factory has not confirmed whether it restored, so it keeps the paused Sandbox untouched. Your files are unchanged.";
-export const restoreFailedHeadline = "The paused Sandbox could not be restored.";
-export const restoreFailedDetail =
-  "Your files are unchanged. Start fresh to continue; the paused memory and private container data are discarded.";
 
 // Native restore and build failures can carry whole log excerpts and host paths.
 // Show the recorded cause up to a readable bound; the full text stays in the record.

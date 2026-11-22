@@ -66,6 +66,10 @@ import {
 } from "./substrate-grant";
 import { substrateResourceReservation, substrateResources } from "./substrate-resources";
 import { renderSubstrateTemplate } from "./substrate-template";
+import {
+  boundNativeProvisioningChecks,
+  provisionBoundNativeResources,
+} from "./substrate-bound-provisioning";
 
 const installationConfiguration = z.strictObject({
   deployment: z.enum(["owned-test", "fresh-workspaces"]),
@@ -705,128 +709,53 @@ export function createSubstrateWorkspaces(
           throw new Error(
             "Native provisioning Create was rejected; foreign resources are never adopted",
           );
-        const spaceRef = { atespace: { name: atespace } };
         const authorize = () =>
           sql.begin((tx) =>
             substrateWorkspaceGrantIn(database, tx, workspaceID, userID, Boolean(changeID)),
           );
-        if (!row.atespaceAttempted) {
-          if (await absent(owner, "GetAtespace", spaceRef))
-            throw new Error("Preexisting Atespace was not adopted");
-          await authorize();
-          await db
-            .update(substrateWorkspace)
-            .set({ atespaceAttemptedAt: query`now()` })
-            .where(provisionIdentity);
-          row = await saved(workspaceID, generation, sql);
-          try {
-            const created = resource.parse(
-              await owner("CreateAtespace", { atespace: { metadata: { name: atespace } } }),
-            );
-            requireOriginal(created, null, row.atespaceAttempted, atespace);
-            await db.update(substrateWorkspace).set({ atespace: created }).where(provisionIdentity);
-          } catch (error) {
-            if (rejected(error))
-              await db
-                .update(substrateWorkspace)
-                .set({ atespaceRejected: true })
-                .where(provisionIdentity);
-            throw error;
-          }
-          row = await saved(workspaceID, generation, sql);
-        }
-        // Once the original grant is confirmed, continuation uses that scoped
-        // Editor identity. An expired global provisioning token must not block
-        // observation or Resume of an already-owned Workspace.
-        const space = resource.parse(await (row.policy ? editor : owner)("GetAtespace", spaceRef));
-        requireOriginal(space, row.atespace, row.atespaceAttempted, atespace);
-        if (!row.atespace)
-          await db.update(substrateWorkspace).set({ atespace: space }).where(provisionIdentity);
-        const policyRef = { ...spaceRef, name: "default" };
-        const bindings = [{ role: "editor", members: [config.editorPrincipal] }];
-        if (!row.policyAttempted) {
-          if (await absent(owner, "GetAtespaceAccessPolicy", policyRef))
-            throw new Error("Preexisting native grant was not adopted");
-          await authorize();
-          await db
-            .update(substrateWorkspace)
-            .set({ policyAttemptedAt: query`now()` })
-            .where(provisionIdentity);
-          row = await saved(workspaceID, generation, sql);
-          try {
-            const created = resource.parse(
-              await owner("CreateAtespaceAccessPolicy", {
-                ...spaceRef,
-                accessPolicy: { metadata: { name: "default" }, bindings },
-              }),
-            );
-            requireOriginal(created, null, row.policyAttempted, "default");
-            if (!isDeepStrictEqual(created["bindings"], bindings))
-              throw new Error("Native editor grant differs from its provisioning intent");
-            await db.update(substrateWorkspace).set({ policy: created }).where(provisionIdentity);
-          } catch (error) {
-            if (rejected(error))
-              await db
-                .update(substrateWorkspace)
-                .set({ policyRejected: true })
-                .where(provisionIdentity);
-            throw error;
-          }
-          row = await saved(workspaceID, generation, sql);
-        }
-        const policy = resource.parse(
-          await (row.policy ? editor : owner)("GetAtespaceAccessPolicy", policyRef),
-        );
-        requireOriginal(policy, row.policy, row.policyAttempted, "default");
-        if (!isDeepStrictEqual(policy["bindings"], bindings))
-          throw new Error("Native editor grant differs from its provisioning intent");
-        if (!row.policy)
-          await db.update(substrateWorkspace).set({ policy }).where(provisionIdentity);
-        const templateRef = { actorTemplate: { atespace, name: "runtime" } };
-        if (!row.templateAttempted) {
-          if (await absent(editor, "GetActorTemplate", templateRef))
-            throw new Error("Preexisting ActorTemplate was not adopted");
-          await authorize();
-          await db
-            .update(substrateWorkspace)
-            .set({ templateAttemptedAt: query`now()` })
-            .where(provisionIdentity);
-          row = await saved(workspaceID, generation, sql);
-          try {
-            const created = resource.parse(
-              await editor("CreateActorTemplate", { actorTemplate: template }),
-            );
-            requireOriginal(created, null, row.templateAttempted, "runtime", atespace);
-            if (substrateTemplateSHA256(created) !== intent.templateSHA256)
-              throw new Error(
-                "Native ActorTemplate spec differs from immutable provisioning intent",
-              );
-            await db
+        row = await provisionBoundNativeResources({
+          label: "Workspace",
+          checks: boundNativeProvisioningChecks(
+            "Workspace",
+            atespace,
+            config.editorPrincipal,
+            template,
+            intent.templateSHA256,
+          ),
+          editor,
+          owner,
+          authorize,
+          read: async () => {
+            const savedRow = await saved(workspaceID, generation, sql);
+            return {
+              ...savedRow,
+              atespaceAttemptedAt: savedRow.atespaceAttempted
+                ? new Date(savedRow.atespaceAttempted)
+                : null,
+              policyAttemptedAt: savedRow.policyAttempted
+                ? new Date(savedRow.policyAttempted)
+                : null,
+              templateAttemptedAt: savedRow.templateAttempted
+                ? new Date(savedRow.templateAttempted)
+                : null,
+            };
+          },
+          dispatch: (kind) =>
+            db
               .update(substrateWorkspace)
-              .set({ template: { metadata: created.metadata } })
-              .where(provisionIdentity);
-          } catch (error) {
-            if (rejected(error))
-              await db
-                .update(substrateWorkspace)
-                .set({ templateRejected: true })
-                .where(provisionIdentity);
-            throw error;
-          }
-          row = await saved(workspaceID, generation, sql);
-        }
-        const actual = resource.parse(await editor("GetActorTemplate", templateRef));
-        requireOriginal(actual, row.template, row.templateAttempted, "runtime", atespace);
-        if (substrateTemplateSHA256(actual) !== intent.templateSHA256)
-          throw new Error("Native ActorTemplate spec differs from immutable provisioning intent");
-        if (!row.template) {
-          // Store only public native metadata; never persist role capabilities or source URLs from the template env.
-          await db
-            .update(substrateWorkspace)
-            .set({ template: { metadata: actual.metadata } })
-            .where(provisionIdentity);
-        }
-        row = await saved(workspaceID, generation, sql);
+              .set({ [`${kind}AttemptedAt`]: query`now()` })
+              .where(provisionIdentity),
+          reject: (kind) =>
+            db
+              .update(substrateWorkspace)
+              .set({ [`${kind}Rejected`]: true })
+              .where(provisionIdentity),
+          remember: (kind, value) =>
+            db
+              .update(substrateWorkspace)
+              .set({ [kind]: value })
+              .where(provisionIdentity),
+        });
         if (project.repository.startsWith("file://"))
           await prepareRuntimeRepository(attemptID, project.repository, revision);
       } finally {
@@ -839,12 +768,6 @@ export function createSubstrateWorkspaces(
       return execution(workspaceID, row).start(userID);
     },
   };
-}
-function rejected(error: unknown) {
-  return (
-    error instanceof SubstrateRPCError &&
-    ["AlreadyExists", "PermissionDenied", "Unauthenticated", "InvalidArgument"].includes(error.code)
-  );
 }
 function requireOriginal(
   value: Resource,

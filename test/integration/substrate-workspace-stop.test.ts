@@ -41,7 +41,7 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
         await gate;
       }
     },
-    async paused() {},
+    async makeIndependent() {},
     async resume() {},
     async requireIndependent(workspaceID, actorUID) {
       expect(workspaceID).toBe(f.workspaceID);
@@ -101,7 +101,7 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
       expect(independent).toBe(true);
       expect(request).toEqual({
         actor: { atespace: f.atespace, name: actor.metadata.name },
-        options: { uid: originalUID, version: "3" },
+        options: { uid: originalUID, version: "2" },
       });
       const [intent] = await f.database.client`
         SELECT a.state,a.stop_intended_at,b.delete_intended_at,b.deleted_at
@@ -126,8 +126,13 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
       WHERE id=${f.attemptID}`;
     await expect(c.stop(f.attemptID)).rejects.toThrow("Independent Source is unconfirmed");
     expect(deletes).toBe(0);
-    expect((await c.get(f.attemptID))?.state).toBe("paused");
-    expect(suspends).toBe(1);
+    expect((await c.get(f.attemptID))?.state).toBe("stopping");
+    expect(suspends).toBe(0);
+    const [earlyStop] = await f.database.client`SELECT stop_intended_at,checkpoint
+      FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+      WHERE a.id=${f.attemptID}`;
+    expect(earlyStop?.["stop_intended_at"]).not.toBeNull();
+    expect(earlyStop?.["checkpoint"]).toBeNull();
     independent = true;
     gate = release.promise;
     const stopping = c.stop(f.attemptID);
@@ -146,11 +151,20 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
     release.resolve();
     expect(await stopResult).toBe("lost Delete reply");
     expect(await startResult).toContain("retired");
-    expect((await c.stop(f.attemptID))?.state).toBe("stopped");
+    const recover = await c.recover();
+    recover();
+    // Startup recovery observes the original lost Delete without a new request.
+    for (let i = 0; i < 100; i++) {
+      const [row] = await f.database
+        .client`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+      if (row?.["state"] === "stopped") break;
+      await Bun.sleep(10);
+    }
+    expect((await c.get(f.attemptID))?.state).toBe("stopped");
     expect((await c.get(f.attemptID))?.native?.state).toBe("deleted");
     expect(creates).toBe(1);
     expect(deletes).toBe(1);
-    expect(suspends).toBe(1);
+    expect(suspends).toBe(0);
     expect(resumes).toBe(1);
     const [retained] = await f.database.client`
       SELECT actor_uid,deleted_at,checkpoint FROM factory.substrate_binding
@@ -158,7 +172,7 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
     if (!retained) throw Error("Original native Stop binding disappeared");
     expect(retained?.["actor_uid"]).toBe(originalUID);
     expect(retained?.["deleted_at"]).not.toBeNull();
-    expect(retained?.["checkpoint"].actorUID).toBe(originalUID);
+    expect(retained?.["checkpoint"]).toBeNull();
     await requireOwnedProjectSourceRetention(f.database, f.projectID);
     // The same read-only guard used by live-fixture disposal must retain this
     // database even after confirmed Actor Stop. The native scope still owns

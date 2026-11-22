@@ -1760,7 +1760,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     openChatActivity,
     openPreviewTarget,
     retryMainPreview,
-    startFreshPreview,
     ticketPreviewTarget,
     openDevelopmentPreview,
   } = createRuntimeNavigation({
@@ -1911,7 +1910,6 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     ticketPreviewTarget,
     openPreviewTarget,
     retryMainPreview,
-    startFreshPreview,
     approveDelivery,
     retryReview,
     retryPromotion,

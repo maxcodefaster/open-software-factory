@@ -410,15 +410,12 @@ test("failed Verification compute is visible while human editing fences reconcil
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${f.owned.projectID},${f.owned.userID},'developer',${f.owned.userID})`;
     expect((await deliveryRead()).verificationComputeWait).toBe(true);
-    // A retained wait row cannot promise a fresh start after readiness or Stop intent.
+    // A retained wait row cannot promise a fresh start after readiness.
     await f.database
       .client`UPDATE factory.runtime_attempt SET ready_at=now() WHERE id=${replacementID}`;
     expect((await deliveryRead()).verificationComputeWait).toBe(false);
-    await f.database.client`UPDATE factory.runtime_attempt SET ready_at=NULL,stop_intended_at=now()
-      WHERE id=${replacementID}`;
-    expect((await deliveryRead()).verificationComputeWait).toBe(false);
     await f.database
-      .client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL WHERE id=${replacementID}`;
+      .client`UPDATE factory.runtime_attempt SET ready_at=NULL WHERE id=${replacementID}`;
     expect((await deliveryRead()).verificationComputeWait).toBe(true);
     // Read projection only. Stop, cancellation and inactive work do not promise an automatic start.
     const checksStopID = crypto.randomUUID();
@@ -504,6 +501,34 @@ test("failed Verification compute is visible while human editing fences reconcil
     expect((await changes.list(f.owned.projectID, f.owned.userID))[0]?.verificationState).toBe(
       "succeeded",
     );
+    // Test the independent read-projection fences before final Stop. This exact
+    // Attempt can never clear Stop to resume the later projection scenarios.
+    await f.database.client`UPDATE factory.verification
+      SET state='runner-starting',summary=NULL,completed_at=NULL WHERE id=${verificationID}`;
+    await f.database.client`UPDATE factory.runtime_attempt
+      SET state='starting',failure=NULL,ready_at=NULL WHERE id=${replacementID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(true);
+    await f.database.client`UPDATE factory.runtime_attempt
+      SET state='stopping',stop_intended_at=now() WHERE id=${replacementID}`;
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
+    const [finalStop] = await f.database.client`
+      SELECT state,stop_intended_at::text FROM factory.runtime_attempt WHERE id=${replacementID}`;
+    expect(finalStop?.["state"]).toBe("stopping");
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL
+        WHERE id=${replacementID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt SET state='starting'
+        WHERE id=${replacementID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
+    expect(
+      (
+        await f.database.client`
+          SELECT state,stop_intended_at::text FROM factory.runtime_attempt WHERE id=${replacementID}`
+      )[0],
+    ).toEqual(finalStop);
+    expect((await deliveryRead()).verificationComputeWait).toBe(false);
     await f.database
       .client`UPDATE factory.change_writer SET state='human',user_id=${f.owned.userID},turn_id=NULL
       WHERE change_id=${f.owned.changeID}`;
@@ -610,7 +635,7 @@ test.each(["failure", "success"] as const)(
           stop: async (id) => {
             stops.push(id);
             await f.database.client`UPDATE factory.runtime_attempt
-              SET stop_intended_at=COALESCE(stop_intended_at,now()),state='stop-intended'
+              SET stop_intended_at=COALESCE(stop_intended_at,now()),state='stopping'
               WHERE id=${id}`;
             return null;
           },
@@ -643,8 +668,20 @@ test.each(["failure", "success"] as const)(
       f.controllers.add(controller);
       try {
         for (const state of ["ready", "stop-intended", "stopping", "cleanup-failed"] as const) {
-          await f.database.client`UPDATE factory.runtime_attempt SET state=${state}
-            WHERE id=${attemptID}`;
+          if (state === "stop-intended" || state === "cleanup-failed") {
+            // These formerly seeded states would reopen an irreversibly
+            // stopping Attempt. Reject them at the DB, not at later handoff.
+            await expect(
+              f.database.client`UPDATE factory.runtime_attempt SET state=${state}
+                WHERE id=${attemptID}`.execute(),
+            ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
+            if (state === "cleanup-failed")
+              await f.database.client`UPDATE factory.runtime_attempt
+                SET failure='Owned cleanup unconfirmed' WHERE id=${attemptID}`;
+          } else {
+            await f.database.client`UPDATE factory.runtime_attempt SET state=${state}
+              WHERE id=${attemptID}`;
+          }
           await controller.reconcile(f.owned.changeID);
           expect(repairs).toEqual([]);
           expect(reviews).toEqual([]);

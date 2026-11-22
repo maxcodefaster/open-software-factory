@@ -55,7 +55,6 @@ const serviceFunctions = {
     startPersonalWorkspace: "startPersonal",
     startTicketWorkspace: "startTicket",
     stopRuntimeAttempt: "stop",
-    startFreshRuntimeAttempt: "startFresh",
     cancelChange: "cancelChange",
     getChanges: "changes",
     getRuntimeAttempts: "attempts",

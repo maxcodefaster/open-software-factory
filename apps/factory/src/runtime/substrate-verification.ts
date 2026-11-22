@@ -29,12 +29,9 @@ import {
   substrateTemplateSHA256,
 } from "./substrate";
 import {
-  absentBoundNativeResource,
   type BoundNativeProvisioningFacts,
-  boundNativeCreateRejected,
   boundNativeProvisioningChecks,
-  boundNativeProvisioningKinds,
-  boundNativeProvisioningResource,
+  provisionBoundNativeResources,
 } from "./substrate-bound-provisioning";
 import type { createSubstrateCapacity } from "./substrate-capacity";
 import { substrateResourceReservation } from "./substrate-resources";
@@ -349,18 +346,14 @@ export function createSubstrateVerification(
           eq(substrateVerification.verificationId, verificationID),
           eq(substrateVerification.runtimeAttemptId, attemptID),
         );
-        for (const kind of boundNativeProvisioningKinds) {
-          if (row[`${kind}Rejected`])
-            throw new Error(
-              "Native Verification Create was rejected; foreign resources are never adopted",
-            );
-          const call = kind === "template" ? editor : owner;
-          const { getMethod, getRequest, createMethod, createRequest, requireOriginal } =
-            checks(kind);
-          if (!row[`${kind}AttemptedAt`]) {
-            if (await absentBoundNativeResource(call, getMethod, getRequest))
-              throw new Error("Preexisting native Verification resource was not adopted");
-            await sql.begin((tx) =>
+        row = await provisionBoundNativeResources({
+          label: "Verification",
+          checks,
+          editor,
+          owner,
+          read: () => saved(verificationID, attemptID, sql),
+          authorize: () =>
+            sql.begin((tx) =>
               substrateVerificationAuthorityIn(
                 tx,
                 config.projectID,
@@ -368,48 +361,23 @@ export function createSubstrateVerification(
                 userID,
                 attemptID,
               ),
-            );
-            await db
+            ),
+          dispatch: (kind) =>
+            db
               .update(substrateVerification)
               .set({ [`${kind}AttemptedAt`]: query`now()` })
-              .where(identity);
-            row = await saved(verificationID, attemptID, sql);
-            try {
-              const created = boundNativeProvisioningResource.parse(
-                await call(createMethod, createRequest),
-              );
-              requireOriginal(created, null, row[`${kind}AttemptedAt`]);
-              const outcome = kind === "template" ? { metadata: created.metadata } : created;
-              await db
-                .update(substrateVerification)
-                .set({ [kind]: outcome })
-                .where(identity);
-            } catch (error) {
-              if (boundNativeCreateRejected(error))
-                await db
-                  .update(substrateVerification)
-                  .set({ [`${kind}Rejected`]: true })
-                  .where(identity);
-              throw error;
-            }
-            row = await saved(verificationID, attemptID, sql);
-          }
-          // A confirmed grant lets the scoped Editor observe retained resources;
-          // continuing this exact job must not depend on a global Owner token.
-          const observer = kind === "template" || row.policy ? editor : owner;
-          const actual = boundNativeProvisioningResource.parse(
-            await observer(getMethod, getRequest),
-          );
-          requireOriginal(actual, row[kind], row[`${kind}AttemptedAt`]);
-          if (!row[kind]) {
-            const outcome = kind === "template" ? { metadata: actual.metadata } : actual;
-            await db
+              .where(identity),
+          reject: (kind) =>
+            db
               .update(substrateVerification)
-              .set({ [kind]: outcome })
-              .where(identity);
-            row = await saved(verificationID, attemptID, sql);
-          }
-        }
+              .set({ [`${kind}Rejected`]: true })
+              .where(identity),
+          remember: (kind, value) =>
+            db
+              .update(substrateVerification)
+              .set({ [kind]: value })
+              .where(identity),
+        });
       } finally {
         try {
           await sql`SELECT pg_advisory_unlock(hashtext(${`native-verification:${verificationID}`}))`;

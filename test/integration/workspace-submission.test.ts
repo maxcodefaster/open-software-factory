@@ -519,7 +519,7 @@ test.each([
               process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://not-admitted.factory.invalid";
             else if (boundary === "Workspace Stop")
               await f.database
-                .client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${f.attemptID}`;
+                .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`;
             else if (boundary === "Agent Stop")
               await f.database
                 .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true,stop_id=${crypto.randomUUID()}

@@ -175,7 +175,7 @@ test("runtime environment freezes version, authenticates parent generation, isol
         await (await endpoint(request(stagingAttempt, stagingToken, 1), stagingAttempt)).json()
       ).bundle.variables.map((v: { name: string }) => v.name),
     ).toEqual(["PREVIEW_ONLY"]);
-    await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${verificationAttempt}`;
+    await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${verificationAttempt}`;
     expect(
       (await endpoint(request(verificationAttempt, verificationToken, 1), verificationAttempt))
         .status,

@@ -120,7 +120,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
       await sql`UPDATE factory.substrate_source SET owner='actor',actor_uid=${actorUID},writer_epoch=writer_epoch+1,writable=true,checkpoint_id=NULL WHERE workspace_id=${workspaceID}`;
     },
     freezeActor: source.freezeActor,
-    async paused(workspaceID, sql) {
+    async makeIndependent(workspaceID, sql) {
       const row = await source.lease(workspaceID, sql);
       if (row?.owner === "actor")
         await sql`UPDATE factory.substrate_source SET owner='service',writer_epoch=writer_epoch+1,
@@ -162,13 +162,17 @@ async function proveGenerations(kind: "personal" | "ticket") {
             : payload;
       if (!value) throw new Error("Missing native declaration");
       const declaredMetadata = value["metadata"] as { name: string; atespace?: string };
+      const [clock] = await f.database.client<
+        { createdAt: string }[]
+      >`SELECT clock_timestamp()::text AS "createdAt"`;
+      if (!clock) throw new Error("Controlled native creation clock is unavailable");
       const actual = {
         ...value,
         metadata: {
           name: declaredMetadata.name,
           uid: crypto.randomUUID(),
           version: "1",
-          createTime: new Date().toISOString(),
+          createTime: new Date(clock.createdAt).toISOString(),
           ...(declaredMetadata.atespace ? { atespace: declaredMetadata.atespace } : {}),
         },
         ...(kind === "Actor" ? { status: { state: "ACTOR_STATE_SUSPENDED" } } : {}),

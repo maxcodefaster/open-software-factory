@@ -242,7 +242,6 @@ export interface DocumentWindowModel {
   ticketPreviewTarget: (changeID: string | undefined) => RuntimeDockTarget | undefined;
   openPreviewTarget: (target: RuntimeDockTarget) => Promise<void>;
   retryMainPreview: (tab: WorkspaceTab) => Promise<void>;
-  startFreshPreview: (tab: WorkspaceTab) => Promise<void>;
   approveDelivery: (changeID: string) => Promise<void>;
   retryReview: (changeID: string) => Promise<void>;
   retryPromotion: (changeID: string) => Promise<void>;
@@ -716,7 +715,6 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
           userID={model.bootstrap.session.user.id}
           canDevelop={model.canDevelopProject()}
           onRetryMainPreview={model.retryMainPreview}
-          onStartFresh={model.startFreshPreview}
           onOpenTicket={(changeID) => {
             const change = props.model
               .changes()

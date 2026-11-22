@@ -36,8 +36,6 @@ export function runtimeWorkspaceURL(
       preview.projectID === projectID &&
       preview.channel === tab.appChannel,
   );
-  // A confirmed failed restore has nothing to open. The panel explains and offers Start fresh.
-  if (attempt?.restoreFailed) return undefined;
   const state = attempt?.state ?? projection?.state;
   const available =
     state &&

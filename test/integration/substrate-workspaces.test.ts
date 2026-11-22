@@ -650,7 +650,7 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
         () =>
           sql`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true,stop_id=${crypto.randomUUID()} WHERE change_id=${f.changeID}`,
         () =>
-          sql`UPDATE factory.runtime_attempt SET state='stop-intended',stop_intended_at=now() WHERE id=${f.attemptID}`,
+          sql`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`,
         () =>
           sql`UPDATE factory.change_commit_operation SET state='failed',completed_at=now() WHERE change_id=${f.changeID} AND source='integration'`,
         () => sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by)
@@ -1067,7 +1067,7 @@ test("product Stop without independent Source refuses deletion rather than repor
       .client`SELECT deleted_at,checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
     expect(saved?.["deleted_at"]).toBeNull();
     expect(saved?.["checkpoint"]).toBeNull();
-    await expect(c.start(f.projectID, f.userID)).rejects.toThrow("Reconcile the startup outcome");
+    await expect(c.start(f.projectID, f.userID)).rejects.toThrow("retired");
     expect(deletes).toBe(0);
   } finally {
     await f.dispose();

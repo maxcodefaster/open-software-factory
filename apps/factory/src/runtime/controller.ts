@@ -99,7 +99,6 @@ const runtimeAttemptFields = {
   updatedAt: query<string>`${runtimeAttempt.updatedAt}`,
   readyAt: query<string | null>`${runtimeAttempt.readyAt}`,
   appReadyAt: query<Record<string, string>>`${runtimeAttempt.appReadyAt}`,
-  restoreFailed: query<boolean>`${runtimeAttempt.state} IN ('resuming', 'cleanup-failed') AND ${runtimeAttempt.resumeFailedAt} IS NOT NULL`,
 };
 export type RuntimeControllerOptions = {
   configuration?: SubstrateInstallationConfiguration;
@@ -289,6 +288,7 @@ export function createRuntimeController(
     return saved.handle;
   }
   const reconnects = new Map<string, ReturnType<typeof setTimeout>>();
+  let continuingStops: Promise<void> | undefined;
   function clearReconnect(attemptID: string) {
     const timer = reconnects.get(attemptID);
     if (timer) clearTimeout(timer);
@@ -412,6 +412,33 @@ export function createRuntimeController(
       .catch(reportFailure("App readiness timestamp is unavailable"));
   });
   return {
+    reconcileStops() {
+      if (continuingStops) return continuingStops;
+      const work = (async () => {
+        const stops = await database.db
+          .select({ id: runtimeAttempt.id })
+          .from(runtimeAttempt)
+          .where(
+            and(isNotNull(runtimeAttempt.stopIntendedAt), eq(runtimeAttempt.state, "stopping")),
+          )
+          .orderBy(runtimeAttempt.updatedAt, runtimeAttempt.id)
+          .limit(16);
+        for (const stop of stops) {
+          try {
+            await (await execution(stop.id)).recover();
+          } catch (cause) {
+            reportFailure("Recorded native Stop cleanup is unavailable")(cause);
+          }
+        }
+      })();
+      continuingStops = work;
+      void work
+        .finally(() => {
+          if (continuingStops === work) continuingStops = undefined;
+        })
+        .catch(() => {});
+      return work;
+    },
     async supportsInitialSourceRole(attemptID: string, sql: DatabaseTransaction) {
       const [attempt] = await drizzleTransaction(sql)
         .select({ projectID: runtimeAttempt.projectId })
@@ -638,32 +665,6 @@ export function createRuntimeController(
       if (coding && codingStop && !(await codingStop.confirm(coding.changeID)))
         throw new CommandError("unavailable", "Compute stopped but Coding Stop is not confirmed");
       return this.get(attemptID);
-    },
-    async startFresh(attemptID: string, userID: string) {
-      const [attempt] = await database.db
-        .select({
-          projectID: runtimeAttempt.projectId,
-          changeID: runtimeAttempt.changeId,
-          workspaceID: runtimeAttempt.workspaceId,
-          confirmed: isNotNull(runtimeAttempt.resumeFailedAt),
-        })
-        .from(runtimeAttempt)
-        .where(eq(runtimeAttempt.id, attemptID));
-      if (!attempt?.workspaceID) throw new CommandError("not-found", "Workspace not found");
-      await database.client.begin((sql) =>
-        workspaceWriteAuthorityIn(sql, attempt.workspaceID ?? "", userID),
-      );
-      if (!attempt.confirmed)
-        throw new CommandError("conflict", "Factory has not confirmed that the restore failed");
-      const stopped = await this.stop(attemptID);
-      if (stopped?.state !== "stopped")
-        throw new CommandError(
-          "unavailable",
-          "Original runtime cleanup is not confirmed; nothing new was started",
-        );
-      return attempt.changeID
-        ? this.startPersisted(attempt.changeID, userID)
-        : this.start(attempt.projectID, userID, attempt.workspaceID);
     },
     async get(attemptID: string) {
       const [attempt] = await database.db

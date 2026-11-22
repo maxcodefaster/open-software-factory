@@ -987,7 +987,12 @@ BEGIN
       OLD.isolated_kind,OLD.verification_id,OLD.parent_connector_token_hash,OLD.child_connector_token_hash,
       OLD.create_intended_at,OLD.created_by,OLD.created_at)
     OR (OLD.declared_apps<>'[]'::jsonb AND NEW.declared_apps IS DISTINCT FROM OLD.declared_apps)
-    THEN RAISE EXCEPTION 'Runtime Attempt identity and create intent are immutable'; END IF;
+     THEN RAISE EXCEPTION 'Runtime Attempt identity and create intent are immutable'; END IF;
+  IF (OLD.stop_intended_at IS NOT NULL AND NEW.stop_intended_at IS DISTINCT FROM OLD.stop_intended_at)
+    OR (OLD.stopped_at IS NOT NULL AND NEW.stopped_at IS DISTINCT FROM OLD.stopped_at)
+    OR (NEW.stop_intended_at IS NOT NULL AND NEW.state NOT IN ('stopping','stopped')) THEN
+    RAISE EXCEPTION 'Final Stop intent cannot be cleared or reopen execution';
+  END IF;
   RETURN NEW;
 END $$;
 
@@ -1190,8 +1195,15 @@ BEGIN
         AND b.checkpoint->>'fidelity'='SNAPSHOT_FIDELITY_ROOTFS'
         AND b.checkpoint#>>'{durableSnapshot,state}'='SNAPSHOT_STORAGE_STATE_COMPLETED'
         AND b.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
-        AND b.checkpoint->>'generation'=b.observation#>>'{status,lastAssignedGeneration}')
-      THEN RAISE EXCEPTION 'Source transfer requires the original durable paused ROOTFS'; END IF;
+         AND b.checkpoint->>'generation'=b.observation#>>'{status,lastAssignedGeneration}')
+      AND NOT (NEW.owner='service' AND EXISTS(
+        SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+        WHERE a.workspace_id=NEW.workspace_id AND a.state='stopping' AND a.stop_intended_at IS NOT NULL
+          AND b.actor_uid=NEW.actor_uid AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected
+          AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+            WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)))
+      THEN RAISE EXCEPTION 'Source transfer requires original durable paused ROOTFS or final Stop intent'; END IF;
   ELSIF NEW.writable IS DISTINCT FROM OLD.writable THEN
     IF NOT OLD.writable OR NEW.writable OR NEW.writer_epoch<>OLD.writer_epoch+1 OR NEW.checkpoint_id IS NULL
       THEN RAISE EXCEPTION 'Source freeze must advance the writer epoch'; END IF;
@@ -4014,7 +4026,6 @@ CREATE TABLE "factory"."runtime_attempt" (
 	"verification_id" uuid,
 	"ready_at" timestamp with time zone,
 	"app_ready_at" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"resume_failed_at" timestamp with time zone,
 	CONSTRAINT "runtime_attempt_id_change_id_key" UNIQUE("id","change_id"),
 	CONSTRAINT "runtime_attempt_id_project_id_key" UNIQUE("id","project_id"),
 	CONSTRAINT "runtime_attempt_id_workspace_id_key" UNIQUE("id","workspace_id"),
@@ -5875,5 +5886,5 @@ INSERT INTO factory.installation_maintenance(singleton) VALUES(true);
 INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid());
 
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'6ebf5d76193e6a9476d4339a8d8d2a68df974490e8af60779267afb326262f4f');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'36edafa42325fad826d3cab8e7629234d4184c86d92ff0fe87089159229f7e25');
 COMMIT;

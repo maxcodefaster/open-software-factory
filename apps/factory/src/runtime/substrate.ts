@@ -26,6 +26,7 @@ import {
   changeAgentSession,
   changeAgentTurnIntent,
   changeCommitOperation,
+  changeWriter,
   developmentWorkspace,
   installationMaintenance,
   projectImagePreparation,
@@ -462,12 +463,14 @@ export function createSubstrateExecution(
         actorUID: substrateBinding.actorUid,
         attemptedAt: expression<string | null>`${substrateBinding.createAttemptedAt}::text`,
         createRejected: substrateBinding.createRejected,
+        stopping: expression<boolean>`${runtimeAttempt.stopIntendedAt} IS NOT NULL`,
         deleting: expression<boolean>`${substrateBinding.deleteIntendedAt} IS NOT NULL`,
         deleted: expression<boolean>`${substrateBinding.deletedAt} IS NOT NULL`,
         checkpoint: substrateBinding.checkpoint,
         observation: substrateBinding.observation,
       })
       .from(substrateBinding)
+      .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, substrateBinding.runtimeAttemptId))
       .where(eq(substrateBinding.runtimeAttemptId, attemptID));
     if (!row || !isDeepStrictEqual(row.intent, retainedIntent))
       throw new Error("Native current configuration differs from immutable binding");
@@ -1117,7 +1120,8 @@ export function createSubstrateExecution(
   }
   async function suspendIn(sql: Database["client"]) {
     const saved = await binding(sql);
-    if (saved.deleting || saved.deleted) throw new Error("Native Actor is stopping");
+    if (saved.stopping || saved.deleting || saved.deleted)
+      throw new Error("Native Actor is stopping");
     const before = await observe(sql, saved);
     const [recorded] = await drizzleTransaction(sql)
       .select({ state: runtimeAttempt.state })
@@ -1284,7 +1288,102 @@ export function createSubstrateExecution(
       if (dispatched?.attempted && !dispatched.outcome)
         await observeActorRPCIn(tx, attemptID, dispatched, actor, checkpoint);
     });
-    if (workspaceID && !retainBootstrap) await sources?.paused(workspaceID, sql);
+    if (workspaceID && !retainBootstrap) await sources?.makeIndependent(workspaceID, sql);
+  }
+  async function stopHandoffIn(sql: Database["client"]) {
+    if (!workspaceID) return undefined;
+    // Recover only the already commissioned handoff, never grant a new writer.
+    const [pending] = await drizzleTransaction(sql)
+      .select({
+        turnID: changeWriter.turnId,
+        epoch: expression<string>`${changeWriter.epoch}::text`,
+      })
+      .from(changeWriter)
+      .innerJoin(runtimeAttempt, eq(runtimeAttempt.changeId, changeWriter.changeId))
+      .where(
+        and(
+          eq(runtimeAttempt.id, attemptID),
+          isNotNull(runtimeAttempt.stopIntendedAt),
+          eq(changeWriter.state, "agent-preparing"),
+          eq(changeWriter.fenceAttemptId, attemptID),
+          eq(changeWriter.fenceRequired, true),
+        ),
+      );
+    return pending?.turnID ? { turnID: pending.turnID, epoch: pending.epoch } : undefined;
+  }
+  async function stopIn(sql: Database["client"], handoff?: PendingWriterHandoff) {
+    let saved = await binding(sql);
+    const db = drizzleTransaction(sql);
+    if (!saved.deleted) {
+      handoff ??= await stopHandoffIn(sql);
+      if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
+      // Final Stop is durable before Source export. It can only continue cleanup.
+      await db
+        .update(runtimeAttempt)
+        .set({
+          stopIntendedAt: expression`COALESCE(${runtimeAttempt.stopIntendedAt},now())`,
+          state: "stopping",
+          updatedAt: expression`now()`,
+        })
+        .where(eq(runtimeAttempt.id, attemptID));
+      await shutdownCoding(attemptID);
+      hub.suspend(attemptID);
+      if (workspaceID && config.deployment === "fresh-workspaces") {
+        if (!sources || !saved.actorUID)
+          throw new CommandError(
+            "unavailable",
+            "Workspace Stop requires its confirmed Source owner; the original Actor was retained",
+          );
+        if (!saved.deleting) {
+          await observe(sql, saved);
+          // Keep the original Parent available only for its fenced Source export.
+          // A fresh bootstrap cannot fetch its Environment under final Stop intent.
+          allow(saved.actorUID);
+          await sources.freezeActor(workspaceID, attemptID, sql);
+          await sources.makeIndependent(workspaceID, sql);
+        }
+        await sources.requireIndependent(workspaceID, saved.actorUID, sql);
+      }
+      await db
+        .update(substrateBinding)
+        .set({
+          deleteIntendedAt: expression`COALESCE(${substrateBinding.deleteIntendedAt},now())`,
+        })
+        .where(eq(substrateBinding.runtimeAttemptId, attemptID));
+      hub.revoke(attemptID);
+      saved = await binding(sql);
+      if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
+      await profile();
+      const value = await getActor();
+      if (value) {
+        if (!saved.actorUID)
+          throw new Error("Delete requires previously observed original Actor UID");
+        const actor = await remember(sql, saved, value);
+        await call("DeleteActor", {
+          actor: ref,
+          options: { uid: saved.actorUID, version: actor.metadata.version },
+        });
+        if (await getActor()) throw new Error("Native Delete has not completed");
+      } else if (!saved.actorUID)
+        throw new Error(
+          "Unknown create outcome retained; absent Actor without an original UID is not confirmed deletion",
+        );
+      await db
+        .update(substrateBinding)
+        .set({ deletedAt: expression`now()` })
+        .where(
+          and(eq(substrateBinding.runtimeAttemptId, attemptID), isNull(substrateBinding.deletedAt)),
+        );
+    }
+    // A crash after confirmed Delete must still complete the saved Stop outcome.
+    await db
+      .update(runtimeAttempt)
+      .set({
+        state: "stopped",
+        stoppedAt: expression`COALESCE(${runtimeAttempt.stoppedAt},now())`,
+        updatedAt: expression`now()`,
+      })
+      .where(and(eq(runtimeAttempt.id, attemptID), expression`${runtimeAttempt.state}<>'stopped'`));
   }
   async function completeInputStopIn(sql: Database["client"], stopID: string) {
     const changed = await drizzleTransaction(sql)
@@ -1633,7 +1732,8 @@ export function createSubstrateExecution(
           .where(eq(substrateBinding.runtimeAttemptId, attemptID));
         if (!present) return;
         const saved = await binding(sql);
-        if (saved.deleting || saved.deleted || !saved.attemptedAt) return;
+        if (saved.deleting || saved.stopping) return stopIn(sql);
+        if (saved.deleted || !saved.attemptedAt) return;
         const actor = await observe(sql, saved);
         if (actor.status.state === "ACTOR_STATE_RESUMING") {
           const principal = await sql.begin((tx) =>
@@ -2049,7 +2149,7 @@ export function createSubstrateExecution(
           });
         }
         let saved = await binding(sql);
-        if (saved.deleting || saved.deleted)
+        if (saved.stopping || saved.deleting || saved.deleted)
           throw new Error("Native name is retired; it cannot be recreated");
         await profile();
         if (!saved.attemptedAt) {
@@ -2203,7 +2303,8 @@ export function createSubstrateExecution(
       return locked(async (sql) => {
         await currentGrant(sql, userID, true);
         const saved = await binding(sql);
-        if (saved.deleting || saved.deleted) throw new Error("Native Actor is stopping");
+        if (saved.stopping || saved.deleting || saved.deleted)
+          throw new Error("Native Actor is stopping");
         const before = await observe(sql, saved);
         await requireSettledBootstrap(sql, saved, before.status.lastAssignedGeneration);
         // Public Resume/Suspend have ObjectRef only, no UID/version options.
@@ -2218,77 +2319,7 @@ export function createSubstrateExecution(
       return locked(suspendIn);
     },
     async stop(handoff?: PendingWriterHandoff) {
-      return locked(async (sql) => {
-        let saved = await binding(sql);
-        if (saved.deleted) return;
-        if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
-        await shutdownCoding(attemptID);
-        if (workspaceID && config.deployment === "fresh-workspaces") {
-          if (!sources || !saved.actorUID)
-            throw new CommandError(
-              "unavailable",
-              "Workspace Stop requires its confirmed Source owner; the original Actor was retained",
-            );
-          // Keep the same Workspace lock across checkpoint, handoff and Delete,
-          // so a concurrent Start or command cannot wake the original Actor.
-          if (!saved.deleting) await suspendIn(sql);
-          await sources.requireIndependent(workspaceID, saved.actorUID, sql);
-          saved = await binding(sql);
-        }
-        await drizzleTransaction(sql)
-          .update(runtimeAttempt)
-          .set({
-            stopIntendedAt: expression`COALESCE(${runtimeAttempt.stopIntendedAt},now())`,
-            state: "stopping",
-            updatedAt: expression`now()`,
-          })
-          .where(eq(runtimeAttempt.id, attemptID));
-        await drizzleTransaction(sql)
-          .update(substrateBinding)
-          .set({
-            deleteIntendedAt: expression`COALESCE(${substrateBinding.deleteIntendedAt},now())`,
-          })
-          .where(eq(substrateBinding.runtimeAttemptId, attemptID));
-        hub.revoke(attemptID);
-        saved = await binding(sql);
-        if (workspaceID) await requireStoppedAgentInputsIn(sql, attemptID, handoff);
-        await profile();
-        const value = await getActor();
-        if (value) {
-          if (!saved.actorUID)
-            throw new Error("Delete requires previously observed original Actor UID");
-          const actor = await remember(sql, saved, value);
-          if (
-            workspaceID &&
-            config.deployment === "fresh-workspaces" &&
-            actor.status.state !== "ACTOR_STATE_DELETING"
-          )
-            requireDurableROOTFS(actor, saved);
-          await call("DeleteActor", {
-            actor: ref,
-            options: { uid: saved.actorUID, version: actor.metadata.version },
-          });
-          if (await getActor()) throw new Error("Native Delete has not completed");
-        } else if (!saved.actorUID)
-          throw new Error(
-            "Unknown create outcome retained; absent Actor without an original UID is not confirmed deletion",
-          );
-        await drizzleTransaction(sql)
-          .update(substrateBinding)
-          .set({ deletedAt: expression`now()` })
-          .where(
-            and(
-              eq(substrateBinding.runtimeAttemptId, attemptID),
-              isNull(substrateBinding.deletedAt),
-            ),
-          );
-        // Confirming deletion settles compute, not the recorded execution
-        // failure. Verification/history must retain its original diagnosis.
-        await drizzleTransaction(sql)
-          .update(runtimeAttempt)
-          .set({ state: "stopped", stoppedAt: expression`now()`, updatedAt: expression`now()` })
-          .where(eq(runtimeAttempt.id, attemptID));
-      });
+      return locked((sql) => stopIn(sql, handoff));
     },
     async authorizeConnector(request: Request) {
       if (
@@ -2310,6 +2341,36 @@ export function createSubstrateExecution(
         );
         const db = drizzleTransaction(sql);
         const newer = alias(runtimeAttempt, "newer");
+        if (retainedSourceParent) {
+          const [cleanup] = await db
+            .select({ id: runtimeAttempt.id })
+            .from(runtimeAttempt)
+            .innerJoin(substrateSource, eq(substrateSource.workspaceId, runtimeAttempt.workspaceId))
+            .where(
+              and(
+                eq(runtimeAttempt.id, attemptID),
+                eq(runtimeAttempt.state, "stopping"),
+                isNotNull(runtimeAttempt.stopIntendedAt),
+                eq(substrateSource.actorUid, saved.actorUID),
+                eq(substrateSource.owner, "actor"),
+                notExists(
+                  db
+                    .select({ id: newer.id })
+                    .from(newer)
+                    .where(
+                      and(
+                        eq(newer.workspaceId, runtimeAttempt.workspaceId),
+                        gt(newer.generation, runtimeAttempt.generation),
+                      ),
+                    ),
+                ),
+              ),
+            );
+          if (cleanup) {
+            await requireStoppedAgentInputsIn(sql, attemptID, await stopHandoffIn(sql));
+            return (await observe(sql, saved)).status.state === "ACTOR_STATE_RUNNING";
+          }
+        }
         const [attempt] = await db
           .select({ userID: runtimeAttempt.createdBy })
           .from(runtimeAttempt)

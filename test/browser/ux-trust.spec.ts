@@ -760,9 +760,24 @@ test("Preview retains its document during reconnect without restarting compute",
   expect(creates).toBe(0);
 });
 
-test("startup Stop, reconnect and detached chat preserve the same Build ownership", async ({
-  page,
-}) => {
+for (const { variant, width, touch } of [
+  { variant: "desktop", width: 1440, touch: false },
+  { variant: "narrow-keyboard", width: 390, touch: false },
+  { variant: "touch", width: 390, touch: true },
+]) {
+  test.describe(`retained implementation Stop on ${variant}`, () => {
+    test.use({ viewport: { width, height: 900 }, hasTouch: touch, isMobile: touch });
+    test("startup Stop, reconnect and detached chat preserve the same Build ownership", async ({
+      page,
+    }) => {
+      await startupStopJourney(page, variant, touch);
+    });
+  });
+}
+
+async function startupStopJourney(page: Page, variant: string, touch: boolean) {
+  const captures = `${evidenceDirectory}/detached-stop/${variant}`;
+  await mkdir(captures, { recursive: true });
   const ticketID = await insertChangedTicket("Startup Stop and reconnect", "active");
   await insertConversation(projectID, ticketID, "build");
   if (!database) throw new Error("Database is not ready");
@@ -838,12 +853,34 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
     },
   });
   await openConversation(page);
+  const panel = page.locator(".agent-panel");
+  const toggle = page.getByRole("button", { name: "Toggle Agent panel", exact: true });
+  const showPanel = async () => {
+    if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+    await expect(panel).toHaveAttribute("aria-hidden", "false");
+  };
+  const dismissOverlay = async () => {
+    if (variant !== "desktop" && (await panel.isVisible())) {
+      await panel.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
+      await expect(panel).toBeHidden();
+    }
+  };
+  const returnToBuild = async () => {
+    await dismissOverlay();
+    await page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }).click();
+    await showPanel();
+  };
+  const openWiki = async () => {
+    await page.getByRole("button", { name: "Wiki", exact: true }).click();
+    await showPanel();
+  };
+  await dismissOverlay();
   await page
     .getByRole("region", { name: "implementation" })
     .getByRole("button")
     .filter({ hasText: "Startup Stop and reconnect" })
     .click();
-  const panel = page.locator(".agent-panel");
+  await showPanel();
   const start = panel.getByRole("button", { name: "Start implementation", exact: true });
   await expect(page.getByLabel("Ticket title", { exact: true })).toHaveText(
     "Startup Stop and reconnect",
@@ -854,12 +891,13 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   // admission requirement and must not be used to manufacture Build context.
   await expect(start).toBeEnabled();
   await expect(panel.getByLabel("Message conversation")).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Stop OpenCode" })).toHaveCount(0);
   await expect(start).toHaveAttribute(
     "title",
     "Stopped before Build started. Start implementation when ready.",
   );
   await page.screenshot({
-    path: `${evidenceDirectory}/build-stopped-before-session.png`,
+    path: `${captures}/build-stopped-before-session.png`,
     fullPage: true,
   });
   await start.click();
@@ -870,16 +908,44 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
     "Waiting for the same Build. Work is not restarted.",
   );
   await panel.getByLabel("Message conversation").fill("Retain next instructions");
-  await page.screenshot({ path: `${evidenceDirectory}/build-reconnecting.png`, fullPage: true });
+  await page.screenshot({ path: `${captures}/build-reconnecting.png`, fullPage: true });
   runtimeConnected = true;
   await expect(panel.locator(".agent-state")).toHaveText("Working");
   await expect(panel.getByLabel("Message conversation")).toHaveValue("Retain next instructions");
   expect(mutations).toEqual(["startCoding"]);
   expect(computeCreates).toEqual([]);
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
-  await page.getByRole("button", { name: "Wiki", exact: true }).click();
+  await openWiki();
   await expect(panel.locator(".agent-message.assistant")).toHaveCount(0);
-  await expect(panel.getByRole("button", { name: "Stop OpenCode" })).toBeVisible();
+  const stop = panel.getByRole("button", { name: "Stop OpenCode", exact: true });
+  await expect(stop).toBeVisible();
+  const retained = panel.getByRole("group", {
+    name: "Retained Ticket implementation",
+    exact: true,
+  });
+  await expect(retained).toContainText("Startup Stop and reconnect");
+  await expect(retained).toContainText("Working");
+  await expect(retained.getByRole("button", { name: "Stop OpenCode" })).toBeEnabled();
+  await expect(
+    panel.locator(".conversation-composer").getByRole("button", { name: "Stop OpenCode" }),
+  ).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
+  if (touch)
+    expect(
+      await stop.evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
+  else {
+    await stop.focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await expect(stop).toBeFocused();
+    expect(await stop.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+    await expect(stop).toHaveCSS("outline-width", "2px");
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+    await page.evaluate(() => innerWidth),
+  );
+  await page.screenshot({ path: `${captures}/wiki-retained-stop.png`, fullPage: true });
   await expect(
     page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }),
   ).toHaveCount(1);
@@ -888,19 +954,27 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   await expect.poll(() => projectMessages.length).toBe(1);
   expect(projectMessages[0]).not.toHaveProperty("ticketId");
   expect(mutations).toEqual(["startCoding"]);
-  await page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }).click();
+  await returnToBuild();
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
   await expect(panel.locator(".agent-state")).toHaveText("Working");
   await expect(panel.getByLabel("Message conversation")).toHaveValue("Retain next instructions");
-  await page.getByRole("button", { name: "Wiki", exact: true }).click();
-  await panel.getByRole("button", { name: "Stop OpenCode" }).click();
+  await openWiki();
+  if (touch) await stop.tap();
+  else {
+    await stop.focus();
+    await page.keyboard.press("Enter");
+  }
   await expect.poll(() => mutations).toEqual(["startCoding", "stopCoding"]);
-  await page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }).click();
+  await expect(stop).toHaveCount(0);
+  await expect(retained).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
+  await page.screenshot({ path: `${captures}/wiki-after-stop.png`, fullPage: true });
+  await returnToBuild();
   await expect(panel.locator(".agent-state")).toHaveText("Stopped");
   expect(computeCreates).toEqual([]);
   await expect(page.locator('iframe[title="Factory IDE"]')).toHaveCount(0);
   expect(pageErrors).toEqual([]);
-});
+}
 
 test.setTimeout(60_000);
 
@@ -3125,7 +3199,6 @@ test("keeps Board materials and text readable on every artwork at desktop and ph
     "setConversationMode",
     "startPersonalWorkspace",
     "startTicketWorkspace",
-    "startFreshRuntimeAttempt",
     "generateKnowledge",
   ]);
   await insertChangedTicket("Failed implementation", "failed");

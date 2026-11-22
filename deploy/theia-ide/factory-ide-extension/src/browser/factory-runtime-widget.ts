@@ -109,15 +109,7 @@ export class FactoryRuntimeWidget extends BaseWidget {
       this.#processList.replaceChildren();
       this.#main.replaceChildren(this.#output);
       this.#output.textContent = runtimePreparationCopy(state);
-      if (state?.restoreFailed) {
-        const fresh = controlButton("Start fresh", () => void factoryRuntimeContext.startFresh());
-        fresh.className = "factory-runtime-primary";
-        fresh.disabled = !factoryWriteContext.allows(state.workspaceID);
-        const controls = document.createElement("div");
-        controls.className = "factory-compute-status";
-        controls.append(fresh);
-        this.#main.prepend(controls);
-      } else if (!this.#runtime && state && ["failed", "stopped", "paused"].includes(state.state)) {
+      if (!this.#runtime && state && ["failed", "stopped", "paused"].includes(state.state)) {
         const label =
           state.state === "failed"
             ? "Retry compute"

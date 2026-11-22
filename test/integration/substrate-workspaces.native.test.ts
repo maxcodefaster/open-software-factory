@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { createServer } from "node:tls";
 import { z } from "zod";
@@ -33,6 +33,9 @@ import { substrateTestTransport } from "../fixtures/substrate-transport";
 
 const liveSchema = z.object({
   owner: z.string().regex(/^subadapter-[a-f0-9]+$/),
+  kubeconfig: z.string(),
+  context: z.string(),
+  cli: z.string(),
   directory: z.string(),
   bridge: z.string(),
   endpoint: z.string(),
@@ -45,6 +48,9 @@ const liveSchema = z.object({
   factoryPort: z.literal(443),
   certFile: z.string(),
   keyFile: z.string(),
+  directIngress: z.boolean().default(false),
+  ingressListenPort: z.number().int().min(1).max(65535).default(443),
+  qualification: z.enum(["lifecycle", "lifecycle-and-git"]).default("lifecycle-and-git"),
   runtime: nativeRuntime,
 });
 
@@ -52,28 +58,84 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
   const file = process.env["FACTORY_SUBSTRATE_WORKSPACES_NATIVE_FIXTURE"];
   if (!file) throw new Error("Explicit owned FACTORY_SUBSTRATE_WORKSPACES_NATIVE_FIXTURE required");
   const live = liveSchema.parse(await Bun.file(file).json());
+  if (process.platform !== "linux" || process.getuid?.() !== 1000 || process.getgid?.() !== 1000)
+    throw new Error("Independent Source qualification requires Linux UID/GID 1000");
+  if (live.context !== `kind-${live.owner}`)
+    throw new Error("Native Workspace fixture context ownership mismatch");
   const owner = await ownedPostgresServer();
   const target = await ownedTestDatabase(owner.identity, crypto.randomUUID());
   const previous = { ...process.env };
   const objectStore = await ownedAttachmentS3();
   const projectID = crypto.randomUUID();
+  const rpcLog = `${live.directory}/native-rpcs-${projectID}.jsonl`;
+  const recordedBridge = `${live.directory}/recorded-bridge-${projectID}`;
+  const sourceFailureFile = `${live.directory}/source-failure-${projectID}`;
+  const deleteFaultFile = `${live.directory}/delete-fault-${projectID}.json`;
+  const deleteHeldFile = `${live.directory}/delete-held-${projectID}`;
+  const deleteReleaseFile = `${live.directory}/delete-release-${projectID}`;
+  await writeFile(
+    recordedBridge,
+    `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+const input = await Bun.stdin.text();
+const request = JSON.parse(input);
+const name = request.request?.actor?.name ?? request.request?.actor?.metadata?.name;
+appendFileSync(${JSON.stringify(rpcLog)}, JSON.stringify({ at: Date.now(), method: request.method, name, uid: request.request?.options?.uid, version: request.request?.options?.version, phase: "dispatch" }) + "\\n", { mode: 0o600 });
+const child = Bun.spawn([${JSON.stringify(live.bridge)}], {
+  stdin: new Blob([input]), stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH },
+});
+const [out, err, exit] = await Promise.all([
+  new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+]);
+let result;
+try { result = JSON.parse(out); } catch {}
+const actor = result?.actor ?? result;
+appendFileSync(${JSON.stringify(rpcLog)}, JSON.stringify({
+  at: Date.now(), method: request.method,
+  name: request.request?.actor?.name ?? request.request?.actor?.metadata?.name,
+  uid: actor?.metadata?.uid, state: actor?.status?.state,
+  error: result?.error?.code, exit, phase: "complete",
+}) + "\\n", { mode: 0o600 });
+const fault = Bun.file(${JSON.stringify(deleteFaultFile)});
+if (request.method === "DeleteActor" && exit === 0 && !result?.error && await fault.exists()) {
+  const expected = await fault.json();
+  if (name === expected.name) {
+    await Bun.write(${JSON.stringify(deleteHeldFile)}, name);
+    while (!(await Bun.file(${JSON.stringify(deleteReleaseFile)}).exists())) await Bun.sleep(20);
+    appendFileSync(${JSON.stringify(rpcLog)}, JSON.stringify({ at: Date.now(), method: request.method, name, phase: "lost-reply" }) + "\\n", { mode: 0o600 });
+    process.stdout.write(JSON.stringify({ error: { code: "Unavailable", message: "Owned lost Delete reply" } }));
+    process.exit(0);
+  }
+}
+if (err) process.stderr.write(err);
+process.stdout.write(out);
+process.exit(exit);
+`,
+    { mode: 0o700 },
+  );
+  const suspendCount = async () =>
+    (await readFile(rpcLog, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { method: string; phase: string })
+      .filter((call) => call.method === "SuspendActor" && call.phase === "dispatch").length;
   const reserve = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const port = reserve.port;
   if (!port) throw new Error("Owned Factory listener address missing");
   await reserve.stop(true);
   const base = `http://127.0.0.1:${port}`;
   const configuration: SubstrateInstallationConfiguration = {
-    deployment: "owned-test",
+    deployment: "fresh-workspaces",
     database: new URL(target.url).pathname.slice(1),
     connection: {
-      bridge: live.bridge,
+      bridge: recordedBridge,
       endpoint: live.endpoint,
       serverName: "api.ate-system.svc",
       caFile: live.caFile,
       tokenFile: live.tokenFile,
     },
     provisioner: {
-      bridge: live.bridge,
+      bridge: recordedBridge,
       endpoint: live.endpoint,
       serverName: "api.ate-system.svc",
       caFile: live.caFile,
@@ -83,6 +145,7 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
     connectorURL: `wss://${live.factoryHostname}/internal/runtime-connect`,
     factoryCAFile: live.certFile,
     workloadImage: live.workloadImage,
+    resources: { cpuMilli: 2000, memoryMiB: 2048 },
     profile: "nightly-20261109-975fb172241c",
     runtime: live.runtime,
     workerSelector: {
@@ -100,6 +163,8 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
   await writeFile(configFile, JSON.stringify(configuration), { mode: 0o600 });
   Object.assign(process.env, ownedRuntimeConfiguration, {
     DATABASE_URL: target.url,
+    KUBECONFIG: live.kubeconfig,
+    FACTORY_KUBERNETES_CONTEXT: live.context,
     FACTORY_HOST: "127.0.0.1",
     FACTORY_PORT: String(port),
     FACTORY_BASE_URL: base,
@@ -120,11 +185,15 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
   const database = createDatabase();
   let application: Awaited<ReturnType<typeof createFactoryApplication>> | undefined;
   let closeBackground: (() => Promise<void>) | undefined;
+  let allowBackground = true;
+  let startsObserved = 0;
   let servers: ReturnType<typeof startFactoryTransport> = [];
   let closeRelay: (() => Promise<void>) | undefined;
   let attemptID: string | undefined;
   const extraAttemptIDs: string[] = [];
+  const pending: Promise<unknown>[] = [];
   const connections: Array<{ role: string; at: number }> = [];
+  let failure: unknown;
   // Owned ingress only: TLS is terminated exactly as a normal Ingress would do.
   // The Unix relay carries opaque TLS; no firewall, trust or egress bypass.
   const ingress = createServer(
@@ -139,13 +208,17 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
       backend.on("close", () => socket.destroy());
     },
   );
-  await new Promise<void>((resolve, reject) => {
-    ingress.once("error", reject);
-    ingress.listen(0, "127.0.0.1", resolve);
-  });
-  const address = ingress.address();
-  if (!address || typeof address === "string") throw new Error("Owned ingress address missing");
   try {
+    await new Promise<void>((resolve, reject) => {
+      ingress.once("error", reject);
+      ingress.listen(
+        live.directIngress ? live.ingressListenPort : 0,
+        live.directIngress ? "0.0.0.0" : "127.0.0.1",
+        resolve,
+      );
+    });
+    const address = ingress.address();
+    if (!address || typeof address === "string") throw new Error("Owned ingress address missing");
     const sourceBinary = `${live.directory}/source-service-${projectID}`;
     const sourceBuild = Bun.spawn(
       [
@@ -165,11 +238,26 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
       },
     );
     if (await sourceBuild.exited) throw new Error("Actual Source service binary build failed");
-    process.env["FACTORY_SOURCE_SERVICE_BINARY"] = sourceBinary;
+    const sourceWrapper = `${sourceBinary}-owned-process`;
+    await writeFile(
+      sourceWrapper,
+      `#!${process.execPath}
+if (process.argv[2] === "source-host" && await Bun.file(${JSON.stringify(sourceFailureFile)}).exists()) {
+  process.stderr.write("Owned Source service launch failure\\n");
+  process.exit(1);
+}
+const child = Bun.spawn([${JSON.stringify(sourceBinary)}, ...process.argv.slice(2)], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+process.on("SIGTERM", () => child.kill("SIGTERM"));
+process.exitCode = await child.exited;
+`,
+      { mode: 0o700 },
+    );
+    process.env["FACTORY_SOURCE_SERVICE_BINARY"] = sourceWrapper;
     application = await createFactoryApplication();
     const app = application;
     const start = app.runtimeController.start.bind(app.runtimeController);
     app.runtimeController.start = async (projectID, userID) => {
+      startsObserved++;
       try {
         return await start(projectID, userID);
       } catch (error) {
@@ -186,11 +274,12 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
       open(socket);
     };
     servers = startFactoryTransport(app);
-    closeBackground = startFactoryLifecycle(app);
-    closeRelay = await substrateTestTransport(
-      `${live.directory}/relay/connection.sock`,
-      address.port,
-    );
+    closeBackground = startFactoryLifecycle(app, async () => allowBackground);
+    if (!live.directIngress)
+      closeRelay = await substrateTestTransport(
+        `${live.directory}/relay/connection.sock`,
+        address.port,
+      );
     const developer = await app.factoryAuth.createManagedUser({
       name: "Native Developer",
       email: "native-developer@factory.local",
@@ -770,100 +859,483 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
       await database.client`SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspaceID}`,
     ).toHaveLength(1);
     expect(await database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(2);
-    // Native Parent regression, not a Ticket/approval/Delivery substitute. The
-    // real HTTPS CGI remote shares only this owned ingress's exact pinned origin.
-    const remoteRoot = `${live.directory}/native-git-${projectID}`;
-    await Bun.$`mkdir -p ${remoteRoot}`.quiet();
-    await Bun.$`git clone --bare --no-hardlinks ${repository} ${remoteRoot}/remote.git`.quiet();
-    await Bun.$`git -C ${remoteRoot}/remote.git config http.receivepack true`.quiet();
-    const remote = nativeGitHTTP(remoteRoot);
-    const staticAssets = app.staticAssets;
-    app.staticAssets = async (request) => (await remote.fetch(request)) ?? staticAssets(request);
-    const commit = await app.runtimeHub.parentOperation(started.id, {
-      operationId: crypto.randomUUID(),
-      action: "git-prepare-commit",
-      expectedSha: revision,
-      commitMessage: "Owned native Git checkpoint",
-      authorName: "Factory",
-      authorEmail: "owned@example.invalid",
-    });
-    const committed = z
-      .string()
-      .regex(/^[a-f0-9]{40}$/)
-      .parse(commit.commitSHA);
-    await writeFile(`${repository}/native-upstream.txt`, "owned native upstream\n");
-    await Bun.$`git -C ${repository} add native-upstream.txt`.quiet();
-    await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m upstream`.quiet();
-    const upstream = (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
-    await Bun.$`git -C ${repository} push ${remoteRoot}/remote.git main:upstream`.quiet();
-    await Bun.$`git -C ${remoteRoot}/remote.git update-ref refs/heads/ticket ${revision}`.quiet();
-    const integration = {
-      operationId: crypto.randomUUID(),
-      action: "git-prepare-integration",
-      expectedSha: committed,
-      mergeParentSha: upstream,
-      repositoryUrl: `https://${live.factoryHostname}${remote.prefix}/remote.git`,
-      username: remote.username,
-      password: remote.password,
-      branch: "ticket",
-      commitMessage: "Owned native integration",
-      authorName: "Factory",
-      authorEmail: "owned@example.invalid",
-    };
-    await expect(
-      app.runtimeHub.parentOperation(started.id, {
+    if (live.qualification === "lifecycle-and-git") {
+      // Native Parent regression, not a Ticket/approval/Delivery substitute. The
+      // real HTTPS CGI remote shares only this owned ingress's exact pinned origin.
+      const remoteRoot = `${live.directory}/native-git-${projectID}`;
+      await Bun.$`mkdir -p ${remoteRoot}`.quiet();
+      await Bun.$`git clone --bare --no-hardlinks ${repository} ${remoteRoot}/remote.git`.quiet();
+      await Bun.$`git -C ${remoteRoot}/remote.git config http.receivepack true`.quiet();
+      const remote = nativeGitHTTP(remoteRoot);
+      const staticAssets = app.staticAssets;
+      app.staticAssets = async (request) => (await remote.fetch(request)) ?? staticAssets(request);
+      const commit = await app.runtimeHub.parentOperation(started.id, {
+        operationId: crypto.randomUUID(),
+        action: "git-prepare-commit",
+        expectedSha: revision,
+        commitMessage: "Owned native Git checkpoint",
+        authorName: "Factory",
+        authorEmail: "owned@example.invalid",
+      });
+      const committed = z
+        .string()
+        .regex(/^[a-f0-9]{40}$/)
+        .parse(commit.commitSHA);
+      await writeFile(`${repository}/native-upstream.txt`, "owned native upstream\n");
+      await Bun.$`git -C ${repository} add native-upstream.txt`.quiet();
+      await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m upstream`.quiet();
+      const upstream = (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
+      await Bun.$`git -C ${repository} push ${remoteRoot}/remote.git main:upstream`.quiet();
+      await Bun.$`git -C ${remoteRoot}/remote.git update-ref refs/heads/ticket ${revision}`.quiet();
+      const integration = {
+        operationId: crypto.randomUUID(),
+        action: "git-prepare-integration",
+        expectedSha: committed,
+        mergeParentSha: upstream,
+        repositoryUrl: `https://${live.factoryHostname}${remote.prefix}/remote.git`,
+        username: remote.username,
+        password: remote.password,
+        branch: "ticket",
+        commitMessage: "Owned native integration",
+        authorName: "Factory",
+        authorEmail: "owned@example.invalid",
+      };
+      // Bun's pending .rejects matcher re-enters WebSocket callbacks. Await
+      // the real operation first, then assert its unchanged denial.
+      const refusedIntegration = await app.runtimeHub
+        .parentOperation(started.id, {
+          ...integration,
+          operationId: crypto.randomUUID(),
+          repositoryUrl: `https://${live.factoryHostname}${remote.prefix}/redirect.git`,
+        })
+        .catch((error: unknown) => error);
+      expect(refusedIntegration).toBeInstanceOf(Error);
+      expect((refusedIntegration as Error).message).toContain(
+        "integration source could not be fetched",
+      );
+      expect(remote.observations.redirects).toBeGreaterThan(0);
+      expect(remote.observations.authenticated).toBe(0);
+      const integrated = await app.runtimeHub.parentOperation(started.id, integration);
+      const integratedSHA = z
+        .string()
+        .regex(/^[a-f0-9]{40}$/)
+        .parse(integrated.commitSHA);
+      const observed = await app.runtimeHub.parentOperation(started.id, {
+        ...integration,
+        action: "git-observe-commit",
+      });
+      expect(observed.commitSHA).toBe(integratedSHA);
+      const push = {
         ...integration,
         operationId: crypto.randomUUID(),
-        repositoryUrl: `https://${live.factoryHostname}${remote.prefix}/redirect.git`,
-      }),
-    ).rejects.toThrow("integration source could not be fetched");
-    expect(remote.observations.redirects).toBeGreaterThan(0);
-    expect(remote.observations.authenticated).toBe(0);
-    const integrated = await app.runtimeHub.parentOperation(started.id, integration);
-    const integratedSHA = z
-      .string()
-      .regex(/^[a-f0-9]{40}$/)
-      .parse(integrated.commitSHA);
-    const observed = await app.runtimeHub.parentOperation(started.id, {
-      ...integration,
-      action: "git-observe-commit",
-    });
-    expect(observed.commitSHA).toBe(integratedSHA);
-    const push = {
-      ...integration,
-      operationId: crypto.randomUUID(),
-      action: "git-push",
-      expectedSha: revision,
-      commitSha: integratedSHA,
-    };
-    const authenticatedBeforeRedirect = remote.observations.authenticated;
-    const redirectsBeforePush = remote.observations.redirects;
-    await expect(
-      app.runtimeHub.parentOperation(started.id, {
-        ...push,
-        operationId: crypto.randomUUID(),
-        repositoryUrl: `https://${live.factoryHostname}${remote.prefix}/redirect.git`,
-      }),
-    ).rejects.toThrow("remote branch could not be observed");
-    expect(remote.observations.redirects).toBeGreaterThan(redirectsBeforePush);
-    expect(remote.observations.authenticated).toBe(authenticatedBeforeRedirect);
-    expect(remote.observations.pushes).toBe(0);
-    expect((await app.runtimeHub.parentOperation(started.id, push)).remoteSHA).toBe(integratedSHA);
-    const pushed = remote.observations.pushes;
-    expect(pushed).toBe(1);
-    expect((await app.runtimeHub.parentOperation(started.id, push)).remoteSHA).toBe(integratedSHA);
-    expect(remote.observations.pushes).toBe(pushed);
-    expect(remote.observations.authenticated).toBeGreaterThan(0);
-    const gitPause = await app.runtimeController.pause(started.id);
-    expect(gitPause?.native?.sourceHandoff).toBe("confirmed-same-node");
-    const archivedUpstream = await source("read", { path: "native-upstream.txt" });
-    expect(archivedUpstream.status).toBe(200);
-    expect(Buffer.from((await archivedUpstream.json()).content, "base64").toString()).toBe(
-      "owned native upstream\n",
-    );
+        action: "git-push",
+        expectedSha: revision,
+        commitSha: integratedSHA,
+      };
+      const authenticatedBeforeRedirect = remote.observations.authenticated;
+      const redirectsBeforePush = remote.observations.redirects;
+      const refusedPush = await app.runtimeHub
+        .parentOperation(started.id, {
+          ...push,
+          operationId: crypto.randomUUID(),
+          repositoryUrl: `https://${live.factoryHostname}${remote.prefix}/redirect.git`,
+        })
+        .catch((error: unknown) => error);
+      expect(refusedPush).toBeInstanceOf(Error);
+      expect((refusedPush as Error).message).toContain("remote branch could not be observed");
+      expect(remote.observations.redirects).toBeGreaterThan(redirectsBeforePush);
+      expect(remote.observations.authenticated).toBe(authenticatedBeforeRedirect);
+      expect(remote.observations.pushes).toBe(0);
+      expect((await app.runtimeHub.parentOperation(started.id, push)).remoteSHA).toBe(
+        integratedSHA,
+      );
+      const pushed = remote.observations.pushes;
+      expect(pushed).toBe(1);
+      expect((await app.runtimeHub.parentOperation(started.id, push)).remoteSHA).toBe(
+        integratedSHA,
+      );
+      expect(remote.observations.pushes).toBe(pushed);
+      expect(remote.observations.authenticated).toBeGreaterThan(0);
+      const gitPause = await app.runtimeController.pause(started.id);
+      expect(gitPause?.native?.sourceHandoff).toBe("confirmed-same-node");
+      const archivedUpstream = await source("read", { path: "native-upstream.txt" });
+      expect(archivedUpstream.status).toBe(200);
+      expect(Buffer.from((await archivedUpstream.json()).content, "base64").toString()).toBe(
+        "owned native upstream\n",
+      );
+    }
+    const [beforeFinalStop] =
+      await database.client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${started.id}`;
+    const suspendsBeforeStop = await suspendCount();
     await serverCall(callFactoryFunction(base, "stopRuntimeAttempt", [started.id], { cookie }));
+    expect(await suspendCount()).toBe(suspendsBeforeStop);
     expect((await app.runtimeController.get(started.id))?.state).toBe("stopped");
+    await expect(editor("GetActor", { actor: ref })).rejects.toMatchObject({ code: "NotFound" });
+    const [retired] = await database.client`
+      SELECT a.stop_intended_at,b.actor_uid,b.deleted_at,b.checkpoint
+      FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+      WHERE a.id=${started.id}`;
+    expect(retired?.["stop_intended_at"]).not.toBeNull();
+    expect(retired?.["actor_uid"]).toBe(originalUID);
+    expect(retired?.["deleted_at"]).not.toBeNull();
+    expect(retired?.["checkpoint"]).toEqual(beforeFinalStop?.["checkpoint"]);
+    const stoppedFile = await (await source("read", { path: "owned-editor.txt" })).json();
+    expect(
+      (
+        await source("write", {
+          path: "owned-editor.txt",
+          content: Buffer.from("saved-after-final-stop").toString("base64"),
+          version: stoppedFile.version,
+        })
+      ).status,
+    ).toBe(200);
+    const successorID = runtimeIdentity(workspaceID, 2).attemptID;
+    extraAttemptIDs.push(successorID);
+    const successor = await serverCall(
+      callFactoryFunction(
+        base,
+        "startPersonalWorkspace",
+        [projectID],
+        { cookie },
+        AbortSignal.timeout(300_000),
+      ),
+    );
+    expect(successor.id).toBe(successorID);
+    expect(successor.native?.actorUID).not.toBe(originalUID);
+    await eventually(
+      () => app.runtimeController.get(successorID),
+      (value) =>
+        value?.state === "ready" &&
+        app.runtimeHub.ready(successorID) &&
+        app.runtimeHub.sourceConnected(successorID),
+      "Successor Actor did not consume independent Source",
+      180_000,
+    );
+    const successorTerminal = await ownedRuntimeTerminal(
+      base,
+      cookie,
+      successorID,
+      "native-successor",
+    );
+    try {
+      expect(
+        await successorTerminal.evaluate(
+          "const fs=require('fs');const s=fs.statSync('owned-editor.txt');return {content:fs.readFileSync('owned-editor.txt','utf8'),uid:s.uid,gid:s.gid,privateFile:fs.readFileSync('owned-private.txt','utf8'),rootfs:fs.existsSync('/tmp/owned-private-rootfs-state'),volume:fs.existsSync('/home/node/owned-private-volume-state'),hooks:fs.readFileSync('/home/node/owned-create-effects','utf8')}",
+        ),
+      ).toEqual({
+        content: "saved-after-final-stop",
+        uid: 1000,
+        gid: 1000,
+        privateFile: privateSource,
+        rootfs: false,
+        volume: false,
+        hooks: "once\n",
+      });
+    } finally {
+      successorTerminal.close();
+      await app.runtimeController.closeTerminal(successorID, "native-successor");
+    }
+    const [freshBinding] =
+      await database.client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${successorID}`;
+    expect(freshBinding?.["checkpoint"]).toBeNull();
+    const suspendsBeforeSuccessorStop = await suspendCount();
+    await serverCall(callFactoryFunction(base, "stopRuntimeAttempt", [successorID], { cookie }));
+    expect(await suspendCount()).toBe(suspendsBeforeSuccessorStop);
+    expect((await app.runtimeController.get(successorID))?.state).toBe("stopped");
+    const [finalBinding] =
+      await database.client`SELECT checkpoint,deleted_at FROM factory.substrate_binding WHERE runtime_attempt_id=${successorID}`;
+    expect(finalBinding?.["checkpoint"]).toBeNull();
+    expect(finalBinding?.["deleted_at"]).not.toBeNull();
+    // Hold only owned processes and replies. Native metadata and Factory
+    // approval/lifecycle records continue through their normal commands.
+    allowBackground = false;
+    const interruptedID = runtimeIdentity(workspaceID, 3).attemptID;
+    extraAttemptIDs.push(interruptedID);
+    const interrupted = await serverCall(
+      callFactoryFunction(
+        base,
+        "startPersonalWorkspace",
+        [projectID],
+        { cookie },
+        AbortSignal.timeout(300_000),
+      ),
+    );
+    expect(interrupted.id).toBe(interruptedID);
+    await eventually(
+      () => app.runtimeController.get(interruptedID),
+      (value) =>
+        value?.state === "ready" &&
+        app.runtimeHub.ready(interruptedID) &&
+        app.runtimeHub.sourceConnected(interruptedID),
+      "Failure-probe Actor did not become ready",
+      180_000,
+    );
+    const interruptedRef = {
+      atespace: `fa-${interruptedID.replaceAll("-", "")}`,
+      name: `runtime-${interruptedID.replaceAll("-", "")}`,
+    };
+    const interruptedActor = nativeActor.parse(await editor("GetActor", { actor: interruptedRef }));
+    const sourceBeforeFailure = await (await source("read", { path: "owned-editor.txt" })).json();
+    expect(Buffer.from(sourceBeforeFailure.content, "base64").toString()).toBe(
+      "saved-after-final-stop",
+    );
+    await writeFile(sourceFailureFile, "owned launch failure", { mode: 0o600 });
+    const suspendBeforeFailure = await suspendCount();
+    await expect(
+      serverCall(
+        callFactoryFunction(
+          base,
+          "stopRuntimeAttempt",
+          [interruptedID],
+          { cookie },
+          AbortSignal.timeout(60_000),
+        ),
+      ),
+    ).rejects.toThrow("Independent Source process exited");
+    const [blockedStop] = await database.client`
+      SELECT a.state,a.stop_intended_at,b.delete_intended_at,b.deleted_at,b.checkpoint
+      FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+      WHERE a.id=${interruptedID}`;
+    expect(blockedStop?.["state"]).toBe("stopping");
+    expect(blockedStop?.["stop_intended_at"]).not.toBeNull();
+    expect(blockedStop?.["delete_intended_at"]).toBeNull();
+    expect(blockedStop?.["deleted_at"]).toBeNull();
+    expect(blockedStop?.["checkpoint"]).toBeNull();
+    expect(
+      nativeActor.parse(await editor("GetActor", { actor: interruptedRef })).metadata.uid,
+    ).toBe(interruptedActor.metadata.uid);
+    expect(await suspendCount()).toBe(suspendBeforeFailure);
+    await expect(
+      serverCall(
+        callFactoryFunction(
+          base,
+          "startPersonalWorkspace",
+          [projectID],
+          { cookie },
+          AbortSignal.timeout(30_000),
+        ),
+      ),
+    ).rejects.toThrow();
+    await rm(sourceFailureFile);
+    await writeFile(deleteFaultFile, JSON.stringify({ name: interruptedRef.name }), {
+      mode: 0o600,
+    });
+    const stopping = serverCall(
+      callFactoryFunction(
+        base,
+        "stopRuntimeAttempt",
+        [interruptedID],
+        { cookie },
+        AbortSignal.timeout(120_000),
+      ),
+    ).then(
+      () => "unexpected success",
+      (error) => String(error),
+    );
+    pending.push(stopping);
+    await eventually(
+      () => Bun.file(deleteHeldFile).exists(),
+      (value) => value,
+      "Original UID-bound Delete did not reach the owned lost-reply probe",
+      60_000,
+    );
+    const beforeRacingStart = startsObserved;
+    const racingStart = serverCall(
+      callFactoryFunction(
+        base,
+        "startPersonalWorkspace",
+        [projectID],
+        { cookie },
+        AbortSignal.timeout(60_000),
+      ),
+    ).then(
+      () => "unexpected restart",
+      (error) => String(error),
+    );
+    pending.push(racingStart);
+    await eventually(
+      async () => startsObserved,
+      (value) => value > beforeRacingStart,
+      "Authenticated concurrent Start did not enter the lifecycle owner",
+      10_000,
+    );
+    await writeFile(deleteReleaseFile, "release owned response", { mode: 0o600 });
+    expect(await stopping).not.toBe("unexpected success");
+    expect(await racingStart).not.toBe("unexpected restart");
+    expect(
+      await readFile(`${live.directory}/native-start-failure-${projectID}.log`, "utf8"),
+    ).toContain("retired");
+    const [lostStop] = await database.client`
+      SELECT a.state,b.deleted_at FROM factory.runtime_attempt a
+      JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${interruptedID}`;
+    expect(lostStop?.["state"]).toBe("stopping");
+    expect(lostStop?.["deleted_at"]).toBeNull();
+    await expect(editor("GetActor", { actor: interruptedRef })).rejects.toMatchObject({
+      code: "NotFound",
+    });
+    const recovered = await app.runtimeController.recover();
+    recovered();
+    await eventually(
+      async () => {
+        const [row] =
+          await database.client`SELECT state FROM factory.runtime_attempt WHERE id=${interruptedID}`;
+        return row?.["state"];
+      },
+      (value) => value === "stopped",
+      "Startup recovery did not complete the original lost Delete",
+      30_000,
+    );
+    expect((await app.runtimeController.get(interruptedID))?.native?.state).toBe("deleted");
+    const [recoveredStop] = await database.client`
+      SELECT a.stop_intended_at,b.actor_uid,b.delete_intended_at,b.deleted_at,b.checkpoint
+      FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+      WHERE a.id=${interruptedID}`;
+    expect(recoveredStop?.["stop_intended_at"]).toEqual(blockedStop?.["stop_intended_at"]);
+    expect(recoveredStop?.["actor_uid"]).toBe(interruptedActor.metadata.uid);
+    expect(recoveredStop?.["deleted_at"]).not.toBeNull();
+    expect(recoveredStop?.["checkpoint"]).toBeNull();
+    expect(await suspendCount()).toBe(suspendBeforeFailure);
+    const calls = (await readFile(rpcLog, "utf8"))
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            method: string;
+            name: string;
+            phase: string;
+            uid?: string;
+            version?: string;
+          },
+      );
+    const dispatchedDeletes = calls.filter(
+      (call) =>
+        call.name === interruptedRef.name &&
+        call.phase === "dispatch" &&
+        call.method === "DeleteActor",
+    );
+    expect(dispatchedDeletes).toHaveLength(1);
+    expect(dispatchedDeletes[0]?.uid).toBe(interruptedActor.metadata.uid);
+    expect(dispatchedDeletes[0]?.version).toMatch(/^[1-9][0-9]*$/);
+    expect(
+      calls.filter((call) => call.name === interruptedRef.name && call.phase === "lost-reply"),
+    ).toHaveLength(1);
+    expect(
+      calls.filter(
+        (call) =>
+          call.name === interruptedRef.name &&
+          call.phase === "dispatch" &&
+          call.method === "ResumeActor",
+      ),
+    ).toHaveLength(1);
+    const retainedSource = await source("read", { path: "owned-editor.txt" });
+    expect(retainedSource.status).toBe(200);
+    expect(Buffer.from((await retainedSource.json()).content, "base64").toString()).toBe(
+      "saved-after-final-stop",
+    );
+    const generations =
+      await database.client`SELECT generation FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} ORDER BY generation`;
+    expect(generations.map((row) => Number(row["generation"]))).toEqual([1, 2, 3]);
+    const pausedStopID = runtimeIdentity(workspaceID, 4).attemptID;
+    extraAttemptIDs.push(pausedStopID);
+    const pausedStart = await serverCall(
+      callFactoryFunction(
+        base,
+        "startPersonalWorkspace",
+        [projectID],
+        { cookie },
+        AbortSignal.timeout(300_000),
+      ),
+    );
+    expect(pausedStart.id).toBe(pausedStopID);
+    await eventually(
+      () => app.runtimeController.get(pausedStopID),
+      (value) =>
+        value?.state === "ready" &&
+        app.runtimeHub.ready(pausedStopID) &&
+        app.runtimeHub.sourceConnected(pausedStopID),
+      "Paused-Stop successor did not become ready",
+      180_000,
+    );
+    const pausedForStop = await app.runtimeController.pause(pausedStopID);
+    expect(pausedForStop?.state).toBe("paused");
+    const [pausedBinding] =
+      await database.client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${pausedStopID}`;
+    expect(pausedBinding?.["checkpoint"].fidelity).toBe("SNAPSHOT_FIDELITY_ROOTFS");
+    const pausedFile = await (await source("read", { path: "owned-editor.txt" })).json();
+    expect(
+      (
+        await source("write", {
+          path: "owned-editor.txt",
+          content: Buffer.from("saved-during-final-pause").toString("base64"),
+          version: pausedFile.version,
+        })
+      ).status,
+    ).toBe(200);
+    const pausedRef = {
+      atespace: `fa-${pausedStopID.replaceAll("-", "")}`,
+      name: `runtime-${pausedStopID.replaceAll("-", "")}`,
+    };
+    expect(nativeActor.parse(await editor("GetActor", { actor: pausedRef })).status.state).toBe(
+      "ACTOR_STATE_SUSPENDED",
+    );
+    const suspendsBeforePausedStop = await suspendCount();
+    await serverCall(callFactoryFunction(base, "stopRuntimeAttempt", [pausedStopID], { cookie }));
+    expect(await suspendCount()).toBe(suspendsBeforePausedStop);
+    const [pausedStoppedBinding] =
+      await database.client`SELECT checkpoint,deleted_at FROM factory.substrate_binding WHERE runtime_attempt_id=${pausedStopID}`;
+    expect(pausedStoppedBinding?.["checkpoint"]).toEqual(pausedBinding?.["checkpoint"]);
+    expect(pausedStoppedBinding?.["deleted_at"]).not.toBeNull();
+    await expect(editor("GetActor", { actor: pausedRef })).rejects.toMatchObject({
+      code: "NotFound",
+    });
+    const pausedStoppedFile = await source("read", { path: "owned-editor.txt" });
+    expect(pausedStoppedFile.status).toBe(200);
+    expect(Buffer.from((await pausedStoppedFile.json()).content, "base64").toString()).toBe(
+      "saved-during-final-pause",
+    );
+    await writeFile(
+      `${live.directory}/lifecycle-evidence-${projectID}.json`,
+      JSON.stringify(
+        {
+          projectID,
+          workspaceID,
+          originalUID,
+          successorID,
+          interruptedID,
+          pausedStopID,
+          qualification: live.qualification,
+          workloadImage: live.workloadImage,
+          runtime: live.runtime,
+          rpcLog,
+          sourceFailureStop: blockedStop,
+          recoveredStop,
+          checks: [
+            "ROOTFS Pause/Resume",
+            "offline dirty and ignored Source",
+            "final Stop without Suspend",
+            "fresh Docker generation",
+            "failed independent Source retains Actor",
+            "concurrent Start fenced",
+            "lost Delete reply",
+            "startup cleanup recovery",
+            "paused final Stop preserves offline edits without another snapshot",
+          ],
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+  } catch (error) {
+    failure = error;
+    await writeFile(`${live.directory}/native-workspace-failure-${projectID}.log`, String(error), {
+      mode: 0o600,
+    });
   } finally {
+    await writeFile(deleteReleaseFile, "release owned response", { mode: 0o600 });
+    await rm(sourceFailureFile, { force: true });
+    await Promise.allSettled(pending);
     for (const id of extraAttemptIDs)
       await application?.runtimeController.stop(id).catch(() => undefined);
     if (attemptID && application)
@@ -872,14 +1344,109 @@ test("fresh Workspace through authenticated FactoryApplication command: native p
     await closeRelay?.();
     ingress.close();
     await closeBackground?.();
+    await application?.workspaceSources.close();
+    let cleanupFailure: unknown;
+    async function cleanupOwnedScopes() {
+      const ownedNames = new Set(
+        [attemptID, ...extraAttemptIDs]
+          .filter(Boolean)
+          .map((id) => `fa-${id?.replaceAll("-", "")}`),
+      );
+      const scopes =
+        await database.client`SELECT atespace,atespace_attempted_at,template,template_attempted_at FROM factory.substrate_workspace`;
+      const control = createSubstrateControl(configuration.provisioner);
+      for (const scope of scopes) {
+        const savedSpace = scope["atespace"] as { metadata: { name: string; uid: string } } | null;
+        if (!savedSpace) {
+          if (scope["atespace_attempted_at"])
+            throw new Error("Unconfirmed native create retains the owned qualification database");
+          continue;
+        }
+        if (!ownedNames.has(savedSpace.metadata.name))
+          throw new Error("Native cleanup found a scope outside this qualification's Attempts");
+        const current = (await control("GetAtespace", {
+          atespace: { name: savedSpace.metadata.name },
+        })) as { metadata: { uid: string } };
+        if (current.metadata.uid !== savedSpace.metadata.uid)
+          throw new Error("Original qualification Atespace UID changed");
+        const savedTemplate = scope["template"] as {
+          metadata: { name: string; uid: string };
+        } | null;
+        if (!savedTemplate && scope["template_attempted_at"])
+          throw new Error("Unconfirmed template create retains the owned qualification database");
+        if (savedTemplate) {
+          const ref = { atespace: savedSpace.metadata.name, name: savedTemplate.metadata.name };
+          const currentTemplate = (await control("GetActorTemplate", { actorTemplate: ref })) as {
+            metadata: { uid: string };
+          };
+          if (currentTemplate.metadata.uid !== savedTemplate.metadata.uid)
+            throw new Error("Original qualification ActorTemplate UID changed");
+          const deletion = Bun.spawn(
+            [
+              live.cli,
+              "--kubeconfig",
+              live.kubeconfig,
+              "--context",
+              live.context,
+              "--token-file",
+              live.provisionerTokenFile,
+              "delete",
+              "actor-template",
+              savedTemplate.metadata.name,
+              "--atespace",
+              savedSpace.metadata.name,
+            ],
+            { stdout: "ignore", stderr: "pipe" },
+          );
+          const error = await new Response(deletion.stderr).text();
+          if (await deletion.exited)
+            throw new Error(`Owned template cleanup failed: ${error.slice(-1000)}`);
+          await expect(control("GetActorTemplate", { actorTemplate: ref })).rejects.toMatchObject({
+            code: "NotFound",
+          });
+        }
+        const deletion = Bun.spawn(
+          [
+            live.cli,
+            "--kubeconfig",
+            live.kubeconfig,
+            "--context",
+            live.context,
+            "--token-file",
+            live.provisionerTokenFile,
+            "delete",
+            "atespace",
+            savedSpace.metadata.name,
+          ],
+          { stdout: "ignore", stderr: "pipe" },
+        );
+        const error = await new Response(deletion.stderr).text();
+        if (await deletion.exited)
+          throw new Error(`Owned native scope cleanup failed: ${error.slice(-1000)}`);
+        await expect(
+          control("GetAtespace", { atespace: { name: savedSpace.metadata.name } }),
+        ).rejects.toMatchObject({ code: "NotFound" });
+      }
+    }
+    await cleanupOwnedScopes().catch((error: unknown) => {
+      cleanupFailure = error;
+    });
     await application?.database.client.end({ timeout: 1 });
     await database.client.end({ timeout: 1 });
     if (attemptID) await removeRuntimeRepository(attemptID);
     for (const id of extraAttemptIDs) await removeRuntimeRepository(id);
     for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
     Object.assign(process.env, previous);
-    await target.dispose();
-    await owner.dispose();
-    await objectStore.dispose();
+    if (cleanupFailure) {
+      console.error(
+        "Owned PostgreSQL, Source and S3 qualification data retained because native cleanup is unconfirmed",
+      );
+      failure ??= cleanupFailure;
+    } else {
+      await target.dispose();
+      await owner.dispose();
+      await objectStore.dispose();
+    }
   }
-}, 600_000);
+  if (failure) throw failure;
+}, 1_200_000);

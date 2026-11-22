@@ -224,8 +224,9 @@ async function setup(integrations = 0, human?: "retained-session" | "absent-sess
           stopped.push(id);
           if (cleanup) await jobs.stop(id);
           else
-            await database.client`UPDATE factory.runtime_attempt SET state='cleanup-failed',
-              stop_intended_at=now() WHERE id=${id}`;
+            await database.client`UPDATE factory.runtime_attempt SET state='stopping',
+              stop_intended_at=COALESCE(stop_intended_at,now()),failure='Owned cleanup unconfirmed'
+              WHERE id=${id}`;
           return null;
         },
       },

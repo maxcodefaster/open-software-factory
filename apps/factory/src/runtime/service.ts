@@ -20,7 +20,7 @@ export function createRuntimeService(options: {
   changes: Pick<ReturnType<typeof createChangeController>, "list" | "cancel" | "get">;
   runtime: Pick<
     ReturnType<typeof createRuntimeController>,
-    "list" | "ensureStaging" | "start" | "startPersisted" | "startFresh" | "stop"
+    "list" | "ensureStaging" | "start" | "startPersisted" | "stop"
   >;
   previews: ReturnType<typeof createProjectAppPreviews>;
   closeBrowser(changeID: string): Promise<unknown>;
@@ -81,20 +81,6 @@ export function createRuntimeService(options: {
         options.revokeAttempt(attemptID);
         options.suspendAttempt(attemptID);
       }
-    },
-    async startFresh(userID: string, attemptID: string) {
-      await options.access.requireRuntime(userID, attemptID, "ide");
-      const [workspace] = await options.database.db
-        .select({ id: runtimeAttempt.workspaceId, projectID: runtimeAttempt.projectId })
-        .from(runtimeAttempt)
-        .where(eq(runtimeAttempt.id, attemptID));
-      if (!workspace?.id) throw new CommandError("not-found", "Runtime Attempt not found");
-      await options.access.requireDevelopment(userID, workspace.projectID);
-      const workspaceID = workspace.id;
-      await options.database.client.begin((sql) =>
-        workspaceWriteAuthorityIn(sql, workspaceID, userID),
-      );
-      return attempt(await options.runtime.startFresh(attemptID, userID));
     },
     async cancelChange(userID: string, changeID: string) {
       const projectID = await options.access.requireChange(userID, changeID);

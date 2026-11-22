@@ -366,13 +366,49 @@ test("native Drizzle wait deletion preserves non-capacity reasons and stopped or
     expect(await f.database.client`SELECT reason FROM factory.runtime_compute_wait`).toHaveLength(
       1,
     );
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt SET state='starting',stop_intended_at=now()
+        WHERE id=${f.attemptID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
     await f.database
-      .client`UPDATE factory.runtime_attempt SET state='starting',stop_intended_at=now()
+      .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now()
       WHERE id=${f.attemptID}`;
     await runtime.get(f.attemptID);
     expect(await f.database.client`SELECT reason FROM factory.runtime_compute_wait`).toHaveLength(
       1,
     );
+    const [finalStop] = await f.database.client`
+      SELECT state,stop_intended_at::text FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+    expect(finalStop?.["state"]).toBe("stopping");
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL
+        WHERE id=${f.attemptID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt
+        SET stop_intended_at=stop_intended_at+interval '1 second'
+        WHERE id=${f.attemptID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt SET state='starting'
+        WHERE id=${f.attemptID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
+    expect(
+      (
+        await f.database.client`
+          SELECT state,stop_intended_at::text FROM factory.runtime_attempt WHERE id=${f.attemptID}`
+      )[0],
+    ).toEqual(finalStop);
+    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
+      WHERE id=${f.attemptID}`;
+    await runtime.get(f.attemptID);
+    expect(await f.database.client`SELECT reason FROM factory.runtime_compute_wait`).toHaveLength(
+      1,
+    );
+    await expect(
+      f.database.client`UPDATE factory.runtime_attempt SET stopped_at=NULL
+        WHERE id=${f.attemptID}`.execute(),
+    ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
   } finally {
     await f.dispose();
   }

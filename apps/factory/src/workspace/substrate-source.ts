@@ -66,7 +66,7 @@ export type SubstrateSourceLease = {
 };
 export type SubstrateSourceHandoff = Pick<
   ReturnType<typeof createSubstrateSources>,
-  "attach" | "freezeActor" | "paused" | "resume" | "requireIndependent"
+  "attach" | "freezeActor" | "makeIndependent" | "resume" | "requireIndependent"
 >;
 
 function objectKey(saved: Checkpoint, suffix: string) {
@@ -640,6 +640,15 @@ export function createSubstrateSources(
     async freezeActor(workspaceID: string, attemptID: string, sql: SQL) {
       const current = await lease(workspaceID, sql);
       if (current?.owner === "service") return;
+      if (
+        current &&
+        (current.writable || current.checkpoint?.id !== current.checkpointID) &&
+        !hub.sourceConnected(attemptID)
+      )
+        throw new CommandError(
+          "unavailable",
+          "Confirmed independent Source is unavailable; the original Parent was retained.",
+        );
       const row = await freeze(workspaceID, "actor", sql);
       if (row.checkpoint?.id === row.checkpointID) return;
       await hub.parentOperation(attemptID, {
@@ -648,7 +657,7 @@ export function createSubstrateSources(
       });
       await confirm(row, attemptID, sql);
     },
-    async paused(workspaceID: string, sql: SQL) {
+    async makeIndependent(workspaceID: string, sql: SQL) {
       const row = await lease(workspaceID, sql);
       if (!row) throw new Error("Source owner is missing");
       if (row.owner === "actor") await transfer(row, "service", sql);

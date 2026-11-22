@@ -210,9 +210,14 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		}
 	}()
 	finishInjection := startupPhase("tool-injection")
+	stopTools := func() {}
 	injectionErr := withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
-		return injectChild(ctx, assignment, result, childToken)
+		var err error
+		stopTools, err = injectChild(ctx, assignment, result, childToken)
+		return err
 	})
+	// Join optional tool work before browser/primary cleanup, including Stop.
+	defer stopTools()
 	finishInjection()
 	if err := injectionErr; err != nil {
 		retainingFailure = true
@@ -1198,10 +1203,10 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 	}
 }
 
-// Compose lookup in the pinned CLI uses project/service, not --id-label. A prior
-// interrupted Stop can therefore return an old primary. Remove only a proven
-// older primary before up; never rebind it or force-recreate this attempt.
-func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
+// A native Actor has one immutable Attempt and generation. Compose lookup uses
+// project/service, so reject a conflicting primary before the CLI can adopt it.
+// A successor Actor has its own private Docker graph; no older primary is repaired.
+func requireCurrentPrimary(ctx context.Context, assignment Assignment) error {
 	output, err := ownedCommand(ctx, "docker", "ps", "-aq", "--no-trunc",
 		"--filter", "label=com.docker.compose.project="+assignment.ComposeProjectName,
 		"--filter", "label="+attemptLabel,
@@ -1209,8 +1214,6 @@ func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
 	if err != nil {
 		return errors.New("could not inspect retained Dev Container identity")
 	}
-	var previous []string
-	current := false
 	for _, id := range strings.Fields(string(output)) {
 		container, err := inspectContainer(ctx, id)
 		if err != nil {
@@ -1221,23 +1224,9 @@ func removePreviousPrimary(ctx context.Context, assignment Assignment) error {
 		if container.ID != id || labels["com.docker.compose.project"] != assignment.ComposeProjectName || err != nil || generation == 0 || labels[attemptLabel] == "" {
 			return errors.New("retained Dev Container identity could not be confirmed")
 		}
-		if generation == assignment.Generation && labels[attemptLabel] == assignment.RuntimeAttemptID {
-			current = true
-			continue
-		}
-		if generation >= assignment.Generation || labels[attemptLabel] == assignment.RuntimeAttemptID {
+		if generation != assignment.Generation || labels[attemptLabel] != assignment.RuntimeAttemptID {
 			return errors.New("retained Dev Container belongs to a conflicting runtime generation")
 		}
-		previous = append(previous, id)
-	}
-	if current && len(previous) != 0 {
-		return errors.New("retained Dev Container has conflicting primary identities")
-	}
-	if len(previous) == 0 {
-		return nil
-	}
-	if err := ownedCommand(ctx, "docker", append([]string{"rm", "-f"}, previous...)...).Run(); err != nil {
-		return errors.New("could not remove the previous Dev Container; retry Workspace start")
 	}
 	return nil
 }
@@ -1250,7 +1239,7 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 	if err := requireNativeDependencyReference(ctx, assignment); err != nil {
 		return devcontainerResult{}, fmt.Errorf("%w: %w", errDevcontainerNotStarted, err)
 	}
-	if err := removePreviousPrimary(ctx, assignment); err != nil {
+	if err := requireCurrentPrimary(ctx, assignment); err != nil {
 		return devcontainerResult{}, fmt.Errorf("%w: %w", errDevcontainerNotStarted, err)
 	}
 	configPath := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
@@ -1359,12 +1348,18 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 	return result, nil
 }
 
-func injectChild(ctx context.Context, assignment Assignment, result devcontainerResult, token string) error {
+func injectChild(ctx context.Context, assignment Assignment, result devcontainerResult, token string) (stopTools func(), returnError error) {
+	stopTools = func() {}
+	defer func() {
+		if returnError != nil {
+			stopTools()
+		}
+	}()
 	finishStaging := startupPhase("child-staging")
 	executable, err := os.Executable()
 	if err != nil {
 		finishStaging()
-		return fmt.Errorf("resolve Connector executable: %w", err)
+		return stopTools, fmt.Errorf("resolve Connector executable: %w", err)
 	}
 	connectorPath := fmt.Sprintf("/tmp/factory-runtime-connector-%d", assignment.Generation)
 	assignmentPath := fmt.Sprintf("/tmp/factory-runtime-assignment-%d.json", assignment.Generation)
@@ -1373,48 +1368,50 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	encoded, err := json.Marshal(childAssignment)
 	if err != nil {
 		finishStaging()
-		return fmt.Errorf("encode child assignment: %w", err)
+		return stopTools, fmt.Errorf("encode child assignment: %w", err)
 	}
 	temporary, err := os.CreateTemp("", "factory-runtime-assignment-*.json")
 	if err != nil {
 		finishStaging()
-		return err
+		return stopTools, err
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
 	if _, err := temporary.Write(encoded); err != nil {
 		temporary.Close()
 		finishStaging()
-		return err
+		return stopTools, err
 	}
 	if err := temporary.Close(); err != nil {
 		finishStaging()
-		return err
+		return stopTools, err
 	}
 	finishStaging()
 	finishConnector := startupPhase("child-connector-injection")
 	err = copyChildExecutable(ctx, result.ContainerID, executable, connectorPath)
 	finishConnector()
 	if err != nil {
-		return err
+		return stopTools, err
 	}
 	finishAssignment := startupPhase("child-assignment-copy")
 	err = ownedCommand(ctx, "docker", "cp", temporaryName, result.ContainerID+":"+assignmentPath).Run()
 	finishAssignment()
 	if err != nil {
-		return fmt.Errorf("copy Connector child assignment: %w", err)
+		return stopTools, fmt.Errorf("copy Connector child assignment: %w", err)
 	}
-	if err := injectApprovedTools(ctx, assignment, result.ContainerID); err != nil {
-		return err
+	languages, err := injectApprovedTools(ctx, assignment, result.ContainerID)
+	stopTools = languages.stop
+	if err != nil {
+		return stopTools, err
 	}
 	if err := prepareChildPermissions(ctx, result.ContainerID, connectorPath, assignmentPath); err != nil {
-		return err
+		return stopTools, err
 	}
 	finishTransport := startupPhase("child-transport")
 	transport, err := nativeChildTransport(ctx, result.ContainerID, assignment.Generation)
 	finishTransport()
 	if err != nil {
-		return err
+		return stopTools, err
 	}
 	arguments := append([]string{"exec", "--interactive", "--user", result.RemoteUser}, transport...)
 	arguments = append(arguments, result.ContainerID, connectorPath, "child", "--assignment", assignmentPath, "--token-stdin")
@@ -1427,10 +1424,13 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	err = command.Start()
 	finishStart()
 	if err != nil {
-		return fmt.Errorf("start Connector child: %w", err)
+		return stopTools, fmt.Errorf("start Connector child: %w", err)
 	}
-	go func() { reportChildExit(os.Stderr, assignment, command.Wait()) }()
-	return nil
+	// Keep the same owned output as the process, rather than resolving a
+	// possibly replaced stderr later in the asynchronous wait.
+	childOutput := command.Stderr
+	go func() { reportChildExit(childOutput, assignment, command.Wait()) }()
+	return stopTools, nil
 }
 
 // reportChildExit records how the injected child process ended. Credentials
@@ -1443,7 +1443,31 @@ func reportChildExit(output io.Writer, assignment Assignment, err error) {
 	fmt.Fprintf(output, "Connector child for attempt %s generation %d exited: %v\n", assignment.RuntimeAttemptID, assignment.Generation, err)
 }
 
-func injectApprovedTools(ctx context.Context, assignment Assignment, containerID string) error {
+// Like the existing owned Parent preparations, this is one invocation-local
+// worker with cancellation and a join, not a queue or lifecycle scheduler.
+type languageToolsPreparation struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error // Read only after done closes.
+}
+
+func (preparation *languageToolsPreparation) stop() {
+	preparation.cancel()
+	<-preparation.done
+}
+
+func injectApprovedTools(ctx context.Context, assignment Assignment, containerID string) (preparation *languageToolsPreparation, returnError error) {
+	ctx, cancel := context.WithCancel(ctx)
+	preparation = &languageToolsPreparation{cancel: cancel, done: make(chan struct{})}
+	workerStarted := false
+	defer func() {
+		if !workerStarted {
+			close(preparation.done)
+		}
+		if returnError != nil {
+			preparation.stop()
+		}
+	}()
 	needsAgent := false
 	needsVerification := false
 	needsLanguages := false
@@ -1459,7 +1483,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		}
 	}
 	if !needsAgent && !needsVerification && !needsLanguages {
-		return nil
+		return preparation, nil
 	}
 	libc := "musl"
 	if needsLanguages || needsAgent {
@@ -1475,59 +1499,58 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		if !strings.Contains(strings.ToLower(string(output)), "musl") {
 			if err != nil {
 				if needsLanguages {
-					return errors.New("Language tools require a supported glibc or musl development container")
+					preparation.err = errors.New("Language tools require a supported glibc or musl development container")
+				} else {
+					preparation.err = errors.New("OpenCode requires a supported glibc or musl development container")
 				}
-				return errors.New("OpenCode requires a supported glibc or musl development container")
+				if needsAgent {
+					return preparation, preparation.err
+				}
+			} else {
+				libc = "glibc"
 			}
-			libc = "glibc"
 		}
 	}
 	if needsLanguages {
-		tool := "/opt/factory/language-tools/" + libc
-		finishSetup := startupPhase("language-tools-setup")
-		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput()
-		finishSetup()
-		if err != nil {
-			return fmt.Errorf("create language tools destination: %w: %s", err, output)
-		}
-		finishTree := startupPhase("language-tools-tree-copy")
-		output, err = ownedCommand(ctx, "docker", "cp", "/opt/factory/language-tools/node_modules", containerID+":/opt/factory/language-tools/node_modules").CombinedOutput()
-		finishTree()
-		if err != nil {
-			return fmt.Errorf("inject language tools: %w: %s", err, output)
-		}
-		finishRuntime := startupPhase("language-tools-runtime-copy")
-		output, err = ownedCommand(ctx, "docker", "cp", tool+"/.", containerID+":/opt/factory/language-tools/runtime").CombinedOutput()
-		finishRuntime()
-		if err != nil {
-			return fmt.Errorf("inject language tools: %w: %s", err, output)
-		}
+		workerStarted = true
+		go func() {
+			defer close(preparation.done)
+			if preparation.err == nil {
+				preparation.err = injectLanguageTools(ctx, assignment, containerID, libc)
+			}
+			if preparation.err != nil && ctx.Err() == nil {
+				// Do not persist raw Docker diagnostics or claim language readiness.
+				// Child's existing LSP attach reports an unavailable runtime until
+				// the complete bundle's executable is published.
+				fmt.Fprintf(os.Stderr, "Language tools unavailable for attempt %s generation %d\n", assignment.RuntimeAttemptID, assignment.Generation)
+			}
+		}()
 	}
 	if needsAgent {
 		tool := "/opt/factory/opencode/" + libc + "/bun"
 		finishSetup := startupPhase("opencode-setup")
-		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput()
+		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode/server").CombinedOutput()
 		finishSetup()
 		if err != nil {
-			return fmt.Errorf("create OpenCode destination: %w: %s", err, output)
+			return preparation, fmt.Errorf("create OpenCode destination: %w: %s", err, output)
 		}
 		finishServer := startupPhase("opencode-server-copy")
-		output, err = ownedCommand(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput()
+		output, err = ownedCommand(ctx, "docker", "cp", "/opt/factory/opencode/server/.", containerID+":/opt/factory/opencode/server").CombinedOutput()
 		finishServer()
 		if err != nil {
-			return fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
+			return preparation, fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
 		}
 		finishRuntime := startupPhase("opencode-runtime-injection")
 		err = copyChildExecutable(ctx, containerID, tool, "/opt/factory/opencode/bun")
 		finishRuntime()
 		if err != nil {
-			return fmt.Errorf("inject OpenCode: %w", err)
+			return preparation, fmt.Errorf("inject OpenCode: %w", err)
 		}
 		finishPermissions := startupPhase("opencode-permissions")
 		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput()
 		finishPermissions()
 		if err != nil {
-			return fmt.Errorf("prepare OpenCode: %w: %s", err, output)
+			return preparation, fmt.Errorf("prepare OpenCode: %w: %s", err, output)
 		}
 	}
 	if needsVerification {
@@ -1535,22 +1558,89 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput()
 		finishSetup()
 		if err != nil {
-			return fmt.Errorf("create Forgejo Runner destination: %w: %s", err, output)
+			return preparation, fmt.Errorf("create Forgejo Runner destination: %w: %s", err, output)
 		}
 		finishRunner := startupPhase("verification-runner-injection")
 		err = copyChildExecutable(ctx, containerID, "/usr/local/bin/forgejo-runner", "/opt/factory/forgejo-runner")
 		finishRunner()
 		if err != nil {
-			return fmt.Errorf("inject Forgejo Runner: %w", err)
+			return preparation, fmt.Errorf("inject Forgejo Runner: %w", err)
 		}
 		finishPermissions := startupPhase("verification-runner-permissions")
 		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput()
 		finishPermissions()
 		if err != nil {
-			return fmt.Errorf("prepare Forgejo Runner: %w: %s", err, output)
+			return preparation, fmt.Errorf("prepare Forgejo Runner: %w: %s", err, output)
 		}
 	}
+	return preparation, nil
+}
+
+func injectLanguageTools(ctx context.Context, assignment Assignment, containerID, libc string) error {
+	// Keep node (the existing LSP availability seam) absent until both copies
+	// succeed. A partial or failed bundle must never be announced as usable.
+	runtime := languageToolsRoot + "/runtime"
+	staging := languageToolsRoot + "/.runtime-" + strconv.FormatUint(assignment.Generation, 10)
+	finishSetup := startupPhase("language-tools-setup")
+	output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID,
+		"sh", "-c", `rm -rf "$1" "$2" && mkdir -p "$1" "$3"`,
+		"factory-language-tools-setup", staging, runtime, languageToolsRoot+"/node_modules").CombinedOutput()
+	finishSetup()
+	if err != nil {
+		return fmt.Errorf("create language tools destination: %w: %s", err, output)
+	}
+	finishTree := startupPhase("language-tools-tree-copy")
+	err = streamLanguageToolContents(ctx, containerID, languageToolsRoot+"/node_modules", languageToolsRoot+"/node_modules")
+	finishTree()
+	if err != nil {
+		return fmt.Errorf("inject language tools: %w", err)
+	}
+	finishRuntime := startupPhase("language-tools-runtime-copy")
+	err = streamLanguageToolContents(ctx, containerID, languageToolsRoot+"/"+libc, staging)
+	finishRuntime()
+	if err != nil {
+		return fmt.Errorf("inject language tools: %w", err)
+	}
+	finishPublish := startupPhase("language-tools-publish")
+	output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mv", staging, runtime).CombinedOutput()
+	finishPublish()
+	if err != nil {
+		return fmt.Errorf("publish language tools: %w: %s", err, output)
+	}
 	return nil
+}
+
+func streamLanguageToolContents(ctx context.Context, containerID, source, destination string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Docker archive extraction holds the primary container lock throughout
+	// docker cp. Stream optional contents through exec instead, so a slow bundle
+	// cannot serialize required copies or Child startup behind that lock.
+	extract := ownedCommand(ctx, "docker", "exec", "--interactive", "--user", "0:0",
+		containerID, "tar", "--no-same-owner", "-xf", "-", "-C", destination)
+	input, err := extract.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	// Closing stdin lets the inner extraction finish before this worker joins.
+	// Keep the existing bounded command wait as a fallback for a lost transport.
+	extract.Cancel = func() error { _ = input.Close(); return nil }
+	if err := extract.Start(); err != nil {
+		return err
+	}
+	archive := ownedCommand(ctx, "tar", "-C", source, "-cf", "-", ".")
+	// Do not pass the shared file descriptor through Start while cancellation
+	// can close it. Wait also joins exec's copy goroutine for this writer.
+	archive.Stdout = io.MultiWriter(input)
+	if err := archive.Start(); err != nil {
+		input.Close()
+		return errors.Join(err, extract.Wait())
+	}
+	archiveErr := archive.Wait()
+	input.Close()
+	return errors.Join(archiveErr, extract.Wait(), ctx.Err())
 }
 
 func inspectContainer(ctx context.Context, containerID string) (inspectedContainer, error) {

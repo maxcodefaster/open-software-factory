@@ -8,6 +8,95 @@ import { createSubstrateSources } from "../../apps/factory/src/workspace/substra
 import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
 import { SubstrateRPCError } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
+import { memoryPrivateObjects } from "../fixtures/private-objects";
+
+test("final Stop hands off a confirmed Source export without ROOTFS and cannot reopen execution", async () => {
+  const f = await substrateFixture();
+  let actor: ReturnType<typeof f.actor> | undefined;
+  const effects: string[] = [];
+  const source = createSubstrateSources(f.database, f.hub, memoryPrivateObjects());
+  const controller = await f.controller(async (method) => {
+    if (method === "GetAtespace") return f.space;
+    if (method === "GetActorTemplate") return f.template;
+    if (method === "GetActor") {
+      if (!actor) throw new SubstrateRPCError("NotFound", "absent");
+      return structuredClone(actor);
+    }
+    effects.push(method);
+    if (method === "CreateActor") {
+      actor = await f.createdActor();
+      return structuredClone(actor);
+    }
+    if (method === "ResumeActor" && actor) {
+      actor.metadata.version = "2";
+      actor.status = {
+        state: "ACTOR_STATE_RUNNING",
+        workerAssignment: { sandboxRuntime: f.config.runtime },
+      };
+      return { actor: structuredClone(actor) };
+    }
+    throw new Error(`Unexpected native effect ${method}`);
+  }, source);
+  const bytes = new TextEncoder().encode("controlled complete Source export");
+  const bundle = {
+    version: 1,
+    bytes: bytes.length,
+    sha256: objectDigest(bytes),
+    chunks: [objectDigest(bytes)],
+  };
+  try {
+    await controller.start(f.projectID, f.userID);
+    const uid = actor?.metadata.uid;
+    if (!uid) throw new Error("Original native Actor is missing");
+    await source.attach(f.workspaceID, uid, f.database.client);
+    f.hub.sourceConnected = () => true;
+    f.hub.parentOperation = async () => ({});
+    f.hub.request = async (_id, _channel, _request, path) =>
+      path.endsWith("/checkpoint") ? Response.json(bundle) : new Response(bytes);
+    await source.freezeActor(f.workspaceID, f.attemptID, f.database.client);
+    const transfer = async () =>
+      await f.database.client`UPDATE factory.substrate_source
+      SET owner='service',writable=true,writer_epoch=writer_epoch+1,service_base=checkpoint_id,checkpoint_id=NULL
+      WHERE workspace_id=${f.workspaceID}`;
+    await expect(transfer()).rejects.toThrow("durable paused ROOTFS");
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`;
+    const request = (role: "parent" | "child") =>
+      new Request("https://factory.test/internal/runtime-connect", {
+        headers: {
+          "x-factory-runtime-attempt": f.attemptID,
+          "x-factory-runtime-generation": "1",
+          "x-factory-runtime-actor-uid": uid,
+          "x-factory-connector-role": role,
+        },
+      });
+    expect(await controller.authorizeConnector(request("parent"))).toBe(true);
+    expect(await controller.authorizeConnector(request("child"))).toBe(false);
+    await transfer();
+    expect(await controller.authorizeConnector(request("parent"))).toBe(false);
+    expect(await source.lease(f.workspaceID)).toMatchObject({
+      actorUID: uid,
+      owner: "service",
+      writable: true,
+      generation: 1,
+    });
+    const [saved] = await f.database
+      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+    expect(saved?.["checkpoint"]).toBeNull();
+    expect(effects).toEqual(["CreateActor", "ResumeActor"]);
+    await expect(
+      Promise.resolve(
+        f.database
+          .client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL,state='ready' WHERE id=${f.attemptID}`,
+      ),
+    ).rejects.toThrow("cannot be cleared");
+    await expect(controller.start(f.projectID, f.userID)).rejects.toThrow("retired");
+    await expect(controller.pause(f.attemptID)).rejects.toThrow("stopping");
+  } finally {
+    await source.close();
+    await f.dispose();
+  }
+}, 60_000);
 
 test("native Ticket Source uses the Change writer fence, not storage ownership, and handoff cannot deadlock a save", async () => {
   const f = await substrateFixture("a".repeat(40), "ticket");
@@ -218,6 +307,7 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
     drained.push(operation.operationId);
     return {};
   };
+  f.hub.sourceConnected = () => true;
   f.hub.request = async (_attempt, channel, request, path) => {
     expect(channel).toBe("source");
     const body = await request.json();
