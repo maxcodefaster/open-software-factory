@@ -16,6 +16,31 @@ Fresh Staging, promotion replacement and publication use the existing product ow
 the shared native Actor adapter. They never fall back to creating legacy capacity.
 Native Attempts keep their original immutable observation bindings.
 
+## Runtime responsibilities
+
+Factory's control plane runs outside the Actor. It owns requirements, approvals,
+execution intent, Source authority and the admitted Agent turn. Substrate owns the
+Actor's placement, lifecycle, routing and snapshots; it is not the coding agent.
+
+The supplied [OpenCode process](../../packages/runtime-kubernetes/src/agent-process.ts)
+runs inside the Project's actual Dev Container, as its development user. Its native
+file and shell tools use that environment, alongside the Child Connector, terminals
+and Project processes. The Actor-private Docker daemon and Parent Connector provide
+infrastructure, not an alternative place to execute Project commands.
+
+The per-user Theia editor runs outside the Actor. It accesses the current canonical
+checkout through authenticated Source routes, rather than owning another clone.
+While compute runs, Source is served by the Actor's development-user subprocess.
+The current ROOTFS Pause and final Stop paths transfer the complete checkout to
+Factory's independent Source owner; owner epochs revoke the previous access.
+
+OpenCode packages are installed during the runtime image build. The current cold
+entrypoint copies the packaged tools into the Dev Container and starts their
+processes; it does not perform a new package installation for each Ticket.
+Project image preparation publishes a reusable image, not a fully initialized
+OpenCode process. Native `RUNNING`, Source availability, OpenCode readiness and
+App health are distinct observations, not interchangeable readiness claims.
+
 An owned Linux arm64 infrastructure proof has exercised the unchanged official
 worker with this nightly and the current Factory Actor image: Docker 29.9.0
 created and ran an inner container, allowed HTTPS kept certificate verification,
