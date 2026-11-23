@@ -120,7 +120,7 @@ exit 73
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if key := compatiblePrebuild(context.Background(), assignment, result, fixturePrebuildConfiguration); key != image {
+	if key := compatiblePrebuild(fixturePrebuildToolsContext(t.Context(), assignment), assignment, result, fixturePrebuildConfiguration); key != image {
 		t.Fatal("clean consumer could not reuse its exact prepared image:", key)
 	}
 	for _, scenario := range []string{"fingerprint", "platform", "label", "dirty-source", "environment-version"} {
@@ -143,7 +143,7 @@ exit 73
 				target.EnvironmentVersion = &version
 			}
 			writeMetadata()
-			if key := compatiblePrebuild(context.Background(), target, selected, fixturePrebuildConfiguration); key != "" {
+			if key := compatiblePrebuild(fixturePrebuildToolsContext(t.Context(), assignment), target, selected, fixturePrebuildConfiguration); key != "" {
 				t.Fatal("different or unconfirmed inputs reused a prepared image:", key)
 			}
 			metadata[0].Architecture = "arm64"

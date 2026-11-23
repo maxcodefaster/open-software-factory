@@ -755,6 +755,14 @@ test("native Compose prebuild and required hooks gate runtime publication on bot
   expect(proof).toMatch(
     /recipes="\$\{4:-build image-only build-no-features credential-free runtime-environment cold-prebuild\}"/,
   );
+  expect(proof).toContain('if [ "$kind" = build ]; then');
+  expect(proof).toContain("export FACTORY_COMPOSE_PROOF_OPENCODE_ROOT=/opt/factory/opencode");
+  expect(proof).toContain(
+    "export FACTORY_COMPOSE_PROOF_CONNECTOR=/usr/local/bin/factory-runtime-connector",
+  );
+  expect(proof).toContain(
+    "unset FACTORY_COMPOSE_PROOF_OPENCODE_ROOT FACTORY_COMPOSE_PROOF_CONNECTOR",
+  );
   expect(proof).not.toMatch(/dependency-seed|prepared-rootfs|prepared-image/);
   const start = proof.indexOf("docker create");
   const create = proof.slice(start, proof.indexOf("docker cp", start));

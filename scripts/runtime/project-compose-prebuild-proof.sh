@@ -90,6 +90,14 @@ docker create --pull=never --name "$name" --label "factory.compose-prebuild-proo
       docker load --input /tmp/images.tar >/dev/null
       export FACTORY_COMPOSE_PROOF_NODE="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_NODE_REF")"
       export FACTORY_COMPOSE_PROOF_REGISTRY="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_REGISTRY_REF")"
+      if [ "$kind" = build ]; then
+        # Qualify the actual shipped payload once. The remaining recipe variants
+        # retain their focused hook, credential and cold-consumer fixtures.
+        export FACTORY_COMPOSE_PROOF_OPENCODE_ROOT=/opt/factory/opencode
+        export FACTORY_COMPOSE_PROOF_CONNECTOR=/usr/local/bin/factory-runtime-connector
+      else
+        unset FACTORY_COMPOSE_PROOF_OPENCODE_ROOT FACTORY_COMPOSE_PROOF_CONNECTOR
+      fi
       FACTORY_COMPOSE_PROOF_KIND="$kind" /tmp/compose-prebuild.test -test.run "^TestPrebuildComposeNative$" -test.v
     done
   ' >/dev/null

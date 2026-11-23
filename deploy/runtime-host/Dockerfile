@@ -133,5 +133,8 @@ COPY --from=input-stop /out/input-stop.mjs /opt/factory/opencode/server/input-st
 COPY --from=bun-tool /opt/factory/opencode/glibc/bun /opt/factory/opencode/glibc/bun
 COPY --from=bun-tool /opt/factory/opencode/musl/bun /opt/factory/opencode/musl/bun
 COPY --from=verification-tool /usr/local/bin/forgejo-runner /usr/local/bin/forgejo-runner
+RUN chmod -R a+rX,go-w,ug-s,o-t /opt/factory/opencode/server \
+  && factory-runtime-connector opencode-manifest > /opt/factory/opencode/manifest.json \
+  && chmod 0444 /opt/factory/opencode/manifest.json
 
 FROM runtime-host AS runtime

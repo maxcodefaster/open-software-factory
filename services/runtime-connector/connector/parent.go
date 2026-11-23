@@ -1399,7 +1399,7 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err != nil {
 		return stopTools, fmt.Errorf("copy Connector child assignment: %w", err)
 	}
-	languages, err := injectApprovedTools(ctx, assignment, result.ContainerID)
+	languages, err := injectApprovedTools(ctx, assignment, result.ContainerID, connectorPath)
 	stopTools = languages.stop
 	if err != nil {
 		return stopTools, err
@@ -1456,7 +1456,7 @@ func (preparation *languageToolsPreparation) stop() {
 	<-preparation.done
 }
 
-func injectApprovedTools(ctx context.Context, assignment Assignment, containerID string) (preparation *languageToolsPreparation, returnError error) {
+func injectApprovedTools(ctx context.Context, assignment Assignment, containerID, verifier string) (preparation *languageToolsPreparation, returnError error) {
 	ctx, cancel := context.WithCancel(ctx)
 	preparation = &languageToolsPreparation{cancel: cancel, done: make(chan struct{})}
 	workerStarted := false
@@ -1527,30 +1527,56 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		}()
 	}
 	if needsAgent {
-		tool := "/opt/factory/opencode/" + libc + "/bun"
-		finishSetup := startupPhase("opencode-setup")
-		output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode/server").CombinedOutput()
-		finishSetup()
+		root := openCodeArtifactsRoot(ctx)
+		manifest, _, err := ReadOpenCodeArtifactsManifest(root)
 		if err != nil {
-			return preparation, fmt.Errorf("create OpenCode destination: %w: %s", err, output)
+			return preparation, errors.New("The shipped OpenCode artifact manifest is unavailable")
 		}
-		finishServer := startupPhase("opencode-server-copy")
-		output, err = ownedCommand(ctx, "docker", "cp", "/opt/factory/opencode/server/.", containerID+":/opt/factory/opencode/server").CombinedOutput()
-		finishServer()
-		if err != nil {
-			return preparation, fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
+		finishCheck := startupPhase("opencode-artifact-verification")
+		matched := verifyChildOpenCodeArtifacts(ctx, containerID, verifier, manifest, libc)
+		finishCheck()
+		if matched {
+			needsAgent = false
+		} else {
+			finishReset := startupPhase("opencode-artifact-reset")
+			err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, verifier, "opencode-reset").Run()
+			finishReset()
+			if err != nil {
+				return preparation, errors.New("Existing OpenCode payload could not be safely replaced")
+			}
 		}
-		finishRuntime := startupPhase("opencode-runtime-injection")
-		err = copyChildExecutable(ctx, containerID, tool, "/opt/factory/opencode/bun")
-		finishRuntime()
-		if err != nil {
-			return preparation, fmt.Errorf("inject OpenCode: %w", err)
-		}
-		finishPermissions := startupPhase("opencode-permissions")
-		output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput()
-		finishPermissions()
-		if err != nil {
-			return preparation, fmt.Errorf("prepare OpenCode: %w: %s", err, output)
+		if needsAgent {
+			tool := filepath.Join(root, libc, "bun")
+			finishSetup := startupPhase("opencode-setup")
+			output, err := ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode/server").CombinedOutput()
+			finishSetup()
+			if err != nil {
+				return preparation, fmt.Errorf("create OpenCode destination: %w: %s", err, output)
+			}
+			finishServer := startupPhase("opencode-server-copy")
+			output, err = ownedCommand(ctx, "docker", "cp", filepath.Join(root, "server")+"/.", containerID+":/opt/factory/opencode/server").CombinedOutput()
+			finishServer()
+			if err != nil {
+				return preparation, fmt.Errorf("inject native OpenCode server: %w: %s", err, output)
+			}
+			finishRuntime := startupPhase("opencode-runtime-injection")
+			err = copyChildExecutable(ctx, containerID, tool, "/opt/factory/opencode/bun")
+			finishRuntime()
+			if err != nil {
+				return preparation, fmt.Errorf("inject OpenCode: %w", err)
+			}
+			finishPermissions := startupPhase("opencode-permissions")
+			output, err = ownedCommand(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput()
+			finishPermissions()
+			if err != nil {
+				return preparation, fmt.Errorf("prepare OpenCode: %w: %s", err, output)
+			}
+			finishVerify := startupPhase("opencode-artifact-verification")
+			matched := verifyChildOpenCodeArtifacts(ctx, containerID, verifier, manifest, libc)
+			finishVerify()
+			if !matched {
+				return preparation, errors.New("Installed OpenCode payload differs from its shipped artifacts")
+			}
 		}
 	}
 	if needsVerification {
@@ -1574,6 +1600,16 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		}
 	}
 	return preparation, nil
+}
+
+func verifyChildOpenCodeArtifacts(ctx context.Context, containerID, verifier string, manifest []byte, libc string) bool {
+	if verifier == "" {
+		return false
+	}
+	command := ownedCommand(ctx, "docker", "exec", "--interactive", "--user", "0:0",
+		containerID, verifier, "opencode-verify", "--libc", libc)
+	command.Stdin = bytes.NewReader(manifest)
+	return command.Run() == nil
 }
 
 func injectLanguageTools(ctx context.Context, assignment Assignment, containerID, libc string) error {

@@ -37,22 +37,24 @@ type PrebuildResult struct {
 }
 
 type prebuildInput struct {
-	Version               int      `json:"version"`
-	Repository            string   `json:"repository"`
-	Commit                string   `json:"commit"`
-	Tree                  string   `json:"tree"`
-	Configuration         string   `json:"configuration"`
-	Dockerfile            string   `json:"dockerfile,omitempty"`
-	Platform              string   `json:"platform"`
-	ImageRepository       string   `json:"imageRepository"`
-	CLIVersion            string   `json:"cliVersion"`
-	CLIIntegrity          string   `json:"cliIntegrity"`
-	ImmutableInputs       []string `json:"immutableInputs"`
-	EnvironmentVersion    uint64   `json:"environmentVersion"`
-	EnvironmentSHA256     string   `json:"environmentSHA256,omitempty"`
-	ComposeService        string   `json:"composeService,omitempty"`
-	NativeTransportSHA256 string   `json:"nativeTransportSha256,omitempty"`
-	nativeBase            *nativePrebuildBase
+	Version                 int      `json:"version"`
+	Repository              string   `json:"repository"`
+	Commit                  string   `json:"commit"`
+	Tree                    string   `json:"tree"`
+	Configuration           string   `json:"configuration"`
+	Dockerfile              string   `json:"dockerfile,omitempty"`
+	Platform                string   `json:"platform"`
+	ImageRepository         string   `json:"imageRepository"`
+	CLIVersion              string   `json:"cliVersion"`
+	CLIIntegrity            string   `json:"cliIntegrity"`
+	ImmutableInputs         []string `json:"immutableInputs"`
+	EnvironmentVersion      uint64   `json:"environmentVersion"`
+	EnvironmentSHA256       string   `json:"environmentSHA256,omitempty"`
+	ComposeService          string   `json:"composeService,omitempty"`
+	NativeTransportSHA256   string   `json:"nativeTransportSha256,omitempty"`
+	OpenCodeArtifactsSHA256 string   `json:"openCodeArtifactsSha256"`
+	nativeBase              *nativePrebuildBase
+	buildContext            string
 }
 
 type prebuildIntent struct {

@@ -61,7 +61,16 @@ func TestPrebuildNativeProxyRequiresTheVerifiedAssignmentAndNeverExportsPrivateE
 }
 
 func TestNativePrebuildRecipeHashesPublicTransportButNeverPrivateImageOrActorFacts(t *testing.T) {
-	input := prebuildInput{Version: 3, NativeTransportSHA256: strings.Repeat("a", 64),
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixturePrebuildTools(t, root)
+	_, toolsDigest, err := ReadOpenCodeArtifactsManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := prebuildInput{Version: 4, NativeTransportSHA256: strings.Repeat("a", 64), OpenCodeArtifactsSHA256: toolsDigest,
 		nativeBase: &nativePrebuildBase{assignment: Assignment{RuntimeAttemptID: "private-attempt"}, reference: "private-local-reference"}}
 	before := prebuildIdentity(input)
 	encoded, err := json.Marshal(input)
@@ -76,6 +85,11 @@ func TestNativePrebuildRecipeHashesPublicTransportButNeverPrivateImageOrActorFac
 	input.NativeTransportSHA256 = strings.Repeat("b", 64)
 	if prebuildIdentity(input) == before {
 		t.Fatal("changed public transport inherited an earlier artifact")
+	}
+	input.NativeTransportSHA256 = strings.Repeat("a", 64)
+	input.OpenCodeArtifactsSHA256 = strings.Repeat("c", 64)
+	if prebuildIdentity(input) == before {
+		t.Fatal("changed public tools inherited an earlier artifact")
 	}
 	var authored prebuildConfiguration
 	if json.Unmarshal([]byte(`{"nativeBase":{"reference":"foreign-reference"}}`), &authored) != nil || authored.nativeBase != nil {

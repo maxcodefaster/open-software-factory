@@ -269,6 +269,11 @@ func TestLanguageToolCopyDockerComponent(t *testing.T) {
 func injectionTimingFixture(t *testing.T) (string, func() []string) {
 	t.Helper()
 	directory := t.TempDir()
+	directory, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixturePrebuildTools(t, filepath.Join(directory, "opencode"))
 	logPath := filepath.Join(directory, "timings")
 	output, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
@@ -292,6 +297,8 @@ case "$*" in
   cp*:/tmp/factory-runtime-connector-*) step=connector-copy ;;
   cp*:/tmp/factory-runtime-assignment-*) step=assignment-copy ;;
   *ldd*) step=libc-probe ;;
+  *opencode-verify*) step=opencode-verify ;;
+  *opencode-reset*) step=opencode-reset ;;
   *factory-language-tools-setup*) step=languages-setup ;;
   exec*tar*-C*/language-tools/node_modules) step=languages-tree ;;
   exec*tar*-C*/language-tools/.runtime-*) step=languages-runtime ;;
@@ -309,6 +316,12 @@ case "$*" in
 esac
 printf 'command:%s\n' "$step" >> "$FACTORY_INJECTION_LOG"
 printf '%s\n' "$*" >> "$FACTORY_INJECTION_COMMAND_LOG"
+if [ "$step" = opencode-verify ]; then
+  /bin/cat >/dev/null
+  test -f "$FACTORY_INJECTION_OPENCODE_COPIED"
+  exit "$?"
+fi
+if [ "$step" = opencode-reset ]; then /bin/rm -f "$FACTORY_INJECTION_OPENCODE_COPIED"; fi
 if [ "$FACTORY_INJECTION_FAIL" = "$step" ]; then
   printf 'private-tool-diagnostic\n' >&2
   exit 23
@@ -328,6 +341,7 @@ if [ "$step" = libc-probe ]; then
   printf '%s\n' "$FACTORY_INJECTION_LIBC"
   exit "$FACTORY_INJECTION_LIBC_STATUS"
 fi
+if [ "$step" = opencode-permissions ]; then : > "$FACTORY_INJECTION_OPENCODE_COPIED"; fi
 if [ "$FACTORY_INJECTION_RUN_CHILD" = 1 ]; then
   if [ "$step" = assignment-copy ]; then /bin/cp "$2" "$FACTORY_INJECTION_ASSIGNMENT"; fi
   if [ "$step" = child-start ]; then exec "$FACTORY_INJECTION_EXECUTABLE" -test.run='^TestParentInjectedChildProcess$'; fi
@@ -357,6 +371,7 @@ printf 'owned archive fixture'
 	}
 	t.Setenv("PATH", directory)
 	t.Setenv("FACTORY_INJECTION_LOG", logPath)
+	t.Setenv("FACTORY_INJECTION_OPENCODE_COPIED", filepath.Join(directory, "opencode-copied"))
 	t.Setenv("FACTORY_INJECTION_COMMAND_LOG", filepath.Join(directory, "commands"))
 	t.Setenv("FACTORY_INJECTION_LIBC", "musl")
 	t.Setenv("FACTORY_INJECTION_LIBC_STATUS", "0")
@@ -416,7 +431,7 @@ func injectionTimingAssignment() Assignment {
 
 func injectTestApprovedTools(t *testing.T, ctx context.Context, assignment Assignment, containerID string) error {
 	t.Helper()
-	preparation, err := injectApprovedTools(ctx, assignment, containerID)
+	preparation, err := injectApprovedTools(injectionTimingContext(ctx), assignment, containerID, "/tmp/factory-runtime-connector-1")
 	t.Cleanup(preparation.stop)
 	<-preparation.done
 	if err != nil {
@@ -427,16 +442,54 @@ func injectTestApprovedTools(t *testing.T, ctx context.Context, assignment Assig
 
 func injectTestChild(t *testing.T, ctx context.Context, assignment Assignment, result devcontainerResult, token string) error {
 	t.Helper()
-	stop, err := injectChild(ctx, assignment, result, token)
+	stop, err := injectChild(injectionTimingContext(ctx), assignment, result, token)
 	t.Cleanup(stop)
 	return err
+}
+
+func injectionTimingContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, openCodeArtifactsRootKey{},
+		filepath.Join(filepath.Dir(os.Getenv("FACTORY_INJECTION_LOG")), "opencode"))
+}
+
+func TestVerifiedPreparedOpenCodeDoesNotRepeatPayloadCopies(t *testing.T) {
+	directory, timeline := injectionTimingFixture(t)
+	// This is the controlled Docker verification response. Separate artifact
+	// tests verify real tree contents; this seam locks down Parent's decision.
+	if err := os.WriteFile(os.Getenv("FACTORY_INJECTION_OPENCODE_COPIED"), []byte("prepared\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	assignment := injectionTimingAssignment()
+	assignment.Channels = []Channel{{Name: "agent", Kind: "agent"}}
+	for range 2 {
+		if err := injectTestApprovedTools(t, t.Context(), assignment, "owned-child"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commands, err := os.ReadFile(filepath.Join(directory, "commands"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(commands), "opencode-verify") != 2 ||
+		strings.Contains(string(commands), "opencode-reset") ||
+		strings.Contains(string(commands), "cp ") {
+		t.Fatal("exact verified preparation still copied or replaced its OpenCode payload")
+	}
+	for _, entry := range timeline() {
+		if entry == "phase:opencode-server-copy" || entry == "phase:opencode-runtime-injection" {
+			t.Fatal("verified reuse recorded a copy that must not occur")
+		}
+	}
 }
 
 func requiredInjectionTimeline(entries []string) []string {
 	var required []string
 	for _, entry := range entries {
 		if strings.HasPrefix(entry, "command:languages-") ||
-			(strings.HasPrefix(entry, "phase:language-tools-") && entry != "phase:language-tools-probe") {
+			(strings.HasPrefix(entry, "phase:language-tools-") && entry != "phase:language-tools-probe") ||
+			strings.HasPrefix(entry, "command:opencode-verify") ||
+			strings.HasPrefix(entry, "command:opencode-reset") ||
+			strings.HasPrefix(entry, "phase:opencode-artifact-") {
 			continue
 		}
 		required = append(required, entry)
@@ -466,10 +519,14 @@ func TestApprovedToolsShareOneLibcProbePerInvocation(t *testing.T) {
 				"exec --interactive --user 0:0 owned-child tar --no-same-owner -xf - -C /opt/factory/language-tools/.runtime-1",
 				"exec --user 0:0 owned-child mv /opt/factory/language-tools/.runtime-1 /opt/factory/language-tools/runtime",
 				"exec --user 0:0 owned-child mkdir -p /opt/factory/opencode/server",
-				"cp /opt/factory/opencode/server/. owned-child:/opt/factory/opencode/server",
-				"cp /opt/factory/opencode/" + libc.tool + "/bun owned-child:/opt/factory/opencode/bun",
+				"cp " + filepath.Join(directory, "opencode/server") + "/. owned-child:/opt/factory/opencode/server",
+				"cp " + filepath.Join(directory, "opencode", libc.tool, "bun") + " owned-child:/opt/factory/opencode/bun",
 				"exec --user 0:0 owned-child chmod 0555 /opt/factory/opencode/bun",
 			}
+			verify := "exec --interactive --user 0:0 owned-child /tmp/factory-runtime-connector-1 opencode-verify --libc " + libc.tool
+			first := append(append([]string{}, want...), verify, verify,
+				"exec --user 0:0 owned-child /tmp/factory-runtime-connector-1 opencode-reset")
+			reuse := append(append([]string{}, want[:7]...), verify)
 			var expected []string
 			for invocation := 1; invocation <= 2; invocation++ {
 				if err := injectTestApprovedTools(t, context.Background(), assignment, "owned-child"); err != nil {
@@ -482,7 +539,11 @@ func TestApprovedToolsShareOneLibcProbePerInvocation(t *testing.T) {
 				if probes := strings.Count(string(content), "ldd --version"); probes != invocation {
 					t.Fatalf("got %d libc probes after %d invocation(s), want %d", probes, invocation, invocation)
 				}
-				expected = append(expected, want...)
+				if invocation == 1 {
+					expected = append(expected, first...)
+				} else {
+					expected = append(expected, reuse...)
+				}
 				got := strings.Split(strings.TrimSpace(string(content)), "\n")
 				slices.Sort(got)
 				slices.Sort(expected)
@@ -674,7 +735,7 @@ func TestOptionalLanguageFailureDoesNotFailRequiredInjection(t *testing.T) {
 		t.Run(step.command, func(t *testing.T) {
 			_, timeline := injectionTimingFixture(t)
 			t.Setenv("FACTORY_INJECTION_FAIL", step.command)
-			preparation, err := injectApprovedTools(t.Context(), injectionTimingAssignment(), "owned-child")
+			preparation, err := injectApprovedTools(injectionTimingContext(t.Context()), injectionTimingAssignment(), "owned-child", "/tmp/factory-runtime-connector-1")
 			defer preparation.stop()
 			<-preparation.done
 			if err != nil || preparation.err == nil {
@@ -734,7 +795,7 @@ func TestChildInjectionCancellationJoinsConcurrentOwnedToolCopies(t *testing.T) 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		stop, err := injectChild(ctx, injectionTimingAssignment(), devcontainerResult{
+		stop, err := injectChild(injectionTimingContext(ctx), injectionTimingAssignment(), devcontainerResult{
 			ContainerID: "owned-child", RemoteUser: "node", RemoteWorkspaceFolder: "/workspace/project",
 		}, "private-child-token")
 		stop()

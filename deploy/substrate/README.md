@@ -38,7 +38,16 @@ OpenCode packages are installed during the runtime image build. The current cold
 entrypoint copies the packaged tools into the Dev Container and starts their
 processes; it does not perform a new package installation for each Ticket.
 Project image preparation publishes a reusable image, not a fully initialized
-OpenCode process. Native `RUNNING`, Source availability, OpenCode readiness and
+OpenCode process. The prepared image includes only the shipped server tree and
+libc-specific Bun executable. Their complete content, membership, modes and safe
+relative links are fingerprinted into the image input. Parent verifies those
+actual installed bytes with its freshly injected static Connector before
+omitting copies; image labels or a writable success marker cannot authorize reuse.
+Missing or changed tools are safely replaced and checked, without starting a
+Session or capturing model credentials, admitted Skills or Project process state.
+The pinned CLI's ordinary local Feature build carries an allowlisted archive so
+its Feature-file permission normalization cannot change the shipped tools.
+Native `RUNNING`, Source availability, OpenCode readiness and
 App health are distinct observations, not interchangeable readiness claims.
 
 MEMORY is not qualified for this private-Docker profile. A separate native ARM

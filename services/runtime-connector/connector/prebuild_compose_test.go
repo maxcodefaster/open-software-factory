@@ -156,7 +156,7 @@ func TestPrebuildComposeRuntimeEnvironmentIsExcludedWithoutChangingConsumerSourc
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(filepath.Dir(snapshot))
-	if input.Version != 3 {
+	if input.Version != 5 || len(input.OpenCodeArtifactsSHA256) != 64 {
 		t.Fatal("Runtime-free producer did not retain its distinct recipe version")
 	}
 	resolved, err := os.ReadFile(filepath.Join(snapshot, ".devcontainer", "compose.json"))
@@ -261,9 +261,18 @@ func TestPrebuildComposeConsumerKeepsPrimaryHooksAndOriginalServiceFiles(t *test
 }
 
 func TestPrebuildComposeBuildUsesNativePlatformWithoutUnsupportedCLIFlag(t *testing.T) {
+	assignment, commit := composePrebuildRepository(t)
+	composePrebuildDocker(t)
+	ctx := fixturePrebuildToolsContext(t.Context(), assignment)
+	input, snapshot, err := prepareFixturePrebuildInput(ctx, assignment, PrebuildRequest{
+		Commit: commit, Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Dir(snapshot))
 	directory := t.TempDir()
-	snapshot := t.TempDir()
-	identity := strings.Repeat("a", 64)
+	identity := prebuildIdentity(input)
 	imageID := "sha256:" + strings.Repeat("b", 64)
 	marker := filepath.Join(directory, "built")
 	log := filepath.Join(directory, "arguments")
@@ -290,9 +299,9 @@ touch %q
 		}
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	result, err := buildProjectPrebuild(context.Background(), prebuildOperation{
+	result, err := buildProjectPrebuild(ctx, prebuildOperation{
 		Identity: identity, Directory: directory, Tag: "registry.factory/prebuilds/project-one:owned",
-		Input: prebuildInput{Configuration: ".devcontainer/devcontainer.json", Platform: "linux/arm64", ComposeService: "workspace"},
+		Input: input,
 	}, snapshot)
 	if err != nil || result != imageID {
 		t.Fatalf("Compose build did not confirm the exact native image: %s: %v", result, err)

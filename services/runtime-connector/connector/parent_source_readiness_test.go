@@ -160,7 +160,7 @@ func TestParentStartupLanguageCopyCannotBlockChildAndAgent(t *testing.T) {
 			assignment.nativeSource = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte("source-remains-usable"))
 			})
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := context.WithCancel(injectionTimingContext(t.Context()))
 			done := make(chan error, 1)
 			go func() { done <- RunParent(ctx, assignment, "owned-parent-token", "owned-child-token") }()
 			joined := false

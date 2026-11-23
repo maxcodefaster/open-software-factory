@@ -21,6 +21,7 @@ func prebuildRepository(t *testing.T) (Assignment, string) {
 		t.Fatal(err)
 	}
 	directory = canonical
+	fixturePrebuildTools(t, filepath.Join(filepath.Dir(directory), "opencode-tools"))
 	files := map[string]string{
 		".devcontainer/devcontainer-lock.json":            `{"features":{}}`,
 		".devcontainer/devcontainer.json":                 `{"build":{"dockerfile":"Dockerfile","context":".."},"features":{"./feature":{}}}`,
@@ -63,7 +64,7 @@ func fixturePrebuildConfiguration(_ context.Context, _ string, path string) (pre
 }
 
 func prepareFixturePrebuildInput(ctx context.Context, assignment Assignment, request PrebuildRequest) (prebuildInput, string, error) {
-	return preparePrebuildInputWith(ctx, assignment, request, fixturePrebuildConfiguration)
+	return preparePrebuildInputWith(fixturePrebuildToolsContext(ctx, assignment), assignment, request, fixturePrebuildConfiguration)
 }
 
 func TestPrebuildUsesCommittedInputsAndSeparatesIdentity(t *testing.T) {
@@ -180,16 +181,16 @@ func TestPrebuildPersistsBeforeBuildAndRecoversPushWithoutRebuild(t *testing.T) 
 		}
 		return request.ImageRepository + "@sha256:" + strings.Repeat("c", 64), nil
 	}
-	if _, err := producePrebuildWith(context.Background(), assignment, request, build, push, fixturePrebuildConfiguration); err == nil {
+	if _, err := producePrebuildWith(fixturePrebuildToolsContext(t.Context(), assignment), assignment, request, build, push, fixturePrebuildConfiguration); err == nil {
 		t.Fatal("lost push acknowledgement reported success")
 	}
 	failPush = false
 	assignment.RuntimeAttemptID = "new-compute-attempt-same-durable-workspace"
-	result, err := producePrebuildWith(context.Background(), assignment, request, build, push, fixturePrebuildConfiguration)
+	result, err := producePrebuildWith(fixturePrebuildToolsContext(t.Context(), assignment), assignment, request, build, push, fixturePrebuildConfiguration)
 	if err != nil || calls != 1 || result.Image != request.ImageRepository+"@sha256:"+strings.Repeat("c", 64) {
 		t.Fatalf("recovery rebuilt or lost exact image: %+v %v, calls=%d", result, err, calls)
 	}
-	if _, err := producePrebuildWith(context.Background(), assignment, request, build, push, fixturePrebuildConfiguration); err != nil || calls != 1 {
+	if _, err := producePrebuildWith(fixturePrebuildToolsContext(t.Context(), assignment), assignment, request, build, push, fixturePrebuildConfiguration); err != nil || calls != 1 {
 		t.Fatal("completed replay rebuilt artifact")
 	}
 }
@@ -339,7 +340,7 @@ func TestPrebuildTaggedJSONCUsesUpstreamResolvedDocumentAndKeepsCanonicalRecipe(
 	read := func(context.Context, string, string) (prebuildConfiguration, error) {
 		return prebuildConfiguration{Image: "node:24", Document: json.RawMessage(`{"image":"node:24","postCreateCommand":"node -v"}`)}, nil
 	}
-	input, snapshot, err := preparePrebuildInputWith(context.Background(), assignment, PrebuildRequest{Commit: commit, Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one"}, read)
+	input, snapshot, err := preparePrebuildInputWith(fixturePrebuildToolsContext(t.Context(), assignment), assignment, PrebuildRequest{Commit: commit, Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one"}, read)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +369,7 @@ func TestPrebuildIncompleteComposeNeverCreatesAnArtifact(t *testing.T) {
 		t.Fatal("published an incomplete Compose recipe")
 		return "", nil
 	}
-	_, err := producePrebuildWith(context.Background(), assignment, PrebuildRequest{Commit: commit, Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one"}, build, push, read)
+	_, err := producePrebuildWith(fixturePrebuildToolsContext(t.Context(), assignment), assignment, PrebuildRequest{Commit: commit, Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one"}, build, push, read)
 	if err == nil || builds != 0 {
 		t.Fatal("incomplete Compose did not retain normal-start fallback")
 	}

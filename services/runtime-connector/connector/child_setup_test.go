@@ -13,6 +13,11 @@ func TestChildSetupUsesRootButRunsConnectorAsRemoteUser(t *testing.T) {
 	for _, kind := range []string{"app", "ide", "agent", "verification"} {
 		t.Run(kind, func(t *testing.T) {
 			directory := t.TempDir()
+			directory, err := filepath.EvalSymlinks(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixturePrebuildTools(t, filepath.Join(directory, "opencode"))
 			logPath := filepath.Join(directory, "docker.log")
 			started := filepath.Join(directory, "child-started")
 			// Docker cp creates root-owned files even when the image declares
@@ -22,6 +27,7 @@ printf '%s\n' "$*" >> "$FACTORY_DOCKER_LOG"
 case "$1" in
   cp) exit 0 ;;
   exec)
+    case "$*" in *opencode-verify*) cat >/dev/null; exit 0 ;; esac
     case "$*" in *"tar --no-same-owner -xf - -C "*)
       test "$2" = --interactive && test "$3" = --user && test "$4" = 0:0 || exit 1
       cat >/dev/null
@@ -52,11 +58,12 @@ esac
 			t.Setenv("FACTORY_CHILD_STARTED", started)
 			assignment := validAssignment()
 			assignment.Channels = []Channel{{Name: kind, Kind: kind}}
-			err := injectTestChild(t, context.Background(), assignment, devcontainerResult{
+			stop, err := injectChild(context.WithValue(context.Background(), openCodeArtifactsRootKey{}, filepath.Join(directory, "opencode")), assignment, devcontainerResult{
 				ContainerID:           "owned-child",
 				RemoteUser:            "node",
 				RemoteWorkspaceFolder: "/workspace/project",
 			}, "private-child-token")
+			t.Cleanup(stop)
 			if err != nil {
 				t.Fatal("non-root Dev Container could not receive its Connector and approved tools", err)
 			}

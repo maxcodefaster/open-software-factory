@@ -1,7 +1,12 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"debug/elf"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -22,7 +27,7 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if os.Getenv("FACTORY_COMPOSE_PREBUILD_NATIVE") != "1" {
 		t.Skip("explicit native Compose prebuild component proof")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	kind := os.Getenv("FACTORY_COMPOSE_PROOF_KIND")
 	if kind == "" {
 		kind = "build"
@@ -37,6 +42,24 @@ func TestPrebuildComposeNative(t *testing.T) {
 	platform := "linux/" + runtime.GOARCH
 	if runtime.GOOS != "linux" || platform != os.Getenv("FACTORY_COMPOSE_PROOF_PLATFORM") {
 		t.Fatal("proof is not running on its admitted native architecture")
+	}
+	// The caller owns this packaged root and verifier, not Project configuration.
+	// Keep the manifest opaque: its compact representation belongs to the adapter.
+	toolsRoot := os.Getenv("FACTORY_COMPOSE_PROOF_OPENCODE_ROOT")
+	var toolsManifest []byte
+	var toolsDigest, verifierSource string
+	if toolsRoot != "" {
+		var err error
+		toolsManifest, toolsDigest, err = ReadOpenCodeArtifactsManifest(toolsRoot)
+		if err != nil {
+			t.Fatal("real OpenCode proof requires an absolute, canonical owned packaged root", err)
+		}
+		verifierSource = os.Getenv("FACTORY_COMPOSE_PROOF_CONNECTOR")
+		if verifierSource == "" {
+			verifierSource = "/usr/local/bin/factory-runtime-connector"
+		}
+		requireComposeProofVerifier(t, verifierSource)
+		t.Logf("real packaged OpenCode input %s; manifest SHA-256 %s", toolsRoot, toolsDigest)
 	}
 	// Match a fresh installation's private Registry trust. It is not a Project
 	// registry grant, and Node's CLI must retain it even with an empty bundle.
@@ -110,10 +133,12 @@ exec %q "$@"
 	if err != nil {
 		t.Fatal(err)
 	}
+	copies := filepath.Join(wrappers, "docker-copies")
 	dockerWrapper := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = builder ] && [ "$2" = prune ]; then printf 'trim\n' >>/tmp/owned-cache-trims; fi
+if [ "$1" = cp ]; then printf '%%s\n' "$*" >>%q; fi
 exec %q "$@"
-`, dockerCLI)
+`, copies, dockerCLI)
 	if err := os.WriteFile(filepath.Join(wrappers, "docker"), []byte(dockerWrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -256,6 +281,12 @@ exec %q "$@"
 		assignment.PublicImageBuild = publicImageBuild(runtimeEnvironment{Version: version, Bundle: environmentBundle{
 			Variables: []environmentVariable{{Name: "RUNTIME_ONLY", Value: "never-capture", Runtime: true}},
 		}})
+	}
+	if toolsRoot == "" {
+		fixturePrebuildTools(t, filepath.Join(filepath.Dir(root), "opencode-tools"))
+		ctx = fixturePrebuildToolsContext(ctx, assignment)
+	} else {
+		ctx = context.WithValue(ctx, openCodeArtifactsRootKey{}, toolsRoot)
 	}
 	request := PrebuildRequest{Commit: commit, Platform: platform, ImageRepository: "127.0.0.1:5000/prebuilds/owned-compose-project"}
 	initialTrims, _ := os.ReadFile("/tmp/owned-cache-trims")
@@ -430,8 +461,269 @@ exec %q "$@"
 			t.Fatal("artifact setup did not leave the non-root child readable and executable")
 		}
 	}
+	if toolsRoot != "" {
+		if !t.Run("real-prepared-opencode", func(t *testing.T) {
+			provePreparedComposeOpenCode(t, ctx, assignment, container.ContainerID,
+				verifierSource, toolsManifest, toolsDigest, copies)
+		}) {
+			t.FailNow()
+		}
+	}
 	t.Logf("Offline native Compose component %s on %s passed: first build %dms, completed-result reuse %dms, cache-independent consumer %dms; this is not Factory/Substrate E2E qualification", kind, platform, first.Milliseconds(), replayed.Milliseconds(), consumer.Milliseconds())
 }
+
+func requireComposeProofVerifier(t *testing.T, source string) {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(source)
+	if err != nil || !filepath.IsAbs(source) || filepath.Clean(source) != source || resolved != source {
+		t.Fatal("real OpenCode proof requires a canonical caller-owned Connector verifier")
+	}
+	info, err := os.Stat(source)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		t.Fatal("caller-owned Connector verifier is not executable", err)
+	}
+	binary, err := elf.Open(source)
+	if err != nil {
+		t.Fatal("caller-owned Connector verifier is not an ELF binary", err)
+	}
+	defer binary.Close()
+	expected := elf.EM_X86_64
+	if runtime.GOARCH == "arm64" {
+		expected = elf.EM_AARCH64
+	}
+	if binary.Machine != expected {
+		t.Fatal("Connector verifier differs from the admitted native architecture")
+	}
+	for _, program := range binary.Progs {
+		if program.Type == elf.PT_INTERP {
+			t.Fatal("Connector verifier must be static, without an injected loader")
+		}
+	}
+	content, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("trusted static Connector verifier SHA-256 %x", sha256.Sum256(content))
+}
+
+// The prepared primary is checked before Parent tool injection. Only the trusted
+// verification binary is copied; neither the server tree nor Bun is repaired.
+func provePreparedComposeOpenCode(t *testing.T, ctx context.Context, assignment Assignment, containerID, verifierSource string, manifest []byte, digest, copies string) {
+	t.Helper()
+	current, currentDigest, err := ReadOpenCodeArtifactsManifest(openCodeArtifactsRoot(ctx))
+	if err != nil || currentDigest != digest || !bytes.Equal(current, manifest) {
+		t.Fatal("caller-owned OpenCode input changed after the real CLI build", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("owned prepared OpenCode Docker operation: %v: %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	libc := run("exec", containerID, "sh", "-c",
+		`if ldd --version 2>&1 | grep -qi musl; then printf musl; else ldd --version >/dev/null 2>&1 && printf glibc; fi`)
+	if libc != "glibc" && libc != "musl" {
+		t.Fatal("prepared OpenCode primary has no admitted native libc")
+	}
+	verifier := "/tmp/factory-compose-opencode-verifier-" + digest
+	run("exec", "--user", "0:0", containerID, "sh", "-c", `test ! -e "$1" && test ! -L "$1"`, "owned-verifier", verifier)
+	run("cp", verifierSource, containerID+":"+verifier)
+	run("exec", "--user", "0:0", containerID, "chmod", "0555", verifier)
+	defer func() {
+		if out, err := exec.Command("docker", "exec", "--user", "0:0", containerID, "rm", verifier).CombinedOutput(); err != nil {
+			t.Errorf("owned verification binary cleanup failed: %v: %s", err, out)
+		}
+	}()
+	if !verifyChildOpenCodeArtifacts(ctx, containerID, verifier, manifest, libc) {
+		t.Fatal("the actual trusted Go verifier rejected the prepared server/Bun before Parent injection")
+	}
+	t.Log("real CLI consumer already carries matched server and Bun before Parent tool injection")
+	before, err := os.ReadFile(copies)
+	if err != nil {
+		t.Fatal("verification-binary copy was not observed", err)
+	}
+	agent := assignment
+	agent.Channels = []Channel{{Name: "agent", Kind: "agent"}}
+	password := make([]byte, 32)
+	if _, err := rand.Read(password); err != nil {
+		t.Fatal(err)
+	}
+	directory := run("exec", "--user", "1000:1000", containerID, "node", "-e",
+		`process.stdout.write(require("fs").mkdtempSync("/tmp/factory-compose-opencode-"))`)
+	defer func() {
+		if out, err := exec.Command("docker", "exec", "--user", "1000:1000", containerID, "node", "-e",
+			`require("fs").rmSync(process.argv[1], {recursive:true})`, directory).CombinedOutput(); err != nil {
+			t.Errorf("owned OpenCode process-data cleanup failed: %v: %s", err, out)
+		}
+	}()
+	for continuation := range 2 {
+		preparation, err := injectApprovedTools(ctx, agent, containerID, verifier)
+		if err != nil {
+			t.Fatal("actual Parent preparation rejected its verified prepared tools", err)
+		}
+		preparation.stop()
+		after, err := os.ReadFile(copies)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatal("initial/continuation Parent preparation copied a server or Bun payload", err)
+		}
+		t.Logf("actual Parent OpenCode preparation %d: zero server/Bun copies", continuation+1)
+		probe, _ := json.Marshal(map[string]any{
+			"password": hex.EncodeToString(password), "directory": directory, "continuation": continuation,
+		})
+		command := exec.CommandContext(ctx, "docker", "exec", "--interactive", "--user", "1000:1000",
+			"--workdir", "/workspace/project", containerID, "node", "--input-type=module", "-e", preparedComposeOpenCodeProbe)
+		command.Stdin = bytes.NewReader(probe)
+		if out, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("actual packaged non-root OpenCode continuation %d failed: %v: %s", continuation+1, err, out)
+		} else {
+			t.Log(strings.TrimSpace(string(out)))
+		}
+	}
+	probe, _ := json.Marshal(map[string]any{
+		"manifest": string(manifest), "libc": libc, "verifier": verifier,
+	})
+	tamper := exec.CommandContext(ctx, "docker", "exec", "--interactive", "--user", "0:0",
+		containerID, "node", "--input-type=module", "-e", preparedComposeOpenCodeTamper)
+	tamper.Stdin = bytes.NewReader(probe)
+	if out, err := tamper.CombinedOutput(); err != nil {
+		t.Fatalf("actual trusted Go verifier tamper proof failed: %v: %s", err, out)
+	} else {
+		t.Log(strings.TrimSpace(string(out)))
+	}
+	after, err := os.ReadFile(copies)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("real server or tamper proof injected replacement OpenCode payload", err)
+	}
+}
+
+// This controller is executed, not copied, inside the prepared primary as UID
+// 1000. Its child is the unchanged shipped wrapper/Bun. Both requests use the
+// published Promise client, and neither starts a session or requests inference.
+const preparedComposeOpenCodeProbe = `
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const input = JSON.parse(Buffer.concat(chunks).toString());
+if (process.getuid() !== 1000) throw new Error("server controller must run as UID 1000");
+const root = "/opt/factory/opencode";
+const pkg = JSON.parse(fs.readFileSync(root + "/server/node_modules/@opencode/server/package.json", "utf8"));
+if (pkg.version !== "2.3.2") throw new Error("prepared payload is not the required published server 2.3.2");
+const { OpenCode } = await import("file://" + root + "/server/node_modules/@opencode/client/dist/promise/index.js");
+const directory = input.directory;
+const pidsFile = path.join(directory, "completed-pids.json");
+const pids = fs.existsSync(pidsFile) ? JSON.parse(fs.readFileSync(pidsFile, "utf8")) : [];
+if (pids.length !== input.continuation) throw new Error("native continuation lost its original process-data owner");
+if (input.continuation > 0 && !fs.existsSync(path.join(directory, "retained.sqlite")))
+  throw new Error("native continuation lost its actual retained server database");
+const authorization = "Basic " + Buffer.from("opencode:" + input.password).toString("base64");
+const client = OpenCode.make({ baseUrl: "http://127.0.0.1:4096", headers: { authorization } });
+let server;
+async function stop() {
+  if (!server?.pid || server.exitCode !== null || server.signalCode !== null) return;
+  const exited = once(server, "exit");
+  server.kill("SIGTERM");
+  const timer = setTimeout(() => server.kill("SIGKILL"), 5000);
+  try { await exited; } finally { clearTimeout(timer); }
+}
+try {
+  const continuation = input.continuation;
+  const log = fs.openSync(path.join(directory, "server-" + continuation + ".log"), "wx", 0o600);
+  server = spawn(root + "/bun", [root + "/server/server.mjs"], {
+    cwd: "/workspace/project",
+    env: {
+      PATH: "/usr/local/bin:/usr/bin:/bin", HOME: directory,
+      XDG_CONFIG_HOME: directory + "/config", XDG_CACHE_HOME: directory + "/cache",
+      XDG_DATA_HOME: directory + "/data",
+      OPENCODE_DB: directory + "/retained.sqlite", OPENCODE_PASSWORD: input.password,
+      OPENCODE_DISABLE_MODELS_FETCH: "1",
+      FACTORY_OPENCODE_CONFIG: JSON.stringify({ providers: {}, permissions: [] })
+    },
+    stdio: ["ignore", log, log]
+  });
+  fs.closeSync(log);
+  let spawnError;
+  server.on("error", error => { spawnError = error; });
+  let info;
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    if (server.exitCode !== null || server.signalCode !== null)
+      throw new Error("packaged server exited: " + fs.readFileSync(path.join(directory, "server-" + continuation + ".log"), "utf8").slice(-16000));
+    try {
+      info = await client.server.info({ signal: AbortSignal.timeout(1500) });
+      break;
+    } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
+  }
+  if (!info || info.version !== "2.3.2" || info.pid !== server.pid)
+    throw new Error("native /api/info did not identify the actual packaged server child");
+  const status = fs.readFileSync("/proc/" + info.pid + "/status", "utf8");
+  if (!/^Uid:\s+1000\s+1000\s+1000\s+1000$/m.test(status))
+    throw new Error("packaged server is not actually UID 1000");
+  const unauthorized = await fetch("http://127.0.0.1:4096/api/info", { signal: AbortSignal.timeout(1500) });
+  if (unauthorized.status !== 401) throw new Error("native server authentication was bypassed");
+  const file = await client.file.read({
+    location: { directory: "/workspace/project" },
+    path: "/workspace/project/seed/dependency/index.js"
+  }, { signal: AbortSignal.timeout(10000) });
+  if (new TextDecoder().decode(file) !== 'module.exports="exact offline dependency";')
+    throw new Error("native @opencode/client file API did not read actual Project source");
+  if (pids.includes(info.pid)) throw new Error("continuation did not launch a fresh packaged server process");
+  pids.push(info.pid);
+  fs.writeFileSync(pidsFile, JSON.stringify(pids), { mode: 0o600 });
+  console.log("prepared server 2.3.2 UID 1000 PID " + info.pid + " continuation " + (continuation + 1) + ": authenticated /api/info and native client source-file read; no inference");
+} finally {
+  await stop();
+}
+`
+
+// Mutate and restore only the owned container's existing files, never the caller's
+// package root. Each rejection and restoration uses the actual static Go binary
+// and the opaque expected manifest, not an image label or a simulated response.
+const preparedComposeOpenCodeTamper = `
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const input = JSON.parse(Buffer.concat(chunks).toString());
+const root = "/opt/factory/opencode";
+const nativeDirectory = path.join(root, "server/node_modules/@parcel", "watcher-linux-" + process.arch + "-" + input.libc);
+const nativeFiles = fs.readdirSync(nativeDirectory).filter(name => name.endsWith(".node")).sort();
+if (nativeFiles.length !== 1) throw new Error("proof requires the actual selected native watcher module");
+const verify = () => spawnSync(input.verifier, ["opencode-verify", "--libc", input.libc], {
+  input: input.manifest, encoding: "utf8", timeout: 30000
+});
+for (const [name, file] of [
+  ["wrapper", root + "/server/server.mjs"],
+  ["Bun", root + "/bun"],
+  ["native module", path.join(nativeDirectory, nativeFiles[0])]
+]) {
+  const original = fs.readFileSync(file);
+  const mode = fs.statSync(file).mode & 0o777;
+  try {
+    fs.chmodSync(file, mode | 0o200);
+    fs.appendFileSync(file, "\nowned component tamper\n");
+    fs.chmodSync(file, mode);
+    const result = verify();
+    if (result.error || result.signal || result.status !== 1 ||
+        !result.stderr.includes("OpenCode artifacts do not match the expected manifest"))
+      throw new Error("actual trusted Go verifier did not reject " + name + " content tampering");
+    console.log("actual trusted Go verifier refused " + name + " tamper");
+  } finally {
+    fs.chmodSync(file, mode | 0o200);
+    fs.writeFileSync(file, original);
+    fs.chmodSync(file, mode);
+  }
+  const restored = verify();
+  if (restored.error || restored.signal || restored.status !== 0)
+    throw new Error("owned " + name + " restoration was not independently verified");
+}
+`
 
 // A real-CLI process boundary with no surviving override. This uses the owned
 // component daemon, not a Substrate Actor or a substitute native acceptance.

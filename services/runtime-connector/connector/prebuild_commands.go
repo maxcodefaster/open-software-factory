@@ -137,6 +137,9 @@ func buildProjectPrebuild(ctx context.Context, operation prebuildOperation, snap
 			return "", err
 		}
 	}
+	if err := stagePrebuildOpenCode(ctx, operation, snapshot); err != nil {
+		return "", err
+	}
 	arguments := []string{"build", "--workspace-folder", snapshot, "--config", filepath.Join(snapshot, operation.Input.Configuration), "--image-name", operation.Tag, "--label", prebuildLabel + "=" + operation.Identity, "--oci-auth-hardening"}
 	if operation.Input.ComposeService == "" {
 		arguments = append(arguments, "--platform", operation.Input.Platform)

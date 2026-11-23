@@ -74,6 +74,7 @@ func nativePrebuildConsumerRepository(t *testing.T) (Assignment, string) {
 		DevcontainerPath: ".devcontainer/devcontainer.json",
 		nativeActorUID:   "86ba05ce-4939-4215-bf45-f1874ff4112a",
 	}
+	fixturePrebuildTools(t, filepath.Join(root, "opencode-tools"))
 	t.Setenv("FACTORY_SUBSTRATE_ACTOR_UID", assignment.nativeActorUID)
 	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
 	t.Setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
@@ -84,6 +85,7 @@ func nativePrebuildConsumerRepository(t *testing.T) (Assignment, string) {
 
 func TestNativePrebuildColdAcquisitionIsNotCancelledByMetadataLookupDeadline(t *testing.T) {
 	assignment, root := nativePrebuildConsumerRepository(t)
+	ctx := fixturePrebuildToolsContext(t.Context(), assignment)
 	version := uint64(2)
 	assignment.EnvironmentVersion = &version
 	bin := filepath.Join(root, "bin")
@@ -123,7 +125,7 @@ esac
 	t.Setenv("NO_PROXY", "localhost,127.0.0.1")
 	t.Setenv("no_proxy", "localhost,127.0.0.1")
 	repository := "registry.factory/prebuilds/" + assignment.RepositoryIdentity
-	input, snapshot, err := preparePrebuildInputWith(context.Background(), assignment,
+	input, snapshot, err := preparePrebuildInputWith(ctx, assignment,
 		PrebuildRequest{Commit: assignment.Revision, Platform: "linux/arm64", ImageRepository: repository}, readPrebuildConfiguration)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +150,7 @@ esac
 	assignment.RuntimeAttemptID = "owned-cold-consumer"
 	assignment.Generation = 1
 	assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
-	selected := compatibleRuntimePrebuild(context.Background(), assignment, "owned-consumer-token")
+	selected := compatibleRuntimePrebuild(ctx, assignment, "owned-consumer-token")
 	if selected != image {
 		out, _ := os.ReadFile(trace)
 		t.Fatalf("a cold pull longer than the metadata window discarded the verified image: %q\n%s", selected, out)
@@ -157,7 +159,7 @@ esac
 	if err != nil || string(out) != "pull\n" {
 		t.Fatal("cold acquisition was repeated")
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
+	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	if selected := compatibleRuntimePrebuild(cancelled, assignment, "owned-consumer-token"); selected != "" {
 		t.Fatal("cancelled caller was ignored during cache selection")
@@ -167,7 +169,7 @@ esac
 	}
 	// Separately cancel after the real acquisition entry, without assuming
 	// metadata/Git scheduling fits into the short caller deadline above.
-	acquiring, cancelAcquiring := context.WithCancel(context.Background())
+	acquiring, cancelAcquiring := context.WithCancel(ctx)
 	defer cancelAcquiring()
 	entered := make(chan bool, 1)
 	go func() {
@@ -194,7 +196,7 @@ esac
 	}
 	// A shorter explicit caller deadline still bounds the complete selection.
 	// On a busy host it can expire before Docker starts.
-	bounded, cancelBounded := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	bounded, cancelBounded := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancelBounded()
 	if selected := compatibleRuntimePrebuild(bounded, assignment, "owned-consumer-token"); selected != "" {
 		t.Fatal("shorter caller deadline was ignored during cold acquisition")
@@ -220,7 +222,7 @@ esac
 		}
 		changed <- os.ErrDeadlineExceeded
 	}()
-	if selected := compatibleRuntimePrebuild(context.Background(), assignment, "owned-consumer-token"); selected != "" {
+	if selected := compatibleRuntimePrebuild(ctx, assignment, "owned-consumer-token"); selected != "" {
 		t.Fatal("Source changed during acquisition but the old prebuild was selected")
 	}
 	if err := <-changed; err != nil {
@@ -230,7 +232,7 @@ esac
 
 func TestNativePrebuildGitKeepsDevelopmentIndexOwnership(t *testing.T) {
 	assignment, _ := nativePrebuildConsumerRepository(t)
-	ctx, err := nativePrebuildContext(context.Background(), assignment)
+	ctx, err := nativePrebuildContext(fixturePrebuildToolsContext(t.Context(), assignment), assignment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +252,7 @@ func TestNativePrebuildGitKeepsDevelopmentIndexOwnership(t *testing.T) {
 
 func TestNativePrebuildConsumerConfigurationRetainsPrivateTransport(t *testing.T) {
 	assignment, root := nativePrebuildConsumerRepository(t)
+	ctx := fixturePrebuildToolsContext(t.Context(), assignment)
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0755); err != nil {
 		t.Fatal(err)
@@ -270,7 +273,7 @@ printf '%s\n' '{"configuration":` + config + `}'
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	image := "registry.factory/prebuilds/" + assignment.RepositoryIdentity + "@sha256:" + strings.Repeat("c", 64)
-	path, cleanup, err := preparePrebuildConsumer(context.Background(), assignment, image)
+	path, cleanup, err := preparePrebuildConsumer(ctx, assignment, image)
 	defer cleanup()
 	if err != nil {
 		out, _ := os.ReadFile(trace)
@@ -292,6 +295,7 @@ printf '%s\n' '{"configuration":` + config + `}'
 
 func TestNativePrebuildConsumerRetainsPrivateDockerContextThroughImageInspection(t *testing.T) {
 	assignment, root := nativePrebuildConsumerRepository(t)
+	ctx := fixturePrebuildToolsContext(t.Context(), assignment)
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0755); err != nil {
 		t.Fatal(err)
@@ -321,7 +325,7 @@ esac
 		}, nil
 	}
 	repository := "registry.factory/prebuilds/" + assignment.RepositoryIdentity
-	input, snapshot, err := preparePrebuildInputWith(context.Background(), assignment,
+	input, snapshot, err := preparePrebuildInputWith(ctx, assignment,
 		PrebuildRequest{Commit: assignment.Revision, Platform: "linux/arm64", ImageRepository: repository}, read)
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +336,7 @@ esac
 		t.Fatal(err)
 	}
 	image := repository + "@sha256:" + strings.Repeat("c", 64)
-	got := compatiblePrebuild(context.Background(), assignment, PrebuildResult{Identity: identity, Image: image}, read)
+	got := compatiblePrebuild(ctx, assignment, PrebuildResult{Identity: identity, Image: image}, read)
 	if got != image {
 		out, _ := os.ReadFile(trace)
 		t.Fatalf("native compatible image was discarded after acquisition: selected=%q; Docker calls:\n%s", got, out)
@@ -344,7 +348,7 @@ esac
 	if err := os.WriteFile(identityFile, []byte(strings.Repeat("d", 64)), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if selected := compatiblePrebuild(context.Background(), assignment, PrebuildResult{Identity: identity, Image: image}, read); selected != "" {
+	if selected := compatiblePrebuild(ctx, assignment, PrebuildResult{Identity: identity, Image: image}, read); selected != "" {
 		t.Fatal("a foreign image input label was admitted")
 	}
 	if err := os.WriteFile(identityFile, []byte(identity), 0644); err != nil {
@@ -353,7 +357,7 @@ esac
 	before, _ := os.ReadFile(trace)
 	changed := assignment
 	changed.nativeActorUID = "dcd0586c-54bf-410d-9f30-2cc7af4dfbc6"
-	if selected := compatiblePrebuild(context.Background(), changed, PrebuildResult{Identity: identity, Image: image}, read); selected != "" {
+	if selected := compatiblePrebuild(ctx, changed, PrebuildResult{Identity: identity, Image: image}, read); selected != "" {
 		t.Fatal("changed native Actor authority selected an image")
 	}
 	after, _ := os.ReadFile(trace)
@@ -363,7 +367,7 @@ esac
 	if err := os.WriteFile(filepath.Join(assignment.WorkspaceFolder, "app.txt"), []byte("unsaved new Source\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if selected := compatiblePrebuild(context.Background(), assignment, PrebuildResult{Identity: identity, Image: image}, read); selected != "" {
+	if selected := compatiblePrebuild(ctx, assignment, PrebuildResult{Identity: identity, Image: image}, read); selected != "" {
 		t.Fatal("a dirty retained checkout selected its old prebuild")
 	}
 	after, _ = os.ReadFile(trace)

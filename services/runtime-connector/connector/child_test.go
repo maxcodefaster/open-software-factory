@@ -102,6 +102,127 @@ func TestDevelopmentAgentHealthDoesNotBlockIDE(t *testing.T) {
 	}
 }
 
+func TestDevelopmentChildServesAgentWhilePreviewIsUnhealthy(t *testing.T) {
+	// Exercise actual Child admission and HTTP forwarding, not a readiness flag
+	// or PID. The controlled Agent endpoint is not real model acceptance.
+	preview := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer preview.Close()
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		user, password, ok := request.BasicAuth()
+		if !ok || user != "opencode" || password != "owned-agent-readiness-password" {
+			http.Error(w, "wrong Agent authority", http.StatusUnauthorized)
+			return
+		}
+		if request.URL.Path != "/api/info" {
+			http.NotFound(w, request)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"version":"2.3.2"}`)
+	}))
+	defer agent.Close()
+	completed := make(chan error, 1)
+	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer owned-agent-before-preview" ||
+			request.Header.Get("X-Factory-Connector-Role") != "child" {
+			http.Error(w, "wrong Child authority", http.StatusUnauthorized)
+			return
+		}
+		connection, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			completed <- err
+			return
+		}
+		defer connection.Close()
+		connection.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var hello Message
+		if err := connection.ReadJSON(&hello); err != nil {
+			completed <- fmt.Errorf("Preview prevented Child admission: %w", err)
+			return
+		}
+		if hello.Type != "hello" || hello.Role != "child" || len(hello.Channels) != 3 {
+			completed <- fmt.Errorf("unexpected Child admission: %#v", hello)
+			return
+		}
+		if err := connection.WriteJSON(Message{Type: "http-request", StreamID: "agent-info",
+			Channel: "agent", Method: http.MethodGet, Path: "/api/info"}); err != nil {
+			completed <- err
+			return
+		}
+		headers := false
+		var body strings.Builder
+		for {
+			var message Message
+			if err := connection.ReadJSON(&message); err != nil {
+				completed <- fmt.Errorf("Preview blocked an actual Agent request: %w", err)
+				return
+			}
+			if message.StreamID != "agent-info" {
+				continue
+			}
+			switch message.Type {
+			case "http-response":
+				headers = message.Status == http.StatusOK
+			case "stream-data":
+				data, err := base64.StdEncoding.DecodeString(message.Data)
+				if err != nil {
+					completed <- err
+					return
+				}
+				body.Write(data)
+			case "stream-end":
+				if !headers || body.String() != `{"version":"2.3.2"}` {
+					completed <- fmt.Errorf("Agent response unavailable before Preview: headers=%v body=%q", headers, body.String())
+				} else {
+					completed <- nil
+				}
+				return
+			case "stream-error":
+				completed <- fmt.Errorf("Agent forwarding failed: %s", message.Error)
+				return
+			}
+		}
+	}))
+	defer control.Close()
+	assignment := validAssignment()
+	assignment.WorkspaceFolder = t.TempDir()
+	assignment.ControlURL = "ws" + strings.TrimPrefix(control.URL, "http")
+	assignment.Channels = []Channel{
+		{Name: "app", Kind: "app", Target: preview.URL, HealthPath: "/"},
+		{Name: "agent", Kind: "agent", Target: agent.URL, HealthPath: "/api/info"},
+		{Name: "ide", Kind: "ide"},
+	}
+	assignment.Processes = []Process{{
+		Name: "agent", Command: []string{"sh", "-c", "exec sleep 30"},
+		Env: map[string]string{"OPENCODE_PASSWORD": "owned-agent-readiness-password"},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- RunChild(ctx, assignment, "owned-agent-before-preview") }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Errorf("Child cleanup failed: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("Child or its owned process survived cancellation")
+		}
+	}()
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Agent could not respond while Preview remained unhealthy")
+	}
+}
+
 func TestFailedDevelopmentCommandDoesNotBlockOtherProcesses(t *testing.T) {
 	assignment := validAssignment()
 	assignment.WorkspaceFolder = t.TempDir()

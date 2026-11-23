@@ -31,6 +31,39 @@ func main() {
 	if len(os.Args) < 2 {
 		fail("usage: factory-runtime-connector <parent|child>")
 	}
+	if os.Args[1] == "opencode-manifest" {
+		if len(os.Args) != 2 {
+			fail("OpenCode manifest accepts no arguments")
+		}
+		manifest, err := connector.OpenCodeArtifactsManifest(connector.OpenCodeArtifactsRoot)
+		if err != nil {
+			fail("OpenCode artifact manifest is unavailable")
+		}
+		if _, err := os.Stdout.Write(manifest); err != nil {
+			fail("OpenCode artifact manifest output failed")
+		}
+		return
+	}
+	if os.Args[1] == "opencode-verify" {
+		if len(os.Args) != 4 || os.Args[2] != "--libc" || (os.Args[3] != "glibc" && os.Args[3] != "musl") {
+			fail("OpenCode verification requires --libc glibc or musl")
+		}
+		manifest, err := io.ReadAll(io.LimitReader(os.Stdin, connector.OpenCodeArtifactsManifestMaxBytes+1))
+		if err != nil || len(manifest) > connector.OpenCodeArtifactsManifestMaxBytes ||
+			connector.VerifyOpenCodeArtifacts(connector.OpenCodeArtifactsRoot, manifest, os.Args[3]) != nil {
+			fail("OpenCode artifacts do not match the expected manifest")
+		}
+		return
+	}
+	if os.Args[1] == "opencode-reset" {
+		if len(os.Args) != 2 {
+			fail("OpenCode reset accepts no arguments")
+		}
+		if err := connector.ResetOpenCodeArtifacts(connector.OpenCodeArtifactsRoot); err != nil {
+			fail("OpenCode artifact reset failed")
+		}
+		return
+	}
 	if os.Args[1] == "native-input-stop-worker" {
 		if len(os.Args) != 2 {
 			fail("native input Stop worker accepts only its fixed stdin assignment")

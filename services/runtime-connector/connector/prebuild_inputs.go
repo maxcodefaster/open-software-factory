@@ -192,7 +192,7 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 			return input, "", err
 		}
 	}
-	var dockerfileRelative string
+	var dockerfileRelative, buildContext string
 	if config.Image != "" {
 		key, err := projectImageKey(config.Image)
 		if err != nil {
@@ -212,6 +212,7 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 			if err := os.WriteFile(configPath, resolved, 0600); err != nil {
 				return input, "", err
 			}
+			config.Document = resolved
 		}
 		immutable = append(immutable, key)
 	} else {
@@ -226,7 +227,8 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 		if contextPath == "" {
 			contextPath = "."
 		}
-		if _, err := prebuildPath(snapshot, filepath.Dir(configPath), contextPath); err != nil {
+		buildContext, err = prebuildPath(snapshot, filepath.Dir(configPath), contextPath)
+		if err != nil {
 			return input, "", err
 		}
 		path, err := prebuildPath(snapshot, filepath.Dir(configPath), dockerfile)
@@ -279,15 +281,29 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 		immutable = append(immutable, features...)
 	}
 	sort.Strings(immutable)
-	input = prebuildInput{Version: 1, Repository: assignment.RepositoryIdentity, Commit: request.Commit, Tree: tree, Configuration: configuration, Dockerfile: dockerfileRelative, Platform: request.Platform, ImageRepository: named.Name(), CLIVersion: prebuildCLIVersion, CLIIntegrity: prebuildCLIIntegrity, ImmutableInputs: immutable}
+	// Keep the pinned CLI's resolved JSON (including JSONC recipes) in the
+	// private snapshot. The generated local tool Feature is added only at build.
+	var resolvedDocument map[string]json.RawMessage
+	if json.Unmarshal(config.Document, &resolvedDocument) != nil {
+		return input, "", errors.New("Resolved Project preparation document is unavailable")
+	}
+	resolved, _ := json.Marshal(resolvedDocument)
+	if err := os.WriteFile(configPath, resolved, 0600); err != nil {
+		return input, "", err
+	}
+	_, toolsDigest, err := ReadOpenCodeArtifactsManifest(openCodeArtifactsRoot(ctx))
+	if err != nil {
+		return input, "", errors.New("Project preparation requires its packaged OpenCode manifest")
+	}
+	input = prebuildInput{Version: 4, Repository: assignment.RepositoryIdentity, Commit: request.Commit, Tree: tree, Configuration: configuration, Dockerfile: dockerfileRelative, Platform: request.Platform, ImageRepository: named.Name(), CLIVersion: prebuildCLIVersion, CLIIntegrity: prebuildCLIIntegrity, ImmutableInputs: immutable, OpenCodeArtifactsSHA256: toolsDigest, buildContext: buildContext}
 	if config.nativeBase != nil {
 		input.NativeTransportSHA256 = config.nativeBase.transport
 		input.nativeBase = config.nativeBase
 	}
 	if config.DockerComposeFile != nil {
-		// v3 excludes unresolved Runtime service environments from the producer.
-		// Do not adopt a v2 producer's result under these different build inputs.
-		input.Version = 3
+		// v5 includes the same public tool payload as non-Compose preparation,
+		// while preserving v3's exclusion of unresolved Runtime environments.
+		input.Version = 5
 		input.ComposeService = config.Service
 	}
 	if assignment.EnvironmentVersion != nil && !assignment.PublicImageBuild {
