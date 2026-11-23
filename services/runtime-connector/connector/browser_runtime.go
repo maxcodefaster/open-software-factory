@@ -144,7 +144,7 @@ func (manager *browserRuntimeManager) handle(ctx context.Context, message Messag
 }
 
 func browserDocker(ctx context.Context, arguments ...string) ([]byte, error) {
-	command := ownedCommand(ctx, "docker", arguments...)
+	command := runtimeDockerCommand(ctx, arguments...)
 	var output browserDockerOutput
 	command.Stdout = &output
 	// Docker error output can contain registry or daemon details. Never expose it

@@ -159,6 +159,38 @@ esac
 	}
 }
 
+func TestBrowserImagePreparationUsesAdmittedRegistryCredentials(t *testing.T) {
+	directory := t.TempDir()
+	reference := "registry.factory/browser-tools@sha256:" + strings.Repeat("a", 64)
+	dockerConfig := filepath.Join(directory, "admitted-config")
+	script := `#!/bin/sh
+test "$DOCKER_CONFIG" = "$FACTORY_EXPECTED_DOCKER_CONFIG" || exit 1
+case "$1 $2" in
+  "image inspect")
+    test -f "$FACTORY_EXPECTED_DOCKER_CONFIG.pulled" || exit 1
+    printf '["%s"]' "$FACTORY_IMAGE_REFERENCE" ;;
+  "pull "*)
+    test "$2" = "$FACTORY_IMAGE_REFERENCE" || exit 1
+    touch "$FACTORY_EXPECTED_DOCKER_CONFIG.pulled" ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CONFIG", filepath.Join(directory, "unrelated-process-default"))
+	t.Setenv("FACTORY_EXPECTED_DOCKER_CONFIG", dockerConfig)
+	t.Setenv("FACTORY_IMAGE_REFERENCE", reference)
+	ctx := context.WithValue(context.Background(), dockerConfigContextKey{}, dockerConfig)
+	if err := ensureBrowserImage(ctx, reference); err != nil {
+		t.Fatalf("browser image preparation did not retain the admitted registry context: %v", err)
+	}
+	if _, err := os.Stat(dockerConfig + ".pulled"); err != nil {
+		t.Fatal("the exact image was not acquired with its admitted credentials")
+	}
+}
+
 func TestBrowserImageRecoversFromARegistryConnectionFailureWithinItsStartupWindow(t *testing.T) {
 	directory := t.TempDir()
 	logPath := filepath.Join(directory, "commands")

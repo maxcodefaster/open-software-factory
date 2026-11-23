@@ -1200,7 +1200,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 	}
 	retryDelay := 250 * time.Millisecond
 	for {
-		command := ownedCommand(ctx, "docker", "pull", reference)
+		command := runtimeDockerCommand(ctx, "pull", reference)
 		var diagnostic browserDockerOutput
 		// Keep only bounded, ephemeral diagnostics for failure classification.
 		// No Registry text, progress or credentials reach the model or Evidence.
